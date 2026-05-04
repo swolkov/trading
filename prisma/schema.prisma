@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model WatchlistItem {
+  id        Int      @id @default(autoincrement())
+  symbol    String   @unique
+  addedAt   DateTime @default(now())
+  sortOrder Int      @default(0)
+}
+
+model UserPreference {
+  id    Int    @id @default(autoincrement())
+  key   String @unique
+  value String
+}
+
+model ResearchReport {
+  id           Int      @id @default(autoincrement())
+  symbol       String
+  name         String   @default("")
+  sector       String   @default("")
+  score        Int      @default(0)
+  signal       String   @default("hold")
+  summary      String   @default("")
+  thesis       String   @default("")
+  keyMetrics   String   @default("")
+  risks        String   @default("")
+  catalysts    String   @default("")
+  priceTarget  Float?
+  currentPrice Float?
+  confidence   Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([score])
+  @@index([createdAt])
+}
+
+model TradeIdea {
+  id          Int      @id @default(autoincrement())
+  symbol      String
+  action      String
+  entryPrice  Float?
+  targetPrice Float?
+  stopLoss    Float?
+  reasoning   String   @default("")
+  timeframe   String   @default("")
+  riskReward  Float?
+  status      String   @default("active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([status])
+}
+
+model ChatMessage {
+  id        Int      @id @default(autoincrement())
+  role      String
+  content   String
+  createdAt DateTime @default(now())
+}
+
+model AutoTradeLog {
+  id          Int      @id @default(autoincrement())
+  symbol      String
+  action      String   // buy, sell, skip, stop_loss, take_profit
+  qty         Int      @default(0)
+  price       Float?
+  reason      String   @default("")
+  aiScore     Int?
+  aiSignal    String?
+  orderId     String?  // Alpaca order ID
+  pnl         Float?   // realized P&L for sells
+  createdAt   DateTime @default(now())
+
+  @@index([symbol])
+  @@index([createdAt])
+  @@index([action])
+}
+
+model AgentRun {
+  id              Int      @id @default(autoincrement())
+  runType         String   // scan, manage, full
+  stocksScanned   Int      @default(0)
+  tradesPlaced    Int      @default(0)
+  positionsManaged Int     @default(0)
+  errors          Int      @default(0)
+  summary         String   @default("")
+  durationMs      Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+}
