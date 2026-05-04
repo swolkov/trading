@@ -13,6 +13,8 @@ import {
   type Position,
 } from "./alpaca";
 import { getKeyStats, getHistoricalBars } from "./yahoo";
+import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
+import { sendNotification } from "@/app/api/notify/route";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
 
@@ -111,7 +113,9 @@ function calculatePositionSize(
   equity: number,
   score: number,
   confidence: number,
-  price: number
+  price: number,
+  regimeMultiplier: number = 1.0,
+  isScaleIn: boolean = false
 ): number {
   // Scale position size by conviction: higher score = larger position
   const baseRatio = RULES.MIN_POSITION_PCT;
@@ -122,9 +126,27 @@ function calculatePositionSize(
   const scoreFactor = Math.min(1, (score - RULES.MIN_SCORE_TO_BUY) / scoreRange);
   const confidenceFactor = Math.min(1, confidence / 100);
 
-  const ratio = baseRatio + (maxRatio - baseRatio) * scoreFactor * confidenceFactor;
+  let ratio = baseRatio + (maxRatio - baseRatio) * scoreFactor * confidenceFactor;
+
+  // Apply market regime multiplier (bull = larger, bear = smaller)
+  ratio *= regimeMultiplier;
+
+  // Scaling: first entry = 60% of full size, scale-in = 40%
+  if (!isScaleIn) ratio *= 0.6;
+  else ratio *= 0.4;
+
   const positionValue = equity * ratio;
   return Math.floor(positionValue / price);
+}
+
+// Check if two stocks are in the same sector (correlation proxy)
+function checkCorrelation(
+  candidateSector: string,
+  heldSectors: Record<string, number>,
+  maxPerSector: number
+): boolean {
+  if (!candidateSector || candidateSector === "Unknown") return true;
+  return (heldSectors[candidateSector] || 0) < maxPerSector;
 }
 
 // ============ MAIN AGENT LOOP ============
@@ -147,13 +169,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
       return { runType: "full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, details };
     }
 
+    // Step 1b: Detect market regime
+    let regime: RegimeAnalysis;
+    try {
+      regime = await detectMarketRegime();
+      details.push(`REGIME: ${regime.regime.toUpperCase()} — ${regime.recommendation}`);
+    } catch {
+      regime = { regime: "choppy", positionSizeMultiplier: 0.8, cashReservePct: 25 } as RegimeAnalysis;
+      details.push("REGIME: Unable to detect, using conservative defaults");
+    }
+
     // Step 2: Get account state
     const account = await getAccount();
     const equity = parseFloat(account.equity);
     const cash = parseFloat(account.cash);
     const positions = await getPositions();
 
-    details.push(`Portfolio: $${equity.toFixed(2)} equity, $${cash.toFixed(2)} cash, ${positions.length} positions`);
+    // Apply regime-adjusted cash reserve
+    const effectiveCashReserve = Math.max(RULES.MIN_CASH_RESERVE_PCT, regime.cashReservePct / 100);
+
+    details.push(`Portfolio: $${equity.toFixed(2)} equity, $${cash.toFixed(2)} cash, ${positions.length} positions (regime sizing: ${regime.positionSizeMultiplier.toFixed(1)}x)`);
 
     // Step 3: Check daily trade count
     const todayStart = new Date();
@@ -648,9 +683,15 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     }
 
-    const summary = `Scanned ${stocksScanned}, placed ${tradesPlaced} trades, managed ${positionsManaged} positions, ${errors} errors`;
+    const summary = `[${regime.regime.toUpperCase()}] Scanned ${stocksScanned}, placed ${tradesPlaced} trades, managed ${positionsManaged} positions, ${errors} errors`;
     details.push(`\n${summary}`);
     await logRun("full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, startTime);
+
+    // Send notification if trades were placed or positions were closed
+    if (tradesPlaced > 0) {
+      const tradeDetails = details.filter((d) => d.includes("BUY") || d.includes("STOP") || d.includes("TAKE PROFIT") || d.includes("TRAILING") || d.includes("THESIS") || d.includes("OPTIONS")).join("\n");
+      await sendNotification(`🤖 Trading Agent: ${summary}\n\n${tradeDetails}`);
+    }
 
     return { runType: "full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, details };
   } catch (err) {

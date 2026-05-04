@@ -18,6 +18,7 @@ const DEFAULTS: Record<string, string> = {
   focus_symbols: "", // comma-separated watchlist for agent to prioritize
   blacklist: "", // comma-separated symbols to never trade
   cooldown_hours: "12",
+  notification_webhook: "", // Slack/Discord webhook URL
 };
 
 export async function GET() {
