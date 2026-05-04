@@ -99,3 +99,9 @@ model AgentRun {
 
   @@index([createdAt])
 }
+
+model AgentConfig {
+  id    Int    @id @default(autoincrement())
+  key   String @unique
+  value String
+}
