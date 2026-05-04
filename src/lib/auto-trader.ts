@@ -15,6 +15,8 @@ import {
 import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions } from "./options-trader";
+import { scanEarningsReactions } from "./earnings-trader";
+import { scanGaps } from "./gap-scanner";
 import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
@@ -343,6 +345,25 @@ export async function runTradingAgent(): Promise<AgentResult> {
       details.push(`  ${pos.symbol}: ${pnlPct >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(1)}% (stop: -${(stopPct * 100).toFixed(1)}%) — holding`);
     }
 
+    // ============ STEP 4b: EARNINGS REACTION TRADES ============
+    try {
+      details.push("\nScanning for earnings reactions...");
+      const earningsPlays = await scanEarningsReactions(equity);
+      for (const play of earningsPlays) {
+        if (play.success) {
+          details.push(`  EARNINGS PLAY: ${play.symbol} ${play.direction === "bullish" ? "BEAT" : "MISSED"} by ${Math.abs(play.surprisePct).toFixed(1)}%, gap ${play.gapPct >= 0 ? "+" : ""}${play.gapPct.toFixed(1)}% → ${play.action} ${play.contractSymbol} x${play.qty}`);
+          tradesPlaced++;
+        } else if (play.action === "skip") {
+          details.push(`  EARNINGS: ${play.symbol} ${play.direction} surprise ${Math.abs(play.surprisePct).toFixed(1)}% — ${play.reasoning}`);
+        }
+      }
+      if (earningsPlays.length === 0) {
+        details.push("  No actionable earnings reactions found");
+      }
+    } catch (err) {
+      details.push(`  Earnings scan error: ${err}`);
+    }
+
     // ============ STEP 5: FIND NEW OPPORTUNITIES ============
 
     if (positions.length >= RULES.MAX_POSITIONS) {
@@ -419,6 +440,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
           candidates.set(m.symbol, "high_volume");
         }
       });
+
+      // Gap stocks (high priority — strong momentum signals)
+      try {
+        const gaps = await scanGaps();
+        for (const gap of gaps.slice(0, 3)) {
+          if (!heldSymbols.has(gap.symbol) && !blacklistSet.has(gap.symbol)) {
+            candidates.set(gap.symbol, `gap_${gap.direction}_${gap.strength}`);
+            details.push(`  GAP: ${gap.symbol} ${gap.gapPct >= 0 ? "+" : ""}${gap.gapPct.toFixed(1)}% (${gap.strength}) — ${gap.recommendation}`);
+          }
+        }
+      } catch { /* ignore */ }
 
       details.push(`Found ${candidates.size} candidates from ${gainers.length} gainers, ${losers.length} losers, ${active.length} active`);
 
