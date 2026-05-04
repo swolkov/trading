@@ -75,6 +75,7 @@ function OptionsPageInner() {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<OptionsContract | null>(null);
   const [qty, setQty] = useState(1);
+  const [side, setSide] = useState<"buy" | "sell">("buy");
   const [ordering, setOrdering] = useState(false);
   const [orderResult, setOrderResult] = useState<{ success?: boolean; error?: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -121,7 +122,7 @@ function OptionsPageInner() {
       const res = await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: selected.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" }),
+        body: JSON.stringify({ symbol: selected.symbol, qty: String(qty), side, type: "market", time_in_force: "day" }),
       });
       const data = await res.json();
       if (data.error) setOrderResult({ error: data.error });
@@ -289,30 +290,54 @@ function OptionsPageInner() {
       {/* Order Panel — slides up when contract selected */}
       {selected && (
         <div className="fixed bottom-0 left-0 right-0 z-50 animate-in slide-in-from-bottom duration-300">
-          <div className="max-w-4xl mx-auto px-4 pb-4">
+          <div className="max-w-5xl mx-auto px-4 pb-4">
             <div className="rounded-2xl border border-white/10 bg-card/95 backdrop-blur-xl shadow-2xl p-5">
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-lg font-bold ${selected.type === "call" ? "text-emerald-400" : "text-red-400"}`}>
-                      {selected.type === "call" ? "BUY CALL" : "BUY PUT"}
-                    </span>
-                    <span className="text-sm text-muted-foreground">{symbol}</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    ${parseFloat(selected.strike_price).toFixed(2)} strike &middot; exp {selected.expiration_date}
-                    {selectedSnap?.greeks && (
-                      <span> &middot; &Delta; {selectedSnap.greeks.delta.toFixed(3)} &middot; &Theta; {selectedSnap.greeks.theta.toFixed(4)}</span>
-                    )}
-                    {selectedSnap?.impliedVolatility && (
-                      <span> &middot; IV {(selectedSnap.impliedVolatility * 100).toFixed(0)}%</span>
-                    )}
-                  </p>
+              {/* Strategy selector */}
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex gap-1.5">
+                  {[
+                    { key: "buy", label: "Buy", desc: "Pay premium" },
+                    { key: "sell", label: "Sell", desc: "Collect premium" },
+                  ].map((s) => (
+                    <button
+                      key={s.key}
+                      onClick={() => setSide(s.key as "buy" | "sell")}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        side === s.key
+                          ? side === "buy"
+                            ? "bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/40"
+                            : "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/40"
+                          : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
+                      }`}
+                    >
+                      {s.label} <span className="text-[10px] opacity-60 ml-1">{s.desc}</span>
+                    </button>
+                  ))}
                 </div>
                 <button onClick={() => { setSelected(null); setOrderResult(null); }} className="text-muted-foreground hover:text-foreground text-xl leading-none">&times;</button>
               </div>
 
-              <div className="grid grid-cols-4 gap-4 mb-4">
+              {/* Contract info */}
+              <div className="flex items-center gap-2 mb-3">
+                <span className={`text-lg font-bold ${
+                  side === "buy"
+                    ? selected.type === "call" ? "text-emerald-400" : "text-red-400"
+                    : "text-amber-400"
+                }`}>
+                  {side === "buy" ? "BUY" : "SELL"} {selected.type === "call" ? "CALL" : "PUT"}
+                </span>
+                <span className="text-sm text-muted-foreground">{symbol}</span>
+                <span className="text-sm">${parseFloat(selected.strike_price).toFixed(2)} strike</span>
+                <span className="text-xs text-muted-foreground">exp {selected.expiration_date}</span>
+                {selectedSnap?.greeks && (
+                  <span className="text-xs text-muted-foreground">&Delta;{selectedSnap.greeks.delta.toFixed(3)} &Theta;{selectedSnap.greeks.theta.toFixed(4)}</span>
+                )}
+                {selectedSnap?.impliedVolatility && (
+                  <span className="text-xs text-muted-foreground">IV {(selectedSnap.impliedVolatility * 100).toFixed(0)}%</span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-5 gap-4 mb-4">
                 <div>
                   <label className="text-[10px] text-muted-foreground uppercase tracking-wider">Contracts</label>
                   <div className="flex items-center gap-2 mt-1">
@@ -327,60 +352,104 @@ function OptionsPageInner() {
                   <p className="text-[10px] text-muted-foreground">per share</p>
                 </div>
                 <div>
-                  <label className="text-[10px] text-muted-foreground uppercase tracking-wider">Total Cost</label>
-                  <p className="text-xl font-bold mt-1">{formatCurrency(totalCost)}</p>
-                  <p className="text-[10px] text-muted-foreground">max risk</p>
+                  <label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    {side === "buy" ? "Total Cost" : "Credit Received"}
+                  </label>
+                  <p className={`text-xl font-bold mt-1 ${side === "sell" ? "text-emerald-400" : ""}`}>
+                    {side === "sell" ? "+" : ""}{formatCurrency(totalCost)}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">{side === "buy" ? "max risk" : "max profit"}</p>
                 </div>
                 <div>
                   <label className="text-[10px] text-muted-foreground uppercase tracking-wider">Breakeven</label>
                   <p className="text-xl font-bold mt-1">
                     {formatCurrency(
                       selected.type === "call"
-                        ? parseFloat(selected.strike_price) + selectedMid
-                        : parseFloat(selected.strike_price) - selectedMid
+                        ? parseFloat(selected.strike_price) + (side === "buy" ? selectedMid : -selectedMid)
+                        : parseFloat(selected.strike_price) - (side === "buy" ? selectedMid : -selectedMid)
                     )}
                   </p>
                   <p className="text-[10px] text-muted-foreground">at expiry</p>
+                </div>
+                <div>
+                  <label className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    {side === "buy" ? "Max Loss" : "Max Risk"}
+                  </label>
+                  <p className="text-xl font-bold mt-1 text-red-400">
+                    {side === "buy"
+                      ? formatCurrency(totalCost)
+                      : side === "sell" && selected.type === "put"
+                      ? formatCurrency(parseFloat(selected.strike_price) * 100 * qty - totalCost)
+                      : "Unlimited"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {side === "sell" && selected.type === "call" ? "naked call = unlimited risk!" : ""}
+                  </p>
                 </div>
               </div>
 
               {/* P&L preview */}
               <div className="grid grid-cols-3 gap-3 mb-4 text-xs">
                 <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-2 text-center">
-                  <p className="text-muted-foreground">If +5%</p>
-                  <p className="text-emerald-400 font-bold">
-                    {selected.type === "call"
+                  <p className="text-muted-foreground">If stock +5%</p>
+                  <p className={`font-bold ${
+                    (side === "buy" && selected.type === "call") || (side === "sell" && selected.type === "put")
+                      ? "text-emerald-400" : "text-red-400"
+                  }`}>
+                    {side === "buy" && selected.type === "call"
                       ? `+${formatCurrency(Math.max(0, (midPrice * 1.05 - parseFloat(selected.strike_price)) * 100 * qty - totalCost))}`
-                      : `${formatCurrency(-totalCost)}`}
+                      : side === "sell" && selected.type === "put"
+                      ? `+${formatCurrency(totalCost)}`
+                      : side === "sell" && selected.type === "call"
+                      ? `-${formatCurrency(Math.max(0, (midPrice * 1.05 - parseFloat(selected.strike_price)) * 100 * qty - totalCost))}`
+                      : `-${formatCurrency(totalCost)}`}
                   </p>
                 </div>
                 <div className="rounded-lg bg-white/5 border border-white/10 p-2 text-center">
                   <p className="text-muted-foreground">If flat</p>
-                  <p className="text-red-400 font-bold">-{formatCurrency(totalCost)}</p>
+                  <p className={`font-bold ${side === "sell" ? "text-emerald-400" : "text-red-400"}`}>
+                    {side === "sell" ? `+${formatCurrency(totalCost)}` : `-${formatCurrency(totalCost)}`}
+                  </p>
                 </div>
                 <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-2 text-center">
-                  <p className="text-muted-foreground">If -5%</p>
-                  <p className={`font-bold ${selected.type === "put" ? "text-emerald-400" : "text-red-400"}`}>
-                    {selected.type === "put"
+                  <p className="text-muted-foreground">If stock -5%</p>
+                  <p className={`font-bold ${
+                    (side === "buy" && selected.type === "put") || (side === "sell" && selected.type === "call")
+                      ? "text-emerald-400" : "text-red-400"
+                  }`}>
+                    {side === "buy" && selected.type === "put"
                       ? `+${formatCurrency(Math.max(0, (parseFloat(selected.strike_price) - midPrice * 0.95) * 100 * qty - totalCost))}`
+                      : side === "sell" && selected.type === "call"
+                      ? `+${formatCurrency(totalCost)}`
+                      : side === "sell" && selected.type === "put"
+                      ? `-${formatCurrency(Math.max(0, (parseFloat(selected.strike_price) - midPrice * 0.95) * 100 * qty - totalCost))}`
                       : `-${formatCurrency(totalCost)}`}
                   </p>
                 </div>
               </div>
 
+              {/* Warning for selling */}
+              {side === "sell" && selected.type === "call" && (
+                <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-2 mb-3 text-xs text-red-400 text-center">
+                  Selling naked calls has UNLIMITED risk. Only do this as a covered call (if you own 100+ shares of {symbol}).
+                </div>
+              )}
+
               <div className="flex gap-3">
                 <button
                   onClick={placeOrder}
                   disabled={ordering}
-                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all ${
-                    selected.type === "call"
-                      ? "bg-emerald-500 hover:bg-emerald-400 text-black"
-                      : "bg-red-500 hover:bg-red-400 text-white"
-                  } disabled:opacity-50`}
+                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all disabled:opacity-50 ${
+                    side === "buy"
+                      ? selected.type === "call"
+                        ? "bg-emerald-500 hover:bg-emerald-400 text-black"
+                        : "bg-red-500 hover:bg-red-400 text-white"
+                      : "bg-amber-500 hover:bg-amber-400 text-black"
+                  }`}
                 >
                   {ordering
                     ? "Placing..."
-                    : `Buy ${qty} ${selected.type === "call" ? "Call" : "Put"} for ${formatCurrency(totalCost)}`}
+                    : `${side === "buy" ? "Buy" : "Sell"} ${qty} ${selected.type === "call" ? "Call" : "Put"} ${side === "buy" ? "for" : "credit"} ${formatCurrency(totalCost)}`}
                 </button>
               </div>
 
