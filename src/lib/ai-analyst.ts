@@ -3,6 +3,7 @@ import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations 
 import { getSnapshot, getNews, getBars } from "./alpaca";
 import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar } from "./finnhub";
 import { analyzeVolatility } from "./options-intelligence";
+import { generateLearningInsights } from "./learning-engine";
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({
@@ -122,6 +123,9 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     take: 3,
   });
 
+  // Generate comprehensive learning insights
+  const learningInsights = await generateLearningInsights().catch(() => null);
+
   // Build the analysis prompt
   const prompt = buildAnalysisPrompt({
     symbol,
@@ -139,6 +143,7 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     upgrades,
     earningsCal: earningsCal.filter((e) => e.symbol === symbol),
     volatility,
+    learningInsights: learningInsights?.aiSummary || null,
   });
 
   // Call Claude for analysis
@@ -219,6 +224,7 @@ function buildAnalysisPrompt(data: {
   upgrades: { company: string; fromGrade: string; toGrade: string; action: string; time: string }[];
   earningsCal: { date: string; epsEstimate: number | null; hour: string }[];
   volatility: { ivRank: number; currentIV: number | null; historicalVolatility20: number; ivVsHv: string; recommendation: string } | null;
+  learningInsights: string | null;
 }): string {
   const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility } = data;
 
@@ -232,20 +238,10 @@ function buildAnalysisPrompt(data: {
     ? `Strong Buy: ${analysts[0].strongBuy}, Buy: ${analysts[0].buy}, Hold: ${analysts[0].hold}, Sell: ${analysts[0].sell}, Strong Sell: ${analysts[0].strongSell}`
     : "No analyst data";
 
-  // Build past performance context for self-learning
-  const recentWins = pastTrades.filter((t) => t.pnl != null && t.pnl > 0);
-  const recentLosses = pastTrades.filter((t) => t.pnl != null && t.pnl < 0);
-  const totalRealizedPnl = pastTrades.filter((t) => t.pnl != null).reduce((sum, t) => sum + (t.pnl || 0), 0);
-  const winRate = recentWins.length + recentLosses.length > 0
-    ? ((recentWins.length / (recentWins.length + recentLosses.length)) * 100).toFixed(0)
-    : "N/A";
-
-  const performanceContext = pastTrades.length > 0
-    ? `\n## Our Trading Performance (Learn From This)
-- Total realized P&L: $${totalRealizedPnl.toFixed(2)}
-- Win rate: ${winRate}% (${recentWins.length}W / ${recentLosses.length}L)
-- Recent trades: ${pastTrades.slice(0, 5).map((t) => `${t.symbol} ${t.action} @ $${t.price?.toFixed(2) || '?'} → P&L: $${t.pnl?.toFixed(2) || 'open'} (score: ${t.aiScore || '?'})`).join(', ')}
-- LESSONS: ${recentLosses.length > recentWins.length ? 'We are losing more than winning — be MORE selective, only take highest conviction trades.' : recentWins.length > 0 ? 'Our winners are working — keep finding similar setups.' : 'No closed trades yet — be cautious with initial positions.'}
+  // Build performance context from learning engine
+  const performanceContext = data.learningInsights
+    ? `\n## AI PERFORMANCE REVIEW — LEARN FROM THIS
+${data.learningInsights}
 ${pastReports.length > 0 ? `\n## Previous Analysis of ${symbol}\n${pastReports.map((r) => `- Score: ${r.score}, Signal: ${r.signal}, Price at time: $${r.currentPrice?.toFixed(2) || '?'} (${new Date(r.createdAt).toLocaleDateString()}) — ${r.summary.slice(0, 100)}`).join('\n')}\nConsider how the stock has moved since our last analysis. Were we right or wrong? Adjust accordingly.` : ''}`
     : '';
 
