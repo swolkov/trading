@@ -14,6 +14,7 @@ import {
 } from "./alpaca";
 import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
+import { findBestContract, executeOptionsTrade, manageOptionsPositions } from "./options-trader";
 import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
@@ -224,30 +225,13 @@ export async function runTradingAgent(): Promise<AgentResult> {
       const pnlPct = (currentPrice - entryPrice) / entryPrice;
       const isOptionsPosition = pos.symbol.length > 10; // Options symbols are longer
 
-      // === OPTIONS MANAGEMENT ===
+      // === OPTIONS MANAGEMENT (smart: profit targets, stop loss, expiry awareness) ===
       if (isOptionsPosition) {
-        // Options: tighter stops, watch theta decay
-        if (pnlPct <= -RULES.OPTIONS_STOP_LOSS) {
-          details.push(`OPTIONS STOP: ${pos.symbol} down ${(pnlPct * 100).toFixed(1)}% — cutting loss`);
-          try {
-            const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
-            await logTrade(pos.symbol, "stop_loss", qty, currentPrice, `Options down ${(pnlPct * 100).toFixed(1)}%`, null, null, order.id, parseFloat(pos.unrealized_pl));
-            tradesPlaced++;
-          } catch (err) { errors++; details.push(`  Failed: ${err}`); }
-          continue;
+        const optActions = await manageOptionsPositions([pos]);
+        for (const act of optActions) {
+          if (act.action !== "hold") tradesPlaced++;
+          details.push(`  ${act.symbol}: ${act.action.toUpperCase()} — ${act.reason}`);
         }
-
-        if (pnlPct >= RULES.OPTIONS_PROFIT_TARGET) {
-          details.push(`OPTIONS PROFIT: ${pos.symbol} up ${(pnlPct * 100).toFixed(1)}% — taking profit`);
-          try {
-            const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
-            await logTrade(pos.symbol, "take_profit", qty, currentPrice, `Options up ${(pnlPct * 100).toFixed(1)}%`, null, null, order.id, parseFloat(pos.unrealized_pl));
-            tradesPlaced++;
-          } catch (err) { errors++; details.push(`  Failed: ${err}`); }
-          continue;
-        }
-
-        details.push(`  ${pos.symbol}: ${pnlPct >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(1)}% — holding option`);
         continue;
       }
 
@@ -615,69 +599,23 @@ export async function runTradingAgent(): Promise<AgentResult> {
             );
             tradesPlaced++;
 
-            // === OPTIONS PLAY: Buy calls/puts based on AI recommendation ===
-            if (analysis.optionsPlay && analysis.optionsPlay.strategy !== "none" && analysis.optionsPlay.confidence >= 60) {
-              try {
-                const optPlay = analysis.optionsPlay;
-                const isCall = optPlay.strategy.includes("call");
-                const isPut = optPlay.strategy.includes("put");
-
-                if ((isCall || isPut) && optPlay.strike) {
-                  // Find matching options contract
-                  const optionType = isCall ? "call" : "put";
-                  const contracts = await getOptionsChain(symbol, undefined, optionType);
-
-                  // Find contract with closest strike, 2-6 weeks out
-                  const now = new Date();
-                  const minExpiry = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000); // 2 weeks
-                  const maxExpiry = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000); // 6 weeks
-
-                  const validContracts = contracts.filter((c) => {
-                    const expDate = new Date(c.expiration_date);
-                    const strikeDiff = Math.abs(parseFloat(c.strike_price) - optPlay.strike!);
-                    return expDate >= minExpiry && expDate <= maxExpiry && strikeDiff <= price * 0.05; // within 5% of recommended strike
-                  });
-
-                  if (validContracts.length > 0) {
-                    // Pick the one closest to recommended strike
-                    validContracts.sort((a, b) =>
-                      Math.abs(parseFloat(a.strike_price) - optPlay.strike!) -
-                      Math.abs(parseFloat(b.strike_price) - optPlay.strike!)
-                    );
-                    const contract = validContracts[0];
-
-                    // Size: max 1-2% of portfolio on options (they're leveraged)
-                    const optionsMaxSpend = equity * 0.015; // 1.5% of portfolio
-                    const optionsQty = Math.max(1, Math.min(5, Math.floor(optionsMaxSpend / (price * 0.02)))); // rough sizing
-
-                    details.push(`  OPTIONS: ${contract.symbol} (${optionType} $${contract.strike_price} exp ${contract.expiration_date}) x${optionsQty}`);
-
-                    const optOrder = await placeOrder({
-                      symbol: contract.symbol,
-                      qty: String(optionsQty),
-                      side: "buy",
-                      type: "market",
-                      time_in_force: "day",
-                    });
-
-                    await logTrade(
-                      contract.symbol,
-                      `buy_${optionType}`,
-                      optionsQty,
-                      null,
-                      `[OPTIONS] ${optPlay.strategy}: ${optPlay.reasoning}. Target: ${optPlay.targetReturn}. Conf: ${optPlay.confidence}%`,
-                      analysis.score,
-                      analysis.signal,
-                      optOrder.id
-                    );
-                    tradesPlaced++;
-                  } else {
-                    details.push(`  OPTIONS: No suitable contracts found for ${symbol} ${optionType} ~$${optPlay.strike}`);
-                  }
+            // === SMART OPTIONS TRADE (primary strategy) ===
+            const direction = analysis.signal.includes("buy") ? "bullish" as const : "bearish" as const;
+            try {
+              const { contract, snapshot, reasoning } = await findBestContract(symbol, direction, price, analysis.confidence);
+              if (contract) {
+                const optResult = await executeOptionsTrade(symbol, contract, snapshot, equity, analysis.score, analysis.signal, analysis.summary);
+                if (optResult.success) {
+                  details.push(`  OPTIONS: ${optResult.reasoning}`);
+                  tradesPlaced++;
+                } else {
+                  details.push(`  OPTIONS FAILED: ${optResult.reasoning}`);
                 }
-              } catch (optErr) {
-                details.push(`  OPTIONS ERROR for ${symbol}: ${optErr}`);
+              } else {
+                details.push(`  OPTIONS: ${reasoning}`);
               }
+            } catch (optErr) {
+              details.push(`  OPTIONS ERROR: ${optErr}`);
             }
           } else {
             const reason_text = `Score ${analysis.score} (need ${RULES.MIN_SCORE_TO_BUY}), Conf ${analysis.confidence}% (need ${RULES.MIN_CONFIDENCE}%), Signal: ${analysis.signal}`;
