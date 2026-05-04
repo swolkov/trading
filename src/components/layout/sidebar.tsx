@@ -14,6 +14,8 @@ const links = [
   { href: "/orders", label: "Orders", icon: "📋" },
   { href: "/analytics", label: "P&L Analytics", icon: "📉" },
   { href: "/market", label: "Market Intel", icon: "🌐" },
+  { href: "/calendar", label: "Calendar", icon: "📅" },
+  { href: "/insider", label: "Insider Trades", icon: "🕵" },
   { href: "/research", label: "Research", icon: "🔬" },
   { href: "/watchlist", label: "Watchlist", icon: "👁" },
 ];

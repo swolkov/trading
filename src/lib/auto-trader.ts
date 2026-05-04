@@ -12,7 +12,7 @@ import {
   getOptionsChain,
   type Position,
 } from "./alpaca";
-import { getKeyStats } from "./yahoo";
+import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
 
@@ -418,17 +418,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
         try {
           // === PRE-SCREENING: Quick checks before expensive AI analysis ===
 
-          // Volume check
-          let bars;
+          // Volume check — try Alpaca first, fallback to Yahoo Finance
+          let bars: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
           try {
             bars = await getBars(symbol, "1Day");
           } catch {
-            details.push(`  ${symbol}: skipped (no bar data)`);
-            continue;
+            bars = [];
+          }
+
+          // Yahoo Finance fallback if Alpaca has insufficient data
+          if (bars.length < 5) {
+            try {
+              details.push(`  ${symbol}: Alpaca has ${bars.length} bars, trying Yahoo Finance...`);
+              bars = await getHistoricalBars(symbol, 200);
+            } catch {
+              // ignore
+            }
           }
 
           if (bars.length < 5) {
-            details.push(`  ${symbol}: skipped (insufficient history: ${bars.length} bars)`);
+            details.push(`  ${symbol}: skipped (insufficient history from both sources: ${bars.length} bars)`);
             continue;
           }
 

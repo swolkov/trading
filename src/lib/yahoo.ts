@@ -1,6 +1,34 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const yahooFinance = require("yahoo-finance2").default || require("yahoo-finance2");
 
+// ---------- Historical Data Fallback ----------
+
+export async function getHistoricalBars(
+  symbol: string,
+  days: number = 200
+): Promise<{ t: string; o: number; h: number; l: number; c: number; v: number }[]> {
+  try {
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
+    const result = await yahooFinance.chart(symbol, {
+      period1: startDate,
+      period2: endDate,
+      interval: "1d",
+    });
+    const quotes = result?.quotes || [];
+    return quotes.map((q: Record<string, number | string | Date>) => ({
+      t: q.date ? new Date(q.date as string).toISOString() : "",
+      o: Number(q.open) || 0,
+      h: Number(q.high) || 0,
+      l: Number(q.low) || 0,
+      c: Number(q.close) || 0,
+      v: Number(q.volume) || 0,
+    })).filter((b: { c: number }) => b.c > 0);
+  } catch {
+    return [];
+  }
+}
+
 // ---------- Company Profile ----------
 
 export interface CompanyProfile {

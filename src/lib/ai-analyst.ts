@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations } from "./yahoo";
 import { getSnapshot, getNews, getBars } from "./alpaca";
+import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar } from "./finnhub";
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({
@@ -38,14 +39,18 @@ interface AnalysisResult {
 }
 
 export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
-  // Gather all data in parallel
-  const [profile, stats, earnings, analysts, news, bars] = await Promise.all([
+  // Gather all data in parallel (Yahoo + Alpaca + Finnhub)
+  const [profile, stats, earnings, analysts, news, bars, insiderTrades, sentiment, upgrades, earningsCal] = await Promise.all([
     getCompanyProfile(symbol).catch(() => null),
     getKeyStats(symbol).catch(() => null),
     getEarnings(symbol).catch(() => null),
     getAnalystRecommendations(symbol).catch(() => []),
     getNews([symbol], 5).catch(() => []),
     getBars(symbol, "1Day", undefined, undefined).catch(() => []),
+    getInsiderTransactions(symbol).catch(() => []),
+    getSocialSentiment(symbol).catch(() => null),
+    getUpgradesDowngrades(symbol).catch(() => []),
+    getEarningsCalendar().catch(() => []),
   ]);
 
   let snapshot = null;
@@ -127,6 +132,10 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     technicals: { sma20, sma50, sma200, rsi, priceChange1d, priceChange1w, priceChange1m, priceChange3m },
     pastTrades,
     pastReports,
+    insiderTrades,
+    sentiment,
+    upgrades,
+    earningsCal: earningsCal.filter((e) => e.symbol === symbol),
   });
 
   // Call Claude for analysis
@@ -202,8 +211,12 @@ function buildAnalysisPrompt(data: {
   };
   pastTrades: { symbol: string; action: string; price: number | null; pnl: number | null; aiScore: number | null; reason: string; createdAt: Date }[];
   pastReports: { score: number; signal: string; summary: string; currentPrice: number | null; createdAt: Date }[];
+  insiderTrades: { name: string; change: number; transactionDate: string; transactionCode: string; transactionPrice: number }[];
+  sentiment: { redditMentions: number; twitterMentions: number; score: number } | null;
+  upgrades: { company: string; fromGrade: string; toGrade: string; action: string; time: string }[];
+  earningsCal: { date: string; epsEstimate: number | null; hour: string }[];
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -290,6 +303,30 @@ ${newsText || 'No recent news'}
 
 ## Company Description
 ${profile?.description?.slice(0, 500) || 'N/A'}
+
+## Insider Trading (VERY IMPORTANT — smart money signal)
+${insiderTrades.length > 0
+  ? insiderTrades.slice(0, 8).map((t) => `- ${t.name}: ${t.transactionCode === 'P' ? 'BOUGHT' : 'SOLD'} ${Math.abs(t.change).toLocaleString()} shares @ $${t.transactionPrice.toFixed(2)} on ${t.transactionDate}`).join('\n')
+  : 'No recent insider transactions'}
+${insiderTrades.length > 0
+  ? `NET INSIDER ACTIVITY: ${insiderTrades.reduce((sum, t) => sum + t.change, 0) > 0 ? 'NET BUYING (BULLISH)' : 'NET SELLING (BEARISH)'}`
+  : ''}
+
+## Social Sentiment
+${sentiment
+  ? `Reddit mentions: ${sentiment.redditMentions} | Twitter mentions: ${sentiment.twitterMentions} | Sentiment score: ${sentiment.score.toFixed(2)} (${sentiment.score > 0.2 ? 'BULLISH' : sentiment.score < -0.2 ? 'BEARISH' : 'NEUTRAL'})`
+  : 'No social sentiment data'}
+
+## Recent Analyst Upgrades/Downgrades
+${upgrades.length > 0
+  ? upgrades.slice(0, 5).map((u) => `- ${u.company}: ${u.action.toUpperCase()} from ${u.fromGrade} to ${u.toGrade} (${new Date(u.time).toLocaleDateString()})`).join('\n')
+  : 'No recent upgrades/downgrades'}
+
+## Upcoming Earnings
+${earningsCal.length > 0
+  ? earningsCal.map((e) => `- Reports: ${e.date} ${e.hour === 'bmo' ? '(Before Market Open)' : e.hour === 'amc' ? '(After Market Close)' : ''} | EPS Est: $${e.epsEstimate?.toFixed(2) || 'N/A'}`).join('\n')
+  : 'No upcoming earnings scheduled'}
+${earningsCal.length > 0 ? 'WARNING: Consider earnings risk when recommending trades. Options plays around earnings can be very profitable OR very risky.' : ''}
 
 ---
 
