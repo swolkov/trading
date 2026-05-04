@@ -1,5 +1,6 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const yahooFinance = require("yahoo-finance2").default || require("yahoo-finance2");
+const YahooFinanceClass = require("yahoo-finance2").default || require("yahoo-finance2");
+const yahooFinance = new YahooFinanceClass({ suppressNotices: ["ripHistorical"] });
 
 // ---------- Historical Data Fallback ----------
 
@@ -10,12 +11,11 @@ export async function getHistoricalBars(
   try {
     const endDate = new Date();
     const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
-    const result = await yahooFinance.chart(symbol, {
-      period1: startDate,
-      period2: endDate,
-      interval: "1d",
+    const quotes = await yahooFinance.historical(symbol, {
+      period1: startDate.toISOString().split("T")[0],
+      period2: endDate.toISOString().split("T")[0],
     });
-    const quotes = result?.quotes || [];
+    if (!Array.isArray(quotes)) return [];
     return quotes.map((q: Record<string, number | string | Date>) => ({
       t: q.date ? new Date(q.date as string).toISOString() : "",
       o: Number(q.open) || 0,
