@@ -14,56 +14,61 @@ import {
 } from "./alpaca";
 import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
-import { sendNotification } from "@/app/api/notify/route";
+import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
 
-// ============ ELITE RISK MANAGEMENT RULES ============
-const RULES = {
-  // Position limits
+// ============ DEFAULT RULES (overridden by database config) ============
+const DEFAULT_RULES = {
   MAX_POSITIONS: 10,
   MAX_PER_SECTOR: 3,
-  MAX_POSITION_PCT: 0.07,        // Max 7% of portfolio per stock (scales by conviction)
-  MIN_POSITION_PCT: 0.02,        // Min 2% — not worth holding less
-  MIN_CASH_RESERVE_PCT: 0.20,    // Always keep 20% cash
-
-  // AI thresholds
+  MAX_POSITION_PCT: 0.07,
+  MIN_POSITION_PCT: 0.02,
+  MIN_CASH_RESERVE_PCT: 0.20,
   MIN_SCORE_TO_BUY: 55,
   MIN_CONFIDENCE: 60,
-
-  // Dynamic stops (ATR-based)
-  STOP_ATR_MULTIPLIER: 2.0,      // Stop loss = entry - (2.0 * ATR)
-  MAX_STOP_PCT: 0.10,            // Hard floor: never risk more than 10%
-  MIN_STOP_PCT: 0.03,            // Hard ceiling: never set stop tighter than 3%
-
-  // Trailing stop
-  TRAILING_ACTIVATION_PCT: 0.05, // Activate trailing stop after +5%
-  TRAILING_ATR_MULTIPLIER: 1.5,  // Trail by 1.5 * ATR once activated
-
-  // Take profit
-  TAKE_PROFIT_PCT: 0.25,         // Take profit at +25% (but trailing stop usually gets it first)
-
-  // Trade frequency
+  STOP_ATR_MULTIPLIER: 2.0,
+  MAX_STOP_PCT: 0.10,
+  MIN_STOP_PCT: 0.03,
+  TRAILING_ACTIVATION_PCT: 0.05,
+  TRAILING_ATR_MULTIPLIER: 1.5,
+  TAKE_PROFIT_PCT: 0.25,
   MAX_DAILY_TRADES: 6,
-  COOLDOWN_HOURS: 12,            // Reduced from 24h for faster reaction
-
-  // Entry
-  LIMIT_ORDER_DISCOUNT: 0.001,   // Place limit orders 0.1% below ask
-
-  // Earnings
-  EARNINGS_BLACKOUT_DAYS: 5,     // Don't buy within 5 days of earnings
-
-  // Volume
-  MIN_VOLUME_RATIO: 0.8,         // Only buy if today's volume > 80% of average
-
-  // Options
-  OPTIONS_MIN_DTE: 3,            // Don't hold options with < 3 days to expiry
-  OPTIONS_PROFIT_TARGET: 0.50,   // Take profit on options at +50%
-  OPTIONS_STOP_LOSS: 0.40,       // Cut options at -40%
-
-  // Re-evaluation
-  REEVALUATE_SCORE_DROP: 30,     // If re-analysis score drops 30+ points, sell
+  COOLDOWN_HOURS: 12,
+  LIMIT_ORDER_DISCOUNT: 0.001,
+  EARNINGS_BLACKOUT_DAYS: 5,
+  MIN_VOLUME_RATIO: 0.8,
+  OPTIONS_MIN_DTE: 3,
+  OPTIONS_PROFIT_TARGET: 0.50,
+  OPTIONS_STOP_LOSS: 0.40,
+  REEVALUATE_SCORE_DROP: 30,
 };
+
+// Load rules from database config, falling back to defaults
+async function loadRules() {
+  const rules = { ...DEFAULT_RULES };
+  try {
+    const configs = await prisma.agentConfig.findMany();
+    const configMap: Record<string, string> = {};
+    for (const c of configs) configMap[c.key] = c.value;
+
+    if (configMap.max_positions) rules.MAX_POSITIONS = parseInt(configMap.max_positions);
+    if (configMap.max_per_sector) rules.MAX_PER_SECTOR = parseInt(configMap.max_per_sector);
+    if (configMap.max_position_pct) rules.MAX_POSITION_PCT = parseInt(configMap.max_position_pct) / 100;
+    if (configMap.min_score) rules.MIN_SCORE_TO_BUY = parseInt(configMap.min_score);
+    if (configMap.min_confidence) rules.MIN_CONFIDENCE = parseInt(configMap.min_confidence);
+    if (configMap.stop_loss_atr) rules.STOP_ATR_MULTIPLIER = parseFloat(configMap.stop_loss_atr);
+    if (configMap.take_profit_pct) rules.TAKE_PROFIT_PCT = parseInt(configMap.take_profit_pct) / 100;
+    if (configMap.cash_reserve_pct) rules.MIN_CASH_RESERVE_PCT = parseInt(configMap.cash_reserve_pct) / 100;
+    if (configMap.max_daily_trades) rules.MAX_DAILY_TRADES = parseInt(configMap.max_daily_trades);
+    if (configMap.cooldown_hours) rules.COOLDOWN_HOURS = parseInt(configMap.cooldown_hours);
+    if (configMap.options_stop_loss_pct) rules.OPTIONS_STOP_LOSS = parseInt(configMap.options_stop_loss_pct) / 100;
+    if (configMap.options_profit_pct) rules.OPTIONS_PROFIT_TARGET = parseInt(configMap.options_profit_pct) / 100;
+  } catch {
+    // use defaults
+  }
+  return rules;
+}
 
 interface AgentResult {
   runType: string;
@@ -115,25 +120,17 @@ function calculatePositionSize(
   confidence: number,
   price: number,
   regimeMultiplier: number = 1.0,
-  isScaleIn: boolean = false
+  rules: { MIN_POSITION_PCT: number; MAX_POSITION_PCT: number; MIN_SCORE_TO_BUY: number } = DEFAULT_RULES
 ): number {
-  // Scale position size by conviction: higher score = larger position
-  const baseRatio = RULES.MIN_POSITION_PCT;
-  const maxRatio = RULES.MAX_POSITION_PCT;
-
-  // Score 55-100 maps to min-max position size
-  const scoreRange = 100 - RULES.MIN_SCORE_TO_BUY;
-  const scoreFactor = Math.min(1, (score - RULES.MIN_SCORE_TO_BUY) / scoreRange);
+  const baseRatio = rules.MIN_POSITION_PCT;
+  const maxRatio = rules.MAX_POSITION_PCT;
+  const scoreRange = 100 - rules.MIN_SCORE_TO_BUY;
+  const scoreFactor = Math.min(1, (score - rules.MIN_SCORE_TO_BUY) / scoreRange);
   const confidenceFactor = Math.min(1, confidence / 100);
 
   let ratio = baseRatio + (maxRatio - baseRatio) * scoreFactor * confidenceFactor;
-
-  // Apply market regime multiplier (bull = larger, bear = smaller)
   ratio *= regimeMultiplier;
-
-  // Scaling: first entry = 60% of full size, scale-in = 40%
-  if (!isScaleIn) ratio *= 0.6;
-  else ratio *= 0.4;
+  ratio *= 0.6; // Initial entry = 60% of full size
 
   const positionValue = equity * ratio;
   return Math.floor(positionValue / price);
@@ -158,6 +155,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
   let stocksScanned = 0;
   let positionsManaged = 0;
   let errors = 0;
+
+  // Load rules from database config
+  const RULES = await loadRules();
+
+  // Check if agent is enabled
+  try {
+    const enabledConfig = await prisma.agentConfig.findUnique({ where: { key: "enabled" } });
+    if (enabledConfig?.value === "false") {
+      return { runType: "full", stocksScanned: 0, tradesPlaced: 0, positionsManaged: 0, errors: 0, summary: "Agent is paused. Enable in Settings.", details: ["Agent is paused."] };
+    }
+  } catch { /* continue */ }
 
   try {
     // Step 1: Check if market is open
@@ -355,7 +363,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     if (positions.length >= RULES.MAX_POSITIONS) {
       details.push(`At max positions (${positions.length}/${RULES.MAX_POSITIONS}) — not scanning`);
-    } else if (cash < equity * RULES.MIN_CASH_RESERVE_PCT) {
+    } else if (cash < equity * effectiveCashReserve) {
       details.push(`Cash below reserve — not buying`);
     } else {
       // Get candidates from multiple sources
@@ -543,7 +551,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
             }
 
             // Calculate position size based on conviction
-            const availableCash = cash - equity * RULES.MIN_CASH_RESERVE_PCT;
+            const availableCash = cash - equity * effectiveCashReserve;
             if (availableCash <= 0) {
               details.push(`  ${symbol}: SKIP — cash below reserve`);
               continue;
@@ -560,7 +568,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             if (price <= 0) continue;
 
-            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price);
+            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, regime.positionSizeMultiplier, RULES);
             if (qty <= 0) {
               details.push(`  ${symbol}: SKIP — position too small`);
               continue;

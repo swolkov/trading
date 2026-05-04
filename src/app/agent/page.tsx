@@ -69,6 +69,20 @@ interface AgentSettings {
   focus_symbols: string;
   blacklist: string;
   cooldown_hours: string;
+  notification_webhook: string;
+}
+
+interface RegimeData {
+  regime: string;
+  recommendation: string;
+  positionSizeMultiplier: number;
+  cashReservePct: number;
+  spy1mReturn: number;
+  spy3mReturn: number;
+  rsi: number | null;
+  volatility: number;
+  goldenCross: boolean;
+  deathCross: boolean;
 }
 
 function actionBadge(action: string) {
@@ -96,19 +110,22 @@ export default function AgentPage() {
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState<AgentSettings | null>(null);
   const [saving, setSaving] = useState(false);
+  const [regime, setRegime] = useState<RegimeData | null>(null);
   const { data: positions } = usePositions();
   const { data: orders } = useOrders("all");
 
   const loadData = useCallback(async () => {
     try {
-      const [runsRes, tradesRes, configRes] = await Promise.all([
+      const [runsRes, tradesRes, configRes, regimeRes] = await Promise.all([
         fetch("/api/agent/logs?type=runs&limit=20").then((r) => r.json()),
         fetch("/api/agent/logs?limit=100").then((r) => r.json()),
         fetch("/api/agent/config").then((r) => r.json()),
+        fetch("/api/regime").then((r) => r.json()).catch(() => null),
       ]);
       if (Array.isArray(runsRes)) setRuns(runsRes);
       if (Array.isArray(tradesRes)) setTrades(tradesRes);
       setSettings(configRes);
+      if (regimeRes && !regimeRes.error) setRegime(regimeRes);
     } catch {
       // ignore
     }
@@ -270,6 +287,29 @@ export default function AgentPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Market Regime */}
+      {regime && (
+        <Card className={regime.regime === "bull" ? "border-emerald-500/30" : regime.regime === "bear" ? "border-red-500/30" : "border-amber-500/30"}>
+          <CardContent className="pt-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Badge className={regime.regime === "bull" ? "bg-emerald-600" : regime.regime === "bear" ? "bg-red-600" : "bg-amber-500"}>
+                  {regime.regime.toUpperCase()} MARKET
+                </Badge>
+                <span className="text-sm">{regime.recommendation}</span>
+              </div>
+              <div className="flex gap-4 text-xs text-muted-foreground">
+                <span>SPY 1M: <span className={pnlColor(regime.spy1mReturn)}>{(regime.spy1mReturn * 100).toFixed(1)}%</span></span>
+                <span>RSI: {regime.rsi?.toFixed(0) || "N/A"}</span>
+                <span>Vol: {regime.volatility.toFixed(0)}%</span>
+                <span>Sizing: {regime.positionSizeMultiplier.toFixed(1)}x</span>
+                <span>{regime.goldenCross ? "Golden Cross" : regime.deathCross ? "Death Cross" : ""}</span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Tabs defaultValue="positions">
         <TabsList>
@@ -603,6 +643,23 @@ export default function AgentPage() {
                       onChange={(e) => updateSetting("blacklist", e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">Comma-separated. Agent will skip these symbols entirely.</p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Notifications</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium">Slack/Discord Webhook URL</label>
+                    <Input
+                      placeholder="https://hooks.slack.com/services/..."
+                      value={settings.notification_webhook}
+                      onChange={(e) => updateSetting("notification_webhook", e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">Get notified when the agent places trades. Create a Slack webhook at api.slack.com/messaging/webhooks</p>
                   </div>
                 </CardContent>
               </Card>
