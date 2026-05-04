@@ -12,17 +12,26 @@ import { prisma } from "./db";
 const OPTIONS_RULES = {
   // Sizing
   MAX_RISK_PER_TRADE_PCT: 0.015,    // Max 1.5% of portfolio per options trade
-  MAX_TOTAL_OPTIONS_PCT: 0.10,       // Max 10% of portfolio in options
-  MAX_OPTIONS_POSITIONS: 6,          // Max 6 options positions at once
+  MAX_TOTAL_OPTIONS_PCT: 0.15,       // Max 15% of portfolio in options (increased for options-first)
+  MAX_OPTIONS_POSITIONS: 10,         // Max 10 options positions
 
   // Strike selection
   BULLISH_DELTA_TARGET: 0.35,        // Slightly OTM calls — good leverage
   BEARISH_DELTA_TARGET: -0.35,       // Slightly OTM puts
   SAFE_DELTA_TARGET: 0.50,           // ATM for safer trades
 
-  // Expiry selection
-  MIN_DTE: 7,                        // Never buy < 7 days to expiry
-  IDEAL_MIN_DTE: 14,                 // Prefer 14+ days
+  // Expiry selection by timeframe
+  DTE_RANGES: {
+    day_trade: { min: 0, max: 2 },
+    weekly: { min: 3, max: 10 },
+    swing: { min: 14, max: 45 },
+    position: { min: 30, max: 90 },
+    leaps: { min: 180, max: 730 },
+  },
+
+  // Default expiry selection
+  MIN_DTE: 0,                        // Allow 0DTE for day trades
+  IDEAL_MIN_DTE: 14,                 // Prefer 14+ days for swing
   IDEAL_MAX_DTE: 45,                 // Prefer < 45 days
   MAX_DTE: 60,                       // Never buy > 60 days
 
@@ -248,6 +257,159 @@ export async function executeOptionsTrade(
       orderId: null,
       success: false,
     };
+  }
+}
+
+// Execute a straddle (buy call + put at same strike — bet on big move either way)
+export async function executeStraddle(
+  symbol: string,
+  equity: number,
+  aiScore: number,
+  reasoning: string
+): Promise<{ success: boolean; details: string }> {
+  try {
+    const contracts = await getOptionsChain(symbol);
+    const now = new Date();
+
+    // Get current price
+    let currentPrice = 0;
+    try {
+      const snap = await getSnapshot(symbol);
+      currentPrice = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
+    } catch { return { success: false, details: "Could not get price" }; }
+
+    // Find ATM call and put, 14-30 DTE
+    const atmCalls = contracts.filter((c) => {
+      const dte = Math.floor((new Date(c.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      return c.type === "call" && dte >= 14 && dte <= 30 &&
+        Math.abs(parseFloat(c.strike_price) - currentPrice) / currentPrice < 0.02;
+    });
+    const atmPuts = contracts.filter((c) => {
+      const dte = Math.floor((new Date(c.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      return c.type === "put" && dte >= 14 && dte <= 30 &&
+        Math.abs(parseFloat(c.strike_price) - currentPrice) / currentPrice < 0.02;
+    });
+
+    if (atmCalls.length === 0 || atmPuts.length === 0) {
+      return { success: false, details: "No suitable ATM contracts for straddle" };
+    }
+
+    // Match same strike and expiry
+    const call = atmCalls[0];
+    const matchingPut = atmPuts.find((p) => p.strike_price === call.strike_price && p.expiration_date === call.expiration_date);
+    if (!matchingPut) {
+      return { success: false, details: "No matching put for straddle" };
+    }
+
+    const maxRisk = equity * OPTIONS_RULES.MAX_RISK_PER_TRADE_PCT;
+    const qty = Math.max(1, Math.min(3, Math.floor(maxRisk / (currentPrice * 0.04 * 100)))); // rough sizing
+
+    // Buy call
+    const callOrder = await placeOrder({ symbol: call.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+    // Buy put
+    const putOrder = await placeOrder({ symbol: matchingPut.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+
+    const strike = parseFloat(call.strike_price);
+    const details = `STRADDLE: Bought ${qty}x ${call.symbol} + ${qty}x ${matchingPut.symbol} @ $${strike.toFixed(2)} exp ${call.expiration_date}. Betting on big move either direction.`;
+
+    await prisma.autoTradeLog.create({
+      data: { symbol: call.symbol, action: "buy_straddle_call", qty, price: null, reason: `[STRADDLE] ${reasoning}`, aiScore, aiSignal: "straddle", orderId: callOrder.id },
+    });
+    await prisma.autoTradeLog.create({
+      data: { symbol: matchingPut.symbol, action: "buy_straddle_put", qty, price: null, reason: `[STRADDLE] ${reasoning}`, aiScore, aiSignal: "straddle", orderId: putOrder.id },
+    });
+
+    return { success: true, details };
+  } catch (err) {
+    return { success: false, details: `Straddle error: ${err}` };
+  }
+}
+
+// Execute a vertical spread (bull call spread or bear put spread — defined risk)
+export async function executeSpread(
+  symbol: string,
+  direction: "bull_call" | "bear_put",
+  equity: number,
+  aiScore: number,
+  reasoning: string
+): Promise<{ success: boolean; details: string }> {
+  try {
+    const type = direction === "bull_call" ? "call" : "put";
+    const contracts = await getOptionsChain(symbol, undefined, type as "call" | "put");
+    const now = new Date();
+
+    let currentPrice = 0;
+    try {
+      const snap = await getSnapshot(symbol);
+      currentPrice = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
+    } catch { return { success: false, details: "Could not get price" }; }
+
+    // Find contracts 14-30 DTE
+    const validContracts = contracts
+      .filter((c) => {
+        const dte = Math.floor((new Date(c.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+        return dte >= 14 && dte <= 30;
+      })
+      .sort((a, b) => parseFloat(a.strike_price) - parseFloat(b.strike_price));
+
+    if (validContracts.length < 2) {
+      return { success: false, details: "Not enough contracts for spread" };
+    }
+
+    // Pick two strikes for the spread
+    let buyContract: typeof validContracts[0];
+    let sellContract: typeof validContracts[0];
+
+    if (direction === "bull_call") {
+      // Buy lower strike call, sell higher strike call
+      const nearATM = validContracts.filter((c) => {
+        const s = parseFloat(c.strike_price);
+        return s >= currentPrice * 0.98 && s <= currentPrice * 1.02;
+      });
+      if (nearATM.length === 0) return { success: false, details: "No ATM strikes" };
+      buyContract = nearATM[0];
+      const higherStrikes = validContracts.filter((c) =>
+        parseFloat(c.strike_price) > parseFloat(buyContract.strike_price) &&
+        c.expiration_date === buyContract.expiration_date
+      );
+      if (higherStrikes.length === 0) return { success: false, details: "No higher strike for spread" };
+      sellContract = higherStrikes[0]; // next strike up
+    } else {
+      // Buy higher strike put, sell lower strike put
+      const nearATM = validContracts.filter((c) => {
+        const s = parseFloat(c.strike_price);
+        return s >= currentPrice * 0.98 && s <= currentPrice * 1.02;
+      });
+      if (nearATM.length === 0) return { success: false, details: "No ATM strikes" };
+      buyContract = nearATM[nearATM.length - 1];
+      const lowerStrikes = validContracts.filter((c) =>
+        parseFloat(c.strike_price) < parseFloat(buyContract.strike_price) &&
+        c.expiration_date === buyContract.expiration_date
+      );
+      if (lowerStrikes.length === 0) return { success: false, details: "No lower strike for spread" };
+      sellContract = lowerStrikes[lowerStrikes.length - 1]; // next strike down
+    }
+
+    const qty = Math.max(1, Math.min(3, Math.floor((equity * OPTIONS_RULES.MAX_RISK_PER_TRADE_PCT) / (currentPrice * 0.02 * 100))));
+
+    // Execute both legs
+    const buyOrder = await placeOrder({ symbol: buyContract.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+    const sellOrder = await placeOrder({ symbol: sellContract.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+
+    const buyStrike = parseFloat(buyContract.strike_price);
+    const sellStrike = parseFloat(sellContract.strike_price);
+    const details = `${direction.toUpperCase()} SPREAD: Buy $${buyStrike.toFixed(2)} / Sell $${sellStrike.toFixed(2)} ${type} x${qty} exp ${buyContract.expiration_date}. Defined risk trade.`;
+
+    await prisma.autoTradeLog.create({
+      data: { symbol: buyContract.symbol, action: `spread_buy_${type}`, qty, price: null, reason: `[SPREAD] ${reasoning}`, aiScore, aiSignal: direction, orderId: buyOrder.id },
+    });
+    await prisma.autoTradeLog.create({
+      data: { symbol: sellContract.symbol, action: `spread_sell_${type}`, qty, price: null, reason: `[SPREAD] ${reasoning}`, aiScore, aiSignal: direction, orderId: sellOrder.id },
+    });
+
+    return { success: true, details };
+  } catch (err) {
+    return { success: false, details: `Spread error: ${err}` };
   }
 }
 

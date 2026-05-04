@@ -14,7 +14,7 @@ import {
 } from "./alpaca";
 import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
-import { findBestContract, executeOptionsTrade, manageOptionsPositions } from "./options-trader";
+import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
 import { scanEarningsReactions } from "./earnings-trader";
 import { scanGaps } from "./gap-scanner";
 import { sendNotification } from "./notifications";
@@ -644,18 +644,36 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             // === SMART OPTIONS TRADE (primary strategy) ===
             const direction = analysis.signal.includes("buy") ? "bullish" as const : "bearish" as const;
+
+            // Choose strategy based on AI recommendation
+            const optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
+
             try {
-              const { contract, snapshot, reasoning } = await findBestContract(symbol, direction, price, analysis.confidence);
-              if (contract) {
-                const optResult = await executeOptionsTrade(symbol, contract, snapshot, equity, analysis.score, analysis.signal, analysis.summary);
-                if (optResult.success) {
-                  details.push(`  OPTIONS: ${optResult.reasoning}`);
-                  tradesPlaced++;
-                } else {
-                  details.push(`  OPTIONS FAILED: ${optResult.reasoning}`);
-                }
+              if (optStrategy === "bull_call_spread" || optStrategy === "bear_put_spread") {
+                // SPREAD TRADE — defined risk
+                const spreadDir = optStrategy === "bull_call_spread" ? "bull_call" as const : "bear_put" as const;
+                const spreadResult = await executeSpread(symbol, spreadDir, equity, analysis.score, analysis.summary);
+                details.push(`  ${spreadResult.details}`);
+                if (spreadResult.success) tradesPlaced += 2; // 2 legs
+              } else if (optStrategy === "straddle" || optStrategy === "strangle") {
+                // STRADDLE — bet on big move either way (before earnings, etc.)
+                const straddleResult = await executeStraddle(symbol, equity, analysis.score, analysis.summary);
+                details.push(`  ${straddleResult.details}`);
+                if (straddleResult.success) tradesPlaced += 2; // 2 legs
               } else {
-                details.push(`  OPTIONS: ${reasoning}`);
+                // SINGLE LEG — buy call or buy put
+                const { contract, snapshot, reasoning } = await findBestContract(symbol, direction, price, analysis.confidence);
+                if (contract) {
+                  const optResult = await executeOptionsTrade(symbol, contract, snapshot, equity, analysis.score, analysis.signal, analysis.summary);
+                  if (optResult.success) {
+                    details.push(`  OPTIONS: ${optResult.reasoning}`);
+                    tradesPlaced++;
+                  } else {
+                    details.push(`  OPTIONS FAILED: ${optResult.reasoning}`);
+                  }
+                } else {
+                  details.push(`  OPTIONS: ${reasoning}`);
+                }
               }
             } catch (optErr) {
               details.push(`  OPTIONS ERROR: ${optErr}`);
