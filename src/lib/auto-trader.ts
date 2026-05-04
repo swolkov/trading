@@ -9,6 +9,7 @@ import {
   getQuote,
   getBars,
   getNews,
+  getOptionsChain,
   type Position,
 } from "./alpaca";
 import { getKeyStats } from "./yahoo";
@@ -349,26 +350,45 @@ export async function runTradingAgent(): Promise<AgentResult> {
         }
       }
 
+      // Load agent config for focus symbols and blacklist
+      let focusSymbols: string[] = [];
+      let blacklist: string[] = [];
+      try {
+        const focusConfig = await prisma.agentConfig.findUnique({ where: { key: "focus_symbols" } });
+        const blacklistConfig = await prisma.agentConfig.findUnique({ where: { key: "blacklist" } });
+        if (focusConfig?.value) focusSymbols = focusConfig.value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+        if (blacklistConfig?.value) blacklist = blacklistConfig.value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+      } catch { /* ignore */ }
+
+      const blacklistSet = new Set(blacklist);
+
       // Candidate selection: diversified sources
       const candidates = new Map<string, string>(); // symbol -> reason
 
+      // PRIORITY: Focus symbols first (user's watchlist)
+      for (const sym of focusSymbols) {
+        if (!heldSymbols.has(sym) && !blacklistSet.has(sym)) {
+          candidates.set(sym, "focus_watchlist");
+        }
+      }
+
       // Top gainers with momentum (but not already overextended)
       gainers.slice(0, 5).forEach((m) => {
-        if (!heldSymbols.has(m.symbol) && m.price > 5 && m.percent_change < 15) {
+        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 5 && m.percent_change < 15) {
           candidates.set(m.symbol, "momentum_gainer");
         }
       });
 
       // Oversold losers (contrarian bounce plays — only if drop isn't catastrophic)
       losers.slice(0, 4).forEach((m) => {
-        if (!heldSymbols.has(m.symbol) && m.price > 10 && m.percent_change > -10) {
+        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 10 && m.percent_change > -10) {
           candidates.set(m.symbol, "oversold_bounce");
         }
       });
 
       // Most active (high liquidity = easier exits)
       active.slice(0, 3).forEach((m) => {
-        if (!heldSymbols.has(m.symbol) && m.price > 5) {
+        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 5) {
           candidates.set(m.symbol, "high_volume");
         }
       });
@@ -541,6 +561,71 @@ export async function runTradingAgent(): Promise<AgentResult> {
               order.id
             );
             tradesPlaced++;
+
+            // === OPTIONS PLAY: Buy calls/puts based on AI recommendation ===
+            if (analysis.optionsPlay && analysis.optionsPlay.strategy !== "none" && analysis.optionsPlay.confidence >= 60) {
+              try {
+                const optPlay = analysis.optionsPlay;
+                const isCall = optPlay.strategy.includes("call");
+                const isPut = optPlay.strategy.includes("put");
+
+                if ((isCall || isPut) && optPlay.strike) {
+                  // Find matching options contract
+                  const optionType = isCall ? "call" : "put";
+                  const contracts = await getOptionsChain(symbol, undefined, optionType);
+
+                  // Find contract with closest strike, 2-6 weeks out
+                  const now = new Date();
+                  const minExpiry = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000); // 2 weeks
+                  const maxExpiry = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000); // 6 weeks
+
+                  const validContracts = contracts.filter((c) => {
+                    const expDate = new Date(c.expiration_date);
+                    const strikeDiff = Math.abs(parseFloat(c.strike_price) - optPlay.strike!);
+                    return expDate >= minExpiry && expDate <= maxExpiry && strikeDiff <= price * 0.05; // within 5% of recommended strike
+                  });
+
+                  if (validContracts.length > 0) {
+                    // Pick the one closest to recommended strike
+                    validContracts.sort((a, b) =>
+                      Math.abs(parseFloat(a.strike_price) - optPlay.strike!) -
+                      Math.abs(parseFloat(b.strike_price) - optPlay.strike!)
+                    );
+                    const contract = validContracts[0];
+
+                    // Size: max 1-2% of portfolio on options (they're leveraged)
+                    const optionsMaxSpend = equity * 0.015; // 1.5% of portfolio
+                    const optionsQty = Math.max(1, Math.min(5, Math.floor(optionsMaxSpend / (price * 0.02)))); // rough sizing
+
+                    details.push(`  OPTIONS: ${contract.symbol} (${optionType} $${contract.strike_price} exp ${contract.expiration_date}) x${optionsQty}`);
+
+                    const optOrder = await placeOrder({
+                      symbol: contract.symbol,
+                      qty: String(optionsQty),
+                      side: "buy",
+                      type: "market",
+                      time_in_force: "day",
+                    });
+
+                    await logTrade(
+                      contract.symbol,
+                      `buy_${optionType}`,
+                      optionsQty,
+                      null,
+                      `[OPTIONS] ${optPlay.strategy}: ${optPlay.reasoning}. Target: ${optPlay.targetReturn}. Conf: ${optPlay.confidence}%`,
+                      analysis.score,
+                      analysis.signal,
+                      optOrder.id
+                    );
+                    tradesPlaced++;
+                  } else {
+                    details.push(`  OPTIONS: No suitable contracts found for ${symbol} ${optionType} ~$${optPlay.strike}`);
+                  }
+                }
+              } catch (optErr) {
+                details.push(`  OPTIONS ERROR for ${symbol}: ${optErr}`);
+              }
+            }
           } else {
             const reason_text = `Score ${analysis.score} (need ${RULES.MIN_SCORE_TO_BUY}), Conf ${analysis.confidence}% (need ${RULES.MIN_CONFIDENCE}%), Signal: ${analysis.signal}`;
             details.push(`  ${symbol}: SKIP — ${reason_text}`);

@@ -26,6 +26,15 @@ interface AnalysisResult {
     timeframe: string;
     riskReward: number | null;
   };
+  optionsPlay?: {
+    strategy: string; // buy_call, buy_put, sell_covered_call, bull_call_spread, bear_put_spread
+    strike: number | null;
+    expiry: string; // e.g. "2-4 weeks"
+    reasoning: string;
+    maxRisk: number | null; // max $ to risk on this play
+    targetReturn: string; // e.g. "50-100%"
+    confidence: number;
+  };
 }
 
 export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
@@ -93,6 +102,19 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     ? ((bars[bars.length - 1].c - bars[bars.length - 63].c) / bars[bars.length - 63].c) * 100
     : null;
 
+  // Get past performance data for self-learning
+  const pastTrades = await prisma.autoTradeLog.findMany({
+    where: { action: { in: ["buy", "sell", "stop_loss", "take_profit", "trailing_stop", "thesis_change"] } },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  const pastReports = await prisma.researchReport.findMany({
+    where: { symbol: symbol.toUpperCase() },
+    orderBy: { createdAt: "desc" },
+    take: 3,
+  });
+
   // Build the analysis prompt
   const prompt = buildAnalysisPrompt({
     symbol,
@@ -103,6 +125,8 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     news,
     currentPrice,
     technicals: { sma20, sma50, sma200, rsi, priceChange1d, priceChange1w, priceChange1m, priceChange3m },
+    pastTrades,
+    pastReports,
   });
 
   // Call Claude for analysis
@@ -176,8 +200,10 @@ function buildAnalysisPrompt(data: {
     priceChange1m: number | null;
     priceChange3m: number | null;
   };
+  pastTrades: { symbol: string; action: string; price: number | null; pnl: number | null; aiScore: number | null; reason: string; createdAt: Date }[];
+  pastReports: { score: number; signal: string; summary: string; currentPrice: number | null; createdAt: Date }[];
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -189,7 +215,32 @@ function buildAnalysisPrompt(data: {
     ? `Strong Buy: ${analysts[0].strongBuy}, Buy: ${analysts[0].buy}, Hold: ${analysts[0].hold}, Sell: ${analysts[0].sell}, Strong Sell: ${analysts[0].strongSell}`
     : "No analyst data";
 
-  return `You are an elite Wall Street equity research analyst and quantitative trader. Analyze this stock with the goal of finding profitable trading opportunities. Be brutally honest — if it's a bad investment, say so. If it's a great opportunity, explain why with conviction.
+  // Build past performance context for self-learning
+  const recentWins = pastTrades.filter((t) => t.pnl != null && t.pnl > 0);
+  const recentLosses = pastTrades.filter((t) => t.pnl != null && t.pnl < 0);
+  const totalRealizedPnl = pastTrades.filter((t) => t.pnl != null).reduce((sum, t) => sum + (t.pnl || 0), 0);
+  const winRate = recentWins.length + recentLosses.length > 0
+    ? ((recentWins.length / (recentWins.length + recentLosses.length)) * 100).toFixed(0)
+    : "N/A";
+
+  const performanceContext = pastTrades.length > 0
+    ? `\n## Our Trading Performance (Learn From This)
+- Total realized P&L: $${totalRealizedPnl.toFixed(2)}
+- Win rate: ${winRate}% (${recentWins.length}W / ${recentLosses.length}L)
+- Recent trades: ${pastTrades.slice(0, 5).map((t) => `${t.symbol} ${t.action} @ $${t.price?.toFixed(2) || '?'} → P&L: $${t.pnl?.toFixed(2) || 'open'} (score: ${t.aiScore || '?'})`).join(', ')}
+- LESSONS: ${recentLosses.length > recentWins.length ? 'We are losing more than winning — be MORE selective, only take highest conviction trades.' : recentWins.length > 0 ? 'Our winners are working — keep finding similar setups.' : 'No closed trades yet — be cautious with initial positions.'}
+${pastReports.length > 0 ? `\n## Previous Analysis of ${symbol}\n${pastReports.map((r) => `- Score: ${r.score}, Signal: ${r.signal}, Price at time: $${r.currentPrice?.toFixed(2) || '?'} (${new Date(r.createdAt).toLocaleDateString()}) — ${r.summary.slice(0, 100)}`).join('\n')}\nConsider how the stock has moved since our last analysis. Were we right or wrong? Adjust accordingly.` : ''}`
+    : '';
+
+  return `You are an elite Wall Street equity research analyst, quantitative trader, and OPTIONS STRATEGIST managing a $100,000 paper trading portfolio. Your goal is to maximize returns through smart stock AND options trades. Be brutally honest — if it's a bad investment, say so. If it's a great opportunity, explain why with conviction.
+
+CRITICAL RULES:
+- You MUST recommend an options play for EVERY stock you analyze (calls if bullish, puts if bearish, or explain why no options play exists)
+- For options: prefer 2-6 week expirations, slightly out-of-the-money strikes for leverage, in-the-money for safety
+- Consider volatility: high IV = sell premium (covered calls), low IV = buy options
+- NEVER recommend options on illiquid stocks (need tight bid-ask spreads)
+- Learn from past performance data below — adjust your confidence based on what's working
+${performanceContext}
 
 ## Stock: ${symbol} — ${profile?.name || 'Unknown'}
 Sector: ${profile?.sector || 'N/A'} | Industry: ${profile?.industry || 'N/A'}
@@ -268,6 +319,15 @@ Respond in EXACTLY this JSON format (no markdown, no code fences, just raw JSON)
     "reasoning": "<1-2 sentence trade rationale>",
     "timeframe": "<day_trade|swing|position|long_term>",
     "riskReward": <risk/reward ratio as number or null>
+  },
+  "optionsPlay": {
+    "strategy": "<buy_call|buy_put|sell_covered_call|bull_call_spread|bear_put_spread|none>",
+    "strike": <recommended strike price as number or null>,
+    "expiry": "<recommended expiry timeframe, e.g. '2 weeks', '1 month', '45 days'>",
+    "reasoning": "<why this options strategy — consider IV, catalysts, risk/reward>",
+    "maxRisk": <maximum dollars to risk on this options trade or null>,
+    "targetReturn": "<expected return range, e.g. '50-100%', '30-50%'>",
+    "confidence": <0-100 confidence in the options play specifically>
   }
 }`;
 }
@@ -294,6 +354,7 @@ function parseAnalysisResponse(text: string, currentPrice: number): AnalysisResu
       confidence: Math.max(0, Math.min(100, parsed.confidence || 50)),
       keyMetrics: parsed.keyMetrics || {},
       tradeIdea: parsed.tradeIdea || null,
+      optionsPlay: parsed.optionsPlay || null,
     };
   } catch {
     // If parsing fails, return a default
