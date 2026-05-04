@@ -596,32 +596,40 @@ export async function runTradingAgent(): Promise<AgentResult> {
               continue;
             }
 
-            // Place limit order slightly below ask for better fill
-            const limitPrice = (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
+            // Check options_only mode
+            let optionsOnlyMode = false;
+            try {
+              const optOnlyConfig = await prisma.agentConfig.findUnique({ where: { key: "options_only" } });
+              optionsOnlyMode = optOnlyConfig?.value === "true";
+            } catch { /* default false */ }
 
-            details.push(`  BUY ${symbol}: ${qty} shares, limit $${limitPrice} (score: ${analysis.score}, ${reason})`);
+            if (!optionsOnlyMode) {
+              // Place stock limit order
+              const limitPrice = (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
 
-            const order = await placeOrder({
-              symbol,
-              qty: String(qty),
-              side: "buy",
-              type: "limit",
-              time_in_force: "day",
-              limit_price: limitPrice,
-            });
+              details.push(`  BUY ${symbol}: ${qty} shares, limit $${limitPrice} (score: ${analysis.score}, ${reason})`);
 
-            // Update sector map
-            heldSectors[sector] = (heldSectors[sector] || 0) + 1;
+              const order = await placeOrder({
+                symbol,
+                qty: String(qty),
+                side: "buy",
+                type: "limit",
+                time_in_force: "day",
+                limit_price: limitPrice,
+              });
 
-            // Calculate ATR-based stop for logging
-            const atr = calculateATR(bars);
-            const stopDistance = atr * RULES.STOP_ATR_MULTIPLIER;
-            const stopPrice = (price - stopDistance).toFixed(2);
-            const targetPrice = analysis.priceTarget || price * 1.15;
+              // Update sector map
+              heldSectors[sector] = (heldSectors[sector] || 0) + 1;
 
-            await logTrade(
-              symbol,
-              "buy",
+              // Calculate ATR-based stop for logging
+              const atr = calculateATR(bars);
+              const stopDistance = atr * RULES.STOP_ATR_MULTIPLIER;
+              const stopPrice = (price - stopDistance).toFixed(2);
+              const targetPrice = analysis.priceTarget || price * 1.15;
+
+              await logTrade(
+                symbol,
+                "buy",
               qty,
               price,
               `[${reason}] Score: ${analysis.score}, Signal: ${analysis.signal}, Conf: ${analysis.confidence}%. Stop: $${stopPrice} (ATR: $${atr.toFixed(2)}). Target: $${targetPrice.toFixed(2)}. ${analysis.summary.slice(0, 150)}`,
@@ -630,6 +638,9 @@ export async function runTradingAgent(): Promise<AgentResult> {
               order.id
             );
             tradesPlaced++;
+            } else {
+              details.push(`  ${symbol}: OPTIONS-ONLY mode — skipping stock, buying options only`);
+            }
 
             // === SMART OPTIONS TRADE (primary strategy) ===
             const direction = analysis.signal.includes("buy") ? "bullish" as const : "bearish" as const;

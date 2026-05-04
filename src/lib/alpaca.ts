@@ -107,6 +107,7 @@ export interface PlaceOrderParams {
   type: "market" | "limit" | "stop" | "stop_limit";
   time_in_force: "day" | "gtc" | "ioc" | "fok";
   limit_price?: string;
+  extended_hours?: boolean;
   stop_price?: string;
 }
 

@@ -19,6 +19,7 @@ const DEFAULTS: Record<string, string> = {
   blacklist: "", // comma-separated symbols to never trade
   cooldown_hours: "12",
   notification_webhook: "", // Slack/Discord webhook URL
+  options_only: "true", // Only trade options, no stocks
 };
 
 export async function GET() {
