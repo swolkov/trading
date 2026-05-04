@@ -87,15 +87,16 @@ export default function MarketPage() {
             <TableRow key={m.symbol}>
               <TableCell className="font-medium">{m.symbol}</TableCell>
               <TableCell className="text-right">
-                {formatCurrency(m.price)}
+                {m.price ? formatCurrency(m.price) : "-"}
               </TableCell>
               <TableCell
                 className={`text-right font-medium ${pnlColor(
-                  m.percent_change
+                  m.percent_change || 0
                 )}`}
               >
-                {m.percent_change >= 0 ? "+" : ""}
-                {m.percent_change.toFixed(2)}%
+                {m.percent_change != null
+                  ? `${m.percent_change >= 0 ? "+" : ""}${m.percent_change.toFixed(2)}%`
+                  : "-"}
               </TableCell>
               {showVolume && (
                 <TableCell className="text-right text-xs text-muted-foreground">
