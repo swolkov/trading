@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations } from "./yahoo";
 import { getSnapshot, getNews, getBars } from "./alpaca";
 import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar } from "./finnhub";
+import { analyzeVolatility } from "./options-intelligence";
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({
@@ -40,7 +41,7 @@ interface AnalysisResult {
 
 export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
   // Gather all data in parallel (Yahoo + Alpaca + Finnhub)
-  const [profile, stats, earnings, analysts, news, bars, insiderTrades, sentiment, upgrades, earningsCal] = await Promise.all([
+  const [profile, stats, earnings, analysts, news, bars, insiderTrades, sentiment, upgrades, earningsCal, volatility] = await Promise.all([
     getCompanyProfile(symbol).catch(() => null),
     getKeyStats(symbol).catch(() => null),
     getEarnings(symbol).catch(() => null),
@@ -51,7 +52,8 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     getSocialSentiment(symbol).catch(() => null),
     getUpgradesDowngrades(symbol).catch(() => []),
     getEarningsCalendar().catch(() => []),
-  ]);
+    analyzeVolatility(symbol).catch(() => null),
+  ] as const);
 
   let snapshot = null;
   try {
@@ -136,6 +138,7 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     sentiment,
     upgrades,
     earningsCal: earningsCal.filter((e) => e.symbol === symbol),
+    volatility,
   });
 
   // Call Claude for analysis
@@ -215,8 +218,9 @@ function buildAnalysisPrompt(data: {
   sentiment: { redditMentions: number; twitterMentions: number; score: number } | null;
   upgrades: { company: string; fromGrade: string; toGrade: string; action: string; time: string }[];
   earningsCal: { date: string; epsEstimate: number | null; hour: string }[];
+  volatility: { ivRank: number; currentIV: number | null; historicalVolatility20: number; ivVsHv: string; recommendation: string } | null;
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -303,6 +307,21 @@ ${newsText || 'No recent news'}
 
 ## Company Description
 ${profile?.description?.slice(0, 500) || 'N/A'}
+
+## Options Volatility Analysis (CRITICAL FOR OPTIONS TRADING)
+${volatility
+  ? `- IV Rank: ${volatility.ivRank}/100 (${volatility.ivRank < 25 ? 'LOW — OPTIONS ARE CHEAP, GOOD TO BUY' : volatility.ivRank < 50 ? 'MODERATE-LOW — OK to buy' : volatility.ivRank < 75 ? 'MODERATE-HIGH — expensive, consider spreads' : 'HIGH — DO NOT buy naked options, sell premium instead'})
+- Current IV: ${volatility.currentIV ? (volatility.currentIV * 100).toFixed(1) + '%' : 'N/A'}
+- Historical Vol (20-day): ${(volatility.historicalVolatility20 * 100).toFixed(1)}%
+- IV vs HV: ${volatility.ivVsHv.toUpperCase()}
+- ${volatility.recommendation}
+
+USE THIS FOR YOUR OPTIONS RECOMMENDATION:
+- IV Rank < 25: BUY options (calls/puts) — they are cheap
+- IV Rank 25-50: Buy options OK with conviction
+- IV Rank 50-75: Use SPREADS instead of naked options to reduce cost
+- IV Rank > 75: SELL premium (covered calls) or AVOID options entirely`
+  : 'No volatility data available — be cautious with options recommendations'}
 
 ## Insider Trading (VERY IMPORTANT — smart money signal)
 ${insiderTrades.length > 0
