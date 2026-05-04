@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Trading Platform",
-  description: "Stock & options trading platform powered by Alpaca",
+  title: "Trading Platform — AI-Powered Options & Stock Trading",
+  description: "Autonomous AI trading agent with deep research, options intelligence, and risk management",
 };
 
 export default function RootLayout({
@@ -29,14 +29,13 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="h-full flex">
+      <body className="h-full flex bg-[oklch(0.105_0.006_260)]">
         <Sidebar />
         <div className="flex-1 flex flex-col min-h-0">
           <TopBar />
-          <main className="flex-1 overflow-auto p-6">{children}</main>
+          <main className="flex-1 overflow-auto p-5">{children}</main>
         </div>
       </body>
     </html>
   );
 }
-// cache bust 1777927723
