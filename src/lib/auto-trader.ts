@@ -427,13 +427,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
             continue;
           }
 
-          if (bars.length < 20) {
-            details.push(`  ${symbol}: skipped (insufficient history)`);
+          if (bars.length < 5) {
+            details.push(`  ${symbol}: skipped (insufficient history: ${bars.length} bars)`);
             continue;
           }
 
           const recentVolume = bars[bars.length - 1]?.v || 0;
-          const avgVolume = bars.slice(-20).reduce((sum, b) => sum + b.v, 0) / 20;
+          const volumeWindow = Math.min(20, bars.length);
+          const avgVolume = bars.slice(-volumeWindow).reduce((sum, b) => sum + b.v, 0) / volumeWindow;
           if (avgVolume > 0 && recentVolume / avgVolume < RULES.MIN_VOLUME_RATIO) {
             details.push(`  ${symbol}: skipped (low volume: ${(recentVolume / avgVolume * 100).toFixed(0)}% of avg)`);
             continue;
