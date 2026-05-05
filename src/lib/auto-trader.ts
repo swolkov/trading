@@ -16,6 +16,7 @@ import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
 import { scanEarningsReactions, prePositionEarnings } from "./earnings-trader";
+import { sellIronCondor, sellCreditSpread } from "./premium-seller";
 import { scanGaps } from "./gap-scanner";
 import { reviewClosedTrades } from "./trade-reviewer";
 import { scanRelativeValue } from "./relative-value";
@@ -517,6 +518,39 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     // Clear correlation cache for this run
     clearCorrelationCache();
+
+    // ============ STEP 4e: PREMIUM SELLING (CHOPPY MARKET PRIMARY STRATEGY) ============
+    // In choppy markets, selling premium is the highest-probability strategy.
+    // Iron condors on SPY/QQQ + credit spreads on individual stocks.
+    if (regime.regime === "choppy" && positions.filter((p) => p.symbol.length > 10).length < 6) {
+      details.push("\n=== PREMIUM SELLING (choppy market — theta works FOR us) ===");
+
+      // Iron condor on SPY — the bread and butter
+      try {
+        const spyIC = await sellIronCondor("SPY", equity);
+        details.push(`  SPY: ${spyIC.details}`);
+        if (spyIC.success) tradesPlaced += 4;
+      } catch (err) {
+        details.push(`  SPY iron condor error: ${err}`);
+      }
+
+      // Credit spreads on large-cap focus symbols — sell puts below support
+      const premiumCandidates = focusSymbols.filter((s) =>
+        !["SPY", "QQQ", "IWM"].includes(s) && !positions.some((p) => p.symbol.includes(s))
+      ).slice(0, 3);
+
+      for (const sym of premiumCandidates) {
+        if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+        try {
+          // Sell bull put spread (collect premium, profit if stock stays above short strike)
+          const spread = await sellCreditSpread(sym, "bull_put", equity);
+          details.push(`  ${sym}: ${spread.details}`);
+          if (spread.success) tradesPlaced += 2;
+        } catch (err) {
+          details.push(`  ${sym} credit spread error: ${err}`);
+        }
+      }
+    }
 
     // ============ STEP 5: FIND NEW OPPORTUNITIES ============
 
