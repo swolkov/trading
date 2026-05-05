@@ -12,14 +12,13 @@ const DEFAULTS: Record<string, string> = {
   take_profit_pct: "25",
   cash_reserve_pct: "20",
   max_daily_trades: "6",
-  trade_options: "true",
+  trade_options: "true", // true = options-only mode, false = stocks only
   options_stop_loss_pct: "40",
   options_profit_pct: "50",
   focus_symbols: "", // comma-separated watchlist for agent to prioritize
   blacklist: "", // comma-separated symbols to never trade
   cooldown_hours: "12",
   notification_webhook: "", // Slack/Discord webhook URL
-  options_only: "true", // Only trade options, no stocks
   daily_loss_limit: "500", // Stop trading if daily loss exceeds this $
   daily_spend_cap: "2000", // Max $ spent on new trades per day
   max_options_exposure: "5000", // Max total $ in options at any time

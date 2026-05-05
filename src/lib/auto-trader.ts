@@ -702,11 +702,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
               continue;
             }
 
-            // Check options_only mode
+            // Check options_only mode (UI stores this as trade_options=true, legacy key: options_only)
             let optionsOnlyMode = false;
             try {
-              const optOnlyConfig = await prisma.agentConfig.findUnique({ where: { key: "options_only" } });
-              optionsOnlyMode = optOnlyConfig?.value === "true";
+              const [optOnlyConfig, tradeOptionsConfig] = await Promise.all([
+                prisma.agentConfig.findUnique({ where: { key: "options_only" } }),
+                prisma.agentConfig.findUnique({ where: { key: "trade_options" } }),
+              ]);
+              optionsOnlyMode = optOnlyConfig?.value === "true" || tradeOptionsConfig?.value === "true";
             } catch { /* default false */ }
 
             if (!optionsOnlyMode) {
