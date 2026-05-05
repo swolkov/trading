@@ -34,12 +34,13 @@ interface AnalysisResult {
     riskReward: number | null;
   };
   optionsPlay?: {
-    strategy: string; // buy_call, buy_put, sell_covered_call, bull_call_spread, bear_put_spread
+    strategy: string; // buy_call, buy_put, sell_covered_call, bull_call_spread, bear_put_spread, straddle
     strike: number | null;
-    expiry: string; // e.g. "2-4 weeks"
+    expiry: string; // e.g. "7 days", "2 weeks"
     reasoning: string;
     maxRisk: number | null; // max $ to risk on this play
-    targetReturn: string; // e.g. "50-100%"
+    targetReturn: string; // e.g. "50-100%", "200-500%"
+    conviction: string; // high, moderate, gamble
     confidence: number;
   };
 }
@@ -314,9 +315,32 @@ ${lessonsContext}
 CRITICAL RULES:
 - You MUST recommend an options play for EVERY stock you analyze (calls if bullish, puts if bearish, or explain why no options play exists)
 - For options: prefer 2-6 week expirations, slightly out-of-the-money strikes for leverage, in-the-money for safety
-- Consider volatility: high IV = sell premium (covered calls), low IV = buy options
+- Consider volatility: high IV = sell premium (covered calls/spreads), low IV = buy naked options
 - NEVER recommend options on illiquid stocks (need tight bid-ask spreads)
 - Learn from past performance data below — adjust your confidence based on what's working
+
+EDGE DETECTION — Think like a quant. Identify WHERE the edge comes from:
+- MOMENTUM EDGE: Stock breaking out of range with volume confirmation → BUY CALLS (7-14 DTE, aggressive)
+- MEAN REVERSION EDGE: Oversold stock at strong support with insider buying → BUY CALLS (14-30 DTE)
+- EARNINGS DRIFT EDGE: Post-earnings gap not yet fully priced → ride the drift (14-21 DTE)
+- IV CRUSH EDGE: IV way above historical vol → SELL premium via spreads, profit from IV collapse
+- INSIDER EDGE: Heavy insider buying/selling = smart money knows something → follow them
+- CORRELATION EDGE: Stock lagging its sector peers with no fundamental reason → mean reversion trade
+- CATALYST EDGE: Upcoming event (FDA, earnings, product launch) not priced in → position before
+
+CONVICTION & TIMEFRAME — Be decisive, not wishy-washy:
+- If you see a clear edge: score ±60 or higher with 80%+ confidence. Do NOT hedge with "hold" signals when the data is clear.
+- HIGH CONVICTION (score ±60+): Recommend aggressive plays — single puts/calls, 7-21 DTE, larger position
+- MODERATE CONVICTION (score ±35-59): Recommend spreads for defined risk, 14-45 DTE
+- LOW CONVICTION (score ±0-34): Say "hold" — do NOT force a trade without an edge
+- Choppy market does NOT mean hold everything — it means be selective and trade the BEST setups only
+
+GAMBLING RULES — Know when asymmetric risk/reward justifies a gamble:
+- If a stock gapped 5%+ with massive volume, a 7-day call/put is a smart gamble (small position, 3-5x potential)
+- Pre-earnings momentum: buy 7-14 DTE options 2-3 days before earnings if setup is clean
+- Extreme RSI (<20 or >80) with a reversal candle = high-probability mean reversion play
+- Short squeeze candidates (high short interest + buying pressure) = explosive upside potential
+- ALWAYS cap gambles at 1% of portfolio — these are lottery tickets, not core positions
 ${performanceContext}
 
 ## Stock: ${symbol} — ${profile?.name || 'Unknown'}
@@ -437,12 +461,13 @@ Respond in EXACTLY this JSON format (no markdown, no code fences, just raw JSON)
     "riskReward": <risk/reward ratio as number or null>
   },
   "optionsPlay": {
-    "strategy": "<buy_call|buy_put|sell_covered_call|bull_call_spread|bear_put_spread|none>",
+    "strategy": "<buy_call|buy_put|sell_covered_call|bull_call_spread|bear_put_spread|straddle|none>",
     "strike": <recommended strike price as number or null>,
-    "expiry": "<recommended expiry timeframe, e.g. '2 weeks', '1 month', '45 days'>",
-    "reasoning": "<why this options strategy — consider IV, catalysts, risk/reward>",
+    "expiry": "<recommended expiry timeframe, e.g. '7 days', '2 weeks', '1 month', '45 days'>",
+    "reasoning": "<why this options strategy — what is the EDGE? consider IV, catalysts, risk/reward>",
     "maxRisk": <maximum dollars to risk on this options trade or null>,
-    "targetReturn": "<expected return range, e.g. '50-100%', '30-50%'>",
+    "targetReturn": "<expected return range, e.g. '50-100%', '200-500%' for gambles>",
+    "conviction": "<high|moderate|gamble>",
     "confidence": <0-100 confidence in the options play specifically>
   }
 }`;

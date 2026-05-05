@@ -63,7 +63,8 @@ export async function findBestContract(
   symbol: string,
   direction: "bullish" | "bearish",
   stockPrice: number,
-  aiConfidence: number
+  aiConfidence: number,
+  conviction?: "high" | "moderate" | "gamble"
 ): Promise<{
   contract: OptionsContract | null;
   snapshot: OptionsSnapshot | null;
@@ -73,22 +74,31 @@ export async function findBestContract(
     const type = direction === "bullish" ? "call" : "put";
     const now = new Date();
 
-    // Request only contracts in our DTE window from the API (7-60 days out)
-    const minExpDate = new Date(now.getTime() + OPTIONS_RULES.MIN_DTE * 24 * 60 * 60 * 1000);
-    const maxExpDate = new Date(now.getTime() + OPTIONS_RULES.MAX_DTE * 24 * 60 * 60 * 1000);
+    // Conviction-based DTE selection:
+    // HIGH conviction (score ±60+, conf 85%+): allow 7-21 DTE for aggressive plays
+    // GAMBLE (gap stocks, momentum): 7-14 DTE, small position, big potential
+    // MODERATE/default: 14-45 DTE for swing trades
+    const isAggressive = conviction === "high" || conviction === "gamble";
+    const minDTE = isAggressive ? 7 : OPTIONS_RULES.IDEAL_MIN_DTE;
+    const maxDTE = conviction === "gamble" ? 21 : OPTIONS_RULES.MAX_DTE;
+
+    const minExpDate = new Date(now.getTime() + minDTE * 24 * 60 * 60 * 1000);
+    const maxExpDate = new Date(now.getTime() + maxDTE * 24 * 60 * 60 * 1000);
     const minExpStr = minExpDate.toISOString().split("T")[0];
     const maxExpStr = maxExpDate.toISOString().split("T")[0];
 
     const contracts = await getOptionsChain(symbol, undefined, type, minExpStr, maxExpStr);
     if (contracts.length === 0) {
-      return { contract: null, snapshot: null, reasoning: `No ${type} contracts available (${OPTIONS_RULES.MIN_DTE}-${OPTIONS_RULES.MAX_DTE} DTE)` };
+      return { contract: null, snapshot: null, reasoning: `No ${type} contracts available (${minDTE}-${maxDTE} DTE)` };
     }
 
-    // Separate into ideal (14-45 DTE) and acceptable (7-60 DTE) pools
+    // Separate into ideal and acceptable pools
+    const idealMinDTE = isAggressive ? 7 : OPTIONS_RULES.IDEAL_MIN_DTE;
+    const idealMaxDTE = conviction === "gamble" ? 14 : OPTIONS_RULES.IDEAL_MAX_DTE;
     const idealContracts = contracts.filter((c) => {
       const expDate = new Date(c.expiration_date);
       const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-      return dte >= OPTIONS_RULES.IDEAL_MIN_DTE && dte <= OPTIONS_RULES.IDEAL_MAX_DTE;
+      return dte >= idealMinDTE && dte <= idealMaxDTE;
     });
 
     const candidatePool = idealContracts.length > 0 ? idealContracts : contracts;

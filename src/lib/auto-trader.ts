@@ -798,7 +798,18 @@ export async function runTradingAgent(): Promise<AgentResult> {
                 if (straddleResult.success) tradesPlaced += 2; // 2 legs
               } else {
                 // SINGLE LEG — buy call or buy put
-                const { contract, snapshot, reasoning } = await findBestContract(symbol, direction, price, analysis.confidence);
+                // Determine conviction level for DTE selection
+                const absScore = Math.abs(analysis.score);
+                const aiConviction = analysis.optionsPlay?.conviction as "high" | "moderate" | "gamble" | undefined;
+                const conviction: "high" | "moderate" | "gamble" = aiConviction || (
+                  absScore >= 60 && analysis.confidence >= 85 ? "high" :
+                  reason.startsWith("gap_") || reason.startsWith("momentum") ? "gamble" :
+                  "moderate"
+                );
+                if (conviction !== "moderate") {
+                  details.push(`  ${symbol}: ${conviction.toUpperCase()} conviction — ${conviction === "gamble" ? "7-14 DTE aggressive" : "7-21 DTE fast trade"}`);
+                }
+                const { contract, snapshot, reasoning } = await findBestContract(symbol, direction, price, analysis.confidence, conviction);
                 if (contract) {
                   const optResult = await executeOptionsTrade(symbol, contract, snapshot, equity, analysis.score, analysis.signal, analysis.summary);
                   if (optResult.success) {
