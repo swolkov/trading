@@ -4,6 +4,7 @@ import { getSnapshot, getNews, getBars } from "./alpaca";
 import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar } from "./finnhub";
 import { analyzeVolatility } from "./options-intelligence";
 import { generateLearningInsights } from "./learning-engine";
+import { getMarketKnowledgeBase } from "./market-knowledge";
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({
@@ -245,7 +246,12 @@ ${data.learningInsights}
 ${pastReports.length > 0 ? `\n## Previous Analysis of ${symbol}\n${pastReports.map((r) => `- Score: ${r.score}, Signal: ${r.signal}, Price at time: $${r.currentPrice?.toFixed(2) || '?'} (${new Date(r.createdAt).toLocaleDateString()}) — ${r.summary.slice(0, 100)}`).join('\n')}\nConsider how the stock has moved since our last analysis. Were we right or wrong? Adjust accordingly.` : ''}`
     : '';
 
-  return `You are an elite Wall Street equity research analyst, quantitative trader, and OPTIONS STRATEGIST managing a $100,000 paper trading portfolio. Your goal is to maximize returns through smart stock AND options trades. Be brutally honest — if it's a bad investment, say so. If it's a great opportunity, explain why with conviction.
+  // Load market knowledge base
+  const marketKnowledge = getMarketKnowledgeBase();
+
+  return `You are an elite Wall Street equity research analyst, quantitative trader, and OPTIONS STRATEGIST managing a $100,000 paper trading portfolio. You have 30 years of market experience encoded in your knowledge base below. Your goal is to maximize returns through smart options trades. Be brutally honest — if it's a bad investment, say so. If it's a great opportunity, explain why with conviction.
+
+${marketKnowledge}
 
 CRITICAL RULES:
 - You MUST recommend an options play for EVERY stock you analyze (calls if bullish, puts if bearish, or explain why no options play exists)
