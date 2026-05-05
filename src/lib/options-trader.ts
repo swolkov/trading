@@ -136,13 +136,29 @@ export async function findBestContract(
 
     // IV check — skip if IV is too high (expensive options)
     if (snapshot?.impliedVolatility && snapshot.impliedVolatility > OPTIONS_RULES.HIGH_IV_THRESHOLD) {
-      // Still allow if AI confidence is very high
       if (aiConfidence < 80) {
         return {
           contract: null,
           snapshot,
           reasoning: `IV too high (${(snapshot.impliedVolatility * 100).toFixed(0)}% > ${OPTIONS_RULES.HIGH_IV_THRESHOLD * 100}%) — options are expensive`,
         };
+      }
+    }
+
+    // LIQUIDITY CHECK — don't buy options with wide bid-ask spreads
+    if (snapshot?.latestQuote) {
+      const bid = snapshot.latestQuote.bp;
+      const ask = snapshot.latestQuote.ap;
+      if (bid > 0 && ask > 0) {
+        const spread = ask - bid;
+        const spreadPct = spread / ((bid + ask) / 2);
+        if (spreadPct > 0.15) { // More than 15% spread = illiquid
+          return {
+            contract: null,
+            snapshot,
+            reasoning: `Illiquid: bid-ask spread ${(spreadPct * 100).toFixed(0)}% ($${bid.toFixed(2)}-$${ask.toFixed(2)}) — too wide, would lose on entry`,
+          };
+        }
       }
     }
 

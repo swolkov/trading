@@ -127,6 +127,14 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
   // Generate comprehensive learning insights
   const learningInsights = await generateLearningInsights().catch(() => null);
 
+  // Get market regime for explicit AI guidance
+  let regimeContext = "";
+  try {
+    const { detectMarketRegime } = await import("./market-regime");
+    const regimeData = await detectMarketRegime();
+    regimeContext = `CURRENT MARKET REGIME: ${regimeData.regime.toUpperCase()}. ${regimeData.recommendation} SPY 1M: ${(regimeData.spy1mReturn * 100).toFixed(1)}%, Vol: ${regimeData.volatility.toFixed(0)}%. ${regimeData.regime === "bull" ? "FAVOR CALLS." : regimeData.regime === "bear" ? "FAVOR PUTS." : "TRADE LESS, use spreads."}`;
+  } catch { /* ignore */ }
+
   // Build the analysis prompt
   const prompt = buildAnalysisPrompt({
     symbol,
@@ -145,6 +153,7 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     earningsCal: earningsCal.filter((e) => e.symbol === symbol),
     volatility,
     learningInsights: learningInsights?.aiSummary || null,
+    regimeContext,
   });
 
   // Call Claude for analysis
@@ -226,8 +235,9 @@ function buildAnalysisPrompt(data: {
   earningsCal: { date: string; epsEstimate: number | null; hour: string }[];
   volatility: { ivRank: number; currentIV: number | null; historicalVolatility20: number; ivVsHv: string; recommendation: string } | null;
   learningInsights: string | null;
+  regimeContext: string;
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, regimeContext } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -246,12 +256,13 @@ ${data.learningInsights}
 ${pastReports.length > 0 ? `\n## Previous Analysis of ${symbol}\n${pastReports.map((r) => `- Score: ${r.score}, Signal: ${r.signal}, Price at time: $${r.currentPrice?.toFixed(2) || '?'} (${new Date(r.createdAt).toLocaleDateString()}) — ${r.summary.slice(0, 100)}`).join('\n')}\nConsider how the stock has moved since our last analysis. Were we right or wrong? Adjust accordingly.` : ''}`
     : '';
 
-  // Load market knowledge base
   const marketKnowledge = getMarketKnowledgeBase();
 
   return `You are an elite Wall Street equity research analyst, quantitative trader, and OPTIONS STRATEGIST managing a $100,000 paper trading portfolio. You have 30 years of market experience encoded in your knowledge base below. Your goal is to maximize returns through smart options trades. Be brutally honest — if it's a bad investment, say so. If it's a great opportunity, explain why with conviction.
 
 ${marketKnowledge}
+
+${regimeContext}
 
 CRITICAL RULES:
 - You MUST recommend an options play for EVERY stock you analyze (calls if bullish, puts if bearish, or explain why no options play exists)

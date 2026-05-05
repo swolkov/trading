@@ -199,7 +199,28 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Apply regime-adjusted cash reserve
     const effectiveCashReserve = Math.max(RULES.MIN_CASH_RESERVE_PCT, regime.cashReservePct / 100);
 
-    details.push(`Portfolio: $${equity.toFixed(2)} equity, $${cash.toFixed(2)} cash, ${positions.length} positions (regime sizing: ${regime.positionSizeMultiplier.toFixed(1)}x)`);
+    // Consecutive loss protection: check last 5 closed trades
+    let lossMultiplier = 1.0;
+    try {
+      const recentClosed = await prisma.autoTradeLog.findMany({
+        where: { pnl: { not: null } },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+      });
+      const consecutiveLosses = recentClosed.findIndex((t) => (t.pnl || 0) > 0);
+      if (consecutiveLosses >= 3) {
+        lossMultiplier = 0.5; // Cut position sizes in half after 3 consecutive losses
+        details.push(`⚠️ LOSS PROTECTION: ${consecutiveLosses} consecutive losses — reducing position sizes 50%`);
+      } else if (consecutiveLosses === -1 && recentClosed.length >= 5) {
+        lossMultiplier = 0.3; // All 5 recent trades are losses — nearly stop trading
+        details.push(`🛑 HEAVY LOSS PROTECTION: All recent trades are losses — reducing sizes 70%`);
+      }
+    } catch { /* ignore */ }
+
+    // Apply loss multiplier to regime sizing
+    const effectiveSizeMultiplier = regime.positionSizeMultiplier * lossMultiplier;
+
+    details.push(`Portfolio: $${equity.toFixed(2)} equity, $${cash.toFixed(2)} cash, ${positions.length} positions (regime: ${regime.regime}, sizing: ${effectiveSizeMultiplier.toFixed(2)}x${lossMultiplier < 1 ? " [loss protected]" : ""})`);
 
     // Step 3: Check daily trade count
     const todayStart = new Date();
@@ -584,7 +605,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             if (price <= 0) continue;
 
-            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, regime.positionSizeMultiplier, RULES);
+            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, RULES);
             if (qty <= 0) {
               details.push(`  ${symbol}: SKIP — position too small`);
               continue;
