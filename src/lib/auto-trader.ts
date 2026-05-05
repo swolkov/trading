@@ -516,21 +516,21 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
 
       // Top gainers with momentum (but not already overextended)
-      gainers.slice(0, 5).forEach((m) => {
+      gainers.slice(0, 20).forEach((m) => {
         if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 5 && m.percent_change < 15) {
           candidates.set(m.symbol, "momentum_gainer");
         }
       });
 
       // Oversold losers (contrarian bounce plays — only if drop isn't catastrophic)
-      losers.slice(0, 4).forEach((m) => {
+      losers.slice(0, 15).forEach((m) => {
         if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 10 && m.percent_change > -10) {
           candidates.set(m.symbol, "oversold_bounce");
         }
       });
 
       // Most active (high liquidity = easier exits)
-      active.slice(0, 3).forEach((m) => {
+      active.slice(0, 15).forEach((m) => {
         if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 5) {
           candidates.set(m.symbol, "high_volume");
         }
@@ -539,7 +539,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
       // Gap stocks (high priority — strong momentum signals)
       try {
         const gaps = await scanGaps();
-        for (const gap of gaps.slice(0, 3)) {
+        for (const gap of gaps.slice(0, 10)) {
           if (!heldSymbols.has(gap.symbol) && !blacklistSet.has(gap.symbol)) {
             candidates.set(gap.symbol, `gap_${gap.direction}_${gap.strength}`);
             details.push(`  GAP: ${gap.symbol} ${gap.gapPct >= 0 ? "+" : ""}${gap.gapPct.toFixed(1)}% (${gap.strength}) — ${gap.recommendation}`);
@@ -549,8 +549,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
       // Relative value: find stocks lagging their peers (Citadel pairs trading)
       try {
-        const rvSignals = await scanRelativeValue([...focusSymbols.slice(0, 15)]);
-        for (const rv of rvSignals.filter((s) => s.signal === "laggard_buy" && s.strength !== "weak").slice(0, 3)) {
+        const rvSignals = await scanRelativeValue([...focusSymbols.slice(0, 30)]);
+        for (const rv of rvSignals.filter((s) => s.signal === "laggard_buy" && s.strength !== "weak").slice(0, 10)) {
           if (!heldSymbols.has(rv.symbol) && !blacklistSet.has(rv.symbol)) {
             candidates.set(rv.symbol, `relative_value_laggard`);
             details.push(`  PAIRS: ${rv.symbol} lagging peers by ${Math.abs(rv.divergence).toFixed(1)}% — ${rv.reasoning}`);
@@ -560,13 +560,18 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
       details.push(`Found ${candidates.size} candidates from ${gainers.length} gainers, ${losers.length} losers, ${active.length} active`);
 
-      // Cooldown check
-      const cooldownTime = new Date(Date.now() - RULES.COOLDOWN_HOURS * 60 * 60 * 1000);
-      const recentReports = await prisma.researchReport.findMany({
-        where: { createdAt: { gte: cooldownTime } },
-        select: { symbol: true },
-      });
-      const recentSymbols = new Set(recentReports.map((r) => r.symbol));
+      // Cooldown check — skip cooldown entirely if we have no positions (fresh start)
+      let recentSymbols = new Set<string>();
+      if (positions.length > 0) {
+        const cooldownTime = new Date(Date.now() - RULES.COOLDOWN_HOURS * 60 * 60 * 1000);
+        const recentReports = await prisma.researchReport.findMany({
+          where: { createdAt: { gte: cooldownTime } },
+          select: { symbol: true },
+        });
+        recentSymbols = new Set(recentReports.map((r) => r.symbol));
+      } else {
+        details.push("No positions — cooldown bypassed, re-analyzing everything");
+      }
 
       // Analyze and potentially buy
       for (const [symbol, reason] of candidates) {
@@ -609,8 +614,13 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const recentVolume = bars[bars.length - 1]?.v || 0;
           const volumeWindow = Math.min(20, bars.length);
           const avgVolume = bars.slice(-volumeWindow).reduce((sum, b) => sum + b.v, 0) / volumeWindow;
-          if (avgVolume > 0 && recentVolume / avgVolume < RULES.MIN_VOLUME_RATIO) {
-            details.push(`  ${symbol}: skipped (low volume: ${(recentVolume / avgVolume * 100).toFixed(0)}% of avg)`);
+          // Relax volume filter in first hour after open (9:30-10:30 ET) — volume builds throughout the day
+          const now = new Date();
+          const etHour = now.getUTCHours() - 4; // rough ET conversion
+          const earlySession = etHour < 11; // before 10:30am ET
+          const volumeThreshold = earlySession ? RULES.MIN_VOLUME_RATIO * 0.5 : RULES.MIN_VOLUME_RATIO;
+          if (avgVolume > 0 && recentVolume / avgVolume < volumeThreshold) {
+            details.push(`  ${symbol}: skipped (low volume: ${(recentVolume / avgVolume * 100).toFixed(0)}% of avg, need ${(volumeThreshold * 100).toFixed(0)}%)`);
             continue;
           }
 
