@@ -385,7 +385,9 @@ export interface OptionsSnapshot {
 export async function getOptionsChain(
   underlyingSymbol: string,
   expiration?: string,
-  type?: "call" | "put"
+  type?: "call" | "put",
+  expirationGte?: string,
+  expirationLte?: string
 ): Promise<OptionsContract[]> {
   const params = new URLSearchParams({
     underlying_symbols: underlyingSymbol,
@@ -393,6 +395,8 @@ export async function getOptionsChain(
     limit: "1000",
   });
   if (expiration) params.set("expiration_date", expiration);
+  if (expirationGte) params.set("expiration_date_gte", expirationGte);
+  if (expirationLte) params.set("expiration_date_lte", expirationLte);
   if (type) params.set("type", type);
 
   const data = await alpacaFetch(

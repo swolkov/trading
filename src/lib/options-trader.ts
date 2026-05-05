@@ -29,11 +29,11 @@ const OPTIONS_RULES = {
     leaps: { min: 180, max: 730 },
   },
 
-  // Default expiry selection
-  MIN_DTE: 0,                        // Allow 0DTE for day trades
-  IDEAL_MIN_DTE: 14,                 // Prefer 14+ days for swing
-  IDEAL_MAX_DTE: 45,                 // Prefer < 45 days
-  MAX_DTE: 60,                       // Never buy > 60 days
+  // Default expiry selection — smart theta management
+  MIN_DTE: 7,                         // NEVER buy < 7 DTE (theta decay accelerates)
+  IDEAL_MIN_DTE: 14,                 // Sweet spot: 14+ days for swing trades
+  IDEAL_MAX_DTE: 45,                 // Prefer < 45 days (good leverage)
+  MAX_DTE: 60,                       // Never buy > 60 days (capital inefficient)
 
   // Exit rules
   PROFIT_TARGET_PCT: 0.75,           // Take profit at +75%
@@ -71,33 +71,27 @@ export async function findBestContract(
 }> {
   try {
     const type = direction === "bullish" ? "call" : "put";
-
-    // Get all contracts
-    const contracts = await getOptionsChain(symbol, undefined, type);
-    if (contracts.length === 0) {
-      return { contract: null, snapshot: null, reasoning: "No options contracts available" };
-    }
-
-    // Filter by DTE
     const now = new Date();
-    const validContracts = contracts.filter((c) => {
-      const expDate = new Date(c.expiration_date);
-      const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-      return dte >= OPTIONS_RULES.MIN_DTE && dte <= OPTIONS_RULES.MAX_DTE;
-    });
 
-    if (validContracts.length === 0) {
-      return { contract: null, snapshot: null, reasoning: "No contracts in valid DTE range (7-60 days)" };
+    // Request only contracts in our DTE window from the API (7-60 days out)
+    const minExpDate = new Date(now.getTime() + OPTIONS_RULES.MIN_DTE * 24 * 60 * 60 * 1000);
+    const maxExpDate = new Date(now.getTime() + OPTIONS_RULES.MAX_DTE * 24 * 60 * 60 * 1000);
+    const minExpStr = minExpDate.toISOString().split("T")[0];
+    const maxExpStr = maxExpDate.toISOString().split("T")[0];
+
+    const contracts = await getOptionsChain(symbol, undefined, type, minExpStr, maxExpStr);
+    if (contracts.length === 0) {
+      return { contract: null, snapshot: null, reasoning: `No ${type} contracts available (${OPTIONS_RULES.MIN_DTE}-${OPTIONS_RULES.MAX_DTE} DTE)` };
     }
 
-    // Prefer ideal DTE range (14-45 days)
-    const idealContracts = validContracts.filter((c) => {
+    // Separate into ideal (14-45 DTE) and acceptable (7-60 DTE) pools
+    const idealContracts = contracts.filter((c) => {
       const expDate = new Date(c.expiration_date);
       const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
       return dte >= OPTIONS_RULES.IDEAL_MIN_DTE && dte <= OPTIONS_RULES.IDEAL_MAX_DTE;
     });
 
-    const candidatePool = idealContracts.length > 0 ? idealContracts : validContracts;
+    const candidatePool = idealContracts.length > 0 ? idealContracts : contracts;
 
     // Select strike based on direction and confidence
     // Higher confidence = closer to ATM (more expensive but higher probability)
@@ -267,6 +261,10 @@ export async function executeOptionsTrade(
       },
     });
 
+    const dte = Math.floor((new Date(contract.expiration_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    const targetPremium = (estimatedPremium * (1 + OPTIONS_RULES.PROFIT_TARGET_PCT)).toFixed(2);
+    const stopPremium = (estimatedPremium * (1 - OPTIONS_RULES.STOP_LOSS_PCT)).toFixed(2);
+
     return {
       symbol,
       contractSymbol: contract.symbol,
@@ -275,7 +273,7 @@ export async function executeOptionsTrade(
       expiry: contract.expiration_date,
       qty,
       premium: estimatedPremium,
-      reasoning: `Bought ${qty}x ${contract.symbol} @ ~$${estimatedPremium.toFixed(2)} ($${(costPerContract * qty).toFixed(2)} total risk)`,
+      reasoning: `Bought ${qty}x ${contract.symbol} @ ~$${estimatedPremium.toFixed(2)} ($${(costPerContract * qty).toFixed(2)} total risk). PLAN: Take profit at $${targetPremium} (+${(OPTIONS_RULES.PROFIT_TARGET_PCT * 100).toFixed(0)}%), stop at $${stopPremium} (-${(OPTIONS_RULES.STOP_LOSS_PCT * 100).toFixed(0)}%), ${dte} DTE. Close by ${contract.expiration_date} if OTM.`,
       orderId: order.id,
       success: true,
     };
@@ -303,8 +301,10 @@ export async function executeStraddle(
   reasoning: string
 ): Promise<{ success: boolean; details: string }> {
   try {
-    const contracts = await getOptionsChain(symbol);
     const now = new Date();
+    const minExp = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const maxExp = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const contracts = await getOptionsChain(symbol, undefined, undefined, minExp, maxExp);
 
     // Get current price
     let currentPrice = 0;
@@ -370,8 +370,10 @@ export async function executeSpread(
 ): Promise<{ success: boolean; details: string }> {
   try {
     const type = direction === "bull_call" ? "call" : "put";
-    const contracts = await getOptionsChain(symbol, undefined, type as "call" | "put");
     const now = new Date();
+    const minExp = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const maxExp = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const contracts = await getOptionsChain(symbol, undefined, type as "call" | "put", minExp, maxExp);
 
     let currentPrice = 0;
     try {
@@ -379,12 +381,8 @@ export async function executeSpread(
       currentPrice = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
     } catch { return { success: false, details: "Could not get price" }; }
 
-    // Find contracts 14-30 DTE
+    // All contracts already 14-30 DTE from API filter
     const validContracts = contracts
-      .filter((c) => {
-        const dte = Math.floor((new Date(c.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-        return dte >= 14 && dte <= 30;
-      })
       .sort((a, b) => parseFloat(a.strike_price) - parseFloat(b.strike_price));
 
     if (validContracts.length < 2) {
