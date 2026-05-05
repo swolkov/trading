@@ -670,12 +670,15 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const analysis = await analyzeStock(symbol);
           details.push(`  ${symbol}: score=${analysis.score}, signal=${analysis.signal}, conf=${analysis.confidence}%`);
 
-          // Check buy criteria
-          if (
-            analysis.score >= RULES.MIN_SCORE_TO_BUY &&
+          // Check trade criteria — bullish (buy calls) OR bearish (buy puts)
+          const isBullish = analysis.score >= RULES.MIN_SCORE_TO_BUY &&
             analysis.confidence >= RULES.MIN_CONFIDENCE &&
-            (analysis.signal === "buy" || analysis.signal === "strong_buy")
-          ) {
+            (analysis.signal === "buy" || analysis.signal === "strong_buy");
+          const isBearish = analysis.score <= -RULES.MIN_SCORE_TO_BUY &&
+            analysis.confidence >= RULES.MIN_CONFIDENCE &&
+            (analysis.signal === "sell" || analysis.signal === "strong_sell");
+
+          if (isBullish || isBearish) {
             // Sector diversification check
             const report = await prisma.researchReport.findFirst({
               where: { symbol },
@@ -729,8 +732,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
               optionsOnlyMode = optOnlyConfig?.value === "true" || tradeOptionsConfig?.value === "true";
             } catch { /* default false */ }
 
-            if (!optionsOnlyMode) {
-              // Place stock limit order
+            if (!optionsOnlyMode && isBullish) {
+              // Place stock limit order (only for bullish — can't short stocks easily)
               const limitPrice = (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
 
               details.push(`  BUY ${symbol}: ${qty} shares, limit $${limitPrice} (score: ${analysis.score}, ${reason})`);
@@ -764,12 +767,12 @@ export async function runTradingAgent(): Promise<AgentResult> {
               order.id
             );
             tradesPlaced++;
-            } else {
-              details.push(`  ${symbol}: OPTIONS-ONLY mode — skipping stock, buying options only`);
+            } else if (optionsOnlyMode || isBearish) {
+              details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
             }
 
             // === SMART OPTIONS TRADE (primary strategy) ===
-            const direction = analysis.signal.includes("buy") ? "bullish" as const : "bearish" as const;
+            const direction = isBearish ? "bearish" as const : "bullish" as const;
 
             // Choose strategy based on AI recommendation
             const optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
