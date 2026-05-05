@@ -134,13 +134,19 @@ export async function sellIronCondor(
 
     const dte = Math.floor((new Date(bestExpiry).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
-    // Execute all 4 legs
-    const orders = await Promise.all([
-      placeOrder({ symbol: shortPut.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" }),
+    // Execute legs in safe order: BUY protective wings FIRST, then SELL short legs
+    // This prevents Alpaca from rejecting sells as "uncovered" options
+    const buyOrders = await Promise.all([
       placeOrder({ symbol: longPut.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" }),
-      placeOrder({ symbol: shortCall.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" }),
       placeOrder({ symbol: longCall.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" }),
     ]);
+    // Wait a moment for buys to fill before selling
+    await new Promise((r) => setTimeout(r, 2000));
+    const sellOrders = await Promise.all([
+      placeOrder({ symbol: shortPut.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" }),
+      placeOrder({ symbol: shortCall.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" }),
+    ]);
+    const orders = [...buyOrders, ...sellOrders];
 
     const spStrike = parseFloat(shortPut.strike_price);
     const lpStrike = parseFloat(longPut.strike_price);
@@ -236,9 +242,10 @@ export async function sellCreditSpread(
 
     const dte = Math.floor((new Date(bestExpiry).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
-    // Execute both legs
-    const shortOrder = await placeOrder({ symbol: shortContract.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+    // Execute legs safely: BUY protective wing first, then SELL short leg
     const longOrder = await placeOrder({ symbol: longContract.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+    await new Promise((r) => setTimeout(r, 1000));
+    const shortOrder = await placeOrder({ symbol: shortContract.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
 
     const sStrike = parseFloat(shortContract.strike_price);
     const lStrike = parseFloat(longContract.strike_price);

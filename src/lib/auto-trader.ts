@@ -504,6 +504,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     // ============ STEP 4d: PORTFOLIO GREEKS ============
     let portfolioDelta = 0;
+    let portfolioTheta = 0;
     try {
       const optPositions = positions.filter((p) => p.symbol.length > 10);
       if (optPositions.length > 0) {
@@ -525,6 +526,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
         if (totalTheta < -100) {
           details.push("⚠️ HIGH THETA DECAY: Losing >$100/day to time decay — consider closing some positions");
         }
+        portfolioTheta = totalTheta;
       }
     } catch { /* greeks optional */ }
 
@@ -911,7 +913,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
               optionsOnlyMode ? "options" : "stock",
               price * (calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore }) || 1),
               1,
-              { equity, cash, positions, portfolioDelta, dailyPnl, totalTheta: 0 }
+              { equity, cash, positions, portfolioDelta, dailyPnl, totalTheta: portfolioTheta }
             );
             if (!riskCheck.approved) {
               details.push(`  ${symbol}: RISK VETO — ${riskCheck.reason}`);
