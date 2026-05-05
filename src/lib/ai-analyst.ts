@@ -190,15 +190,15 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
   try {
     const debate = await runAdversarialAnalysis(symbol, analysis, currentPrice);
 
-    // If the adversarial analysis strongly disagrees, override the score
+    // If the adversarial analysis strongly disagrees, reduce confidence (but not too aggressively)
     if (
-      (analysis.signal.includes("buy") && debate.verdict.includes("bearish") && debate.confidence > 70) ||
-      (analysis.signal.includes("sell") && debate.verdict.includes("bullish") && debate.confidence > 70)
+      (analysis.signal.includes("buy") && debate.verdict.includes("bearish") && debate.confidence > 80) ||
+      (analysis.signal.includes("sell") && debate.verdict.includes("bullish") && debate.confidence > 80)
     ) {
-      // The debate found the initial analysis is wrong — reduce confidence
-      analysis.confidence = Math.max(20, analysis.confidence - 30);
+      // The debate found the initial analysis is wrong — reduce confidence modestly
+      analysis.confidence = Math.max(40, analysis.confidence - 15);
       analysis.risks.push(`ADVERSARIAL: ${debate.killShot}`);
-      analysis.thesis += `\n\n[ADVERSARIAL REVIEW] The bear case challenges this thesis: ${debate.bearCase}. Kill shot: ${debate.killShot}. Confidence reduced.`;
+      analysis.thesis += `\n\n[ADVERSARIAL REVIEW] Counter-thesis: ${debate.killShot}. Confidence adjusted.`;
     }
 
     // Add blind spots to risks regardless

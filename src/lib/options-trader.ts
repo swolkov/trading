@@ -40,9 +40,9 @@ const OPTIONS_RULES = {
   STOP_LOSS_PCT: 0.40,               // Cut at -40%
   CLOSE_BEFORE_EXPIRY_DAYS: 5,       // Close if < 5 days to expiry and OTM
 
-  // IV awareness
-  HIGH_IV_THRESHOLD: 0.50,           // IV > 50% = expensive, be cautious
-  LOW_IV_THRESHOLD: 0.25,            // IV < 25% = cheap, good to buy
+  // IV awareness — most large-cap stocks run 30-60% IV in choppy markets
+  HIGH_IV_THRESHOLD: 0.75,           // IV > 75% = truly expensive, skip unless high conviction
+  LOW_IV_THRESHOLD: 0.30,            // IV < 30% = cheap, ideal time to buy options
 };
 
 export interface OptionsTradeResult {
@@ -113,59 +113,56 @@ export async function findBestContract(
       Math.abs(parseFloat(b.strike_price) - targetStrike)
     );
 
-    // Take the best match
-    const bestContract = candidatePool[0];
-    if (!bestContract) {
+    // Try top 5 closest strikes to find one with good liquidity
+    const topCandidates = candidatePool.slice(0, 5);
+    if (topCandidates.length === 0) {
       return { contract: null, snapshot: null, reasoning: "No suitable strike found" };
     }
 
-    // Try to get snapshot for IV and greeks
-    let snapshot: OptionsSnapshot | null = null;
-    try {
-      const snapshots = await getOptionsSnapshots([bestContract.symbol]);
-      snapshot = snapshots[bestContract.symbol] || null;
-    } catch {
-      // snapshots not always available
-    }
-
-    // IV check — skip if IV is too high (expensive options)
-    if (snapshot?.impliedVolatility && snapshot.impliedVolatility > OPTIONS_RULES.HIGH_IV_THRESHOLD) {
-      if (aiConfidence < 80) {
-        return {
-          contract: null,
-          snapshot,
-          reasoning: `IV too high (${(snapshot.impliedVolatility * 100).toFixed(0)}% > ${OPTIONS_RULES.HIGH_IV_THRESHOLD * 100}%) — options are expensive`,
-        };
+    for (const candidate of topCandidates) {
+      // Try to get snapshot for IV and greeks
+      let snapshot: OptionsSnapshot | null = null;
+      try {
+        const snapshots = await getOptionsSnapshots([candidate.symbol]);
+        snapshot = snapshots[candidate.symbol] || null;
+      } catch {
+        // snapshots not always available — proceed without
       }
-    }
 
-    // LIQUIDITY CHECK — don't buy options with wide bid-ask spreads
-    if (snapshot?.latestQuote) {
-      const bid = snapshot.latestQuote.bp;
-      const ask = snapshot.latestQuote.ap;
-      if (bid > 0 && ask > 0) {
-        const spread = ask - bid;
-        const spreadPct = spread / ((bid + ask) / 2);
-        if (spreadPct > 0.15) { // More than 15% spread = illiquid
-          return {
-            contract: null,
-            snapshot,
-            reasoning: `Illiquid: bid-ask spread ${(spreadPct * 100).toFixed(0)}% ($${bid.toFixed(2)}-$${ask.toFixed(2)}) — too wide, would lose on entry`,
-          };
+      // IV check — skip if IV is extreme (>75%) and conviction is low
+      if (snapshot?.impliedVolatility && snapshot.impliedVolatility > OPTIONS_RULES.HIGH_IV_THRESHOLD) {
+        if (aiConfidence < 80) {
+          continue; // try next strike
         }
       }
+
+      // LIQUIDITY CHECK — bid-ask spread must be < 15%
+      if (snapshot?.latestQuote) {
+        const bid = snapshot.latestQuote.bp;
+        const ask = snapshot.latestQuote.ap;
+        if (bid > 0 && ask > 0) {
+          const spread = ask - bid;
+          const spreadPct = spread / ((bid + ask) / 2);
+          if (spreadPct > 0.15) {
+            continue; // try next strike
+          }
+        }
+      }
+
+      const strike = parseFloat(candidate.strike_price);
+      const dte = Math.floor((new Date(candidate.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      const ivText = snapshot?.impliedVolatility ? `${(snapshot.impliedVolatility * 100).toFixed(0)}%` : "N/A";
+      const deltaText = snapshot?.greeks?.delta ? snapshot.greeks.delta.toFixed(3) : "N/A";
+
+      return {
+        contract: candidate,
+        snapshot,
+        reasoning: `${type.toUpperCase()} $${strike.toFixed(2)} exp ${candidate.expiration_date} (${dte} DTE, IV: ${ivText}, Delta: ${deltaText})`,
+      };
     }
 
-    const strike = parseFloat(bestContract.strike_price);
-    const dte = Math.floor((new Date(bestContract.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-    const ivText = snapshot?.impliedVolatility ? `${(snapshot.impliedVolatility * 100).toFixed(0)}%` : "N/A";
-    const deltaText = snapshot?.greeks?.delta ? snapshot.greeks.delta.toFixed(3) : "N/A";
-
-    return {
-      contract: bestContract,
-      snapshot,
-      reasoning: `${type.toUpperCase()} $${strike.toFixed(2)} exp ${bestContract.expiration_date} (${dte} DTE, IV: ${ivText}, Delta: ${deltaText})`,
-    };
+    // All candidates failed liquidity/IV checks
+    return { contract: null, snapshot: null, reasoning: `All ${topCandidates.length} strikes failed liquidity or IV checks` };
   } catch (err) {
     return { contract: null, snapshot: null, reasoning: `Options error: ${err}` };
   }
