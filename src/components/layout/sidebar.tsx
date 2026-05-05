@@ -50,10 +50,10 @@ export function Sidebar() {
       <div className="px-4 py-4 border-b border-border">
         <Link href="/" className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-md bg-primary/20 flex items-center justify-center">
-            <span className="text-primary font-black text-xs">A</span>
+            <span className="text-primary font-black text-xs">DA</span>
           </div>
           <div>
-            <h1 className="text-[13px] font-bold tracking-tight leading-none">Apex Trading</h1>
+            <h1 className="text-[13px] font-bold tracking-tight leading-none">Dean Alpha</h1>
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" />
               <span className="text-[9px] text-emerald-400/80 font-medium tracking-wider uppercase">Paper Live</span>
