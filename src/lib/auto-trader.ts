@@ -17,6 +17,7 @@ import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
 import { scanEarningsReactions } from "./earnings-trader";
 import { scanGaps } from "./gap-scanner";
+import { reviewClosedTrades } from "./trade-reviewer";
 import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
@@ -179,6 +180,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
       await logRun("full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, startTime);
       return { runType: "full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, details };
     }
+
+    // Step 0: Review past trades and extract lessons
+    try {
+      const lessons = await reviewClosedTrades();
+      if (lessons.length > 0) {
+        details.push(`LESSONS LEARNED: ${lessons.length} insights from past trades`);
+      }
+    } catch { /* ignore */ }
 
     // Step 1b: Detect market regime
     let regime: RegimeAnalysis;

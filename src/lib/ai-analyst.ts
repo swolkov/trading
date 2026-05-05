@@ -5,6 +5,8 @@ import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getE
 import { analyzeVolatility } from "./options-intelligence";
 import { generateLearningInsights } from "./learning-engine";
 import { getMarketKnowledgeBase } from "./market-knowledge";
+import { runAdversarialAnalysis } from "./adversarial-analysis";
+import { getTradeLessons } from "./trade-reviewer";
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({
@@ -128,6 +130,9 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
   const learningInsights = await generateLearningInsights().catch(() => null);
 
   // Get market regime for explicit AI guidance
+  // Get accumulated trade lessons
+  const tradeLessons = await getTradeLessons().catch(() => "");
+
   let regimeContext = "";
   try {
     const { detectMarketRegime } = await import("./market-regime");
@@ -154,6 +159,7 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     volatility,
     learningInsights: learningInsights?.aiSummary || null,
     regimeContext,
+    tradeLessons,
   });
 
   // Call Claude for analysis
@@ -170,6 +176,31 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
 
   // Parse the structured response
   const analysis = parseAnalysisResponse(text, currentPrice);
+
+  // Run adversarial analysis to validate/challenge the initial recommendation
+  try {
+    const debate = await runAdversarialAnalysis(symbol, analysis, currentPrice);
+
+    // If the adversarial analysis strongly disagrees, override the score
+    if (
+      (analysis.signal.includes("buy") && debate.verdict.includes("bearish") && debate.confidence > 70) ||
+      (analysis.signal.includes("sell") && debate.verdict.includes("bullish") && debate.confidence > 70)
+    ) {
+      // The debate found the initial analysis is wrong — reduce confidence
+      analysis.confidence = Math.max(20, analysis.confidence - 30);
+      analysis.risks.push(`ADVERSARIAL: ${debate.killShot}`);
+      analysis.thesis += `\n\n[ADVERSARIAL REVIEW] The bear case challenges this thesis: ${debate.bearCase}. Kill shot: ${debate.killShot}. Confidence reduced.`;
+    }
+
+    // Add blind spots to risks regardless
+    for (const blindSpot of debate.blindSpots) {
+      if (!analysis.risks.includes(blindSpot)) {
+        analysis.risks.push(blindSpot);
+      }
+    }
+  } catch {
+    // adversarial analysis optional
+  }
 
   // Store in database
   await prisma.researchReport.create({
@@ -236,8 +267,9 @@ function buildAnalysisPrompt(data: {
   volatility: { ivRank: number; currentIV: number | null; historicalVolatility20: number; ivVsHv: string; recommendation: string } | null;
   learningInsights: string | null;
   regimeContext: string;
+  tradeLessons: string;
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, regimeContext } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, regimeContext, tradeLessons } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -250,6 +282,9 @@ function buildAnalysisPrompt(data: {
     : "No analyst data";
 
   // Build performance context from learning engine
+  // Inject trade lessons
+  const lessonsContext = tradeLessons || "";
+
   const performanceContext = data.learningInsights
     ? `\n## AI PERFORMANCE REVIEW — LEARN FROM THIS
 ${data.learningInsights}
@@ -263,6 +298,7 @@ ${pastReports.length > 0 ? `\n## Previous Analysis of ${symbol}\n${pastReports.m
 ${marketKnowledge}
 
 ${regimeContext}
+${lessonsContext}
 
 CRITICAL RULES:
 - You MUST recommend an options play for EVERY stock you analyze (calls if bullish, puts if bearish, or explain why no options play exists)
