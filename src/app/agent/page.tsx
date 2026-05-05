@@ -527,37 +527,68 @@ export default function AgentPage() {
                   <CardTitle className="text-sm">Strategy & Controls</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Strategy Mode</label>
-                      <Select value={settings.strategy} onValueChange={(v) => v && updateSetting("strategy", v)}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="aggressive">Aggressive (higher risk/reward)</SelectItem>
-                          <SelectItem value="balanced">Balanced (recommended)</SelectItem>
-                          <SelectItem value="conservative">Conservative (capital preservation)</SelectItem>
-                        </SelectContent>
-                      </Select>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium">Strategy Mode</label>
+                      <div className="flex gap-1.5">
+                        {[
+                          { value: "aggressive", label: "Aggressive", color: "bg-red-500/15 text-red-400 border-red-500/30" },
+                          { value: "balanced", label: "Balanced", color: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
+                          { value: "conservative", label: "Conservative", color: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
+                        ].map((s) => (
+                          <button
+                            key={s.value}
+                            onClick={() => updateSetting("strategy", s.value)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                              settings.strategy === s.value ? s.color : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06]"
+                            }`}
+                          >
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Agent Enabled</label>
-                      <Select value={settings.enabled} onValueChange={(v) => v && updateSetting("enabled", v)}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="true">Active — trades automatically</SelectItem>
-                          <SelectItem value="false">Paused — scan only, no trades</SelectItem>
-                        </SelectContent>
-                      </Select>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium">Agent Status</label>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => updateSetting("enabled", "true")}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                            settings.enabled === "true" ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          Active
+                        </button>
+                        <button
+                          onClick={() => updateSetting("enabled", "false")}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                            settings.enabled === "false" ? "bg-red-500/15 text-red-400 border-red-500/30" : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          Paused
+                        </button>
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Trade Options</label>
-                      <Select value={settings.trade_options} onValueChange={(v) => v && updateSetting("trade_options", v)}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="true">Yes — manage options positions</SelectItem>
-                          <SelectItem value="false">No — stocks only</SelectItem>
-                        </SelectContent>
-                      </Select>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium">Trade Type</label>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => updateSetting("trade_options", "true")}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                            settings.trade_options === "true" ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          Options
+                        </button>
+                        <button
+                          onClick={() => updateSetting("trade_options", "false")}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                            settings.trade_options === "false" ? "bg-blue-500/15 text-blue-400 border-blue-500/30" : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          Stocks Only
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </CardContent>
@@ -567,55 +598,58 @@ export default function AgentPage() {
                 <CardHeader>
                   <CardTitle className="text-sm">Risk Management</CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Max Positions</label>
-                      <Input type="number" value={settings.max_positions} onChange={(e) => updateSetting("max_positions", e.target.value)} />
+                <CardContent className="space-y-5">
+                  {/* Position Limits */}
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-2">Position Limits</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {[
+                        { key: "max_positions", label: "Max Positions", val: settings.max_positions },
+                        { key: "max_per_sector", label: "Per Sector", val: settings.max_per_sector },
+                        { key: "max_position_pct", label: "Size %", val: settings.max_position_pct, suffix: "%" },
+                        { key: "cash_reserve_pct", label: "Cash Reserve", val: settings.cash_reserve_pct, suffix: "%" },
+                      ].map((f) => (
+                        <div key={f.key} className="space-y-1">
+                          <label className="text-[11px] text-muted-foreground">{f.label}</label>
+                          <Input type="number" className="h-9" value={f.val} onChange={(e) => updateSetting(f.key as keyof AgentSettings, e.target.value)} />
+                        </div>
+                      ))}
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Max Per Sector</label>
-                      <Input type="number" value={settings.max_per_sector} onChange={(e) => updateSetting("max_per_sector", e.target.value)} />
+                  </div>
+
+                  {/* Exit Rules */}
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-2">Exit Rules</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {[
+                        { key: "stop_loss_atr", label: "Stop Loss (ATR)", val: settings.stop_loss_atr, step: "0.1" },
+                        { key: "take_profit_pct", label: "Take Profit %", val: settings.take_profit_pct },
+                        { key: "options_stop_loss_pct", label: "Options Stop %", val: settings.options_stop_loss_pct },
+                        { key: "options_profit_pct", label: "Options Profit %", val: settings.options_profit_pct },
+                      ].map((f) => (
+                        <div key={f.key} className="space-y-1">
+                          <label className="text-[11px] text-muted-foreground">{f.label}</label>
+                          <Input type="number" step={f.step || "1"} className="h-9" value={f.val} onChange={(e) => updateSetting(f.key as keyof AgentSettings, e.target.value)} />
+                        </div>
+                      ))}
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Max Position %</label>
-                      <Input type="number" value={settings.max_position_pct} onChange={(e) => updateSetting("max_position_pct", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Cash Reserve %</label>
-                      <Input type="number" value={settings.cash_reserve_pct} onChange={(e) => updateSetting("cash_reserve_pct", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Stop Loss (ATR mult)</label>
-                      <Input type="number" step="0.1" value={settings.stop_loss_atr} onChange={(e) => updateSetting("stop_loss_atr", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Take Profit %</label>
-                      <Input type="number" value={settings.take_profit_pct} onChange={(e) => updateSetting("take_profit_pct", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Min AI Score</label>
-                      <Input type="number" value={settings.min_score} onChange={(e) => updateSetting("min_score", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Min Confidence %</label>
-                      <Input type="number" value={settings.min_confidence} onChange={(e) => updateSetting("min_confidence", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Max Daily Trades</label>
-                      <Input type="number" value={settings.max_daily_trades} onChange={(e) => updateSetting("max_daily_trades", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Cooldown (hours)</label>
-                      <Input type="number" value={settings.cooldown_hours} onChange={(e) => updateSetting("cooldown_hours", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Options Stop %</label>
-                      <Input type="number" value={settings.options_stop_loss_pct} onChange={(e) => updateSetting("options_stop_loss_pct", e.target.value)} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium">Options Profit %</label>
-                      <Input type="number" value={settings.options_profit_pct} onChange={(e) => updateSetting("options_profit_pct", e.target.value)} />
+                  </div>
+
+                  {/* AI & Frequency */}
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-2">AI Thresholds & Frequency</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {[
+                        { key: "min_score", label: "Min AI Score", val: settings.min_score },
+                        { key: "min_confidence", label: "Min Confidence %", val: settings.min_confidence },
+                        { key: "max_daily_trades", label: "Max Daily Trades", val: settings.max_daily_trades },
+                        { key: "cooldown_hours", label: "Cooldown (hrs)", val: settings.cooldown_hours },
+                      ].map((f) => (
+                        <div key={f.key} className="space-y-1">
+                          <label className="text-[11px] text-muted-foreground">{f.label}</label>
+                          <Input type="number" className="h-9" value={f.val} onChange={(e) => updateSetting(f.key as keyof AgentSettings, e.target.value)} />
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </CardContent>
