@@ -573,10 +573,16 @@ export async function runTradingAgent(): Promise<AgentResult> {
         details.push("No positions — cooldown bypassed, re-analyzing everything");
       }
 
-      // Analyze and potentially buy
+      // Analyze and potentially buy — cap AI analyses to avoid timeout (each takes ~20-30s)
+      let aiAnalysesRun = 0;
+      const MAX_AI_ANALYSES = 8;
       for (const [symbol, reason] of candidates) {
         if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
         if (positions.length + tradesPlaced >= RULES.MAX_POSITIONS) break;
+        if (aiAnalysesRun >= MAX_AI_ANALYSES) {
+          details.push(`Hit AI analysis limit (${MAX_AI_ANALYSES}) — stopping scan to avoid timeout`);
+          break;
+        }
 
         stocksScanned++;
 
@@ -660,6 +666,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
           // === FULL AI ANALYSIS ===
           details.push(`  Analyzing ${symbol} (${reason})...`);
+          aiAnalysesRun++;
           const analysis = await analyzeStock(symbol);
           details.push(`  ${symbol}: score=${analysis.score}, signal=${analysis.signal}, conf=${analysis.confidence}%`);
 
