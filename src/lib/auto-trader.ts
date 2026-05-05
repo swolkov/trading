@@ -717,7 +717,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             if (price <= 0) continue;
 
-            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, RULES);
+            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore });
             if (qty <= 0) {
               details.push(`  ${symbol}: SKIP — position too small`);
               continue;
