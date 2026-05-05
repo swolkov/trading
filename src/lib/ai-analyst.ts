@@ -335,6 +335,15 @@ CONVICTION & TIMEFRAME — Be decisive, not wishy-washy:
 - LOW CONVICTION (score ±0-34): Say "hold" — do NOT force a trade without an edge
 - Choppy market does NOT mean hold everything — it means be selective and trade the BEST setups only
 
+PREMIUM SELLING (THE REAL EDGE) — In choppy/range-bound markets, SELLING premium is how professionals profit:
+- CHOPPY MARKET = SELL PREMIUM via credit spreads. Time decay (theta) works FOR you. Stock staying flat = profit.
+- Bull put spread: Sell higher strike put, buy lower strike put. Collect credit. Profit if stock stays above short strike.
+- Bear call spread: Sell lower strike call, buy higher strike call. Collect credit. Profit if stock stays below short strike.
+- Iron condor: Sell both a bull put spread AND a bear call spread. Profit if stock stays in a range. IDEAL for choppy markets.
+- The key metric is probability of profit (POP). A 70% POP trade means you win 7 out of 10 times.
+- Sell at 30 delta (70% probability of expiring OTM). Collect premium. Let time do the work.
+- ONLY buy naked options in TRENDING markets with clear momentum. In choppy markets, option BUYERS lose to theta.
+
 GAMBLING RULES — Know when asymmetric risk/reward justifies a gamble:
 - If a stock gapped 5%+ with massive volume, a 7-day call/put is a smart gamble (small position, 3-5x potential)
 - Pre-earnings momentum: buy 7-14 DTE options 2-3 days before earnings if setup is clean

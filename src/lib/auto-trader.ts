@@ -874,9 +874,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
               }
             } catch { /* correlation check optional */ }
 
-            // === IV-AWARE STRATEGY SELECTION ===
+            // === REGIME-AWARE STRATEGY SELECTION ===
+            // In CHOPPY markets: sell premium (credit spreads) — time decay works FOR us
+            // In TRENDING markets: buy options (debit) — ride the move
             const direction = isBearish ? "bearish" as const : "bullish" as const;
             let optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
+
+            // CHOPPY MARKET = ALWAYS use spreads (sell premium, collect theta)
+            if (regime.regime === "choppy" && (optStrategy === "buy_call" || optStrategy === "buy_put")) {
+              optStrategy = direction === "bullish" ? "bull_call_spread" : "bear_put_spread";
+              details.push(`  ${symbol}: CHOPPY regime — using spread to collect premium (theta works FOR us)`);
+            }
 
             // Override strategy based on IV rank — expensive options = use spreads
             try {
