@@ -565,23 +565,23 @@ export async function runTradingAgent(): Promise<AgentResult> {
         }
       }
 
-      // Top gainers with momentum (but not already overextended)
+      // Top gainers with momentum — $20 min price ensures liquid options
       gainers.slice(0, 20).forEach((m) => {
-        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 5 && m.percent_change < 15) {
+        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 20 && m.percent_change < 15) {
           candidates.set(m.symbol, "momentum_gainer");
         }
       });
 
       // Oversold losers (contrarian bounce plays — only if drop isn't catastrophic)
       losers.slice(0, 15).forEach((m) => {
-        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 10 && m.percent_change > -10) {
+        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 20 && m.percent_change > -10) {
           candidates.set(m.symbol, "oversold_bounce");
         }
       });
 
       // Most active (high liquidity = easier exits)
       active.slice(0, 15).forEach((m) => {
-        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 5) {
+        if (!heldSymbols.has(m.symbol) && !blacklistSet.has(m.symbol) && m.price > 20) {
           candidates.set(m.symbol, "high_volume");
         }
       });
@@ -590,7 +590,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
       try {
         const gaps = await scanGaps();
         for (const gap of gaps.slice(0, 10)) {
-          if (!heldSymbols.has(gap.symbol) && !blacklistSet.has(gap.symbol)) {
+          if (!heldSymbols.has(gap.symbol) && !blacklistSet.has(gap.symbol) && gap.currentPrice > 20) {
             candidates.set(gap.symbol, `gap_${gap.direction}_${gap.strength}`);
             details.push(`  GAP: ${gap.symbol} ${gap.gapPct >= 0 ? "+" : ""}${gap.gapPct.toFixed(1)}% (${gap.strength}) — ${gap.recommendation}`);
           }
