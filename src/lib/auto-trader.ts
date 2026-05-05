@@ -671,11 +671,16 @@ export async function runTradingAgent(): Promise<AgentResult> {
           details.push(`  ${symbol}: score=${analysis.score}, signal=${analysis.signal}, conf=${analysis.confidence}%`);
 
           // Check trade criteria — bullish (buy calls) OR bearish (buy puts)
-          const isBullish = analysis.score >= RULES.MIN_SCORE_TO_BUY &&
-            analysis.confidence >= RULES.MIN_CONFIDENCE &&
+          // In choppy/bearish markets, lower the score threshold since extreme conviction is rare
+          const regimeScoreAdjust = regime.regime === "choppy" ? 15 : regime.regime === "bear" ? 20 : 0;
+          const effectiveMinScore = Math.max(30, RULES.MIN_SCORE_TO_BUY - regimeScoreAdjust);
+          const effectiveMinConf = Math.max(50, RULES.MIN_CONFIDENCE - regimeScoreAdjust);
+
+          const isBullish = analysis.score >= effectiveMinScore &&
+            analysis.confidence >= effectiveMinConf &&
             (analysis.signal === "buy" || analysis.signal === "strong_buy");
-          const isBearish = analysis.score <= -RULES.MIN_SCORE_TO_BUY &&
-            analysis.confidence >= RULES.MIN_CONFIDENCE &&
+          const isBearish = analysis.score <= -effectiveMinScore &&
+            analysis.confidence >= effectiveMinConf &&
             (analysis.signal === "sell" || analysis.signal === "strong_sell");
 
           if (isBullish || isBearish) {
@@ -808,7 +813,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
               details.push(`  OPTIONS ERROR: ${optErr}`);
             }
           } else {
-            const reason_text = `Score ${analysis.score} (need ${RULES.MIN_SCORE_TO_BUY}), Conf ${analysis.confidence}% (need ${RULES.MIN_CONFIDENCE}%), Signal: ${analysis.signal}`;
+            const reason_text = `Score ${analysis.score} (need ±${effectiveMinScore}), Conf ${analysis.confidence}% (need ${effectiveMinConf}%), Signal: ${analysis.signal}`;
             details.push(`  ${symbol}: SKIP — ${reason_text}`);
             await logTrade(symbol, "skip", 0, null, reason_text, analysis.score, analysis.signal);
           }
