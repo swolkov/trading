@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Trading Platform — AI-Powered Options & Stock Trading",
+  title: "Apex Trading — AI-Powered Options Intelligence",
   description: "Autonomous AI trading agent with deep research, options intelligence, and risk management",
 };
 
@@ -29,11 +29,15 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="h-full flex bg-[oklch(0.105_0.006_260)]">
+      <body className="h-full flex bg-background">
         <Sidebar />
         <div className="flex-1 flex flex-col min-h-0">
           <TopBar />
-          <main className="flex-1 overflow-auto p-5">{children}</main>
+          <main className="flex-1 overflow-auto">
+            <div className="p-5 animate-fade-up">
+              {children}
+            </div>
+          </main>
         </div>
       </body>
     </html>

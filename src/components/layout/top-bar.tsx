@@ -8,18 +8,18 @@ export function TopBar() {
 
   if (isLoading) {
     return (
-      <header className="h-12 border-b border-white/[0.06] bg-[oklch(0.13_0.005_260)] flex items-center px-6">
-        <div className="h-3 w-48 bg-white/5 animate-pulse rounded" />
+      <header className="h-11 border-b border-border bg-sidebar flex items-center px-5 gap-6">
+        <div className="skeleton h-3 w-32" />
+        <div className="skeleton h-3 w-24" />
+        <div className="skeleton h-3 w-28" />
       </header>
     );
   }
 
   if (error || !account) {
     return (
-      <header className="h-12 border-b border-white/[0.06] bg-[oklch(0.13_0.005_260)] flex items-center px-6">
-        <span className="text-xs text-red-400">
-          Failed to load account. Check your Alpaca API keys.
-        </span>
+      <header className="h-11 border-b border-border bg-sidebar flex items-center px-5">
+        <span className="text-[11px] text-destructive">Check Alpaca API keys</span>
       </header>
     );
   }
@@ -29,34 +29,32 @@ export function TopBar() {
   const dailyPnl = equity - lastEquity;
   const dailyPnlPct = lastEquity > 0 ? dailyPnl / lastEquity : 0;
 
+  const items = [
+    { label: "Equity", value: formatCurrency(equity) },
+    { label: "Cash", value: formatCurrency(account.cash) },
+    { label: "Buying Power", value: formatCurrency(account.buying_power) },
+  ];
+
   return (
-    <header className="h-12 border-b border-white/[0.06] bg-[oklch(0.13_0.005_260)] flex items-center px-6 gap-8">
+    <header className="h-11 border-b border-border bg-sidebar flex items-center px-5 gap-6">
+      {items.map((item) => (
+        <div key={item.label} className="flex items-center gap-1.5">
+          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">{item.label}</span>
+          <span className="text-[12px] font-semibold tabular-nums">{item.value}</span>
+        </div>
+      ))}
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Equity</span>
-        <span className="text-sm font-bold">{formatCurrency(equity)}</span>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Cash</span>
-        <span className="text-sm font-semibold">{formatCurrency(account.cash)}</span>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Buying Power</span>
-        <span className="text-sm font-semibold">{formatCurrency(account.buying_power)}</span>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Daily P&L</span>
-        <span className={`text-sm font-bold ${pnlColor(dailyPnl)}`}>
-          {dailyPnl >= 0 ? "+" : ""}
-          {formatCurrency(dailyPnl)}
-          <span className="text-[10px] ml-1 opacity-70">
+        <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Daily P&L</span>
+        <span className={`text-[12px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+          {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
+          <span className="text-[10px] font-medium ml-0.5 opacity-70">
             ({dailyPnlPct >= 0 ? "+" : ""}{(dailyPnlPct * 100).toFixed(2)}%)
           </span>
         </span>
       </div>
-      <div className="ml-auto">
-        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400/80 font-medium tracking-wider border border-emerald-500/20">
-          PAPER
-        </span>
+      <div className="ml-auto flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" />
+        <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider font-medium">Paper</span>
       </div>
     </header>
   );

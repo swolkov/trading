@@ -36,9 +36,15 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Hero */}
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">Dashboard</h2>
-        <p className="text-sm text-muted-foreground/60">Paper trading portfolio overview</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
+          <p className="text-[11px] text-muted-foreground/50">Portfolio overview &middot; Paper trading</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" />
+          <span className="text-[10px] text-muted-foreground/40">Live data</span>
+        </div>
       </div>
 
       {/* Key Metrics */}
