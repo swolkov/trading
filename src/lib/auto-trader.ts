@@ -130,7 +130,9 @@ function calculatePositionSize(
   const baseRatio = rules.MIN_POSITION_PCT;
   const maxRatio = rules.MAX_POSITION_PCT;
   const scoreRange = 100 - rules.MIN_SCORE_TO_BUY;
-  const scoreFactor = Math.min(1, (score - rules.MIN_SCORE_TO_BUY) / scoreRange);
+  // Use absolute score so bearish signals (-50 etc.) size correctly
+  const absScore = Math.abs(score);
+  const scoreFactor = Math.min(1, (absScore - rules.MIN_SCORE_TO_BUY) / scoreRange);
   const confidenceFactor = Math.min(1, confidence / 100);
 
   let ratio = baseRatio + (maxRatio - baseRatio) * scoreFactor * confidenceFactor;
