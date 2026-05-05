@@ -209,6 +209,70 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Apply regime-adjusted cash reserve
     const effectiveCashReserve = Math.max(RULES.MIN_CASH_RESERVE_PCT, regime.cashReservePct / 100);
 
+    // ============ SPENDING & SAFETY LIMITS ============
+    let dailyLossLimit = 500;
+    let dailySpendCap = 2000;
+    let maxOptionsExposure = 5000;
+    let perTradeMax = 500;
+    let drawdownKillPct = 10;
+    try {
+      const configs = await prisma.agentConfig.findMany();
+      const cm: Record<string, string> = {};
+      for (const c of configs) cm[c.key] = c.value;
+      if (cm.daily_loss_limit) dailyLossLimit = parseFloat(cm.daily_loss_limit);
+      if (cm.daily_spend_cap) dailySpendCap = parseFloat(cm.daily_spend_cap);
+      if (cm.max_options_exposure) maxOptionsExposure = parseFloat(cm.max_options_exposure);
+      if (cm.per_trade_max) perTradeMax = parseFloat(cm.per_trade_max);
+      if (cm.drawdown_kill_pct) drawdownKillPct = parseFloat(cm.drawdown_kill_pct);
+    } catch { /* use defaults */ }
+
+    // DRAWDOWN KILL SWITCH: if account dropped too much from peak, stop
+    const portfolioValue = parseFloat(account.portfolio_value || account.equity);
+    const lastEquityVal = parseFloat(account.last_equity);
+    const startingCapital = 100000; // paper trading start
+    const peakValue = Math.max(startingCapital, lastEquityVal, portfolioValue);
+    const drawdownPct = ((peakValue - portfolioValue) / peakValue) * 100;
+    if (drawdownPct >= drawdownKillPct) {
+      const summary = `KILL SWITCH: Account down ${drawdownPct.toFixed(1)}% from peak (limit: ${drawdownKillPct}%). Agent paused.`;
+      details.push(summary);
+      await sendNotification(`🛑 ${summary}`);
+      await logRun("full", 0, 0, 0, 0, summary, startTime);
+      return { runType: "full", stocksScanned: 0, tradesPlaced: 0, positionsManaged: 0, errors: 0, summary, details };
+    }
+
+    // DAILY LOSS CHECK: if already lost too much today, stop
+    const dailyPnl = portfolioValue - lastEquityVal;
+    if (dailyPnl < -dailyLossLimit) {
+      const summary = `DAILY LOSS LIMIT: Down $${Math.abs(dailyPnl).toFixed(2)} today (limit: $${dailyLossLimit}). Stopping.`;
+      details.push(summary);
+      await logRun("full", 0, 0, 0, 0, summary, startTime);
+      return { runType: "full", stocksScanned: 0, tradesPlaced: 0, positionsManaged: 0, errors: 0, summary, details };
+    }
+
+    // DAILY SPEND CHECK: how much have we already spent today on new trades?
+    const todayBuys = await prisma.autoTradeLog.findMany({
+      where: {
+        createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+        action: { in: ["buy", "buy_call", "buy_put", "earnings_call", "earnings_put", "buy_straddle_call", "buy_straddle_put", "spread_buy_call", "spread_buy_put"] },
+      },
+    });
+    const todaySpent = todayBuys.reduce((sum, t) => sum + (t.price || 0) * (t.qty || 1) * 100, 0);
+    const remainingBudget = dailySpendCap - todaySpent;
+
+    if (remainingBudget <= 0) {
+      const summary = `DAILY SPEND CAP: Already spent $${todaySpent.toFixed(0)} today (cap: $${dailySpendCap}). No more trades.`;
+      details.push(summary);
+      await logRun("full", 0, 0, 0, 0, summary, startTime);
+      return { runType: "full", stocksScanned: 0, tradesPlaced: 0, positionsManaged: 0, errors: 0, summary, details };
+    }
+
+    // OPTIONS EXPOSURE CHECK: total value of current options positions
+    const optionsPositions = positions.filter((p) => p.symbol.length > 10);
+    const currentOptionsExposure = optionsPositions.reduce((sum, p) => sum + Math.abs(parseFloat(p.market_value)), 0);
+    const optionsHeadroom = maxOptionsExposure - currentOptionsExposure;
+
+    details.push(`Safety: Daily loss $${Math.abs(dailyPnl).toFixed(0)}/$${dailyLossLimit} | Spent $${todaySpent.toFixed(0)}/$${dailySpendCap} | Options exposure $${currentOptionsExposure.toFixed(0)}/$${maxOptionsExposure} | Drawdown ${drawdownPct.toFixed(1)}%/${drawdownKillPct}%`);
+
     // Consecutive loss protection: check last 5 closed trades
     let lossMultiplier = 1.0;
     try {

@@ -20,6 +20,11 @@ const DEFAULTS: Record<string, string> = {
   cooldown_hours: "12",
   notification_webhook: "", // Slack/Discord webhook URL
   options_only: "true", // Only trade options, no stocks
+  daily_loss_limit: "500", // Stop trading if daily loss exceeds this $
+  daily_spend_cap: "2000", // Max $ spent on new trades per day
+  max_options_exposure: "5000", // Max total $ in options at any time
+  per_trade_max: "500", // Never spend more than this on one trade
+  drawdown_kill_pct: "10", // Pause agent if account drops this % from peak
 };
 
 export async function GET() {

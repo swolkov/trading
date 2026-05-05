@@ -70,6 +70,11 @@ interface AgentSettings {
   blacklist: string;
   cooldown_hours: string;
   notification_webhook: string;
+  daily_loss_limit: string;
+  daily_spend_cap: string;
+  max_options_exposure: string;
+  per_trade_max: string;
+  drawdown_kill_pct: string;
 }
 
 interface RegimeData {
@@ -651,6 +656,25 @@ export default function AgentPage() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                  {/* Spending & Safety Limits */}
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-2">Spending & Safety Limits (for live trading)</p>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      {[
+                        { key: "daily_loss_limit", label: "Daily Loss Limit $", val: settings.daily_loss_limit },
+                        { key: "daily_spend_cap", label: "Daily Spend Cap $", val: settings.daily_spend_cap },
+                        { key: "max_options_exposure", label: "Max Options Exposure $", val: settings.max_options_exposure },
+                        { key: "per_trade_max", label: "Per Trade Max $", val: settings.per_trade_max },
+                        { key: "drawdown_kill_pct", label: "Kill Switch %", val: settings.drawdown_kill_pct },
+                      ].map((f) => (
+                        <div key={f.key} className="space-y-1">
+                          <label className="text-[11px] text-muted-foreground">{f.label}</label>
+                          <Input type="number" className="h-9" value={f.val} onChange={(e) => updateSetting(f.key as keyof AgentSettings, e.target.value)} />
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/30 mt-2">Kill Switch pauses the agent if your account drops this % from its peak value.</p>
                   </div>
                 </CardContent>
               </Card>

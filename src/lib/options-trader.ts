@@ -208,8 +208,27 @@ export async function executeOptionsTrade(
 
   // Each contract = 100 shares, so cost = premium * 100 * qty
   const costPerContract = estimatedPremium * 100;
-  const maxQty = Math.floor(maxRisk / costPerContract);
+
+  // Apply per-trade max from config
+  let perTradeLimit = maxRisk;
+  try {
+    const ptConfig = await prisma.agentConfig.findUnique({ where: { key: "per_trade_max" } });
+    if (ptConfig?.value) perTradeLimit = Math.min(maxRisk, parseFloat(ptConfig.value));
+  } catch { /* use default */ }
+
+  const maxQty = Math.floor(perTradeLimit / costPerContract);
   const qty = Math.max(1, Math.min(maxQty, 5)); // 1-5 contracts
+
+  // Final cost check
+  const totalCost = costPerContract * qty;
+  if (totalCost > perTradeLimit * 1.1) {
+    return {
+      symbol, contractSymbol: contract.symbol, type, strike,
+      expiry: contract.expiration_date, qty: 0, premium: estimatedPremium,
+      reasoning: `Trade too expensive: $${totalCost.toFixed(0)} exceeds per-trade limit $${perTradeLimit.toFixed(0)}`,
+      orderId: null, success: false,
+    };
+  }
 
   try {
     const order = await placeOrder({
