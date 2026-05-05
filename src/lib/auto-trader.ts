@@ -42,7 +42,7 @@ const DEFAULT_RULES = {
   COOLDOWN_HOURS: 12,
   LIMIT_ORDER_DISCOUNT: 0.001,
   EARNINGS_BLACKOUT_DAYS: 5,
-  MIN_VOLUME_RATIO: 0.8,
+  MIN_VOLUME_RATIO: 0.5,
   OPTIONS_MIN_DTE: 3,
   OPTIONS_PROFIT_TARGET: 0.50,
   OPTIONS_STOP_LOSS: 0.40,
@@ -671,10 +671,10 @@ export async function runTradingAgent(): Promise<AgentResult> {
           details.push(`  ${symbol}: score=${analysis.score}, signal=${analysis.signal}, conf=${analysis.confidence}%`);
 
           // Check trade criteria — bullish (buy calls) OR bearish (buy puts)
-          // In choppy/bearish markets, lower the score threshold since extreme conviction is rare
-          const regimeScoreAdjust = regime.regime === "choppy" ? 15 : regime.regime === "bear" ? 20 : 0;
-          const effectiveMinScore = Math.max(30, RULES.MIN_SCORE_TO_BUY - regimeScoreAdjust);
-          const effectiveMinConf = Math.max(50, RULES.MIN_CONFIDENCE - regimeScoreAdjust);
+          // In choppy/bearish markets, lower thresholds since extreme conviction is rare
+          const regimeScoreAdjust = regime.regime === "choppy" ? 30 : regime.regime === "bear" ? 35 : 0;
+          const effectiveMinScore = Math.max(25, RULES.MIN_SCORE_TO_BUY - regimeScoreAdjust);
+          const effectiveMinConf = Math.max(40, RULES.MIN_CONFIDENCE - regimeScoreAdjust);
 
           const isBullish = analysis.score >= effectiveMinScore &&
             analysis.confidence >= effectiveMinConf &&
