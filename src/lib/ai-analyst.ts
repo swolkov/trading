@@ -6,6 +6,7 @@ import { analyzeVolatility } from "./options-intelligence";
 import { generateLearningInsights } from "./learning-engine";
 import { getMarketKnowledgeBase } from "./market-knowledge";
 import { runAdversarialAnalysis } from "./adversarial-analysis";
+import { getCrossAssetSignals } from "./cross-asset";
 import { getTradeLessons } from "./trade-reviewer";
 import { prisma } from "./db";
 
@@ -133,6 +134,13 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
   // Get accumulated trade lessons
   const tradeLessons = await getTradeLessons().catch(() => "");
 
+  // Get cross-asset macro signals (Citadel-style)
+  let crossAssetContext = "";
+  try {
+    const signals = await getCrossAssetSignals();
+    crossAssetContext = signals.summary;
+  } catch { /* ignore */ }
+
   let regimeContext = "";
   try {
     const { detectMarketRegime } = await import("./market-regime");
@@ -160,6 +168,7 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     learningInsights: learningInsights?.aiSummary || null,
     regimeContext,
     tradeLessons,
+    crossAssetContext,
   });
 
   // Call Claude for analysis
@@ -268,8 +277,9 @@ function buildAnalysisPrompt(data: {
   learningInsights: string | null;
   regimeContext: string;
   tradeLessons: string;
+  crossAssetContext: string;
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, regimeContext, tradeLessons } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, regimeContext, tradeLessons, crossAssetContext } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -298,6 +308,7 @@ ${pastReports.length > 0 ? `\n## Previous Analysis of ${symbol}\n${pastReports.m
 ${marketKnowledge}
 
 ${regimeContext}
+${crossAssetContext}
 ${lessonsContext}
 
 CRITICAL RULES:

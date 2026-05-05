@@ -18,6 +18,7 @@ import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeS
 import { scanEarningsReactions } from "./earnings-trader";
 import { scanGaps } from "./gap-scanner";
 import { reviewClosedTrades } from "./trade-reviewer";
+import { scanRelativeValue } from "./relative-value";
 import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { prisma } from "./db";
@@ -478,6 +479,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
           if (!heldSymbols.has(gap.symbol) && !blacklistSet.has(gap.symbol)) {
             candidates.set(gap.symbol, `gap_${gap.direction}_${gap.strength}`);
             details.push(`  GAP: ${gap.symbol} ${gap.gapPct >= 0 ? "+" : ""}${gap.gapPct.toFixed(1)}% (${gap.strength}) — ${gap.recommendation}`);
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Relative value: find stocks lagging their peers (Citadel pairs trading)
+      try {
+        const rvSignals = await scanRelativeValue([...focusSymbols.slice(0, 15)]);
+        for (const rv of rvSignals.filter((s) => s.signal === "laggard_buy" && s.strength !== "weak").slice(0, 3)) {
+          if (!heldSymbols.has(rv.symbol) && !blacklistSet.has(rv.symbol)) {
+            candidates.set(rv.symbol, `relative_value_laggard`);
+            details.push(`  PAIRS: ${rv.symbol} lagging peers by ${Math.abs(rv.divergence).toFixed(1)}% — ${rv.reasoning}`);
           }
         }
       } catch { /* ignore */ }
