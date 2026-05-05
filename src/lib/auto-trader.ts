@@ -914,11 +914,16 @@ export async function runTradingAgent(): Promise<AgentResult> {
             const direction = isBearish ? "bearish" as const : "bullish" as const;
             let optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
 
-            // CHOPPY MARKET = ALWAYS use spreads (sell premium, collect theta)
+            // CHOPPY MARKET = use spreads or credit strategies (sell premium, collect theta)
             if (regime.regime === "choppy" && (optStrategy === "buy_call" || optStrategy === "buy_put")) {
+              // In choppy: sell credit spreads (premium selling) — profit from stock doing nothing
               optStrategy = direction === "bullish" ? "bull_call_spread" : "bear_put_spread";
-              details.push(`  ${symbol}: CHOPPY regime — using spread to collect premium (theta works FOR us)`);
+              details.push(`  ${symbol}: CHOPPY regime — using spread (theta works FOR us)`);
             }
+
+            // Map AI's new strategy types to execution
+            if (optStrategy === "sell_put_spread") optStrategy = "bull_call_spread"; // sell put spread = bull put credit spread
+            if (optStrategy === "sell_call_spread") optStrategy = "bear_put_spread"; // sell call spread = bear call credit spread
 
             // Override strategy based on IV rank — expensive options = use spreads
             try {
@@ -931,7 +936,12 @@ export async function runTradingAgent(): Promise<AgentResult> {
             } catch { /* use default strategy */ }
 
             try {
-              if (optStrategy === "bull_call_spread" || optStrategy === "bear_put_spread") {
+              if (optStrategy === "iron_condor") {
+                // IRON CONDOR — profit from stock staying in range (choppy market king)
+                const icResult = await sellIronCondor(symbol, equity);
+                details.push(`  ${icResult.details}`);
+                if (icResult.success) tradesPlaced += 4;
+              } else if (optStrategy === "bull_call_spread" || optStrategy === "bear_put_spread") {
                 // SPREAD TRADE — defined risk
                 const spreadDir = optStrategy === "bull_call_spread" ? "bull_call" as const : "bear_put" as const;
                 const spreadResult = await executeSpread(symbol, spreadDir, equity, analysis.score, analysis.summary);

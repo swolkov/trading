@@ -335,14 +335,35 @@ CONVICTION & TIMEFRAME — Be decisive, not wishy-washy:
 - LOW CONVICTION (score ±0-34): Say "hold" — do NOT force a trade without an edge
 - Choppy market does NOT mean hold everything — it means be selective and trade the BEST setups only
 
-PREMIUM SELLING (THE REAL EDGE) — In choppy/range-bound markets, SELLING premium is how professionals profit:
-- CHOPPY MARKET = SELL PREMIUM via credit spreads. Time decay (theta) works FOR you. Stock staying flat = profit.
-- Bull put spread: Sell higher strike put, buy lower strike put. Collect credit. Profit if stock stays above short strike.
-- Bear call spread: Sell lower strike call, buy higher strike call. Collect credit. Profit if stock stays below short strike.
-- Iron condor: Sell both a bull put spread AND a bear call spread. Profit if stock stays in a range. IDEAL for choppy markets.
-- The key metric is probability of profit (POP). A 70% POP trade means you win 7 out of 10 times.
-- Sell at 30 delta (70% probability of expiring OTM). Collect premium. Let time do the work.
-- ONLY buy naked options in TRENDING markets with clear momentum. In choppy markets, option BUYERS lose to theta.
+MASTER STRATEGY GUIDE — Pick the RIGHT strategy for the situation:
+
+PREMIUM SELLING (choppy/range-bound markets — THE REAL EDGE):
+- Bull put credit spread: Sell higher put, buy lower put. Collect credit. Profit if stock stays ABOVE short strike. Use when MILDLY BULLISH or NEUTRAL. 65-75% win rate.
+- Bear call credit spread: Sell lower call, buy higher call. Collect credit. Profit if stock stays BELOW short strike. Use when MILDLY BEARISH or NEUTRAL. 65-75% win rate.
+- Iron condor: Sell BOTH a bull put spread AND bear call spread. Profit if stock stays in RANGE. IDEAL for CHOPPY markets. 55-70% win rate.
+- The key metric is probability of profit (POP). Sell at 30 delta = 70% POP. Collect premium. Let time do the work.
+
+DIRECTIONAL BUYING (trending markets — ride momentum):
+- Buy calls: Stock in strong uptrend, breaking out with volume. 14-30 DTE, slightly OTM. Need 3-5% move to profit.
+- Buy puts: Stock breaking down, insider selling, negative catalyst. 14-30 DTE. Need stock to drop.
+- Bull call debit spread: Buy lower call, sell higher call. Cheaper than naked call. Capped profit but defined risk. Use in MODERATE uptrend.
+- Bear put debit spread: Buy higher put, sell lower put. Cheaper than naked put. Use in MODERATE downtrend.
+
+VOLATILITY PLAYS (when you expect a big move but unsure of direction):
+- Straddle: Buy ATM call + put same strike. Profit from BIG move in either direction. Use BEFORE earnings, FDA, major events. Need 5%+ move.
+- Calendar spread: Buy far-dated option, sell near-dated same strike. Profit from IV expansion or time decay difference. Advanced play.
+
+QUICK MOMENTUM (7-14 DTE aggressive plays):
+- Gap-and-go: Stock gaps 5%+ on volume. Buy calls/puts in gap direction. Quick 1-3 day hold. Cap at 1% of portfolio.
+- Earnings drift: After strong earnings beat, momentum continues 1-2 weeks. Buy calls, ride the drift.
+- Mean reversion: Extreme RSI + support/resistance = snap back. Buy opposite direction.
+
+REGIME MATCHING IS EVERYTHING:
+- BULL market: Buy calls, bull call spreads, sell put credit spreads
+- BEAR market: Buy puts, bear put spreads, sell call credit spreads
+- CHOPPY market: Iron condors, credit spreads, straddles before catalysts. DO NOT buy naked calls/puts (theta kills you)
+- HIGH IV: Sell premium (credit spreads, iron condors). You are overpaid for the risk.
+- LOW IV: Buy options (straddles, naked calls/puts). Options are cheap.
 
 GAMBLING RULES — Know when asymmetric risk/reward justifies a gamble:
 - If a stock gapped 5%+ with massive volume, a 7-day call/put is a smart gamble (small position, 3-5x potential)
@@ -470,7 +491,7 @@ Respond in EXACTLY this JSON format (no markdown, no code fences, just raw JSON)
     "riskReward": <risk/reward ratio as number or null>
   },
   "optionsPlay": {
-    "strategy": "<buy_call|buy_put|sell_covered_call|bull_call_spread|bear_put_spread|straddle|none>",
+    "strategy": "<buy_call|buy_put|bull_call_spread|bear_put_spread|straddle|iron_condor|sell_put_spread|sell_call_spread|calendar_spread|none>",
     "strike": <recommended strike price as number or null>,
     "expiry": "<recommended expiry timeframe, e.g. '7 days', '2 weeks', '1 month', '45 days'>",
     "reasoning": "<why this options strategy — what is the EDGE? consider IV, catalysts, risk/reward>",
