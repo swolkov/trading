@@ -519,6 +519,46 @@ export async function manageOptionsPositions(
       continue;
     }
 
+    // ROLL FORWARD — if profitable (20%+) and near expiry (<=7 DTE), roll to later expiration
+    if (pnlPct >= 0.20 && dte <= 7) {
+      try {
+        // Parse underlying symbol and option type from OCC symbol (e.g., TSLA260522P00385000)
+        const occMatch = pos.symbol.match(/^([A-Z]+)\d{6}([CP])(\d{8})$/);
+        if (occMatch) {
+          const underlying = occMatch[1];
+          const optType: "call" | "put" = occMatch[2] === "C" ? "call" : "put";
+          const strike = parseInt(occMatch[3]) / 1000;
+
+          // Find same-strike contract 14-30 DTE out
+          const rollMinDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+          const rollMaxDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+          const rollCandidates = await getOptionsChain(underlying, undefined, optType, rollMinDate, rollMaxDate);
+
+          const sameStrike = rollCandidates.find((c) => Math.abs(parseFloat(c.strike_price) - strike) < 0.5);
+
+          if (sameStrike) {
+            // Sell current, buy new
+            const sellOrder = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+            const buyOrder = await placeOrder({ symbol: sameStrike.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+
+            await prisma.autoTradeLog.create({
+              data: {
+                symbol: pos.symbol,
+                action: "roll_forward",
+                qty,
+                price: parseFloat(pos.current_price),
+                reason: `Rolled ${pos.symbol} → ${sameStrike.symbol} (${dte} DTE → ${sameStrike.expiration_date}, +${(pnlPct * 100).toFixed(1)}% profit locked, continuing thesis)`,
+                pnl: parseFloat(pos.unrealized_pl),
+                orderId: sellOrder.id,
+              },
+            });
+            actions.push({ action: "roll_forward", symbol: pos.symbol, reason: `→ ${sameStrike.symbol}, +${(pnlPct * 100).toFixed(1)}%` });
+            continue;
+          }
+        }
+      } catch { /* roll failed, fall through to other checks */ }
+    }
+
     // CLOSE BEFORE EXPIRY — if < 5 DTE and losing money, close to salvage remaining value
     if (dte <= OPTIONS_RULES.CLOSE_BEFORE_EXPIRY_DAYS && pnlPct < 0) {
       try {

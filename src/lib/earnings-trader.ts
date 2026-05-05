@@ -1,6 +1,7 @@
 import { getEarningsCalendar } from "./finnhub";
 import { getSnapshot, placeOrder, getOptionsChain, getOptionsSnapshots } from "./alpaca";
 import { getHistoricalBars } from "./yahoo";
+import { analyzeVolatility } from "./options-intelligence";
 import { prisma } from "./db";
 
 // ============ EARNINGS REACTION TRADING ============
@@ -243,6 +244,127 @@ export async function scanEarningsReactions(equity: number): Promise<EarningsPla
     }
   } catch (err) {
     console.error("[earnings-trader]", err);
+  }
+
+  return results;
+}
+
+// ============ EARNINGS PRE-POSITIONING ============
+// Buy straddles 2-5 days BEFORE earnings when IV is still cheap
+// Profit from the big post-earnings move in either direction
+
+export async function prePositionEarnings(
+  equity: number,
+  focusSymbols: string[]
+): Promise<{ symbol: string; action: string; details: string; success: boolean }[]> {
+  const results: { symbol: string; action: string; details: string; success: boolean }[] = [];
+
+  try {
+    const today = new Date();
+    const fiveDaysOut = new Date(today.getTime() + 5 * 24 * 60 * 60 * 1000);
+    const twoDaysOut = new Date(today.getTime() + 2 * 24 * 60 * 60 * 1000);
+
+    const earnings = await getEarningsCalendar(
+      twoDaysOut.toISOString().split("T")[0],
+      fiveDaysOut.toISOString().split("T")[0]
+    );
+
+    if (earnings.length === 0) return results;
+
+    const focusSet = new Set(focusSymbols.map((s) => s.toUpperCase()));
+    const earningsInFocus = earnings.filter((e) => focusSet.has(e.symbol));
+
+    let positioned = 0;
+    for (const earning of earningsInFocus.slice(0, 5)) {
+      if (positioned >= 2) break; // Cap at 2 pre-earnings positions per run
+
+      const symbol = earning.symbol;
+
+      // Skip if already pre-positioned
+      const existing = await prisma.autoTradeLog.findFirst({
+        where: {
+          symbol: { contains: symbol },
+          action: "earnings_pre_straddle",
+          createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+        },
+      });
+      if (existing) continue;
+
+      // Check IV rank — only buy if options are still cheap (IV rank < 50)
+      try {
+        const vol = await analyzeVolatility(symbol);
+        if (vol && vol.ivRank > 50) {
+          results.push({
+            symbol,
+            action: "skip",
+            details: `IV rank ${vol.ivRank}/100 — too expensive to pre-position (need < 50)`,
+            success: false,
+          });
+          continue;
+        }
+      } catch {
+        // No vol data, proceed with caution
+      }
+
+      // Get current price
+      let currentPrice = 0;
+      try {
+        const snap = await getSnapshot(symbol);
+        currentPrice = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
+      } catch { continue; }
+      if (currentPrice <= 0) continue;
+
+      // Find ATM call and put, 14-21 DTE (survive through earnings + aftermath)
+      const now = new Date();
+      const minExp = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const maxExp = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+      const allContracts = await getOptionsChain(symbol, undefined, undefined, minExp, maxExp);
+      const atmCalls = allContracts.filter((c) =>
+        c.type === "call" && Math.abs(parseFloat(c.strike_price) - currentPrice) / currentPrice < 0.02
+      );
+      const atmPuts = allContracts.filter((c) =>
+        c.type === "put" && Math.abs(parseFloat(c.strike_price) - currentPrice) / currentPrice < 0.02
+      );
+
+      if (atmCalls.length === 0 || atmPuts.length === 0) {
+        results.push({ symbol, action: "skip", details: "No ATM contracts for straddle", success: false });
+        continue;
+      }
+
+      const call = atmCalls[0];
+      const matchPut = atmPuts.find((p) => p.strike_price === call.strike_price && p.expiration_date === call.expiration_date);
+      if (!matchPut) {
+        results.push({ symbol, action: "skip", details: "No matching put for straddle", success: false });
+        continue;
+      }
+
+      // Size: 1% of portfolio for pre-earnings gamble
+      const maxRisk = equity * 0.01;
+      const qty = Math.max(1, Math.min(2, Math.floor(maxRisk / (currentPrice * 0.04 * 100))));
+
+      try {
+        const callOrder = await placeOrder({ symbol: call.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+        const putOrder = await placeOrder({ symbol: matchPut.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+
+        const strike = parseFloat(call.strike_price);
+        const details = `PRE-EARNINGS STRADDLE: ${symbol} reports ${earning.date}. Bought ${qty}x call + put @ $${strike.toFixed(2)} exp ${call.expiration_date}. IV rank low — options cheap before the vol spike.`;
+
+        await prisma.autoTradeLog.create({
+          data: { symbol: call.symbol, action: "earnings_pre_straddle", qty, price: null, reason: details, aiScore: null, aiSignal: "straddle", orderId: callOrder.id },
+        });
+        await prisma.autoTradeLog.create({
+          data: { symbol: matchPut.symbol, action: "earnings_pre_straddle", qty, price: null, reason: details, aiScore: null, aiSignal: "straddle", orderId: putOrder.id },
+        });
+
+        results.push({ symbol, action: "earnings_pre_straddle", details, success: true });
+        positioned++;
+      } catch (err) {
+        results.push({ symbol, action: "error", details: `Failed: ${err}`, success: false });
+      }
+    }
+  } catch (err) {
+    console.error("[earnings-pre-position]", err);
   }
 
   return results;

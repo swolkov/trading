@@ -15,12 +15,15 @@ import {
 import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
-import { scanEarningsReactions } from "./earnings-trader";
+import { scanEarningsReactions, prePositionEarnings } from "./earnings-trader";
 import { scanGaps } from "./gap-scanner";
 import { reviewClosedTrades } from "./trade-reviewer";
 import { scanRelativeValue } from "./relative-value";
 import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
+import { analyzeVolatility } from "./options-intelligence";
+import { checkCorrelationWithPortfolio, clearCorrelationCache } from "./correlation";
+import { getOptionsSnapshots } from "./alpaca";
 import { prisma } from "./db";
 
 // ============ DEFAULT RULES (overridden by database config) ============
@@ -461,6 +464,60 @@ export async function runTradingAgent(): Promise<AgentResult> {
       details.push(`  Earnings scan error: ${err}`);
     }
 
+    // Load focus symbols early (used by pre-positioning and candidate selection)
+    let focusSymbols: string[] = [];
+    let blacklist: string[] = [];
+    try {
+      const focusConfig = await prisma.agentConfig.findUnique({ where: { key: "focus_symbols" } });
+      const blacklistConfig = await prisma.agentConfig.findUnique({ where: { key: "blacklist" } });
+      if (focusConfig?.value) focusSymbols = focusConfig.value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+      if (blacklistConfig?.value) blacklist = blacklistConfig.value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+    } catch { /* ignore */ }
+
+    // ============ STEP 4c: PRE-POSITION FOR UPCOMING EARNINGS ============
+    try {
+      details.push("\nPre-positioning for upcoming earnings...");
+      const preEarnings = await prePositionEarnings(equity, focusSymbols);
+      for (const pe of preEarnings) {
+        details.push(`  ${pe.symbol}: ${pe.action.toUpperCase()} — ${pe.details}`);
+        if (pe.success) tradesPlaced += 2; // straddle = 2 legs
+      }
+      if (preEarnings.length === 0) {
+        details.push("  No upcoming earnings in focus list (2-5 days out)");
+      }
+    } catch (err) {
+      details.push(`  Earnings pre-position error: ${err}`);
+    }
+
+    // ============ STEP 4d: PORTFOLIO GREEKS ============
+    let portfolioDelta = 0;
+    try {
+      const optPositions = positions.filter((p) => p.symbol.length > 10);
+      if (optPositions.length > 0) {
+        const optSymbols = optPositions.map((p) => p.symbol);
+        const snapshots = await getOptionsSnapshots(optSymbols);
+        let totalTheta = 0;
+        let totalGamma = 0;
+        for (const pos of optPositions) {
+          const snap = snapshots[pos.symbol];
+          const qty = parseInt(pos.qty);
+          if (snap?.greeks) {
+            portfolioDelta += (snap.greeks.delta || 0) * qty * 100;
+            totalTheta += (snap.greeks.theta || 0) * qty * 100;
+            totalGamma += (snap.greeks.gamma || 0) * qty * 100;
+          }
+        }
+        const directionText = portfolioDelta > 50 ? "bullish" : portfolioDelta < -50 ? "bearish" : "neutral";
+        details.push(`PORTFOLIO GREEKS: Delta: ${portfolioDelta.toFixed(0)} (${directionText}), Theta: $${totalTheta.toFixed(2)}/day, Gamma: ${totalGamma.toFixed(2)}`);
+        if (totalTheta < -100) {
+          details.push("⚠️ HIGH THETA DECAY: Losing >$100/day to time decay — consider closing some positions");
+        }
+      }
+    } catch { /* greeks optional */ }
+
+    // Clear correlation cache for this run
+    clearCorrelationCache();
+
     // ============ STEP 5: FIND NEW OPPORTUNITIES ============
 
     if (positions.length >= RULES.MAX_POSITIONS) {
@@ -495,16 +552,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
         }
       }
 
-      // Load agent config for focus symbols and blacklist
-      let focusSymbols: string[] = [];
-      let blacklist: string[] = [];
-      try {
-        const focusConfig = await prisma.agentConfig.findUnique({ where: { key: "focus_symbols" } });
-        const blacklistConfig = await prisma.agentConfig.findUnique({ where: { key: "blacklist" } });
-        if (focusConfig?.value) focusSymbols = focusConfig.value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
-        if (blacklistConfig?.value) blacklist = blacklistConfig.value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
-      } catch { /* ignore */ }
-
+      // focusSymbols and blacklist already loaded in Step 4c
       const blacklistSet = new Set(blacklist);
 
       // Candidate selection: diversified sources
@@ -704,9 +752,11 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const effectiveMinScore = Math.max(25, RULES.MIN_SCORE_TO_BUY - regimeScoreAdjust);
           const effectiveMinConf = Math.max(40, RULES.MIN_CONFIDENCE - regimeScoreAdjust);
 
-          // If portfolio is heavily one-directional, lower threshold for opposite direction
-          const bullishThreshold = bearBias ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
-          const bearishThreshold = bullBias ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
+          // If portfolio is heavily one-directional (by position count OR delta), lower threshold for opposite
+          const deltaIsVeryBearish = portfolioDelta < -200;
+          const deltaIsVeryBullish = portfolioDelta > 200;
+          const bullishThreshold = (bearBias || deltaIsVeryBearish) ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
+          const bearishThreshold = (bullBias || deltaIsVeryBullish) ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
 
           const isBullish = analysis.score >= bullishThreshold &&
             analysis.confidence >= effectiveMinConf &&
@@ -808,11 +858,35 @@ export async function runTradingAgent(): Promise<AgentResult> {
               details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
             }
 
-            // === SMART OPTIONS TRADE (primary strategy) ===
-            const direction = isBearish ? "bearish" as const : "bullish" as const;
+            // === CORRELATION CHECK — avoid redundant correlated positions ===
+            try {
+              const corrCheck = await checkCorrelationWithPortfolio(symbol, positions);
+              if (corrCheck.correlated) {
+                // Correlated in same direction = skip (redundant risk)
+                const existingIsPut = positions.some((p) => p.symbol.includes(corrCheck.with!) && p.symbol.includes("P0"));
+                const newIsPut = isBearish;
+                if (existingIsPut === newIsPut) {
+                  details.push(`  ${symbol}: SKIP — correlated with ${corrCheck.with} (r=${corrCheck.correlation!.toFixed(2)}), same direction`);
+                  continue;
+                } else {
+                  details.push(`  ${symbol}: Correlated with ${corrCheck.with} but OPPOSITE direction — good hedge`);
+                }
+              }
+            } catch { /* correlation check optional */ }
 
-            // Choose strategy based on AI recommendation
-            const optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
+            // === IV-AWARE STRATEGY SELECTION ===
+            const direction = isBearish ? "bearish" as const : "bullish" as const;
+            let optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
+
+            // Override strategy based on IV rank — expensive options = use spreads
+            try {
+              const vol = await analyzeVolatility(symbol);
+              if (vol && vol.ivRank > 50 && (optStrategy === "buy_call" || optStrategy === "buy_put")) {
+                // High IV = options expensive, use spreads for defined risk
+                optStrategy = direction === "bullish" ? "bull_call_spread" : "bear_put_spread";
+                details.push(`  ${symbol}: IV rank ${vol.ivRank}/100 — switching to spread (options expensive)`);
+              }
+            } catch { /* use default strategy */ }
 
             try {
               if (optStrategy === "bull_call_spread" || optStrategy === "bear_put_spread") {
