@@ -575,10 +575,23 @@ export async function runTradingAgent(): Promise<AgentResult> {
         details.push("No positions — cooldown bypassed, re-analyzing everything");
       }
 
+      // Prioritize candidates: special signals first (gaps, pairs, momentum), then focus watchlist
+      // This ensures high-signal candidates get analyzed before hitting the AI limit
+      const prioritized = [...candidates.entries()].sort(([, a], [, b]) => {
+        const priority = (r: string) =>
+          r.startsWith("gap_") ? 0 :
+          r.startsWith("relative_value") ? 1 :
+          r.startsWith("momentum") ? 2 :
+          r === "oversold_bounce" ? 3 :
+          r === "high_volume" ? 4 :
+          5; // focus_watchlist last (they often score "hold")
+        return priority(a) - priority(b);
+      });
+
       // Analyze and potentially buy — cap AI analyses to avoid timeout (each takes ~20-30s)
       let aiAnalysesRun = 0;
       const MAX_AI_ANALYSES = 8;
-      for (const [symbol, reason] of candidates) {
+      for (const [symbol, reason] of prioritized) {
         if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
         if (positions.length + tradesPlaced >= RULES.MAX_POSITIONS) break;
         if (aiAnalysesRun >= MAX_AI_ANALYSES) {
@@ -632,23 +645,25 @@ export async function runTradingAgent(): Promise<AgentResult> {
             continue;
           }
 
-          // RSI check — don't buy extremely overbought
+          // RSI and trend checks — but DON'T block bearish plays or special signals
           const closes = bars.map((b) => b.c);
           const rsi = calculateRSI(closes);
-          if (rsi && rsi > 80) {
-            details.push(`  ${symbol}: skipped (RSI ${rsi.toFixed(0)} — overbought)`);
+          const sma50 = sma(closes, 50);
+          const currentClose = closes[closes.length - 1];
+          const isSpecialSignal = reason.startsWith("gap_") || reason.startsWith("relative_value") || reason.startsWith("momentum") || reason === "oversold_bounce";
+
+          // RSI > 85 = overbought, but let AI decide if it's momentum or reversal
+          // RSI > 80 only blocks if NOT a special signal (gaps, pairs, momentum)
+          if (rsi && rsi > 85 && !isSpecialSignal) {
+            details.push(`  ${symbol}: skipped (RSI ${rsi.toFixed(0)} — extreme overbought)`);
             continue;
           }
 
-          // Trend check — price should be above 50-day SMA (uptrend)
-          const sma50 = sma(closes, 50);
-          const currentClose = closes[closes.length - 1];
-          if (sma50 && currentClose < sma50 * 0.97) {
-            // Allow 3% below SMA for bounce plays
-            if (reason !== "oversold_bounce") {
-              details.push(`  ${symbol}: skipped (below 50-SMA, not in uptrend)`);
-              continue;
-            }
+          // Below 50-SMA check — skip for bearish plays (we WANT to buy puts on downtrending stocks)
+          // and for special signals (pairs, mean reversion, etc.)
+          if (sma50 && currentClose < sma50 * 0.97 && !isSpecialSignal) {
+            details.push(`  ${symbol}: skipped (below 50-SMA, not in uptrend)`);
+            continue;
           }
 
           // Earnings blackout check
@@ -666,6 +681,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
             // earnings check failed, continue anyway
           }
 
+          // === PORTFOLIO BALANCE CHECK ===
+          // Count current directional bias to avoid loading all one direction
+          const currentPuts = positions.filter((p) => p.symbol.length > 10 && p.symbol.includes("P0")).length +
+            (tradesPlaced > 0 ? 1 : 0); // rough count
+          const currentCalls = positions.filter((p) => p.symbol.length > 10 && p.symbol.includes("C0")).length;
+          const bearBias = currentPuts > currentCalls + 3; // heavily bearish
+          const bullBias = currentCalls > currentPuts + 3; // heavily bullish
+          if (bearBias) {
+            details.push(`  ⚖️ Portfolio is heavily bearish (${currentPuts} puts vs ${currentCalls} calls) — favoring bullish opportunities`);
+          }
+
           // === FULL AI ANALYSIS ===
           details.push(`  Analyzing ${symbol} (${reason})...`);
           aiAnalysesRun++;
@@ -678,10 +704,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const effectiveMinScore = Math.max(25, RULES.MIN_SCORE_TO_BUY - regimeScoreAdjust);
           const effectiveMinConf = Math.max(40, RULES.MIN_CONFIDENCE - regimeScoreAdjust);
 
-          const isBullish = analysis.score >= effectiveMinScore &&
+          // If portfolio is heavily one-directional, lower threshold for opposite direction
+          const bullishThreshold = bearBias ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
+          const bearishThreshold = bullBias ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
+
+          const isBullish = analysis.score >= bullishThreshold &&
             analysis.confidence >= effectiveMinConf &&
             (analysis.signal === "buy" || analysis.signal === "strong_buy");
-          const isBearish = analysis.score <= -effectiveMinScore &&
+          const isBearish = analysis.score <= -bearishThreshold &&
             analysis.confidence >= effectiveMinConf &&
             (analysis.signal === "sell" || analysis.signal === "strong_sell");
 
