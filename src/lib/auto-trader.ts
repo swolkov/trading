@@ -17,6 +17,8 @@ import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
 import { scanEarningsReactions, prePositionEarnings } from "./earnings-trader";
 import { sellIronCondor, sellCreditSpread } from "./premium-seller";
+import { generateMacroBriefing } from "./macro-briefing";
+import { reviewTrade } from "./risk-agent";
 import { scanGaps } from "./gap-scanner";
 import { reviewClosedTrades } from "./trade-reviewer";
 import { scanRelativeValue } from "./relative-value";
@@ -188,7 +190,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
       return { runType: "full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, details };
     }
 
-    // Step 0: Review past trades and extract lessons
+    // Step 0: Morning macro briefing from Head Strategist
+    let macroBriefing = "";
+    try {
+      const briefing = await generateMacroBriefing();
+      macroBriefing = `MACRO BRIEFING: ${briefing.summary}\nBias: ${briefing.bias.toUpperCase()}\nFavor: ${briefing.sectorFavors.join(", ") || "none"}\nAvoid: ${briefing.sectorAvoids.join(", ") || "none"}\nToday's rules: ${briefing.tradingRules.join(" | ")}`;
+      details.push(macroBriefing);
+    } catch {
+      details.push("MACRO BRIEFING: Unable to generate");
+    }
+
+    // Step 0b: Review past trades and extract lessons
     try {
       const lessons = await reviewClosedTrades();
       if (lessons.length > 0) {
@@ -890,6 +902,24 @@ export async function runTradingAgent(): Promise<AgentResult> {
             tradesPlaced++;
             } else if (optionsOnlyMode || isBearish) {
               details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
+            }
+
+            // === RISK AGENT REVIEW — final gatekeeper before any trade ===
+            const riskCheck = reviewTrade(
+              symbol,
+              isBearish ? "bearish" : "bullish",
+              optionsOnlyMode ? "options" : "stock",
+              price * (calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore }) || 1),
+              1,
+              { equity, cash, positions, portfolioDelta, dailyPnl, totalTheta: 0 }
+            );
+            if (!riskCheck.approved) {
+              details.push(`  ${symbol}: RISK VETO — ${riskCheck.reason}`);
+              await logTrade(symbol, "risk_veto", 0, null, riskCheck.reason, analysis.score, analysis.signal);
+              continue;
+            }
+            if (riskCheck.reason !== "Approved") {
+              details.push(`  ${symbol}: RISK NOTE — ${riskCheck.reason}`);
             }
 
             // === CORRELATION CHECK — avoid redundant correlated positions ===
