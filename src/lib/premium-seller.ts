@@ -6,6 +6,7 @@ import {
   getBars,
   type OptionsContract,
 } from "./alpaca";
+import { getHistoricalBars } from "./yahoo";
 import { prisma } from "./db";
 
 // ============ PREMIUM SELLING STRATEGIES ============
@@ -64,6 +65,7 @@ export async function sellIronCondor(
     // Use recent ATR to determine the range
     let bars: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
     try { bars = await getBars(symbol, "1Day"); } catch { bars = []; }
+    if (bars.length < 20) { try { bars = await getHistoricalBars(symbol, 60); } catch { bars = []; } }
     if (bars.length < 20) return fail(symbol, "iron_condor", "Insufficient history");
 
     const atr14 = calculateATR(bars.slice(-15));
@@ -177,6 +179,7 @@ export async function sellCreditSpread(
 
     let bars: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
     try { bars = await getBars(symbol, "1Day"); } catch { bars = []; }
+    if (bars.length < 20) { try { bars = await getHistoricalBars(symbol, 60); } catch { bars = []; } }
     if (bars.length < 20) return fail(symbol, "credit_spread", "Insufficient history");
 
     const atr14 = calculateATR(bars.slice(-15));
