@@ -533,25 +533,33 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 4e: PREMIUM SELLING (CHOPPY MARKET PRIMARY STRATEGY) ============
-    // In choppy markets, selling premium is the highest-probability strategy.
-    // Iron condors on SPY/QQQ + credit spreads on individual stocks.
-    if (regime.regime === "choppy" && positions.filter((p) => p.symbol.length > 10).length < 6) {
-      details.push("\n=== PREMIUM SELLING (choppy market — theta works FOR us) ===");
+    // ============ STEP 4e: PREMIUM SELLING (PRIMARY STRATEGY) ============
+    // Sell premium on indexes + large caps. This is the MAIN money maker.
+    // Iron condors profit from range. Credit spreads profit from stock staying above/below a level.
+    const optPositionCount = positions.filter((p) => p.symbol.length > 10).length;
+    if (optPositionCount < 8) {
+      details.push("\n=== PREMIUM SELLING (theta works FOR us — PRIMARY STRATEGY) ===");
 
-      // Iron condor on SPY — the bread and butter
-      try {
-        const spyIC = await sellIronCondor("SPY", equity);
-        details.push(`  SPY: ${spyIC.details}`);
-        if (spyIC.success) tradesPlaced += 4;
-      } catch (err) {
-        details.push(`  SPY iron condor error: ${err}`);
+      // Iron condors on SPY AND QQQ — the bread and butter
+      for (const index of ["SPY", "QQQ"]) {
+        if (positions.some((p) => p.symbol.includes(index))) {
+          details.push(`  ${index}: Already have position — skipping`);
+          continue;
+        }
+        try {
+          const ic = await sellIronCondor(index, equity);
+          details.push(`  ${index}: ${ic.details}`);
+          if (ic.success) tradesPlaced += 4;
+        } catch (err) {
+          details.push(`  ${index} iron condor error: ${err}`);
+        }
       }
 
-      // Credit spreads on large-cap focus symbols — sell puts below support
+      // Credit spreads on large-cap focus symbols — sell puts below support (bullish credit spread)
+      // AND sell calls above resistance (bearish credit spread) for balance
       const premiumCandidates = focusSymbols.filter((s) =>
-        !["SPY", "QQQ", "IWM"].includes(s) && !positions.some((p) => p.symbol.includes(s))
-      ).slice(0, 3);
+        !["SPY", "QQQ", "IWM", "DIA"].includes(s) && !positions.some((p) => p.symbol.includes(s))
+      ).slice(0, 5);
 
       for (const sym of premiumCandidates) {
         if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
@@ -566,7 +574,9 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     }
 
-    // ============ STEP 5: FIND NEW OPPORTUNITIES ============
+    // ============ STEP 5: DIRECTIONAL TRADES (SECONDARY — only high conviction) ============
+    // Premium selling above is the PRIMARY strategy. This section only buys
+    // calls/puts when the 5-expert committee has STRONG consensus (score 70+).
 
     if (positions.length >= RULES.MAX_POSITIONS) {
       details.push(`At max positions (${positions.length}/${RULES.MAX_POSITIONS}) — not scanning`);
@@ -795,10 +805,10 @@ export async function runTradingAgent(): Promise<AgentResult> {
           details.push(`  ${symbol}: score=${analysis.score}, signal=${analysis.signal}, conf=${analysis.confidence}%`);
 
           // Check trade criteria — bullish (buy calls) OR bearish (buy puts)
-          // In choppy/bearish markets, lower thresholds since extreme conviction is rare
-          const regimeScoreAdjust = regime.regime === "choppy" ? 30 : regime.regime === "bear" ? 35 : 0;
-          const effectiveMinScore = Math.max(25, RULES.MIN_SCORE_TO_BUY - regimeScoreAdjust);
-          const effectiveMinConf = Math.max(40, RULES.MIN_CONFIDENCE - regimeScoreAdjust);
+          // NO regime adjustment — directional bets need REAL conviction (score 70+)
+          // Premium selling handles the choppy market. This section is for home runs only.
+          const effectiveMinScore = RULES.MIN_SCORE_TO_BUY;
+          const effectiveMinConf = RULES.MIN_CONFIDENCE;
 
           // If portfolio is heavily one-directional (by position count OR delta), lower threshold for opposite
           const deltaIsVeryBearish = portfolioDelta < -200;
