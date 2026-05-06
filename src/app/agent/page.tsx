@@ -119,18 +119,23 @@ export default function AgentPage() {
   const { data: positions } = usePositions();
   const { data: orders } = useOrders("all");
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [activity, setActivity] = useState<any[]>([]);
+
   const loadData = useCallback(async () => {
     try {
-      const [runsRes, tradesRes, configRes, regimeRes] = await Promise.all([
+      const [runsRes, tradesRes, configRes, regimeRes, activityRes] = await Promise.all([
         fetch("/api/agent/logs?type=runs&limit=20").then((r) => r.json()),
         fetch("/api/agent/logs?limit=100").then((r) => r.json()),
         fetch("/api/agent/config").then((r) => r.json()),
         fetch("/api/regime").then((r) => r.json()).catch(() => null),
+        fetch("/api/agent/activity").then((r) => r.json()).catch(() => []),
       ]);
       if (Array.isArray(runsRes)) setRuns(runsRes);
       if (Array.isArray(tradesRes)) setTrades(tradesRes);
       setSettings(configRes);
       if (regimeRes && !regimeRes.error) setRegime(regimeRes);
+      if (Array.isArray(activityRes)) setActivity(activityRes);
     } catch {
       // ignore
     }
@@ -139,6 +144,9 @@ export default function AgentPage() {
 
   useEffect(() => {
     loadData();
+    // Auto-refresh every 60 seconds
+    const interval = setInterval(loadData, 60000);
+    return () => clearInterval(interval);
   }, [loadData]);
 
   async function triggerAgent() {
@@ -315,6 +323,61 @@ export default function AgentPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Live Activity Feed */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 live-dot" />
+            Live Activity (Last 24h)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-2 max-h-72 overflow-y-auto">
+            {activity.length === 0 && <p className="text-xs text-muted-foreground">No recent activity</p>}
+            {activity.slice(0, 20).map((a, i) => (
+              <div key={i} className={`flex items-start gap-3 text-xs border-l-2 pl-3 py-1 ${
+                a.type === "success" ? "border-emerald-500" :
+                a.type === "loss" ? "border-red-500" :
+                a.type === "trade" ? "border-blue-500" :
+                a.type === "run" ? "border-white/20" :
+                "border-white/10"
+              }`}>
+                <span className="text-muted-foreground/50 whitespace-nowrap min-w-[60px]">
+                  {new Date(a.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+                <div className="flex-1 min-w-0">
+                  {a.type === "run" ? (
+                    <span className="text-muted-foreground">{a.reason}</span>
+                  ) : (
+                    <div>
+                      <span className={`font-medium ${
+                        a.action.includes("buy") ? "text-emerald-400" :
+                        a.action.includes("sell") || a.action.includes("stop") ? "text-red-400" :
+                        a.action.includes("skip") || a.action.includes("veto") ? "text-muted-foreground" :
+                        "text-foreground"
+                      }`}>
+                        {a.action.replace(/_/g, " ").toUpperCase()}
+                      </span>
+                      {a.symbol && <span className="ml-1 font-bold">{a.symbol}</span>}
+                      {a.qty > 0 && <span className="text-muted-foreground ml-1">{a.qty}x</span>}
+                      {a.price && <span className="text-muted-foreground ml-1">@ ${a.price.toFixed(2)}</span>}
+                      {a.pnl != null && (
+                        <span className={`ml-2 ${a.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          P&L: ${a.pnl.toFixed(2)}
+                        </span>
+                      )}
+                      {a.score != null && (
+                        <span className="ml-2 text-muted-foreground/60">Score: {a.score}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       <Tabs defaultValue="positions">
         <TabsList>
