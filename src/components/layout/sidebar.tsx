@@ -29,6 +29,7 @@ const sections = [
     links: [
       { href: "/market", label: "Market Intel" },
       { href: "/analytics", label: "P&L Analytics" },
+      { href: "/performance", label: "Agent Performance" },
       { href: "/calendar", label: "Calendar" },
       { href: "/insider", label: "Insider Trades" },
       { href: "/research", label: "Research" },
