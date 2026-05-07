@@ -39,6 +39,8 @@ export interface Account {
   maintenance_margin: string;
   daytrade_count: number;
   pattern_day_trader: boolean;
+  daytrading_buying_power: string;
+  options_buying_power: string;
 }
 
 export async function getAccount(): Promise<Account> {

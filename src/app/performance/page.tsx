@@ -81,28 +81,56 @@ export default function PerformancePage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div>
-        <h1 className="text-2xl font-bold">Performance Dashboard</h1>
-        <p className="text-sm text-muted-foreground">Everything you need to trust this agent with real money</p>
+        <h1 className="text-2xl font-bold">How Is The Agent Doing?</h1>
+        <p className="text-sm text-muted-foreground">Simple breakdown of your AI trading agent's performance</p>
       </div>
 
-      {/* Key Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-        <StatCard label="Total P&L" value={`$${o.totalPnl.toLocaleString()}`} color={pnlColor(o.totalPnl)} />
-        <StatCard label="Win Rate" value={`${o.winRate}%`} sub={`${data.overview.totalTrades} closed trades`} color={o.winRate >= 50 ? "text-emerald-400" : "text-red-400"} />
-        <StatCard label="Profit Factor" value={`${o.profitFactor}x`} sub="Gross profit / loss" color={o.profitFactor >= 1 ? "text-emerald-400" : "text-red-400"} />
-        <StatCard label="Avg Win" value={`$${o.avgWin.toFixed(0)}`} color="text-emerald-400" />
-        <StatCard label="Avg Loss" value={`$${o.avgLoss.toFixed(0)}`} color="text-red-400" />
-        <StatCard label="Max Drawdown" value={`$${o.maxDrawdown.toFixed(0)}`} color="text-red-400" />
-        <StatCard label="Expectancy" value={`$${o.expectancy.toFixed(0)}`} sub="Avg $ per trade" color={pnlColor(o.expectancy)} />
+      {/* Big Simple Status */}
+      <Card className={`border-2 ${o.totalPnl >= 0 ? "border-emerald-500/30" : "border-red-500/30"}`}>
+        <CardContent className="pt-6 pb-4 text-center">
+          <p className="text-sm text-muted-foreground mb-1">Total Money Made / Lost</p>
+          <p className={`text-5xl font-bold ${pnlColor(o.totalPnl)}`}>
+            {o.totalPnl >= 0 ? "+" : ""}${Math.abs(o.totalPnl).toLocaleString()}
+          </p>
+          <p className="text-sm text-muted-foreground mt-2">
+            from {o.totalTrades} completed trades
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Key Metrics — Beginner Friendly */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard
+          label="Winning Trades"
+          value={`${o.winRate}%`}
+          sub={o.winRate >= 55 ? "Good! Above 55% is profitable" : "Needs improvement (target: 55%+)"}
+          color={o.winRate >= 50 ? "text-emerald-400" : "text-red-400"}
+        />
+        <StatCard
+          label="Avg When We Win"
+          value={`+$${o.avgWin.toFixed(0)}`}
+          sub="How much we make per winning trade"
+          color="text-emerald-400"
+        />
+        <StatCard
+          label="Avg When We Lose"
+          value={`-$${o.avgLoss.toFixed(0)}`}
+          sub="How much we lose per losing trade"
+          color="text-red-400"
+        />
+        <StatCard
+          label="Per Trade Average"
+          value={`${o.expectancy >= 0 ? "+" : ""}$${o.expectancy.toFixed(0)}`}
+          sub={o.expectancy > 0 ? "Making money on average" : "Losing money on average"}
+          color={pnlColor(o.expectancy)}
+        />
       </div>
 
-      {/* Secondary Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <StatCard label="Best Trade" value={`+$${o.bestTrade.toFixed(0)}`} color="text-emerald-400" />
-        <StatCard label="Worst Trade" value={`$${o.worstTrade.toFixed(0)}`} color="text-red-400" />
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard label="Best Single Trade" value={`+$${o.bestTrade.toFixed(0)}`} color="text-emerald-400" />
+        <StatCard label="Worst Single Trade" value={`-$${Math.abs(o.worstTrade).toFixed(0)}`} color="text-red-400" />
+        <StatCard label="Biggest Dip" value={`-$${o.maxDrawdown.toFixed(0)}`} sub="Worst losing streak total" color="text-red-400" />
         <StatCard label="Current Streak" value={o.currentStreak} color={o.currentStreak.includes("win") ? "text-emerald-400" : "text-red-400"} />
-        <StatCard label="Open Positions" value={`${o.openTrades}`} />
-        <StatCard label="Agent Runs" value={`${data.agent.totalRuns}`} sub={`${data.agent.totalScanned} stocks scanned`} />
       </div>
 
       {/* Equity Curve */}
@@ -139,7 +167,7 @@ export default function PerformancePage() {
         {/* Strategy Breakdown */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Strategy Breakdown</CardTitle>
+            <CardTitle className="text-sm">Which Strategies Make Money?</CardTitle>
           </CardHeader>
           <CardContent>
             {data.byStrategy.length === 0 ? (
@@ -170,7 +198,7 @@ export default function PerformancePage() {
         {/* Symbol Breakdown */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">P&L by Symbol</CardTitle>
+            <CardTitle className="text-sm">Which Stocks Make Money?</CardTitle>
           </CardHeader>
           <CardContent>
             {data.bySymbol.length === 0 ? (
@@ -251,19 +279,20 @@ export default function PerformancePage() {
       </Card>
 
       {/* Trust Checklist */}
-      <Card>
+      <Card className="border-2 border-white/10">
         <CardHeader>
-          <CardTitle className="text-sm">Ready for Live Trading?</CardTitle>
+          <CardTitle className="text-sm">Safe to Use Real Money?</CardTitle>
+          <p className="text-xs text-muted-foreground">All items must be green before switching to live trading</p>
         </CardHeader>
         <CardContent>
-          <div className="space-y-2">
+          <div className="space-y-3">
             {[
-              { check: o.totalTrades >= 50, label: "50+ closed trades", value: `${o.totalTrades}/50` },
-              { check: o.winRate >= 55, label: "Win rate above 55%", value: `${o.winRate}%` },
-              { check: o.profitFactor >= 1.5, label: "Profit factor above 1.5x", value: `${o.profitFactor}x` },
-              { check: o.expectancy > 0, label: "Positive expectancy", value: `$${o.expectancy.toFixed(0)}/trade` },
-              { check: o.maxDrawdown < 5000, label: "Max drawdown under $5,000", value: `$${o.maxDrawdown.toFixed(0)}` },
-              { check: data.agent.totalRuns >= 20, label: "20+ agent runs", value: `${data.agent.totalRuns}` },
+              { check: o.totalTrades >= 50, label: "Made at least 50 trades (enough data to trust)", value: `${o.totalTrades}/50` },
+              { check: o.winRate >= 55, label: "Wins more than it loses (55%+ win rate)", value: `${o.winRate}%` },
+              { check: o.profitFactor >= 1.5, label: "Wins are bigger than losses (1.5x+ profit factor)", value: `${o.profitFactor}x` },
+              { check: o.expectancy > 0, label: "Makes money on average per trade", value: `$${o.expectancy.toFixed(0)}/trade` },
+              { check: o.maxDrawdown < 5000, label: "Never lost more than $5,000 in a row", value: `$${o.maxDrawdown.toFixed(0)}` },
+              { check: data.agent.totalRuns >= 20, label: "Agent has run at least 20 times", value: `${data.agent.totalRuns}` },
             ].map((item, i) => (
               <div key={i} className="flex items-center gap-3 text-xs">
                 <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${

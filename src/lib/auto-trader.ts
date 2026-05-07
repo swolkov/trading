@@ -224,6 +224,13 @@ export async function runTradingAgent(): Promise<AgentResult> {
     const cash = parseFloat(account.cash);
     const positions = await getPositions();
 
+    // PDT CHECK: if day trading buying power is $0, we can only manage existing positions
+    const dtBuyingPower = parseFloat(account.daytrading_buying_power || "0");
+    const isPDTRestricted = account.pattern_day_trader && dtBuyingPower <= 0;
+    if (isPDTRestricted) {
+      details.push("PDT RESTRICTED: Day trading buying power is $0. Managing positions only — no new trades until restriction lifts.");
+    }
+
     // Apply regime-adjusted cash reserve
     const effectiveCashReserve = Math.max(RULES.MIN_CASH_RESERVE_PCT, regime.cashReservePct / 100);
 
@@ -535,9 +542,10 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     // ============ STEP 4e: PREMIUM SELLING (PRIMARY STRATEGY) ============
     // Sell premium on indexes + large caps. This is the MAIN money maker.
-    // Iron condors profit from range. Credit spreads profit from stock staying above/below a level.
-    const optPositionCount = positions.filter((p) => p.symbol.length > 10).length;
-    if (optPositionCount < 8) {
+    const optPositionCount = positions.filter((p) => p.symbol.length > 10 && Math.abs(parseFloat(p.market_value)) > 1).length;
+    if (isPDTRestricted) {
+      details.push("\n=== PREMIUM SELLING: Skipped (PDT restricted) ===");
+    } else if (optPositionCount < 8) {
       details.push("\n=== PREMIUM SELLING (theta works FOR us — PRIMARY STRATEGY) ===");
 
       // Iron condors on SPY AND QQQ — the bread and butter
@@ -578,8 +586,12 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Premium selling above is the PRIMARY strategy. This section only buys
     // calls/puts when the 5-expert committee has STRONG consensus (score 70+).
 
-    if (positions.length >= RULES.MAX_POSITIONS) {
-      details.push(`At max positions (${positions.length}/${RULES.MAX_POSITIONS}) — not scanning`);
+    // Count real positions (exclude worthless ones with $0 market value)
+    const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
+    if (isPDTRestricted) {
+      details.push(`Directional scanning: Skipped (PDT restricted)`);
+    } else if (activePositions.length >= RULES.MAX_POSITIONS) {
+      details.push(`At max positions (${activePositions.length}/${RULES.MAX_POSITIONS}) — not scanning`);
     } else if (cash < equity * effectiveCashReserve) {
       details.push(`Cash below reserve — not buying`);
     } else {
