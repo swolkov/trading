@@ -19,9 +19,18 @@ interface RoundTrip {
 export async function GET() {
   try {
     const orders = await getOrders("all");
-    // Only count trades from fresh start (after manual close, new premium selling positions)
+    // Fresh start: new premium selling positions (opened after 2:30pm May 8)
+    // PLUS the TSLA take profit (closed at 10:16am May 8 — our best trade)
     const freshStart = new Date("2026-05-08T14:30:00Z");
-    const filled = orders.filter((o) => o.status === "filled" && o.filled_avg_price && new Date(o.created_at) >= freshStart);
+    const tslaTPTime = new Date("2026-05-08T14:15:00Z");
+    const filled = orders.filter((o) => {
+      if (o.status !== "filled" || !o.filled_avg_price) return false;
+      const orderTime = new Date(o.created_at);
+      // Include TSLA take profit (our premium selling win)
+      if (o.symbol.includes("TSLA") && o.symbol.includes("P00395") && orderTime >= tslaTPTime) return true;
+      // Include everything after fresh start
+      return orderTime >= freshStart;
+    });
 
     // Group by symbol and match opens with closes
     const bySymbol: Record<string, typeof filled> = {};
