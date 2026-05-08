@@ -19,8 +19,8 @@ interface RoundTrip {
 export async function GET() {
   try {
     const orders = await getOrders("all");
-    // Only count trades from May 8, 2026 onwards (fresh start with premium selling strategy)
-    const freshStart = new Date("2026-05-08T00:00:00Z");
+    // Only count trades from fresh start (after manual close, new premium selling positions)
+    const freshStart = new Date("2026-05-08T14:30:00Z");
     const filled = orders.filter((o) => o.status === "filled" && o.filled_avg_price && new Date(o.created_at) >= freshStart);
 
     // Group by symbol and match opens with closes
