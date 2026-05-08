@@ -17,6 +17,7 @@ import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
 import { scanEarningsReactions, prePositionEarnings } from "./earnings-trader";
 import { sellIronCondor, sellCreditSpread } from "./premium-seller";
+import { scanQuickPlays, executeQuickPlay } from "./quick-plays";
 import { generateMacroBriefing } from "./macro-briefing";
 import { reviewTrade } from "./risk-agent";
 import { scanGaps } from "./gap-scanner";
@@ -590,6 +591,38 @@ export async function runTradingAgent(): Promise<AgentResult> {
         } catch (err) {
           details.push(`  ${sym} credit spread error: ${err}`);
         }
+      }
+    }
+
+    // ============ STEP 4f: QUICK PLAYS — 7-14 DTE TECHNICAL SETUPS ============
+    // Purely mechanical: RSI extremes, breakouts, gaps, support bounces
+    // Small bets (1% of equity), no AI committee needed
+    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
+    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS - 2) {
+      try {
+        details.push("\n=== QUICK PLAYS (7-14 DTE technical setups) ===");
+        const plays = await scanQuickPlays(focusSymbols);
+        if (plays.length === 0) {
+          details.push("  No setups found — nothing meets the criteria right now");
+        }
+        let quickTradesPlaced = 0;
+        for (const play of plays.slice(0, 2)) { // Max 2 quick plays per run
+          if (quickTradesPlaced >= 2) break;
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          // Skip if we already have a position in this stock
+          if (positions.some((p) => p.symbol.includes(play.symbol))) {
+            details.push(`  ${play.symbol}: Already have position — skipping`);
+            continue;
+          }
+          const result = await executeQuickPlay(play, equity);
+          details.push(`  ${result.details}`);
+          if (result.success) {
+            tradesPlaced++;
+            quickTradesPlaced++;
+          }
+        }
+      } catch (err) {
+        details.push(`  Quick plays error: ${err}`);
       }
     }
 
