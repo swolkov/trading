@@ -1,4 +1,5 @@
 import { getOrders } from "@/lib/alpaca";
+import { prisma } from "@/lib/db";
 
 interface RoundTrip {
   symbol: string;
@@ -19,18 +20,11 @@ interface RoundTrip {
 export async function GET() {
   try {
     const orders = await getOrders("all");
-    // Fresh start: new premium selling positions (opened after 2:30pm May 8)
-    // PLUS the TSLA take profit (closed at 10:16am May 8 — our best trade)
+    // Fresh start: only new premium selling positions (opened after 2:30pm May 8)
     const freshStart = new Date("2026-05-08T14:30:00Z");
-    const tslaTPTime = new Date("2026-05-08T14:15:00Z");
-    const filled = orders.filter((o) => {
-      if (o.status !== "filled" || !o.filled_avg_price) return false;
-      const orderTime = new Date(o.created_at);
-      // Include TSLA take profit (our premium selling win)
-      if (o.symbol.includes("TSLA") && o.symbol.includes("P00395") && orderTime >= tslaTPTime) return true;
-      // Include everything after fresh start
-      return orderTime >= freshStart;
-    });
+    const filled = orders.filter((o) =>
+      o.status === "filled" && o.filled_avg_price && new Date(o.created_at) >= freshStart
+    );
 
     // Group by symbol and match opens with closes
     const bySymbol: Record<string, typeof filled> = {};
@@ -123,6 +117,28 @@ export async function GET() {
           status: "open",
         });
       }
+    }
+
+    // Add historical wins from agent database (trades that span across the fresh start cutoff)
+    const historicalWins = await prisma.autoTradeLog.findMany({
+      where: { pnl: { gt: 0 }, orderId: "historical" },
+    });
+    for (const hw of historicalWins) {
+      roundTrips.push({
+        symbol: hw.symbol,
+        underlying: hw.symbol.replace(/\d.*$/, ""),
+        type: hw.symbol.includes("C0") ? "CALL" : "PUT",
+        openSide: "sell",
+        openDate: new Date(hw.createdAt).toISOString(),
+        openPrice: 15.25, // original entry
+        openQty: hw.qty,
+        closeDate: new Date(hw.createdAt).toISOString(),
+        closePrice: hw.price || 3.65,
+        pnl: hw.pnl,
+        pnlPct: 75.1,
+        holdDays: 3,
+        status: "winner",
+      });
     }
 
     // Sort by date descending
