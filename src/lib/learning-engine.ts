@@ -228,3 +228,107 @@ APPLY THESE LESSONS: ${winRate > 0.6 ? "Strategy is working — maintain current
     aiSummary,
   };
 }
+
+// ============ SCORE ADJUSTMENT BASED ON LEARNING ============
+// Returns a multiplier (0.5 to 1.5) to adjust the AI score based on
+// what we've learned about sectors, symbols, and setups that work/don't work.
+
+export interface ScoreAdjustment {
+  multiplier: number;  // 0.5 to 1.5
+  reasons: string[];
+}
+
+export async function getScoreAdjustment(
+  symbol: string,
+  sector: string,
+  setup: string // e.g., "momentum_gainer", "sector_breakout_up", "relative_value_laggard"
+): Promise<ScoreAdjustment> {
+  let multiplier = 1.0;
+  const reasons: string[] = [];
+
+  try {
+    // Check per-symbol history
+    const symbolTrades = await prisma.autoTradeLog.findMany({
+      where: { symbol: { contains: symbol }, pnl: { not: null } },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+
+    if (symbolTrades.length >= 3) {
+      const symbolWins = symbolTrades.filter((t) => (t.pnl || 0) > 0).length;
+      const symbolWR = symbolWins / symbolTrades.length;
+
+      if (symbolWR >= 0.7) {
+        multiplier *= 1.15;
+        reasons.push(`${symbol} has ${(symbolWR * 100).toFixed(0)}% win rate (${symbolTrades.length} trades) — boosting`);
+      } else if (symbolWR <= 0.3 && symbolTrades.length >= 4) {
+        multiplier *= 0.7;
+        reasons.push(`${symbol} has ${(symbolWR * 100).toFixed(0)}% win rate (${symbolTrades.length} trades) — reducing`);
+      }
+    }
+
+    // Check sector performance
+    if (sector && sector !== "Unknown") {
+      const sectorReports = await prisma.researchReport.findMany({
+        where: { sector },
+        select: { symbol: true },
+        take: 50,
+      });
+      const sectorSymbols = [...new Set(sectorReports.map((r) => r.symbol))];
+
+      if (sectorSymbols.length > 0) {
+        const sectorTrades = await prisma.autoTradeLog.findMany({
+          where: {
+            symbol: { in: sectorSymbols },
+            pnl: { not: null },
+          },
+          take: 30,
+        });
+
+        if (sectorTrades.length >= 5) {
+          const sectorWins = sectorTrades.filter((t) => (t.pnl || 0) > 0).length;
+          const sectorWR = sectorWins / sectorTrades.length;
+
+          if (sectorWR >= 0.65) {
+            multiplier *= 1.1;
+            reasons.push(`${sector} sector: ${(sectorWR * 100).toFixed(0)}% win rate — favorable`);
+          } else if (sectorWR <= 0.35) {
+            multiplier *= 0.75;
+            reasons.push(`${sector} sector: ${(sectorWR * 100).toFixed(0)}% win rate — unfavorable, reducing exposure`);
+          }
+        }
+      }
+    }
+
+    // Check setup-type performance (from trade reasons)
+    if (setup) {
+      const setupTrades = await prisma.autoTradeLog.findMany({
+        where: {
+          reason: { contains: setup },
+          pnl: { not: null },
+        },
+        take: 20,
+      });
+
+      if (setupTrades.length >= 4) {
+        const setupWins = setupTrades.filter((t) => (t.pnl || 0) > 0).length;
+        const setupWR = setupWins / setupTrades.length;
+
+        if (setupWR >= 0.7) {
+          multiplier *= 1.15;
+          reasons.push(`"${setup}" pattern: ${(setupWR * 100).toFixed(0)}% win rate — this setup works for us`);
+        } else if (setupWR <= 0.3) {
+          multiplier *= 0.65;
+          reasons.push(`"${setup}" pattern: ${(setupWR * 100).toFixed(0)}% win rate — this setup doesn't work, downweighting`);
+        }
+      }
+    }
+
+    // Clamp multiplier
+    multiplier = Math.max(0.5, Math.min(1.5, multiplier));
+  } catch {
+    // learning adjustment optional
+  }
+
+  return { multiplier, reasons };
+}

@@ -145,20 +145,29 @@ export async function scanUnusualActivity(symbols: string[]): Promise<UnusualAct
             const snap = snapshots[contract.symbol];
             if (!snap) continue;
 
-            const volume = snap.latestTrade ? 1 : 0; // approximate
+            // Get actual volume from dailyBar (preferred), or estimate from trade data
+            let volume = 0;
+            if (snap.dailyBar?.v) {
+              volume = snap.dailyBar.v;
+            } else if (snap.latestTrade?.s) {
+              // latestTrade.s = size of last trade in contracts
+              // Without daily volume, use trade size * multiplier as rough estimate
+              volume = snap.latestTrade.s * 10; // conservative estimate
+            }
+
             const oi = parseInt(contract.open_interest || "0");
             const premium = snap.latestQuote
               ? (snap.latestQuote.ap + snap.latestQuote.bp) / 2
               : snap.latestTrade?.p || 0;
 
-            if (oi > 100 && premium > 0.5) {
+            if (premium > 0.5 && (oi > 50 || volume > 0)) {
               const strike = parseFloat(contract.strike_price);
               const expDate = new Date(contract.expiration_date);
               const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-              const volumeOiRatio = oi > 0 ? volume / oi : 0;
+              const volumeOiRatio = oi > 0 ? volume / oi : volume > 0 ? 5 : 0; // no OI + volume = new position = very unusual
 
               // Only flag if there's meaningful activity
-              if (premium * 100 > 50) { // at least $50 per contract
+              if (premium * 100 > 50 && (volume > 0 || oi > 500)) {
                 results.push({
                   symbol,
                   contractSymbol: contract.symbol,
@@ -170,7 +179,7 @@ export async function scanUnusualActivity(symbols: string[]): Promise<UnusualAct
                   openInterest: oi,
                   volumeOiRatio,
                   premium,
-                  totalPremium: premium * 100,
+                  totalPremium: volume > 0 ? volume * premium * 100 : premium * 100,
                   signal: contract.type === "call" ? "bullish" : "bearish",
                   strength: volumeOiRatio > 3 ? "sweep" : volumeOiRatio > 2 ? "very_unusual" : volumeOiRatio > 1 ? "unusual" : "normal",
                 });

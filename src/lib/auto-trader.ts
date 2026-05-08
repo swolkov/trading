@@ -16,7 +16,7 @@ import { getKeyStats, getHistoricalBars } from "./yahoo";
 import { detectMarketRegime, type RegimeAnalysis } from "./market-regime";
 import { findBestContract, executeOptionsTrade, manageOptionsPositions, executeStraddle, executeSpread } from "./options-trader";
 import { scanEarningsReactions, prePositionEarnings } from "./earnings-trader";
-import { sellIronCondor, sellCreditSpread } from "./premium-seller";
+import { sellIronCondor, sellCreditSpread, defendPremiumPosition } from "./premium-seller";
 import { scanQuickPlays, executeQuickPlay } from "./quick-plays";
 import { generateMacroBriefing } from "./macro-briefing";
 import { reviewTrade } from "./risk-agent";
@@ -25,6 +25,7 @@ import { reviewClosedTrades } from "./trade-reviewer";
 import { scanRelativeValue } from "./relative-value";
 import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
+import { getScoreAdjustment } from "./learning-engine";
 import { analyzeVolatility } from "./options-intelligence";
 import { checkCorrelationWithPortfolio, clearCorrelationCache } from "./correlation";
 import { scanSector, type SectorScanResult } from "./sector-scanner";
@@ -133,12 +134,12 @@ function calculatePositionSize(
   confidence: number,
   price: number,
   regimeMultiplier: number = 1.0,
-  rules: { MIN_POSITION_PCT: number; MAX_POSITION_PCT: number; MIN_SCORE_TO_BUY: number } = DEFAULT_RULES
+  rules: { MIN_POSITION_PCT: number; MAX_POSITION_PCT: number; MIN_SCORE_TO_BUY: number } = DEFAULT_RULES,
+  annualizedVol?: number // stock's 20-day annualized volatility (0-1 scale)
 ): number {
   const baseRatio = rules.MIN_POSITION_PCT;
   const maxRatio = rules.MAX_POSITION_PCT;
   const scoreRange = 100 - rules.MIN_SCORE_TO_BUY;
-  // Use absolute score so bearish signals (-50 etc.) size correctly
   const absScore = Math.abs(score);
   const scoreFactor = Math.min(1, (absScore - rules.MIN_SCORE_TO_BUY) / scoreRange);
   const confidenceFactor = Math.min(1, confidence / 100);
@@ -147,8 +148,29 @@ function calculatePositionSize(
   ratio *= regimeMultiplier;
   ratio *= 0.6; // Initial entry = 60% of full size
 
+  // Volatility normalization: high-vol stocks get smaller positions
+  // Target: a 5% position in a 15% vol stock = same risk as 2.5% position in 30% vol stock
+  // Baseline vol = 25% annualized (typical large cap). Adjust proportionally.
+  if (annualizedVol && annualizedVol > 0) {
+    const baselineVol = 0.25;
+    const volAdjust = Math.max(0.4, Math.min(1.5, baselineVol / annualizedVol));
+    ratio *= volAdjust;
+  }
+
   const positionValue = equity * ratio;
   return Math.floor(positionValue / price);
+}
+
+// Calculate annualized volatility from price bars
+function calculateAnnualizedVol(bars: { c: number }[]): number {
+  if (bars.length < 21) return 0.25; // default 25%
+  const returns: number[] = [];
+  for (let i = bars.length - 20; i < bars.length; i++) {
+    returns.push(Math.log(bars[i].c / bars[i - 1].c));
+  }
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance = returns.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / (returns.length - 1);
+  return Math.sqrt(variance * 252);
 }
 
 // Check if two stocks are in the same sector (correlation proxy)
@@ -360,8 +382,22 @@ export async function runTradingAgent(): Promise<AgentResult> {
       const pnlPct = (currentPrice - entryPrice) / entryPrice;
       const isOptionsPosition = pos.symbol.length > 10; // Options symbols are longer
 
-      // === OPTIONS MANAGEMENT (smart: profit targets, stop loss, expiry awareness) ===
+      // === OPTIONS MANAGEMENT (smart: profit targets, stop loss, expiry awareness, partial takes) ===
       if (isOptionsPosition) {
+        // Check if this is a SHORT options position (premium selling) — needs defense logic
+        const isShortOptions = qty < 0;
+        if (isShortOptions) {
+          try {
+            const defense = await defendPremiumPosition(pos, equity);
+            if (defense.action !== "hold") tradesPlaced++;
+            details.push(`  ${pos.symbol}: PREMIUM ${defense.action.replace(/_/g, " ").toUpperCase()} — ${defense.details}`);
+          } catch (err) {
+            details.push(`  ${pos.symbol}: Premium defense error — ${err}`);
+          }
+          continue;
+        }
+
+        // Long options management (profit targets, stops, partials)
         const optActions = await manageOptionsPositions([pos]);
         for (const act of optActions) {
           if (act.action !== "hold") tradesPlaced++;
@@ -386,15 +422,59 @@ export async function runTradingAgent(): Promise<AgentResult> {
       const atrStopPct = atrStopDistance / entryPrice;
       const stopPct = Math.max(RULES.MIN_STOP_PCT, Math.min(RULES.MAX_STOP_PCT, atrStopPct));
 
+      // Find original buy to calculate hold duration
+      const originalBuy = await prisma.autoTradeLog.findFirst({
+        where: { symbol: pos.symbol, action: { in: ["buy", "buy_call", "buy_put"] } },
+        orderBy: { createdAt: "desc" },
+      });
+      const holdDays = originalBuy
+        ? (Date.now() - new Date(originalBuy.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+        : 0;
+
+      // === PARTIAL PROFIT-TAKING ===
+      // At +15%: sell half, move mental stop to breakeven
+      // At +30%: sell another quarter, trail the rest
+      // At full TAKE_PROFIT_PCT: sell everything
+      const hasPartialTake = originalBuy
+        ? await prisma.autoTradeLog.count({
+            where: { symbol: pos.symbol, action: "partial_profit", createdAt: { gte: originalBuy.createdAt } },
+          })
+        : 0;
+
+      if (pnlPct >= 0.15 && pnlPct < RULES.TAKE_PROFIT_PCT && hasPartialTake === 0 && qty >= 2) {
+        // First partial: sell half
+        const sellQty = Math.max(1, Math.floor(qty / 2));
+        details.push(`PARTIAL PROFIT: ${pos.symbol} up +${(pnlPct * 100).toFixed(1)}% — selling ${sellQty}/${qty} shares, breakeven stop on rest`);
+        try {
+          const order = await placeOrder({ symbol: pos.symbol, qty: String(sellQty), side: "sell", type: "market", time_in_force: "day" });
+          await logTrade(pos.symbol, "partial_profit", sellQty, currentPrice, `Partial take #1: sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%. Remaining ${qty - sellQty} shares with breakeven stop.`, null, null, order.id, parseFloat(pos.unrealized_pl) * (sellQty / qty));
+          tradesPlaced++;
+        } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+        continue;
+      }
+
+      if (pnlPct >= 0.30 && pnlPct < RULES.TAKE_PROFIT_PCT && hasPartialTake === 1 && qty >= 2) {
+        // Second partial: sell another quarter (half of remaining)
+        const sellQty = Math.max(1, Math.floor(qty / 2));
+        details.push(`PARTIAL PROFIT #2: ${pos.symbol} up +${(pnlPct * 100).toFixed(1)}% — selling ${sellQty} more, trailing rest`);
+        try {
+          const order = await placeOrder({ symbol: pos.symbol, qty: String(sellQty), side: "sell", type: "market", time_in_force: "day" });
+          await logTrade(pos.symbol, "partial_profit", sellQty, currentPrice, `Partial take #2: sold ${sellQty} more at +${(pnlPct * 100).toFixed(1)}%. Remaining ${qty - sellQty} shares trailing.`, null, null, order.id, parseFloat(pos.unrealized_pl) * (sellQty / qty));
+          tradesPlaced++;
+        } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+        continue;
+      }
+
+      // After first partial take, breakeven stop replaces ATR stop
+      const effectiveStopPct = hasPartialTake > 0 ? 0 : stopPct;
+
       // TRAILING STOP: if position is up enough, trail the stop
       if (pnlPct >= RULES.TRAILING_ACTIVATION_PCT) {
         const trailDistance = atr * RULES.TRAILING_ATR_MULTIPLIER;
         const trailStopPrice = currentPrice - trailDistance;
         const trailFromHigh = (currentPrice - trailStopPrice) / currentPrice;
 
-        // Check if we've pulled back significantly from a recent high
-        // Simple check: if the pullback from entry exceeds the trail, it might be reversing
-        const highWaterMark = entryPrice * (1 + pnlPct); // approximate
+        const highWaterMark = entryPrice * (1 + pnlPct);
         const pullbackFromHigh = 1 - (currentPrice / highWaterMark);
 
         if (pullbackFromHigh > trailFromHigh && pnlPct < RULES.TRAILING_ACTIVATION_PCT * 1.5) {
@@ -408,6 +488,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
         }
       }
 
+      // BREAKEVEN STOP: after partial profit-taking, don't let winners become losers
+      if (hasPartialTake > 0 && pnlPct <= 0) {
+        details.push(`BREAKEVEN STOP: ${pos.symbol} gave back gains after partial take — selling at ${(pnlPct * 100).toFixed(1)}%`);
+        try {
+          const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+          await logTrade(pos.symbol, "breakeven_stop", qty, currentPrice, `Breakeven stop after partial profit: ${(pnlPct * 100).toFixed(1)}%`, null, null, order.id, parseFloat(pos.unrealized_pl));
+          tradesPlaced++;
+        } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+        continue;
+      }
+
       // HARD STOP LOSS (ATR-based)
       if (pnlPct <= -stopPct) {
         details.push(`STOP LOSS: ${pos.symbol} down ${(pnlPct * 100).toFixed(1)}% (ATR stop: -${(stopPct * 100).toFixed(1)}%) — selling`);
@@ -419,9 +510,9 @@ export async function runTradingAgent(): Promise<AgentResult> {
         continue;
       }
 
-      // HARD TAKE PROFIT
+      // HARD TAKE PROFIT (full exit)
       if (pnlPct >= RULES.TAKE_PROFIT_PCT) {
-        details.push(`TAKE PROFIT: ${pos.symbol} up ${(pnlPct * 100).toFixed(1)}% — selling`);
+        details.push(`TAKE PROFIT: ${pos.symbol} up ${(pnlPct * 100).toFixed(1)}% — selling all`);
         try {
           const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
           await logTrade(pos.symbol, "take_profit", qty, currentPrice, `Up ${(pnlPct * 100).toFixed(1)}%`, null, null, order.id, parseFloat(pos.unrealized_pl));
@@ -430,19 +521,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
         continue;
       }
 
+      // === DEAD MONEY DETECTION ===
+      // If held > 10 days and moved < 3%, the capital is better deployed elsewhere
+      if (holdDays > 10 && Math.abs(pnlPct) < 0.03) {
+        details.push(`DEAD MONEY: ${pos.symbol} held ${holdDays.toFixed(0)} days, only ${(pnlPct * 100).toFixed(1)}% move — freeing capital`);
+        try {
+          const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+          await logTrade(pos.symbol, "dead_money", qty, currentPrice, `Dead money exit: held ${holdDays.toFixed(0)} days with ${(pnlPct * 100).toFixed(1)}% return. Capital better used elsewhere.`, null, null, order.id, parseFloat(pos.unrealized_pl));
+          tradesPlaced++;
+        } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+        continue;
+      }
+
       // THESIS RE-EVALUATION: Check if original analysis still holds
-      // Find the original analysis that triggered this buy
       const originalReport = await prisma.researchReport.findFirst({
         where: { symbol: pos.symbol },
         orderBy: { createdAt: "desc" },
       });
 
       if (originalReport && originalReport.score > 0) {
-        // If position has been held for > 3 days, re-evaluate
-        const holdDays = (Date.now() - new Date(originalReport.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-
         if (holdDays > 3) {
-          // Check for negative news
           try {
             const news = await getNews([pos.symbol], 3);
             const hasNegativeNews = news.some((n) =>
@@ -451,7 +549,6 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             if (hasNegativeNews && pnlPct < 0) {
               details.push(`THESIS CHANGE: ${pos.symbol} negative news + underwater — re-evaluating...`);
-              // Quick re-analysis: just check if the signal flipped
               try {
                 const newAnalysis = await analyzeStock(pos.symbol);
                 const scoreDrop = originalReport.score - newAnalysis.score;
@@ -475,7 +572,9 @@ export async function runTradingAgent(): Promise<AgentResult> {
         }
       }
 
-      details.push(`  ${pos.symbol}: ${pnlPct >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(1)}% (stop: -${(stopPct * 100).toFixed(1)}%) — holding`);
+      const partialNote = hasPartialTake > 0 ? ` [${hasPartialTake} partial takes, BE stop]` : "";
+      const holdNote = holdDays > 5 ? ` [${holdDays.toFixed(0)}d]` : "";
+      details.push(`  ${pos.symbol}: ${pnlPct >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(1)}% (stop: -${(effectiveStopPct * 100).toFixed(1)}%)${partialNote}${holdNote} — holding`);
     }
 
     // ============ STEP 4b: EARNINGS REACTION TRADES ============
@@ -897,6 +996,25 @@ export async function runTradingAgent(): Promise<AgentResult> {
           details.push(`  Analyzing ${symbol} (${reason})...`);
           aiAnalysesRun++;
           const analysis = await analyzeStock(symbol);
+
+          // === LEARNING ENGINE FEEDBACK: adjust score based on historical performance ===
+          const report = await prisma.researchReport.findFirst({
+            where: { symbol },
+            orderBy: { createdAt: "desc" },
+            select: { sector: true },
+          });
+          const sectorForLearning = report?.sector || "Unknown";
+          const learningAdj = await getScoreAdjustment(symbol, sectorForLearning, reason);
+          if (learningAdj.multiplier !== 1.0) {
+            const originalScore = analysis.score;
+            analysis.score = Math.round(analysis.score * learningAdj.multiplier);
+            analysis.score = Math.max(-100, Math.min(100, analysis.score));
+            for (const lr of learningAdj.reasons) {
+              details.push(`  LEARNING: ${lr}`);
+            }
+            details.push(`  ${symbol}: score adjusted ${originalScore} → ${analysis.score} (${learningAdj.multiplier.toFixed(2)}x)`);
+          }
+
           details.push(`  ${symbol}: score=${analysis.score}, signal=${analysis.signal}, conf=${analysis.confidence}%`);
 
           // Check trade criteria — bullish (buy calls) OR bearish (buy puts)
@@ -950,7 +1068,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             if (price <= 0) continue;
 
-            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore });
+            const stockVol = calculateAnnualizedVol(bars);
+            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore }, stockVol);
             if (qty <= 0) {
               details.push(`  ${symbol}: SKIP — position too small`);
               continue;

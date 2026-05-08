@@ -312,6 +312,133 @@ function getMidPrice(snapshot: { latestQuote?: { bp: number; ap: number }; lates
   return snapshot.latestTrade?.p || 0;
 }
 
+// ============ PREMIUM SELLING DEFENSE ============
+// When a short strike is being tested (price within 1 ATR), defend the position:
+// 1. Roll the tested side out in time for more credit
+// 2. Close the winning side early if it's worth < 10% of original credit
+// 3. Close the whole position if loss > 2x credit
+
+export interface PremiumDefenseAction {
+  symbol: string;
+  action: "roll_out" | "close_winning_side" | "close_all" | "hold";
+  details: string;
+  success: boolean;
+}
+
+export async function defendPremiumPosition(
+  position: { symbol: string; qty: string; avg_entry_price: string; current_price: string; unrealized_pl: string },
+  equity: number
+): Promise<PremiumDefenseAction> {
+  const pnlPct = parseFloat(position.unrealized_pl) / (parseFloat(position.avg_entry_price) * parseInt(position.qty) * 100);
+  const qty = Math.abs(parseInt(position.qty));
+
+  // Parse the OCC symbol to get underlying, expiry, type, strike
+  const occMatch = position.symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+  if (!occMatch) {
+    return { symbol: position.symbol, action: "hold", details: "Could not parse OCC symbol", success: false };
+  }
+
+  const underlying = occMatch[1];
+  const dateStr = occMatch[2];
+  const optType = occMatch[3] === "C" ? "call" : "put";
+  const strike = parseInt(occMatch[4]) / 1000;
+
+  const year = 2000 + parseInt(dateStr.slice(0, 2));
+  const month = parseInt(dateStr.slice(2, 4)) - 1;
+  const day = parseInt(dateStr.slice(4, 6));
+  const expiry = new Date(year, month, day);
+  const now = new Date();
+  const dte = Math.floor((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+  // Get current underlying price
+  let underlyingPrice = 0;
+  try {
+    const snap = await getSnapshot(underlying);
+    underlyingPrice = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
+  } catch {
+    return { symbol: position.symbol, action: "hold", details: "Could not get underlying price", success: false };
+  }
+
+  // Check if short strike is being tested
+  const distanceToStrike = Math.abs(underlyingPrice - strike) / underlyingPrice;
+  const isTested = distanceToStrike < 0.02; // within 2% of strike
+
+  // CLOSE ALL: if loss > 2x the original credit (estimated from entry price)
+  const entryCredit = parseFloat(position.avg_entry_price);
+  const currentValue = parseFloat(position.current_price);
+  if (currentValue > entryCredit * PREMIUM_RULES.STOP_LOSS_MULTIPLIER) {
+    try {
+      const side = parseInt(position.qty) < 0 ? "buy" : "sell"; // close short = buy, close long = sell
+      const order = await placeOrder({ symbol: position.symbol, qty: String(qty), side, type: "market", time_in_force: "day" });
+      await prisma.autoTradeLog.create({
+        data: {
+          symbol: position.symbol, action: "premium_defense_close", qty, price: currentValue,
+          reason: `Premium defense: loss exceeds 2x credit ($${currentValue.toFixed(2)} vs entry $${entryCredit.toFixed(2)}). Cutting loss.`,
+          pnl: parseFloat(position.unrealized_pl), orderId: order.id,
+        },
+      });
+      return { symbol: position.symbol, action: "close_all", details: `Closed — loss exceeded 2x credit`, success: true };
+    } catch (err) {
+      return { symbol: position.symbol, action: "close_all", details: `Failed to close: ${err}`, success: false };
+    }
+  }
+
+  // CLOSE WINNING SIDE: if position is worth < 10% of original credit (nearly max profit)
+  if (currentValue < entryCredit * 0.10 && currentValue > 0) {
+    try {
+      const side = parseInt(position.qty) < 0 ? "buy" : "sell";
+      const order = await placeOrder({ symbol: position.symbol, qty: String(qty), side, type: "market", time_in_force: "day" });
+      await prisma.autoTradeLog.create({
+        data: {
+          symbol: position.symbol, action: "premium_take_profit", qty, price: currentValue,
+          reason: `Premium near max profit: worth $${currentValue.toFixed(2)} (${((1 - currentValue / entryCredit) * 100).toFixed(0)}% of max). Closing winner.`,
+          pnl: parseFloat(position.unrealized_pl), orderId: order.id,
+        },
+      });
+      return { symbol: position.symbol, action: "close_winning_side", details: `Closed at ${((1 - currentValue / entryCredit) * 100).toFixed(0)}% max profit`, success: true };
+    } catch (err) {
+      return { symbol: position.symbol, action: "close_winning_side", details: `Failed: ${err}`, success: false };
+    }
+  }
+
+  // ROLL OUT: if strike is being tested and DTE < 14, roll to later expiration
+  if (isTested && dte < 14 && parseInt(position.qty) < 0) { // only roll short positions
+    try {
+      // Find same-strike contract 21-45 DTE out
+      const rollMinDate = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const rollMaxDate = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const rollCandidates = await getOptionsChain(underlying, undefined, optType as "call" | "put", rollMinDate, rollMaxDate);
+      const sameStrike = rollCandidates.find((c) => Math.abs(parseFloat(c.strike_price) - strike) < 1);
+
+      if (sameStrike) {
+        // Close current (buy back short), open new (sell further out)
+        const buyBackOrder = await placeOrder({ symbol: position.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" });
+        await new Promise((r) => setTimeout(r, 1000));
+        const rollOrder = await placeOrder({ symbol: sameStrike.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: position.symbol, action: "premium_roll", qty, price: currentValue,
+            reason: `Premium defense: rolled ${position.symbol} → ${sameStrike.symbol}. Strike $${strike} tested (price $${underlyingPrice.toFixed(2)}). Extended to ${sameStrike.expiration_date} for more time premium.`,
+            pnl: null, orderId: buyBackOrder.id,
+          },
+        });
+
+        return {
+          symbol: position.symbol, action: "roll_out",
+          details: `Rolled to ${sameStrike.expiration_date} — strike tested at $${underlyingPrice.toFixed(2)}`, success: true,
+        };
+      }
+    } catch {
+      // roll failed
+    }
+  }
+
+  // HOLD: position is fine
+  const status = isTested ? `WATCH: strike $${strike} being tested (price $${underlyingPrice.toFixed(2)})` : "OK";
+  return { symbol: position.symbol, action: "hold", details: `${status}, ${dte} DTE, P&L ${(pnlPct * 100).toFixed(1)}%`, success: true };
+}
+
 function fail(symbol: string, strategy: string, details: string): PremiumTradeResult {
   return { symbol, strategy, shortStrike: 0, longStrike: 0, credit: 0, maxRisk: 0, qty: 0, dte: 0, details, success: false };
 }

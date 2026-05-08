@@ -479,7 +479,52 @@ export async function manageOptionsPositions(
       dte = Math.floor((expiry.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
     }
 
-    // TAKE PROFIT
+    // PARTIAL PROFIT-TAKING: at +30%, sell half; at full target, sell rest
+    const hasOptPartial = await prisma.autoTradeLog.count({
+      where: { symbol: pos.symbol, action: "partial_profit" },
+    });
+
+    if (pnlPct >= 0.30 && pnlPct < OPTIONS_RULES.PROFIT_TARGET_PCT && hasOptPartial === 0 && qty >= 2) {
+      const sellQty = Math.max(1, Math.floor(qty / 2));
+      try {
+        const order = await placeOrder({ symbol: pos.symbol, qty: String(sellQty), side: "sell", type: "market", time_in_force: "day" });
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: pos.symbol,
+            action: "partial_profit",
+            qty: sellQty,
+            price: parseFloat(pos.current_price),
+            reason: `Options partial take: sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%. Remaining ${qty - sellQty} contracts with breakeven stop.`,
+            pnl: parseFloat(pos.unrealized_pl) * (sellQty / qty),
+            orderId: order.id,
+          },
+        });
+        actions.push({ action: "partial_profit", symbol: pos.symbol, reason: `Sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%` });
+      } catch { /* ignore */ }
+      continue;
+    }
+
+    // BREAKEVEN STOP: after partial take, don't let winner become loser
+    if (hasOptPartial > 0 && pnlPct <= 0) {
+      try {
+        const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: pos.symbol,
+            action: "breakeven_stop",
+            qty,
+            price: parseFloat(pos.current_price),
+            reason: `Options breakeven stop after partial take: ${(pnlPct * 100).toFixed(1)}%`,
+            pnl: parseFloat(pos.unrealized_pl),
+            orderId: order.id,
+          },
+        });
+        actions.push({ action: "breakeven_stop", symbol: pos.symbol, reason: `${(pnlPct * 100).toFixed(1)}% after partial` });
+      } catch { /* ignore */ }
+      continue;
+    }
+
+    // TAKE PROFIT (full exit)
     if (pnlPct >= OPTIONS_RULES.PROFIT_TARGET_PCT) {
       try {
         const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
@@ -497,6 +542,35 @@ export async function manageOptionsPositions(
         actions.push({ action: "take_profit", symbol: pos.symbol, reason: `+${(pnlPct * 100).toFixed(1)}%` });
       } catch { /* ignore */ }
       continue;
+    }
+
+    // DEAD MONEY: options held > 7 days with < 10% movement and DTE burning
+    if (dte <= 21 && dte > OPTIONS_RULES.CLOSE_BEFORE_EXPIRY_DAYS && Math.abs(pnlPct) < 0.10) {
+      // Check how long we've held this
+      const optBuy = await prisma.autoTradeLog.findFirst({
+        where: { symbol: pos.symbol, action: { in: ["buy_call", "buy_put", "quick_call", "quick_put"] } },
+        orderBy: { createdAt: "desc" },
+      });
+      const optHoldDays = optBuy ? (Date.now() - new Date(optBuy.createdAt).getTime()) / (1000 * 60 * 60 * 24) : 0;
+
+      if (optHoldDays > 7) {
+        try {
+          const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+          await prisma.autoTradeLog.create({
+            data: {
+              symbol: pos.symbol,
+              action: "dead_money",
+              qty,
+              price: parseFloat(pos.current_price),
+              reason: `Options dead money: held ${optHoldDays.toFixed(0)} days, only ${(pnlPct * 100).toFixed(1)}% move, ${dte} DTE remaining. Theta eating premium.`,
+              pnl: parseFloat(pos.unrealized_pl),
+              orderId: order.id,
+            },
+          });
+          actions.push({ action: "dead_money", symbol: pos.symbol, reason: `${optHoldDays.toFixed(0)}d hold, ${(pnlPct * 100).toFixed(1)}%, ${dte} DTE` });
+        } catch { /* ignore */ }
+        continue;
+      }
     }
 
     // STOP LOSS
