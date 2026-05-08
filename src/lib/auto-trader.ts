@@ -235,11 +235,13 @@ export async function runTradingAgent(): Promise<AgentResult> {
     const effectiveCashReserve = Math.max(RULES.MIN_CASH_RESERVE_PCT, regime.cashReservePct / 100);
 
     // ============ SPENDING & SAFETY LIMITS ============
-    let dailyLossLimit = 500;
-    let dailySpendCap = 2000;
-    let maxOptionsExposure = 5000;
-    let perTradeMax = 500;
-    let drawdownKillPct = 10;
+    // Safety limits — scale with account size (defaults for ~$5k account)
+    // These are overridden by database config if set
+    let dailyLossLimit = Math.max(100, equity * 0.05);     // 5% of equity
+    let dailySpendCap = Math.max(500, equity * 0.50);      // 50% of equity
+    let maxOptionsExposure = Math.max(1000, equity * 0.75); // 75% of equity
+    let perTradeMax = Math.max(50, equity * 0.02);          // 2% of equity
+    let drawdownKillPct = 10;                                // 10% always
     try {
       const configs = await prisma.agentConfig.findMany();
       const cm: Record<string, string> = {};

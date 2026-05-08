@@ -17,9 +17,10 @@ const PREMIUM_RULES = {
   // Strike selection — sell at ~30 delta (~70% probability of profit)
   SHORT_DELTA_TARGET: 0.30,
 
-  // Spread width
-  SPREAD_WIDTH_PCT: 0.03,       // 3% between strikes
-  MIN_SPREAD_WIDTH: 2.50,       // Minimum $2.50 between strikes
+  // Spread width — SCALES with account size
+  // $5k account = $2.50 wide, $50k = $5 wide, $100k+ = $10 wide
+  SPREAD_WIDTH_MIN: 2.50,
+  SPREAD_WIDTH_MAX: 10.00,
 
   // DTE
   MIN_DTE: 14,
@@ -31,8 +32,8 @@ const PREMIUM_RULES = {
   STOP_LOSS_MULTIPLIER: 2.0,    // Close if loss = 2x the credit received
   CLOSE_AT_DTE: 7,              // Close if < 7 DTE regardless
 
-  // Sizing
-  MAX_RISK_PER_TRADE: 0.02,     // 2% of portfolio per trade
+  // Sizing — everything scales with equity
+  MAX_RISK_PER_TRADE: 0.02,     // 2% of portfolio per trade (scales automatically)
   MAX_PREMIUM_POSITIONS: 6,     // Max 6 premium-selling positions
 };
 
@@ -51,6 +52,23 @@ export interface PremiumTradeResult {
 
 // ============ SELL IRON CONDOR ON INDEX (SPY/QQQ) ============
 // Best strategy in choppy markets — profit if index stays in a range
+
+// Dynamic spread width based on account size
+function getSpreadWidth(equity: number): number {
+  // $5k = $2.50, $25k = $5, $50k = $7.50, $100k+ = $10
+  const width = Math.max(
+    PREMIUM_RULES.SPREAD_WIDTH_MIN,
+    Math.min(PREMIUM_RULES.SPREAD_WIDTH_MAX, equity / 10000)
+  );
+  // Round to nearest $2.50
+  return Math.round(width / 2.5) * 2.5;
+}
+
+// Dynamic contract count based on account size and risk
+function getContractCount(equity: number, maxRiskPerContract: number): number {
+  const maxTotalRisk = equity * PREMIUM_RULES.MAX_RISK_PER_TRADE;
+  return Math.max(1, Math.min(5, Math.floor(maxTotalRisk / maxRiskPerContract)));
+}
 
 export async function sellIronCondor(
   symbol: string, // "SPY" or "QQQ"
@@ -95,12 +113,12 @@ export async function sellIronCondor(
 
     // PUT SIDE: sell put near rangeLow, buy put below it
     const shortPut = findClosestStrike(expiryPuts, rangeLow);
-    const longPutStrike = parseFloat(shortPut?.strike_price || "0") - Math.max(PREMIUM_RULES.MIN_SPREAD_WIDTH, price * PREMIUM_RULES.SPREAD_WIDTH_PCT);
+    const longPutStrike = parseFloat(shortPut?.strike_price || "0") - getSpreadWidth(equity);
     const longPut = findClosestStrike(expiryPuts, longPutStrike);
 
     // CALL SIDE: sell call near rangeHigh, buy call above it
     const shortCall = findClosestStrike(expiryCalls, rangeHigh);
-    const longCallStrike = parseFloat(shortCall?.strike_price || "0") + Math.max(PREMIUM_RULES.MIN_SPREAD_WIDTH, price * PREMIUM_RULES.SPREAD_WIDTH_PCT);
+    const longCallStrike = parseFloat(shortCall?.strike_price || "0") + getSpreadWidth(equity);
     const longCall = findClosestStrike(expiryCalls, longCallStrike);
 
     if (!shortPut || !longPut || !shortCall || !longCall) {
@@ -129,8 +147,7 @@ export async function sellIronCondor(
       Math.abs(parseFloat(shortCall.strike_price) - parseFloat(longCall.strike_price))
     );
     const maxRiskPerContract = (spreadWidth - totalCredit) * 100;
-    const maxTotalRisk = equity * PREMIUM_RULES.MAX_RISK_PER_TRADE;
-    const qty = Math.max(1, Math.min(5, Math.floor(maxTotalRisk / maxRiskPerContract)));
+    const qty = getContractCount(equity, maxRiskPerContract);
 
     const dte = Math.floor((new Date(bestExpiry).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
@@ -215,7 +232,7 @@ export async function sellCreditSpread(
     const shortContract = findClosestStrike(expiryContracts, shortStrikeTarget);
     if (!shortContract) return fail(symbol, "credit_spread", "No suitable short strike");
 
-    const spreadWidth = Math.max(PREMIUM_RULES.MIN_SPREAD_WIDTH, price * PREMIUM_RULES.SPREAD_WIDTH_PCT);
+    const spreadWidth = getSpreadWidth(equity);
     const longStrikeTarget = direction === "bull_put"
       ? parseFloat(shortContract.strike_price) - spreadWidth
       : parseFloat(shortContract.strike_price) + spreadWidth;
@@ -237,8 +254,7 @@ export async function sellCreditSpread(
 
     const actualWidth = Math.abs(parseFloat(shortContract.strike_price) - parseFloat(longContract.strike_price));
     const maxRiskPerContract = (actualWidth - credit) * 100;
-    const maxTotalRisk = equity * PREMIUM_RULES.MAX_RISK_PER_TRADE;
-    const qty = Math.max(1, Math.min(5, Math.floor(maxTotalRisk / maxRiskPerContract)));
+    const qty = getContractCount(equity, maxRiskPerContract);
 
     const dte = Math.floor((new Date(bestExpiry).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
