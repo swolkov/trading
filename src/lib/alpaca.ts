@@ -373,6 +373,8 @@ export interface OptionsSnapshot {
     p: number;
     s: number;
     t: string;
+    x: string;
+    c: string[];
   };
   greeks?: {
     delta: number;
@@ -382,6 +384,16 @@ export interface OptionsSnapshot {
     rho: number;
   };
   impliedVolatility?: number;
+  // Alpaca returns daily bar data when available
+  dailyBar?: {
+    o: number;
+    h: number;
+    l: number;
+    c: number;
+    v: number;
+    t: string;
+    vw: number;
+  };
 }
 
 export async function getOptionsChain(

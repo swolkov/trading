@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { useState, useEffect } from "react";
 
 const sections = [
   {
@@ -39,14 +40,20 @@ const sections = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Close mobile menu on navigation
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
     return pathname.startsWith(href);
   };
 
-  return (
-    <aside className="w-52 border-r border-border bg-sidebar flex flex-col shrink-0">
+  const sidebarContent = (
+    <>
       {/* Logo */}
       <div className="px-4 py-4 border-b border-border">
         <Link href="/" className="flex items-center gap-3 group">
@@ -102,6 +109,44 @@ export function Sidebar() {
           Alpaca · Yahoo · Finnhub · Claude
         </p>
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile hamburger button */}
+      <button
+        onClick={() => setMobileOpen(!mobileOpen)}
+        className="md:hidden fixed top-3 left-3 z-50 w-10 h-10 rounded-lg bg-card border border-border flex items-center justify-center shadow-lg"
+        aria-label="Toggle menu"
+      >
+        <div className="space-y-1.5">
+          <span className={cn("block w-5 h-0.5 bg-foreground transition-all", mobileOpen && "rotate-45 translate-y-2")} />
+          <span className={cn("block w-5 h-0.5 bg-foreground transition-all", mobileOpen && "opacity-0")} />
+          <span className={cn("block w-5 h-0.5 bg-foreground transition-all", mobileOpen && "-rotate-45 -translate-y-2")} />
+        </div>
+      </button>
+
+      {/* Mobile overlay */}
+      {mobileOpen && (
+        <div
+          className="md:hidden fixed inset-0 bg-black/50 z-40"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+      {/* Desktop sidebar */}
+      <aside className="hidden md:flex w-52 border-r border-border bg-sidebar flex-col shrink-0">
+        {sidebarContent}
+      </aside>
+
+      {/* Mobile sidebar */}
+      <aside className={cn(
+        "md:hidden fixed left-0 top-0 bottom-0 w-64 bg-sidebar border-r border-border z-40 flex flex-col transition-transform duration-300",
+        mobileOpen ? "translate-x-0" : "-translate-x-full"
+      )}>
+        {sidebarContent}
+      </aside>
+    </>
   );
 }
