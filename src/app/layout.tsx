@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Dean Alpha — AI-Powered Options Intelligence",
+  title: "Esbueno Trades — AI-Powered Options Intelligence",
   description: "Autonomous AI trading agent with deep research, options intelligence, and risk management",
 };
 

@@ -27,6 +27,7 @@ import { sendNotification } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { analyzeVolatility } from "./options-intelligence";
 import { checkCorrelationWithPortfolio, clearCorrelationCache } from "./correlation";
+import { scanSector, type SectorScanResult } from "./sector-scanner";
 import { getOptionsSnapshots } from "./alpaca";
 import { prisma } from "./db";
 
@@ -722,7 +723,43 @@ export async function runTradingAgent(): Promise<AgentResult> {
         }
       } catch { /* ignore */ }
 
-      details.push(`Found ${candidates.size} candidates from ${gainers.length} gainers, ${losers.length} losers, ${active.length} active`);
+      // Sector Scanner: themed universe monitoring with RS, breakouts, and pass/fail
+      let sectorScanResults: SectorScanResult[] = [];
+      try {
+        // Load active sectors from config, default to ai_capex
+        let activeSectors = ["ai_capex"];
+        try {
+          const sectorConfig = await prisma.agentConfig.findUnique({ where: { key: "sector_scanner_sectors" } });
+          if (sectorConfig?.value) activeSectors = sectorConfig.value.split(",").map((s) => s.trim()).filter(Boolean);
+        } catch { /* use default */ }
+
+        for (const sectorKey of activeSectors) {
+          try {
+            const sectorResult = await scanSector(sectorKey);
+            sectorScanResults.push(sectorResult);
+            details.push(`\n=== SECTOR: ${sectorResult.sectorHealth.sectorName} (${sectorResult.sectorHealth.signal.replace(/_/g, " ").toUpperCase()}) ===`);
+            details.push(`  ${sectorResult.sectorHealth.summary}`);
+
+            // Add passing candidates
+            for (const c of sectorResult.candidates.slice(0, 10)) {
+              if (!heldSymbols.has(c.symbol) && !blacklistSet.has(c.symbol)) {
+                const reason = c.breakout
+                  ? `sector_breakout_${c.breakout.breakoutDirection}`
+                  : c.direction === "bullish" ? "sector_rs_leader" : "sector_rs_laggard";
+                candidates.set(c.symbol, reason);
+                const detail = c.breakout
+                  ? `${c.symbol}: RANGE BREAKOUT ${c.breakout.breakoutDirection.toUpperCase()} after ${c.breakout.rangeDays}d (+${c.breakout.breakoutPct.toFixed(1)}%, vol ${c.breakout.volumeRatio.toFixed(1)}x)${c.breakout.confirmed ? " CONFIRMED" : ""}`
+                  : `${c.symbol}: RS rank #${c.rs.rsRank}, score ${c.score} (${c.direction})`;
+                details.push(`  ${detail} — ${c.reasons[0] || ""}`);
+              }
+            }
+          } catch (err) {
+            details.push(`  Sector scan error (${sectorKey}): ${err}`);
+          }
+        }
+      } catch { /* ignore */ }
+
+      details.push(`Found ${candidates.size} candidates from ${gainers.length} gainers, ${losers.length} losers, ${active.length} active${sectorScanResults.length > 0 ? `, ${sectorScanResults.length} sector scans` : ""}`);
 
       // Cooldown check — skip cooldown entirely if we have no positions (fresh start)
       let recentSymbols = new Set<string>();
@@ -737,16 +774,18 @@ export async function runTradingAgent(): Promise<AgentResult> {
         details.push("No positions — cooldown bypassed, re-analyzing everything");
       }
 
-      // Prioritize candidates: special signals first (gaps, pairs, momentum), then focus watchlist
+      // Prioritize candidates: special signals first (gaps, sector breakouts, pairs, momentum), then focus watchlist
       // This ensures high-signal candidates get analyzed before hitting the AI limit
       const prioritized = [...candidates.entries()].sort(([, a], [, b]) => {
         const priority = (r: string) =>
-          r.startsWith("gap_") ? 0 :
-          r.startsWith("relative_value") ? 1 :
-          r.startsWith("momentum") ? 2 :
-          r === "oversold_bounce" ? 3 :
-          r === "high_volume" ? 4 :
-          5; // focus_watchlist last (they often score "hold")
+          r.startsWith("sector_breakout") ? 0 :
+          r.startsWith("gap_") ? 1 :
+          r.startsWith("relative_value") ? 2 :
+          r.startsWith("sector_rs") ? 3 :
+          r.startsWith("momentum") ? 4 :
+          r === "oversold_bounce" ? 5 :
+          r === "high_volume" ? 6 :
+          7; // focus_watchlist last (they often score "hold")
         return priority(a) - priority(b);
       });
 

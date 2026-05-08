@@ -17,19 +17,18 @@ const sections = [
     ],
   },
   {
-    label: "AI & AUTOMATION",
+    label: "AGENTS",
     links: [
+      { href: "/agents", label: "Agent Hub" },
       { href: "/ai", label: "AI Analyst" },
-      { href: "/agent", label: "Auto Trader" },
       { href: "/backtest", label: "Backtest" },
     ],
   },
   {
-    label: "INTELLIGENCE",
+    label: "ANALYTICS",
     links: [
+      { href: "/performance", label: "Performance" },
       { href: "/market", label: "Market Intel" },
-      { href: "/analytics", label: "P&L Analytics" },
-      { href: "/performance", label: "Agent Performance" },
       { href: "/calendar", label: "Calendar" },
       { href: "/insider", label: "Insider Trades" },
       { href: "/research", label: "Research" },
@@ -50,15 +49,18 @@ export function Sidebar() {
     <aside className="w-52 border-r border-border bg-sidebar flex flex-col shrink-0">
       {/* Logo */}
       <div className="px-4 py-4 border-b border-border">
-        <Link href="/" className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-md bg-primary/20 flex items-center justify-center">
-            <span className="text-primary font-black text-xs">DA</span>
+        <Link href="/" className="flex items-center gap-3 group">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 via-emerald-400 to-teal-300 flex items-center justify-center shadow-md shadow-emerald-500/25 group-hover:shadow-emerald-500/40 transition-shadow">
+            <span className="text-white font-black text-sm tracking-tighter">E</span>
           </div>
           <div>
-            <h1 className="text-[13px] font-bold tracking-tight leading-none">Dean Alpha</h1>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" />
-              <span className="text-[9px] text-emerald-400/80 font-medium tracking-wider uppercase">Paper Live</span>
+            <h1 className="text-[13px] font-bold tracking-tight leading-none bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">Esbueno Trades</h1>
+            <div className="flex items-center gap-1.5 mt-1">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+              </span>
+              <span className="text-[9px] text-emerald-400/80 font-semibold tracking-[0.15em] uppercase">Paper Live</span>
             </div>
           </div>
         </Link>
