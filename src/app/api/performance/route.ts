@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { getPositions } from "@/lib/alpaca";
 
 export async function GET() {
   try {
@@ -6,6 +7,16 @@ export async function GET() {
     const allTrades = await prisma.autoTradeLog.findMany({
       orderBy: { createdAt: "desc" },
     });
+
+    // Get actual open positions from Alpaca (source of truth)
+    let livePositionCount = 0;
+    try {
+      const positions = await getPositions();
+      livePositionCount = positions.length;
+    } catch {
+      // fallback to log-based count if Alpaca unavailable
+      livePositionCount = allTrades.filter((t) => t.pnl == null && !t.action.includes("skip") && !t.action.includes("veto")).length;
+    }
 
     const closedTrades = allTrades.filter((t) => t.pnl != null && t.pnl !== 0);
     const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
@@ -101,7 +112,7 @@ export async function GET() {
     return Response.json({
       overview: {
         totalTrades: closedTrades.length,
-        openTrades: allTrades.filter((t) => t.pnl == null && !t.action.includes("skip")).length,
+        openTrades: livePositionCount,
         winRate: Math.round(winRate * 10) / 10,
         profitFactor: Math.round(profitFactor * 100) / 100,
         totalPnl: Math.round(totalPnl * 100) / 100,
