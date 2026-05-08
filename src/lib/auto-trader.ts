@@ -208,6 +208,15 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     } catch { /* ignore */ }
 
+    // Load permanent lessons from our first week of trading
+    try {
+      const permLessons = await prisma.agentConfig.findUnique({ where: { key: "permanent_lessons" } });
+      if (permLessons?.value) {
+        const lessonList = JSON.parse(permLessons.value);
+        details.push(`PERMANENT RULES (${lessonList.length}): ${lessonList[0].slice(0, 80)}...`);
+      }
+    } catch { /* ignore */ }
+
     // Step 1b: Detect market regime
     let regime: RegimeAnalysis;
     try {
