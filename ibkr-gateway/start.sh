@@ -4,41 +4,22 @@ set -e
 cd /opt/ibkr
 
 echo "=== IBKR Client Portal Gateway ==="
-echo "Port: 5000 (HTTPS)"
+echo "Gateway: HTTPS on port 5000"
+echo "Nginx proxy: HTTP on port 8080"
 echo "==================================="
 
-# Verify the gateway files exist
+# Verify files
 if [ ! -f "dist/ibgroup.web.core.iblink.router.clientportal.gw.jar" ]; then
   echo "ERROR: Gateway jar not found!"
-  ls -la dist/ 2>/dev/null || echo "dist/ directory missing"
   ls -la /opt/ibkr/
   sleep 3600
   exit 1
 fi
 
-if [ ! -f "root/conf.yaml" ]; then
-  echo "ERROR: conf.yaml not found!"
-  ls -la root/ 2>/dev/null
-  sleep 3600
-  exit 1
-fi
+echo "Starting nginx reverse proxy..."
+nginx
 
-if [ ! -f "root/vertx.jks" ]; then
-  echo "ERROR: SSL keystore (vertx.jks) not found!"
-  ls -la root/ 2>/dev/null
-  sleep 3600
-  exit 1
-fi
-
-echo "Gateway JAR: dist/ibgroup.web.core.iblink.router.clientportal.gw.jar"
-echo "Config: root/conf.yaml"
-echo "SSL Keystore: root/vertx.jks"
-echo ""
-echo "Starting gateway..."
-echo "Visit https://<your-domain> to authenticate with IBKR"
-echo ""
-
-# Run using the same classpath as IBKR's official run.sh
+echo "Starting IBKR gateway..."
 export RUNTIME_PATH="root:dist/ibgroup.web.core.iblink.router.clientportal.gw.jar:build/lib/runtime/*"
 
 exec java \
