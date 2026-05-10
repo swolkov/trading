@@ -2,11 +2,9 @@
     proxyRemoteSsl: true
     proxyRemoteHost: "https://api.ibkr.com"
     listenPort: 5000
-    listenSsl: true
+    listenSsl: false
     ccp: false
     svcEnvironment: "v1"
-    sslCert: "vertx.jks"
-    sslPwd: "mywebapi"
     authDelay: 3000
     portalBaseURL: ""
     serverOptions:
