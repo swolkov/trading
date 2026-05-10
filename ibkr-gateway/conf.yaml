@@ -1,18 +1,11 @@
 # IBKR Client Portal Gateway Configuration
-# Paper trading mode
 listenPort: 5000
-listenSsl: true
+listenSsl: false
 svcEnvironment: v1
-
-# Allow connections from any IP (Railway container)
 ip2loc: ""
-
-# CORS - allow your Vercel app
 cors:
   origin: "*"
-
-# Paper trading account
 paperTrading: true
-
-# Session timeout (keep alive)
 ssoExpireTime: 86400
+proxyRemoteHost: ""
+proxyRemotePort: 0

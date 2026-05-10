@@ -34,16 +34,23 @@ interface IBKRResponse {
 async function ibkrFetch(path: string, options?: RequestInit): Promise<IBKRResponse> {
   await syncIBKRConfig();
   const url = `${IBKR_BASE_URL}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
-  });
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+      signal: AbortSignal.timeout(15000), // 15s timeout
+    });
+  } catch (err) {
+    throw new Error(`IBKR connection failed (${IBKR_BASE_URL}): ${err}`);
+  }
 
   if (!res.ok) {
-    const body = await res.text();
+    const body = await res.text().catch(() => "");
     throw new Error(`IBKR API error ${res.status}: ${body}`);
   }
 

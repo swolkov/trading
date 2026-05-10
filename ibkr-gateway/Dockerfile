@@ -28,6 +28,6 @@ RUN chmod +x /opt/ibkr/start.sh
 EXPOSE 5000
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s \
-  CMD curl -k -f https://localhost:5000/v1/api/iserver/auth/status || exit 1
+  CMD curl -f http://localhost:5000/v1/api/iserver/auth/status || exit 1
 
 CMD ["/opt/ibkr/start.sh"]
