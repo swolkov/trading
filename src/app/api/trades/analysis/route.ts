@@ -1,4 +1,4 @@
-import { getOrders } from "@/lib/alpaca";
+import { getOrders, getPositions } from "@/lib/alpaca";
 import { prisma } from "@/lib/db";
 
 interface RoundTrip {
@@ -19,7 +19,7 @@ interface RoundTrip {
 
 export async function GET() {
   try {
-    const orders = await getOrders("all");
+    const [orders, positions] = await Promise.all([getOrders("all"), getPositions()]);
     // Fresh start: only new premium selling positions (opened after 2:30pm May 8)
     const freshStart = new Date("2026-05-08T14:30:00Z");
     const filled = orders.filter((o) =>
@@ -169,7 +169,7 @@ export async function GET() {
     return Response.json({
       stats: {
         totalTrades: closed.length,
-        openTrades: roundTrips.filter((t) => t.status === "open").length,
+        openTrades: positions.length,
         winners: winners.length,
         losers: losers.length,
         winRate: closed.length > 0 ? Math.round((winners.length / closed.length) * 1000) / 10 : 0,
