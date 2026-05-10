@@ -31,6 +31,9 @@ interface IBKRResponse {
   [key: string]: any;
 }
 
+// Session cookie management — the gateway uses cookie-based auth
+let _ibkrSessionCookie = "";
+
 async function ibkrFetch(path: string, options?: RequestInit): Promise<IBKRResponse> {
   await syncIBKRConfig();
   const url = `${IBKR_BASE_URL}${path}`;
@@ -41,12 +44,19 @@ async function ibkrFetch(path: string, options?: RequestInit): Promise<IBKRRespo
       ...options,
       headers: {
         "Content-Type": "application/json",
+        ..._ibkrSessionCookie ? { "Cookie": _ibkrSessionCookie } : {},
         ...options?.headers,
       },
-      signal: AbortSignal.timeout(15000), // 15s timeout
+      signal: AbortSignal.timeout(15000),
     });
   } catch (err) {
     throw new Error(`IBKR connection failed (${IBKR_BASE_URL}): ${err}`);
+  }
+
+  // Capture session cookies from response
+  const setCookie = res.headers.get("set-cookie");
+  if (setCookie) {
+    _ibkrSessionCookie = setCookie.split(",").map((c) => c.split(";")[0].trim()).join("; ");
   }
 
   if (!res.ok) {
@@ -55,6 +65,18 @@ async function ibkrFetch(path: string, options?: RequestInit): Promise<IBKRRespo
   }
 
   return res.json();
+}
+
+// Authenticate to the gateway — call this after browser login to establish server session
+export async function reauthenticate(): Promise<{ authenticated: boolean }> {
+  try {
+    // Tickle to keep session alive
+    await ibkrFetch("/tickle", { method: "POST" });
+    const status = await ibkrFetch("/iserver/auth/status", { method: "POST" });
+    return { authenticated: status.authenticated || false };
+  } catch {
+    return { authenticated: false };
+  }
 }
 
 // ============ AUTHENTICATION ============
