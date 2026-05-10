@@ -2,21 +2,31 @@
 
 cd /opt/ibkr
 
-echo "=== IBKR Client Portal Gateway ==="
-echo "Starting on port 5000 (HTTPS)"
+echo "=== IBKR Gateway Debug ==="
 date
+echo "Java version:"
+java -version 2>&1
+echo ""
 
-# Verify
-if [ ! -f "dist/ibgroup.web.core.iblink.router.clientportal.gw.jar" ]; then
-  echo "FATAL: Gateway jar missing"
-  ls -laR /opt/ibkr/ 2>&1 | head -50
-  sleep 86400
-  exit 1
-fi
+echo "Checking files..."
+ls -la dist/*.jar 2>/dev/null && echo "JAR: OK" || echo "JAR: MISSING"
+ls -la root/conf.yaml 2>/dev/null && echo "CONF: OK" || echo "CONF: MISSING"
+ls -la root/vertx.jks 2>/dev/null && echo "JKS: OK" || echo "JKS: MISSING"
+echo ""
 
-echo "JAR found. Launching..."
+# Start a simple HTTP responder on port 5000 for Railway healthcheck
+# while the gateway starts in the background
+echo "Starting temp health responder..."
+while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"starting\":true}" | nc -l -p 5000 -q 1 2>/dev/null || true; done &
+HEALTH_PID=$!
+sleep 2
 
+echo "Launching IBKR gateway..."
 export RUNTIME_PATH="root:dist/ibgroup.web.core.iblink.router.clientportal.gw.jar:build/lib/runtime/*"
+
+# Kill the temp responder — gateway will take over port 5000
+kill $HEALTH_PID 2>/dev/null
+sleep 1
 
 java \
   -server \
@@ -28,7 +38,9 @@ java \
   ibgroup.web.core.clientportal.gw.GatewayStart \
   --conf root/conf.yaml 2>&1
 
-# If Java exits, keep container alive so we can read logs
-echo "Gateway exited with code $?"
-echo "Keeping container alive for debugging..."
+EXIT_CODE=$?
+echo ""
+echo "=== Gateway exited with code $EXIT_CODE ==="
+echo "Container staying alive for log inspection..."
+# Keep alive so Railway doesn't restart and we can read logs
 sleep 86400
