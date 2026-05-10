@@ -160,6 +160,9 @@ function categorizeStrategy(action: string): string {
   if (action.includes("spread")) return "Credit Spread";
   if (action.includes("sell_bull") || action.includes("sell_bear")) return "Credit Spread";
   if (action.includes("straddle")) return "Straddle";
+  if (action.includes("futures_long")) return "Futures Long";
+  if (action.includes("futures_short")) return "Futures Short";
+  if (action.includes("futures_session")) return "Futures Session Close";
   if (action.includes("buy_call") || action.includes("earnings_call") || action.includes("quick_call")) return "Buy Calls";
   if (action.includes("buy_put") || action.includes("earnings_put") || action.includes("quick_put")) return "Buy Puts";
   if (action === "partial_profit") return "Partial Profit";
