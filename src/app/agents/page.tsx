@@ -62,29 +62,84 @@ export default function AgentHubPage() {
     return () => clearInterval(interval);
   }, [loadData]);
 
-  const runOptionsAgent = async () => {
-    setRunning(true);
+  const [runningAgent, setRunningAgent] = useState<string | null>(null);
+
+  const runAgent = async (endpoint: string, agentId: string) => {
+    setRunningAgent(agentId);
     try {
-      const res = await fetch("/api/cron/trade", { method: "POST" });
+      const res = await fetch(endpoint, { method: "POST" });
       const data = await res.json();
       setRunResult(data);
     } catch { /* ignore */ }
-    setRunning(false);
+    setRunningAgent(null);
     loadData();
   };
 
   const agents = [
     {
-      id: "options",
-      name: "Options Agent",
-      description: "Premium selling, credit spreads, iron condors, directional plays",
-      status: config?.enabled === "true" ? "active" : "paused",
-      strategy: "Premium Selling + Quick Plays + High Conviction",
+      id: "premarket",
+      name: "Pre-Market Research",
+      description: "Scans overnight news, sector health, gap alerts on held positions",
+      status: "active",
+      schedule: "9:00 AM ET (before open)",
+      strategy: "News analysis, sector scanning, gap detection, morning briefing",
       details: [
-        `Min Score: ${config?.min_score || "70"}`,
-        `Strategy: ${config?.strategy || "balanced"}`,
-        `Trade Type: ${config?.trade_options === "true" ? "Options" : "Stocks"}`,
+        "Overnight news for focus symbols",
+        "Sector breakout/weakness detection",
+        "Gap alerts on existing positions",
+        "Sends morning briefing notification",
       ],
+      endpoint: "/api/cron/premarket",
+      canRun: true,
+    },
+    {
+      id: "trading",
+      name: "Trading Agent",
+      description: "Full scan — finds new trades, AI analysis, executes buys/sells",
+      status: config?.enabled === "true" ? "active" : "paused",
+      schedule: "Every 30 min during market hours (16x/day)",
+      strategy: "Premium Selling + Sector Breakouts + Quick Plays + High Conviction",
+      details: [
+        `Min Score: ${config?.min_score || "55"}`,
+        `Strategy: ${config?.strategy || "balanced"}`,
+        "Iron condors, credit spreads, directional calls/puts",
+        "Sector scanner, relative value, gap plays",
+        "5-expert AI committee with adversarial review",
+      ],
+      endpoint: "/api/cron/trade",
+      canRun: true,
+    },
+    {
+      id: "monitor",
+      name: "Position Monitor",
+      description: "Watches positions for stops, profits, premium defense",
+      status: "active",
+      schedule: "Every 15 min during market hours (36x/day)",
+      strategy: "Stop losses, partial profits, breakeven stops, premium defense, dead money",
+      details: [
+        "Spread-aware management (never splits legs)",
+        "Partial profit-taking (+30% sell half)",
+        "Breakeven stop after partial take",
+        "Premium defense: roll tested strikes",
+        "Dead money exits (>7d, <10% move)",
+      ],
+      endpoint: "/api/cron/monitor",
+      canRun: true,
+    },
+    {
+      id: "review",
+      name: "Post-Market Review",
+      description: "End-of-day summary, learning engine update, performance report",
+      status: "active",
+      schedule: "4:30 PM ET (after close)",
+      strategy: "Daily P&L review, lesson extraction, performance notification",
+      details: [
+        "Daily win/loss summary",
+        "Updates learning engine",
+        "Extracts patterns from trades",
+        "Sends EOD notification",
+      ],
+      endpoint: "/api/cron/review",
       canRun: true,
     },
     {
@@ -92,55 +147,15 @@ export default function AgentHubPage() {
       name: "Futures Agent",
       description: "Micro E-mini futures (MES, MNQ, MYM, M2K) via IBKR",
       status: futuresStatus?.connected ? "active" : "waiting",
+      schedule: "TBD — waiting for IBKR connection",
       strategy: "EMA crossover + RSI + VWAP + AI confirmation",
       details: [
-        futuresStatus?.connected ? "IBKR Connected" : "Waiting for IBKR (May 12)",
+        futuresStatus?.connected ? "IBKR Connected" : "Waiting for IBKR",
         "Contracts: MES, MNQ, MYM, M2K",
         "Risk: $200 max per trade",
       ],
+      endpoint: "/api/futures/trade",
       canRun: futuresStatus?.connected || false,
-    },
-    {
-      id: "quick",
-      name: "Quick Plays",
-      description: "7-14 DTE mechanical trades based on technical setups",
-      status: "active",
-      strategy: "RSI extremes, breakouts, gaps, support bounces",
-      details: [
-        "Oversold bounce (RSI < 25)",
-        "Momentum breakout (50-SMA + volume)",
-        "Gap and go (3%+ with volume)",
-        "Risk: 1% of equity per play",
-      ],
-      canRun: false,
-    },
-    {
-      id: "macro",
-      name: "Macro Strategist",
-      description: "Morning briefing — sets the tone for all trading",
-      status: "active",
-      strategy: "VIX, bonds, dollar, oil, gold, news analysis",
-      details: [
-        "Runs first each cycle",
-        "Sets sector favors/avoids",
-        "Today's specific trading rules",
-        "Cached 2 hours",
-      ],
-      canRun: false,
-    },
-    {
-      id: "risk",
-      name: "Risk Agent",
-      description: "Reviews every trade before execution — the gatekeeper",
-      status: "active",
-      strategy: "Position limits, delta limits, correlation, PDT detection",
-      details: [
-        "Max 2% per trade",
-        "Delta exposure limits",
-        "Correlation blocking",
-        "PDT auto-detection",
-      ],
-      canRun: false,
     },
   ];
 
@@ -151,8 +166,8 @@ export default function AgentHubPage() {
           <h1 className="text-2xl font-bold">Agent Hub</h1>
           <p className="text-sm text-muted-foreground">All AI agents in one place — status, controls, activity</p>
         </div>
-        <Button onClick={runOptionsAgent} disabled={running} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-          {running ? "Running..." : "Run Options Agent"}
+        <Button onClick={() => runAgent("/api/cron/trade", "trading")} disabled={runningAgent !== null} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+          {runningAgent === "trading" ? "Running..." : "Run Trading Agent"}
         </Button>
       </div>
 
@@ -174,6 +189,7 @@ export default function AgentHubPage() {
               <p className="text-[11px] text-muted-foreground">{agent.description}</p>
             </CardHeader>
             <CardContent className="space-y-2">
+              <p className="text-[10px] text-blue-400 font-medium">{agent.schedule}</p>
               <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Strategy</p>
               <p className="text-xs">{agent.strategy}</p>
               <div className="space-y-1 mt-2">
@@ -181,6 +197,17 @@ export default function AgentHubPage() {
                   <p key={i} className="text-[11px] text-muted-foreground">{d}</p>
                 ))}
               </div>
+              {agent.canRun && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full mt-2 text-xs"
+                  disabled={runningAgent !== null}
+                  onClick={() => runAgent(agent.endpoint, agent.id)}
+                >
+                  {runningAgent === agent.id ? "Running..." : `Run ${agent.name}`}
+                </Button>
+              )}
             </CardContent>
           </Card>
         ))}
