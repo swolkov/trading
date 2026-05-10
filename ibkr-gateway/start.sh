@@ -4,49 +4,48 @@ set -e
 cd /opt/ibkr
 
 echo "=== IBKR Client Portal Gateway ==="
-echo "Paper Trading Mode: ON"
-echo "Port: 5000 (HTTP)"
+echo "Port: 5000 (HTTPS)"
 echo "==================================="
 
-# Find the run.jar
-RUNJAR=$(find /opt/ibkr -name "run.jar" -type f | head -1)
-
-if [ -z "$RUNJAR" ]; then
-  echo "ERROR: run.jar not found! Listing all jars:"
-  find /opt/ibkr -name "*.jar" -type f
-  echo ""
-  echo "Listing directory structure:"
+# Verify the gateway files exist
+if [ ! -f "dist/ibgroup.web.core.iblink.router.clientportal.gw.jar" ]; then
+  echo "ERROR: Gateway jar not found!"
+  ls -la dist/ 2>/dev/null || echo "dist/ directory missing"
   ls -la /opt/ibkr/
-  ls -la /opt/ibkr/*/ 2>/dev/null || true
-  # Keep container alive so we can debug via Railway logs
-  echo "Sleeping to keep container alive for debugging..."
   sleep 3600
   exit 1
 fi
 
-echo "Found JAR: $RUNJAR"
-GWDIR=$(dirname "$RUNJAR")/..
-
-# Use our conf.yaml
-CONF="/opt/ibkr/root/conf.yaml"
-if [ ! -f "$CONF" ]; then
-  # Try to find any conf.yaml
-  CONF=$(find /opt/ibkr -name "conf.yaml" -type f | head -1)
-fi
-
-if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+if [ ! -f "root/conf.yaml" ]; then
   echo "ERROR: conf.yaml not found!"
-  find /opt/ibkr -name "*.yaml" -type f
+  ls -la root/ 2>/dev/null
   sleep 3600
   exit 1
 fi
 
-echo "Config: $CONF"
-echo "Starting gateway..."
+if [ ! -f "root/vertx.jks" ]; then
+  echo "ERROR: SSL keystore (vertx.jks) not found!"
+  ls -la root/ 2>/dev/null
+  sleep 3600
+  exit 1
+fi
 
-# Run the gateway — it will listen on port 5000
-# The gateway requires browser login — it will start and wait for auth
-exec java -server \
+echo "Gateway JAR: dist/ibgroup.web.core.iblink.router.clientportal.gw.jar"
+echo "Config: root/conf.yaml"
+echo "SSL Keystore: root/vertx.jks"
+echo ""
+echo "Starting gateway..."
+echo "Visit https://<your-domain> to authenticate with IBKR"
+echo ""
+
+# Run using the same classpath as IBKR's official run.sh
+export RUNTIME_PATH="root:dist/ibgroup.web.core.iblink.router.clientportal.gw.jar:build/lib/runtime/*"
+
+exec java \
+  -server \
   -Dvertx.disableDnsResolver=true \
   -Djava.net.preferIPv4Stack=true \
-  -jar "$RUNJAR" "$CONF"
+  -Dvertx.logger-delegate-factory-class-name=io.vertx.core.logging.SLF4JLogDelegateFactory \
+  -cp "${RUNTIME_PATH}" \
+  ibgroup.web.core.clientportal.gw.GatewayStart \
+  --conf root/conf.yaml
