@@ -1,10 +1,9 @@
 import { runFuturesAgent } from "@/lib/futures-agent";
-import { checkAuth } from "@/lib/ibkr";
+import { checkTradovateAuth } from "@/lib/tradovate";
 
 export const maxDuration = 300;
 
 // Futures agent cron — runs every 30 min during futures market hours
-// Futures trade nearly 24 hours (Sun 6pm - Fri 5pm ET) with a 1hr break
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -13,10 +12,9 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Check if IBKR is connected before running
-    const auth = await checkAuth();
+    const auth = await checkTradovateAuth();
     if (!auth.authenticated) {
-      return Response.json({ status: "skipped", reason: "IBKR not connected" });
+      return Response.json({ status: "skipped", reason: "Tradovate not connected — set env vars" });
     }
 
     const result = await runFuturesAgent();

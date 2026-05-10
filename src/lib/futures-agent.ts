@@ -1,18 +1,20 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
-  checkAuth,
-  searchFuturesContract,
-  getFuturesSnapshot,
-  getFuturesBars,
+  checkTradovateAuth,
+  findContract,
+  getBars as getTVBars,
   placeBracketOrder,
-  placeFuturesOrder,
-  getIBKRPositions,
-  getIBKRAccountSummary,
-  FUTURES_CONTRACTS,
-} from "./ibkr";
+  placeMarketOrder,
+  getTradovatePositions,
+  getTradovateAccountSummary,
+  TRADOVATE_CONTRACTS,
+} from "./tradovate";
 import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
+
+// Alias for backward compatibility
+const FUTURES_CONTRACTS = TRADOVATE_CONTRACTS;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" });
 
@@ -347,12 +349,13 @@ export async function runFuturesAgent(): Promise<{
   const trades: FuturesTradeResult[] = [];
   let managed = 0;
 
-  // Check IBKR connection
-  const auth = await checkAuth();
+  // Check Tradovate connection
+  const auth = await checkTradovateAuth();
   if (!auth.authenticated) {
-    details.push("IBKR not authenticated — cannot trade futures");
+    details.push("Tradovate not authenticated — set TRADOVATE_USERNAME, TRADOVATE_PASSWORD, TRADOVATE_CID, TRADOVATE_SEC env vars");
     return { trades, managed, details };
   }
+  details.push(`TRADOVATE: Connected — Account ${auth.accountName} (#${auth.accountId})`);
 
   // Session check
   const { session, isRTH, minutesSinceOpen } = getSession();
@@ -389,10 +392,10 @@ export async function runFuturesAgent(): Promise<{
   // Account state
   let equity = 0;
   try {
-    const summary = await getIBKRAccountSummary();
-    equity = parseFloat(summary?.netliquidation?.amount || summary?.equity || "0");
+    const summary = await getTradovateAccountSummary();
+    equity = summary.netLiq || summary.balance || 0;
     if (equity === 0) equity = 1000000; // paper trading default
-    details.push(`ACCOUNT: $${equity.toLocaleString()}`);
+    details.push(`ACCOUNT: $${equity.toLocaleString()} (Unrealized: $${summary.unrealizedPnl.toFixed(0)})`);
   } catch (err) {
     details.push(`Account error: ${err}`);
     return { trades, managed, details };
@@ -422,40 +425,35 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Get existing futures positions
-  const positions = await getIBKRPositions();
-  const futuresPositions = positions.filter((p) => p.assetClass === "FUT");
+  const futuresPositions = await getTradovatePositions();
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
 
   // ============ MANAGE EXISTING POSITIONS ============
   for (const pos of futuresPositions) {
     managed++;
-    const unrealizedPnl = parseFloat(pos.unrealizedPnl || "0");
-    const avgPrice = parseFloat(pos.avgCost || pos.avgPrice || "0");
-    const mktPrice = parseFloat(pos.mktPrice || "0");
-    const qty = parseInt(pos.position || pos.pos || "0");
+    const qty = pos.netPos;
+    const avgPrice = pos.netPrice;
 
-    // Bracket orders handle stop/target automatically via IBKR.
-    // We only intervene here for time-based or session-based exits.
+    // Bracket orders handle stop/target automatically via Tradovate.
+    // We only intervene here for session-based exits.
 
-    // Close all positions before market close (don't hold overnight unless strong trend)
+    // Close all positions before market close in choppy markets
     if (session === "close" && regime === "choppy") {
-      details.push(`  ${pos.contractDesc || pos.symbol}: CLOSING before market close (choppy, not holding overnight)`);
+      details.push(`  ${pos.contractName}: CLOSING before market close (choppy, not holding overnight)`);
       try {
-        await placeFuturesOrder({
-          conid: pos.conid,
-          side: qty > 0 ? "SELL" : "BUY",
+        await placeMarketOrder({
+          contractId: pos.contractId,
+          action: qty > 0 ? "Sell" : "Buy",
           quantity: Math.abs(qty),
-          orderType: "MKT",
-          tif: "IOC",
         });
         await prisma.autoTradeLog.create({
           data: {
-            symbol: `FUT:${pos.contractDesc || pos.symbol}`,
+            symbol: `FUT:${pos.contractName}`,
             action: "futures_session_close",
             qty: Math.abs(qty),
-            price: mktPrice,
-            reason: `Session close: closing before EOD in choppy market. P&L: $${unrealizedPnl.toFixed(2)}`,
-            pnl: unrealizedPnl,
+            price: avgPrice,
+            reason: `Session close: closing before EOD in choppy market.`,
+            pnl: null,
             orderId: null,
           },
         });
@@ -463,26 +461,11 @@ export async function runFuturesAgent(): Promise<{
       continue;
     }
 
-    // Emergency stop: if somehow P&L exceeds 2x max risk (bracket order didn't trigger)
-    if (unrealizedPnl < -maxRiskPerTrade * 2) {
-      details.push(`  ${pos.contractDesc || pos.symbol}: EMERGENCY STOP — down $${Math.abs(unrealizedPnl).toFixed(2)} (>2x max risk)`);
-      try {
-        await placeFuturesOrder({
-          conid: pos.conid,
-          side: qty > 0 ? "SELL" : "BUY",
-          quantity: Math.abs(qty),
-          orderType: "MKT",
-          tif: "IOC",
-        });
-      } catch (err) { details.push(`  Failed to close: ${err}`); }
-      continue;
-    }
-
-    details.push(`  ${pos.contractDesc || pos.symbol}: ${qty > 0 ? "LONG" : "SHORT"} ${Math.abs(qty)}x @ $${avgPrice.toFixed(2)} | Mkt: $${mktPrice.toFixed(2)} | P&L: $${unrealizedPnl.toFixed(2)}`);
+    details.push(`  ${pos.contractName}: ${qty > 0 ? "LONG" : "SHORT"} ${Math.abs(qty)}x @ $${avgPrice.toFixed(2)}`);
   }
 
   // ============ SCAN FOR NEW TRADES ============
-  const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(parseInt(p.position || p.pos || "0")), 0);
+  const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(p.netPos), 0);
   if (totalContracts >= FUTURES_RULES.MAX_TOTAL_CONTRACTS) {
     details.push("At contract limit — not scanning for new trades");
     return { trades, managed, details };
@@ -495,7 +478,7 @@ export async function runFuturesAgent(): Promise<{
 
   for (const symbol of symbolsToTrade) {
     // Skip if already have position in this symbol
-    if (futuresPositions.some((p) => (p.contractDesc || "").includes(symbol))) {
+    if (futuresPositions.some((p) => p.contractName.startsWith(symbol))) {
       details.push(`${symbol}: Already have position — skipping`);
       continue;
     }
@@ -503,7 +486,7 @@ export async function runFuturesAgent(): Promise<{
     const contractInfo = FUTURES_CONTRACTS[symbol];
     details.push(`\n--- ${symbol} (${contractInfo.name}) ---`);
 
-    const contract = await searchFuturesContract(symbol);
+    const contract = await findContract(symbol);
     if (!contract) {
       details.push(`  Could not find contract`);
       continue;
@@ -513,26 +496,24 @@ export async function runFuturesAgent(): Promise<{
     let bars5min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
     let bars15min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
     let barsDaily: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
-    let snapshot: { last: number; bid: number; ask: number };
 
     try {
-      [bars5min, bars15min, barsDaily, snapshot] = await Promise.all([
-        getFuturesBars(contract.conid, "1d", "5min"),
-        getFuturesBars(contract.conid, "3d", "15min"),
-        getFuturesBars(contract.conid, "1m", "1d"),
-        getFuturesSnapshot(contract.conid),
+      [bars5min, bars15min, barsDaily] = await Promise.all([
+        getTVBars(contract.id, 100, "5min"),
+        getTVBars(contract.id, 100, "15min"),
+        getTVBars(contract.id, 30, "1d"),
       ]);
     } catch (err) {
       details.push(`  Data error: ${err}`);
       continue;
     }
 
-    if (!snapshot.last || bars5min.length < 30) {
+    if (bars5min.length < 30) {
       details.push(`  Insufficient data (${bars5min.length} bars)`);
       continue;
     }
 
-    const price = snapshot.last;
+    const price = bars5min[bars5min.length - 1].c;
     const closes5 = bars5min.map((b) => b.c);
     const closes15 = bars15min.map((b) => b.c);
 
@@ -627,8 +608,8 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
     // ============ EXECUTE WITH BRACKET ORDER ============
     try {
       const order = await placeBracketOrder({
-        conid: contract.conid,
-        side,
+        contractId: contract.id,
+        action: side === "BUY" ? "Buy" : "Sell",
         quantity: contracts,
         stopLoss: parseFloat(stopPrice.toFixed(2)),
         takeProfit: parseFloat(targetPrice.toFixed(2)),
@@ -643,14 +624,14 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
           reason: `[FUTURES ${symbol}] ${setup.type.replace(/_/g, " ").toUpperCase()}: ${side} ${contracts}x @ $${price.toFixed(2)}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${riskReward.toFixed(1)}. Risk: $${(riskPerContract * contracts).toFixed(0)} (${(FUTURES_RULES.RISK_PER_TRADE_PCT * 100).toFixed(1)}% of equity). ${setup.reasoning}`,
           aiScore: setup.confidence,
           aiSignal: setup.direction,
-          orderId: order.orderId,
+          orderId: String(order.orderId),
         },
       });
 
       trades.push({
         symbol, action: setup.direction, contracts, price,
         stopLoss: stopPrice, target: targetPrice,
-        reasoning: setup.reasoning, orderId: order.orderId, success: true,
+        reasoning: setup.reasoning, orderId: String(order.orderId), success: true,
       });
 
       details.push(`  ORDER PLACED with bracket (stop + target). Order ID: ${order.orderId}`);

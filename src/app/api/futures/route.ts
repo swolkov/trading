@@ -1,17 +1,18 @@
 import { runFuturesAgent } from "@/lib/futures-agent";
-import { checkAuth } from "@/lib/ibkr";
+import { checkTradovateAuth } from "@/lib/tradovate";
 
 export const maxDuration = 300;
 
 export async function GET() {
   try {
-    const auth = await checkAuth();
+    const auth = await checkTradovateAuth();
     return Response.json({
       connected: auth.authenticated,
       accountId: auth.accountId,
+      accountName: auth.accountName,
       message: auth.authenticated
-        ? "IBKR connected — futures trading active"
-        : "IBKR not connected. Set IBKR_BASE_URL, IBKR_ACCOUNT_ID env vars and run the Client Portal Gateway.",
+        ? `Tradovate connected — Account: ${auth.accountName} (#${auth.accountId})`
+        : "Tradovate not connected. Set TRADOVATE_USERNAME, TRADOVATE_PASSWORD, TRADOVATE_CID, TRADOVATE_SEC env vars.",
     });
   } catch (error) {
     return Response.json({ connected: false, error: String(error) });
