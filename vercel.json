@@ -2,7 +2,11 @@
   "crons": [
     {
       "path": "/api/cron/trade",
-      "schedule": "30 13,14,16,18,20 * * 1-5"
+      "schedule": "30 13,14,15,16,17,18,19,20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/monitor",
+      "schedule": "0,15,30,45 13-21 * * 1-5"
     }
   ]
 }
