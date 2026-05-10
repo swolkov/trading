@@ -2,8 +2,21 @@
 // REST API for futures trading (MES, MNQ, MYM, M2K)
 // Requires IBKR Client Portal Gateway running or OAuth2 token
 
-const IBKR_BASE_URL = process.env.IBKR_BASE_URL || "https://localhost:5000/v1/api";
-const IBKR_ACCOUNT_ID = process.env.IBKR_ACCOUNT_ID || "";
+import { getIBKRConfig } from "./trading-mode";
+
+let IBKR_BASE_URL = process.env.IBKR_BASE_URL || "https://localhost:5000/v1/api";
+let IBKR_ACCOUNT_ID = process.env.IBKR_ACCOUNT_ID || "";
+
+// Sync IBKR config from trading mode (paper vs live)
+async function syncIBKRConfig() {
+  try {
+    const config = await getIBKRConfig();
+    IBKR_BASE_URL = config.baseUrl;
+    IBKR_ACCOUNT_ID = config.accountId;
+  } catch {
+    // keep defaults (paper)
+  }
+}
 
 // Known contract IDs for micro futures (these are static and never change)
 export const FUTURES_CONTRACTS: Record<string, { name: string; exchange: string; multiplier: number; tickSize: number; margin: number }> = {
@@ -19,6 +32,7 @@ interface IBKRResponse {
 }
 
 async function ibkrFetch(path: string, options?: RequestInit): Promise<IBKRResponse> {
+  await syncIBKRConfig();
   const url = `${IBKR_BASE_URL}${path}`;
   const res = await fetch(url, {
     ...options,

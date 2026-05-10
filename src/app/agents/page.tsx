@@ -38,22 +38,33 @@ function pnl(val: number) {
   return val > 0 ? "text-emerald-500" : val < 0 ? "text-red-500" : "text-muted-foreground";
 }
 
+interface TradingModes {
+  modes: Record<string, string>;
+  hasLiveKeys: Record<string, boolean>;
+}
+
 export default function AgentHubPage() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<AgentRun | null>(null);
   const [futuresStatus, setFuturesStatus] = useState<{ connected: boolean; message?: string } | null>(null);
+  const [tradingModes, setTradingModes] = useState<TradingModes | null>(null);
+  const [modePassword, setModePassword] = useState("");
+  const [modeMessage, setModeMessage] = useState("");
+  const [showModePanel, setShowModePanel] = useState(false);
 
   const loadData = useCallback(async () => {
-    const [configRes, activityRes, futuresRes] = await Promise.all([
+    const [configRes, activityRes, futuresRes, modesRes] = await Promise.all([
       fetch("/api/agent/config").then((r) => r.json()).catch(() => null),
       fetch("/api/agent/activity").then((r) => r.json()).catch(() => []),
       fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false })),
+      fetch("/api/trading-mode").then((r) => r.json()).catch(() => null),
     ]);
     if (configRes) setConfig(configRes);
     if (Array.isArray(activityRes)) setActivity(activityRes);
     if (futuresRes) setFuturesStatus(futuresRes);
+    if (modesRes) setTradingModes(modesRes);
   }, []);
 
   useEffect(() => {
@@ -61,6 +72,22 @@ export default function AgentHubPage() {
     const interval = setInterval(loadData, 60000);
     return () => clearInterval(interval);
   }, [loadData]);
+
+  const switchMode = async (type: string, mode: string) => {
+    if (!modePassword) { setModeMessage("Enter password first"); return; }
+    setModeMessage("");
+    try {
+      const res = await fetch("/api/trading-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, mode, password: modePassword }),
+      });
+      const data = await res.json();
+      if (data.error) { setModeMessage(data.error); return; }
+      setModeMessage(data.message);
+      loadData();
+    } catch { setModeMessage("Failed to switch mode"); }
+  };
 
   const [runningAgent, setRunningAgent] = useState<string | null>(null);
 
@@ -212,6 +239,96 @@ export default function AgentHubPage() {
           </Card>
         ))}
       </div>
+
+      {/* Trading Mode — Paper vs Live */}
+      <Card className="border-2 border-yellow-500/20">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-sm">Trading Mode</CardTitle>
+              <p className="text-[11px] text-muted-foreground">Paper = simulated money. Live = real money. Password required to switch.</p>
+            </div>
+            <Button size="sm" variant="outline" className="text-xs" onClick={() => setShowModePanel(!showModePanel)}>
+              {showModePanel ? "Hide" : "Manage"}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {/* Current modes — always visible */}
+          <div className="flex gap-4">
+            {(["options", "futures", "stocks"] as const).map((type) => {
+              const mode = tradingModes?.modes?.[type] || "paper";
+              const isPaper = mode === "paper";
+              return (
+                <div key={type} className="flex items-center gap-2">
+                  <span className="text-xs capitalize font-medium">{type}:</span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                    isPaper ? "bg-emerald-500/15 text-emerald-500" : "bg-red-500/15 text-red-500"
+                  }`}>
+                    {mode.toUpperCase()}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Password-protected switch panel */}
+          {showModePanel && (
+            <div className="mt-4 pt-4 border-t border-white/10 space-y-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="password"
+                  placeholder="Enter password to switch modes"
+                  value={modePassword}
+                  onChange={(e) => setModePassword(e.target.value)}
+                  className="flex-1 bg-muted/50 border border-white/10 rounded px-3 py-1.5 text-xs"
+                />
+              </div>
+
+              {modeMessage && (
+                <p className={`text-xs ${modeMessage.includes("switched") ? "text-emerald-400" : "text-red-400"}`}>
+                  {modeMessage}
+                </p>
+              )}
+
+              <div className="grid grid-cols-3 gap-3">
+                {(["options", "futures", "stocks"] as const).map((type) => {
+                  const currentMode = tradingModes?.modes?.[type] || "paper";
+                  const hasKeys = tradingModes?.hasLiveKeys?.[type] || false;
+                  const isPaper = currentMode === "paper";
+
+                  return (
+                    <div key={type} className="space-y-1.5">
+                      <p className="text-xs font-medium capitalize">{type}</p>
+                      <div className="flex gap-1">
+                        <Button
+                          size="sm"
+                          variant={isPaper ? "default" : "outline"}
+                          className="flex-1 text-[10px] h-7"
+                          disabled={isPaper}
+                          onClick={() => switchMode(type, "paper")}
+                        >
+                          Paper
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={!isPaper ? "default" : "outline"}
+                          className={`flex-1 text-[10px] h-7 ${!isPaper ? "bg-red-600 hover:bg-red-700" : ""}`}
+                          disabled={!isPaper || !hasKeys}
+                          onClick={() => switchMode(type, "live")}
+                        >
+                          Live
+                        </Button>
+                      </div>
+                      {!hasKeys && <p className="text-[9px] text-muted-foreground/50">Live keys not configured</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Tabs defaultValue="activity">
         <TabsList>

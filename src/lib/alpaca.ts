@@ -1,16 +1,62 @@
-const BASE_URL = process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
+import { getAlpacaConfig } from "./trading-mode";
+
 const DATA_URL = process.env.ALPACA_DATA_URL || "https://data.alpaca.markets";
 
+// Dynamic base URL — switches between paper/live based on DB mode.
+// DEFAULT IS ALWAYS PAPER. Live requires: password + env vars + explicit DB switch.
+let _cachedConfig: { baseUrl: string; apiKey: string; apiSecret: string; isLive: boolean } | null = null;
+let _configExpires = 0;
+
+async function getConfig() {
+  if (_cachedConfig && Date.now() < _configExpires) return _cachedConfig;
+  try {
+    _cachedConfig = await getAlpacaConfig();
+  } catch {
+    // If DB is unavailable, ALWAYS fall back to paper
+    _cachedConfig = {
+      baseUrl: process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets",
+      apiKey: process.env.ALPACA_API_KEY || "",
+      apiSecret: process.env.ALPACA_API_SECRET || "",
+      isLive: false,
+    };
+  }
+  _configExpires = Date.now() + 60000;
+  return _cachedConfig;
+}
+
+// BASE_URL — reads from cached config, defaults to paper.
+// The cache is populated on first alpacaFetch call.
+function get_BASE_URL(): string {
+  return _cachedConfig?.baseUrl || process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
+}
+// All existing code references BASE_URL in template literals — this stays in sync with the mode.
+let BASE_URL = process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
+
 function headers() {
+  // Sync headers using current cache or env vars
+  // The actual mode-aware headers are applied in alpacaFetch
   return {
-    "APCA-API-KEY-ID": process.env.ALPACA_API_KEY || "",
-    "APCA-API-SECRET-KEY": process.env.ALPACA_API_SECRET || "",
+    "APCA-API-KEY-ID": _cachedConfig?.apiKey || process.env.ALPACA_API_KEY || "",
+    "APCA-API-SECRET-KEY": _cachedConfig?.apiSecret || process.env.ALPACA_API_SECRET || "",
     "Content-Type": "application/json",
   };
 }
 
+// Check if currently in live mode (for display purposes)
+export async function isLiveMode(): Promise<boolean> {
+  const config = await getConfig();
+  return config.isLive;
+}
+
 async function alpacaFetch(url: string, options?: RequestInit) {
-  const res = await fetch(url, {
+  // Load mode-aware config (paper vs live) and sync BASE_URL + headers
+  const config = await getConfig();
+  BASE_URL = config.baseUrl;
+
+  // Replace any stale BASE_URL in the URL if it was constructed before config loaded
+  const resolvedUrl = url.replace(/https:\/\/(paper-api|api)\.alpaca\.markets/, config.baseUrl);
+
+  const res = await fetch(resolvedUrl, {
     ...options,
     headers: { ...headers(), ...options?.headers },
   });

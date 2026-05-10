@@ -1,0 +1,70 @@
+import { prisma } from "./db";
+
+export type TradingMode = "paper" | "live";
+export type TradeType = "options" | "futures" | "stocks";
+
+// Cache mode for 60 seconds to avoid hitting DB on every API call
+let modeCache: Record<string, { mode: TradingMode; expires: number }> = {};
+
+export async function getTradingMode(type: TradeType): Promise<TradingMode> {
+  const cached = modeCache[type];
+  if (cached && Date.now() < cached.expires) return cached.mode;
+
+  try {
+    const config = await prisma.agentConfig.findUnique({ where: { key: `trading_mode_${type}` } });
+    const mode = (config?.value === "live" ? "live" : "paper") as TradingMode;
+    modeCache[type] = { mode, expires: Date.now() + 60000 };
+    return mode;
+  } catch {
+    return "paper"; // always default to paper
+  }
+}
+
+// Get Alpaca credentials based on current mode
+export async function getAlpacaConfig(): Promise<{
+  baseUrl: string;
+  apiKey: string;
+  apiSecret: string;
+  isLive: boolean;
+}> {
+  const mode = await getTradingMode("options");
+
+  if (mode === "live" && process.env.ALPACA_LIVE_API_KEY && process.env.ALPACA_LIVE_API_SECRET) {
+    return {
+      baseUrl: "https://api.alpaca.markets",
+      apiKey: process.env.ALPACA_LIVE_API_KEY,
+      apiSecret: process.env.ALPACA_LIVE_API_SECRET,
+      isLive: true,
+    };
+  }
+
+  return {
+    baseUrl: process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets",
+    apiKey: process.env.ALPACA_API_KEY || "",
+    apiSecret: process.env.ALPACA_API_SECRET || "",
+    isLive: false,
+  };
+}
+
+// Get IBKR config based on current mode
+export async function getIBKRConfig(): Promise<{
+  baseUrl: string;
+  accountId: string;
+  isLive: boolean;
+}> {
+  const mode = await getTradingMode("futures");
+
+  if (mode === "live" && process.env.IBKR_LIVE_BASE_URL) {
+    return {
+      baseUrl: process.env.IBKR_LIVE_BASE_URL,
+      accountId: process.env.IBKR_LIVE_ACCOUNT_ID || process.env.IBKR_ACCOUNT_ID || "",
+      isLive: true,
+    };
+  }
+
+  return {
+    baseUrl: process.env.IBKR_BASE_URL || "https://localhost:5000/v1/api",
+    accountId: process.env.IBKR_ACCOUNT_ID || "",
+    isLive: false,
+  };
+}
