@@ -203,6 +203,81 @@ export async function placeFuturesOrder(order: FuturesOrder): Promise<{ orderId:
   throw new Error(`Unexpected order response: ${JSON.stringify(data)}`);
 }
 
+// Place bracket order: entry + stop loss + take profit as one atomic group
+export async function placeBracketOrder(params: {
+  conid: number;
+  side: "BUY" | "SELL";
+  quantity: number;
+  stopLoss: number;
+  takeProfit: number;
+}): Promise<{ orderId: string; status: string }> {
+  const closeSide = params.side === "BUY" ? "SELL" : "BUY";
+  const cOID = `bracket_${Date.now()}`;
+
+  const body = {
+    orders: [
+      // Parent: market entry
+      {
+        acctId: IBKR_ACCOUNT_ID,
+        conid: params.conid,
+        secType: `${params.conid}:FUT`,
+        orderType: "MKT",
+        side: params.side,
+        quantity: params.quantity,
+        tif: "GTC",
+        cOID,
+      },
+      // Child 1: stop loss
+      {
+        acctId: IBKR_ACCOUNT_ID,
+        conid: params.conid,
+        secType: `${params.conid}:FUT`,
+        orderType: "STP",
+        side: closeSide,
+        quantity: params.quantity,
+        auxPrice: params.stopLoss,
+        tif: "GTC",
+        parentId: cOID,
+      },
+      // Child 2: take profit
+      {
+        acctId: IBKR_ACCOUNT_ID,
+        conid: params.conid,
+        secType: `${params.conid}:FUT`,
+        orderType: "LMT",
+        side: closeSide,
+        quantity: params.quantity,
+        price: params.takeProfit,
+        tif: "GTC",
+        parentId: cOID,
+      },
+    ],
+  };
+
+  const data = await ibkrFetch(`/iserver/account/${IBKR_ACCOUNT_ID}/orders`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+  // Handle confirmation prompts
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      if (item.id && !item.order_id) {
+        await ibkrFetch(`/iserver/reply/${item.id}`, {
+          method: "POST",
+          body: JSON.stringify({ confirmed: true }),
+        });
+      }
+    }
+    const orderResult = data.find((d) => d.order_id);
+    if (orderResult) {
+      return { orderId: orderResult.order_id, status: orderResult.order_status || "submitted" };
+    }
+  }
+
+  throw new Error(`Bracket order response unexpected: ${JSON.stringify(data)}`);
+}
+
 export async function cancelFuturesOrder(orderId: string): Promise<void> {
   await ibkrFetch(`/iserver/account/${IBKR_ACCOUNT_ID}/order/${orderId}`, {
     method: "DELETE",
