@@ -1,6 +1,6 @@
 FROM eclipse-temurin:17-jre-alpine
 
-RUN apk add --no-cache curl unzip bash
+RUN apk add --no-cache curl unzip bash socat
 
 WORKDIR /opt/ibkr
 
