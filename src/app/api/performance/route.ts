@@ -72,8 +72,8 @@ export async function GET() {
 
     // Recent trades for the table
     const recentTrades = allTrades
-      .filter((t) => !t.action.includes("skip") && !t.action.includes("veto"))
-      .slice(0, 30)
+      .filter((t) => !t.action.includes("skip") && !t.action.includes("veto") && !t.action.includes("risk_veto"))
+      .slice(0, 50)
       .map((t) => ({
         symbol: t.symbol,
         action: t.action,
@@ -157,10 +157,16 @@ export async function GET() {
 
 function categorizeStrategy(action: string): string {
   if (action.includes("iron_condor")) return "Iron Condor";
-  if (action.includes("spread") || action.includes("sell_bull") || action.includes("sell_bear")) return "Credit Spread";
+  if (action.includes("spread")) return "Credit Spread";
+  if (action.includes("sell_bull") || action.includes("sell_bear")) return "Credit Spread";
   if (action.includes("straddle")) return "Straddle";
-  if (action.includes("buy_call") || action.includes("earnings_call")) return "Buy Calls";
-  if (action.includes("buy_put") || action.includes("earnings_put")) return "Buy Puts";
+  if (action.includes("buy_call") || action.includes("earnings_call") || action.includes("quick_call")) return "Buy Calls";
+  if (action.includes("buy_put") || action.includes("earnings_put") || action.includes("quick_put")) return "Buy Puts";
+  if (action === "partial_profit") return "Partial Profit";
+  if (action === "breakeven_stop") return "Breakeven Stop";
+  if (action === "dead_money") return "Dead Money Exit";
+  if (action.includes("premium_defense") || action.includes("premium_roll")) return "Premium Defense";
+  if (action.includes("premium_take")) return "Premium Take Profit";
   if (action.includes("stop_loss")) return "Stop Loss";
   if (action.includes("take_profit")) return "Take Profit";
   if (action.includes("roll")) return "Roll Forward";

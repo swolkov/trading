@@ -362,7 +362,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
     const todayTrades = await prisma.autoTradeLog.count({
       where: {
         createdAt: { gte: todayStart },
-        action: { in: ["buy", "sell", "stop_loss", "take_profit", "trailing_stop", "thesis_change"] },
+        action: { in: ["buy", "sell", "stop_loss", "take_profit", "trailing_stop", "thesis_change", "partial_profit", "breakeven_stop", "dead_money", "spread_take_profit", "spread_stop_loss", "spread_expiry_close", "premium_defense_close", "premium_roll"] },
       },
     });
 
@@ -374,6 +374,42 @@ export async function runTradingAgent(): Promise<AgentResult> {
     }
 
     // ============ STEP 4: MANAGE EXISTING POSITIONS ============
+
+    // === SPREAD DETECTION: Group paired options legs to prevent managing them independently ===
+    // A spread = same underlying, same expiry, one long + one short, different strikes
+    // We MUST close both legs together or neither — closing one leg leaves a naked position.
+    const spreadLegs = new Set<string>(); // symbols that are part of a spread (managed as unit)
+
+    const allOptionPositions = positions.filter((p) => p.symbol.length > 10);
+    for (const pos of allOptionPositions) {
+      const match = pos.symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+      if (!match) continue;
+      const [, underlying, expDate, optType] = match;
+      const qty = parseInt(pos.qty);
+
+      // Find the other leg: same underlying, same expiry, same type (C or P), opposite direction
+      const partner = allOptionPositions.find((p) => {
+        if (p.symbol === pos.symbol) return false;
+        const m = p.symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+        if (!m) return false;
+        const partnerQty = parseInt(p.qty);
+        return m[1] === underlying && m[2] === expDate && m[3] === optType &&
+          ((qty > 0 && partnerQty < 0) || (qty < 0 && partnerQty > 0)); // opposite sides
+      });
+
+      if (partner) {
+        spreadLegs.add(pos.symbol);
+        spreadLegs.add(partner.symbol);
+      }
+    }
+
+    if (spreadLegs.size > 0) {
+      details.push(`SPREAD DETECTION: ${spreadLegs.size / 2} spread(s) identified — managing as units, not individual legs`);
+    }
+
+    // Group spreads for unified management
+    const processedSpreads = new Set<string>(); // track which spreads we've already handled
+
     for (const pos of positions) {
       positionsManaged++;
       const currentPrice = parseFloat(pos.current_price);
@@ -382,8 +418,94 @@ export async function runTradingAgent(): Promise<AgentResult> {
       const pnlPct = (currentPrice - entryPrice) / entryPrice;
       const isOptionsPosition = pos.symbol.length > 10; // Options symbols are longer
 
-      // === OPTIONS MANAGEMENT (smart: profit targets, stop loss, expiry awareness, partial takes) ===
+      // === OPTIONS MANAGEMENT ===
       if (isOptionsPosition) {
+
+        // === SPREAD MANAGEMENT: handle both legs together ===
+        if (spreadLegs.has(pos.symbol)) {
+          if (processedSpreads.has(pos.symbol)) continue; // already handled with partner
+
+          // Find the partner leg
+          const match = pos.symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+          if (!match) continue;
+          const [, underlying, expDate, optType] = match;
+
+          const partner = allOptionPositions.find((p) => {
+            if (p.symbol === pos.symbol) return false;
+            const m = p.symbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+            if (!m) return false;
+            const pQty = parseInt(p.qty);
+            return m[1] === underlying && m[2] === expDate && m[3] === optType &&
+              ((qty > 0 && pQty < 0) || (qty < 0 && pQty > 0));
+          });
+
+          if (partner) {
+            processedSpreads.add(pos.symbol);
+            processedSpreads.add(partner.symbol);
+
+            // Calculate COMBINED spread P&L
+            const spreadPnl = parseFloat(pos.unrealized_pl) + parseFloat(partner.unrealized_pl);
+            const spreadEntry = Math.abs(parseFloat(pos.avg_entry_price) * parseInt(pos.qty) * 100) +
+              Math.abs(parseFloat(partner.avg_entry_price) * parseInt(partner.qty) * 100);
+            const spreadPnlPct = spreadEntry > 0 ? spreadPnl / spreadEntry : 0;
+
+            const longLeg = qty > 0 ? pos : partner;
+            const shortLeg = qty < 0 ? pos : partner;
+            const longStrike = longLeg.symbol.match(/(\d{8})$/)?.[1];
+            const shortStrike = shortLeg.symbol.match(/(\d{8})$/)?.[1];
+
+            // Parse DTE
+            const year = 2000 + parseInt(expDate.slice(0, 2));
+            const month = parseInt(expDate.slice(2, 4)) - 1;
+            const day = parseInt(expDate.slice(4, 6));
+            const expiry = new Date(year, month, day);
+            const dte = Math.floor((expiry.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+
+            const spreadDesc = `${underlying} $${parseInt(shortStrike || "0") / 1000}/$${parseInt(longStrike || "0") / 1000} ${optType === "P" ? "put" : "call"} spread`;
+
+            // TAKE PROFIT: close both legs if spread P&L > 50% of max profit
+            if (spreadPnlPct >= 0.50) {
+              details.push(`  SPREAD TAKE PROFIT: ${spreadDesc} up ${(spreadPnlPct * 100).toFixed(1)}% — closing both legs`);
+              try {
+                // Close long leg (sell), close short leg (buy back)
+                await placeOrder({ symbol: longLeg.symbol, qty: String(Math.abs(parseInt(longLeg.qty))), side: "sell", type: "market", time_in_force: "day" });
+                await placeOrder({ symbol: shortLeg.symbol, qty: String(Math.abs(parseInt(shortLeg.qty))), side: "buy", type: "market", time_in_force: "day" });
+                await logTrade(pos.symbol, "spread_take_profit", Math.abs(qty), currentPrice, `Spread take profit: ${spreadDesc} at ${(spreadPnlPct * 100).toFixed(1)}%. Combined P&L: $${spreadPnl.toFixed(2)}`, null, null, undefined, spreadPnl);
+                tradesPlaced += 2;
+              } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+              continue;
+            }
+
+            // STOP LOSS: if spread is losing more than 2x max credit
+            if (spreadPnlPct <= -1.0) {
+              details.push(`  SPREAD STOP: ${spreadDesc} down ${(spreadPnlPct * 100).toFixed(1)}% — closing both legs`);
+              try {
+                await placeOrder({ symbol: longLeg.symbol, qty: String(Math.abs(parseInt(longLeg.qty))), side: "sell", type: "market", time_in_force: "day" });
+                await placeOrder({ symbol: shortLeg.symbol, qty: String(Math.abs(parseInt(shortLeg.qty))), side: "buy", type: "market", time_in_force: "day" });
+                await logTrade(pos.symbol, "spread_stop_loss", Math.abs(qty), currentPrice, `Spread stop: ${spreadDesc} at ${(spreadPnlPct * 100).toFixed(1)}%. Combined P&L: $${spreadPnl.toFixed(2)}`, null, null, undefined, spreadPnl);
+                tradesPlaced += 2;
+              } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+              continue;
+            }
+
+            // CLOSE NEAR EXPIRY: if < 5 DTE, close the spread to avoid assignment risk
+            if (dte <= 5) {
+              details.push(`  SPREAD EXPIRY: ${spreadDesc} ${dte} DTE — closing both legs to avoid assignment`);
+              try {
+                await placeOrder({ symbol: longLeg.symbol, qty: String(Math.abs(parseInt(longLeg.qty))), side: "sell", type: "market", time_in_force: "day" });
+                await placeOrder({ symbol: shortLeg.symbol, qty: String(Math.abs(parseInt(shortLeg.qty))), side: "buy", type: "market", time_in_force: "day" });
+                await logTrade(pos.symbol, "spread_expiry_close", Math.abs(qty), currentPrice, `Spread expiry close: ${spreadDesc} at ${dte} DTE. P&L: $${spreadPnl.toFixed(2)}`, null, null, undefined, spreadPnl);
+                tradesPlaced += 2;
+              } catch (err) { errors++; details.push(`  Failed: ${err}`); }
+              continue;
+            }
+
+            details.push(`  ${spreadDesc}: ${spreadPnl >= 0 ? "+" : ""}$${spreadPnl.toFixed(2)} (${(spreadPnlPct * 100).toFixed(1)}%), ${dte} DTE — holding as unit`);
+            continue;
+          }
+        }
+
+        // === STANDALONE OPTIONS: not part of a spread ===
         // Check if this is a SHORT options position (premium selling) — needs defense logic
         const isShortOptions = qty < 0;
         if (isShortOptions) {
