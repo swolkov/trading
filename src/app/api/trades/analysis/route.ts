@@ -20,8 +20,8 @@ interface RoundTrip {
 export async function GET() {
   try {
     const [orders, positions] = await Promise.all([getOrders("all"), getPositions()]);
-    // Fresh start: only new premium selling positions (opened after 2:30pm May 8)
-    const freshStart = new Date("2026-05-08T14:30:00Z");
+    // Fresh start: new directional strategy (after May 11 market close)
+    const freshStart = new Date("2026-05-11T21:00:00Z");
     const filled = orders.filter((o) =>
       o.status === "filled" && o.filled_avg_price && new Date(o.created_at) >= freshStart
     );
