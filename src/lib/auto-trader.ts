@@ -34,10 +34,10 @@ import { prisma } from "./db";
 
 // ============ DEFAULT RULES (overridden by database config) ============
 const DEFAULT_RULES = {
-  MAX_POSITIONS: 10,
+  MAX_POSITIONS: 8,
   MAX_PER_SECTOR: 3,
-  MAX_POSITION_PCT: 0.03,        // 3% of equity max per OPTIONS trade (~$2,700 on $92k)
-  MIN_POSITION_PCT: 0.01,        // 1% of equity min per trade (~$920)
+  MAX_POSITION_PCT: 0.03,        // 3% of equity max per trade (~$2,700 on $91k)
+  MIN_POSITION_PCT: 0.015,       // 1.5% of equity min per trade (~$1,350)
   MIN_CASH_RESERVE_PCT: 0.20,
   MIN_SCORE_TO_BUY: 55,
   MIN_CONFIDENCE: 60,
@@ -47,7 +47,7 @@ const DEFAULT_RULES = {
   TRAILING_ACTIVATION_PCT: 0.05,
   TRAILING_ATR_MULTIPLIER: 1.5,
   TAKE_PROFIT_PCT: 0.25,
-  MAX_DAILY_TRADES: 6,
+  MAX_DAILY_TRADES: 4,
   COOLDOWN_HOURS: 12,
   LIMIT_ORDER_DISCOUNT: 0.001,
   EARNINGS_BLACKOUT_DAYS: 5,
@@ -782,42 +782,10 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 4e: QUICK PLAYS (PRIMARY — fast, cheap, proven patterns) ============
-    // Purely technical: RSI extremes, breakouts, gaps, support bounces
-    // 7-14 DTE, 1-2% equity per trade, no AI committee needed (saves API costs + time)
-    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
-    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS - 2) {
-      try {
-        details.push("\n=== QUICK PLAYS (PRIMARY — 7-14 DTE technical setups) ===");
-
-        // Scan focus symbols + top movers for broader coverage
-        const quickScanList = [...new Set([...focusSymbols, ...((await getTopMovers("gainers").catch(() => [])).slice(0, 10).map((m) => m.symbol)), ...((await getTopMovers("losers").catch(() => [])).slice(0, 10).map((m) => m.symbol))])].slice(0, 30);
-
-        const plays = await scanQuickPlays(quickScanList);
-        if (plays.length === 0) {
-          details.push("  No setups found");
-        }
-        let quickTradesPlaced = 0;
-        for (const play of plays.slice(0, 4)) { // Max 4 quick plays per run
-          if (quickTradesPlaced >= 4) break;
-          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
-          if (positions.some((p) => p.symbol.includes(play.symbol))) {
-            details.push(`  ${play.symbol}: Already have position — skipping`);
-            continue;
-          }
-          const result = await executeQuickPlay(play, equity);
-          details.push(`  ${result.details}`);
-          if (result.success) { tradesPlaced++; quickTradesPlaced++; }
-        }
-      } catch (err) {
-        details.push(`  Quick plays error: ${err}`);
-      }
-    }
-
-    // ============ STEP 5: DIRECTIONAL TRADES (SECONDARY — AI committee for high conviction) ============
-    // Buy straight calls/puts when the AI committee has strong conviction.
-    // Score 70+: full size (2% equity). Score 55-69: half size (1% equity).
-    // Only runs if quick plays didn't fill all slots. Costs API credits.
+    // ============ STEP 5: SWING TRADES (PRIMARY — 14-30 DTE, best 2-3 setups) ============
+    // Buy straight calls/puts on the best setups. WITH the trend only.
+    // Score 55+: trade it. Score 70+: bigger size + NO spreads regardless.
+    // Only top liquid names. Be PICKY — 2-3 great trades beats 6 mediocre ones.
 
     // Count real positions (exclude worthless ones with $0 market value)
     const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
@@ -1338,25 +1306,49 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     }
 
-    // ============ STEP 6: PREMIUM SELLING (BACKUP — only if trade slots remain) ============
-    const currentSpreadCount = positions.filter((p) => p.symbol.length > 10 && parseInt(p.qty) < 0).length;
+    // ============ STEP 6: QUICK PLAYS (SECONDARY — extreme setups only) ============
+    // Only trade extreme RSI (<20 or >85) and big gaps (5%+). Small position, lottery ticket.
+    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
     const tradesRemaining = RULES.MAX_DAILY_TRADES - tradesPlaced - todayTrades;
-    if (!isPDTRestricted && currentSpreadCount < 3 && regime.regime === "choppy" && tradesRemaining >= 2) {
-      details.push("\n=== PREMIUM SELLING (backup — choppy market, filling remaining slots) ===");
+    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS && tradesRemaining >= 1) {
+      try {
+        details.push("\n=== QUICK PLAYS (extreme setups only — lottery tickets) ===");
+        const plays = await scanQuickPlays(focusSymbols.slice(0, 15));
+        // Only take the most extreme setups (confidence 75+)
+        const extremePlays = plays.filter((p) => p.confidence >= 75);
+        if (extremePlays.length === 0) {
+          details.push("  No extreme setups found");
+        }
+        for (const play of extremePlays.slice(0, 1)) { // Max 1 quick play per run
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          if (positions.some((p) => p.symbol.includes(play.symbol))) continue;
+          const result = await executeQuickPlay(play, equity);
+          details.push(`  ${result.details}`);
+          if (result.success) tradesPlaced++;
+        }
+      } catch (err) {
+        details.push(`  Quick plays error: ${err}`);
+      }
+    }
 
-      const premiumCandidates = focusSymbols.filter((s) =>
-        !["SPY", "QQQ", "IWM", "DIA"].includes(s) && !positions.some((p) => p.symbol.includes(s))
-      ).slice(0, 3);
+    // ============ STEP 7: PREMIUM SELLING (TERTIARY — only if NO directional trades placed) ============
+    if (!isPDTRestricted && tradesPlaced === 0 && regime.regime === "choppy") {
+      const currentSpreadCount = positions.filter((p) => p.symbol.length > 10 && parseInt(p.qty) < 0).length;
+      if (currentSpreadCount < 2) {
+        details.push("\n=== PREMIUM SELLING (no directional setups — collecting theta income) ===");
+        const premiumCandidates = focusSymbols.filter((s) =>
+          !["SPY", "QQQ", "IWM", "DIA"].includes(s) && !positions.some((p) => p.symbol.includes(s))
+        ).slice(0, 2);
 
-      for (const sym of premiumCandidates) {
-        if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
-        if (currentSpreadCount + tradesPlaced >= 6) break; // max 3 new spreads (6 legs)
-        try {
-          const spread = await sellCreditSpread(sym, "bull_put", equity);
-          details.push(`  ${sym}: ${spread.details}`);
-          if (spread.success) tradesPlaced += 2;
-        } catch (err) {
-          details.push(`  ${sym} credit spread error: ${err}`);
+        for (const sym of premiumCandidates) {
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          try {
+            const spread = await sellCreditSpread(sym, "bull_put", equity);
+            details.push(`  ${sym}: ${spread.details}`);
+            if (spread.success) tradesPlaced += 2;
+          } catch (err) {
+            details.push(`  ${sym} credit spread error: ${err}`);
+          }
         }
       }
     }

@@ -29,16 +29,16 @@ const OPTIONS_RULES = {
     leaps: { min: 180, max: 730 },
   },
 
-  // Default expiry selection — smart theta management
-  MIN_DTE: 7,                         // NEVER buy < 7 DTE (theta decay accelerates)
-  IDEAL_MIN_DTE: 14,                 // Sweet spot: 14+ days for swing trades
-  IDEAL_MAX_DTE: 45,                 // Prefer < 45 days (good leverage)
-  MAX_DTE: 60,                       // Never buy > 60 days (capital inefficient)
+  // Default expiry selection — 14-30 DTE sweet spot
+  MIN_DTE: 14,                        // NEVER buy < 14 DTE (theta kills you)
+  IDEAL_MIN_DTE: 14,                 // Sweet spot starts at 14 days
+  IDEAL_MAX_DTE: 30,                 // Sweet spot ends at 30 days
+  MAX_DTE: 45,                       // Never buy > 45 days (capital inefficient)
 
-  // Exit rules — let winners run, cut losers fast
-  PROFIT_TARGET_PCT: 1.00,           // Take profit at +100% (double your money)
-  STOP_LOSS_PCT: 0.40,               // Cut at -40% (risk $400 to make $1,000)
-  CLOSE_BEFORE_EXPIRY_DAYS: 5,       // Close if < 5 days to expiry and OTM
+  // Exit rules — take money fast, cut losers faster
+  PROFIT_TARGET_PCT: 0.75,           // Take full profit at +75%
+  STOP_LOSS_PCT: 0.25,               // Cut FAST at -25% (don't hope, cut)
+  CLOSE_BEFORE_EXPIRY_DAYS: 7,       // Close if < 7 days to expiry (don't let theta crush you)
 
   // IV awareness — most large-cap stocks run 30-60% IV in choppy markets
   HIGH_IV_THRESHOLD: 0.75,           // IV > 75% = truly expensive, skip unless high conviction
@@ -484,7 +484,7 @@ export async function manageOptionsPositions(
       where: { symbol: pos.symbol, action: "partial_profit" },
     });
 
-    if (pnlPct >= 0.30 && pnlPct < OPTIONS_RULES.PROFIT_TARGET_PCT && hasOptPartial === 0 && qty >= 2) {
+    if (pnlPct >= 0.40 && pnlPct < OPTIONS_RULES.PROFIT_TARGET_PCT && hasOptPartial === 0 && qty >= 2) {
       const sellQty = Math.max(1, Math.floor(qty / 2));
       try {
         const order = await placeOrder({ symbol: pos.symbol, qty: String(sellQty), side: "sell", type: "market", time_in_force: "day" });
