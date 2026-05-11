@@ -782,8 +782,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 5a: MECHANICAL TRADES (NO AI needed — pairs + sector breakouts) ============
-    // These are statistical edges that don't need Claude's opinion. Execute directly.
+    // ============ STEP 5: AI RESEARCH + MECHANICAL TRADES ============
     const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
     if (!isPDTRestricted && activePositions.length < RULES.MAX_POSITIONS && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
       details.push("\n=== MECHANICAL TRADES (pairs + sector signals — no AI needed) ===");
@@ -848,8 +847,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
     }
 
     // ============ STEP 5b: AI SWING TRADES (14-30 DTE, best setups) ============
-    // Buy straight calls/puts when AI committee has conviction.
-    // Score 45+: trade it. Score 70+: bigger size, NO spreads.
+    // 5-expert committee: technical, fundamental, sentiment, options strategist, risk manager.
+    // Full research on each candidate — the REAL edge of this system.
     if (isPDTRestricted) {
       details.push(`Directional scanning: Skipped (PDT restricted)`);
     } else if (activePositions.length >= RULES.MAX_POSITIONS) {

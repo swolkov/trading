@@ -343,48 +343,40 @@ EDGE DETECTION — Think like a quant. Identify WHERE the edge comes from:
 - CORRELATION EDGE: Stock lagging its sector peers with no fundamental reason → mean reversion trade
 - CATALYST EDGE: Upcoming event (FDA, earnings, product launch) not priced in → position before
 
-CONVICTION & TIMEFRAME — Be decisive, not wishy-washy:
-- If you see a clear edge: score ±60 or higher with 80%+ confidence. Do NOT hedge with "hold" signals when the data is clear.
-- HIGH CONVICTION (score ±60+): Recommend aggressive plays — single puts/calls, 7-21 DTE, larger position
-- MODERATE CONVICTION (score ±35-59): Recommend spreads for defined risk, 14-45 DTE
-- LOW CONVICTION (score ±0-34): Say "hold" — do NOT force a trade without an edge
-- Choppy market does NOT mean hold everything — it means be selective and trade the BEST setups only
+CONVICTION & TIMEFRAME — BE DECISIVE. MAKE A CALL.
+- EVERY stock is either a BUY or a SELL. The market is not neutral for individual stocks.
+- Score ±45 or higher = signal "buy" or "sell". NOT "hold". Take a position.
+- Score ±60+ = strong conviction. Recommend aggressive single calls/puts, 14-30 DTE.
+- Score ±45-59 = moderate conviction. Still recommend calls/puts (NOT spreads), 14-30 DTE.
+- Score ±0-34 = truly no edge. Only THEN say "hold".
+- Choppy market does NOT mean hold everything. Individual stocks still trend even when SPY chops.
+- NEVER recommend spreads or hedges. We buy straight calls and puts ONLY.
+- DO NOT sit on the fence. If 3 out of 5 experts agree on direction, that IS a trade.
 
-MASTER STRATEGY GUIDE — Pick the RIGHT strategy for the situation:
+STRATEGY — STRAIGHT CALLS AND PUTS ONLY:
+- BULLISH: Buy calls. 14-30 DTE, slightly OTM (2-4%). Target 50-100% return.
+- BEARISH: Buy puts. 14-30 DTE, slightly OTM (2-4%). Target 50-100% return.
+- DO NOT recommend spreads, iron condors, straddles, or hedged strategies.
+- We want MAXIMUM upside on directional conviction.
 
-PREMIUM SELLING (choppy/range-bound markets — THE REAL EDGE):
-- Bull put credit spread: Sell higher put, buy lower put. Collect credit. Profit if stock stays ABOVE short strike. Use when MILDLY BULLISH or NEUTRAL. 65-75% win rate.
-- Bear call credit spread: Sell lower call, buy higher call. Collect credit. Profit if stock stays BELOW short strike. Use when MILDLY BEARISH or NEUTRAL. 65-75% win rate.
-- Iron condor: Sell BOTH a bull put spread AND bear call spread. Profit if stock stays in RANGE. IDEAL for CHOPPY markets. 55-70% win rate.
-- The key metric is probability of profit (POP). Sell at 30 delta = 70% POP. Collect premium. Let time do the work.
+WHEN TO BUY CALLS (score 45+):
+- Stock in uptrend (above 20-SMA or 50-SMA)
+- Strong earnings + positive revision trend
+- Insider buying
+- Lagging sector peers (mean reversion catch-up)
+- Breaking out of consolidation range with volume
 
-DIRECTIONAL BUYING (trending markets — ride momentum):
-- Buy calls: Stock in strong uptrend, breaking out with volume. 14-30 DTE, slightly OTM. Need 3-5% move to profit.
-- Buy puts: Stock breaking down, insider selling, negative catalyst. 14-30 DTE. Need stock to drop.
-- Bull call debit spread: Buy lower call, sell higher call. Cheaper than naked call. Capped profit but defined risk. Use in MODERATE uptrend.
-- Bear put debit spread: Buy higher put, sell lower put. Cheaper than naked put. Use in MODERATE downtrend.
+WHEN TO BUY PUTS (score -45 or lower):
+- Stock breaking down below key support
+- Insider selling heavily
+- Overvalued vs peers (leading too far ahead)
+- Negative earnings revision or guidance cut
+- Breaking below 50-SMA with volume
 
-VOLATILITY PLAYS (when you expect a big move but unsure of direction):
-- Straddle: Buy ATM call + put same strike. Profit from BIG move in either direction. Use BEFORE earnings, FDA, major events. Need 5%+ move.
-- Calendar spread: Buy far-dated option, sell near-dated same strike. Profit from IV expansion or time decay difference. Advanced play.
-
-QUICK MOMENTUM (7-14 DTE aggressive plays):
-- Gap-and-go: Stock gaps 5%+ on volume. Buy calls/puts in gap direction. Quick 1-3 day hold. Cap at 1% of portfolio.
-- Earnings drift: After strong earnings beat, momentum continues 1-2 weeks. Buy calls, ride the drift.
-- Mean reversion: Extreme RSI + support/resistance = snap back. Buy opposite direction.
-
-REGIME MATCHING IS EVERYTHING:
-- BULL market: Buy calls, bull call spreads, sell put credit spreads
-- BEAR market: Buy puts, bear put spreads, sell call credit spreads
-- CHOPPY market: Iron condors, credit spreads, straddles before catalysts. DO NOT buy naked calls/puts (theta kills you)
-- HIGH IV: Sell premium (credit spreads, iron condors). You are overpaid for the risk.
-- LOW IV: Buy options (straddles, naked calls/puts). Options are cheap.
-
-GAMBLING RULES — Know when asymmetric risk/reward justifies a gamble:
-- If a stock gapped 5%+ with massive volume, a 7-day call/put is a smart gamble (small position, 3-5x potential)
-- Pre-earnings momentum: buy 7-14 DTE options 2-3 days before earnings if setup is clean
-- Extreme RSI (<20 or >80) with a reversal candle = high-probability mean reversion play
-- Short squeeze candidates (high short interest + buying pressure) = explosive upside potential
+CHOPPY MARKET DOES NOT MEAN "HOLD EVERYTHING":
+- SPY can be choppy while individual stocks trend
+- Look for the stocks that ARE moving within the chop
+- Mean reversion trades work BEST in choppy markets (oversold bounce, overbought fade)
 - ALWAYS cap gambles at 1% of portfolio — these are lottery tickets, not core positions
 ${performanceContext}
 
@@ -506,7 +498,7 @@ Respond in EXACTLY this JSON format (no markdown, no code fences, just raw JSON)
     "riskReward": <risk/reward ratio as number or null>
   },
   "optionsPlay": {
-    "strategy": "<buy_call|buy_put|bull_call_spread|bear_put_spread|straddle|iron_condor|sell_put_spread|sell_call_spread|calendar_spread|none>",
+    "strategy": "<buy_call|buy_put|none>",
     "strike": <recommended strike price as number or null>,
     "expiry": "<recommended expiry timeframe, e.g. '7 days', '2 weeks', '1 month', '45 days'>",
     "reasoning": "<why this options strategy — what is the EDGE? consider IV, catalysts, risk/reward>",
