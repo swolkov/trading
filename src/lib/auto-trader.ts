@@ -782,13 +782,74 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 5: SWING TRADES (PRIMARY — 14-30 DTE, best 2-3 setups) ============
-    // Buy straight calls/puts on the best setups. WITH the trend only.
-    // Score 55+: trade it. Score 70+: bigger size + NO spreads regardless.
-    // Only top liquid names. Be PICKY — 2-3 great trades beats 6 mediocre ones.
-
-    // Count real positions (exclude worthless ones with $0 market value)
+    // ============ STEP 5a: MECHANICAL TRADES (NO AI needed — pairs + sector breakouts) ============
+    // These are statistical edges that don't need Claude's opinion. Execute directly.
     const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
+    if (!isPDTRestricted && activePositions.length < RULES.MAX_POSITIONS && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
+      details.push("\n=== MECHANICAL TRADES (pairs + sector signals — no AI needed) ===");
+
+      // Pairs trades: buy calls on stocks lagging peers by 10%+
+      try {
+        const rvSignals = await scanRelativeValue([...focusSymbols.slice(0, 30)]);
+        const strongLaggards = rvSignals.filter((s) => s.signal === "laggard_buy" && s.strength !== "weak" && Math.abs(s.divergence) >= 10);
+
+        for (const rv of strongLaggards.slice(0, 2)) {
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          if (positions.some((p) => p.symbol.includes(rv.symbol))) continue;
+
+          // Get price and find a 14-30 DTE call
+          try {
+            const snap = await getSnapshot(rv.symbol);
+            const price = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
+            if (price < 20) continue;
+
+            const direction = "bullish" as const;
+            const conviction: "moderate" | "high" = Math.abs(rv.divergence) >= 15 ? "high" : "moderate";
+            const { contract, snapshot: optSnap, reasoning } = await findBestContract(rv.symbol, direction, price, 70, conviction);
+
+            if (contract) {
+              const optResult = await executeOptionsTrade(rv.symbol, contract, optSnap, equity, 65, "buy", `[PAIRS] ${rv.reasoning}`);
+              if (optResult.success) {
+                details.push(`  PAIRS BUY: ${rv.symbol} — lagging peers by ${Math.abs(rv.divergence).toFixed(1)}%. ${optResult.reasoning}`);
+                tradesPlaced++;
+              } else {
+                details.push(`  PAIRS: ${rv.symbol} — ${optResult.reasoning}`);
+              }
+            } else {
+              details.push(`  PAIRS: ${rv.symbol} — ${reasoning}`);
+            }
+          } catch (err) {
+            details.push(`  PAIRS: ${rv.symbol} error — ${err}`);
+          }
+        }
+
+        // Also look for leaders to buy puts (stocks leading by 10%+ = overextended)
+        const strongLeaders = rvSignals.filter((s) => s.signal === "leader_sell" && s.strength !== "weak" && Math.abs(s.divergence) >= 10);
+        for (const rv of strongLeaders.slice(0, 1)) {
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          if (positions.some((p) => p.symbol.includes(rv.symbol))) continue;
+
+          try {
+            const snap = await getSnapshot(rv.symbol);
+            const price = snap.latestTrade?.p || snap.latestQuote?.ap || 0;
+            if (price < 20) continue;
+
+            const { contract, snapshot: optSnap, reasoning } = await findBestContract(rv.symbol, "bearish", price, 70, "moderate");
+            if (contract) {
+              const optResult = await executeOptionsTrade(rv.symbol, contract, optSnap, equity, 65, "sell", `[PAIRS] ${rv.reasoning}`);
+              if (optResult.success) {
+                details.push(`  PAIRS SELL: ${rv.symbol} — leading peers by ${Math.abs(rv.divergence).toFixed(1)}%. ${optResult.reasoning}`);
+                tradesPlaced++;
+              }
+            }
+          } catch { /* skip */ }
+        }
+      } catch { /* pairs scanning optional */ }
+    }
+
+    // ============ STEP 5b: AI SWING TRADES (14-30 DTE, best setups) ============
+    // Buy straight calls/puts when AI committee has conviction.
+    // Score 45+: trade it. Score 70+: bigger size, NO spreads.
     if (isPDTRestricted) {
       details.push(`Directional scanning: Skipped (PDT restricted)`);
     } else if (activePositions.length >= RULES.MAX_POSITIONS) {
@@ -1086,12 +1147,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const bullishThreshold = (bearBias || deltaIsVeryBearish) ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
           const bearishThreshold = (bullBias || deltaIsVeryBullish) ? Math.max(20, effectiveMinScore - 10) : effectiveMinScore;
 
+          // Accept trades when score is strong enough — don't require exact signal match
+          // Score 45+ with "hold" is still worth a trade (AI is being cautious, score says otherwise)
           const isBullish = analysis.score >= bullishThreshold &&
             analysis.confidence >= effectiveMinConf &&
-            (analysis.signal === "buy" || analysis.signal === "strong_buy");
+            analysis.signal !== "sell" && analysis.signal !== "strong_sell"; // anything except bearish
           const isBearish = analysis.score <= -bearishThreshold &&
             analysis.confidence >= effectiveMinConf &&
-            (analysis.signal === "sell" || analysis.signal === "strong_sell");
+            analysis.signal !== "buy" && analysis.signal !== "strong_buy"; // anything except bullish
 
           if (isBullish || isBearish) {
             // Sector diversification check
@@ -1331,27 +1394,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     }
 
-    // ============ STEP 7: PREMIUM SELLING (TERTIARY — only if NO directional trades placed) ============
-    if (!isPDTRestricted && tradesPlaced === 0 && regime.regime === "choppy") {
-      const currentSpreadCount = positions.filter((p) => p.symbol.length > 10 && parseInt(p.qty) < 0).length;
-      if (currentSpreadCount < 2) {
-        details.push("\n=== PREMIUM SELLING (no directional setups — collecting theta income) ===");
-        const premiumCandidates = focusSymbols.filter((s) =>
-          !["SPY", "QQQ", "IWM", "DIA"].includes(s) && !positions.some((p) => p.symbol.includes(s))
-        ).slice(0, 2);
-
-        for (const sym of premiumCandidates) {
-          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
-          try {
-            const spread = await sellCreditSpread(sym, "bull_put", equity);
-            details.push(`  ${sym}: ${spread.details}`);
-            if (spread.success) tradesPlaced += 2;
-          } catch (err) {
-            details.push(`  ${sym} credit spread error: ${err}`);
-          }
-        }
-      }
-    }
+    // Premium selling REMOVED — user wants directional only, no spreads/hedges
+    // Spreads only placed if AI specifically recommends AND score < 70
 
     const summary = `[${regime.regime.toUpperCase()}] Scanned ${stocksScanned}, placed ${tradesPlaced} trades, managed ${positionsManaged} positions, ${errors} errors`;
     details.push(`\n${summary}`);
