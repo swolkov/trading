@@ -40,6 +40,27 @@ interface IdeaContext {
   reasoning: string;
 }
 
+interface PositionPlan {
+  symbol: string;
+  type: "spread_leg" | "standalone_long" | "standalone_short" | "worthless";
+  spreadGroup?: string;
+  spreadPartner?: string;
+  underlying: string;
+  optionType: string;
+  dte: number;
+  expiryDate: string;
+  netCredit?: number;
+  maxLoss?: number;
+  spreadPnl?: number;
+  pnlPctOfMax?: number;
+  takeProfitAt: string;
+  stopLossAt: string;
+  expiryCloseAt: string;
+  plan: string;
+  reasoning: string;
+  urgency: "none" | "watch" | "action_soon" | "immediate";
+}
+
 function timeframeBadge(tf: string) {
   const colors: Record<string, string> = {
     day_trade: "bg-red-500",
@@ -67,15 +88,18 @@ export function PositionsTable() {
   const [tradeContexts, setTradeContexts] = useState<Record<string, TradeContext>>({});
   const [researchContexts, setResearchContexts] = useState<Record<string, ResearchContext>>({});
   const [ideaContexts, setIdeaContexts] = useState<Record<string, IdeaContext>>({});
+  const [plans, setPlans] = useState<Record<string, PositionPlan>>({});
+  const [expandedPlans, setExpandedPlans] = useState<Set<string>>(new Set());
 
   // Load AI context for each position
   useEffect(() => {
     async function loadContexts() {
       try {
-        const [tradesRes, reportsRes, ideasRes] = await Promise.all([
+        const [tradesRes, reportsRes, ideasRes, plansRes] = await Promise.all([
           fetch("/api/agent/logs?limit=50").then((r) => r.json()),
           fetch("/api/ai/reports?limit=20").then((r) => r.json()),
           fetch("/api/ai/ideas").then((r) => r.json()),
+          fetch("/api/positions/plan").then((r) => r.json()),
         ]);
 
         // Map trade logs by symbol (most recent buy)
@@ -106,6 +130,13 @@ export function PositionsTable() {
           }
         }
         setIdeaContexts(iMap);
+
+        // Map plans by symbol
+        const pMap: Record<string, PositionPlan> = {};
+        if (Array.isArray(plansRes)) {
+          for (const p of plansRes) pMap[p.symbol] = p;
+        }
+        setPlans(pMap);
       } catch {
         // ignore
       }
@@ -246,8 +277,101 @@ export function PositionsTable() {
                 </div>
               </div>
 
-              {/* AI Reasoning */}
-              {(trade?.reason || research?.summary) && (
+              {/* AI Plan Button */}
+              {plans[pos.symbol] && (
+                <div>
+                  <button
+                    onClick={() => {
+                      const next = new Set(expandedPlans);
+                      if (next.has(pos.symbol)) next.delete(pos.symbol);
+                      else next.add(pos.symbol);
+                      setExpandedPlans(next);
+                    }}
+                    className="text-xs text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1"
+                  >
+                    {expandedPlans.has(pos.symbol) ? "Hide" : "Show"} AI Plan
+                    <span className={`inline-block transition-transform ${expandedPlans.has(pos.symbol) ? "rotate-180" : ""}`}>▼</span>
+                    {plans[pos.symbol].urgency === "immediate" && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] bg-red-500/20 text-red-400 font-bold">ACTION NEEDED</span>
+                    )}
+                    {plans[pos.symbol].urgency === "action_soon" && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] bg-yellow-500/20 text-yellow-400 font-bold">WATCH</span>
+                    )}
+                    {plans[pos.symbol].spreadGroup && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] bg-blue-500/15 text-blue-400">SPREAD</span>
+                    )}
+                  </button>
+
+                  {expandedPlans.has(pos.symbol) && (() => {
+                    const p = plans[pos.symbol];
+                    return (
+                      <div className="mt-2 bg-muted/50 rounded-lg p-3 space-y-2 text-xs">
+                        {/* Position type */}
+                        <div className="flex items-center gap-2">
+                          {p.spreadGroup && <span className="font-bold text-blue-400">{p.spreadGroup}</span>}
+                          <span className="text-muted-foreground">{p.dte} DTE — Expires {p.expiryDate}</span>
+                        </div>
+
+                        {/* Spread metrics */}
+                        {p.netCredit != null && (
+                          <div className="grid grid-cols-4 gap-2 py-1 border-y border-white/5">
+                            <div>
+                              <span className="text-muted-foreground/60">Credit Received</span>
+                              <p className="font-medium text-emerald-400">${p.netCredit.toFixed(0)}</p>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground/60">Max Risk</span>
+                              <p className="font-medium text-red-400">${p.maxLoss?.toFixed(0)}</p>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground/60">Current P&L</span>
+                              <p className={`font-medium ${(p.spreadPnl || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {(p.spreadPnl || 0) >= 0 ? "+" : ""}${p.spreadPnl?.toFixed(0)}
+                              </p>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground/60">% of Max Profit</span>
+                              <p className="font-medium">{((p.pnlPctOfMax || 0) * 100).toFixed(0)}%</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Exit triggers */}
+                        <div className="grid grid-cols-3 gap-2">
+                          <div>
+                            <span className="text-muted-foreground/60">Take Profit</span>
+                            <p className="font-medium text-emerald-400">{p.takeProfitAt}</p>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground/60">Stop Loss</span>
+                            <p className="font-medium text-red-400">{p.stopLossAt}</p>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground/60">Expiry Close</span>
+                            <p className="font-medium">{p.expiryCloseAt}</p>
+                          </div>
+                        </div>
+
+                        {/* Agent's plan */}
+                        <div className={`p-2 rounded ${
+                          p.urgency === "immediate" ? "bg-red-500/10 border border-red-500/20" :
+                          p.urgency === "action_soon" ? "bg-yellow-500/10 border border-yellow-500/20" :
+                          "bg-white/5"
+                        }`}>
+                          <span className="font-medium text-foreground">Plan: </span>
+                          <span>{p.plan}</span>
+                        </div>
+                        <div className="text-muted-foreground/60">
+                          <span className="font-medium">Why: </span>{p.reasoning}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Fallback AI Reasoning (if no plan available) */}
+              {!plans[pos.symbol] && (trade?.reason || research?.summary) && (
                 <div className="text-xs text-muted-foreground bg-muted/50 rounded p-2">
                   <span className="font-medium text-foreground">AI Reasoning: </span>
                   {trade?.reason?.slice(0, 200) || research?.summary?.slice(0, 200)}
