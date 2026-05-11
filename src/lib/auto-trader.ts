@@ -782,82 +782,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 4e: PREMIUM SELLING (SECONDARY — base income in choppy markets) ============
-    // Only sell premium when no directional setups available. Keep max 3 spreads running.
-    const optPositionCount = positions.filter((p) => p.symbol.length > 10 && Math.abs(parseFloat(p.market_value)) > 1).length;
-    const spreadCount = spreadLegs.size / 2; // number of active spreads
-    if (isPDTRestricted) {
-      details.push("\n=== PREMIUM SELLING: Skipped (PDT restricted) ===");
-    } else if (spreadCount < 3 && regime.regime === "choppy") {
-      details.push("\n=== PREMIUM SELLING (backup income — choppy market, max 3 spreads) ===");
-
-      // Iron condors on SPY AND QQQ — the bread and butter
-      for (const index of ["SPY", "QQQ"]) {
-        if (positions.some((p) => p.symbol.includes(index))) {
-          details.push(`  ${index}: Already have position — skipping`);
-          continue;
-        }
-        try {
-          const ic = await sellIronCondor(index, equity);
-          details.push(`  ${index}: ${ic.details}`);
-          if (ic.success) tradesPlaced += 4;
-        } catch (err) {
-          details.push(`  ${index} iron condor error: ${err}`);
-        }
-      }
-
-      // Credit spreads on large-cap focus symbols — sell puts below support (bullish credit spread)
-      // AND sell calls above resistance (bearish credit spread) for balance
-      const premiumCandidates = focusSymbols.filter((s) =>
-        !["SPY", "QQQ", "IWM", "DIA"].includes(s) && !positions.some((p) => p.symbol.includes(s))
-      ).slice(0, 5);
-
-      for (const sym of premiumCandidates) {
-        if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
-        try {
-          // Sell bull put spread (collect premium, profit if stock stays above short strike)
-          const spread = await sellCreditSpread(sym, "bull_put", equity);
-          details.push(`  ${sym}: ${spread.details}`);
-          if (spread.success) tradesPlaced += 2;
-        } catch (err) {
-          details.push(`  ${sym} credit spread error: ${err}`);
-        }
-      }
-    }
-
-    // ============ STEP 4f: QUICK PLAYS — 7-14 DTE TECHNICAL SETUPS ============
-    // Purely mechanical: RSI extremes, breakouts, gaps, support bounces
-    // Small bets (1% of equity), no AI committee needed
-    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
-    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS - 2) {
-      try {
-        details.push("\n=== QUICK PLAYS (7-14 DTE technical setups) ===");
-        const plays = await scanQuickPlays(focusSymbols);
-        if (plays.length === 0) {
-          details.push("  No setups found — nothing meets the criteria right now");
-        }
-        let quickTradesPlaced = 0;
-        for (const play of plays.slice(0, 2)) { // Max 2 quick plays per run
-          if (quickTradesPlaced >= 2) break;
-          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
-          // Skip if we already have a position in this stock
-          if (positions.some((p) => p.symbol.includes(play.symbol))) {
-            details.push(`  ${play.symbol}: Already have position — skipping`);
-            continue;
-          }
-          const result = await executeQuickPlay(play, equity);
-          details.push(`  ${result.details}`);
-          if (result.success) {
-            tradesPlaced++;
-            quickTradesPlaced++;
-          }
-        }
-      } catch (err) {
-        details.push(`  Quick plays error: ${err}`);
-      }
-    }
-
-    // ============ STEP 5: DIRECTIONAL TRADES (PRIMARY — conviction-based) ============
+    // ============ STEP 5: DIRECTIONAL TRADES (PRIMARY — runs FIRST) ============
     // Buy straight calls/puts when the AI committee has conviction.
     // Score 70+: full size (2% equity). Score 55-69: half size (1% equity).
     // NO spreads on high-conviction trades — maximize upside.
@@ -1378,6 +1303,52 @@ export async function runTradingAgent(): Promise<AgentResult> {
           errors++;
           details.push(`  ${symbol}: ERROR — ${err}`);
         }
+      }
+    }
+
+    // ============ STEP 6: PREMIUM SELLING (BACKUP — only if trade slots remain) ============
+    const currentSpreadCount = positions.filter((p) => p.symbol.length > 10 && parseInt(p.qty) < 0).length;
+    const tradesRemaining = RULES.MAX_DAILY_TRADES - tradesPlaced - todayTrades;
+    if (!isPDTRestricted && currentSpreadCount < 3 && regime.regime === "choppy" && tradesRemaining >= 2) {
+      details.push("\n=== PREMIUM SELLING (backup — choppy market, filling remaining slots) ===");
+
+      const premiumCandidates = focusSymbols.filter((s) =>
+        !["SPY", "QQQ", "IWM", "DIA"].includes(s) && !positions.some((p) => p.symbol.includes(s))
+      ).slice(0, 3);
+
+      for (const sym of premiumCandidates) {
+        if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+        if (currentSpreadCount + tradesPlaced >= 6) break; // max 3 new spreads (6 legs)
+        try {
+          const spread = await sellCreditSpread(sym, "bull_put", equity);
+          details.push(`  ${sym}: ${spread.details}`);
+          if (spread.success) tradesPlaced += 2;
+        } catch (err) {
+          details.push(`  ${sym} credit spread error: ${err}`);
+        }
+      }
+    }
+
+    // ============ STEP 7: QUICK PLAYS (fill remaining slots) ============
+    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
+    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS - 2 && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
+      try {
+        details.push("\n=== QUICK PLAYS (7-14 DTE technical setups) ===");
+        const plays = await scanQuickPlays(focusSymbols);
+        if (plays.length === 0) {
+          details.push("  No setups found");
+        }
+        let quickTradesPlaced = 0;
+        for (const play of plays.slice(0, 2)) {
+          if (quickTradesPlaced >= 2) break;
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          if (positions.some((p) => p.symbol.includes(play.symbol))) continue;
+          const result = await executeQuickPlay(play, equity);
+          details.push(`  ${result.details}`);
+          if (result.success) { tradesPlaced++; quickTradesPlaced++; }
+        }
+      } catch (err) {
+        details.push(`  Quick plays error: ${err}`);
       }
     }
 
