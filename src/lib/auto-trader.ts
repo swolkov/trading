@@ -804,8 +804,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
             if (price < 20) continue;
 
             const direction = "bullish" as const;
-            const conviction: "moderate" | "high" = Math.abs(rv.divergence) >= 15 ? "high" : "moderate";
-            const { contract, snapshot: optSnap, reasoning } = await findBestContract(rv.symbol, direction, price, 70, conviction);
+            // Always use "moderate" conviction for 14-30 DTE swing trades (not short-dated)
+            const { contract, snapshot: optSnap, reasoning } = await findBestContract(rv.symbol, direction, price, 70, "moderate");
 
             if (contract) {
               const optResult = await executeOptionsTrade(rv.symbol, contract, optSnap, equity, 65, "buy", `[PAIRS] ${rv.reasoning}`);
