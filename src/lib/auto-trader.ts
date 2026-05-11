@@ -39,7 +39,7 @@ const DEFAULT_RULES = {
   MAX_POSITION_PCT: 0.03,        // 3% of equity max per trade (~$2,700 on $91k)
   MIN_POSITION_PCT: 0.015,       // 1.5% of equity min per trade (~$1,350)
   MIN_CASH_RESERVE_PCT: 0.20,
-  MIN_SCORE_TO_BUY: 55,
+  MIN_SCORE_TO_BUY: 45,
   MIN_CONFIDENCE: 60,
   STOP_ATR_MULTIPLIER: 2.0,
   MAX_STOP_PCT: 0.10,
