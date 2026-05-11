@@ -443,16 +443,24 @@ export async function runTradingAgent(): Promise<AgentResult> {
             processedSpreads.add(pos.symbol);
             processedSpreads.add(partner.symbol);
 
-            // Calculate COMBINED spread P&L
-            const spreadPnl = parseFloat(pos.unrealized_pl) + parseFloat(partner.unrealized_pl);
-            const spreadEntry = Math.abs(parseFloat(pos.avg_entry_price) * parseInt(pos.qty) * 100) +
-              Math.abs(parseFloat(partner.avg_entry_price) * parseInt(partner.qty) * 100);
-            const spreadPnlPct = spreadEntry > 0 ? spreadPnl / spreadEntry : 0;
-
             const longLeg = qty > 0 ? pos : partner;
             const shortLeg = qty < 0 ? pos : partner;
             const longStrike = longLeg.symbol.match(/(\d{8})$/)?.[1];
             const shortStrike = shortLeg.symbol.match(/(\d{8})$/)?.[1];
+
+            // Combined P&L from Alpaca (already correct)
+            const spreadPnl = parseFloat(pos.unrealized_pl) + parseFloat(partner.unrealized_pl);
+
+            // For credit spreads: max profit = net credit received, max loss = spread width - credit
+            const shortEntry = parseFloat(shortLeg.avg_entry_price);
+            const longEntry = parseFloat(longLeg.avg_entry_price);
+            const netCredit = (shortEntry - longEntry) * Math.abs(parseInt(shortLeg.qty)) * 100;
+            const spreadWidth = Math.abs(parseInt(shortStrike || "0") - parseInt(longStrike || "0")) / 1000;
+            const maxLoss = (spreadWidth - (shortEntry - longEntry)) * Math.abs(parseInt(shortLeg.qty)) * 100;
+
+            // P&L as % of max profit (for take profit) and max loss (for stop)
+            const pnlPctOfMaxProfit = netCredit > 0 ? spreadPnl / netCredit : 0;
+            const pnlPctOfMaxLoss = maxLoss > 0 ? spreadPnl / maxLoss : 0;
 
             // Parse DTE
             const year = 2000 + parseInt(expDate.slice(0, 2));
@@ -463,26 +471,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
             const spreadDesc = `${underlying} $${parseInt(shortStrike || "0") / 1000}/$${parseInt(longStrike || "0") / 1000} ${optType === "P" ? "put" : "call"} spread`;
 
-            // TAKE PROFIT: close both legs if spread P&L > 50% of max profit
-            if (spreadPnlPct >= 0.50) {
-              details.push(`  SPREAD TAKE PROFIT: ${spreadDesc} up ${(spreadPnlPct * 100).toFixed(1)}% — closing both legs`);
+            // TAKE PROFIT: close at 50% of max credit collected
+            if (pnlPctOfMaxProfit >= 0.50) {
+              details.push(`  SPREAD TAKE PROFIT: ${spreadDesc} at ${(pnlPctOfMaxProfit * 100).toFixed(0)}% of max profit ($${spreadPnl.toFixed(0)}/$${netCredit.toFixed(0)}) — closing both legs`);
               try {
                 // Close long leg (sell), close short leg (buy back)
                 await placeOrder({ symbol: longLeg.symbol, qty: String(Math.abs(parseInt(longLeg.qty))), side: "sell", type: "market", time_in_force: "day" });
                 await placeOrder({ symbol: shortLeg.symbol, qty: String(Math.abs(parseInt(shortLeg.qty))), side: "buy", type: "market", time_in_force: "day" });
-                await logTrade(pos.symbol, "spread_take_profit", Math.abs(qty), currentPrice, `Spread take profit: ${spreadDesc} at ${(spreadPnlPct * 100).toFixed(1)}%. Combined P&L: $${spreadPnl.toFixed(2)}`, null, null, undefined, spreadPnl);
+                await logTrade(pos.symbol, "spread_take_profit", Math.abs(qty), currentPrice, `Spread take profit: ${spreadDesc} at ${(pnlPctOfMaxProfit * 100).toFixed(0)}% of max profit. P&L: $${spreadPnl.toFixed(2)}`, null, null, undefined, spreadPnl);
                 tradesPlaced += 2;
               } catch (err) { errors++; details.push(`  Failed: ${err}`); }
               continue;
             }
 
-            // STOP LOSS: if spread is losing more than 2x max credit
-            if (spreadPnlPct <= -1.0) {
-              details.push(`  SPREAD STOP: ${spreadDesc} down ${(spreadPnlPct * 100).toFixed(1)}% — closing both legs`);
+            // STOP LOSS: if spread loss exceeds max risk (spread width - credit)
+            if (spreadPnl <= -maxLoss * 0.90) {
+              details.push(`  SPREAD STOP: ${spreadDesc} loss $${Math.abs(spreadPnl).toFixed(0)} near max risk $${maxLoss.toFixed(0)} — closing both legs`);
               try {
                 await placeOrder({ symbol: longLeg.symbol, qty: String(Math.abs(parseInt(longLeg.qty))), side: "sell", type: "market", time_in_force: "day" });
                 await placeOrder({ symbol: shortLeg.symbol, qty: String(Math.abs(parseInt(shortLeg.qty))), side: "buy", type: "market", time_in_force: "day" });
-                await logTrade(pos.symbol, "spread_stop_loss", Math.abs(qty), currentPrice, `Spread stop: ${spreadDesc} at ${(spreadPnlPct * 100).toFixed(1)}%. Combined P&L: $${spreadPnl.toFixed(2)}`, null, null, undefined, spreadPnl);
+                await logTrade(pos.symbol, "spread_stop_loss", Math.abs(qty), currentPrice, `Spread stop: ${spreadDesc} loss $${Math.abs(spreadPnl).toFixed(0)} (max risk: $${maxLoss.toFixed(0)}). Closing.`, null, null, undefined, spreadPnl);
                 tradesPlaced += 2;
               } catch (err) { errors++; details.push(`  Failed: ${err}`); }
               continue;
@@ -500,7 +508,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
               continue;
             }
 
-            details.push(`  ${spreadDesc}: ${spreadPnl >= 0 ? "+" : ""}$${spreadPnl.toFixed(2)} (${(spreadPnlPct * 100).toFixed(1)}%), ${dte} DTE — holding as unit`);
+            const profitPct = netCredit > 0 ? (pnlPctOfMaxProfit * 100).toFixed(0) : "N/A";
+            details.push(`  ${spreadDesc}: ${spreadPnl >= 0 ? "+" : ""}$${spreadPnl.toFixed(0)} (${profitPct}% of max profit), ${dte} DTE — holding`);
             continue;
           }
         }
