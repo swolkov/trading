@@ -782,10 +782,42 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 5: DIRECTIONAL TRADES (PRIMARY — runs FIRST) ============
-    // Buy straight calls/puts when the AI committee has conviction.
+    // ============ STEP 4e: QUICK PLAYS (PRIMARY — fast, cheap, proven patterns) ============
+    // Purely technical: RSI extremes, breakouts, gaps, support bounces
+    // 7-14 DTE, 1-2% equity per trade, no AI committee needed (saves API costs + time)
+    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
+    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS - 2) {
+      try {
+        details.push("\n=== QUICK PLAYS (PRIMARY — 7-14 DTE technical setups) ===");
+
+        // Scan focus symbols + top movers for broader coverage
+        const quickScanList = [...new Set([...focusSymbols, ...((await getTopMovers("gainers").catch(() => [])).slice(0, 10).map((m) => m.symbol)), ...((await getTopMovers("losers").catch(() => [])).slice(0, 10).map((m) => m.symbol))])].slice(0, 30);
+
+        const plays = await scanQuickPlays(quickScanList);
+        if (plays.length === 0) {
+          details.push("  No setups found");
+        }
+        let quickTradesPlaced = 0;
+        for (const play of plays.slice(0, 4)) { // Max 4 quick plays per run
+          if (quickTradesPlaced >= 4) break;
+          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
+          if (positions.some((p) => p.symbol.includes(play.symbol))) {
+            details.push(`  ${play.symbol}: Already have position — skipping`);
+            continue;
+          }
+          const result = await executeQuickPlay(play, equity);
+          details.push(`  ${result.details}`);
+          if (result.success) { tradesPlaced++; quickTradesPlaced++; }
+        }
+      } catch (err) {
+        details.push(`  Quick plays error: ${err}`);
+      }
+    }
+
+    // ============ STEP 5: DIRECTIONAL TRADES (SECONDARY — AI committee for high conviction) ============
+    // Buy straight calls/puts when the AI committee has strong conviction.
     // Score 70+: full size (2% equity). Score 55-69: half size (1% equity).
-    // NO spreads on high-conviction trades — maximize upside.
+    // Only runs if quick plays didn't fill all slots. Costs API credits.
 
     // Count real positions (exclude worthless ones with $0 market value)
     const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
@@ -1326,29 +1358,6 @@ export async function runTradingAgent(): Promise<AgentResult> {
         } catch (err) {
           details.push(`  ${sym} credit spread error: ${err}`);
         }
-      }
-    }
-
-    // ============ STEP 7: QUICK PLAYS (fill remaining slots) ============
-    const activePos = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
-    if (!isPDTRestricted && activePos.length < RULES.MAX_POSITIONS - 2 && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
-      try {
-        details.push("\n=== QUICK PLAYS (7-14 DTE technical setups) ===");
-        const plays = await scanQuickPlays(focusSymbols);
-        if (plays.length === 0) {
-          details.push("  No setups found");
-        }
-        let quickTradesPlaced = 0;
-        for (const play of plays.slice(0, 2)) {
-          if (quickTradesPlaced >= 2) break;
-          if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
-          if (positions.some((p) => p.symbol.includes(play.symbol))) continue;
-          const result = await executeQuickPlay(play, equity);
-          details.push(`  ${result.details}`);
-          if (result.success) { tradesPlaced++; quickTradesPlaced++; }
-        }
-      } catch (err) {
-        details.push(`  Quick plays error: ${err}`);
       }
     }
 

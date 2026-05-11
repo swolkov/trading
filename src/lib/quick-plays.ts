@@ -198,10 +198,10 @@ export async function executeQuickPlay(
 
       if (premium <= 0) premium = price * 0.015;
 
-      // Size: 1% of equity for quick plays (small bets)
-      const maxRisk = equity * 0.01;
+      // Size: 2% of equity for quick plays (primary strategy)
+      const maxRisk = equity * 0.02;
       const costPerContract = premium * 100;
-      const qty = Math.max(1, Math.min(3, Math.floor(maxRisk / costPerContract)));
+      const qty = Math.max(1, Math.min(5, Math.floor(maxRisk / costPerContract)));
 
       const strike = parseFloat(contract.strike_price);
       const dte = Math.floor((new Date(contract.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
