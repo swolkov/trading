@@ -10,9 +10,9 @@ import { prisma } from "./db";
 
 // ============ OPTIONS TRADING RULES ============
 const OPTIONS_RULES = {
-  // Sizing
-  MAX_RISK_PER_TRADE_PCT: 0.015,    // Max 1.5% of portfolio per options trade
-  MAX_TOTAL_OPTIONS_PCT: 0.15,       // Max 15% of portfolio in options (increased for options-first)
+  // Sizing — more aggressive for directional trades
+  MAX_RISK_PER_TRADE_PCT: 0.02,     // Max 2% of portfolio per options trade (~$1,840 on $92k)
+  MAX_TOTAL_OPTIONS_PCT: 0.25,       // Max 25% of portfolio in options
   MAX_OPTIONS_POSITIONS: 10,         // Max 10 options positions
 
   // Strike selection
@@ -35,9 +35,9 @@ const OPTIONS_RULES = {
   IDEAL_MAX_DTE: 45,                 // Prefer < 45 days (good leverage)
   MAX_DTE: 60,                       // Never buy > 60 days (capital inefficient)
 
-  // Exit rules
-  PROFIT_TARGET_PCT: 0.75,           // Take profit at +75%
-  STOP_LOSS_PCT: 0.40,               // Cut at -40%
+  // Exit rules — let winners run, cut losers fast
+  PROFIT_TARGET_PCT: 1.00,           // Take profit at +100% (double your money)
+  STOP_LOSS_PCT: 0.40,               // Cut at -40% (risk $400 to make $1,000)
   CLOSE_BEFORE_EXPIRY_DAYS: 5,       // Close if < 5 days to expiry and OTM
 
   // IV awareness — most large-cap stocks run 30-60% IV in choppy markets

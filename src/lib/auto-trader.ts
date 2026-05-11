@@ -36,8 +36,8 @@ import { prisma } from "./db";
 const DEFAULT_RULES = {
   MAX_POSITIONS: 10,
   MAX_PER_SECTOR: 3,
-  MAX_POSITION_PCT: 0.07,
-  MIN_POSITION_PCT: 0.02,
+  MAX_POSITION_PCT: 0.03,        // 3% of equity max per OPTIONS trade (~$2,700 on $92k)
+  MIN_POSITION_PCT: 0.01,        // 1% of equity min per trade (~$920)
   MIN_CASH_RESERVE_PCT: 0.20,
   MIN_SCORE_TO_BUY: 55,
   MIN_CONFIDENCE: 60,
@@ -146,7 +146,6 @@ function calculatePositionSize(
 
   let ratio = baseRatio + (maxRatio - baseRatio) * scoreFactor * confidenceFactor;
   ratio *= regimeMultiplier;
-  ratio *= 0.6; // Initial entry = 60% of full size
 
   // Volatility normalization: high-vol stocks get smaller positions
   // Target: a 5% position in a 15% vol stock = same risk as 2.5% position in 30% vol stock
@@ -783,13 +782,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // Clear correlation cache for this run
     clearCorrelationCache();
 
-    // ============ STEP 4e: PREMIUM SELLING (PRIMARY STRATEGY) ============
-    // Sell premium on indexes + large caps. This is the MAIN money maker.
+    // ============ STEP 4e: PREMIUM SELLING (SECONDARY — base income in choppy markets) ============
+    // Only sell premium when no directional setups available. Keep max 3 spreads running.
     const optPositionCount = positions.filter((p) => p.symbol.length > 10 && Math.abs(parseFloat(p.market_value)) > 1).length;
+    const spreadCount = spreadLegs.size / 2; // number of active spreads
     if (isPDTRestricted) {
       details.push("\n=== PREMIUM SELLING: Skipped (PDT restricted) ===");
-    } else if (optPositionCount < 8) {
-      details.push("\n=== PREMIUM SELLING (theta works FOR us — PRIMARY STRATEGY) ===");
+    } else if (spreadCount < 3 && regime.regime === "choppy") {
+      details.push("\n=== PREMIUM SELLING (backup income — choppy market, max 3 spreads) ===");
 
       // Iron condors on SPY AND QQQ — the bread and butter
       for (const index of ["SPY", "QQQ"]) {
@@ -857,9 +857,10 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     }
 
-    // ============ STEP 5: DIRECTIONAL TRADES (SECONDARY — only high conviction) ============
-    // Premium selling above is the PRIMARY strategy. This section only buys
-    // calls/puts when the 5-expert committee has STRONG consensus (score 70+).
+    // ============ STEP 5: DIRECTIONAL TRADES (PRIMARY — conviction-based) ============
+    // Buy straight calls/puts when the AI committee has conviction.
+    // Score 70+: full size (2% equity). Score 55-69: half size (1% equity).
+    // NO spreads on high-conviction trades — maximize upside.
 
     // Count real positions (exclude worthless ones with $0 market value)
     const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
@@ -1295,32 +1296,32 @@ export async function runTradingAgent(): Promise<AgentResult> {
               }
             } catch { /* correlation check optional */ }
 
-            // === REGIME-AWARE STRATEGY SELECTION ===
-            // In CHOPPY markets: sell premium (credit spreads) — time decay works FOR us
-            // In TRENDING markets: buy options (debit) — ride the move
+            // === CONVICTION-BASED STRATEGY SELECTION ===
+            // HIGH conviction (score 70+): straight calls/puts — maximize upside
+            // MEDIUM conviction (55-69): straight calls/puts but smaller size
+            // Only use spreads when AI specifically recommends it
             const direction = isBearish ? "bearish" as const : "bullish" as const;
-            let optStrategy = analysis.optionsPlay?.strategy || (direction === "bullish" ? "buy_call" : "buy_put");
+            const absScore = Math.abs(analysis.score);
+            const isHighConviction = absScore >= 70 && analysis.confidence >= 75;
 
-            // CHOPPY MARKET = use spreads or credit strategies (sell premium, collect theta)
-            if (regime.regime === "choppy" && (optStrategy === "buy_call" || optStrategy === "buy_put")) {
-              // In choppy: sell credit spreads (premium selling) — profit from stock doing nothing
-              optStrategy = direction === "bullish" ? "bull_call_spread" : "bear_put_spread";
-              details.push(`  ${symbol}: CHOPPY regime — using spread (theta works FOR us)`);
+            // Default: straight directional trade
+            let optStrategy = direction === "bullish" ? "buy_call" : "buy_put";
+
+            // Only override to spread if AI specifically recommended it AND conviction is low
+            if (!isHighConviction && analysis.optionsPlay?.strategy) {
+              const aiStrat = analysis.optionsPlay.strategy;
+              if (aiStrat.includes("spread") || aiStrat.includes("iron_condor") || aiStrat.includes("straddle")) {
+                optStrategy = aiStrat;
+              }
             }
 
-            // Map AI's new strategy types to execution
-            if (optStrategy === "sell_put_spread") optStrategy = "bull_call_spread"; // sell put spread = bull put credit spread
-            if (optStrategy === "sell_call_spread") optStrategy = "bear_put_spread"; // sell call spread = bear call credit spread
+            // Map strategy names
+            if (optStrategy === "sell_put_spread") optStrategy = "bull_call_spread";
+            if (optStrategy === "sell_call_spread") optStrategy = "bear_put_spread";
 
-            // Override strategy based on IV rank — expensive options = use spreads
-            try {
-              const vol = await analyzeVolatility(symbol);
-              if (vol && vol.ivRank > 50 && (optStrategy === "buy_call" || optStrategy === "buy_put")) {
-                // High IV = options expensive, use spreads for defined risk
-                optStrategy = direction === "bullish" ? "bull_call_spread" : "bear_put_spread";
-                details.push(`  ${symbol}: IV rank ${vol.ivRank}/100 — switching to spread (options expensive)`);
-              }
-            } catch { /* use default strategy */ }
+            if (isHighConviction) {
+              details.push(`  ${symbol}: HIGH CONVICTION (score ${analysis.score}, conf ${analysis.confidence}%) — STRAIGHT ${direction === "bullish" ? "CALL" : "PUT"}, no hedging`);
+            }
 
             try {
               if (optStrategy === "iron_condor") {
