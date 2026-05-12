@@ -8,14 +8,14 @@ import WebSocket from "ws";
 
 // ── Config ──────────────────────────────────────────────
 
-const DEMO_WS = "wss://md-demo.tradovateapi.com/v1/websocket";
-const LIVE_WS = "wss://md-live.tradovateapi.com/v1/websocket";
 const DEMO_API = "https://demo.tradovateapi.com/v1";
 const LIVE_API = "https://live.tradovateapi.com/v1";
 
-const USE_DEMO = true; // Always demo until explicitly changed
-const API_BASE = USE_DEMO ? DEMO_API : LIVE_API;
-const WS_URL = USE_DEMO ? DEMO_WS : LIVE_WS;
+// Market data WebSocket — use LIVE for data (CME subscription is on live account)
+// Orders — use DEMO for execution (no real money risk)
+const MD_WS_URL = "wss://md.tradovateapi.com/v1/websocket";
+const ORDER_API = DEMO_API; // Orders go to demo
+const AUTH_API = LIVE_API;  // Auth against live to get mdAccessToken with CME data
 
 const SYMBOLS = ["MES", "MNQ", "MYM", "M2K"];
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
@@ -31,7 +31,7 @@ let accountName = "";
 async function authenticate(): Promise<string> {
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
-  const res = await fetch(`${API_BASE}/auth/accesstokenrequest`, {
+  const res = await fetch(`${AUTH_API}/auth/accesstokenrequest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -69,13 +69,17 @@ async function authenticate(): Promise<string> {
     accountName = active.name;
   }
 
-  log(`Authenticated — Account: ${accountName} (#${accountId}) — ${USE_DEMO ? "DEMO" : "LIVE"}`);
+  log(`Authenticated — Account: ${accountName} (#${accountId})`);
   return accessToken;
 }
 
 async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
   const token = await authenticate();
-  const res = await fetch(`${API_BASE}${path}`, {
+  // Orders/positions use DEMO, contract lookups use LIVE (for market data access)
+  const base = path.startsWith("/order") || path.startsWith("/position") || path.startsWith("/account") || path.startsWith("/cashBalance")
+    ? ORDER_API
+    : AUTH_API;
+  const res = await fetch(`${base}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -718,7 +722,7 @@ function connectWebSocket() {
   log("Connecting to Tradovate WebSocket...");
   wsAuthorized = false;
 
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(MD_WS_URL);
 
   ws.on("open", () => {
     log("WebSocket TCP connected — waiting for server open frame...");
@@ -962,7 +966,7 @@ async function main() {
   log("╔══════════════════════════════════════════════╗");
   log("║  ESBUENO FUTURES — REAL-TIME TRADING ENGINE  ║");
   log("╚══════════════════════════════════════════════╝");
-  log(`Mode: ${USE_DEMO ? "DEMO" : "LIVE"}`);
+  log(`Mode: DEMO orders / LIVE market data`);
   log(`Symbols: ${SYMBOLS.join(", ")}`);
   log(`Bar interval: ${BAR_INTERVAL_MS / 1000}s`);
 
