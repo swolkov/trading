@@ -787,6 +787,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
     if (!isPDTRestricted && activePositions.length < RULES.MAX_POSITIONS && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
       details.push("\n=== MECHANICAL TRADES (pairs + sector signals — no AI needed) ===");
 
+      // Cooldown: skip symbols traded in the last 4 hours to prevent churning
+      const cooldownTime = new Date(Date.now() - 4 * 60 * 60 * 1000);
+      const recentTrades = await prisma.autoTradeLog.findMany({
+        where: { createdAt: { gte: cooldownTime } },
+        select: { symbol: true },
+      });
+      const recentSymbols = new Set(recentTrades.map((t) => t.symbol.replace(/\d.*$/, "")));
+
       // Pairs trades: buy calls on stocks lagging peers by 10%+
       try {
         const rvSignals = await scanRelativeValue([...focusSymbols.slice(0, 30)]);
@@ -795,6 +803,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
         for (const rv of strongLaggards.slice(0, 2)) {
           if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
           if (positions.some((p) => p.symbol.includes(rv.symbol))) continue;
+          if (recentSymbols.has(rv.symbol)) { details.push(`  PAIRS: ${rv.symbol} — cooldown (traded recently)`); continue; }
 
           // Get price and find a 14-30 DTE call
           try {

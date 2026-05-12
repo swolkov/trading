@@ -284,7 +284,8 @@ export async function placeMarketOrder(params: {
   return { orderId: data.orderId, status: data.orderStatus || "submitted" };
 }
 
-// Place bracket order: entry + stop + target
+// Place bracket order: market entry + stop loss + take profit
+// Uses 3 separate orders since Tradovate's OSO endpoint is unreliable
 export async function placeBracketOrder(params: {
   contractId: number;
   action: "Buy" | "Sell";
@@ -296,31 +297,66 @@ export async function placeBracketOrder(params: {
 
   const closeAction = params.action === "Buy" ? "Sell" : "Buy";
 
-  // OSO = One Sends Other (bracket)
-  const data = await tvFetch("/order/placeosoorder", {
+  // Get account name for accountSpec
+  const accounts = await tvFetch("/account/list") as { id: number; name: string }[];
+  const account = accounts.find((a) => a.id === _accountId) || accounts[0];
+  const accountSpec = account?.name || String(_accountId);
+
+  // Step 1: Place market entry
+  const entryData = await tvFetch("/order/placeorder", {
     method: "POST",
     body: JSON.stringify({
-      accountSpec: _accountId,
+      accountSpec,
       accountId: _accountId,
       action: params.action,
       symbol: params.contractId,
       orderQty: params.quantity,
       orderType: "Market",
+      timeInForce: "Day",
       isAutomated: true,
-      bracket1: {
+    }),
+  }) as { orderId: number };
+
+  // Wait for fill
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Step 2: Place stop loss
+  try {
+    await tvFetch("/order/placeorder", {
+      method: "POST",
+      body: JSON.stringify({
+        accountSpec,
+        accountId: _accountId,
         action: closeAction,
+        symbol: params.contractId,
+        orderQty: params.quantity,
         orderType: "Stop",
         stopPrice: params.stopLoss,
-      },
-      bracket2: {
+        timeInForce: "GTC",
+        isAutomated: true,
+      }),
+    });
+  } catch { /* stop order optional — agent monitors positions */ }
+
+  // Step 3: Place take profit
+  try {
+    await tvFetch("/order/placeorder", {
+      method: "POST",
+      body: JSON.stringify({
+        accountSpec,
+        accountId: _accountId,
         action: closeAction,
+        symbol: params.contractId,
+        orderQty: params.quantity,
         orderType: "Limit",
         price: params.takeProfit,
-      },
-    }),
-  }) as { orderId: number; orderStatus?: string };
+        timeInForce: "GTC",
+        isAutomated: true,
+      }),
+    });
+  } catch { /* target order optional — agent monitors positions */ }
 
-  return { orderId: data.orderId, status: data.orderStatus || "submitted" };
+  return { orderId: entryData.orderId, status: "submitted" };
 }
 
 // Cancel an order
