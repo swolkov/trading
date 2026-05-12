@@ -12,7 +12,9 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
-const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical"] });
+const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] });
+
+import { prisma } from "../lib/db";
 
 // ── Config ──────────────────────────────────────────────
 
@@ -352,6 +354,20 @@ async function closePosition(sym: string, price: number, reason: string) {
     });
     dailyPnl += pnl;
     log(`CLOSED ${sym}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
+
+    // Log close to database
+    try {
+      await prisma.autoTradeLog.create({ data: {
+        symbol: `FUT:${sym}`,
+        action: `futures_${reason}`,
+        qty: pos.quantity,
+        price,
+        pnl,
+        reason: `[FUTURES ${sym}] ${reason}: Closed ${pos.quantity}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Daily: $${dailyPnl.toFixed(0)}`,
+        orderId: null,
+      }});
+    } catch {}
+
     positions.delete(sym);
   } catch (err) { log(`Close failed ${sym}: ${err}`); }
 }
@@ -496,6 +512,20 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
+
+    // Log to database so Vercel dashboard shows it
+    try {
+      await prisma.autoTradeLog.create({ data: {
+        symbol: `FUT:${sym}`,
+        action: `futures_${direction}`,
+        qty,
+        price,
+        reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x`,
+        aiScore: Math.round(rr * 30), // use R:R as a proxy score
+        aiSignal: direction,
+        orderId: String(entry.orderId),
+      }});
+    } catch {}
   } catch (err) { log(`TRADE FAILED: ${err}`); }
 }
 
