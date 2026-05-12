@@ -2,16 +2,24 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   checkTradovateAuth,
   findContract,
-  getBars as getTVBars,
   placeBracketOrder,
   placeMarketOrder,
   getTradovatePositions,
   getTradovateAccountSummary,
   TRADOVATE_CONTRACTS,
 } from "./tradovate";
+import { getHistoricalBars } from "./yahoo";
 import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
+
+// Yahoo Finance symbols for micro futures (use the full-size contract as proxy)
+const YAHOO_FUTURES_MAP: Record<string, string> = {
+  MES: "ES=F",   // E-mini S&P 500
+  MNQ: "NQ=F",   // E-mini Nasdaq 100
+  MYM: "YM=F",   // E-mini Dow
+  M2K: "RTY=F",  // E-mini Russell 2000
+};
 
 // Alias for backward compatibility
 const FUTURES_CONTRACTS = TRADOVATE_CONTRACTS;
@@ -492,28 +500,28 @@ export async function runFuturesAgent(): Promise<{
       continue;
     }
 
-    // Get multi-timeframe data
-    let bars5min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
-    let bars15min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
-    let barsDaily: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
+    // Get multi-timeframe data from Yahoo Finance (free, no subscription needed)
+    const yahooSymbol = YAHOO_FUTURES_MAP[symbol];
+    if (!yahooSymbol) { details.push(`  No Yahoo symbol for ${symbol}`); continue; }
 
+    let barsDaily: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
     try {
-      [bars5min, bars15min, barsDaily] = await Promise.all([
-        getTVBars(contract.id, 100, "5min"),
-        getTVBars(contract.id, 100, "15min"),
-        getTVBars(contract.id, 30, "1d"),
-      ]);
+      barsDaily = await getHistoricalBars(yahooSymbol, 60);
     } catch (err) {
       details.push(`  Data error: ${err}`);
       continue;
     }
 
-    if (bars5min.length < 30) {
-      details.push(`  Insufficient data (${bars5min.length} bars)`);
+    if (barsDaily.length < 30) {
+      details.push(`  Insufficient data (${barsDaily.length} bars)`);
       continue;
     }
 
-    const price = bars5min[bars5min.length - 1].c;
+    // Convert Yahoo bars (string timestamps) to number timestamps for compatibility
+    const numericBars = barsDaily.map((b) => ({ ...b, t: new Date(b.t).getTime() / 1000 }));
+    const bars5min = numericBars;
+    const bars15min = numericBars;
+    const price = barsDaily[barsDaily.length - 1].c;
     const closes5 = bars5min.map((b) => b.c);
     const closes15 = bars15min.map((b) => b.c);
 
