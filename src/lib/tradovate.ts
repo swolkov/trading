@@ -359,6 +359,78 @@ export async function placeBracketOrder(params: {
   return { orderId: entryData.orderId, status: "submitted" };
 }
 
+// Place a limit entry with stop + target (bracket)
+// Entry only fills if price reaches the limit. Stop/target placed after fill.
+export async function placeLimitBracketOrder(params: {
+  contractId: number;
+  action: "Buy" | "Sell";
+  quantity: number;
+  limitPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+}): Promise<TradovateOrderResult> {
+  if (!_accountId) await checkTradovateAuth();
+
+  const closeAction = params.action === "Buy" ? "Sell" : "Buy";
+  const accounts = await tvFetch("/account/list") as { id: number; name: string }[];
+  const account = accounts.find((a) => a.id === _accountId) || accounts[0];
+  const accountSpec = account?.name || String(_accountId);
+
+  // Place limit entry (GTC — stays open until filled or cancelled by next agent run)
+  const entryData = await tvFetch("/order/placeorder", {
+    method: "POST",
+    body: JSON.stringify({
+      accountSpec,
+      accountId: _accountId,
+      action: params.action,
+      symbol: params.contractId,
+      orderQty: params.quantity,
+      orderType: "Limit",
+      price: params.limitPrice,
+      timeInForce: "Day", // expires end of day if not filled
+      isAutomated: true,
+    }),
+  }) as { orderId: number };
+
+  // Place stop loss (GTC — protects if limit fills)
+  try {
+    await tvFetch("/order/placeorder", {
+      method: "POST",
+      body: JSON.stringify({
+        accountSpec,
+        accountId: _accountId,
+        action: closeAction,
+        symbol: params.contractId,
+        orderQty: params.quantity,
+        orderType: "Stop",
+        stopPrice: params.stopLoss,
+        timeInForce: "GTC",
+        isAutomated: true,
+      }),
+    });
+  } catch { /* agent monitors positions as backup */ }
+
+  // Place take profit (GTC)
+  try {
+    await tvFetch("/order/placeorder", {
+      method: "POST",
+      body: JSON.stringify({
+        accountSpec,
+        accountId: _accountId,
+        action: closeAction,
+        symbol: params.contractId,
+        orderQty: params.quantity,
+        orderType: "Limit",
+        price: params.takeProfit,
+        timeInForce: "GTC",
+        isAutomated: true,
+      }),
+    });
+  } catch { /* agent monitors positions as backup */ }
+
+  return { orderId: entryData.orderId, status: "limit_submitted" };
+}
+
 // Cancel an order
 export async function cancelOrder(orderId: number): Promise<void> {
   await tvFetch(`/order/cancelorder`, {

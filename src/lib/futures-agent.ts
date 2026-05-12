@@ -6,6 +6,8 @@ import {
   placeMarketOrder,
   getTradovatePositions,
   getTradovateAccountSummary,
+  getOpenOrders,
+  cancelOrder,
   TRADOVATE_CONTRACTS,
 } from "./tradovate";
 import { getHistoricalBars, getIntradayBars } from "./yahoo";
@@ -72,11 +74,6 @@ function ema(data: number[], period: number): number[] {
     result.push(data[i] * k + result[i - 1] * (1 - k));
   }
   return result;
-}
-
-function sma(data: number[], period: number): number | null {
-  if (data.length < period) return null;
-  return data.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
 function rsi(closes: number[], period: number = 14): number | null {
@@ -157,29 +154,195 @@ function calcKeyLevels(dailyBars: { h: number; l: number; c: number }[], intrada
 
 // ============ SESSION DETECTION ============
 
-type Session = "pre_market" | "open" | "morning" | "midday" | "afternoon" | "close" | "after_hours";
+type Session = "pre_market" | "open" | "morning" | "midday" | "afternoon" | "close" | "eth_evening" | "eth_overnight" | "eth_asia" | "eth_europe" | "halt";
 
-function getSession(): { session: Session; isRTH: boolean; minutesSinceOpen: number } {
+function getSession(): { session: Session; isRTH: boolean; isETH: boolean; minutesSinceOpen: number } {
   const now = new Date();
   const utcHour = now.getUTCHours() + now.getUTCMinutes() / 60;
+  const dayOfWeek = now.getUTCDay(); // 0=Sun, 6=Sat
 
   const minutesSinceOpen = Math.max(0, (utcHour - FUTURES_RULES.RTH_START_UTC) * 60);
   const isRTH = utcHour >= FUTURES_RULES.RTH_START_UTC && utcHour < FUTURES_RULES.RTH_END_UTC;
 
-  let session: Session;
-  if (utcHour < 13) session = "after_hours";
-  else if (utcHour < 13.5) session = "pre_market";
-  else if (minutesSinceOpen < 15) session = "open";
-  else if (utcHour < 16) session = "morning";       // 9:45 AM - 12 PM ET
-  else if (utcHour < 18) session = "midday";         // 12 PM - 2 PM ET
-  else if (utcHour < 19.75) session = "afternoon";   // 2 PM - 3:45 PM ET
-  else if (utcHour < 20) session = "close";          // 3:45 PM - 4 PM ET
-  else session = "after_hours";
+  // Futures halt: daily 5:00-6:00 PM ET = 21:00-22:00 UTC
+  const isHalt = utcHour >= 21 && utcHour < 22;
 
-  return { session, isRTH, minutesSinceOpen };
+  // Weekend: Sat all day, Sun before 6PM ET (22:00 UTC)
+  const isWeekend = dayOfWeek === 6 || (dayOfWeek === 0 && utcHour < 22);
+
+  if (isWeekend || isHalt) {
+    return { session: "halt", isRTH: false, isETH: false, minutesSinceOpen: 0 };
+  }
+
+  // ETH sessions (outside RTH 9:30 AM - 4:00 PM ET)
+  const isETH = !isRTH;
+
+  let session: Session;
+  if (isRTH) {
+    if (minutesSinceOpen < 15) session = "open";
+    else if (utcHour < 16) session = "morning";         // 9:45 AM - 12 PM ET
+    else if (utcHour < 18) session = "midday";           // 12 PM - 2 PM ET
+    else if (utcHour < 19.75) session = "afternoon";     // 2 PM - 3:45 PM ET
+    else session = "close";                               // 3:45 PM - 4 PM ET
+  } else if (utcHour >= 20 && utcHour < 21) {
+    session = "eth_evening";                              // 4 PM - 5 PM ET (post-close)
+  } else if (utcHour >= 22 || utcHour < 2) {
+    session = "eth_evening";                              // 6 PM - 10 PM ET
+  } else if (utcHour >= 2 && utcHour < 7) {
+    session = "eth_asia";                                 // 10 PM - 3 AM ET (Asia session)
+  } else if (utcHour >= 7 && utcHour < 13) {
+    session = "eth_europe";                               // 3 AM - 9 AM ET (Europe/London)
+  } else {
+    session = "pre_market";                               // 9 AM - 9:30 AM ET
+  }
+
+  return { session, isRTH, isETH, minutesSinceOpen };
 }
 
-// ============ SETUP DETECTION ============
+// ============ DAY TYPE CLASSIFIER ============
+// The #1 determinant of profitability: is today a TREND day or a RANGE day?
+// This drives which setups we look for.
+
+type DayType = "trend" | "range" | "unknown";
+
+function classifyDayType(
+  dailyBars: { o: number; h: number; l: number; c: number; v: number }[],
+  todayBars: { o: number; h: number; l: number; c: number; v: number }[],
+  levels: KeyLevels,
+): { dayType: DayType; confidence: number; reasoning: string } {
+  let trendScore = 0;
+  const reasons: string[] = [];
+
+  // 1. Gap size — gap > 0.3% of prev close = trend day signal
+  if (levels.prevDayClose > 0 && todayBars.length > 0) {
+    const openPrice = todayBars[0].o;
+    const gapPct = Math.abs(openPrice - levels.prevDayClose) / levels.prevDayClose * 100;
+    if (gapPct > 0.5) { trendScore += 3; reasons.push(`large gap ${gapPct.toFixed(2)}%`); }
+    else if (gapPct > 0.3) { trendScore += 2; reasons.push(`gap ${gapPct.toFixed(2)}%`); }
+    else if (gapPct < 0.1) { trendScore -= 2; reasons.push(`tiny gap ${gapPct.toFixed(2)}%`); }
+  }
+
+  // 2. Opening range size vs average — wide OR = trend day
+  if (levels.openingRangeHigh > 0 && levels.openingRangeLow > 0) {
+    const orSize = levels.openingRangeHigh - levels.openingRangeLow;
+    const avgATR = dailyBars.length >= 14 ? atr(dailyBars.slice(-15)) : 0;
+    if (avgATR > 0) {
+      const orRatio = orSize / avgATR;
+      if (orRatio > 0.5) { trendScore += 2; reasons.push(`wide OR (${(orRatio * 100).toFixed(0)}% of ATR)`); }
+      else if (orRatio < 0.25) { trendScore -= 2; reasons.push(`narrow OR (${(orRatio * 100).toFixed(0)}% of ATR)`); }
+    }
+  }
+
+  // 3. Price relative to previous day range — outside = trend
+  if (todayBars.length > 0 && levels.prevDayHigh > 0) {
+    const current = todayBars[todayBars.length - 1].c;
+    if (current > levels.prevDayHigh) { trendScore += 2; reasons.push("trading above prev day high"); }
+    else if (current < levels.prevDayLow) { trendScore += 2; reasons.push("trading below prev day low"); }
+    else { trendScore -= 1; reasons.push("inside prev day range"); }
+  }
+
+  // 4. Volume in first 30 min vs average — high volume = trend
+  if (todayBars.length >= 6) {
+    const first30vol = todayBars.slice(0, 6).reduce((s, b) => s + b.v, 0);
+    const avgDailyVol = dailyBars.length >= 5 ? dailyBars.slice(-5).reduce((s, b) => s + b.v, 0) / 5 : 0;
+    if (avgDailyVol > 0) {
+      // First 30 min typically = ~15-20% of daily volume
+      const volRatio = (first30vol / avgDailyVol) * 100;
+      if (volRatio > 25) { trendScore += 2; reasons.push(`high early volume (${volRatio.toFixed(0)}% of daily avg)`); }
+      else if (volRatio < 12) { trendScore -= 1; reasons.push(`low early volume`); }
+    }
+  }
+
+  // 5. Consecutive daily bars in same direction = trending regime
+  if (dailyBars.length >= 3) {
+    const last3 = dailyBars.slice(-3);
+    const allUp = last3.every((b) => b.c > b.o);
+    const allDown = last3.every((b) => b.c < b.o);
+    if (allUp || allDown) { trendScore += 1; reasons.push(`3-day directional streak`); }
+  }
+
+  const dayType: DayType = trendScore >= 3 ? "trend" : trendScore <= -1 ? "range" : "unknown";
+  const confidence = Math.min(95, 50 + Math.abs(trendScore) * 8);
+
+  return { dayType, confidence, reasoning: `${dayType.toUpperCase()} day (score ${trendScore}): ${reasons.join(", ")}` };
+}
+
+// ============ TIME-OF-DAY QUALITY ============
+// Not all hours are equal. This adjusts confidence and position size.
+
+function getTimeQuality(session: Session, minutesSinceOpen: number): { quality: "prime" | "good" | "avoid"; sizeMultiplier: number } {
+  // RTH prime: 9:45-11:30 AM ET (post-opening-range, best setups)
+  if (session === "morning" && minutesSinceOpen >= 15) return { quality: "prime", sizeMultiplier: 1.0 };
+
+  // RTH afternoon: 1:30-3:45 PM ET (second best window)
+  if (session === "afternoon") return { quality: "good", sizeMultiplier: 0.8 };
+
+  // RTH lunch: 11:30 AM - 1:30 PM = chop — reduce size
+  if (session === "midday") return { quality: "avoid", sizeMultiplier: 0.5 };
+
+  // RTH close: 3:45-4:00 PM = don't open new trades
+  if (session === "close") return { quality: "avoid", sizeMultiplier: 0 };
+
+  // ETH Europe/London: 3 AM - 9 AM ET = good liquidity, real setups
+  if (session === "eth_europe") return { quality: "good", sizeMultiplier: 0.6 };
+
+  // ETH evening: 6 PM - 10 PM ET = thin but can trend
+  if (session === "eth_evening") return { quality: "good", sizeMultiplier: 0.4 };
+
+  // ETH Asia: 10 PM - 3 AM ET = thinnest liquidity, reduce heavily
+  if (session === "eth_asia") return { quality: "avoid", sizeMultiplier: 0.3 };
+
+  // Halt
+  if (session === "halt") return { quality: "avoid", sizeMultiplier: 0 };
+
+  return { quality: "good", sizeMultiplier: 0.7 };
+}
+
+// ============ VOLUME ANALYSIS ============
+
+function analyzeVolume(bars: { v: number; c: number }[]): {
+  ratio: number;       // current vs 20-bar avg
+  trend: "surge" | "rising" | "normal" | "declining" | "dry";
+  buyPressure: number; // 0-1 (up bars close vs prev close)
+} {
+  if (bars.length < 20) return { ratio: 1, trend: "normal", buyPressure: 0.5 };
+
+  const last20 = bars.slice(-20);
+  const avgVol = last20.reduce((s, b) => s + b.v, 0) / 20;
+  const current = bars[bars.length - 1].v;
+  const ratio = avgVol > 0 ? current / avgVol : 1;
+
+  // Volume trend over last 5 bars
+  const last5 = bars.slice(-5);
+  const first5avg = last20.slice(0, 5).reduce((s, b) => s + b.v, 0) / 5;
+  const last5avg = last5.reduce((s, b) => s + b.v, 0) / 5;
+  const volChange = first5avg > 0 ? last5avg / first5avg : 1;
+
+  let trend: "surge" | "rising" | "normal" | "declining" | "dry";
+  if (ratio > 2.0) trend = "surge";
+  else if (volChange > 1.3) trend = "rising";
+  else if (volChange < 0.6) trend = "dry";
+  else if (volChange < 0.8) trend = "declining";
+  else trend = "normal";
+
+  // Buy pressure: proportion of volume on up bars (close > prev close)
+  let upVol = 0, totalVol = 0;
+  for (let i = 1; i < last20.length; i++) {
+    totalVol += last20[i].v;
+    if (last20[i].c > last20[i - 1].c) upVol += last20[i].v;
+  }
+  const buyPressure = totalVol > 0 ? upVol / totalVol : 0.5;
+
+  return { ratio, trend, buyPressure };
+}
+
+// ============ SETUP DETECTION v2 ============
+// Rebuilt from first principles:
+// - Day type drives setup selection
+// - Trend days: Opening Range Breakout + Trend Continuation (go WITH the move)
+// - Range days: VWAP Mean Reversion ONLY (fade extremes)
+// - KILLED: Key Level Bounce (too noisy), EMA Crossover (too lagging)
+// - Added: time-of-day filter, volume profile, adaptive confidence
 
 type SetupType =
   | "opening_range_breakout"
@@ -192,7 +355,7 @@ type SetupType =
 interface Setup {
   type: SetupType;
   direction: "long" | "short";
-  confidence: number;   // 0-100
+  confidence: number;
   reasoning: string;
   stopDistance: number;
   targetDistance: number;
@@ -205,133 +368,174 @@ function detectSetup(
   levels: KeyLevels,
   vwapData: { vwap: number; upperBand: number; lowerBand: number },
   session: Session,
-  regime: string
+  regime: string,
+  dayType: DayType = "unknown",
+  minutesSinceOpen: number = 60,
 ): Setup {
+  if (closes.length < 25) return { type: "none", direction: "long", confidence: 0, reasoning: "Insufficient data", stopDistance: 0, targetDistance: 0 };
+
   const currentRSI = rsi(closes) || 50;
   const emaFast = ema(closes, 9);
   const emaSlow = ema(closes, 21);
   const currentATR = atr(bars);
-  const avgVolume = bars.length >= 20 ? bars.slice(-20).reduce((s, b) => s + b.v, 0) / 20 : 0;
-  const currentVolume = bars[bars.length - 1]?.v || 0;
-  const volumeRatio = avgVolume > 0 ? currentVolume / avgVolume : 1;
+  if (currentATR <= 0) return { type: "none", direction: "long", confidence: 0, reasoning: "ATR is zero", stopDistance: 0, targetDistance: 0 };
 
   const fastEMA = emaFast[emaFast.length - 1];
   const slowEMA = emaSlow[emaSlow.length - 1];
-  const prevFastEMA = emaFast[emaFast.length - 2];
-  const prevSlowEMA = emaSlow[emaSlow.length - 2];
 
-  // === SETUP 1: OPENING RANGE BREAKOUT (first 30 min only) ===
-  if (session === "morning" && levels.openingRangeHigh > 0) {
-    if (price > levels.openingRangeHigh && volumeRatio > 1.2) {
-      return {
-        type: "opening_range_breakout", direction: "long", confidence: 75,
-        reasoning: `Broke above opening range high ($${levels.openingRangeHigh.toFixed(2)}) with ${volumeRatio.toFixed(1)}x volume`,
-        stopDistance: currentATR * 1.5,
-        targetDistance: (price - levels.openingRangeLow) * 1.5, // 1.5x the range
-      };
-    }
-    if (price < levels.openingRangeLow && volumeRatio > 1.2) {
-      return {
-        type: "opening_range_breakout", direction: "short", confidence: 75,
-        reasoning: `Broke below opening range low ($${levels.openingRangeLow.toFixed(2)}) with ${volumeRatio.toFixed(1)}x volume`,
-        stopDistance: currentATR * 1.5,
-        targetDistance: (levels.openingRangeHigh - price) * 1.5,
-      };
+  const volume = analyzeVolume(bars);
+  const timeQ = getTimeQuality(session, minutesSinceOpen);
+
+  // ── DON'T TRADE during lunch chop unless perfect setup ──
+  if (timeQ.quality === "avoid") {
+    return { type: "none", direction: "long", confidence: 0, reasoning: `Avoiding ${session} session (low quality)`, stopDistance: 0, targetDistance: 0 };
+  }
+
+  // ── SETUP 1: OPENING RANGE BREAKOUT ──
+  // ONLY on trend days. Requires: wide OR, volume surge, within first 90 min.
+  if ((dayType === "trend" || dayType === "unknown") && session === "morning" && levels.openingRangeHigh > 0 && levels.openingRangeLow > 0) {
+    const orSize = levels.openingRangeHigh - levels.openingRangeLow;
+
+    // Must have meaningful OR (> 30% of ATR) to avoid noise breakouts
+    if (orSize > currentATR * 0.3) {
+      if (price > levels.openingRangeHigh && volume.ratio > 1.5) {
+        let conf = 72;
+        // Boost: volume surge on breakout
+        if (volume.trend === "surge") conf += 8;
+        // Boost: price already above prev day high = strong trend
+        if (price > levels.prevDayHigh && levels.prevDayHigh > 0) conf += 5;
+        // Boost: buy pressure dominant
+        if (volume.buyPressure > 0.6) conf += 3;
+        // Penalty: thin breakout (barely above OR)
+        if (price - levels.openingRangeHigh < currentATR * 0.1) conf -= 5;
+
+        return {
+          type: "opening_range_breakout", direction: "long", confidence: conf,
+          reasoning: `OR breakout long: price $${price.toFixed(2)} > OR high $${levels.openingRangeHigh.toFixed(2)}, vol ${volume.ratio.toFixed(1)}x (${volume.trend})`,
+          stopDistance: Math.max(orSize * 0.5, currentATR * 1.0), // stop at mid-range or 1 ATR
+          targetDistance: orSize * 1.5, // 1.5x the OR size
+        };
+      }
+      if (price < levels.openingRangeLow && volume.ratio > 1.5) {
+        let conf = 72;
+        if (volume.trend === "surge") conf += 8;
+        if (price < levels.prevDayLow && levels.prevDayLow > 0) conf += 5;
+        if (volume.buyPressure < 0.4) conf += 3;
+        if (levels.openingRangeLow - price < currentATR * 0.1) conf -= 5;
+
+        return {
+          type: "opening_range_breakout", direction: "short", confidence: conf,
+          reasoning: `OR breakout short: price $${price.toFixed(2)} < OR low $${levels.openingRangeLow.toFixed(2)}, vol ${volume.ratio.toFixed(1)}x (${volume.trend})`,
+          stopDistance: Math.max(orSize * 0.5, currentATR * 1.0),
+          targetDistance: orSize * 1.5,
+        };
+      }
     }
   }
 
-  // === SETUP 2: VWAP MEAN REVERSION (midday range-bound) ===
-  if ((session === "midday" || session === "afternoon") && regime !== "bull" && regime !== "bear") {
-    // Price at upper VWAP band + overbought RSI → short back to VWAP
-    if (price > vwapData.upperBand && currentRSI > 70) {
-      return {
-        type: "vwap_mean_reversion", direction: "short", confidence: 70,
-        reasoning: `Price at VWAP upper band ($${vwapData.upperBand.toFixed(2)}) + RSI ${currentRSI.toFixed(0)} overbought → fade to VWAP`,
-        stopDistance: currentATR * 1.5,
-        targetDistance: price - vwapData.vwap,
-      };
-    }
-    // Price at lower VWAP band + oversold RSI → long back to VWAP
-    if (price < vwapData.lowerBand && currentRSI < 30) {
-      return {
-        type: "vwap_mean_reversion", direction: "long", confidence: 70,
-        reasoning: `Price at VWAP lower band ($${vwapData.lowerBand.toFixed(2)}) + RSI ${currentRSI.toFixed(0)} oversold → bounce to VWAP`,
-        stopDistance: currentATR * 1.5,
-        targetDistance: vwapData.vwap - price,
-      };
-    }
-  }
+  // ── SETUP 2: TREND CONTINUATION ──
+  // ONLY on trend days or in trending regime. Pullback to EMA zone (within 0.3%, not exact touch).
+  // Requires: volume declining on pullback (healthy), RSI not extreme.
+  if ((dayType === "trend" || regime === "bull" || regime === "bear") &&
+      (session === "morning" || session === "afternoon")) {
+    const isTrendUp = fastEMA > slowEMA;
+    const isTrendDown = fastEMA < slowEMA;
+    const nearEMA9 = Math.abs(price - fastEMA) / price < 0.003; // within 0.3%
+    const aboveEMA21 = price > slowEMA;
+    const belowEMA21 = price < slowEMA;
 
-  // === SETUP 3: TREND CONTINUATION (trending markets) ===
-  if (regime === "bull" || regime === "bear") {
-    const isTrendUp = fastEMA > slowEMA && price > fastEMA;
-    const isTrendDown = fastEMA < slowEMA && price < fastEMA;
+    if (isTrendUp && nearEMA9 && aboveEMA21 && currentRSI > 35 && currentRSI < 65) {
+      let conf = 75;
+      // Boost: volume declining on pullback (healthy pullback, not selling pressure)
+      if (volume.trend === "declining" || volume.trend === "dry") conf += 8;
+      // Boost: price above VWAP (intraday trend confirmation)
+      if (price > vwapData.vwap) conf += 5;
+      // Boost: strong prior trend (EMA gap widening)
+      if ((fastEMA - slowEMA) / price > 0.002) conf += 3;
+      // Penalty: volume surge on pullback = selling, not healthy
+      if (volume.trend === "surge") conf -= 10;
+      // Penalty: RSI already high = late entry
+      if (currentRSI > 60) conf -= 5;
 
-    // Pullback to EMA in uptrend → long
-    if (isTrendUp && price <= fastEMA * 1.001 && price >= slowEMA && currentRSI > 40 && currentRSI < 60) {
       return {
-        type: "trend_continuation", direction: "long", confidence: 80,
-        reasoning: `Uptrend pullback to EMA9 ($${fastEMA.toFixed(2)}). Trend intact, RSI ${currentRSI.toFixed(0)} neutral`,
-        stopDistance: currentATR * 1.5,
-        targetDistance: currentATR * 3.0, // wider target in trending market
-      };
-    }
-    // Pullback to EMA in downtrend → short
-    if (isTrendDown && price >= fastEMA * 0.999 && price <= slowEMA && currentRSI > 40 && currentRSI < 60) {
-      return {
-        type: "trend_continuation", direction: "short", confidence: 80,
-        reasoning: `Downtrend pullback to EMA9 ($${fastEMA.toFixed(2)}). Trend intact, RSI ${currentRSI.toFixed(0)} neutral`,
-        stopDistance: currentATR * 1.5,
-        targetDistance: currentATR * 3.0,
-      };
-    }
-  }
-
-  // === SETUP 4: KEY LEVEL BOUNCE ===
-  if (levels.prevDayHigh > 0) {
-    const nearPrevHigh = Math.abs(price - levels.prevDayHigh) / price < 0.001;
-    const nearPrevLow = Math.abs(price - levels.prevDayLow) / price < 0.001;
-
-    if (nearPrevLow && currentRSI < 35) {
-      return {
-        type: "key_level_bounce", direction: "long", confidence: 65,
-        reasoning: `Bouncing off previous day low ($${levels.prevDayLow.toFixed(2)}) + RSI ${currentRSI.toFixed(0)} oversold`,
-        stopDistance: currentATR * 2.0,
+        type: "trend_continuation", direction: "long", confidence: conf,
+        reasoning: `Trend pullback long: near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, vol ${volume.trend}`,
+        stopDistance: Math.max(currentATR * 1.2, Math.abs(price - slowEMA) * 1.1), // stop below EMA21
         targetDistance: currentATR * 2.5,
       };
     }
-    if (nearPrevHigh && currentRSI > 65) {
+    if (isTrendDown && nearEMA9 && belowEMA21 && currentRSI > 35 && currentRSI < 65) {
+      let conf = 75;
+      if (volume.trend === "declining" || volume.trend === "dry") conf += 8;
+      if (price < vwapData.vwap) conf += 5;
+      if ((slowEMA - fastEMA) / price > 0.002) conf += 3;
+      if (volume.trend === "surge") conf -= 10;
+      if (currentRSI < 40) conf -= 5;
+
       return {
-        type: "key_level_bounce", direction: "short", confidence: 65,
-        reasoning: `Rejecting previous day high ($${levels.prevDayHigh.toFixed(2)}) + RSI ${currentRSI.toFixed(0)} overbought`,
-        stopDistance: currentATR * 2.0,
+        type: "trend_continuation", direction: "short", confidence: conf,
+        reasoning: `Trend pullback short: near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, vol ${volume.trend}`,
+        stopDistance: Math.max(currentATR * 1.2, Math.abs(slowEMA - price) * 1.1),
         targetDistance: currentATR * 2.5,
       };
     }
   }
 
-  // === SETUP 5: EMA CROSSOVER (fallback — lowest priority) ===
-  const isBullishCross = prevFastEMA <= prevSlowEMA && fastEMA > slowEMA;
-  const isBearishCross = prevFastEMA >= prevSlowEMA && fastEMA < slowEMA;
+  // ── SETUP 3: VWAP MEAN REVERSION ──
+  // ONLY on range days or choppy regime. Requires: declining volume at extreme + RSI confirmation.
+  // This is the highest-probability setup when conditions are right.
+  if ((dayType === "range" || regime === "choppy" || regime === "neutral") &&
+      (session === "morning" || session === "midday" || session === "afternoon")) {
+    // Short from VWAP upper band
+    if (price > vwapData.upperBand && currentRSI > 65) {
+      let conf = 68;
+      // Boost: declining volume at extreme = exhaustion
+      if (volume.trend === "declining" || volume.trend === "dry") conf += 10;
+      // Boost: strong RSI extreme
+      if (currentRSI > 75) conf += 5;
+      // Boost: inside previous day range (range confirmation)
+      if (price < levels.prevDayHigh && price > levels.prevDayLow) conf += 3;
+      // Penalty: volume surge at extreme = breakout, not reversion
+      if (volume.trend === "surge") conf -= 15;
+      // Penalty: price breaking prev day high = trend, not range
+      if (levels.prevDayHigh > 0 && price > levels.prevDayHigh) conf -= 10;
 
-  if (isBullishCross && price > vwapData.vwap && volumeRatio > 1.0) {
-    return {
-      type: "ema_crossover", direction: "long", confidence: 60,
-      reasoning: `EMA9 crossed above EMA21, price above VWAP ($${vwapData.vwap.toFixed(2)})`,
-      stopDistance: currentATR * FUTURES_RULES.ATR_STOP_MULTIPLIER,
-      targetDistance: currentATR * FUTURES_RULES.ATR_TARGET_MULTIPLIER,
-    };
-  }
-  if (isBearishCross && price < vwapData.vwap && volumeRatio > 1.0) {
-    return {
-      type: "ema_crossover", direction: "short", confidence: 60,
-      reasoning: `EMA9 crossed below EMA21, price below VWAP ($${vwapData.vwap.toFixed(2)})`,
-      stopDistance: currentATR * FUTURES_RULES.ATR_STOP_MULTIPLIER,
-      targetDistance: currentATR * FUTURES_RULES.ATR_TARGET_MULTIPLIER,
-    };
+      const targetDist = price - vwapData.vwap;
+      if (targetDist > currentATR * 0.3) { // only if target is meaningful
+        return {
+          type: "vwap_mean_reversion", direction: "short", confidence: conf,
+          reasoning: `VWAP fade short: $${price.toFixed(2)} > upper band $${vwapData.upperBand.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, vol ${volume.trend}`,
+          stopDistance: currentATR * 1.2, // tighter stop for mean reversion
+          targetDistance: targetDist * 0.8, // target 80% of the way to VWAP (don't hold for exact touch)
+        };
+      }
+    }
+    // Long from VWAP lower band
+    if (price < vwapData.lowerBand && currentRSI < 35) {
+      let conf = 68;
+      if (volume.trend === "declining" || volume.trend === "dry") conf += 10;
+      if (currentRSI < 25) conf += 5;
+      if (price < levels.prevDayHigh && price > levels.prevDayLow) conf += 3;
+      if (volume.trend === "surge") conf -= 15;
+      if (levels.prevDayLow > 0 && price < levels.prevDayLow) conf -= 10;
+
+      const targetDist = vwapData.vwap - price;
+      if (targetDist > currentATR * 0.3) {
+        return {
+          type: "vwap_mean_reversion", direction: "long", confidence: conf,
+          reasoning: `VWAP fade long: $${price.toFixed(2)} < lower band $${vwapData.lowerBand.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, vol ${volume.trend}`,
+          stopDistance: currentATR * 1.2,
+          targetDistance: targetDist * 0.8,
+        };
+      }
+    }
   }
 
-  return { type: "none", direction: "long", confidence: 0, reasoning: "No setup", stopDistance: 0, targetDistance: 0 };
+  // ── NO SETUP ──
+  // Key Level Bounce: KILLED — prev day H/L are magnets, not reliable bounces
+  // EMA Crossover: KILLED — lagging signal, move is often exhausted by the time it triggers
+
+  return { type: "none", direction: "long", confidence: 0, reasoning: "No valid setup", stopDistance: 0, targetDistance: 0 };
 }
 
 // ============ MAIN FUTURES AGENT ============
@@ -363,20 +567,29 @@ export async function runFuturesAgent(): Promise<{
     details.push("Tradovate not authenticated — set TRADOVATE_USERNAME, TRADOVATE_PASSWORD, TRADOVATE_CID, TRADOVATE_SEC env vars");
     return { trades, managed, details };
   }
-  details.push(`TRADOVATE: Connected — Account ${auth.accountName} (#${auth.accountId})`);
+  // Verify trading mode — default is DEMO, must be explicitly changed to live
+  const tradingMode = await (await import("./trading-mode")).getTradingMode("futures");
+  details.push(`TRADOVATE: Connected — Account ${auth.accountName} (#${auth.accountId}) — MODE: ${tradingMode.toUpperCase()}`);
+  if (tradingMode === "live") {
+    details.push("⚠ LIVE MODE — real money at risk");
+  }
 
   // Session check
-  const { session, isRTH, minutesSinceOpen } = getSession();
-  details.push(`SESSION: ${session.replace(/_/g, " ").toUpperCase()} | RTH: ${isRTH ? "YES" : "NO"} | ${minutesSinceOpen.toFixed(0)} min since open`);
+  const { session, isRTH, isETH, minutesSinceOpen } = getSession();
+  details.push(`SESSION: ${session.replace(/_/g, " ").toUpperCase()} | RTH: ${isRTH ? "YES" : "NO"} | ETH: ${isETH ? "YES" : "NO"} | ${minutesSinceOpen.toFixed(0)} min since open`);
 
-  // Avoid first/last 15 min of RTH
-  if (isRTH && minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES) {
-    details.push("Skipping — first 15 min after open (too choppy)");
+  // Halt = market closed (weekend or daily 5-6 PM ET break)
+  if (session === "halt") {
+    details.push("Market halted — no action");
     return { trades, managed, details };
   }
-  if (isRTH && minutesSinceOpen > (6.5 * 60 - FUTURES_RULES.AVOID_LAST_MINUTES)) {
-    details.push("Skipping — last 15 min before close");
-    return { trades, managed, details };
+
+  // Determine if we should scan for NEW trades (vs just managing positions)
+  // Position management ALWAYS runs regardless of session
+  const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (6.5 * 60 - FUTURES_RULES.AVOID_LAST_MINUTES));
+  const canScanNewTrades = session !== "close" && !isFirstLast15;
+  if (!canScanNewTrades) {
+    details.push(`New trade scanning paused (${isFirstLast15 ? "first/last 15 min RTH" : session}) — position management still active`);
   }
 
   // Market regime
@@ -390,11 +603,9 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Macro context
-  let macroContext = "";
   try {
     const signals = await getCrossAssetSignals();
-    macroContext = `VIX: ${signals.vix.toFixed(1)} (${signals.vixSignal}) | Macro: ${signals.macroSignal}`;
-    details.push(`MACRO: ${macroContext}`);
+    details.push(`MACRO: VIX: ${signals.vix.toFixed(1)} (${signals.vixSignal}) | Macro: ${signals.macroSignal}`);
   } catch { /* ignore */ }
 
   // Account state
@@ -437,42 +648,188 @@ export async function runFuturesAgent(): Promise<{
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
 
   // ============ MANAGE EXISTING POSITIONS ============
+  // Pre-fetch Yahoo bars for each unique symbol (avoid duplicate API calls)
+  const posBarCache: Record<string, { bars: { t: number; o: number; h: number; l: number; c: number; v: number }[]; price: number; atrVal: number }> = {};
+  for (const pos of futuresPositions) {
+    const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
+    if (sym && !posBarCache[sym]) {
+      const yahooSym = YAHOO_FUTURES_MAP[sym];
+      if (yahooSym) {
+        try {
+          const bars = await getIntradayBars(yahooSym, "5m", "1d");
+          posBarCache[sym] = {
+            bars,
+            price: bars.length > 0 ? bars[bars.length - 1].c : 0,
+            atrVal: atr(bars.map((b) => ({ h: b.h, l: b.l, c: b.c }))),
+          };
+        } catch { posBarCache[sym] = { bars: [], price: 0, atrVal: 5 }; }
+      }
+    }
+  }
+
+  // Get all open orders so we can cancel brackets when we manually close
+  const openOrders = await getOpenOrders();
+
   for (const pos of futuresPositions) {
     managed++;
     const qty = pos.netPos;
+    const absQty = Math.abs(qty);
     const avgPrice = pos.netPrice;
+    const direction = qty > 0 ? "long" : "short";
+    const symbolMatch = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
+    const multiplier = symbolMatch ? FUTURES_CONTRACTS[symbolMatch].multiplier : 5;
 
-    // Bracket orders handle stop/target automatically via Tradovate.
-    // We only intervene here for session-based exits.
+    // Use cached bars
+    const cached = symbolMatch ? posBarCache[symbolMatch] : null;
+    const currentPrice = cached?.price || avgPrice;
+    const currentATRVal = cached?.atrVal || 5;
 
-    // Close all positions before market close in choppy markets
+    const priceDiff = direction === "long" ? currentPrice - avgPrice : avgPrice - currentPrice;
+    const unrealizedPnl = priceDiff * multiplier * absQty;
+
+    details.push(`  ${pos.contractName}: ${direction.toUpperCase()} ${absQty}x @ $${avgPrice.toFixed(2)} → $${currentPrice.toFixed(2)} (${unrealizedPnl >= 0 ? "+" : ""}$${unrealizedPnl.toFixed(0)})`);
+
+    // Find the trade log for stop/target reference
+    const tradeLog = await prisma.autoTradeLog.findFirst({
+      where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: { startsWith: "futures_" }, orderId: { not: null } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    let origStop = 0, origTarget = 0;
+    if (tradeLog?.reason) {
+      const sm = tradeLog.reason.match(/Stop:\s*\$?([\d,.]+)/);
+      const tm = tradeLog.reason.match(/Target:\s*\$?([\d,.]+)/);
+      if (sm) origStop = parseFloat(sm[1].replace(",", ""));
+      if (tm) origTarget = parseFloat(tm[1].replace(",", ""));
+    }
+    const stopDistance = origStop > 0 ? Math.abs(avgPrice - origStop) : currentATRVal * 1.5;
+
+    // Helper: cancel bracket orders for this contract before manual close
+    const cancelBracketOrders = async () => {
+      const relatedOrders = openOrders.filter((o) => o.contractId === pos.contractId);
+      for (const order of relatedOrders) {
+        try { await cancelOrder(order.id); } catch { /* ignore — may already be filled */ }
+      }
+    };
+
+    // ── TRAILING STOP LOGIC ──
+    // Bracket orders handle the original stop/target. We layer on top:
+    // - At 2R+ profit: if price reverses past 1 ATR trailing level, close manually
+    if (priceDiff >= stopDistance * 2 && currentATRVal > 0) {
+      const trailStop = direction === "long"
+        ? currentPrice - currentATRVal
+        : currentPrice + currentATRVal;
+
+      // Only trail if trail level is tighter than original stop
+      const isTrailTighter = origStop > 0
+        ? (direction === "long" ? trailStop > origStop : trailStop < origStop)
+        : true;
+
+      if (isTrailTighter) {
+        details.push(`    TRAILING: ${(priceDiff / stopDistance).toFixed(1)}R profit — trail at $${trailStop.toFixed(2)}`);
+
+        // Check if we should record that this position reached 2R (for breakeven tracking)
+        const reached2R = await prisma.autoTradeLog.findFirst({
+          where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_reached_2r", createdAt: { gte: todayStart } },
+        });
+        if (!reached2R) {
+          await prisma.autoTradeLog.create({ data: {
+            symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_reached_2r",
+            qty: absQty, price: currentPrice, pnl: null, orderId: null,
+            reason: `Position reached ${(priceDiff / stopDistance).toFixed(1)}R. Trail stop active at $${trailStop.toFixed(2)}.`,
+          }});
+        }
+      }
+    }
+
+    // ── BREAKEVEN STOP ──
+    // If position previously reached 1R+ (tracked in DB) but has now pulled back to entry, close
+    if (priceDiff <= 0 && priceDiff > -stopDistance * 0.5) {
+      // Check if this position ever reached 1R
+      const everReached1R = await prisma.autoTradeLog.findFirst({
+        where: {
+          symbol: `FUT:${symbolMatch || pos.contractName}`,
+          action: { in: ["futures_reached_2r", "futures_scale_out"] },
+          createdAt: { gte: todayStart },
+        },
+      });
+      if (everReached1R) {
+        details.push(`    BREAKEVEN STOP: Was at 1R+, pulled back to ${(priceDiff / stopDistance).toFixed(2)}R — closing to protect`);
+        try {
+          await cancelBracketOrders();
+          await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: absQty });
+          await prisma.autoTradeLog.create({ data: {
+            symbol: `FUT:${pos.contractName}`, action: "futures_breakeven_close",
+            qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
+            reason: `Breakeven stop: Position was at 1R+, pulled back past entry. P&L: $${unrealizedPnl.toFixed(0)}`,
+          }});
+        } catch (err) { details.push(`    Breakeven close failed: ${err}`); }
+        continue; // position closed, skip remaining checks
+      }
+    }
+
+    // ── SCALE OUT at 1R (close half) ──
+    // Only if 2+ contracts AND haven't already scaled today
+    // IMPORTANT: After scaling, we cancel original bracket and let remaining ride without bracket
+    // (the trailing stop logic above handles the exit for remaining contracts)
+    if (absQty >= 2 && priceDiff >= stopDistance && priceDiff < stopDistance * 2) {
+      const scaleQty = Math.floor(absQty / 2);
+      if (scaleQty >= 1) {
+        const alreadyScaled = await prisma.autoTradeLog.findFirst({
+          where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out", createdAt: { gte: todayStart } },
+        });
+        if (!alreadyScaled) {
+          details.push(`    SCALE OUT: Taking profit on ${scaleQty}/${absQty} at 1R`);
+          try {
+            // Cancel bracket orders first to avoid quantity mismatch
+            await cancelBracketOrders();
+            await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: scaleQty });
+            await prisma.autoTradeLog.create({ data: {
+              symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out",
+              qty: scaleQty, price: currentPrice, pnl: priceDiff * multiplier * scaleQty, orderId: null,
+              reason: `Scale out: Closed ${scaleQty}/${absQty} at 1R ($${currentPrice.toFixed(2)}). Cancelled bracket. Remaining ${absQty - scaleQty} managed by trailing stop.`,
+            }});
+          } catch (err) { details.push(`    Scale out failed: ${err}`); }
+        }
+      }
+    }
+
+    // ── EOD close in choppy markets ──
     if (session === "close" && regime === "choppy") {
-      details.push(`  ${pos.contractName}: CLOSING before market close (choppy, not holding overnight)`);
+      details.push(`  ${pos.contractName}: CLOSING before EOD (choppy)`);
       try {
-        await placeMarketOrder({
-          contractId: pos.contractId,
-          action: qty > 0 ? "Sell" : "Buy",
-          quantity: Math.abs(qty),
-        });
-        await prisma.autoTradeLog.create({
-          data: {
-            symbol: `FUT:${pos.contractName}`,
-            action: "futures_session_close",
-            qty: Math.abs(qty),
-            price: avgPrice,
-            reason: `Session close: closing before EOD in choppy market.`,
-            pnl: null,
-            orderId: null,
-          },
-        });
+        await cancelBracketOrders();
+        await placeMarketOrder({ contractId: pos.contractId, action: qty > 0 ? "Sell" : "Buy", quantity: absQty });
+        await prisma.autoTradeLog.create({ data: {
+          symbol: `FUT:${pos.contractName}`, action: "futures_session_close",
+          qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
+          reason: `Session close: EOD in choppy market. P&L: $${unrealizedPnl.toFixed(0)}`,
+        }});
       } catch (err) { details.push(`  Failed to close: ${err}`); }
       continue;
     }
 
-    details.push(`  ${pos.contractName}: ${qty > 0 ? "LONG" : "SHORT"} ${Math.abs(qty)}x @ $${avgPrice.toFixed(2)}`);
+    // ── MAX DRAWDOWN KILL SWITCH ──
+    if (unrealizedPnl < -(equity * FUTURES_RULES.MAX_DRAWDOWN_PCT)) {
+      details.push(`  EMERGENCY: ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% drawdown kill switch — CLOSING`);
+      try {
+        await cancelBracketOrders();
+        await placeMarketOrder({ contractId: pos.contractId, action: qty > 0 ? "Sell" : "Buy", quantity: absQty });
+        await prisma.autoTradeLog.create({ data: {
+          symbol: `FUT:${pos.contractName}`, action: "futures_emergency_close",
+          qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
+          reason: `EMERGENCY: Drawdown kill switch. P&L: $${unrealizedPnl.toFixed(0)} exceeds ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity.`,
+        }});
+      } catch (err) { details.push(`  Emergency close failed: ${err}`); }
+    }
   }
 
   // ============ SCAN FOR NEW TRADES ============
+  if (!canScanNewTrades) {
+    details.push("Scan paused — positions managed, returning");
+    return { trades, managed, details };
+  }
+
   const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(p.netPos), 0);
   if (totalContracts >= FUTURES_RULES.MAX_TOTAL_CONTRACTS) {
     details.push("At contract limit — not scanning for new trades");
@@ -534,8 +891,12 @@ export async function runFuturesAgent(): Promise<{
     const closes5 = bars5min.map((b) => b.c);
     const closes15 = bars15min.map((b) => b.c);
 
-    // Calculate indicators
-    const vwapData = vwap(bars5min.slice(-78)); // today's session
+    // Calculate indicators — VWAP anchored to session open (RTH bars only)
+    const rthStartToday = new Date();
+    rthStartToday.setUTCHours(13, 30, 0, 0);
+    const rthStartTs = rthStartToday.getTime() / 1000;
+    const sessionBars = bars5min.filter((b) => b.t >= rthStartTs);
+    const vwapData = vwap(sessionBars.length >= 3 ? sessionBars : bars5min.slice(-78));
     const keyLevels = calcKeyLevels(barsDaily, bars5min);
     const currentATR = atr(bars5min);
     const currentRSI = rsi(closes5);
@@ -543,12 +904,17 @@ export async function runFuturesAgent(): Promise<{
     // 15-min trend for confirmation
     const trend15 = bars15min.length >= 21 ? (ema(closes15, 9).slice(-1)[0] > ema(closes15, 21).slice(-1)[0] ? "up" : "down") : "flat";
 
+    // Day type classification
+    const dayClassification = classifyDayType(barsDaily, bars5min, keyLevels);
+    const dayType = dayClassification.dayType;
+
     details.push(`  Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} [${vwapData.lowerBand.toFixed(2)}-${vwapData.upperBand.toFixed(2)}]`);
     details.push(`  RSI: ${currentRSI?.toFixed(0) || "N/A"} | ATR: ${currentATR.toFixed(2)} | 15m Trend: ${trend15.toUpperCase()}`);
+    details.push(`  DAY TYPE: ${dayClassification.reasoning}`);
     details.push(`  Levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} | PDL $${keyLevels.prevDayLow.toFixed(2)} | OR ${keyLevels.openingRangeLow.toFixed(2)}-${keyLevels.openingRangeHigh.toFixed(2)}`);
 
     // Detect setup
-    const setup = detectSetup(price, closes5, bars5min, keyLevels, vwapData, session, regime);
+    const setup = detectSetup(price, closes5, bars5min, keyLevels, vwapData, session, regime, dayType, minutesSinceOpen);
 
     if (setup.type === "none") {
       details.push(`  No setup — holding`);
@@ -608,11 +974,31 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
     // ============ POSITION SIZING (equity-based) ============
     const stopDistance = setup.stopDistance;
     const targetDistance = setup.targetDistance;
+
+    // Sanity check: stop and target must be reasonable
+    if (stopDistance <= 0 || targetDistance <= 0) {
+      details.push(`  Invalid stop/target distance — skipping`);
+      continue;
+    }
+    if (targetDistance / stopDistance < 1.5) {
+      details.push(`  R:R too low (${(targetDistance / stopDistance).toFixed(1)}) — need 1.5+ — skipping`);
+      continue;
+    }
+
     const riskPerContract = stopDistance * contractInfo.multiplier;
+
+    // Sanity: if risk per contract exceeds 1% of equity, cap at 1 contract
+    const maxByRisk = Math.floor(maxRiskPerTrade / riskPerContract);
     const contracts = Math.max(1, Math.min(
       FUTURES_RULES.MAX_CONTRACTS_PER_TRADE,
-      Math.floor(maxRiskPerTrade / riskPerContract)
+      maxByRisk,
     ));
+
+    // Final sanity: never risk more than 0.5% on a single trade
+    const totalRisk = riskPerContract * contracts;
+    if (totalRisk > equity * 0.005) {
+      details.push(`  Risk too high ($${totalRisk.toFixed(0)} = ${((totalRisk / equity) * 100).toFixed(2)}% of equity) — capping at 1 contract`);
+    }
 
     const side = setup.direction === "long" ? "BUY" as const : "SELL" as const;
     const stopPrice = setup.direction === "long" ? price - stopDistance : price + stopDistance;

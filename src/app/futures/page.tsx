@@ -3,17 +3,35 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { FuturesChart } from "@/components/charts/futures-chart";
+
+// ── Types ──────────────────────────────────────────────
+
+interface FuturesQuote {
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  multiplier: number;
+  tickSize: number;
+  margin: number;
+  price: number;
+  change: number;
+  changePercent: number;
+  prevClose: number;
+  open: number;
+  high: number;
+  low: number;
+  volume: number;
+  bid: number;
+  ask: number;
+  timestamp: string;
+}
 
 interface FuturesStatus {
   connected: boolean;
   accountId?: string;
+  accountName?: string;
   message?: string;
-}
-
-interface FuturesResult {
-  trades: { symbol: string; action: string; contracts: number; price: number; stopLoss: number; target: number; reasoning: string; success: boolean }[];
-  managed: number;
-  details: string[];
 }
 
 interface FuturesTrade {
@@ -26,91 +44,185 @@ interface FuturesTrade {
   time: string;
 }
 
-const CONTRACTS = [
-  { symbol: "MES", name: "Micro E-mini S&P 500", multiplier: "$5/pt", margin: "$1,320", when: "Always" },
-  { symbol: "MNQ", name: "Micro E-mini Nasdaq 100", multiplier: "$2/pt", margin: "$1,630", when: "Trending only" },
-  { symbol: "MYM", name: "Micro E-mini Dow", multiplier: "$0.50/pt", margin: "$880", when: "Always" },
-  { symbol: "M2K", name: "Micro E-mini Russell 2000", multiplier: "$5/pt", margin: "$730", when: "Trending only" },
-];
+interface FuturesResult {
+  trades: { symbol: string; action: string; contracts: number; price: number; stopLoss: number; target: number; reasoning: string; success: boolean }[];
+  managed: number;
+  details: string[];
+}
+
+interface FuturesPosition {
+  id: number;
+  contractName: string;
+  symbol: string;
+  direction: "long" | "short";
+  quantity: number;
+  entryPrice: number;
+  currentPrice: number;
+  unrealizedPnl: number;
+  stopLoss: number | null;
+  target: number | null;
+  pctToStop: number | null;
+  pctToTarget: number | null;
+  multiplier: number;
+  setup: string | null;
+  aiScore: number | null;
+  openedAt: string;
+}
+
+interface FuturesAccount {
+  balance: number;
+  netLiq: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  marginUsed: number;
+}
+
+interface ActivityLog {
+  id: string;
+  symbol: string;
+  action: string;
+  qty: number;
+  price: number | null;
+  pnl: number | null;
+  reason: string;
+  aiScore: number | null;
+  time: string;
+}
+
+interface PositionsData {
+  connected: boolean;
+  account: FuturesAccount | null;
+  positions: FuturesPosition[];
+  orders: { id: number; action: string; type: string; qty: number; status: string }[];
+  activity: ActivityLog[];
+}
+
+interface BacktestSetup {
+  setup: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgWin: number;
+  avgLoss: number;
+  profitFactor: number;
+  totalPnl: number;
+  maxDrawdown: number;
+  avgRMultiple: number;
+  avgHoldBars: number;
+  sharpe: number;
+  verdict: "keep" | "optimize" | "kill";
+}
+
+interface BacktestData {
+  symbol: string;
+  period: string;
+  totalBars: number;
+  tradingDays: number;
+  setups: BacktestSetup[];
+  equity: number[];
+  summary: {
+    totalTrades: number;
+    winRate: number;
+    profitFactor: number;
+    totalPnl: number;
+    maxDrawdown: number;
+    sharpe: number;
+    bestSetup: string;
+    worstSetup: string;
+  };
+}
+
+// ── Constants ──────────────────────────────────────────
+
+const CONTRACTS = ["MES", "MNQ", "MYM", "M2K"];
 
 const STRATEGIES = [
-  {
-    name: "Opening Range Breakout",
-    priority: 1,
-    when: "First 30 min after open",
-    direction: "Long or Short",
-    description: "Price breaks above/below the first 15-min range with 1.2x+ volume. Most reliable early-session setup.",
-    rules: ["Wait for first 15 min to establish range", "Enter on break with volume confirmation", "Stop: 1.5 ATR", "Target: 1.5x the opening range"],
-  },
-  {
-    name: "VWAP Mean Reversion",
-    priority: 2,
-    when: "Midday/afternoon, choppy markets",
-    direction: "Fade to VWAP",
-    description: "Price hits VWAP upper/lower band + RSI extreme. Fade back toward VWAP for a high-probability mean reversion.",
-    rules: ["Price at VWAP +/- 1 std dev", "RSI > 70 (short) or RSI < 30 (long)", "Target: VWAP itself", "Only in choppy/neutral regime"],
-  },
-  {
-    name: "Trend Continuation",
-    priority: 3,
-    when: "Bull or bear regime",
-    direction: "With trend",
-    description: "Pullback to EMA9 in an established trend. RSI neutral (40-60). The bread and butter of trending markets.",
-    rules: ["EMA9 > EMA21 (long) or EMA9 < EMA21 (short)", "Price pulls back to EMA9", "RSI between 40-60 (not extreme)", "Target: 3x ATR (wider in trends)"],
-  },
-  {
-    name: "Key Level Bounce",
-    priority: 4,
-    when: "Anytime",
-    direction: "Bounce",
-    description: "Price tests previous day high/low with RSI confirmation. High-probability reversal at known levels.",
-    rules: ["Price within 0.1% of previous day high or low", "RSI confirms (< 35 at support, > 65 at resistance)", "Stop: 2x ATR", "Target: 2.5x ATR"],
-  },
-  {
-    name: "EMA Crossover",
-    priority: 5,
-    when: "Anytime (fallback)",
-    direction: "Cross direction",
-    description: "EMA9 crosses EMA21 with price above/below VWAP and volume confirmation. Lowest priority, used when nothing else sets up.",
-    rules: ["EMA9 crosses EMA21", "Price must be on same side of VWAP", "Volume > average", "Stop: 1.5 ATR, Target: 2.5 ATR"],
-  },
+  { name: "Opening Range Breakout", priority: 1, confidence: "75%", when: "First 30 min", desc: "Break above/below 15-min range with volume" },
+  { name: "VWAP Mean Reversion", priority: 2, confidence: "70%", when: "Midday, choppy", desc: "Fade VWAP band extremes + RSI" },
+  { name: "Trend Continuation", priority: 3, confidence: "80%", when: "Trending", desc: "Pullback to EMA9 in trend" },
+  { name: "Key Level Bounce", priority: 4, confidence: "65%", when: "Anytime", desc: "Prev day H/L with RSI confirm" },
+  { name: "EMA Crossover", priority: 5, confidence: "60%", when: "Fallback", desc: "9/21 cross + VWAP alignment" },
 ];
 
 const RISK_RULES = [
-  { rule: "0.2% of equity risked per trade", detail: "$1M paper = $2,000 risk. When live with $100k = $200 risk. Same percentages." },
-  { rule: "Bracket orders on every entry", detail: "Stop loss + take profit placed atomically with entry at the exchange. No relying on cron checks." },
-  { rule: "1% daily loss limit", detail: "If down 1% of equity in a day, agent stops trading. Protects against tilt." },
-  { rule: "Max 6 trades per day", detail: "Quality over quantity. 2-3 good trades beats 10 mediocre ones." },
-  { rule: "15-min trend confirmation", detail: "Won't go against the 15-min trend. If 5-min says long but 15-min says down, confidence is reduced." },
-  { rule: "Skip first/last 15 min of RTH", detail: "Opening and closing are too choppy. Avoids getting chopped up in noise." },
-  { rule: "Close choppy positions before EOD", detail: "In choppy markets, closes all positions before 4 PM. Only holds overnight in strong trends." },
-  { rule: "AI confirmation (optional boost)", detail: "Asks Claude for a quick agree/disagree. Adjusts confidence +5% or -15% based on response." },
+  "0.2% equity risk per trade",
+  "Bracket orders on every entry",
+  "1% daily loss limit",
+  "Max 6 trades/day",
+  "Skip first/last 15 min RTH",
+  "AI confirmation boost",
 ];
+
+// ── Helpers ────────────────────────────────────────────
 
 function pnlColor(val: number) {
   return val > 0 ? "text-emerald-400" : val < 0 ? "text-red-400" : "text-muted-foreground";
 }
 
-export default function FuturesPage() {
-  const [status, setStatus] = useState<FuturesStatus | null>(null);
-  const [result, setResult] = useState<FuturesResult | null>(null);
-  const [trades, setTrades] = useState<FuturesTrade[]>([]);
-  const [running, setRunning] = useState(false);
+function formatNum(n: number, decimals = 2) {
+  return n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
 
-  const loadData = useCallback(async () => {
-    const [statusRes, tradesRes] = await Promise.all([
-      fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false, message: "Connection check failed" })),
-      fetch("/api/agent/activity?filter=futures").then((r) => r.json()).catch(() => []),
-    ]);
-    setStatus(statusRes);
-    if (Array.isArray(tradesRes)) setTrades(tradesRes.filter((t: FuturesTrade) => t.symbol?.startsWith("FUT:")));
+function formatVol(v: number) {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+  return String(v);
+}
+
+// ── Component ──────────────────────────────────────────
+
+export default function FuturesPage() {
+  const [quotes, setQuotes] = useState<FuturesQuote[]>([]);
+  const [status, setStatus] = useState<FuturesStatus | null>(null);
+  const [trades, setTrades] = useState<FuturesTrade[]>([]);
+  const [posData, setPosData] = useState<PositionsData | null>(null);
+  const [result, setResult] = useState<FuturesResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [selectedContract, setSelectedContract] = useState("MES");
+  const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "history" | "backtest">("chart");
+  const [backtest, setBacktest] = useState<BacktestData | null>(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+
+  // ── Data Loading ─────────────────────────────────────
+
+  const loadQuotes = useCallback(async () => {
+    try {
+      const res = await fetch("/api/futures/quotes");
+      const data = await res.json();
+      if (Array.isArray(data)) setQuotes(data);
+    } catch { /* ignore */ }
+  }, []);
+
+  const loadPositions = useCallback(async () => {
+    try {
+      const res = await fetch("/api/futures/positions");
+      const data = await res.json();
+      if (data && !data.error) setPosData(data);
+    } catch { /* ignore */ }
+  }, []);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const [statusRes, tradesRes] = await Promise.all([
+        fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false })),
+        fetch("/api/agent/activity?filter=futures").then((r) => r.json()).catch(() => []),
+      ]);
+      setStatus(statusRes);
+      if (Array.isArray(tradesRes)) setTrades(tradesRes.filter((t: FuturesTrade) => t.symbol?.startsWith("FUT:")));
+    } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 30000);
-    return () => clearInterval(interval);
-  }, [loadData]);
+    loadQuotes();
+    loadStatus();
+    loadPositions();
+    // Refresh quotes every 15s, positions every 10s, status every 30s
+    const quoteInterval = setInterval(loadQuotes, 15000);
+    const posInterval = setInterval(loadPositions, 10000);
+    const statusInterval = setInterval(loadStatus, 30000);
+    return () => { clearInterval(quoteInterval); clearInterval(posInterval); clearInterval(statusInterval); };
+  }, [loadQuotes, loadStatus, loadPositions]);
 
   const runAgent = async () => {
     setRunning(true);
@@ -121,227 +233,688 @@ export default function FuturesPage() {
       setResult({ trades: [], managed: 0, details: [`Error: ${err}`] });
     }
     setRunning(false);
-    loadData();
+    loadStatus();
+    loadPositions();
   };
 
-  // Stats from trade history
+  // ── Derived data ─────────────────────────────────────
+
+  const selectedQuote = quotes.find((q) => q.symbol === selectedContract);
   const closedTrades = trades.filter((t) => t.pnl != null);
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const totalPnl = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
 
   return (
-    <div className="space-y-6 animate-fade-up">
+    <div className="space-y-4 animate-fade-up">
+      {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Futures Trading</h1>
-          <p className="text-sm text-muted-foreground">Expert micro futures system via Interactive Brokers</p>
+          <h1 className="text-xl font-bold tracking-tight">Futures Command Center</h1>
+          <p className="text-[11px] text-muted-foreground/60">
+            Micro futures — live data via Yahoo Finance
+            {status?.connected && (
+              <span className="text-emerald-400 ml-2">Tradovate Connected</span>
+            )}
+          </p>
         </div>
-        <Button onClick={runAgent} disabled={running || !status?.connected} size="sm">
-          {running ? "Running..." : "Run Futures Agent"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            <span className={`w-2 h-2 rounded-full ${status?.connected ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`} />
+            <span className="text-[10px] text-muted-foreground/60">
+              {status?.connected ? status.accountName : "Tradovate pending"}
+            </span>
+          </div>
+          <Button onClick={runAgent} disabled={running || !status?.connected} size="sm" variant="outline" className="text-xs h-7">
+            {running ? "Running..." : "Run Agent"}
+          </Button>
+        </div>
       </div>
 
-      {/* Connection + Stats Row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Card>
-          <CardContent className="pt-4 pb-3">
-            <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">IBKR Status</p>
-            <div className="flex items-center gap-2 mt-1">
-              <span className={`w-2 h-2 rounded-full ${status?.connected ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
-              <span className={`text-sm font-bold ${status?.connected ? "text-emerald-400" : "text-red-400"}`}>
-                {status?.connected ? "Connected" : "Disconnected"}
-              </span>
-            </div>
-            <p className="text-[10px] text-muted-foreground/50 mt-0.5">{status?.accountId || "Paper trading"}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-3">
-            <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Futures P&L</p>
-            <p className={`text-2xl font-bold mt-1 ${pnlColor(totalPnl)}`}>
-              {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
-            </p>
-            <p className="text-[10px] text-muted-foreground/50">{closedTrades.length} closed trades</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-3">
-            <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Win Rate</p>
-            <p className="text-2xl font-bold mt-1">
-              {closedTrades.length > 0 ? `${((wins.length / closedTrades.length) * 100).toFixed(0)}%` : "—"}
-            </p>
-            <p className="text-[10px] text-muted-foreground/50">{wins.length}W / {closedTrades.length - wins.length}L</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-3">
-            <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Schedule</p>
-            <p className="text-sm font-bold mt-1">Every 30 min</p>
-            <p className="text-[10px] text-muted-foreground/50">24hrs weekdays (futures hours)</p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Strategy Framework */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Strategy Framework — 5 Expert Setups</CardTitle>
-          <p className="text-xs text-muted-foreground">Prioritized from highest to lowest. Agent checks in order, takes the first valid setup.</p>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            {STRATEGIES.map((s, i) => (
-              <div key={i} className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3">
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] bg-blue-500/15 text-blue-400 px-1.5 py-0.5 rounded font-bold">#{s.priority}</span>
-                    <span className="text-sm font-bold">{s.name}</span>
+      {/* ── Live Price Tiles ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {CONTRACTS.map((sym) => {
+          const q = quotes.find((x) => x.symbol === sym);
+          const isSelected = sym === selectedContract;
+          const isUp = (q?.change ?? 0) >= 0;
+          return (
+            <button
+              key={sym}
+              onClick={() => setSelectedContract(sym)}
+              className={`text-left rounded-lg border p-3 transition-all ${
+                isSelected
+                  ? "border-emerald-500/40 bg-emerald-500/[0.06] shadow-lg shadow-emerald-500/5"
+                  : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className={`text-sm font-bold ${isSelected ? "text-emerald-400" : ""}`}>{sym}</span>
+                {q && (
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                    isUp ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+                  }`}>
+                    {isUp ? "+" : ""}{q.changePercent.toFixed(2)}%
+                  </span>
+                )}
+              </div>
+              {q ? (
+                <>
+                  <p className={`text-lg font-bold tabular-nums ${isUp ? "text-emerald-400" : "text-red-400"}`}>
+                    {formatNum(q.price)}
+                  </p>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className={`text-[10px] tabular-nums ${isUp ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                      {isUp ? "+" : ""}{formatNum(q.change)}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground/40">
+                      Vol {formatVol(q.volume)}
+                    </span>
                   </div>
-                  <span className="text-[10px] text-muted-foreground">{s.when}</span>
+                </>
+              ) : (
+                <div className="h-10 flex items-center">
+                  <span className="text-[10px] text-muted-foreground/40 animate-pulse">Loading...</span>
                 </div>
-                <p className="text-xs text-muted-foreground mb-2">{s.description}</p>
-                <div className="flex flex-wrap gap-2">
-                  {s.rules.map((r, j) => (
-                    <span key={j} className="text-[10px] bg-white/5 px-2 py-0.5 rounded">{r}</span>
-                  ))}
-                </div>
-              </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Selected Contract Detail Bar ── */}
+      {selectedQuote && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 px-1 text-[11px] text-muted-foreground/60">
+          <span>Open <span className="text-foreground/80 font-medium tabular-nums">{formatNum(selectedQuote.open)}</span></span>
+          <span>High <span className="text-emerald-400/80 font-medium tabular-nums">{formatNum(selectedQuote.high)}</span></span>
+          <span>Low <span className="text-red-400/80 font-medium tabular-nums">{formatNum(selectedQuote.low)}</span></span>
+          <span>Prev Close <span className="text-foreground/80 font-medium tabular-nums">{formatNum(selectedQuote.prevClose)}</span></span>
+          <span>Bid <span className="text-foreground/60 tabular-nums">{formatNum(selectedQuote.bid)}</span></span>
+          <span>Ask <span className="text-foreground/60 tabular-nums">{formatNum(selectedQuote.ask)}</span></span>
+          <span>${selectedQuote.multiplier}/pt</span>
+          <span>${selectedQuote.margin.toLocaleString()} margin</span>
+        </div>
+      )}
+
+      {/* ── Main Content Area ── */}
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
+        {/* Left: Chart + Tabs */}
+        <div className="space-y-3">
+          {/* Tab bar */}
+          <div className="flex gap-1 border-b border-white/[0.06] pb-2">
+            {(["chart", "strategy", "backtest", "history"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => {
+                  setActiveTab(tab);
+                  if (tab === "backtest" && !backtest && !backtestLoading) {
+                    setBacktestLoading(true);
+                    fetch("/api/futures/backtest")
+                      .then((r) => r.json())
+                      .then((data) => { if (!data.error) setBacktest(data); })
+                      .catch(() => {})
+                      .finally(() => setBacktestLoading(false));
+                  }
+                }}
+                className={`px-3 py-1.5 rounded-t text-xs font-medium transition-colors ${
+                  activeTab === tab
+                    ? "text-foreground border-b-2 border-emerald-500"
+                    : "text-muted-foreground/60 hover:text-foreground"
+                }`}
+              >
+                {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : tab === "backtest" ? "Backtest" : "Trade History"}
+              </button>
             ))}
           </div>
-        </CardContent>
-      </Card>
 
-      {/* Risk Rules */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Risk Management</CardTitle>
-          <p className="text-xs text-muted-foreground">Equity-based — same percentages paper and live</p>
-        </CardHeader>
-        <CardContent>
-          <div className="grid md:grid-cols-2 gap-2">
-            {RISK_RULES.map((r, i) => (
-              <div key={i} className="flex items-start gap-2 text-xs">
-                <span className="text-emerald-400 mt-0.5 shrink-0">{i + 1}.</span>
+          {/* Chart tab */}
+          {activeTab === "chart" && (
+            <Card className="border-white/[0.06]">
+              <CardContent className="pt-4">
+                <FuturesChart symbol={selectedContract} height={480} />
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Strategy tab */}
+          {activeTab === "strategy" && (
+            <Card className="border-white/[0.06]">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">5 Expert Setups — Priority Order</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {STRATEGIES.map((s) => (
+                    <div key={s.priority} className="flex items-start gap-3 bg-white/[0.02] border border-white/[0.04] rounded-lg p-3">
+                      <span className="text-[10px] bg-blue-500/15 text-blue-400 px-1.5 py-0.5 rounded font-bold shrink-0">#{s.priority}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-bold">{s.name}</span>
+                          <span className="text-[10px] text-emerald-400 font-bold">{s.confidence}</span>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground/60 mt-0.5">{s.desc}</p>
+                        <span className="text-[9px] text-muted-foreground/40">{s.when}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-4 pt-3 border-t border-white/[0.06]">
+                  <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-2 font-bold">Risk Rules</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {RISK_RULES.map((r, i) => (
+                      <span key={i} className="text-[10px] text-muted-foreground/60 flex items-center gap-1.5">
+                        <span className="text-emerald-400/60">{i + 1}.</span> {r}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Backtest tab */}
+          {activeTab === "backtest" && (
+            <Card className="border-white/[0.06]">
+              <CardContent className="pt-4">
+                {backtestLoading ? (
+                  <div className="text-center py-12">
+                    <p className="text-sm text-muted-foreground/60 animate-pulse">Running backtest on ~55 days of ES 5-min data...</p>
+                    <p className="text-[10px] text-muted-foreground/30 mt-1">This takes 10-30 seconds</p>
+                  </div>
+                ) : backtest ? (
+                  <div className="space-y-4">
+                    {/* Summary */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="bg-white/[0.03] rounded-lg p-3">
+                        <p className="text-[9px] text-muted-foreground/40 uppercase">Total P&L</p>
+                        <p className={`text-xl font-bold tabular-nums ${pnlColor(backtest.summary.totalPnl)}`}>
+                          {backtest.summary.totalPnl >= 0 ? "+" : ""}{backtest.summary.totalPnl.toFixed(1)} pts
+                        </p>
+                      </div>
+                      <div className="bg-white/[0.03] rounded-lg p-3">
+                        <p className="text-[9px] text-muted-foreground/40 uppercase">Win Rate</p>
+                        <p className="text-xl font-bold">{(backtest.summary.winRate * 100).toFixed(0)}%</p>
+                        <p className="text-[9px] text-muted-foreground/30">{backtest.summary.totalTrades} trades</p>
+                      </div>
+                      <div className="bg-white/[0.03] rounded-lg p-3">
+                        <p className="text-[9px] text-muted-foreground/40 uppercase">Profit Factor</p>
+                        <p className={`text-xl font-bold ${backtest.summary.profitFactor >= 1.5 ? "text-emerald-400" : backtest.summary.profitFactor >= 1.0 ? "text-amber-400" : "text-red-400"}`}>
+                          {backtest.summary.profitFactor.toFixed(2)}
+                        </p>
+                      </div>
+                      <div className="bg-white/[0.03] rounded-lg p-3">
+                        <p className="text-[9px] text-muted-foreground/40 uppercase">Sharpe</p>
+                        <p className={`text-xl font-bold ${backtest.summary.sharpe >= 1.0 ? "text-emerald-400" : backtest.summary.sharpe >= 0.5 ? "text-amber-400" : "text-red-400"}`}>
+                          {backtest.summary.sharpe.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-[10px] text-muted-foreground/40">
+                      {backtest.symbol} | {backtest.period} | {backtest.tradingDays} trading days | {backtest.totalBars.toLocaleString()} bars
+                    </div>
+
+                    {/* Per-setup breakdown */}
+                    <div>
+                      <p className="text-xs font-bold mb-2">Per-Setup Performance</p>
+                      <div className="space-y-2">
+                        {backtest.setups.map((s) => (
+                          <div key={s.setup} className={`bg-white/[0.02] border rounded-lg p-3 ${
+                            s.verdict === "keep" ? "border-emerald-500/30" :
+                            s.verdict === "optimize" ? "border-amber-500/30" :
+                            "border-red-500/30"
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-bold">{s.setup.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}</span>
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                  s.verdict === "keep" ? "bg-emerald-500/15 text-emerald-400" :
+                                  s.verdict === "optimize" ? "bg-amber-500/15 text-amber-400" :
+                                  "bg-red-500/15 text-red-400"
+                                }`}>
+                                  {s.verdict.toUpperCase()}
+                                </span>
+                              </div>
+                              <span className={`text-sm font-bold tabular-nums ${pnlColor(s.totalPnl)}`}>
+                                {s.totalPnl >= 0 ? "+" : ""}{s.totalPnl.toFixed(1)} pts
+                              </span>
+                            </div>
+                            {s.trades > 0 ? (
+                              <div className="grid grid-cols-4 md:grid-cols-8 gap-2 text-[10px]">
+                                <div>
+                                  <p className="text-muted-foreground/40">Trades</p>
+                                  <p className="font-bold">{s.trades}</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">Win Rate</p>
+                                  <p className="font-bold">{(s.winRate * 100).toFixed(0)}%</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">W/L</p>
+                                  <p className="font-bold">{s.wins}/{s.losses}</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">PF</p>
+                                  <p className={`font-bold ${s.profitFactor >= 1.5 ? "text-emerald-400" : s.profitFactor >= 1.0 ? "text-amber-400" : "text-red-400"}`}>
+                                    {s.profitFactor.toFixed(2)}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">Avg Win</p>
+                                  <p className="text-emerald-400 font-bold">{s.avgWin.toFixed(1)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">Avg Loss</p>
+                                  <p className="text-red-400 font-bold">{s.avgLoss.toFixed(1)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">Avg R</p>
+                                  <p className="font-bold">{s.avgRMultiple.toFixed(2)}R</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground/40">Sharpe</p>
+                                  <p className="font-bold">{s.sharpe.toFixed(2)}</p>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-[10px] text-muted-foreground/30">No trades triggered in test period</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Equity curve (simple text representation) */}
+                    {backtest.equity.length > 0 && (
+                      <div>
+                        <p className="text-xs font-bold mb-2">Equity Curve (cumulative points)</p>
+                        <div className="bg-black/30 rounded-lg p-3 h-24 flex items-end gap-px">
+                          {(() => {
+                            // Sample equity to ~80 bars for display
+                            const eq = backtest.equity;
+                            const step = Math.max(1, Math.floor(eq.length / 80));
+                            const sampled = eq.filter((_, i) => i % step === 0);
+                            const min = Math.min(...sampled, 0);
+                            const max = Math.max(...sampled, 1);
+                            const range = max - min || 1;
+                            return sampled.map((v, i) => {
+                              const height = ((v - min) / range) * 100;
+                              return (
+                                <div
+                                  key={i}
+                                  className={`flex-1 min-w-[2px] rounded-t ${v >= 0 ? "bg-emerald-500/60" : "bg-red-500/60"}`}
+                                  style={{ height: `${Math.max(2, height)}%` }}
+                                />
+                              );
+                            });
+                          })()}
+                        </div>
+                        <div className="flex justify-between text-[9px] text-muted-foreground/30 mt-1">
+                          <span>Trade 1</span>
+                          <span>Max DD: {backtest.summary.maxDrawdown.toFixed(1)} pts</span>
+                          <span>Trade {backtest.equity.length}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Re-run button */}
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs h-7"
+                        onClick={() => {
+                          setBacktestLoading(true);
+                          setBacktest(null);
+                          fetch("/api/futures/backtest")
+                            .then((r) => r.json())
+                            .then((data) => { if (!data.error) setBacktest(data); })
+                            .catch(() => {})
+                            .finally(() => setBacktestLoading(false));
+                        }}
+                      >
+                        Re-run Backtest
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground/40 text-center py-8">Click to run backtest</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* History tab */}
+          {activeTab === "history" && (
+            <Card className="border-white/[0.06]">
+              <CardContent className="pt-4">
+                {trades.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-muted-foreground/40 border-b border-white/[0.06]">
+                          <th className="text-left py-2 font-medium">Symbol</th>
+                          <th className="text-left py-2 font-medium">Action</th>
+                          <th className="text-right py-2 font-medium">Qty</th>
+                          <th className="text-right py-2 font-medium">Price</th>
+                          <th className="text-right py-2 font-medium">P&L</th>
+                          <th className="text-left py-2 font-medium">Reason</th>
+                          <th className="text-right py-2 font-medium">Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {trades.slice(0, 50).map((t, i) => (
+                          <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                            <td className="py-2 font-bold">{t.symbol.replace("FUT:", "")}</td>
+                            <td className="py-2">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" :
+                                t.action.includes("short") ? "bg-red-500/15 text-red-400" :
+                                "bg-white/10 text-muted-foreground"
+                              }`}>{t.action.replace("futures_", "").toUpperCase()}</span>
+                            </td>
+                            <td className="py-2 text-right tabular-nums">{t.qty}</td>
+                            <td className="py-2 text-right tabular-nums">{t.price ? `$${t.price.toFixed(2)}` : "—"}</td>
+                            <td className={`py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnlColor(t.pnl) : ""}`}>
+                              {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "Open"}
+                            </td>
+                            <td className="py-2 text-muted-foreground/60 max-w-[180px] truncate">{t.reason?.slice(0, 60)}</td>
+                            <td className="py-2 text-right text-muted-foreground/40 tabular-nums">
+                              {new Date(t.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground/40 text-center py-8">No futures trades yet — agent will log trades here once Tradovate is connected</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+        </div>
+
+        {/* Right sidebar: Positions + Stats + Activity */}
+        <div className="space-y-3">
+          {/* ── LIVE POSITIONS ── */}
+          <Card className={`border-white/[0.06] ${posData?.positions?.length ? "border-emerald-500/20" : ""}`}>
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">
+                  Open Positions
+                </CardTitle>
+                {posData?.positions?.length ? (
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+                  </span>
+                ) : null}
+              </div>
+            </CardHeader>
+            <CardContent>
+              {posData?.positions && posData.positions.length > 0 ? (
+                <div className="space-y-2">
+                  {posData.positions.map((pos) => {
+                    const isProfit = pos.unrealizedPnl >= 0;
+                    return (
+                      <div key={pos.id} className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-2.5 space-y-2">
+                        {/* Header: symbol + direction + P&L */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-bold">{pos.symbol}</span>
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              pos.direction === "long" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+                            }`}>
+                              {pos.direction.toUpperCase()} {pos.quantity}x
+                            </span>
+                          </div>
+                          <span className={`text-sm font-bold tabular-nums ${pnlColor(pos.unrealizedPnl)}`}>
+                            {pos.unrealizedPnl >= 0 ? "+" : ""}${pos.unrealizedPnl.toFixed(0)}
+                          </span>
+                        </div>
+
+                        {/* Prices row */}
+                        <div className="grid grid-cols-3 gap-2 text-[10px]">
+                          <div>
+                            <p className="text-muted-foreground/40">Entry</p>
+                            <p className="font-medium tabular-nums">${formatNum(pos.entryPrice)}</p>
+                          </div>
+                          <div>
+                            <p className="text-muted-foreground/40">Current</p>
+                            <p className={`font-medium tabular-nums ${isProfit ? "text-emerald-400" : "text-red-400"}`}>
+                              ${formatNum(pos.currentPrice)}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-muted-foreground/40">AI Score</p>
+                            <p className="font-medium">{pos.aiScore ? `${pos.aiScore}%` : "—"}</p>
+                          </div>
+                        </div>
+
+                        {/* Stop / Target progress bar */}
+                        {(pos.stopLoss || pos.target) && (
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[9px]">
+                              <span className="text-red-400/70">
+                                Stop ${pos.stopLoss ? formatNum(pos.stopLoss) : "—"}
+                                {pos.pctToStop != null && <span className="ml-1">({pos.pctToStop.toFixed(1)}%)</span>}
+                              </span>
+                              <span className="text-emerald-400/70">
+                                Target ${pos.target ? formatNum(pos.target) : "—"}
+                                {pos.pctToTarget != null && <span className="ml-1">({pos.pctToTarget.toFixed(1)}%)</span>}
+                              </span>
+                            </div>
+                            {/* Visual progress between stop and target */}
+                            {pos.stopLoss && pos.target && (
+                              <div className="h-1.5 bg-white/[0.06] rounded-full overflow-hidden">
+                                {(() => {
+                                  const range = pos.target - pos.stopLoss;
+                                  const progress = range !== 0 ? ((pos.currentPrice - pos.stopLoss) / range) * 100 : 50;
+                                  const clampedProgress = Math.max(0, Math.min(100, progress));
+                                  return (
+                                    <div
+                                      className={`h-full rounded-full transition-all ${isProfit ? "bg-emerald-500" : "bg-red-500"}`}
+                                      style={{ width: `${clampedProgress}%` }}
+                                    />
+                                  );
+                                })()}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Setup name + time */}
+                        <div className="flex justify-between text-[9px] text-muted-foreground/30">
+                          {pos.setup && <span>{pos.setup}</span>}
+                          <span>{new Date(pos.openedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Account summary when positions exist */}
+                  {posData.account && (
+                    <div className="pt-2 border-t border-white/[0.06] grid grid-cols-2 gap-2 text-[10px]">
+                      <div>
+                        <span className="text-muted-foreground/40">Net Liq</span>
+                        <p className="font-bold">${posData.account.netLiq.toLocaleString()}</p>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground/40">Margin Used</span>
+                        <p className="font-bold">${posData.account.marginUsed.toLocaleString()}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground/30 text-center py-4">
+                  {posData?.connected ? "No open positions" : "Positions will appear once Tradovate is connected"}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* ── PERFORMANCE STATS ── */}
+          <Card className="border-white/[0.06]">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Performance</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div>
+                <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
+                <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
+                  {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <span className="font-medium">{r.rule}</span>
-                  <p className="text-[10px] text-muted-foreground/60">{r.detail}</p>
+                  <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
+                  <p className="text-lg font-bold">
+                    {closedTrades.length > 0 ? `${((wins.length / closedTrades.length) * 100).toFixed(0)}%` : "—"}
+                  </p>
+                  <p className="text-[9px] text-muted-foreground/30">{wins.length}W / {closedTrades.length - wins.length}L</p>
+                </div>
+                <div>
+                  <p className="text-[10px] text-muted-foreground/40">Trades</p>
+                  <p className="text-lg font-bold">{closedTrades.length}</p>
+                  <p className="text-[9px] text-muted-foreground/30">closed total</p>
                 </div>
               </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
 
-      {/* Contracts */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Micro Futures Contracts</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {CONTRACTS.map((c) => (
-              <div key={c.symbol} className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3 space-y-1">
-                <p className="text-sm font-bold text-emerald-400">{c.symbol}</p>
-                <p className="text-[11px] text-muted-foreground">{c.name}</p>
-                <div className="flex justify-between text-[10px] text-muted-foreground/60">
-                  <span>{c.multiplier}</span>
-                  <span>{c.margin}</span>
-                </div>
-                <p className="text-[10px] text-blue-400">{c.when}</p>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Trade History */}
-      {trades.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Futures Trade History</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-muted-foreground/60 border-b border-white/10">
-                    <th className="text-left py-2 font-medium">Symbol</th>
-                    <th className="text-left py-2 font-medium">Action</th>
-                    <th className="text-right py-2 font-medium">Qty</th>
-                    <th className="text-right py-2 font-medium">Price</th>
-                    <th className="text-right py-2 font-medium">P&L</th>
-                    <th className="text-left py-2 font-medium">Reason</th>
-                    <th className="text-right py-2 font-medium">Time</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.slice(0, 30).map((t, i) => (
-                    <tr key={i} className="border-b border-white/[0.04]">
-                      <td className="py-2 font-medium">{t.symbol.replace("FUT:", "")}</td>
-                      <td className="py-2">
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                          t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" :
-                          t.action.includes("short") ? "bg-red-500/15 text-red-400" :
-                          "bg-white/10"
-                        }`}>{t.action.replace("futures_", "").toUpperCase()}</span>
-                      </td>
-                      <td className="py-2 text-right">{t.qty}</td>
-                      <td className="py-2 text-right">{t.price ? `$${t.price.toFixed(2)}` : "—"}</td>
-                      <td className={`py-2 text-right font-bold ${t.pnl != null ? pnlColor(t.pnl) : ""}`}>
-                        {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "Open"}
-                      </td>
-                      <td className="py-2 text-muted-foreground max-w-[200px] truncate">{t.reason?.slice(0, 80)}</td>
-                      <td className="py-2 text-right text-muted-foreground">
-                        {new Date(t.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                      </td>
-                    </tr>
+          {/* ── AGENT ACTIVITY FEED ── */}
+          <Card className="border-white/[0.06]">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Agent Activity</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {posData?.activity && posData.activity.length > 0 ? (
+                <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                  {posData.activity.slice(0, 15).map((log) => (
+                    <div key={log.id} className="flex items-start gap-2 text-[10px]">
+                      <span className={`shrink-0 mt-0.5 w-1.5 h-1.5 rounded-full ${
+                        log.action.includes("long") ? "bg-emerald-500" :
+                        log.action.includes("short") ? "bg-red-500" :
+                        log.action.includes("close") ? "bg-amber-500" :
+                        "bg-white/20"
+                      }`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold">{log.symbol}</span>
+                          <span className={`px-1 py-0.5 rounded text-[8px] font-bold ${
+                            log.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" :
+                            log.action.includes("short") ? "bg-red-500/15 text-red-400" :
+                            "bg-white/10 text-muted-foreground"
+                          }`}>
+                            {log.action.replace("futures_", "").toUpperCase()}
+                          </span>
+                          <span className="text-muted-foreground/30 tabular-nums">{log.qty}x</span>
+                          {log.pnl != null && (
+                            <span className={`font-bold tabular-nums ${pnlColor(log.pnl)}`}>
+                              {log.pnl >= 0 ? "+" : ""}${log.pnl.toFixed(0)}
+                            </span>
+                          )}
+                          {log.aiScore && (
+                            <span className="text-blue-400/60">{log.aiScore}%</span>
+                          )}
+                        </div>
+                        <p className="text-muted-foreground/30 truncate">{log.reason?.slice(0, 80)}</p>
+                        <p className="text-muted-foreground/20 tabular-nums">
+                          {new Date(log.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </p>
+                      </div>
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground/30 text-center py-3">No agent activity yet</p>
+              )}
+            </CardContent>
+          </Card>
 
-      {/* Agent Output */}
-      {result && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Last Agent Run</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="bg-black/30 rounded-lg p-3 max-h-96 overflow-y-auto font-mono text-[11px] text-muted-foreground space-y-0.5">
-              {result.details.map((d, i) => (
-                <div key={i} className={
-                  d.includes("TRADE:") || d.includes("ORDER PLACED") ? "text-emerald-400 font-medium" :
-                  d.includes("STOP") || d.includes("EMERGENCY") ? "text-red-400" :
-                  d.includes("SETUP:") ? "text-blue-400 font-medium" :
-                  d.includes("REGIME:") || d.includes("MACRO:") ? "text-purple-400" :
-                  ""
-                }>{d}</div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+          {/* ── CONTRACT SPECS ── */}
+          {selectedQuote && (
+            <Card className="border-white/[0.06]">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">
+                  {selectedQuote.symbol} Specs
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground/60">Contract</span>
+                    <span className="font-medium">{selectedQuote.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground/60">Multiplier</span>
+                    <span className="font-medium">${selectedQuote.multiplier}/pt</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground/60">Tick Size</span>
+                    <span className="font-medium">{selectedQuote.tickSize}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground/60">Tick Value</span>
+                    <span className="font-medium">${(selectedQuote.tickSize * selectedQuote.multiplier).toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground/60">Day Margin</span>
+                    <span className="font-medium">${selectedQuote.margin.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground/60">Day Range</span>
+                    <span className="font-medium tabular-nums">
+                      {formatNum(selectedQuote.low)} — {formatNum(selectedQuote.high)}
+                    </span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
-      {/* Setup Instructions (when not connected) */}
-      {!status?.connected && (
-        <Card className="border-yellow-500/20">
-          <CardHeader>
-            <CardTitle className="text-sm">Connect IBKR Gateway</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs space-y-2 text-muted-foreground">
-            <p>The gateway is deployed on Railway. To activate:</p>
-            <div className="space-y-1 ml-4">
-              <p>1. Visit <span className="text-blue-400">trading-production-fbc9.up.railway.app</span> in your browser</p>
-              <p>2. Log in with your IBKR paper trading credentials</p>
-              <p>3. Once authenticated, the futures agent will start trading automatically</p>
-              <p>4. Re-authenticate daily (~24hr session)</p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+          {/* ── SETUP REQUIRED ── */}
+          {!status?.connected && (
+            <Card className="border-amber-500/20 bg-amber-500/[0.03]">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-[11px] text-amber-400 uppercase tracking-wider font-bold">Setup Required</CardTitle>
+              </CardHeader>
+              <CardContent className="text-[11px] space-y-2 text-muted-foreground/60">
+                <p>Tradovate deposit clears ~May 14. Then:</p>
+                <div className="space-y-1 ml-2">
+                  <p>1. Subscribe to API ($25/mo)</p>
+                  <p>2. Create API keys (CID + SEC)</p>
+                  <p>3. Set Vercel env vars</p>
+                  <p>4. Redeploy — agent auto-connects</p>
+                </div>
+                <p className="text-[9px] text-muted-foreground/30 pt-1">Charts + quotes work now via Yahoo Finance. Agent + positions need Tradovate auth.</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* ── AGENT OUTPUT ── */}
+          {result && (
+            <Card className="border-white/[0.06]">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Last Agent Run</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="bg-black/30 rounded-lg p-2 max-h-64 overflow-y-auto font-mono text-[10px] text-muted-foreground/60 space-y-0.5">
+                  {result.details.map((d, i) => (
+                    <div key={i} className={
+                      d.includes("TRADE:") || d.includes("ORDER PLACED") ? "text-emerald-400 font-medium" :
+                      d.includes("STOP") || d.includes("EMERGENCY") ? "text-red-400" :
+                      d.includes("SETUP:") ? "text-blue-400 font-medium" :
+                      d.includes("REGIME:") || d.includes("MACRO:") ? "text-purple-400" :
+                      ""
+                    }>{d}</div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
