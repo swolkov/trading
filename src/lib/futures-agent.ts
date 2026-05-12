@@ -8,7 +8,7 @@ import {
   getTradovateAccountSummary,
   TRADOVATE_CONTRACTS,
 } from "./tradovate";
-import { getHistoricalBars } from "./yahoo";
+import { getHistoricalBars, getIntradayBars } from "./yahoo";
 import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
@@ -500,28 +500,37 @@ export async function runFuturesAgent(): Promise<{
       continue;
     }
 
-    // Get multi-timeframe data from Yahoo Finance (free, no subscription needed)
+    // Get multi-timeframe data from Yahoo Finance (free intraday + daily)
     const yahooSymbol = YAHOO_FUTURES_MAP[symbol];
     if (!yahooSymbol) { details.push(`  No Yahoo symbol for ${symbol}`); continue; }
 
-    let barsDaily: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
+    let bars5min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
+    let bars15min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
+    let barsDailyRaw: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
+
     try {
-      barsDaily = await getHistoricalBars(yahooSymbol, 60);
+      [bars5min, bars15min, barsDailyRaw] = await Promise.all([
+        getIntradayBars(yahooSymbol, "5m", "1d"),
+        getIntradayBars(yahooSymbol, "15m", "5d"),
+        getHistoricalBars(yahooSymbol, 60),
+      ]);
     } catch (err) {
       details.push(`  Data error: ${err}`);
       continue;
     }
 
-    if (barsDaily.length < 30) {
-      details.push(`  Insufficient data (${barsDaily.length} bars)`);
+    const barsDaily = barsDailyRaw.map((b) => ({ ...b, t: new Date(b.t).getTime() / 1000 }));
+
+    // Need at least some data to trade
+    if (bars5min.length < 10 && barsDaily.length < 20) {
+      details.push(`  Insufficient data (5min: ${bars5min.length}, daily: ${barsDaily.length})`);
       continue;
     }
 
-    // Convert Yahoo bars (string timestamps) to number timestamps for compatibility
-    const numericBars = barsDaily.map((b) => ({ ...b, t: new Date(b.t).getTime() / 1000 }));
-    const bars5min = numericBars;
-    const bars15min = numericBars;
-    const price = barsDaily[barsDaily.length - 1].c;
+    // Use 5min data if available, fall back to daily
+    const primaryBars = bars5min.length >= 20 ? bars5min : barsDaily;
+    const price = primaryBars[primaryBars.length - 1].c;
+    details.push(`  Data: ${bars5min.length} 5min bars, ${bars15min.length} 15min bars, ${barsDaily.length} daily bars`);
     const closes5 = bars5min.map((b) => b.c);
     const closes15 = bars15min.map((b) => b.c);
 

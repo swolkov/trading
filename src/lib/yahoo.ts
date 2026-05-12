@@ -29,6 +29,37 @@ export async function getHistoricalBars(
   }
 }
 
+// ---------- Intraday Bars (5min, 15min) — FREE from Yahoo ----------
+
+export async function getIntradayBars(
+  symbol: string,
+  interval: "5m" | "15m" | "1h" = "5m",
+  range: "1d" | "5d" = "1d"
+): Promise<{ t: number; o: number; h: number; l: number; c: number; v: number }[]> {
+  try {
+    const result = await yahooFinance.chart(symbol, {
+      period1: range === "1d" ? new Date(Date.now() - 24 * 60 * 60 * 1000) : new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+      period2: new Date(),
+      interval,
+    });
+
+    if (!result?.quotes || !Array.isArray(result.quotes)) return [];
+
+    return result.quotes
+      .filter((q: Record<string, number | null>) => q.close != null && q.close > 0)
+      .map((q: Record<string, number | Date | null>) => ({
+        t: q.date ? new Date(String(q.date)).getTime() / 1000 : 0,
+        o: Number(q.open) || 0,
+        h: Number(q.high) || 0,
+        l: Number(q.low) || 0,
+        c: Number(q.close) || 0,
+        v: Number(q.volume) || 0,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 // ---------- Company Profile ----------
 
 export interface CompanyProfile {
