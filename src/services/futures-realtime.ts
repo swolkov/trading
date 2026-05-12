@@ -694,69 +694,62 @@ async function executeTrade(
 }
 
 // ── WebSocket Connection ────────────────────────────────
+// Tradovate uses a CUSTOM framing protocol:
+//   "o"        = server open frame (send auth after this)
+//   "h"        = server heartbeat
+//   "a[...]"   = data frame (strip "a", JSON.parse the array)
+// Client sends "[]" every 2.5s as heartbeat.
 
 let ws: WebSocket | null = null;
 let wsHeartbeat: ReturnType<typeof setInterval> | null = null;
+let wsAuthorized = false;
+let lastServerMessage = Date.now();
+let wsReqId = 2; // 0=authorize, 1=reserved, 2+=requests
 
 function connectWebSocket() {
   log("Connecting to Tradovate WebSocket...");
+  wsAuthorized = false;
 
   ws = new WebSocket(WS_URL);
 
-  ws.on("open", async () => {
-    log("WebSocket connected");
-
-    // Authorize
-    ws!.send(`authorize\n1\n\n${accessToken}`);
+  ws.on("open", () => {
+    log("WebSocket TCP connected — waiting for server open frame...");
   });
 
   ws.on("message", (data: Buffer) => {
-    const msg = data.toString();
+    const raw = data.toString();
+    lastServerMessage = Date.now();
 
-    // Tradovate uses a custom protocol: frametype\nid\n\nbody
-    const lines = msg.split("\n");
-    if (lines.length < 1) return;
-
-    // Auth response
-    if (msg.includes('"s":200') && !wsHeartbeat) {
-      log("WebSocket authorized — subscribing to market data");
-
-      // Subscribe to quotes for all contracts
-      let reqId = 10;
-      for (const [sym, contract] of contracts) {
-        ws!.send(`md/subscribeQuote\n${reqId}\n\n{"symbol":"${contract.name}"}`);
-        log(`Subscribed to quotes: ${contract.name} (${sym})`);
-        reqId++;
-      }
-
-      // Heartbeat every 2.5 seconds
-      wsHeartbeat = setInterval(() => {
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send("[]");
-        }
-      }, 2500);
+    // ── "o" frame = server ready, send authorization ──
+    if (raw === "o") {
+      log("Server open frame received — sending authorization...");
+      ws!.send(`authorize\n0\n\n${accessToken}`);
+      return;
     }
 
-    // Parse market data messages
-    try {
-      // Look for quote data in the message
-      if (msg.includes('"md/subscribeQuote"') || msg.includes('"entries"') || msg.includes('"Trade"') || msg.includes('"bid"')) {
-        // Try to extract quote updates
-        const jsonMatch = msg.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          handleMarketData(parsed);
+    // ── "h" frame = server heartbeat ──
+    if (raw === "h") {
+      return; // just update lastServerMessage timestamp
+    }
+
+    // ── "a[...]" frame = data array ──
+    if (raw.startsWith("a")) {
+      const jsonStr = raw.slice(1); // strip the "a" prefix
+      try {
+        const messages = JSON.parse(jsonStr) as Record<string, unknown>[];
+        for (const msg of messages) {
+          handleWsMessage(msg);
         }
+      } catch (err) {
+        // Sometimes frames are malformed during high traffic
       }
-    } catch {
-      // Not all messages are quotes
+      return;
     }
   });
 
   ws.on("close", (code: number) => {
     log(`WebSocket closed (${code}) — reconnecting in 5s`);
-    if (wsHeartbeat) clearInterval(wsHeartbeat);
-    wsHeartbeat = null;
+    cleanup();
     setTimeout(connectWebSocket, 5000);
   });
 
@@ -765,33 +758,145 @@ function connectWebSocket() {
   });
 }
 
-function handleMarketData(data: Record<string, unknown>) {
-  // Tradovate sends market data in various formats
-  // Look for trade/quote updates
-  const entries = data.entries as Record<string, { price?: number; size?: number }>[] | undefined;
-  if (entries) {
-    // DOM or quote entries
+function cleanup() {
+  if (wsHeartbeat) clearInterval(wsHeartbeat);
+  wsHeartbeat = null;
+  wsAuthorized = false;
+}
+
+function handleWsMessage(msg: Record<string, unknown>) {
+  // ── Response to a request (has "i" = request ID, "s" = status) ──
+  if ("i" in msg && "s" in msg) {
+    const reqId = msg.i as number;
+    const status = msg.s as number;
+
+    // Auth response
+    if (reqId === 0) {
+      if (status === 200) {
+        log("WebSocket AUTHORIZED — subscribing to market data...");
+        wsAuthorized = true;
+
+        // Start client heartbeat (every 2.5s)
+        if (!wsHeartbeat) {
+          wsHeartbeat = setInterval(() => {
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send("[]");
+            }
+            // Check for server silence (>10s = dead connection)
+            if (Date.now() - lastServerMessage > 10000) {
+              log("Server silent for 10s — reconnecting");
+              ws?.close();
+            }
+          }, 2500);
+        }
+
+        // Subscribe to quotes for all resolved contracts
+        for (const [sym, contract] of contracts) {
+          const id = wsReqId++;
+          ws!.send(`md/subscribeQuote\n${id}\n\n{"symbol":"${contract.name}"}`);
+          log(`Subscribing to ${contract.name} (${sym}) — req #${id}`);
+        }
+      } else {
+        log(`WebSocket auth FAILED (status ${status}): ${JSON.stringify(msg)}`);
+      }
+      return;
+    }
+
+    // Subscription confirmation
+    if (status === 200 && msg.d) {
+      const d = msg.d as Record<string, unknown>;
+      if (d.subscriptionId) {
+        log(`Subscription confirmed — req #${reqId}, subscriptionId: ${d.subscriptionId}`);
+      }
+    } else if (status !== 200) {
+      log(`Request #${reqId} failed (${status}): ${JSON.stringify(msg)}`);
+    }
     return;
   }
 
-  // Direct quote update
-  const trade = data as { contractId?: number; price?: number; size?: number; id?: number };
-  if (trade.contractId && trade.price) {
-    // Find which symbol this is
-    for (const [sym, contract] of contracts) {
-      if (contract.id === trade.contractId) {
-        onQuote({
-          contractId: contract.id,
-          symbol: sym,
-          price: trade.price,
-          bid: 0,
-          ask: 0,
-          volume: trade.size || 0,
-          timestamp: Math.floor(Date.now() / 1000),
-        });
-        return;
+  // ── Event message (has "e" = event type) ──
+  if ("e" in msg) {
+    const eventType = msg.e as string;
+
+    if (eventType === "md" && msg.d) {
+      // Market data event
+      const d = msg.d as { quotes?: QuoteUpdate[] };
+      if (d.quotes && Array.isArray(d.quotes)) {
+        for (const quote of d.quotes) {
+          processQuoteUpdate(quote);
+        }
       }
     }
+  }
+}
+
+interface QuoteUpdate {
+  timestamp?: string;
+  contractId: number;
+  entries: Record<string, { price?: number; size?: number }>;
+}
+
+function processQuoteUpdate(quote: QuoteUpdate) {
+  // Find which symbol this contractId maps to
+  let sym: string | null = null;
+  for (const [s, c] of contracts) {
+    if (c.id === quote.contractId) {
+      sym = s;
+      break;
+    }
+  }
+  if (!sym) return;
+
+  const entries = quote.entries || {};
+
+  // Extract trade price (most important for bar building)
+  const trade = entries.Trade || entries.Bid || entries.Offer;
+  if (!trade?.price) return;
+
+  const bid = entries.Bid?.price || 0;
+  const ask = entries.Offer?.price || 0;
+  const volume = entries.Trade?.size || 0;
+
+  tickCount++;
+  onQuote({
+    contractId: quote.contractId,
+    symbol: sym,
+    price: trade.price,
+    bid,
+    ask,
+    volume,
+    timestamp: quote.timestamp
+      ? Math.floor(new Date(quote.timestamp).getTime() / 1000)
+      : Math.floor(Date.now() / 1000),
+  });
+}
+
+// ── Heartbeat (write to DB so Vercel cron knows we're alive) ──
+
+let tickCount = 0;
+
+async function writeHeartbeat() {
+  try {
+    // Use direct SQL since we don't want full Prisma setup in this service
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) return;
+
+    const res = await fetch(dbUrl.includes("neon.tech")
+      ? `https://ep-jolly-field-anjir64r-pooler.c-6.us-east-1.aws.neon.tech/sql`
+      : dbUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Neon-Connection-String": dbUrl },
+      body: JSON.stringify({
+        query: `INSERT INTO "AgentConfig" (key, value) VALUES ('futures_engine_heartbeat', $1)
+                ON CONFLICT (key) DO UPDATE SET value = $1`,
+        params: [new Date().toISOString()],
+      }),
+    });
+    if (!res.ok) {
+      // Fallback: just log, don't crash
+    }
+  } catch {
+    // Heartbeat is best-effort — don't crash the engine
   }
 }
 
@@ -858,14 +963,18 @@ async function main() {
   // Periodic tasks
   setInterval(checkSessionReset, 60_000);     // Check session reset every minute
   setInterval(syncPositions, 30_000);          // Sync positions every 30s
+  setInterval(writeHeartbeat, 60_000);         // Write heartbeat to DB every minute
 
-  // Status log every 5 minutes
+  // Status log every 2 minutes
   setInterval(() => {
     const session = getSessionName();
     const posCount = positions.size;
-    const quoteCounts = [...barBuilders.entries()].map(([sym, b]) => `${sym}:${b.bars5m.length}bars`).join(" ");
-    log(`STATUS: ${session.toUpperCase()} | Positions: ${posCount} | Daily P&L: $${dailyPnl.toFixed(0)} | Trades: ${dailyTradeCount}/6 | ${quoteCounts}`);
-  }, 300_000);
+    const quoteCounts = [...barBuilders.entries()].map(([sym, b]) => {
+      const lastPrice = b.lastQuote?.price ? `$${b.lastQuote.price.toFixed(2)}` : "—";
+      return `${sym}:${b.bars5m.length}bars/${lastPrice}`;
+    }).join(" ");
+    log(`STATUS: ${session.toUpperCase()} | Ticks: ${tickCount} | Positions: ${posCount} | P&L: $${dailyPnl.toFixed(0)} | Trades: ${dailyTradeCount}/6 | ${quoteCounts}`);
+  }, 120_000);
 
   log("Engine started — waiting for market data...");
 }
