@@ -23,6 +23,7 @@ const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 // ── Tradovate Auth ──────────────────────────────────────
 
 let accessToken = "";
+let mdAccessToken = ""; // separate token for market data WebSocket
 let tokenExpires = 0;
 let accountId = 0;
 let accountName = "";
@@ -51,6 +52,13 @@ async function authenticate(): Promise<string> {
 
   const data = await res.json();
   accessToken = data.accessToken;
+  // Tradovate returns separate mdAccessToken for market data WebSocket
+  if (data.mdAccessToken) {
+    mdAccessToken = data.mdAccessToken;
+    log(`Got separate mdAccessToken for market data`);
+  } else {
+    mdAccessToken = accessToken;
+  }
   tokenExpires = Date.now() + 23 * 60 * 60 * 1000;
 
   // Get account
@@ -723,7 +731,7 @@ function connectWebSocket() {
     // ── "o" frame = server ready, send authorization ──
     if (raw === "o") {
       log("Server open frame received — sending authorization...");
-      ws!.send(`authorize\n0\n\n${accessToken}`);
+      ws!.send(`authorize\n0\n\n${mdAccessToken}`);
       return;
     }
 
@@ -737,13 +745,22 @@ function connectWebSocket() {
       const jsonStr = raw.slice(1); // strip the "a" prefix
       try {
         const messages = JSON.parse(jsonStr) as Record<string, unknown>[];
+        // Log first 20 frames for debugging, then only errors/trades
+        if (tickCount < 5) {
+          log(`WS FRAME: ${raw.slice(0, 300)}`);
+        }
         for (const msg of messages) {
           handleWsMessage(msg);
         }
       } catch (err) {
-        // Sometimes frames are malformed during high traffic
+        log(`WS PARSE ERROR: ${raw.slice(0, 200)}`);
       }
       return;
+    }
+
+    // Log unknown frame types for debugging
+    if (raw.length > 0 && raw.length < 200) {
+      log(`WS UNKNOWN FRAME: "${raw.slice(0, 100)}"`);
     }
   });
 
