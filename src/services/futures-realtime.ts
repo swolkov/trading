@@ -1,29 +1,37 @@
 #!/usr/bin/env node
 // ============ REAL-TIME FUTURES TRADING ENGINE ============
-// Persistent process — connects to Tradovate WebSocket, streams quotes,
-// builds bars, detects setups on bar close, executes instantly.
-// Deploy on Railway (or any persistent Node.js host).
+// Persistent process — polls Yahoo Finance every 5s for prices,
+// builds bars, detects setups on bar close, executes via Tradovate.
+// Deploy on Railway.
+//
+// WHY YAHOO POLLING (not Tradovate WebSocket):
+// Tradovate demo accounts don't provide market data via WebSocket.
+// Yahoo Finance gives us ~5s delayed quotes for ES=F, NQ=F, YM=F, RTY=F.
+// For demo testing with 5-min bars, this is more than adequate.
+// When live account is funded, switch to Tradovate WebSocket for tick data.
 
-import WebSocket from "ws";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
+const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical"] });
 
 // ── Config ──────────────────────────────────────────────
 
 const DEMO_API = "https://demo.tradovateapi.com/v1";
-const LIVE_API = "https://live.tradovateapi.com/v1";
-
-const MD_WS_DEMO = "wss://md-demo.tradovateapi.com/v1/websocket";
-const MD_WS_LIVE = "wss://md.tradovateapi.com/v1/websocket";
-let MD_WS_URL = MD_WS_DEMO;
 const ORDER_API = DEMO_API;
-let authApiUrl = DEMO_API; // Start with demo auth, can switch to live
-
-const SYMBOLS = ["MES", "MNQ", "MYM", "M2K"];
+const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
-// ── Tradovate Auth ──────────────────────────────────────
+const SYMBOLS = ["MES", "MNQ", "MYM", "M2K"];
+const YAHOO_MAP: Record<string, string> = {
+  MES: "ES=F", MNQ: "NQ=F", MYM: "YM=F", M2K: "RTY=F",
+};
+const CONTRACT_MULTIPLIERS: Record<string, number> = {
+  MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
+};
+
+// ── Tradovate Auth (for order execution only) ───────────
 
 let accessToken = "";
-let mdAccessToken = ""; // separate token for market data WebSocket
 let tokenExpires = 0;
 let accountId = 0;
 let accountName = "";
@@ -31,7 +39,7 @@ let accountName = "";
 async function authenticate(): Promise<string> {
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
-  const res = await fetch(`${authApiUrl}/auth/accesstokenrequest`, {
+  const res = await fetch(`${ORDER_API}/auth/accesstokenrequest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -45,123 +53,79 @@ async function authenticate(): Promise<string> {
     }),
   });
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Auth failed (${res.status}): ${body}`);
-  }
+  if (!res.ok) throw new Error(`Auth failed (${res.status}): ${await res.text().catch(() => "")}`);
 
   const data = await res.json();
   accessToken = data.accessToken;
-  // Tradovate returns separate mdAccessToken for market data WebSocket
-  if (data.mdAccessToken) {
-    mdAccessToken = data.mdAccessToken;
-    log(`Got separate mdAccessToken for market data`);
-  } else {
-    mdAccessToken = accessToken;
-  }
   tokenExpires = Date.now() + 23 * 60 * 60 * 1000;
 
-  // Get account
   const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
   const active = accounts.find((a) => a.active) || accounts[0];
-  if (active) {
-    accountId = active.id;
-    accountName = active.name;
-  }
+  if (active) { accountId = active.id; accountName = active.name; }
 
-  log(`Authenticated — Account: ${accountName} (#${accountId})`);
+  log(`Authenticated — ${accountName} (#${accountId}) — DEMO`);
   return accessToken;
 }
 
 async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
   const token = await authenticate();
-  // Orders/positions use DEMO, everything else uses current auth API
-  const base = path.startsWith("/order") || path.startsWith("/position") || path.startsWith("/account") || path.startsWith("/cashBalance")
-    ? ORDER_API
-    : authApiUrl;
-  const res = await fetch(`${base}${path}`, {
+  const res = await fetch(`${ORDER_API}${path}`, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...options?.headers,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...options?.headers },
     signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`API ${res.status}: ${body}`);
-  }
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text().catch(() => "")}`);
   return res.json();
 }
-
-// ── Logging ──────────────────────────────────────────────
 
 function log(msg: string) {
   const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
   console.log(`[${ts}] ${msg}`);
 }
 
-// ── Contract Resolution ──────────────────────────────────
+// ── Contract Resolution ─────────────────────────────────
 
-interface ContractInfo {
-  id: number;
-  name: string;
-  tickSize: number;
-  symbol: string; // our symbol (MES, MNQ, etc.)
-}
-
+interface ContractInfo { id: number; name: string; tickSize: number; symbol: string; }
 const contracts: Map<string, ContractInfo> = new Map();
 
 async function resolveContracts() {
   for (const sym of SYMBOLS) {
     try {
-      const results = await apiFetch(`/contract/suggest?t=${sym}&l=5`) as {
-        id: number; name: string; tickSize: number; providerTickSize: number;
-      }[];
+      const results = await apiFetch(`/contract/suggest?t=${sym}&l=5`) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
       if (results.length > 0) {
-        contracts.set(sym, {
-          id: results[0].id,
-          name: results[0].name,
-          tickSize: results[0].providerTickSize || results[0].tickSize,
-          symbol: sym,
-        });
+        contracts.set(sym, { id: results[0].id, name: results[0].name, tickSize: results[0].providerTickSize || results[0].tickSize, symbol: sym });
         log(`Resolved ${sym} → ${results[0].name} (ID: ${results[0].id})`);
       }
-    } catch (err) {
-      log(`Failed to resolve ${sym}: ${err}`);
-    }
+    } catch (err) { log(`Failed to resolve ${sym}: ${err}`); }
   }
 }
 
 // ── Technical Indicators ────────────────────────────────
 
+interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; }
+
 function ema(data: number[], period: number): number[] {
-  if (data.length === 0) return [];
+  if (!data.length) return [];
   const k = 2 / (period + 1);
-  const result = [data[0]];
-  for (let i = 1; i < data.length; i++) result.push(data[i] * k + result[i - 1] * (1 - k));
-  return result;
+  const r = [data[0]];
+  for (let i = 1; i < data.length; i++) r.push(data[i] * k + r[i - 1] * (1 - k));
+  return r;
 }
 
 function rsi(closes: number[], period = 14): number | null {
   if (closes.length < period + 1) return null;
   const changes: number[] = [];
   for (let i = closes.length - period; i < closes.length; i++) changes.push(closes[i] - closes[i - 1]);
-  const gains = changes.filter((c) => c > 0);
-  const losses = changes.filter((c) => c < 0).map((c) => Math.abs(c));
-  const avgGain = gains.length > 0 ? gains.reduce((a, b) => a + b, 0) / period : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((a, b) => a + b, 0) / period : 0;
-  if (avgLoss === 0) return 100;
-  return 100 - 100 / (1 + avgGain / avgLoss);
+  const avgGain = changes.filter(c => c > 0).reduce((a, b) => a + b, 0) / period;
+  const avgLoss = changes.filter(c => c < 0).reduce((a, b) => a + Math.abs(b), 0) / period;
+  return avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
 }
 
 function atr(bars: Bar[], period = 14): number {
   if (bars.length < period + 1) return 0;
   const trs: number[] = [];
-  for (let i = bars.length - period; i < bars.length; i++) {
+  for (let i = bars.length - period; i < bars.length; i++)
     trs.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i - 1].c), Math.abs(bars[i].l - bars[i - 1].c)));
-  }
   return trs.reduce((a, b) => a + b, 0) / trs.length;
 }
 
@@ -169,132 +133,102 @@ function calcVwap(bars: Bar[]): { vwap: number; upper: number; lower: number } {
   let cumPV = 0, cumV = 0, cumPV2 = 0;
   for (const b of bars) {
     const tp = (b.h + b.l + b.c) / 3;
-    cumPV += tp * b.v;
-    cumPV2 += tp * tp * b.v;
-    cumV += b.v;
+    cumPV += tp * b.v; cumPV2 += tp * tp * b.v; cumV += b.v;
   }
   const v = cumV > 0 ? cumPV / cumV : 0;
-  const variance = cumV > 0 ? (cumPV2 / cumV) - v * v : 0;
-  const sd = Math.sqrt(Math.max(0, variance));
+  const sd = Math.sqrt(Math.max(0, cumV > 0 ? (cumPV2 / cumV) - v * v : 0));
   return { vwap: v, upper: v + sd, lower: v - sd };
 }
 
-// ── Bar Building ────────────────────────────────────────
+// ── Bar Building & Price Polling ────────────────────────
 
-interface Bar {
-  t: number; // unix seconds
-  o: number;
-  h: number;
-  l: number;
-  c: number;
-  v: number;
-}
-
-interface Quote {
-  contractId: number;
-  symbol: string;
-  price: number;
-  bid: number;
-  ask: number;
-  volume: number;
-  timestamp: number;
-}
-
-// Per-symbol bar builders
 const barBuilders: Map<string, {
   currentBar: Bar | null;
-  bars5m: Bar[];       // rolling 5-min bars (last 200)
-  lastQuote: Quote | null;
-  sessionBars: Bar[];  // today's bars for VWAP
+  bars5m: Bar[];
+  sessionBars: Bar[];
+  lastPrice: number;
+  lastVolume: number;
   prevDayHigh: number;
   prevDayLow: number;
   prevDayClose: number;
   openingRangeHigh: number;
   openingRangeLow: number;
-  barCount: number;     // bars since session open
+  barCount: number;
 }> = new Map();
 
-function initBarBuilder(symbol: string) {
-  barBuilders.set(symbol, {
-    currentBar: null,
-    bars5m: [],
-    lastQuote: null,
-    sessionBars: [],
-    prevDayHigh: 0,
-    prevDayLow: 0,
-    prevDayClose: 0,
-    openingRangeHigh: 0,
-    openingRangeLow: 0,
-    barCount: 0,
+function initBarBuilder(sym: string) {
+  barBuilders.set(sym, {
+    currentBar: null, bars5m: [], sessionBars: [], lastPrice: 0, lastVolume: 0,
+    prevDayHigh: 0, prevDayLow: 0, prevDayClose: 0,
+    openingRangeHigh: 0, openingRangeLow: 0, barCount: 0,
   });
 }
 
-function getBarPeriodStart(timestamp: number): number {
-  return Math.floor(timestamp / (BAR_INTERVAL_MS / 1000)) * (BAR_INTERVAL_MS / 1000);
-}
+let tickCount = 0;
 
-function onQuote(quote: Quote) {
-  const builder = barBuilders.get(quote.symbol);
-  if (!builder) return;
+function onPrice(sym: string, price: number, volume: number) {
+  const b = barBuilders.get(sym);
+  if (!b || price <= 0) return;
 
-  builder.lastQuote = quote;
-  const periodStart = getBarPeriodStart(quote.timestamp);
+  tickCount++;
+  b.lastPrice = price;
+  b.lastVolume = volume;
 
-  if (!builder.currentBar || builder.currentBar.t !== periodStart) {
-    // New bar period — close previous bar and start new one
-    if (builder.currentBar) {
-      // Previous bar is complete
-      const completedBar = { ...builder.currentBar };
-      builder.bars5m.push(completedBar);
-      builder.sessionBars.push(completedBar);
-      if (builder.bars5m.length > 200) builder.bars5m.shift();
-      builder.barCount++;
+  const periodStart = Math.floor(Date.now() / BAR_INTERVAL_MS) * (BAR_INTERVAL_MS / 1000);
 
-      // Update opening range (first 3 bars = 15 min)
-      if (builder.barCount <= 3) {
-        builder.openingRangeHigh = Math.max(builder.openingRangeHigh, completedBar.h);
-        builder.openingRangeLow = builder.openingRangeLow === 0
-          ? completedBar.l
-          : Math.min(builder.openingRangeLow, completedBar.l);
+  if (!b.currentBar || b.currentBar.t !== periodStart) {
+    // New bar period
+    if (b.currentBar) {
+      const completed = { ...b.currentBar };
+      b.bars5m.push(completed);
+      b.sessionBars.push(completed);
+      if (b.bars5m.length > 200) b.bars5m.shift();
+      b.barCount++;
+
+      if (b.barCount <= 3) {
+        b.openingRangeHigh = Math.max(b.openingRangeHigh, completed.h);
+        b.openingRangeLow = b.openingRangeLow === 0 ? completed.l : Math.min(b.openingRangeLow, completed.l);
       }
 
-      // ──── BAR CLOSE — RUN SETUP DETECTION ────
-      onBarClose(quote.symbol, completedBar);
+      // ── BAR CLOSE → SETUP DETECTION ──
+      onBarClose(sym, completed);
     }
-
-    // Start new bar
-    builder.currentBar = {
-      t: periodStart,
-      o: quote.price,
-      h: quote.price,
-      l: quote.price,
-      c: quote.price,
-      v: 0,
-    };
+    b.currentBar = { t: periodStart, o: price, h: price, l: price, c: price, v: 0 };
   } else {
-    // Update current bar
-    builder.currentBar.h = Math.max(builder.currentBar.h, quote.price);
-    builder.currentBar.l = Math.min(builder.currentBar.l, quote.price);
-    builder.currentBar.c = quote.price;
-    builder.currentBar.v += quote.volume;
+    b.currentBar.h = Math.max(b.currentBar.h, price);
+    b.currentBar.l = Math.min(b.currentBar.l, price);
+    b.currentBar.c = price;
+    b.currentBar.v += volume;
   }
 
-  // ──── TICK-BY-TICK POSITION MANAGEMENT ────
-  checkPositions(quote);
+  // Tick-by-tick position management
+  checkPositions(sym, price);
+}
+
+async function pollPrices() {
+  try {
+    const yahooSymbols = SYMBOLS.map(s => YAHOO_MAP[s]);
+    const quotes = await yfEngine.quote(yahooSymbols);
+    const arr = Array.isArray(quotes) ? quotes : [quotes];
+
+    for (let i = 0; i < SYMBOLS.length; i++) {
+      const q = arr[i];
+      if (q?.regularMarketPrice) {
+        onPrice(SYMBOLS[i], q.regularMarketPrice, q.regularMarketVolume || 0);
+      }
+    }
+  } catch (err) {
+    // Yahoo occasionally fails — just skip this poll
+  }
 }
 
 // ── Session Management ──────────────────────────────────
-
-function isRTH(): boolean {
-  const now = new Date();
-  const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
-  return utcH >= 13.5 && utcH < 20;
-}
 
 function getSessionName(): string {
   const now = new Date();
   const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
   if (utcH >= 21 && utcH < 22) return "halt";
+  if (now.getUTCDay() === 6 || (now.getUTCDay() === 0 && utcH < 22)) return "halt";
   if (utcH >= 13.5 && utcH < 14) return "open";
   if (utcH >= 14 && utcH < 16) return "morning";
   if (utcH >= 16 && utcH < 18) return "midday";
@@ -309,270 +243,192 @@ function getSessionName(): string {
 
 function getMinutesSinceRTHOpen(): number {
   const now = new Date();
-  const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
-  return Math.max(0, (utcH - 13.5) * 60);
+  return Math.max(0, (now.getUTCHours() + now.getUTCMinutes() / 60 - 13.5) * 60);
 }
 
 function getSizeMultiplier(): number {
-  const session = getSessionName();
-  if (session === "morning") return 1.0;
-  if (session === "afternoon") return 0.8;
-  if (session === "midday") return 0.5;
-  if (session === "eth_europe") return 0.6;
-  if (session === "eth_evening") return 0.4;
-  if (session === "eth_asia") return 0.3;
-  if (session === "close" || session === "halt" || session === "open") return 0;
+  const s = getSessionName();
+  if (s === "morning") return 1.0;
+  if (s === "afternoon") return 0.8;
+  if (s === "midday") return 0.5;
+  if (s === "eth_europe") return 0.6;
+  if (s === "eth_evening") return 0.4;
+  if (s === "eth_asia") return 0.3;
+  if (s === "close" || s === "halt" || s === "open") return 0;
   return 0.7;
 }
 
-// ── Daily Session Reset ─────────────────────────────────
-
 function checkSessionReset() {
   const now = new Date();
-  const utcH = now.getUTCHours();
-  const utcM = now.getUTCMinutes();
-
-  // Reset at RTH open (13:30 UTC = 9:30 AM ET)
-  if (utcH === 13 && utcM >= 29 && utcM <= 31) {
-    for (const [sym, builder] of barBuilders) {
-      // Save previous day levels from session bars
-      if (builder.sessionBars.length > 0) {
-        builder.prevDayHigh = Math.max(...builder.sessionBars.map((b) => b.h));
-        builder.prevDayLow = Math.min(...builder.sessionBars.map((b) => b.l));
-        builder.prevDayClose = builder.sessionBars[builder.sessionBars.length - 1].c;
+  if (now.getUTCHours() === 13 && now.getUTCMinutes() >= 29 && now.getUTCMinutes() <= 31) {
+    for (const [sym, b] of barBuilders) {
+      if (b.sessionBars.length > 0) {
+        b.prevDayHigh = Math.max(...b.sessionBars.map(x => x.h));
+        b.prevDayLow = Math.min(...b.sessionBars.map(x => x.l));
+        b.prevDayClose = b.sessionBars[b.sessionBars.length - 1].c;
       }
-      builder.sessionBars = [];
-      builder.openingRangeHigh = 0;
-      builder.openingRangeLow = 0;
-      builder.barCount = 0;
-      log(`Session reset for ${sym} — PDH: ${builder.prevDayHigh.toFixed(2)} PDL: ${builder.prevDayLow.toFixed(2)}`);
+      b.sessionBars = []; b.openingRangeHigh = 0; b.openingRangeLow = 0; b.barCount = 0;
+      log(`Session reset ${sym} — PDH:${b.prevDayHigh.toFixed(2)} PDL:${b.prevDayLow.toFixed(2)}`);
     }
-    dailyTradeCount = 0;
-    dailyPnl = 0;
+    dailyTradeCount = 0; dailyPnl = 0;
   }
 }
 
 // ── Position Tracking ───────────────────────────────────
 
 interface Position {
-  symbol: string;
-  contractId: number;
-  direction: "long" | "short";
-  quantity: number;
-  entryPrice: number;
-  stopLoss: number;
-  target: number;
-  trailStop: number | null;
-  reachedBreakeven: boolean;
-  scaledOut: boolean;
+  symbol: string; contractId: number; direction: "long" | "short";
+  quantity: number; entryPrice: number; stopLoss: number; target: number;
+  trailStop: number | null; reachedBreakeven: boolean;
+  stopOrderId: number | null; targetOrderId: number | null;
   entryTime: number;
-  stopOrderId: number | null;
-  targetOrderId: number | null;
 }
 
 const positions: Map<string, Position> = new Map();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
 
-const CONTRACT_MULTIPLIERS: Record<string, number> = {
-  MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
-};
-
-function checkPositions(quote: Quote) {
-  const pos = positions.get(quote.symbol);
+function checkPositions(sym: string, price: number) {
+  const pos = positions.get(sym);
   if (!pos) return;
 
-  const price = quote.price;
-  const multiplier = CONTRACT_MULTIPLIERS[quote.symbol] || 5;
-  const priceDiff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
+  const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+  const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
 
-  // ── TRAILING STOP (tick-by-tick) ──
-  if (priceDiff >= stopDist * 2 && !pos.reachedBreakeven) {
-    pos.reachedBreakeven = true;
-    log(`${quote.symbol}: Reached 2R — breakeven flag set`);
-  }
-
-  if (priceDiff >= stopDist * 2) {
-    const currentATRVal = atr(barBuilders.get(quote.symbol)?.bars5m || []);
+  // Trailing stop at 2R+
+  if (diff >= stopDist * 2) {
+    if (!pos.reachedBreakeven) { pos.reachedBreakeven = true; log(`${sym}: Reached 2R — breakeven active`); }
+    const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
-      const newTrail = pos.direction === "long"
-        ? price - currentATRVal
-        : price + currentATRVal;
-
-      // Only tighten the trail, never widen
-      if (!pos.trailStop ||
-        (pos.direction === "long" && newTrail > pos.trailStop) ||
-        (pos.direction === "short" && newTrail < pos.trailStop)) {
-        pos.trailStop = newTrail;
+      const trail = pos.direction === "long" ? price - currentATRVal : price + currentATRVal;
+      if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
+        pos.trailStop = trail;
       }
     }
   }
 
-  // ── CHECK TRAIL HIT ──
+  // Trail hit
   if (pos.trailStop) {
-    const trailHit = pos.direction === "long"
-      ? price <= pos.trailStop
-      : price >= pos.trailStop;
-
-    if (trailHit) {
-      const pnl = priceDiff * multiplier * pos.quantity;
-      log(`${quote.symbol}: TRAIL STOP HIT at $${price.toFixed(2)} (trail: $${pos.trailStop.toFixed(2)}). P&L: $${pnl.toFixed(0)}`);
-      closePosition(quote.symbol, price, "trail_stop");
-      return;
+    if ((pos.direction === "long" && price <= pos.trailStop) || (pos.direction === "short" && price >= pos.trailStop)) {
+      log(`${sym}: TRAIL STOP at $${price.toFixed(2)} (trail:$${pos.trailStop.toFixed(2)}). P&L: $${(diff * mult * pos.quantity).toFixed(0)}`);
+      closePosition(sym, price, "trail_stop"); return;
     }
   }
 
-  // ── BREAKEVEN STOP ──
-  if (pos.reachedBreakeven && priceDiff <= 0) {
-    const pnl = priceDiff * multiplier * pos.quantity;
-    log(`${quote.symbol}: BREAKEVEN STOP — was at 2R+, pulled back. P&L: $${pnl.toFixed(0)}`);
-    closePosition(quote.symbol, price, "breakeven");
-    return;
+  // Breakeven stop
+  if (pos.reachedBreakeven && diff <= 0) {
+    log(`${sym}: BREAKEVEN STOP. P&L: $${(diff * mult * pos.quantity).toFixed(0)}`);
+    closePosition(sym, price, "breakeven"); return;
   }
 
-  // ── EMERGENCY DRAWDOWN ──
-  const unrealizedPnl = priceDiff * multiplier * pos.quantity;
-  if (unrealizedPnl < -500) { // $500 emergency stop per position
-    log(`${quote.symbol}: EMERGENCY CLOSE — unrealized $${unrealizedPnl.toFixed(0)}`);
-    closePosition(quote.symbol, price, "emergency");
-    return;
+  // Emergency
+  if (diff * mult * pos.quantity < -500) {
+    log(`${sym}: EMERGENCY CLOSE $${(diff * mult * pos.quantity).toFixed(0)}`);
+    closePosition(sym, price, "emergency"); return;
   }
 }
 
-async function closePosition(symbol: string, price: number, reason: string) {
-  const pos = positions.get(symbol);
+async function closePosition(sym: string, price: number, reason: string) {
+  const pos = positions.get(sym);
   if (!pos) return;
-
-  const multiplier = CONTRACT_MULTIPLIERS[symbol] || 5;
-  const priceDiff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
-  const pnl = priceDiff * multiplier * pos.quantity;
+  const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+  const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
+  const pnl = diff * mult * pos.quantity;
 
   try {
-    // Cancel existing stop/target orders
-    if (pos.stopOrderId) try { await cancelOrderById(pos.stopOrderId); } catch {}
-    if (pos.targetOrderId) try { await cancelOrderById(pos.targetOrderId); } catch {}
+    // Cancel bracket orders
+    if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+    if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
 
-    // Market close
+    const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+    const acct = accounts.find(a => a.id === accountId) || accounts[0];
     await apiFetch("/order/placeorder", {
       method: "POST",
       body: JSON.stringify({
-        accountSpec: accountName,
-        accountId,
-        action: pos.direction === "long" ? "Sell" : "Buy",
-        symbol: pos.contractId,
-        orderQty: pos.quantity,
-        orderType: "Market",
-        timeInForce: "Day",
-        isAutomated: true,
+        accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
+        symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
       }),
     });
-
     dailyPnl += pnl;
-    log(`CLOSED ${symbol}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
-    positions.delete(symbol);
-  } catch (err) {
-    log(`Failed to close ${symbol}: ${err}`);
-  }
+    log(`CLOSED ${sym}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
+    positions.delete(sym);
+  } catch (err) { log(`Close failed ${sym}: ${err}`); }
 }
 
-async function cancelOrderById(orderId: number) {
-  await apiFetch("/order/cancelorder", {
-    method: "POST",
-    body: JSON.stringify({ orderId }),
-  });
-}
+// ── Setup Detection (on 5-min bar close) ────────────────
 
-// ── Setup Detection (on each 5-min bar close) ───────────
-
-function onBarClose(symbol: string, bar: Bar) {
-  const builder = barBuilders.get(symbol);
-  if (!builder || builder.bars5m.length < 25) return;
+function onBarClose(sym: string, bar: Bar) {
+  const b = barBuilders.get(sym);
+  if (!b || b.bars5m.length < 25) return;
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier();
-  if (sizeMult === 0) return; // Don't trade during halt/close/open
+  if (sizeMult === 0 || positions.has(sym) || dailyTradeCount >= 6 || dailyPnl < -500) return;
 
-  // Don't open new if already in position for this symbol
-  if (positions.has(symbol)) return;
-
-  // Daily limits
-  if (dailyTradeCount >= 6) return;
-  if (dailyPnl < -500) { // $500 daily loss limit on demo
-    return;
-  }
-
-  const bars = builder.bars5m;
-  const closes = bars.map((b) => b.c);
+  const bars = b.bars5m;
+  const closes = bars.map(x => x.c);
   const price = bar.c;
   const currentATR = atr(bars);
   if (currentATR <= 0) return;
 
   const currentRSI = rsi(closes) || 50;
-  const emaFast = ema(closes, 9);
-  const emaSlow = ema(closes, 21);
-  const fastEMA = emaFast[emaFast.length - 1];
-  const slowEMA = emaSlow[emaSlow.length - 1];
+  const fast = ema(closes, 9);
+  const slow = ema(closes, 21);
+  const fastEMA = fast[fast.length - 1];
+  const slowEMA = slow[slow.length - 1];
+  const vwapData = b.sessionBars.length >= 3 ? calcVwap(b.sessionBars) : calcVwap(bars.slice(-78));
 
-  // Session VWAP
-  const vwapData = builder.sessionBars.length >= 3
-    ? calcVwap(builder.sessionBars)
-    : calcVwap(bars.slice(-78));
-
-  // Volume analysis
+  // Volume
   const last20 = bars.slice(-20);
-  const avgVol = last20.reduce((s, b) => s + b.v, 0) / 20;
+  const avgVol = last20.reduce((s, x) => s + x.v, 0) / 20;
   const volRatio = avgVol > 0 ? bar.v / avgVol : 1;
-  const volTrend = volRatio > 2 ? "surge" : volRatio > 1.3 ? "rising" : volRatio < 0.6 ? "dry" : volRatio < 0.8 ? "declining" : "normal";
+  const volTrend = volRatio > 2 ? "surge" : volRatio < 0.6 ? "dry" : "normal";
 
   // Day type
-  const orSize = builder.openingRangeHigh - builder.openingRangeLow;
-  const outsidePrevRange = (builder.prevDayHigh > 0 && price > builder.prevDayHigh) || (builder.prevDayLow > 0 && price < builder.prevDayLow);
-  const dayType = outsidePrevRange || orSize > currentATR * 0.5 ? "trend" : "range";
+  const orSize = b.openingRangeHigh - b.openingRangeLow;
+  const outsideRange = (b.prevDayHigh > 0 && price > b.prevDayHigh) || (b.prevDayLow > 0 && price < b.prevDayLow);
+  const dayType = outsideRange || orSize > currentATR * 0.5 ? "trend" : "range";
 
-  // ── SETUP 1: OPENING RANGE BREAKOUT (trend days, morning) ──
-  if ((dayType === "trend") && session === "morning" && builder.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
-    if (price > builder.openingRangeHigh && volRatio > 1.5) {
-      executeTrade(symbol, "long", price, currentATR, orSize, sizeMult,
-        `OR breakout long: $${price.toFixed(2)} > OR high $${builder.openingRangeHigh.toFixed(2)}, vol ${volRatio.toFixed(1)}x`);
-      return;
+  log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | ${dayType} | ${session} | ${b.bars5m.length} bars`);
+
+  // SETUP 1: Opening Range Breakout (trend days, morning)
+  if (dayType === "trend" && session === "morning" && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
+    if (price > b.openingRangeHigh && volRatio > 1.5) {
+      executeTrade(sym, "long", price, Math.max(orSize * 0.5, currentATR), orSize * 1.5, sizeMult,
+        `OR breakout long $${price.toFixed(2)} > $${b.openingRangeHigh.toFixed(2)}`); return;
     }
-    if (price < builder.openingRangeLow && volRatio > 1.5) {
-      executeTrade(symbol, "short", price, currentATR, orSize, sizeMult,
-        `OR breakout short: $${price.toFixed(2)} < OR low $${builder.openingRangeLow.toFixed(2)}, vol ${volRatio.toFixed(1)}x`);
-      return;
+    if (price < b.openingRangeLow && volRatio > 1.5) {
+      executeTrade(sym, "short", price, Math.max(orSize * 0.5, currentATR), orSize * 1.5, sizeMult,
+        `OR breakout short $${price.toFixed(2)} < $${b.openingRangeLow.toFixed(2)}`); return;
     }
   }
 
-  // ── SETUP 2: TREND CONTINUATION (pullback to EMA9) ──
-  if ((dayType === "trend" || (fastEMA > slowEMA && Math.abs(fastEMA - slowEMA) / price > 0.001)) &&
+  // SETUP 2: Trend Continuation (pullback to EMA9)
+  if ((dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
       (session === "morning" || session === "afternoon" || session === "eth_europe")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
     if (nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge") {
-      executeTrade(symbol, "long", price, currentATR, currentATR * 2.5, sizeMult,
-        `Trend continuation long: near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, vol ${volTrend}`);
-      return;
+      executeTrade(sym, "long", price, currentATR * 1.2, currentATR * 2.5, sizeMult,
+        `Trend pullback long near EMA9 $${fastEMA.toFixed(2)}`); return;
     }
     if (nearEMA && fastEMA < slowEMA && price < slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge") {
-      executeTrade(symbol, "short", price, currentATR, currentATR * 2.5, sizeMult,
-        `Trend continuation short: near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, vol ${volTrend}`);
-      return;
+      executeTrade(sym, "short", price, currentATR * 1.2, currentATR * 2.5, sizeMult,
+        `Trend pullback short near EMA9 $${fastEMA.toFixed(2)}`); return;
     }
   }
 
-  // ── SETUP 3: VWAP MEAN REVERSION (range days) ──
+  // SETUP 3: VWAP Mean Reversion (range days)
   if (dayType === "range" && (session === "morning" || session === "midday" || session === "afternoon")) {
     const targetDist = Math.abs(price - vwapData.vwap) * 0.8;
     if (targetDist > currentATR * 0.3) {
       if (price > vwapData.upper && currentRSI > 65 && volTrend !== "surge") {
-        executeTrade(symbol, "short", price, currentATR * 1.2, targetDist, sizeMult,
-          `VWAP fade short: $${price.toFixed(2)} > upper $${vwapData.upper.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`);
-        return;
+        executeTrade(sym, "short", price, currentATR * 1.2, targetDist, sizeMult,
+          `VWAP fade short $${price.toFixed(2)} > upper $${vwapData.upper.toFixed(2)}`); return;
       }
       if (price < vwapData.lower && currentRSI < 35 && volTrend !== "surge") {
-        executeTrade(symbol, "long", price, currentATR * 1.2, targetDist, sizeMult,
-          `VWAP fade long: $${price.toFixed(2)} < lower $${vwapData.lower.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`);
-        return;
+        executeTrade(sym, "long", price, currentATR * 1.2, targetDist, sizeMult,
+          `VWAP fade long $${price.toFixed(2)} < lower $${vwapData.lower.toFixed(2)}`); return;
       }
     }
   }
@@ -580,463 +436,115 @@ function onBarClose(symbol: string, bar: Bar) {
 
 // ── Trade Execution ─────────────────────────────────────
 
-async function executeTrade(
-  symbol: string,
-  direction: "long" | "short",
-  price: number,
-  stopDist: number,
-  targetDist: number,
-  sizeMult: number,
-  reasoning: string,
-) {
-  const contract = contracts.get(symbol);
+async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, reasoning: string) {
+  const contract = contracts.get(sym);
   if (!contract) return;
 
-  const multiplier = CONTRACT_MULTIPLIERS[symbol] || 5;
-
-  // Position sizing: risk 0.2% of equity per trade, scaled by time-of-day
-  const equity = 50000; // Demo account — will fetch dynamically later
+  const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+  const equity = 50000;
   const maxRisk = equity * 0.002 * sizeMult;
-  const riskPerContract = stopDist * multiplier;
-  const qty = Math.max(1, Math.min(10, Math.floor(maxRisk / riskPerContract)));
+  const riskPer = stopDist * mult;
+  const qty = Math.max(1, Math.min(10, Math.floor(maxRisk / riskPer)));
+  const rr = targetDist / stopDist;
+  if (rr < 1.5) { log(`${sym}: R:R ${rr.toFixed(1)} too low`); return; }
 
   const stopPrice = direction === "long" ? price - stopDist : price + stopDist;
   const targetPrice = direction === "long" ? price + targetDist : price - targetDist;
-  const rr = targetDist / stopDist;
-
-  if (rr < 1.5) {
-    log(`${symbol}: R:R ${rr.toFixed(1)} too low — skipping`);
-    return;
-  }
-
   const side = direction === "long" ? "Buy" : "Sell";
   const closeSide = direction === "long" ? "Sell" : "Buy";
 
-  log(`\n${"=".repeat(60)}`);
-  log(`TRADE: ${side} ${qty}x ${symbol} @ $${price.toFixed(2)}`);
-  log(`  Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R: ${rr.toFixed(1)}`);
-  log(`  Risk: $${(riskPerContract * qty).toFixed(0)} | Size mult: ${sizeMult}`);
+  log(`\n${"=".repeat(50)}`);
+  log(`TRADE: ${side} ${qty}x ${sym} @ $${price.toFixed(2)}`);
+  log(`  Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R: ${rr.toFixed(1)} | Risk: $${(riskPer * qty).toFixed(0)}`);
   log(`  ${reasoning}`);
-  log(`${"=".repeat(60)}\n`);
+  log(`${"=".repeat(50)}\n`);
 
   try {
     const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-    const acct = accounts.find((a) => a.id === accountId) || accounts[0];
+    const acct = accounts.find(a => a.id === accountId) || accounts[0];
 
-    // Entry order (market for immediate fill)
-    const entry = await apiFetch("/order/placeorder", {
-      method: "POST",
-      body: JSON.stringify({
-        accountSpec: acct.name,
-        accountId,
-        action: side,
-        symbol: contract.id,
-        orderQty: qty,
-        orderType: "Market",
-        timeInForce: "Day",
-        isAutomated: true,
-      }),
-    }) as { orderId: number };
+    const entry = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+      accountSpec: acct.name, accountId, action: side, symbol: contract.id,
+      orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+    })}) as { orderId: number };
 
-    // Wait for fill
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 1500));
 
-    // Stop loss
     let stopOrderId: number | null = null;
     try {
-      const stop = await apiFetch("/order/placeorder", {
-        method: "POST",
-        body: JSON.stringify({
-          accountSpec: acct.name,
-          accountId,
-          action: closeSide,
-          symbol: contract.id,
-          orderQty: qty,
-          orderType: "Stop",
-          stopPrice,
-          timeInForce: "GTC",
-          isAutomated: true,
-        }),
-      }) as { orderId: number };
-      stopOrderId = stop.orderId;
+      const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
+        orderQty: qty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
+      })}) as { orderId: number };
+      stopOrderId = s.orderId;
     } catch {}
 
-    // Take profit
     let targetOrderId: number | null = null;
     try {
-      const target = await apiFetch("/order/placeorder", {
-        method: "POST",
-        body: JSON.stringify({
-          accountSpec: acct.name,
-          accountId,
-          action: closeSide,
-          symbol: contract.id,
-          orderQty: qty,
-          orderType: "Limit",
-          price: targetPrice,
-          timeInForce: "GTC",
-          isAutomated: true,
-        }),
-      }) as { orderId: number };
-      targetOrderId = target.orderId;
+      const t = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
+        orderQty: qty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
+      })}) as { orderId: number };
+      targetOrderId = t.orderId;
     } catch {}
 
-    // Track position
-    positions.set(symbol, {
-      symbol,
-      contractId: contract.id,
-      direction,
-      quantity: qty,
-      entryPrice: price,
-      stopLoss: stopPrice,
-      target: targetPrice,
-      trailStop: null,
-      reachedBreakeven: false,
-      scaledOut: false,
-      entryTime: Date.now(),
-      stopOrderId,
-      targetOrderId,
+    positions.set(sym, {
+      symbol: sym, contractId: contract.id, direction, quantity: qty,
+      entryPrice: price, stopLoss: stopPrice, target: targetPrice,
+      trailStop: null, reachedBreakeven: false,
+      stopOrderId, targetOrderId, entryTime: Date.now(),
     });
-
     dailyTradeCount++;
-    log(`Order placed: #${entry.orderId} | Stop: #${stopOrderId} | Target: #${targetOrderId}`);
-  } catch (err) {
-    log(`TRADE FAILED: ${err}`);
-  }
+    log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
+  } catch (err) { log(`TRADE FAILED: ${err}`); }
 }
 
-// ── WebSocket Connection ────────────────────────────────
-// Tradovate uses a CUSTOM framing protocol:
-//   "o"        = server open frame (send auth after this)
-//   "h"        = server heartbeat
-//   "a[...]"   = data frame (strip "a", JSON.parse the array)
-// Client sends "[]" every 2.5s as heartbeat.
-
-let ws: WebSocket | null = null;
-let wsHeartbeat: ReturnType<typeof setInterval> | null = null;
-let wsAuthorized = false;
-let lastServerMessage = Date.now();
-let wsReqId = 2; // 0=authorize, 1=reserved, 2+=requests
-
-function connectWebSocket() {
-  log("Connecting to Tradovate WebSocket...");
-  wsAuthorized = false;
-
-  ws = new WebSocket(MD_WS_URL);
-
-  ws.on("open", () => {
-    log("WebSocket TCP connected — waiting for server open frame...");
-  });
-
-  ws.on("message", (data: Buffer) => {
-    const raw = data.toString();
-    lastServerMessage = Date.now();
-
-    // ── "o" frame = server ready, send authorization ──
-    if (raw === "o") {
-      log("Server open frame received — sending authorization...");
-      ws!.send(`authorize\n0\n\n${mdAccessToken}`);
-      return;
-    }
-
-    // ── "h" frame = server heartbeat ──
-    if (raw === "h") {
-      return; // just update lastServerMessage timestamp
-    }
-
-    // ── "a[...]" frame = data array ──
-    if (raw.startsWith("a")) {
-      const jsonStr = raw.slice(1); // strip the "a" prefix
-      try {
-        const messages = JSON.parse(jsonStr) as Record<string, unknown>[];
-        // Log first 20 frames for debugging, then only errors/trades
-        if (tickCount < 5) {
-          log(`WS FRAME: ${raw.slice(0, 300)}`);
-        }
-        for (const msg of messages) {
-          handleWsMessage(msg);
-        }
-      } catch (err) {
-        log(`WS PARSE ERROR: ${raw.slice(0, 200)}`);
-      }
-      return;
-    }
-
-    // Log unknown frame types for debugging
-    if (raw.length > 0 && raw.length < 200) {
-      log(`WS UNKNOWN FRAME: "${raw.slice(0, 100)}"`);
-    }
-  });
-
-  ws.on("close", (code: number) => {
-    log(`WebSocket closed (${code}) — reconnecting in 5s`);
-    cleanup();
-    setTimeout(connectWebSocket, 5000);
-  });
-
-  ws.on("error", (err: Error) => {
-    log(`WebSocket error: ${err.message}`);
-  });
-}
-
-function cleanup() {
-  if (wsHeartbeat) clearInterval(wsHeartbeat);
-  wsHeartbeat = null;
-  wsAuthorized = false;
-}
-
-function handleWsMessage(msg: Record<string, unknown>) {
-  // ── Response to a request (has "i" = request ID, "s" = status) ──
-  if ("i" in msg && "s" in msg) {
-    const reqId = msg.i as number;
-    const status = msg.s as number;
-
-    // Auth response
-    if (reqId === 0) {
-      if (status === 200) {
-        log("WebSocket AUTHORIZED — subscribing to market data...");
-        wsAuthorized = true;
-
-        // Start client heartbeat (every 2.5s)
-        if (!wsHeartbeat) {
-          wsHeartbeat = setInterval(() => {
-            if (ws?.readyState === WebSocket.OPEN) {
-              ws.send("[]");
-            }
-            // Check for server silence (>10s = dead connection)
-            if (Date.now() - lastServerMessage > 10000) {
-              log("Server silent for 10s — reconnecting");
-              ws?.close();
-            }
-          }, 2500);
-        }
-
-        // Subscribe to quotes for all resolved contracts
-        for (const [sym, contract] of contracts) {
-          const id = wsReqId++;
-          // Use contract ID (number) instead of name — more reliable
-          ws!.send(`md/subscribeQuote\n${id}\n\n{"symbol":${contract.id}}`);
-          log(`Subscribing to ${contract.name} (${sym}) ID:${contract.id} — req #${id}`);
-        }
-      } else {
-        log(`WebSocket auth FAILED (status ${status}): ${JSON.stringify(msg)}`);
-      }
-      return;
-    }
-
-    // Subscription response
-    if (msg.d) {
-      const d = msg.d as Record<string, unknown>;
-      if (d.subscriptionId) {
-        log(`Subscription confirmed — req #${reqId}, subscriptionId: ${d.subscriptionId}`);
-      } else if (d.errorCode === "UnknownSymbol") {
-        if (MD_WS_URL === MD_WS_DEMO) {
-          log(`Demo MD rejected symbol — switching to LIVE market data...`);
-          MD_WS_URL = MD_WS_LIVE;
-          authApiUrl = LIVE_API;
-          accessToken = "";
-          mdAccessToken = "";
-          tokenExpires = 0;
-          ws?.close();
-          return;
-        }
-        // Live also rejected — try subscribing by contract NAME instead of ID
-        log(`Live MD also rejected ID — trying contract name string...`);
-        for (const [sym, contract] of contracts) {
-          const id = wsReqId++;
-          ws!.send(`md/subscribeQuote\n${id}\n\n{"symbol":"${contract.name}"}`);
-          log(`Retry subscribe by name: ${contract.name} — req #${id}`);
-        }
-        return;
-      } else if (d.errorText) {
-        log(`Subscription error req #${reqId}: ${d.errorText}`);
-      }
-    }
-    return;
-  }
-
-  // ── Event message (has "e" = event type) ──
-  if ("e" in msg) {
-    const eventType = msg.e as string;
-
-    if (eventType === "md" && msg.d) {
-      // Market data event
-      const d = msg.d as { quotes?: QuoteUpdate[] };
-      if (d.quotes && Array.isArray(d.quotes)) {
-        for (const quote of d.quotes) {
-          processQuoteUpdate(quote);
-        }
-      }
-    }
-  }
-}
-
-interface QuoteUpdate {
-  timestamp?: string;
-  contractId: number;
-  entries: Record<string, { price?: number; size?: number }>;
-}
-
-function processQuoteUpdate(quote: QuoteUpdate) {
-  // Find which symbol this contractId maps to
-  let sym: string | null = null;
-  for (const [s, c] of contracts) {
-    if (c.id === quote.contractId) {
-      sym = s;
-      break;
-    }
-  }
-  if (!sym) return;
-
-  const entries = quote.entries || {};
-
-  // Extract trade price (most important for bar building)
-  const trade = entries.Trade || entries.Bid || entries.Offer;
-  if (!trade?.price) return;
-
-  const bid = entries.Bid?.price || 0;
-  const ask = entries.Offer?.price || 0;
-  const volume = entries.Trade?.size || 0;
-
-  tickCount++;
-  onQuote({
-    contractId: quote.contractId,
-    symbol: sym,
-    price: trade.price,
-    bid,
-    ask,
-    volume,
-    timestamp: quote.timestamp
-      ? Math.floor(new Date(quote.timestamp).getTime() / 1000)
-      : Math.floor(Date.now() / 1000),
-  });
-}
-
-// ── Heartbeat (write to DB so Vercel cron knows we're alive) ──
-
-let tickCount = 0;
-
-async function writeHeartbeat() {
-  try {
-    // Use direct SQL since we don't want full Prisma setup in this service
-    const dbUrl = process.env.DATABASE_URL;
-    if (!dbUrl) return;
-
-    const res = await fetch(dbUrl.includes("neon.tech")
-      ? `https://ep-jolly-field-anjir64r-pooler.c-6.us-east-1.aws.neon.tech/sql`
-      : dbUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Neon-Connection-String": dbUrl },
-      body: JSON.stringify({
-        query: `INSERT INTO "AgentConfig" (key, value) VALUES ('futures_engine_heartbeat', $1)
-                ON CONFLICT (key) DO UPDATE SET value = $1`,
-        params: [new Date().toISOString()],
-      }),
-    });
-    if (!res.ok) {
-      // Fallback: just log, don't crash
-    }
-  } catch {
-    // Heartbeat is best-effort — don't crash the engine
-  }
-}
-
-// ── Position Sync (periodic check against Tradovate) ────
+// ── Position Sync ───────────────────────────────────────
 
 async function syncPositions() {
   try {
-    const tvPositions = await apiFetch("/position/list") as {
-      id: number; contractId: number; netPos: number; netPrice: number;
-    }[];
-
-    for (const tvPos of tvPositions) {
-      if (tvPos.netPos === 0) continue;
-      // Check if we're tracking this position
-      let found = false;
-      for (const [, pos] of positions) {
-        if (pos.contractId === tvPos.contractId) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        // Position exists on Tradovate but not in our tracker — log it
-        log(`SYNC: Untracked position found — contractId ${tvPos.contractId}, qty ${tvPos.netPos}`);
-      }
-    }
-
-    // Check if our tracked positions still exist
+    const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number }[];
     for (const [sym, pos] of positions) {
-      const exists = tvPositions.find((p) => p.contractId === pos.contractId && p.netPos !== 0);
-      if (!exists) {
-        // Position was closed (by stop/target at exchange)
-        log(`SYNC: Position ${sym} no longer exists — removed from tracker (stop/target hit at exchange)`);
+      if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
+        log(`SYNC: ${sym} closed at exchange (stop/target hit)`);
         positions.delete(sym);
       }
     }
-  } catch (err) {
-    log(`Position sync failed: ${err}`);
-  }
+  } catch {}
 }
 
-// ── Main Entry Point ────────────────────────────────────
+// ── Main ────────────────────────────────────────────────
 
 async function main() {
   log("╔══════════════════════════════════════════════╗");
   log("║  ESBUENO FUTURES — REAL-TIME TRADING ENGINE  ║");
   log("╚══════════════════════════════════════════════╝");
-  log(`Mode: DEMO orders / LIVE market data`);
-  log(`Symbols: ${SYMBOLS.join(", ")}`);
-  log(`Bar interval: ${BAR_INTERVAL_MS / 1000}s`);
+  log("Mode: DEMO | Data: Yahoo Finance (5s poll) | Orders: Tradovate");
 
-  // Authenticate
   await authenticate();
-
-  // Resolve contracts
   await resolveContracts();
-
-  // Init bar builders
   for (const sym of SYMBOLS) initBarBuilder(sym);
 
-  // Connect WebSocket (will auto-fallback demo→live if needed)
-  connectWebSocket();
-
-  // If we later switch to live MD, re-resolve contracts against live
-  const origResolve = resolveContracts;
-  const reconnectWithLiveContracts = async () => {
-    if (authApiUrl === LIVE_API && contracts.size > 0) {
-      log("Re-resolving contracts against LIVE API...");
-      contracts.clear();
-      await resolveContracts();
-    }
-  };
-  // Check every 10s if we switched to live and need to re-resolve
-  setInterval(async () => {
-    if (authApiUrl === LIVE_API && !wsAuthorized) {
-      await reconnectWithLiveContracts();
-    }
-  }, 10000);
-
-  // Periodic tasks
-  setInterval(checkSessionReset, 60_000);     // Check session reset every minute
-  setInterval(syncPositions, 30_000);          // Sync positions every 30s
-  setInterval(writeHeartbeat, 60_000);         // Write heartbeat to DB every minute
+  // Start polling
+  setInterval(pollPrices, POLL_INTERVAL_MS);
+  setInterval(checkSessionReset, 60_000);
+  setInterval(syncPositions, 30_000);
 
   // Status log every 2 minutes
   setInterval(() => {
     const session = getSessionName();
-    const posCount = positions.size;
-    const quoteCounts = [...barBuilders.entries()].map(([sym, b]) => {
-      const lastPrice = b.lastQuote?.price ? `$${b.lastQuote.price.toFixed(2)}` : "—";
-      return `${sym}:${b.bars5m.length}bars/${lastPrice}`;
+    const prices = SYMBOLS.map(s => {
+      const b = barBuilders.get(s);
+      return `${s}:${b?.lastPrice ? "$" + b.lastPrice.toFixed(2) : "—"}/${b?.bars5m.length || 0}bars`;
     }).join(" ");
-    log(`STATUS: ${session.toUpperCase()} | Ticks: ${tickCount} | Positions: ${posCount} | P&L: $${dailyPnl.toFixed(0)} | Trades: ${dailyTradeCount}/6 | ${quoteCounts}`);
+    log(`STATUS: ${session.toUpperCase()} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | ${prices}`);
   }, 120_000);
 
-  log("Engine started — waiting for market data...");
+  log("Polling started — fetching prices every 5s...");
+
+  // First poll immediately
+  await pollPrices();
+  log(`Initial prices loaded`);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+main().catch(err => { console.error("Fatal:", err); process.exit(1); });
