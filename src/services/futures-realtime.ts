@@ -829,15 +829,24 @@ function handleWsMessage(msg: Record<string, unknown>) {
       const d = msg.d as Record<string, unknown>;
       if (d.subscriptionId) {
         log(`Subscription confirmed — req #${reqId}, subscriptionId: ${d.subscriptionId}`);
-      } else if (d.errorCode === "UnknownSymbol" && MD_WS_URL === MD_WS_DEMO) {
-        log(`Demo MD rejected symbol — switching to LIVE market data WebSocket...`);
-        MD_WS_URL = MD_WS_LIVE;
-        authApiUrl = LIVE_API;
-        // Clear cached auth so we re-auth against live
-        accessToken = "";
-        mdAccessToken = "";
-        tokenExpires = 0;
-        ws?.close(); // triggers reconnect → will use live MD + live auth
+      } else if (d.errorCode === "UnknownSymbol") {
+        if (MD_WS_URL === MD_WS_DEMO) {
+          log(`Demo MD rejected symbol — switching to LIVE market data...`);
+          MD_WS_URL = MD_WS_LIVE;
+          authApiUrl = LIVE_API;
+          accessToken = "";
+          mdAccessToken = "";
+          tokenExpires = 0;
+          ws?.close();
+          return;
+        }
+        // Live also rejected — try subscribing by contract NAME instead of ID
+        log(`Live MD also rejected ID — trying contract name string...`);
+        for (const [sym, contract] of contracts) {
+          const id = wsReqId++;
+          ws!.send(`md/subscribeQuote\n${id}\n\n{"symbol":"${contract.name}"}`);
+          log(`Retry subscribe by name: ${contract.name} — req #${id}`);
+        }
         return;
       } else if (d.errorText) {
         log(`Subscription error req #${reqId}: ${d.errorText}`);
@@ -989,8 +998,24 @@ async function main() {
   // Init bar builders
   for (const sym of SYMBOLS) initBarBuilder(sym);
 
-  // Connect WebSocket
+  // Connect WebSocket (will auto-fallback demo→live if needed)
   connectWebSocket();
+
+  // If we later switch to live MD, re-resolve contracts against live
+  const origResolve = resolveContracts;
+  const reconnectWithLiveContracts = async () => {
+    if (authApiUrl === LIVE_API && contracts.size > 0) {
+      log("Re-resolving contracts against LIVE API...");
+      contracts.clear();
+      await resolveContracts();
+    }
+  };
+  // Check every 10s if we switched to live and need to re-resolve
+  setInterval(async () => {
+    if (authApiUrl === LIVE_API && !wsAuthorized) {
+      await reconnectWithLiveContracts();
+    }
+  }, 10000);
 
   // Periodic tasks
   setInterval(checkSessionReset, 60_000);     // Check session reset every minute
