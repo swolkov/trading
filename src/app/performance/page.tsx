@@ -216,6 +216,7 @@ export default function PerformancePage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-muted-foreground/60 border-b border-white/10">
+                  <th className="text-left py-2.5 font-medium">Date</th>
                   <th className="text-left py-2.5 font-medium">Stock</th>
                   <th className="text-left py-2.5 font-medium">Type</th>
                   <th className="text-left py-2.5 font-medium">Direction</th>
@@ -231,6 +232,11 @@ export default function PerformancePage() {
               <tbody>
                 {data.trades.map((t, i) => (
                   <tr key={i} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                    <td className="py-2.5 text-muted-foreground text-[10px]">
+                      {new Date(t.openDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                      <br />
+                      {new Date(t.openDate).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
+                    </td>
                     <td className="py-2.5 font-bold">{t.underlying}</td>
                     <td className="py-2.5">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] ${
