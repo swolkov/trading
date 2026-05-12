@@ -1,0 +1,18 @@
+FROM node:22-slim
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json ./
+COPY prisma ./prisma/
+COPY prisma.config.ts ./
+
+# Install dependencies
+RUN npm ci --ignore-scripts && npx prisma generate
+
+# Copy source
+COPY src ./src/
+COPY tsconfig.json ./
+
+# Run the real-time futures engine
+CMD ["npx", "tsx", "src/services/futures-realtime.ts"]
