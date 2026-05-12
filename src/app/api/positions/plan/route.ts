@@ -180,16 +180,22 @@ export async function GET() {
         urgency = Math.abs(pnlPct) > 0.3 ? "watch" : "none";
       } else {
         // Long option
-        if (pnlPct >= 0.25) {
-          plan = `Approaching partial take profit at +30%. Will sell half and set breakeven stop on remainder.`;
+        const canPartial = Math.abs(qty) >= 2;
+        if (pnlPct >= 0.35 && canPartial) {
+          plan = `Approaching partial take profit at +40%. Will sell half and set breakeven stop on remainder.`;
           urgency = "watch";
-        } else if (pnlPct <= -0.35) {
-          plan = `Approaching stop loss at -40%. Will close entire position.`;
-          urgency = "action_soon";
+        } else if (pnlPct >= 0.60) {
+          plan = `Approaching full take profit at +75%. Will close entire position.`;
+          urgency = "watch";
+        } else if (pnlPct <= -0.20) {
+          plan = `Approaching stop loss at -25%. Will close entire position.`;
+          urgency = pnlPct <= -0.23 ? "immediate" : "action_soon";
         } else {
-          plan = `Holding. Take profit at +75%. Partial at +30%. Stop at -40%. Dead money exit if flat >7 days.`;
+          plan = canPartial
+            ? `Holding. Partial at +40% (sell half). Full profit at +75%. Stop at -25%. Close at 7 DTE.`
+            : `Holding. Full profit at +75%. Stop at -25%. Close at 7 DTE. (1 contract — no partial possible)`;
         }
-        reasoning = `Currently ${(pnlPct * 100).toFixed(1)}%. ${dte} DTE remaining.`;
+        reasoning = `Currently ${(pnlPct * 100).toFixed(1)}%. ${dte} DTE remaining.${!canPartial ? " Single contract — exits are all-or-nothing." : ""}`;
       }
 
       plans.push({
@@ -198,8 +204,8 @@ export async function GET() {
         underlying,
         optionType: optType === "C" ? "call" : "put",
         dte, expiryDate: expiryStr,
-        takeProfitAt: isShort ? "90% of credit collected" : "+75% (full), +30% (partial half)",
-        stopLossAt: isShort ? "2x entry credit" : "-40%",
+        takeProfitAt: isShort ? "90% of credit collected" : (Math.abs(qty) >= 2 ? "+75% (full), +40% (partial half)" : "+75% (full, single contract)"),
+        stopLossAt: isShort ? "2x entry credit" : "-25%",
         expiryCloseAt: `At 5 DTE`,
         plan, reasoning, urgency,
       });
