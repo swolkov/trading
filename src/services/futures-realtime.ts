@@ -810,8 +810,9 @@ function handleWsMessage(msg: Record<string, unknown>) {
         // Subscribe to quotes for all resolved contracts
         for (const [sym, contract] of contracts) {
           const id = wsReqId++;
-          ws!.send(`md/subscribeQuote\n${id}\n\n{"symbol":"${contract.name}"}`);
-          log(`Subscribing to ${contract.name} (${sym}) — req #${id}`);
+          // Use contract ID (number) instead of name — more reliable
+          ws!.send(`md/subscribeQuote\n${id}\n\n{"symbol":${contract.id}}`);
+          log(`Subscribing to ${contract.name} (${sym}) ID:${contract.id} — req #${id}`);
         }
       } else {
         log(`WebSocket auth FAILED (status ${status}): ${JSON.stringify(msg)}`);
