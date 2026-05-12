@@ -11,11 +11,11 @@ import WebSocket from "ws";
 const DEMO_API = "https://demo.tradovateapi.com/v1";
 const LIVE_API = "https://live.tradovateapi.com/v1";
 
-// Market data WebSocket — use LIVE for data (CME subscription is on live account)
-// Orders — use DEMO for execution (no real money risk)
-const MD_WS_URL = "wss://md.tradovateapi.com/v1/websocket";
-const ORDER_API = DEMO_API; // Orders go to demo
-const AUTH_API = LIVE_API;  // Auth against live to get mdAccessToken with CME data
+const MD_WS_DEMO = "wss://md-demo.tradovateapi.com/v1/websocket";
+const MD_WS_LIVE = "wss://md.tradovateapi.com/v1/websocket";
+let MD_WS_URL = MD_WS_DEMO;
+const ORDER_API = DEMO_API;
+let authApiUrl = DEMO_API; // Start with demo auth, can switch to live
 
 const SYMBOLS = ["MES", "MNQ", "MYM", "M2K"];
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
@@ -31,7 +31,7 @@ let accountName = "";
 async function authenticate(): Promise<string> {
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
-  const res = await fetch(`${AUTH_API}/auth/accesstokenrequest`, {
+  const res = await fetch(`${authApiUrl}/auth/accesstokenrequest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -75,10 +75,10 @@ async function authenticate(): Promise<string> {
 
 async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
   const token = await authenticate();
-  // Orders/positions use DEMO, contract lookups use LIVE (for market data access)
+  // Orders/positions use DEMO, everything else uses current auth API
   const base = path.startsWith("/order") || path.startsWith("/position") || path.startsWith("/account") || path.startsWith("/cashBalance")
     ? ORDER_API
-    : AUTH_API;
+    : authApiUrl;
   const res = await fetch(`${base}${path}`, {
     ...options,
     headers: {
@@ -824,14 +824,24 @@ function handleWsMessage(msg: Record<string, unknown>) {
       return;
     }
 
-    // Subscription confirmation
-    if (status === 200 && msg.d) {
+    // Subscription response
+    if (msg.d) {
       const d = msg.d as Record<string, unknown>;
       if (d.subscriptionId) {
         log(`Subscription confirmed — req #${reqId}, subscriptionId: ${d.subscriptionId}`);
+      } else if (d.errorCode === "UnknownSymbol" && MD_WS_URL === MD_WS_DEMO) {
+        log(`Demo MD rejected symbol — switching to LIVE market data WebSocket...`);
+        MD_WS_URL = MD_WS_LIVE;
+        authApiUrl = LIVE_API;
+        // Clear cached auth so we re-auth against live
+        accessToken = "";
+        mdAccessToken = "";
+        tokenExpires = 0;
+        ws?.close(); // triggers reconnect → will use live MD + live auth
+        return;
+      } else if (d.errorText) {
+        log(`Subscription error req #${reqId}: ${d.errorText}`);
       }
-    } else if (status !== 200) {
-      log(`Request #${reqId} failed (${status}): ${JSON.stringify(msg)}`);
     }
     return;
   }
