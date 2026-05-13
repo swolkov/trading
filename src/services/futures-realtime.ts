@@ -372,6 +372,121 @@ async function closePosition(sym: string, price: number, reason: string) {
   } catch (err) { log(`Close failed ${sym}: ${err}`); }
 }
 
+// ── Multi-Timeframe (build 15-min bars from 5-min) ──────
+
+function get15mTrend(bars5m: Bar[]): { trend: "up" | "down" | "flat"; strength: number } {
+  // Aggregate 5-min bars into 15-min bars
+  const bars15m: Bar[] = [];
+  for (let i = 0; i + 2 < bars5m.length; i += 3) {
+    bars15m.push({
+      t: bars5m[i].t,
+      o: bars5m[i].o,
+      h: Math.max(bars5m[i].h, bars5m[i + 1].h, bars5m[i + 2].h),
+      l: Math.min(bars5m[i].l, bars5m[i + 1].l, bars5m[i + 2].l),
+      c: bars5m[i + 2].c,
+      v: bars5m[i].v + bars5m[i + 1].v + bars5m[i + 2].v,
+    });
+  }
+  if (bars15m.length < 21) return { trend: "flat", strength: 0 };
+
+  const closes = bars15m.map(b => b.c);
+  const fast = ema(closes, 9);
+  const slow = ema(closes, 21);
+  const f = fast[fast.length - 1];
+  const s = slow[slow.length - 1];
+  const spread = Math.abs(f - s) / s;
+
+  if (f > s) return { trend: "up", strength: spread };
+  if (f < s) return { trend: "down", strength: spread };
+  return { trend: "flat", strength: 0 };
+}
+
+// ── AI Confirmation (asks Claude before each trade) ─────
+
+async function getAIConfirmation(setup: {
+  sym: string; direction: string; reasoning: string;
+  price: number; rsi: number; atr: number; vwap: number;
+  dayType: string; session: string; trend15: string;
+  prevDayHigh: number; prevDayLow: number;
+}): Promise<{ agree: boolean; confidence: number; reasoning: string }> {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return { agree: true, confidence: 0, reasoning: "AI unavailable" };
+
+    const prompt = `You are an expert micro E-mini futures day trader with 15 years of experience. Evaluate this setup in 1 sentence.
+
+${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()}
+Setup: ${setup.reasoning}
+RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
+15m trend: ${setup.trend15} | Day type: ${setup.dayType} | Session: ${setup.session}
+Prev day: H $${setup.prevDayHigh.toFixed(2)} L $${setup.prevDayLow.toFixed(2)}
+VIX: ${currentVIX.toFixed(1)}
+
+Rate confidence 0-100 and respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 100,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) return { agree: true, confidence: 0, reasoning: "AI call failed" };
+
+    const data = await res.json() as { content: { type: string; text: string }[] };
+    const text = data.content?.find(b => b.type === "text")?.text || "";
+    const parsed = JSON.parse(text.trim());
+    return { agree: !!parsed.agree, confidence: parsed.confidence || 50, reasoning: parsed.reasoning || "" };
+  } catch {
+    return { agree: true, confidence: 0, reasoning: "AI unavailable" };
+  }
+}
+
+// ── Confidence Scoring ──────────────────────────────────
+
+function scoreSetup(factors: {
+  baseConfidence: number;
+  volTrend: string;
+  volRatio: number;
+  trend15Aligns: boolean;
+  rsiExtreme: boolean;
+  priceAboveVWAP: boolean;
+  dayTypeMatch: boolean;
+  sessionQuality: string;
+}): { score: number; reasons: string[] } {
+  let score = factors.baseConfidence;
+  const reasons: string[] = [];
+
+  // Volume confirmation
+  if (factors.volTrend === "surge" && factors.volRatio > 2) { score += 8; reasons.push("volume surge +8"); }
+  else if (factors.volTrend === "declining") { score += 5; reasons.push("declining vol (healthy pullback) +5"); }
+  else if (factors.volTrend === "dry") { score -= 5; reasons.push("dry volume -5"); }
+
+  // 15-min trend alignment
+  if (factors.trend15Aligns) { score += 10; reasons.push("15m trend confirms +10"); }
+  else { score -= 10; reasons.push("15m trend opposes -10"); }
+
+  // RSI extreme (good for mean reversion, careful for breakout)
+  if (factors.rsiExtreme) { score += 3; reasons.push("RSI at extreme +3"); }
+
+  // VWAP position
+  if (factors.priceAboveVWAP) { score += 3; reasons.push("price above VWAP +3"); }
+
+  // Session quality
+  if (factors.sessionQuality === "prime") { score += 5; reasons.push("prime session +5"); }
+  else if (factors.sessionQuality === "avoid") { score -= 10; reasons.push("poor session -10"); }
+
+  return { score: Math.max(0, Math.min(100, score)), reasons };
+}
+
 // ── Setup Detection (on 5-min bar close) ────────────────
 
 function onBarClose(sym: string, bar: Bar) {
@@ -395,36 +510,55 @@ function onBarClose(sym: string, bar: Bar) {
   const slowEMA = slow[slow.length - 1];
   const vwapData = b.sessionBars.length >= 3 ? calcVwap(b.sessionBars) : calcVwap(bars.slice(-78));
 
-  // Volume
+  // Volume analysis
   const last20 = bars.slice(-20);
   const avgVol = last20.reduce((s, x) => s + x.v, 0) / 20;
   const volRatio = avgVol > 0 ? bar.v / avgVol : 1;
-  const volTrend = volRatio > 2 ? "surge" : volRatio < 0.6 ? "dry" : "normal";
+  const volTrend = volRatio > 2 ? "surge" : volRatio < 0.6 ? "dry" : volRatio < 0.8 ? "declining" : "normal";
+
+  // Multi-timeframe: 15-min trend
+  const tf15 = get15mTrend(bars);
 
   // Day type
   const orSize = b.openingRangeHigh - b.openingRangeLow;
   const outsideRange = (b.prevDayHigh > 0 && price > b.prevDayHigh) || (b.prevDayLow > 0 && price < b.prevDayLow);
   const dayType = outsideRange || orSize > currentATR * 0.5 ? "trend" : "range";
 
+  // VIX
   const vix = getVIXMultiplier();
   const adjustedATR = currentATR * vix.stopMult;
-
-  log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | ${dayType} day | ${session} | ${b.bars5m.length} bars | ${vix.label}`);
-
-  // Apply VIX multiplier to position sizing
   const effectiveSizeMult = sizeMult * vix.sizeMult;
+  const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.7 ? "good" : "avoid";
+
+  log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
+
+  // ── EVALUATE ALL SETUPS WITH CONFIDENCE SCORING ──
 
   // SETUP 1: Opening Range Breakout (trend days, morning)
   if (dayType === "trend" && session === "morning" && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
-    if (price > b.openingRangeHigh && volRatio > 1.5) {
-      log(`  → SETUP: OR Breakout LONG | OR high: $${b.openingRangeHigh.toFixed(2)} | Vol: ${volRatio.toFixed(1)}x`);
-      executeTrade(sym, "long", price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult,
-        `OR breakout long $${price.toFixed(2)} > $${b.openingRangeHigh.toFixed(2)}, vol ${volRatio.toFixed(1)}x`); return;
-    }
-    if (price < b.openingRangeLow && volRatio > 1.5) {
-      log(`  → SETUP: OR Breakout SHORT | OR low: $${b.openingRangeLow.toFixed(2)} | Vol: ${volRatio.toFixed(1)}x`);
-      executeTrade(sym, "short", price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult,
-        `OR breakout short $${price.toFixed(2)} < $${b.openingRangeLow.toFixed(2)}, vol ${volRatio.toFixed(1)}x`); return;
+    const isLong = price > b.openingRangeHigh && volRatio > 1.5;
+    const isShort = price < b.openingRangeLow && volRatio > 1.5;
+
+    if (isLong || isShort) {
+      const dir = isLong ? "long" : "short";
+      const { score, reasons } = scoreSetup({
+        baseConfidence: 70,
+        volTrend, volRatio,
+        trend15Aligns: isLong ? tf15.trend === "up" : tf15.trend === "down",
+        rsiExtreme: false,
+        priceAboveVWAP: isLong ? price > vwapData.vwap : price < vwapData.vwap,
+        dayTypeMatch: true,
+        sessionQuality,
+      });
+
+      log(`  → OR BREAKOUT ${dir.toUpperCase()} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+      if (score >= 65) {
+        evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult, score,
+          `OR breakout ${dir} $${price.toFixed(2)} ${isLong ? ">" : "<"} OR ${isLong ? "high" : "low"} $${(isLong ? b.openingRangeHigh : b.openingRangeLow).toFixed(2)}, vol ${volRatio.toFixed(1)}x, conf ${score}%`,
+          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+      }
+      return;
     }
   }
 
@@ -432,15 +566,29 @@ function onBarClose(sym: string, bar: Bar) {
   if ((dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
       (session === "morning" || session === "afternoon" || session === "eth_europe" || session === "eth_evening")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
-    if (nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge") {
-      log(`  → SETUP: Trend Continuation LONG | EMA9: $${fastEMA.toFixed(2)} | EMA21: $${slowEMA.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
-      executeTrade(sym, "long", price, adjustedATR * 1.2, adjustedATR * 2.5, effectiveSizeMult,
-        `Trend pullback long near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
-    }
-    if (nearEMA && fastEMA < slowEMA && price < slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge") {
-      log(`  → SETUP: Trend Continuation SHORT | EMA9: $${fastEMA.toFixed(2)} | EMA21: $${slowEMA.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
-      executeTrade(sym, "short", price, adjustedATR * 1.2, adjustedATR * 2.5, effectiveSizeMult,
-        `Trend pullback short near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
+    const isLong = nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
+    const isShort = nearEMA && fastEMA < slowEMA && price < slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
+
+    if (isLong || isShort) {
+      const dir = isLong ? "long" : "short";
+      const { score, reasons } = scoreSetup({
+        baseConfidence: 72,
+        volTrend, volRatio,
+        trend15Aligns: isLong ? tf15.trend === "up" : tf15.trend === "down",
+        rsiExtreme: false,
+        priceAboveVWAP: isLong ? price > vwapData.vwap : price < vwapData.vwap,
+        dayTypeMatch: dayType === "trend",
+        sessionQuality,
+      });
+
+      log(`  → TREND CONTINUATION ${dir.toUpperCase()} | EMA9:$${fastEMA.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+      if (score >= 65) {
+        evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, adjustedATR * 2.5, effectiveSizeMult, score,
+          `Trend pullback ${dir} near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, 15m ${tf15.trend}, conf ${score}%`,
+          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+      }
+      return;
     }
   }
 
@@ -448,18 +596,73 @@ function onBarClose(sym: string, bar: Bar) {
   if (dayType === "range" && (session === "morning" || session === "midday" || session === "afternoon")) {
     const targetDist = Math.abs(price - vwapData.vwap) * 0.8;
     if (targetDist > currentATR * 0.3) {
-      if (price > vwapData.upper && currentRSI > 65 && volTrend !== "surge") {
-        log(`  → SETUP: VWAP Reversion SHORT | VWAP: $${vwapData.vwap.toFixed(2)} | Upper: $${vwapData.upper.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
-        executeTrade(sym, "short", price, adjustedATR * 1.2, targetDist, effectiveSizeMult,
-          `VWAP fade short $${price.toFixed(2)} > upper $${vwapData.upper.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
-      }
-      if (price < vwapData.lower && currentRSI < 35 && volTrend !== "surge") {
-        log(`  → SETUP: VWAP Reversion LONG | VWAP: $${vwapData.vwap.toFixed(2)} | Lower: $${vwapData.lower.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
-        executeTrade(sym, "long", price, adjustedATR * 1.2, targetDist, effectiveSizeMult,
-          `VWAP fade long $${price.toFixed(2)} < lower $${vwapData.lower.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
+      const isShort = price > vwapData.upper && currentRSI > 65 && volTrend !== "surge";
+      const isLong = price < vwapData.lower && currentRSI < 35 && volTrend !== "surge";
+
+      if (isLong || isShort) {
+        const dir = isLong ? "long" : "short";
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 68,
+          volTrend, volRatio,
+          trend15Aligns: true, // mean reversion doesn't need trend alignment
+          rsiExtreme: true,
+          priceAboveVWAP: false, // by definition we're at the band
+          dayTypeMatch: true,
+          sessionQuality,
+        });
+
+        log(`  → VWAP REVERSION ${dir.toUpperCase()} | VWAP:$${vwapData.vwap.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+        if (score >= 65) {
+          evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, targetDist, effectiveSizeMult, score,
+            `VWAP fade ${dir} $${price.toFixed(2)} ${isShort ? ">" : "<"} ${isShort ? "upper" : "lower"} $${(isShort ? vwapData.upper : vwapData.lower).toFixed(2)}, RSI ${currentRSI.toFixed(0)}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        }
+        return;
       }
     }
   }
+}
+
+// ── AI Evaluation + Execute ─────────────────────────────
+
+async function evaluateAndTrade(
+  sym: string, direction: string, price: number,
+  stopDist: number, targetDist: number, sizeMult: number, technicalScore: number,
+  reasoning: string, rsiVal: number, atrVal: number, vwapVal: number,
+  dayType: string, session: string, trend15: string,
+  prevDayHigh: number, prevDayLow: number,
+) {
+  // Get AI confirmation
+  const ai = await getAIConfirmation({
+    sym, direction, reasoning, price,
+    rsi: rsiVal, atr: atrVal, vwap: vwapVal,
+    dayType, session, trend15, prevDayHigh, prevDayLow,
+  });
+
+  // Adjust confidence based on AI
+  let finalScore = technicalScore;
+  if (ai.confidence > 0) {
+    if (ai.agree) {
+      finalScore += Math.min(10, Math.round(ai.confidence / 10));
+      log(`  AI CONFIRMS (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
+    } else {
+      finalScore -= 15;
+      log(`  AI DISAGREES (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
+    }
+  } else {
+    log(`  AI: ${ai.reasoning}`);
+  }
+
+  // Final gate: need 65%+ after AI adjustment
+  if (finalScore < 65) {
+    log(`  SKIPPED: Final confidence ${finalScore}% below 65% threshold`);
+    return;
+  }
+
+  log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}%`);
+  await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult,
+    `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
 }
 
 // ── Trade Execution ─────────────────────────────────────
