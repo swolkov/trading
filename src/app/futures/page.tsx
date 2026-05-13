@@ -975,6 +975,29 @@ export default function FuturesPage() {
                   {posData?.connected ? "No open positions" : "Positions will appear once Tradovate is connected"}
                 </p>
               )}
+              {/* Account summary — always visible */}
+              {posData?.account && (
+                <div className="pt-2 mt-2 border-t border-white/[0.06] grid grid-cols-2 gap-2 text-[10px]">
+                  <div>
+                    <span className="text-muted-foreground/40">Balance</span>
+                    <p className="font-bold">${posData.account.balance.toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground/40">Net Liq</span>
+                    <p className="font-bold">${posData.account.netLiq.toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground/40">Realized P&L</span>
+                    <p className={`font-bold ${pnlColor(posData.account.realizedPnl)}`}>
+                      {posData.account.realizedPnl >= 0 ? "+" : ""}${posData.account.realizedPnl.toLocaleString()}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground/40">Margin Used</span>
+                    <p className="font-bold">${posData.account.marginUsed.toLocaleString()}</p>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
 
