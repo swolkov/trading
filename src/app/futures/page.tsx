@@ -140,20 +140,24 @@ interface BacktestData {
 const CONTRACTS = ["MES", "MNQ", "MYM", "M2K"];
 
 const STRATEGIES = [
-  { name: "Opening Range Breakout", priority: 1, confidence: "75%", when: "First 30 min", desc: "Break above/below 15-min range with volume" },
-  { name: "VWAP Mean Reversion", priority: 2, confidence: "70%", when: "Midday, choppy", desc: "Fade VWAP band extremes + RSI" },
-  { name: "Trend Continuation", priority: 3, confidence: "80%", when: "Trending", desc: "Pullback to EMA9 in trend" },
-  { name: "Key Level Bounce", priority: 4, confidence: "65%", when: "Anytime", desc: "Prev day H/L with RSI confirm" },
-  { name: "EMA Crossover", priority: 5, confidence: "60%", when: "Fallback", desc: "9/21 cross + VWAP alignment" },
+  { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
+  { name: "IB Breakout", priority: 2, confidence: "75%+", when: "After 10:30 AM", desc: "Break above/below 60-min Initial Balance with volume + 15m trend alignment." },
+  { name: "Failed IB Breakout", priority: 3, confidence: "73%", when: "After IB break fails", desc: "Price tests IB high/low, returns to range. Fade to IB midpoint." },
+  { name: "Trend Continuation", priority: 4, confidence: "72%", when: "Morning/Afternoon", desc: "Pullback to EMA9 in trending market. Best backtest setup (67% WR)." },
+  { name: "Extreme RSI Bounce", priority: 5, confidence: "70%", when: "RSI <25 or >75", desc: "Exhaustion reversal on declining volume. Any session, any day type." },
 ];
 
 const RISK_RULES = [
-  "0.2% equity risk per trade",
-  "Bracket orders on every entry",
-  "1% daily loss limit",
-  "Max 6 trades/day",
-  "Skip first/last 15 min RTH",
-  "AI confirmation boost",
+  "Dynamic sizing: 0.25-1% per trade",
+  "Scale out 50% at 1R, trail rest",
+  "Breakeven stop at 1R profit",
+  "$1,500 daily loss kill switch",
+  "Max 2 positions, 6 trades/day",
+  "AI hard gate (Claude confirms)",
+  "Tilt: 30min pause after 2 stops",
+  "EOD forced close at 3:50 PM",
+  "Skip lunch 12-2 PM, half Mon/Fri",
+  "No re-entry on stopped symbols",
 ];
 
 // ── Helpers ────────────────────────────────────────────
@@ -245,7 +249,31 @@ export default function FuturesPage() {
   const selectedQuote = quotes.find((q) => q.symbol === selectedContract);
   const closedTrades = trades.filter((t) => t.pnl != null);
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
+  const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
   const totalPnl = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0;
+  const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0;
+  const bestTrade = closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
+  const worstTrade = closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
+
+  // Daily/Weekly/Monthly P&L
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const dailyPnl = closedTrades
+    .filter((t) => new Date(t.time) >= todayStart)
+    .reduce((s, t) => s + (t.pnl || 0), 0);
+  const weeklyPnl = closedTrades
+    .filter((t) => new Date(t.time) >= weekStart)
+    .reduce((s, t) => s + (t.pnl || 0), 0);
+  const monthlyPnl = closedTrades
+    .filter((t) => new Date(t.time) >= monthStart)
+    .reduce((s, t) => s + (t.pnl || 0), 0);
+  const dailyTrades = closedTrades.filter((t) => new Date(t.time) >= todayStart).length;
+  const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
+  const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -794,24 +822,88 @@ export default function FuturesPage() {
               <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Performance</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              {/* Total P&L */}
               <div>
                 <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
                 <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
                   {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
                 </p>
               </div>
+              {/* Win Rate + Trades */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
                   <p className="text-lg font-bold">
                     {closedTrades.length > 0 ? `${((wins.length / closedTrades.length) * 100).toFixed(0)}%` : "—"}
                   </p>
-                  <p className="text-[9px] text-muted-foreground/30">{wins.length}W / {closedTrades.length - wins.length}L</p>
+                  <p className="text-[9px] text-muted-foreground/30">{wins.length}W / {losses.length}L</p>
                 </div>
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Trades</p>
                   <p className="text-lg font-bold">{closedTrades.length}</p>
                   <p className="text-[9px] text-muted-foreground/30">closed total</p>
+                </div>
+              </div>
+              {/* Avg Win / Avg Loss */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-[10px] text-muted-foreground/40">Avg Win</p>
+                  <p className="text-sm font-bold text-emerald-400 tabular-nums">
+                    {wins.length > 0 ? `+$${avgWin.toFixed(0)}` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] text-muted-foreground/40">Avg Loss</p>
+                  <p className="text-sm font-bold text-red-400 tabular-nums">
+                    {losses.length > 0 ? `-$${Math.abs(avgLoss).toFixed(0)}` : "—"}
+                  </p>
+                </div>
+              </div>
+              {/* Best / Worst */}
+              {bestTrade && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Best Trade</p>
+                    <p className="text-[11px] font-bold text-emerald-400 tabular-nums">+${(bestTrade.pnl || 0).toFixed(0)}</p>
+                    <p className="text-[9px] text-muted-foreground/30">{bestTrade.symbol.replace("FUT:", "")}</p>
+                  </div>
+                  {worstTrade && (
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Worst Trade</p>
+                      <p className="text-[11px] font-bold text-red-400 tabular-nums">-${Math.abs(worstTrade.pnl || 0).toFixed(0)}</p>
+                      <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol.replace("FUT:", "")}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* Daily / Weekly / Monthly P&L */}
+              <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-muted-foreground/40">Today</span>
+                  <div className="text-right">
+                    <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+                      {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toFixed(0)}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{dailyTrades} trades</span>
+                  </div>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-muted-foreground/40">This Week</span>
+                  <div className="text-right">
+                    <span className={`text-sm font-bold tabular-nums ${pnlColor(weeklyPnl)}`}>
+                      {weeklyPnl >= 0 ? "+" : "-"}${Math.abs(weeklyPnl).toFixed(0)}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} trades</span>
+                  </div>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-muted-foreground/40">This Month</span>
+                  <div className="text-right">
+                    <span className={`text-sm font-bold tabular-nums ${pnlColor(monthlyPnl)}`}>
+                      {monthlyPnl >= 0 ? "+" : "-"}${Math.abs(monthlyPnl).toFixed(0)}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} trades</span>
+                  </div>
                 </div>
               </div>
             </CardContent>
