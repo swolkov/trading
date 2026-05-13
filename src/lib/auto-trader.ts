@@ -1014,14 +1014,21 @@ export async function runTradingAgent(): Promise<AgentResult> {
         return priority(a) - priority(b);
       });
 
-      // Analyze and potentially buy — cap AI analyses to avoid timeout (each takes ~20-30s)
+      // Analyze and potentially buy — cap AI analyses to avoid timeout
+      // Each AI call takes ~20-30s. With macro briefing + trade review + scanning,
+      // we only have ~120s left for stock analysis before Vercel's 300s limit.
       let aiAnalysesRun = 0;
-      const MAX_AI_ANALYSES = 8;
+      const MAX_AI_ANALYSES = 3;
       for (const [symbol, reason] of prioritized) {
         if (tradesPlaced + todayTrades >= RULES.MAX_DAILY_TRADES) break;
         if (positions.length + tradesPlaced >= RULES.MAX_POSITIONS) break;
         if (aiAnalysesRun >= MAX_AI_ANALYSES) {
           details.push(`Hit AI analysis limit (${MAX_AI_ANALYSES}) — stopping scan to avoid timeout`);
+          break;
+        }
+        // Time guard: exit gracefully before Vercel 300s timeout
+        if (Date.now() - startTime > 240_000) {
+          details.push(`Time guard: ${Math.round((Date.now() - startTime) / 1000)}s elapsed — stopping to avoid 504 timeout`);
           break;
         }
 
