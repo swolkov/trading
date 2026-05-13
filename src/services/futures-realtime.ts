@@ -325,7 +325,7 @@ function checkPositions(sym: string, price: number) {
   }
 
   // Emergency
-  if (diff * mult * pos.quantity < -500) {
+  if (diff * mult * pos.quantity < -750) {
     log(`${sym}: EMERGENCY CLOSE $${(diff * mult * pos.quantity).toFixed(0)}`);
     closePosition(sym, price, "emergency"); return;
   }
@@ -380,7 +380,7 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier();
-  if (sizeMult === 0 || positions.has(sym) || dailyTradeCount >= 6 || dailyPnl < -500) return;
+  if (sizeMult === 0 || positions.has(sym) || dailyTradeCount >= 10 || dailyPnl < -1500) return;
 
   const bars = b.bars5m;
   const closes = bars.map(x => x.c);
@@ -470,7 +470,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = 50000;
-  const maxRisk = equity * 0.002 * sizeMult;
+  const maxRisk = equity * 0.005 * sizeMult; // 0.5% per trade on demo — faster validation
   const riskPer = stopDist * mult;
   const qty = Math.max(1, Math.min(10, Math.floor(maxRisk / riskPer)));
   const rr = targetDist / stopDist;
