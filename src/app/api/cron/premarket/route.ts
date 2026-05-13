@@ -5,6 +5,7 @@ import { detectMarketRegime } from "@/lib/market-regime";
 import { scanSector, SECTOR_UNIVERSES } from "@/lib/sector-scanner";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
+import { updateMarketRegime, updateVolatilityEnvironment, vaultWrite } from "@/lib/vault";
 
 export const maxDuration = 120;
 
@@ -24,15 +25,16 @@ export async function GET(request: Request) {
 
     // 1. Market regime
     let regimeSummary = "";
+    let regime: Awaited<ReturnType<typeof detectMarketRegime>> | null = null;
     try {
-      const regime = await detectMarketRegime();
+      regime = await detectMarketRegime();
       regimeSummary = `REGIME: ${regime.regime.toUpperCase()} — ${regime.recommendation}`;
       details.push(regimeSummary);
     } catch {
       details.push("REGIME: Unable to detect");
     }
 
-    // 2. Macro briefing
+    // 2. Macro briefing + vault brain update
     let macroBriefingSummary = "";
     try {
       const briefing = await generateMacroBriefing();
@@ -41,6 +43,35 @@ export async function GET(request: Request) {
       if (briefing.tradingRules.length > 0) {
         details.push(`RULES: ${briefing.tradingRules.join(" | ")}`);
       }
+
+      // Update vault Brain files
+      try {
+        if (regime) {
+          await updateMarketRegime(regime.regime, {
+            trend: regime.spyAbove50sma ? "Above 50 SMA" : "Below 50 SMA",
+            volatility: `Annualized ${(regime.volatility * 100).toFixed(1)}%`,
+            momentum: `1M: ${(regime.spy1mReturn * 100).toFixed(1)}%, 3M: ${(regime.spy3mReturn * 100).toFixed(1)}%`,
+            implications: regime.recommendation,
+          });
+        }
+
+        const today = new Date().toISOString().slice(0, 10);
+        await vaultWrite("Brain/macro-outlook.md", `---
+last_updated: "${today}"
+updated_by: "research-agent"
+---
+
+# Macro Outlook
+
+## Summary
+${briefing.summary}
+
+## Bias: ${briefing.bias.toUpperCase()}
+
+## Trading Rules for Today
+${briefing.tradingRules.map((r: string) => `- ${r}`).join("\n")}
+`, "research-agent");
+      } catch { /* vault optional */ }
     } catch {
       details.push("MACRO: Unable to generate");
     }
