@@ -48,7 +48,7 @@ export default function AgentHubPage() {
   const [activity, setActivity] = useState<Activity[]>([]);
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<AgentRun | null>(null);
-  const [futuresStatus, setFuturesStatus] = useState<{ connected: boolean; message?: string } | null>(null);
+  const [futuresStatus, setFuturesStatus] = useState<{ connected: boolean; message?: string; accountName?: string } | null>(null);
   const [tradingModes, setTradingModes] = useState<TradingModes | null>(null);
   const [modePassword, setModePassword] = useState("");
   const [modeMessage, setModeMessage] = useState("");
