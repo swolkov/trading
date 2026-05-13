@@ -85,6 +85,24 @@ function log(msg: string) {
   console.log(`[${ts}] ${msg}`);
 }
 
+// Cancel all working orders on Tradovate (cleanup orphaned brackets)
+async function cancelAllOrders() {
+  try {
+    const orders = await apiFetch("/order/list") as { id: number; ordStatus: string }[];
+    const working = orders.filter(o => o.ordStatus === "Working" || o.ordStatus === "Accepted");
+    if (working.length === 0) return;
+    log(`[CLEANUP] Cancelling ${working.length} orphaned working orders`);
+    for (const order of working) {
+      try {
+        await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: order.id }) });
+      } catch {}
+    }
+    log(`[CLEANUP] Done — all orders cancelled`);
+  } catch (err) {
+    log(`[CLEANUP] Failed to cancel orders: ${err}`);
+  }
+}
+
 // Best-effort notification for critical events (trades, closes, errors)
 async function notify(msg: string) {
   try {
@@ -288,18 +306,24 @@ function checkSessionReset() {
       log(`Session reset ${sym} — PDH:${b.prevDayHigh.toFixed(2)} PDL:${b.prevDayLow.toFixed(2)}`);
     }
     dailyTradeCount = 0; dailyPnl = 0; stoppedSymbols.clear(); consecutiveStops = 0; tiltPauseUntil = 0;
+    // Clean slate: cancel any orphaned orders from yesterday
+    cancelAllOrders().catch(err => log(`[RESET] Order cleanup failed: ${err}`));
   }
 
-  // EOD forced close: flatten all positions at 3:50 PM ET (19:50 UTC)
-  if (now.getUTCHours() === 19 && now.getUTCMinutes() >= 49 && now.getUTCMinutes() <= 51 && positions.size > 0) {
-    log(`[EOD] 3:50 PM ET — closing all ${positions.size} positions before market close`);
-    for (const [sym] of [...positions]) {
-      const b = barBuilders.get(sym);
-      const price = b?.lastPrice || 0;
-      if (price > 0) {
-        closePosition(sym, price, "eod_close").catch(err => log(`[EOD] Failed to close ${sym}: ${err}`));
+  // EOD forced close: flatten all positions AND cancel all orders at 3:50 PM ET (19:50 UTC)
+  if (now.getUTCHours() === 19 && now.getUTCMinutes() >= 49 && now.getUTCMinutes() <= 51) {
+    if (positions.size > 0) {
+      log(`[EOD] 3:50 PM ET — closing all ${positions.size} positions before market close`);
+      for (const [sym] of [...positions]) {
+        const b = barBuilders.get(sym);
+        const price = b?.lastPrice || 0;
+        if (price > 0) {
+          closePosition(sym, price, "eod_close").catch(err => log(`[EOD] Failed to close ${sym}: ${err}`));
+        }
       }
     }
+    // Cancel ALL working orders to prevent orphaned fills overnight
+    cancelAllOrders().catch(err => log(`[EOD] Failed to cancel orders: ${err}`));
   }
 }
 
