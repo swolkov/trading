@@ -65,6 +65,33 @@ interface CommandData {
   avoidStrategies: string[];
   heartbeats: Record<string, string | null>;
   recentRuns: { type: string; summary: string; errors: number; duration: number; time: string }[];
+  // New systems
+  benchmark: {
+    lastRun: string; period: string; portfolioReturn: string; benchmarkReturn: string;
+    alpha: string; beta: string; sharpe: string; informationRatio: string;
+    beatingBenchmark: boolean; verdict: string;
+  } | null;
+  drawdownState: {
+    mode: string; currentDrawdownPct: number; peakEquity: number; currentEquity: number;
+    consecutiveLosses: number; recentWinRate: number; reason: string;
+    overrides: { sizeMultiplier: number; minScoreOverride: number; maxPositions: number; allowedStrategies: string[] };
+  } | null;
+  drawdownMode: string;
+  stressTest: {
+    timestamp: string; equity: number; portfolioResilience: string;
+    worstCase: { scenario: string; loss: number; lossPct: number };
+    scenarios: { name: string; estimatedPnl: number; estimatedPnlPct: number; severity: string; advice: string }[];
+  } | null;
+  pnlAttribution: {
+    period: string; totalPnl: number; stockSelectionPnl: number; timingPnl: number; sizingPnl: number;
+    bestSource: string; worstSource: string; insights: string[];
+    strategyRanking: { strategy: string; pnl: number; trades: number; winRate: number; grade: string }[];
+  } | null;
+  walkForward: {
+    timestamp: string; overallHealth: string;
+    strategies: { strategy: string; grade: string; recommendation: string; recentWinRate: number; recentPnl: number; edgeDecaying: boolean }[];
+    insights: string[];
+  } | null;
 }
 
 function StatusDot({ status }: { status: "ok" | "warning" | "critical" | "unknown" }) {
@@ -596,7 +623,288 @@ export default function CommandCenterPage() {
         </Card>
       </div>
 
-      {/* Row 3: Risk Alerts + Recent Agent Runs */}
+      {/* Row 3: Benchmark + Drawdown + Stress Test */}
+      <div className="grid lg:grid-cols-3 gap-4">
+        {/* Benchmark */}
+        <Card className={`border-zinc-800 ${data?.benchmark?.beatingBenchmark === false ? "border-red-500/20" : data?.benchmark?.beatingBenchmark ? "border-emerald-500/20" : ""}`}>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-bold">vs SPY Benchmark</CardTitle>
+              <Button size="sm" variant="ghost" className="text-[10px] h-6 px-2" disabled={runningAgent !== null} onClick={() => runAgent("/api/benchmark", "bench")}>
+                {runningAgent === "bench" ? "..." : "Refresh"}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {data?.benchmark ? (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Portfolio</p>
+                    <p className={`text-lg font-bold ${parseFloat(data.benchmark.portfolioReturn) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                      {parseFloat(data.benchmark.portfolioReturn) >= 0 ? "+" : ""}{data.benchmark.portfolioReturn}%
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">SPY</p>
+                    <p className={`text-lg font-bold ${parseFloat(data.benchmark.benchmarkReturn) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                      {parseFloat(data.benchmark.benchmarkReturn) >= 0 ? "+" : ""}{data.benchmark.benchmarkReturn}%
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Alpha</p>
+                    <p className={`text-sm font-bold ${parseFloat(data.benchmark.alpha) > 0 ? "text-emerald-500" : "text-red-500"}`}>
+                      {parseFloat(data.benchmark.alpha) >= 0 ? "+" : ""}{data.benchmark.alpha}%
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Sharpe</p>
+                    <p className="text-sm font-medium">{data.benchmark.sharpe}</p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Beta</p>
+                    <p className="text-sm font-medium">{data.benchmark.beta}</p>
+                  </div>
+                </div>
+                <p className="text-[10px] text-muted-foreground border-t border-zinc-800 pt-2">{data.benchmark.verdict}</p>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">No benchmark data — click Refresh to generate</p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Drawdown Protocol */}
+        <Card className={`border-zinc-800 ${data?.drawdownMode === "LOCKDOWN" ? "border-red-500/40 bg-red-500/5" : data?.drawdownMode === "RECOVERY" ? "border-orange-500/30" : data?.drawdownMode === "CAUTION" ? "border-yellow-500/20" : ""}`}>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-bold">Drawdown Protocol</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className={`px-3 py-2 rounded-lg text-center ${
+              data?.drawdownMode === "NORMAL" ? "bg-emerald-500/10 border border-emerald-500/20" :
+              data?.drawdownMode === "CAUTION" ? "bg-yellow-500/10 border border-yellow-500/20" :
+              data?.drawdownMode === "RECOVERY" ? "bg-orange-500/10 border border-orange-500/20" :
+              data?.drawdownMode === "LOCKDOWN" ? "bg-red-500/10 border border-red-500/20" :
+              "bg-zinc-900 border border-zinc-800"
+            }`}>
+              <p className={`text-lg font-black ${
+                data?.drawdownMode === "NORMAL" ? "text-emerald-500" :
+                data?.drawdownMode === "CAUTION" ? "text-yellow-500" :
+                data?.drawdownMode === "RECOVERY" ? "text-orange-500" :
+                data?.drawdownMode === "LOCKDOWN" ? "text-red-500" : ""
+              }`}>
+                {data?.drawdownMode || "UNKNOWN"}
+              </p>
+            </div>
+            {data?.drawdownState && (
+              <>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Drawdown</p>
+                    <p className={`text-sm font-medium ${data.drawdownState.currentDrawdownPct > 3 ? "text-red-500" : ""}`}>
+                      {data.drawdownState.currentDrawdownPct.toFixed(1)}%
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Consec. Losses</p>
+                    <p className={`text-sm font-medium ${data.drawdownState.consecutiveLosses >= 3 ? "text-red-500" : ""}`}>
+                      {data.drawdownState.consecutiveLosses}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Win Rate</p>
+                    <p className={`text-sm font-medium ${data.drawdownState.recentWinRate < 40 ? "text-red-500" : ""}`}>
+                      {data.drawdownState.recentWinRate.toFixed(0)}%
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Sizing</p>
+                    <p className="text-sm font-medium">{(data.drawdownState.overrides.sizeMultiplier * 100).toFixed(0)}%</p>
+                  </div>
+                </div>
+                <p className="text-[10px] text-muted-foreground border-t border-zinc-800 pt-2">{data.drawdownState.reason}</p>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Stress Test */}
+        <Card className={`border-zinc-800 ${data?.stressTest?.portfolioResilience === "fragile" ? "border-red-500/20" : data?.stressTest?.portfolioResilience === "weak" ? "border-orange-500/20" : ""}`}>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-bold">Stress Test</CardTitle>
+              <Button size="sm" variant="ghost" className="text-[10px] h-6 px-2" disabled={runningAgent !== null} onClick={() => runAgent("/api/stress-test", "stress")}>
+                {runningAgent === "stress" ? "..." : "Run"}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {data?.stressTest ? (
+              <>
+                <div className={`px-3 py-2 rounded-lg text-center border ${
+                  data.stressTest.portfolioResilience === "strong" ? "bg-emerald-500/10 border-emerald-500/20" :
+                  data.stressTest.portfolioResilience === "moderate" ? "bg-yellow-500/10 border-yellow-500/20" :
+                  data.stressTest.portfolioResilience === "weak" ? "bg-orange-500/10 border-orange-500/20" :
+                  "bg-red-500/10 border-red-500/20"
+                }`}>
+                  <p className="text-[9px] text-muted-foreground/60">Resilience</p>
+                  <p className="text-sm font-bold uppercase">{data.stressTest.portfolioResilience}</p>
+                </div>
+                <div className="space-y-1.5">
+                  {data.stressTest.scenarios.map((s) => (
+                    <div key={s.name} className="flex items-center justify-between">
+                      <span className="text-[10px] truncate max-w-[120px]">{s.name}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-medium ${s.estimatedPnl < 0 ? "text-red-500" : "text-emerald-500"}`}>
+                          {s.estimatedPnl >= 0 ? "+" : ""}${(s.estimatedPnl / 1000).toFixed(1)}k
+                        </span>
+                        <span className={`text-[8px] px-1.5 py-0.5 rounded ${
+                          s.severity === "survivable" ? "bg-emerald-500/15 text-emerald-500" :
+                          s.severity === "painful" ? "bg-yellow-500/15 text-yellow-500" :
+                          s.severity === "critical" ? "bg-orange-500/15 text-orange-500" :
+                          "bg-red-500/15 text-red-500"
+                        }`}>{s.severity}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">No stress test data — click Run to analyze</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Row 4: P&L Attribution + Walk-Forward */}
+      <div className="grid lg:grid-cols-2 gap-4">
+        {/* P&L Attribution */}
+        <Card className="border-zinc-800">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-bold">P&L Attribution</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {data?.pnlAttribution ? (
+              <>
+                <div className="grid grid-cols-4 gap-2">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Total P&L</p>
+                    <p className={`text-sm font-bold ${pnlColor(data.pnlAttribution.totalPnl)}`}>
+                      ${data.pnlAttribution.totalPnl.toFixed(0)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Selection</p>
+                    <p className={`text-sm font-medium ${pnlColor(data.pnlAttribution.stockSelectionPnl)}`}>
+                      ${data.pnlAttribution.stockSelectionPnl.toFixed(0)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Timing</p>
+                    <p className={`text-sm font-medium ${pnlColor(data.pnlAttribution.timingPnl)}`}>
+                      ${data.pnlAttribution.timingPnl.toFixed(0)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground/60">Sizing</p>
+                    <p className={`text-sm font-medium ${pnlColor(data.pnlAttribution.sizingPnl)}`}>
+                      ${data.pnlAttribution.sizingPnl.toFixed(0)}
+                    </p>
+                  </div>
+                </div>
+                {/* Strategy ranking */}
+                {data.pnlAttribution.strategyRanking.length > 0 && (
+                  <div className="border-t border-zinc-800 pt-2 space-y-1">
+                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">By Strategy</p>
+                    {data.pnlAttribution.strategyRanking.slice(0, 5).map((s) => (
+                      <div key={s.strategy} className="flex items-center justify-between text-[10px]">
+                        <div className="flex items-center gap-2">
+                          <span className={`font-bold ${gradeColor(s.grade)}`}>{s.grade}</span>
+                          <span>{s.strategy.replace(/_/g, " ")}</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="text-muted-foreground">{s.trades}t {s.winRate.toFixed(0)}%</span>
+                          <span className={`font-medium ${pnlColor(s.pnl)}`}>${s.pnl.toFixed(0)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Insights */}
+                {data.pnlAttribution.insights.length > 0 && (
+                  <div className="border-t border-zinc-800 pt-2">
+                    {data.pnlAttribution.insights.slice(0, 3).map((insight, i) => (
+                      <p key={i} className="text-[10px] text-blue-400 mt-1">{insight}</p>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">No attribution data — runs during post-market review</p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Walk-Forward Optimization */}
+        <Card className={`border-zinc-800 ${data?.walkForward?.overallHealth === "critical" ? "border-red-500/20" : data?.walkForward?.overallHealth === "declining" ? "border-orange-500/20" : ""}`}>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-bold">Strategy Health</CardTitle>
+              <Button size="sm" variant="ghost" className="text-[10px] h-6 px-2" disabled={runningAgent !== null} onClick={() => runAgent("/api/cron/walk-forward", "wf")}>
+                {runningAgent === "wf" ? "..." : "Analyze"}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {data?.walkForward ? (
+              <>
+                <div className={`px-3 py-1 rounded-lg text-center border ${
+                  data.walkForward.overallHealth === "healthy" ? "bg-emerald-500/10 border-emerald-500/20" :
+                  data.walkForward.overallHealth === "mixed" ? "bg-yellow-500/10 border-yellow-500/20" :
+                  data.walkForward.overallHealth === "declining" ? "bg-orange-500/10 border-orange-500/20" :
+                  "bg-red-500/10 border-red-500/20"
+                }`}>
+                  <p className="text-xs font-bold uppercase">{data.walkForward.overallHealth}</p>
+                </div>
+                <div className="space-y-1.5">
+                  {data.walkForward.strategies.map((s) => (
+                    <div key={s.strategy} className="flex items-center justify-between text-[10px]">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-bold ${gradeColor(s.grade)}`}>{s.grade}</span>
+                        <span>{s.strategy.replace(/_/g, " ")}</span>
+                        {s.edgeDecaying && <span className="text-[8px] px-1 py-0.5 rounded bg-red-500/15 text-red-500">DECAY</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground">{s.recentWinRate.toFixed(0)}%</span>
+                        <span className={`font-medium ${pnlColor(s.recentPnl)}`}>${s.recentPnl.toFixed(0)}</span>
+                        <span className={`text-[8px] px-1.5 py-0.5 rounded ${
+                          s.recommendation === "keep" ? "bg-emerald-500/15 text-emerald-500" :
+                          s.recommendation === "optimize" ? "bg-blue-500/15 text-blue-400" :
+                          s.recommendation === "reduce" ? "bg-yellow-500/15 text-yellow-500" :
+                          "bg-red-500/15 text-red-500"
+                        }`}>{s.recommendation}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {data.walkForward.insights.length > 0 && (
+                  <div className="border-t border-zinc-800 pt-2">
+                    {data.walkForward.insights.slice(0, 2).map((insight, i) => (
+                      <p key={i} className="text-[10px] text-blue-400 mt-1">{insight}</p>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">No walk-forward data — runs weekly Sunday night</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Row 5: Risk Alerts + Recent Agent Runs */}
       <div className="grid lg:grid-cols-2 gap-4">
         {/* Active Risk Alerts */}
         <Card className="border-zinc-800">

@@ -15,6 +15,7 @@ import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
 import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, updateMarketRegime, updateVolatilityEnvironment } from "./vault";
+import { evaluateDrawdownState } from "./drawdown-protocol";
 
 // Yahoo Finance symbols for micro futures (use the full-size contract as proxy)
 const YAHOO_FUTURES_MAP: Record<string, string> = {
@@ -653,6 +654,19 @@ export async function runFuturesAgent(): Promise<{
     sizeOverride = regimeOverride * eventOverride;
     if (sizeOverride !== 1.0) {
       details.push(`OVERRIDES: regime ${regimeOverride}x × event ${eventOverride}x = ${sizeOverride.toFixed(2)}x sizing`);
+    }
+  } catch { /* use defaults */ }
+
+  // Evaluate drawdown protocol
+  try {
+    const ddState = await evaluateDrawdownState();
+    if (ddState.mode !== "NORMAL") {
+      sizeOverride *= ddState.overrides.sizeMultiplier;
+      details.push(`DRAWDOWN: ${ddState.mode} — sizing ${(ddState.overrides.sizeMultiplier * 100).toFixed(0)}%`);
+      if (ddState.mode === "LOCKDOWN") {
+        details.push("LOCKDOWN: No new futures trades");
+        return { trades, managed, details };
+      }
     }
   } catch { /* use defaults */ }
 

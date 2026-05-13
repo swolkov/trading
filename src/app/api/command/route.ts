@@ -15,7 +15,7 @@ export async function GET() {
     const recentRuns = await prisma.agentRun.findMany({
       where: {
         createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        runType: { in: ["watchdog", "portfolio_risk", "regime_transition", "event_catalyst", "execution_quality"] },
+        runType: { in: ["watchdog", "portfolio_risk", "regime_transition", "event_catalyst", "execution_quality", "walk_forward"] },
       },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -65,6 +65,22 @@ export async function GET() {
         premarketCron: configMap.premarket_last_run || null,
         reviewCron: configMap.review_last_run || null,
       },
+
+      // Benchmark tracking
+      benchmark: parseJSON("benchmark_report"),
+
+      // P&L attribution
+      pnlAttribution: parseJSON("pnl_attribution"),
+
+      // Stress test
+      stressTest: parseJSON("stress_test_result"),
+
+      // Drawdown protocol
+      drawdownState: parseJSON("drawdown_state"),
+      drawdownMode: configMap.drawdown_mode || "NORMAL",
+
+      // Walk-forward optimization
+      walkForward: parseJSON("walk_forward_result"),
 
       // Meta-agent run history
       recentRuns: recentRuns.map((r) => ({
