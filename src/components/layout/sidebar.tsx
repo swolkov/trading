@@ -19,6 +19,7 @@ const sections = [
       { href: "/trade", label: "Trade" },
       { href: "/options", label: "Options" },
       { href: "/futures", label: "Futures" },
+      { href: "/positions", label: "Positions" },
     ],
   },
   {

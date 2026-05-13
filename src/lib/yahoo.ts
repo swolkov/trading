@@ -329,3 +329,101 @@ export async function getAnalystRecommendations(
     return [];
   }
 }
+
+// ---------- Ownership Breakdown ----------
+
+export interface OwnershipBreakdown {
+  insidersPercentHeld: number | null;
+  institutionsPercentHeld: number | null;
+  institutionsFloatPercentHeld: number | null;
+  institutionsCount: number | null;
+}
+
+export async function getOwnershipBreakdown(
+  symbol: string
+): Promise<OwnershipBreakdown | null> {
+  try {
+    const result = await yahooFinance.quoteSummary(symbol, {
+      modules: ["majorHoldersBreakdown"],
+    });
+    const holders = result.majorHoldersBreakdown;
+    if (!holders) return null;
+
+    return {
+      insidersPercentHeld: holders.insidersPercentHeld ?? null,
+      institutionsPercentHeld: holders.institutionsPercentHeld ?? null,
+      institutionsFloatPercentHeld: holders.institutionsFloatPercentHeld ?? null,
+      institutionsCount: holders.institutionsCount ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------- Cash Flow Statements ----------
+
+export interface CashFlowStatement {
+  date: string;
+  operatingCashFlow: number;
+  capitalExpenditure: number;
+  freeCashFlow: number;
+  dividendsPaid: number;
+  stockRepurchased: number;
+}
+
+export async function getCashFlowStatements(
+  symbol: string
+): Promise<CashFlowStatement[]> {
+  try {
+    const result = await yahooFinance.quoteSummary(symbol, {
+      modules: ["cashflowStatementHistory"],
+    });
+    const statements = result.cashflowStatementHistory?.cashflowStatements;
+    if (!statements) return [];
+
+    return statements.map((s: Record<string, number | string | Date | null>) => ({
+      date: s.endDate ? new Date(s.endDate).toISOString().split("T")[0] : "",
+      operatingCashFlow: Number(s.totalCashFromOperatingActivities) || 0,
+      capitalExpenditure: Number(s.capitalExpenditures) || 0,
+      freeCashFlow: (Number(s.totalCashFromOperatingActivities) || 0) + (Number(s.capitalExpenditures) || 0),
+      dividendsPaid: Math.abs(Number(s.dividendsPaid) || 0),
+      stockRepurchased: Math.abs(Number(s.repurchaseOfStock) || 0),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Net Insider Purchase Activity ----------
+
+export interface InsiderPurchaseActivity {
+  buyInfoShares: number;
+  sellInfoShares: number;
+  netInfoShares: number;
+  totalInsiderShares: number;
+  buyPercentInsiderShares: number | null;
+  sellPercentInsiderShares: number | null;
+}
+
+export async function getNetInsiderActivity(
+  symbol: string
+): Promise<InsiderPurchaseActivity | null> {
+  try {
+    const result = await yahooFinance.quoteSummary(symbol, {
+      modules: ["netSharePurchaseActivity"],
+    });
+    const activity = result.netSharePurchaseActivity;
+    if (!activity) return null;
+
+    return {
+      buyInfoShares: activity.buyInfoShares || 0,
+      sellInfoShares: activity.sellInfoShares || 0,
+      netInfoShares: activity.netInfoShares || 0,
+      totalInsiderShares: activity.totalInsiderShares || 0,
+      buyPercentInsiderShares: activity.buyPercentInsiderShares ?? null,
+      sellPercentInsiderShares: activity.sellPercentInsiderShares ?? null,
+    };
+  } catch {
+    return null;
+  }
+}

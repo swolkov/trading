@@ -117,7 +117,45 @@ ${briefing.tradingRules.map((r: string) => `- ${r}`).join("\n")}
       }
     } catch { /* ignore */ }
 
-    // 5. Check existing positions for overnight gaps
+    // 5. Overnight futures gap — ES/NQ tell us market direction before open
+    let futuresGapContext = "";
+    try {
+      const [esBars, nqBars] = await Promise.all([
+        getHistoricalBars("ES=F", 5).catch(() => []),
+        getHistoricalBars("NQ=F", 5).catch(() => []),
+      ]);
+
+      const gaps: string[] = [];
+      if (esBars.length >= 2) {
+        const esGap = ((esBars[esBars.length - 1].c - esBars[esBars.length - 2].c) / esBars[esBars.length - 2].c) * 100;
+        gaps.push(`ES ${esGap >= 0 ? "+" : ""}${esGap.toFixed(2)}%`);
+        if (Math.abs(esGap) >= 0.5) {
+          futuresGapContext += `ES futures ${esGap > 0 ? "UP" : "DOWN"} ${Math.abs(esGap).toFixed(2)}% overnight. `;
+        }
+      }
+      if (nqBars.length >= 2) {
+        const nqGap = ((nqBars[nqBars.length - 1].c - nqBars[nqBars.length - 2].c) / nqBars[nqBars.length - 2].c) * 100;
+        gaps.push(`NQ ${nqGap >= 0 ? "+" : ""}${nqGap.toFixed(2)}%`);
+        if (Math.abs(nqGap) >= 0.5) {
+          futuresGapContext += `NQ futures ${nqGap > 0 ? "UP" : "DOWN"} ${Math.abs(nqGap).toFixed(2)}% overnight. `;
+        }
+      }
+
+      if (gaps.length > 0) {
+        details.push(`FUTURES OVERNIGHT: ${gaps.join(" | ")}`);
+      }
+      if (futuresGapContext) {
+        details.push(`FUTURES BIAS: ${futuresGapContext}`);
+        // Persist for stock agent to read during analysis
+        await prisma.agentConfig.upsert({
+          where: { key: "futures_overnight_gap" },
+          create: { key: "futures_overnight_gap", value: futuresGapContext },
+          update: { value: futuresGapContext },
+        });
+      }
+    } catch { /* ignore */ }
+
+    // 6. Check existing positions for overnight gaps (stocks)
     let positionAlerts: string[] = [];
     try {
       const positions = await prisma.autoTradeLog.findMany({
@@ -155,6 +193,7 @@ ${briefing.tradingRules.map((r: string) => `- ${r}`).join("\n")}
       regimeSummary,
       macroBriefingSummary,
       "",
+      futuresGapContext ? `FUTURES: ${futuresGapContext}` : "",
       newsHighlights.length > 0 ? `OVERNIGHT NEWS:\n${newsHighlights.map((n) => `  - ${n}`).join("\n")}` : "No major overnight news",
       "",
       sectorInsights.length > 0 ? `SECTORS:\n${sectorInsights.map((s) => `  - ${s}`).join("\n")}` : "",

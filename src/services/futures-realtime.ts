@@ -811,6 +811,9 @@ async function getAIConfirmation(setup: {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return { agree: true, confidence: 0, reasoning: "AI unavailable" };
 
+    const macroCtx = crossAssetSummary || "No macro data";
+    const eventCtx = macroBlockReason || "No macro events nearby";
+
     const prompt = `You are an elite micro E-mini futures day trader. You only take A+ setups with clear edge.
 
 ${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()}
@@ -818,10 +821,14 @@ Setup: ${setup.reasoning}
 RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
 15m trend: ${setup.trend15} | Day type: ${setup.dayType} | Session: ${setup.session}
 Key levels: PDH $${setup.prevDayHigh.toFixed(2)} | PDL $${setup.prevDayLow.toFixed(2)}
-VIX: ${currentVIX.toFixed(1)}
+VIX: ${currentVIX.toFixed(1)} | Term structure: ${vixTermStructure} ${vixTermStructure === "backwardation" ? "(FEAR — market stressed)" : "(normal)"}
+${macroCtx}
+${sectorContext || "No sector data"}
+Earnings week: ${earningsWeekSymbols.length > 0 ? earningsWeekSymbols.join(", ") + " reporting — elevated vol" : "no mega-cap earnings"}
+Macro events: ${eventCtx}
 
-REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), or R:R < 2:1.
-ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session.
+REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), R:R < 2:1, or macro signals strongly oppose direction (risk_off + long, risk_on + short).
+ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session, and macro confirms or is neutral.
 
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
 
@@ -905,6 +912,12 @@ function onBarClose(sym: string, bar: Bar) {
   if (Date.now() < tiltPauseUntil) return;
   // No re-entry on stopped-out symbols
   if (stoppedSymbols.has(sym)) return;
+  // MACRO EVENT GATE: reduce/block trading around CPI, FOMC, jobs reports
+  const macro = getMacroMultiplier();
+  if (macro.multiplier === 0) {
+    log(`  ✗ MACRO BLOCK: ${macro.reason} — no new trades`);
+    return;
+  }
 
   const bars = b.bars5m;
   const closes = bars.map(x => x.c);
@@ -936,7 +949,11 @@ function onBarClose(sym: string, bar: Bar) {
   // VIX
   const vix = getVIXMultiplier();
   const adjustedATR = currentATR * vix.stopMult;
-  let effectiveSizeMult = sizeMult * vix.sizeMult;
+  let effectiveSizeMult = sizeMult * vix.sizeMult * macro.multiplier;
+  // Earnings week: reduce NQ/MNQ when mega-caps reporting
+  if ((sym === "MNQ" || sym === "MES") && earningsWeekNQPenalty < 1.0) {
+    effectiveSizeMult *= earningsWeekNQPenalty;
+  }
   const dayOfWeek = new Date().getUTCDay();
   if (dayOfWeek === 1 || dayOfWeek === 5) effectiveSizeMult *= 0.5; // half size Mon/Fri
   const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.5 ? "good" : "avoid";
@@ -1458,21 +1475,296 @@ async function preloadBars() {
 // ── VIX Check (adjust risk based on volatility) ──
 
 let currentVIX = 20;
+let vix3m = 20;
+let vixTermStructure: "contango" | "backwardation" | "flat" = "contango";
 
 async function updateVIX() {
   try {
-    const q = await yfEngine.quote("^VIX");
-    if (q?.regularMarketPrice) {
-      currentVIX = q.regularMarketPrice;
-    }
+    const [vixQ, vix3mQ] = await Promise.all([
+      yfEngine.quote("^VIX").catch(() => null),
+      yfEngine.quote("^VIX3M").catch(() => null),
+    ]);
+    if (vixQ?.regularMarketPrice) currentVIX = vixQ.regularMarketPrice;
+    if (vix3mQ?.regularMarketPrice) vix3m = vix3mQ.regularMarketPrice;
+
+    // Term structure: VIX < VIX3M = contango (normal), VIX > VIX3M = backwardation (fear)
+    const ratio = currentVIX / (vix3m || currentVIX);
+    if (ratio > 1.05) vixTermStructure = "backwardation";
+    else if (ratio < 0.95) vixTermStructure = "contango";
+    else vixTermStructure = "flat";
   } catch {}
 }
 
 function getVIXMultiplier(): { stopMult: number; sizeMult: number; label: string } {
-  if (currentVIX > 30) return { stopMult: 2.0, sizeMult: 0.5, label: `VIX ${currentVIX.toFixed(1)} EXTREME — half size, wide stops` };
-  if (currentVIX > 25) return { stopMult: 1.5, sizeMult: 0.7, label: `VIX ${currentVIX.toFixed(1)} HIGH — reduced size` };
-  if (currentVIX < 14) return { stopMult: 0.8, sizeMult: 1.0, label: `VIX ${currentVIX.toFixed(1)} LOW — tight stops` };
-  return { stopMult: 1.0, sizeMult: 1.0, label: `VIX ${currentVIX.toFixed(1)} normal` };
+  // Backwardation = market stress, extra caution
+  const backwardationPenalty = vixTermStructure === "backwardation" ? 0.7 : 1.0;
+
+  if (currentVIX > 30) return { stopMult: 2.0, sizeMult: 0.5 * backwardationPenalty, label: `VIX ${currentVIX.toFixed(1)} EXTREME (${vixTermStructure}) — half size, wide stops` };
+  if (currentVIX > 25) return { stopMult: 1.5, sizeMult: 0.7 * backwardationPenalty, label: `VIX ${currentVIX.toFixed(1)} HIGH (${vixTermStructure}) — reduced size` };
+  if (currentVIX < 14) return { stopMult: 0.8, sizeMult: 1.0, label: `VIX ${currentVIX.toFixed(1)} LOW (${vixTermStructure}) — tight stops` };
+  return { stopMult: 1.0, sizeMult: 1.0 * backwardationPenalty, label: `VIX ${currentVIX.toFixed(1)} normal (${vixTermStructure})` };
+}
+
+// ── Economic Calendar Gate (MACRO AWARENESS) ─────────────
+// Fetches upcoming high-impact events and reduces/blocks trading around them.
+// CPI, FOMC, jobs reports can move ES 50+ points in seconds.
+
+interface MacroEvent {
+  event: string;
+  time: string; // ISO or HH:MM
+  impact: string;
+  sizeMultiplier: number; // 0.0 = no trades, 0.5 = half size
+}
+
+let upcomingMacroEvents: MacroEvent[] = [];
+let macroSizeMultiplier = 1.0;
+let macroBlockReason = "";
+
+async function updateEconomicCalendar() {
+  try {
+    const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
+    if (!FINNHUB_KEY) return;
+
+    const today = new Date();
+    const from = today.toISOString().split("T")[0];
+    const to = new Date(today.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+    const res = await fetch(`https://finnhub.io/api/v1/calendar/economic?from=${from}&to=${to}&token=${FINNHUB_KEY}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const events = (data.economicCalendar || [])
+      .filter((e: Record<string, string>) => e.country === "US" && (e.impact === "high" || e.impact === "medium"));
+
+    upcomingMacroEvents = events.map((e: Record<string, string>) => {
+      const name = (e.event || "").toLowerCase();
+      let sizeMult = 1.0;
+
+      // High-impact events — massive moves
+      if (name.includes("fomc") || name.includes("federal funds rate")) sizeMult = 0.0; // NO TRADES
+      if (name.includes("cpi") || name.includes("consumer price")) sizeMult = 0.0;
+      if (name.includes("nonfarm") || name.includes("non-farm") || name.includes("payroll")) sizeMult = 0.0;
+      if (name.includes("ppi") || name.includes("producer price")) sizeMult = 0.3;
+      if (name.includes("gdp")) sizeMult = 0.3;
+      if (name.includes("unemployment") || name.includes("jobless")) sizeMult = 0.5;
+      if (name.includes("retail sales")) sizeMult = 0.5;
+      if (name.includes("ism") || name.includes("pmi")) sizeMult = 0.5;
+      if (name.includes("consumer confidence") || name.includes("sentiment")) sizeMult = 0.7;
+
+      return { event: e.event || "", time: e.time || "", impact: e.impact || "medium", sizeMultiplier: sizeMult };
+    }).filter((e: MacroEvent) => e.sizeMultiplier < 1.0);
+
+    log(`[MACRO] Loaded ${upcomingMacroEvents.length} market-moving events (next 3 days)`);
+    for (const ev of upcomingMacroEvents.slice(0, 5)) {
+      log(`  → ${ev.event} | Impact: ${ev.impact} | Size: ${(ev.sizeMultiplier * 100).toFixed(0)}%`);
+    }
+  } catch (err) {
+    log(`[MACRO] Calendar fetch failed: ${err}`);
+  }
+}
+
+function getMacroMultiplier(): { multiplier: number; reason: string } {
+  const now = new Date();
+  const todayStr = now.toISOString().split("T")[0];
+  const nowMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+
+  let worstMult = 1.0;
+  let worstReason = "";
+
+  for (const ev of upcomingMacroEvents) {
+    // Parse event time — format varies but usually "HH:MM" or ISO
+    let eventMinutes = -1;
+    const timeMatch = ev.time.match(/(\d{1,2}):(\d{2})/);
+    if (timeMatch) {
+      eventMinutes = parseInt(timeMatch[1]) * 60 + parseInt(timeMatch[2]);
+    }
+
+    // If event is today, check if we're within the danger window
+    if (ev.time.startsWith(todayStr) || eventMinutes >= 0) {
+      const minutesBefore = eventMinutes - nowMinutes;
+
+      // 30 minutes BEFORE event: apply full reduction
+      // 15 minutes AFTER event: still reduced (whipsaw period)
+      if (minutesBefore > -15 && minutesBefore < 30) {
+        if (ev.sizeMultiplier < worstMult) {
+          worstMult = ev.sizeMultiplier;
+          worstReason = `${ev.event} in ${minutesBefore > 0 ? minutesBefore + "m" : Math.abs(minutesBefore) + "m ago"} — size ${(ev.sizeMultiplier * 100).toFixed(0)}%`;
+        }
+      }
+      // 60 minutes before high-impact: reduced
+      else if (minutesBefore > 0 && minutesBefore < 60 && ev.sizeMultiplier <= 0.3) {
+        const scaledMult = Math.min(0.5, ev.sizeMultiplier + 0.3);
+        if (scaledMult < worstMult) {
+          worstMult = scaledMult;
+          worstReason = `${ev.event} in ${minutesBefore}m — pre-event caution ${(scaledMult * 100).toFixed(0)}%`;
+        }
+      }
+    }
+  }
+
+  macroSizeMultiplier = worstMult;
+  macroBlockReason = worstReason;
+  return { multiplier: worstMult, reason: worstReason };
+}
+
+// ── Mega-Cap Earnings Week Filter ─────────────────────────
+// When AAPL, MSFT, NVDA, AMZN, GOOG, META, TSLA report earnings,
+// NQ/MNQ volatility spikes dramatically. Reduce size.
+
+const MEGA_CAPS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"];
+let earningsWeekSymbols: string[] = [];
+let earningsWeekNQPenalty = 1.0;
+
+async function updateEarningsWeekFilter() {
+  try {
+    const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
+    if (!FINNHUB_KEY) return;
+
+    const today = new Date();
+    const from = today.toISOString().split("T")[0];
+    const to = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+    const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${FINNHUB_KEY}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const calendar = data.earningsCalendar || [];
+    earningsWeekSymbols = calendar
+      .filter((e: Record<string, string>) => MEGA_CAPS.includes(e.symbol))
+      .map((e: Record<string, string>) => e.symbol);
+
+    if (earningsWeekSymbols.length >= 3) {
+      earningsWeekNQPenalty = 0.5; // 3+ mega-caps reporting = half size NQ
+    } else if (earningsWeekSymbols.length >= 1) {
+      earningsWeekNQPenalty = 0.7; // 1-2 mega-caps = reduced
+    } else {
+      earningsWeekNQPenalty = 1.0;
+    }
+
+    if (earningsWeekSymbols.length > 0) {
+      log(`[EARNINGS] Mega-cap earnings this week: ${earningsWeekSymbols.join(", ")} — MNQ size ${(earningsWeekNQPenalty * 100).toFixed(0)}%`);
+    }
+  } catch (err) {
+    log(`[EARNINGS] Filter fetch failed: ${err}`);
+  }
+}
+
+// ── Cross-Asset Macro Signals ─────────────────────────────
+
+let crossAssetSummary = "";
+
+async function updateCrossAssetSignals() {
+  try {
+    const symbols = ["^VIX", "UUP", "TLT", "USO", "GLD"];
+    const quotes = await Promise.all(
+      symbols.map(s => yfEngine.quote(s).catch(() => null))
+    );
+
+    const data: Record<string, { price: number; change: number }> = {};
+    for (let i = 0; i < symbols.length; i++) {
+      const q = quotes[i];
+      if (q?.regularMarketPrice) {
+        data[symbols[i]] = {
+          price: q.regularMarketPrice,
+          change: q.regularMarketChangePercent || 0,
+        };
+      }
+    }
+
+    const vix = data["^VIX"];
+    const dollar = data["UUP"];
+    const bonds = data["TLT"];
+    const oil = data["USO"];
+    const gold = data["GLD"];
+
+    const signals: string[] = [];
+    if (vix) signals.push(`VIX:${vix.price.toFixed(1)}(${vix.change > 0 ? "+" : ""}${vix.change.toFixed(1)}%)`);
+    if (dollar) signals.push(`Dollar:${dollar.change > 0 ? "+" : ""}${dollar.change.toFixed(1)}%`);
+    if (bonds) signals.push(`TLT:${bonds.change > 0 ? "+" : ""}${bonds.change.toFixed(1)}%`);
+    if (oil) signals.push(`Oil:${oil.change > 0 ? "+" : ""}${oil.change.toFixed(1)}%`);
+    if (gold) signals.push(`Gold:${gold.change > 0 ? "+" : ""}${gold.change.toFixed(1)}%`);
+
+    // Determine macro stance
+    let riskSignal = "mixed";
+    const riskOnCount = [
+      vix && vix.change < -3,
+      bonds && bonds.change > 0,
+      gold && gold.change < 0,
+    ].filter(Boolean).length;
+    const riskOffCount = [
+      vix && vix.change > 3,
+      bonds && bonds.change < 0,
+      gold && gold.change > 1,
+    ].filter(Boolean).length;
+
+    if (riskOnCount >= 2) riskSignal = "risk_on";
+    if (riskOffCount >= 2) riskSignal = "risk_off";
+
+    crossAssetSummary = `Macro: ${riskSignal.toUpperCase()} | ${signals.join(" | ")}`;
+    log(`[MACRO] ${crossAssetSummary}`);
+  } catch (err) {
+    log(`[MACRO] Cross-asset fetch failed: ${err}`);
+  }
+}
+
+// ── Sector Rotation Intelligence (Cross-Pollination) ──────
+// Detects which sectors lead/lag. Tech leading = favor MNQ. Financials leading = favor MES.
+// Defensive sectors leading (XLU, XLP) = risk-off, reduce all.
+
+let sectorBias: "tech_leads" | "broad_rally" | "defensive" | "mixed" = "mixed";
+let sectorContext = "";
+
+async function updateSectorRotation() {
+  try {
+    const sectors = [
+      { sym: "XLK", name: "Tech" },
+      { sym: "XLF", name: "Financials" },
+      { sym: "XLE", name: "Energy" },
+      { sym: "XLV", name: "Healthcare" },
+      { sym: "XLI", name: "Industrials" },
+      { sym: "XLY", name: "Discretionary" },
+      { sym: "XLP", name: "Staples" },
+      { sym: "XLU", name: "Utilities" },
+    ];
+
+    const quotes = await Promise.all(
+      sectors.map(s => yfEngine.quote(s.sym).catch(() => null))
+    );
+
+    const results: { name: string; change: number }[] = [];
+    for (let i = 0; i < sectors.length; i++) {
+      const q = quotes[i];
+      if (q?.regularMarketChangePercent != null) {
+        results.push({ name: sectors[i].name, change: q.regularMarketChangePercent });
+      }
+    }
+
+    if (results.length < 4) return;
+
+    results.sort((a, b) => b.change - a.change);
+    const leaders = results.slice(0, 3).map(r => r.name);
+    const laggards = results.slice(-3).map(r => r.name);
+
+    // Determine bias
+    if (leaders.includes("Tech") && leaders.includes("Discretionary")) {
+      sectorBias = "tech_leads";
+    } else if (leaders.includes("Utilities") || leaders.includes("Staples")) {
+      sectorBias = "defensive";
+    } else if (results.filter(r => r.change > 0).length >= 6) {
+      sectorBias = "broad_rally";
+    } else {
+      sectorBias = "mixed";
+    }
+
+    sectorContext = `Sectors: ${sectorBias.toUpperCase()} | Leaders: ${leaders.join(",")} | Laggards: ${laggards.join(",")}`;
+    log(`[SECTORS] ${sectorContext}`);
+  } catch (err) {
+    log(`[SECTORS] Update failed: ${err}`);
+  }
 }
 
 // ── Reliability: Safe interval wrapper ───────────────────
@@ -1603,9 +1895,13 @@ async function main() {
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
 
-  // Get initial VIX
+  // Get initial VIX + macro intelligence
   await updateVIX();
   log(`VIX: ${currentVIX.toFixed(1)}`);
+  await updateEconomicCalendar();
+  await updateCrossAssetSignals();
+  await updateEarningsWeekFilter();
+  await updateSectorRotation();
 
   // Start polling — all wrapped in safe intervals
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
@@ -1613,6 +1909,10 @@ async function main() {
   safeInterval(syncPositions, 30_000, "syncPositions");
   safeInterval(writeHeartbeat, 60_000, "writeHeartbeat");
   safeInterval(updateVIX, 300_000, "updateVIX");
+  safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
+  safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
+  safeInterval(updateEarningsWeekFilter, 3600_000, "updateEarningsWeekFilter"); // hourly
+  safeInterval(updateSectorRotation, 600_000, "updateSectorRotation"); // every 10min
 
   // Watchdog: monitors tickCount and restarts poll if stalled
   startWatchdog();
@@ -1627,7 +1927,8 @@ async function main() {
       const b = barBuilders.get(s);
       return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
     }).join(" ");
-    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | Yahoo:${yahooStatus} | Tilt:${tiltStatus} | ${prices}`);
+    const macroStatus = macroBlockReason || "clear";
+    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | Yahoo:${yahooStatus} | Tilt:${tiltStatus} | ${prices}`);
   }, 120_000, "statusLog");
 
   log("Engine ready — scanning for setups on every 5-min bar close...");

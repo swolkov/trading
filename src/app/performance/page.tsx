@@ -3,6 +3,18 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
+interface Position {
+  symbol: string;
+  qty: string;
+  side: string;
+  avg_entry_price: string;
+  current_price: string;
+  market_value: string;
+  unrealized_pl: string;
+  unrealized_plpc: string;
+  asset_class: string;
+}
+
 interface TradeAnalysis {
   stats: {
     totalTrades: number;
@@ -53,13 +65,28 @@ function fmt(val: number) {
   return val >= 0 ? `+$${val.toLocaleString()}` : `-$${Math.abs(val).toLocaleString()}`;
 }
 
+function parseOptionSymbol(symbol: string) {
+  const match = symbol.match(/^([A-Z]+)(\d{6})([CP])(\d+)$/);
+  if (!match) return null;
+  const underlying = match[1];
+  const dateStr = match[2]; // YYMMDD
+  const type = match[3] === "C" ? "CALL" : "PUT";
+  const strike = parseInt(match[4]) / 1000;
+  const expiry = new Date(`20${dateStr.slice(0, 2)}-${dateStr.slice(2, 4)}-${dateStr.slice(4, 6)}`);
+  const now = new Date();
+  const dte = Math.max(0, Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+  return { underlying, type, strike, expiry: expiry.toLocaleDateString("en-US", { month: "short", day: "numeric" }), dte };
+}
+
 export default function PerformancePage() {
   const [data, setData] = useState<TradeAnalysis | null>(null);
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
+  const [positions, setPositions] = useState<Position[]>([]);
 
   useEffect(() => {
     fetch("/api/trades/analysis").then((r) => r.json()).then(setData).catch(console.error);
     fetch("/api/portfolio-history?period=1M&timeframe=1D").then((r) => r.json()).then((d) => { if (!d.error) setHistory(d); }).catch(() => {});
+    fetch("/api/positions").then((r) => r.json()).then((p) => { if (Array.isArray(p)) setPositions(p); }).catch(() => {});
   }, []);
 
   if (!data) return <div className="p-6 text-muted-foreground">Loading...</div>;
@@ -126,6 +153,118 @@ export default function PerformancePage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Open Options Positions */}
+      {(() => {
+        const optionPositions = positions.filter((p) => parseOptionSymbol(p.symbol));
+        const stockPositions = positions.filter((p) => !parseOptionSymbol(p.symbol));
+        if (optionPositions.length === 0 && stockPositions.length === 0) return null;
+        return (
+          <>
+            {optionPositions.length > 0 && (
+              <Card className="border-2 border-purple-500/20">
+                <CardHeader>
+                  <CardTitle className="text-sm">Open Options Positions ({optionPositions.length})</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-muted-foreground/60 border-b border-white/10">
+                          <th className="text-left py-2 font-medium">Underlying</th>
+                          <th className="text-left py-2 font-medium">Type</th>
+                          <th className="text-right py-2 font-medium">Strike</th>
+                          <th className="text-right py-2 font-medium">Expiry</th>
+                          <th className="text-right py-2 font-medium">DTE</th>
+                          <th className="text-right py-2 font-medium">Qty</th>
+                          <th className="text-right py-2 font-medium">Entry</th>
+                          <th className="text-right py-2 font-medium">Current</th>
+                          <th className="text-right py-2 font-medium">Mkt Value</th>
+                          <th className="text-right py-2 font-medium">P&L</th>
+                          <th className="text-right py-2 font-medium">% P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {optionPositions.map((p, i) => {
+                          const opt = parseOptionSymbol(p.symbol)!;
+                          const pl = parseFloat(p.unrealized_pl);
+                          const plPct = (parseFloat(p.unrealized_plpc) * 100);
+                          return (
+                            <tr key={i} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                              <td className="py-2 font-bold">{opt.underlying}</td>
+                              <td className="py-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                  opt.type === "CALL" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+                                }`}>{opt.type}</span>
+                              </td>
+                              <td className="py-2 text-right">${opt.strike.toFixed(0)}</td>
+                              <td className="py-2 text-right text-muted-foreground">{opt.expiry}</td>
+                              <td className={`py-2 text-right font-medium ${opt.dte <= 7 ? "text-red-400" : opt.dte <= 14 ? "text-yellow-400" : "text-muted-foreground"}`}>{opt.dte}d</td>
+                              <td className="py-2 text-right">{p.qty} {p.side === "long" ? "L" : "S"}</td>
+                              <td className="py-2 text-right">${parseFloat(p.avg_entry_price).toFixed(2)}</td>
+                              <td className="py-2 text-right">${parseFloat(p.current_price).toFixed(2)}</td>
+                              <td className="py-2 text-right">${parseFloat(p.market_value).toLocaleString()}</td>
+                              <td className={`py-2 text-right font-bold ${pnl(pl)}`}>{fmt(Math.round(pl))}</td>
+                              <td className={`py-2 text-right ${pnl(plPct)}`}>{plPct > 0 ? "+" : ""}{plPct.toFixed(1)}%</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="mt-3 flex gap-4 text-xs text-muted-foreground">
+                    <span>Total Options P&L: <span className={`font-bold ${pnl(optionPositions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0))}`}>
+                      {fmt(Math.round(optionPositions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0)))}
+                    </span></span>
+                    <span>Total Market Value: <span className="font-bold">${Math.round(optionPositions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value)), 0)).toLocaleString()}</span></span>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+            {stockPositions.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Open Stock Positions ({stockPositions.length})</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-muted-foreground/60 border-b border-white/10">
+                          <th className="text-left py-2 font-medium">Symbol</th>
+                          <th className="text-right py-2 font-medium">Qty</th>
+                          <th className="text-right py-2 font-medium">Entry</th>
+                          <th className="text-right py-2 font-medium">Current</th>
+                          <th className="text-right py-2 font-medium">Mkt Value</th>
+                          <th className="text-right py-2 font-medium">P&L</th>
+                          <th className="text-right py-2 font-medium">% P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {stockPositions.map((p, i) => {
+                          const pl = parseFloat(p.unrealized_pl);
+                          const plPct = (parseFloat(p.unrealized_plpc) * 100);
+                          return (
+                            <tr key={i} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                              <td className="py-2 font-bold">{p.symbol}</td>
+                              <td className="py-2 text-right">{p.qty} {p.side === "long" ? "L" : "S"}</td>
+                              <td className="py-2 text-right">${parseFloat(p.avg_entry_price).toFixed(2)}</td>
+                              <td className="py-2 text-right">${parseFloat(p.current_price).toFixed(2)}</td>
+                              <td className="py-2 text-right">${parseFloat(p.market_value).toLocaleString()}</td>
+                              <td className={`py-2 text-right font-bold ${pnl(pl)}`}>{fmt(Math.round(pl))}</td>
+                              <td className={`py-2 text-right ${pnl(plPct)}`}>{plPct > 0 ? "+" : ""}{plPct.toFixed(1)}%</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </>
+        );
+      })()}
 
       {/* Equity Curve */}
       {equityData.length > 0 && (

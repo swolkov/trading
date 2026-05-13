@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations } from "./yahoo";
+import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations, getIncomeStatements, getOwnershipBreakdown, getCashFlowStatements, getNetInsiderActivity } from "./yahoo";
 import { getSnapshot, getNews, getBars } from "./alpaca";
-import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar } from "./finnhub";
+import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar, getCompanyPeers, getRecommendationTrends, getCongressionalTrading, getEconomicCalendar, getInsiderSentiment, getSupportResistance, getEpsEstimates, getRevenueEstimates, getPriceTargetConsensus } from "./finnhub";
 import { analyzeVolatility } from "./options-intelligence";
 import { generateLearningInsights } from "./learning-engine";
 import { getMarketKnowledgeBase } from "./market-knowledge";
@@ -47,7 +47,7 @@ interface AnalysisResult {
 
 export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
   // Gather all data in parallel (Yahoo + Alpaca + Finnhub)
-  const [profile, stats, earnings, analysts, news, bars, insiderTrades, sentiment, upgrades, earningsCal, volatility] = await Promise.all([
+  const [profile, stats, earnings, analysts, news, bars, insiderTrades, sentiment, upgrades, earningsCal, volatility, incomeStatements, peers, recTrends, congressionalTrades, economicEvents, ownership, cashFlows, netInsiderActivity, insiderSentiment, supportResistance, epsEstimates, revenueEstimates, priceTargets] = await Promise.all([
     getCompanyProfile(symbol).catch(() => null),
     getKeyStats(symbol).catch(() => null),
     getEarnings(symbol).catch(() => null),
@@ -59,6 +59,19 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     getUpgradesDowngrades(symbol).catch(() => []),
     getEarningsCalendar().catch(() => []),
     analyzeVolatility(symbol).catch(() => null),
+    getIncomeStatements(symbol).catch(() => []),
+    getCompanyPeers(symbol).catch(() => []),
+    getRecommendationTrends(symbol).catch(() => []),
+    getCongressionalTrading(symbol).catch(() => []),
+    getEconomicCalendar().catch(() => []),
+    getOwnershipBreakdown(symbol).catch(() => null),
+    getCashFlowStatements(symbol).catch(() => []),
+    getNetInsiderActivity(symbol).catch(() => null),
+    getInsiderSentiment(symbol).catch(() => []),
+    getSupportResistance(symbol).catch(() => null),
+    getEpsEstimates(symbol).catch(() => []),
+    getRevenueEstimates(symbol).catch(() => []),
+    getPriceTargetConsensus(symbol).catch(() => null),
   ] as const);
 
   let snapshot = null;
@@ -142,6 +155,13 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     crossAssetContext = signals.summary;
   } catch { /* ignore */ }
 
+  // Get overnight futures gap for directional bias
+  let futuresGapContext = "";
+  try {
+    const gapConfig = await prisma.agentConfig.findUnique({ where: { key: "futures_overnight_gap" } });
+    if (gapConfig?.value) futuresGapContext = `OVERNIGHT FUTURES: ${gapConfig.value}`;
+  } catch { /* ignore */ }
+
   let regimeContext = "";
   try {
     const { detectMarketRegime } = await import("./market-regime");
@@ -166,10 +186,24 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     upgrades,
     earningsCal: earningsCal.filter((e) => e.symbol === symbol),
     volatility,
+    incomeStatements,
+    peers,
+    recTrends,
+    congressionalTrades,
+    economicEvents,
+    ownership,
+    cashFlows,
+    netInsiderActivity,
+    insiderSentiment,
+    supportResistance,
+    epsEstimates,
+    revenueEstimates,
+    priceTargets,
     learningInsights: learningInsights?.aiSummary || null,
     regimeContext,
     tradeLessons,
     crossAssetContext,
+    futuresGapContext,
   });
 
   // Call Claude for analysis
@@ -275,12 +309,26 @@ function buildAnalysisPrompt(data: {
   upgrades: { company: string; fromGrade: string; toGrade: string; action: string; time: string }[];
   earningsCal: { date: string; epsEstimate: number | null; hour: string }[];
   volatility: { ivRank: number; currentIV: number | null; historicalVolatility20: number; ivVsHv: string; recommendation: string } | null;
+  incomeStatements: Awaited<ReturnType<typeof getIncomeStatements>>;
+  peers: string[];
+  recTrends: { period: string; strongBuy: number; buy: number; hold: number; sell: number; strongSell: number }[];
+  congressionalTrades: { name: string; symbol: string; transactionType: string; transactionDate: string; amount: string }[];
+  economicEvents: { event: string; time: string; impact: string; actual: number | null; estimate: number | null; prev: number | null }[];
+  ownership: Awaited<ReturnType<typeof getOwnershipBreakdown>>;
+  cashFlows: Awaited<ReturnType<typeof getCashFlowStatements>>;
+  netInsiderActivity: Awaited<ReturnType<typeof getNetInsiderActivity>>;
+  insiderSentiment: { month: number; year: number; mspr: number; change: number }[];
+  supportResistance: { levels: number[] } | null;
+  epsEstimates: { period: string; epsAvg: number | null; epsHigh: number | null; epsLow: number | null; numberAnalysts: number }[];
+  revenueEstimates: { period: string; revenueAvg: number | null; revenueHigh: number | null; revenueLow: number | null; numberAnalysts: number }[];
+  priceTargets: { targetHigh: number; targetLow: number; targetMean: number; targetMedian: number } | null;
   learningInsights: string | null;
   regimeContext: string;
   tradeLessons: string;
   crossAssetContext: string;
+  futuresGapContext: string;
 }): string {
-  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, regimeContext, tradeLessons, crossAssetContext } = data;
+  const { symbol, profile, stats, earnings, analysts, news, currentPrice, technicals, pastTrades, pastReports, insiderTrades, sentiment, upgrades, earningsCal, volatility, incomeStatements, peers, recTrends, congressionalTrades, economicEvents, ownership, cashFlows, netInsiderActivity, insiderSentiment, supportResistance, epsEstimates, revenueEstimates, priceTargets, regimeContext, tradeLessons, crossAssetContext } = data;
 
   const newsText = news.map((n) => `- ${n.headline} (${n.source}, ${new Date(n.created_at).toLocaleDateString()})`).join("\n");
 
@@ -325,6 +373,7 @@ ${marketKnowledge}
 
 ${regimeContext}
 ${crossAssetContext}
+${data.futuresGapContext || ""}
 ${lessonsContext}
 
 CRITICAL RULES:
@@ -461,6 +510,89 @@ ${sentiment
 ${upgrades.length > 0
   ? upgrades.slice(0, 5).map((u) => `- ${u.company}: ${u.action.toUpperCase()} from ${u.fromGrade} to ${u.toGrade} (${new Date(u.time).toLocaleDateString()})`).join('\n')
   : 'No recent upgrades/downgrades'}
+
+## Company P&L — Income Statements (KNOW THE BUSINESS)
+${incomeStatements.length > 0
+  ? incomeStatements.slice(0, 4).map((s) => `- ${s.date}: Revenue $${(s.revenue / 1e9).toFixed(2)}B | Gross Profit $${(s.grossProfit / 1e9).toFixed(2)}B (${s.revenue > 0 ? ((s.grossProfit / s.revenue) * 100).toFixed(1) : 'N/A'}%) | Operating Income $${(s.operatingIncome / 1e9).toFixed(2)}B | Net Income $${(s.netIncome / 1e9).toFixed(2)}B | EBITDA $${(s.ebitda / 1e9).toFixed(2)}B`).join('\n')
+  : 'No income statement data'}
+${incomeStatements.length >= 2 ? `Revenue Trend: ${incomeStatements[0].revenue > incomeStatements[1].revenue ? 'GROWING' : 'DECLINING'} | Profit Trend: ${incomeStatements[0].netIncome > incomeStatements[1].netIncome ? 'IMPROVING' : 'DETERIORATING'}` : ''}
+
+## Company Peers (Competitive Landscape)
+${peers.length > 0
+  ? `Industry peers: ${peers.slice(0, 10).join(', ')}\nCompare ${symbol}'s valuation and growth vs these peers for relative value.`
+  : 'No peer data available'}
+
+## Analyst Recommendation Trends Over Time
+${recTrends.length > 0
+  ? recTrends.slice(0, 4).map((r) => `- ${r.period}: Strong Buy: ${r.strongBuy}, Buy: ${r.buy}, Hold: ${r.hold}, Sell: ${r.sell}, Strong Sell: ${r.strongSell}`).join('\n')
+  : 'No recommendation trend data'}
+${recTrends.length >= 2 ? `Trend: ${(recTrends[0].strongBuy + recTrends[0].buy) > (recTrends[1].strongBuy + recTrends[1].buy) ? 'ANALYSTS GETTING MORE BULLISH' : (recTrends[0].strongBuy + recTrends[0].buy) < (recTrends[1].strongBuy + recTrends[1].buy) ? 'ANALYSTS GETTING MORE BEARISH' : 'STABLE CONSENSUS'}` : ''}
+
+## Congressional Trading (Political Smart Money)
+${congressionalTrades.length > 0
+  ? congressionalTrades.slice(0, 5).map((t) => `- ${t.name}: ${t.transactionType} ~${t.amount} on ${t.transactionDate}`).join('\n')
+  : 'No recent congressional trades'}
+${congressionalTrades.length > 0 ? 'Politicians often trade on non-public information. Heavy buying = potential catalyst ahead.' : ''}
+
+## Ownership Structure (WHO Owns This Stock)
+${ownership
+  ? `- Insiders own: ${ownership.insidersPercentHeld != null ? (ownership.insidersPercentHeld * 100).toFixed(1) + '%' : 'N/A'}
+- Institutions own: ${ownership.institutionsPercentHeld != null ? (ownership.institutionsPercentHeld * 100).toFixed(1) + '%' : 'N/A'}
+- Institutions % of float: ${ownership.institutionsFloatPercentHeld != null ? (ownership.institutionsFloatPercentHeld * 100).toFixed(1) + '%' : 'N/A'}
+- Number of institutions: ${ownership.institutionsCount?.toLocaleString() || 'N/A'}
+${ownership.insidersPercentHeld != null && ownership.insidersPercentHeld > 0.1 ? 'HIGH INSIDER OWNERSHIP (>10%) — management has skin in the game, bullish signal' : ''}
+${ownership.institutionsPercentHeld != null && ownership.institutionsPercentHeld > 0.9 ? 'VERY HIGH INSTITUTIONAL OWNERSHIP — crowded trade, watch for institutional selling' : ''}`
+  : 'No ownership data available'}
+
+## Cash Flow Analysis (CRITICAL — Cash is King)
+${cashFlows.length > 0
+  ? cashFlows.slice(0, 4).map((cf) => `- ${cf.date}: Operating CF $${(cf.operatingCashFlow / 1e9).toFixed(2)}B | CapEx $${(cf.capitalExpenditure / 1e9).toFixed(2)}B | FCF $${(cf.freeCashFlow / 1e9).toFixed(2)}B | Buybacks $${(cf.stockRepurchased / 1e9).toFixed(2)}B | Dividends $${(cf.dividendsPaid / 1e9).toFixed(2)}B`).join('\n')
+  : 'No cash flow data'}
+${cashFlows.length >= 2 ? `FCF Trend: ${cashFlows[0].freeCashFlow > cashFlows[1].freeCashFlow ? 'IMPROVING' : 'DETERIORATING'} | ${cashFlows[0].stockRepurchased > cashFlows[0].dividendsPaid ? 'Company prioritizes BUYBACKS over dividends' : 'Company prioritizes DIVIDENDS over buybacks'}` : ''}
+
+## Net Insider Purchase Activity (Yahoo — aggregated buying pressure)
+${netInsiderActivity
+  ? `- Insider buys: ${netInsiderActivity.buyInfoShares.toLocaleString()} shares | Sells: ${netInsiderActivity.sellInfoShares.toLocaleString()} shares | NET: ${netInsiderActivity.netInfoShares.toLocaleString()} shares
+- Total insider holdings: ${netInsiderActivity.totalInsiderShares.toLocaleString()} shares
+${netInsiderActivity.netInfoShares > 0 ? 'INSIDERS ARE NET BUYERS — bullish signal' : netInsiderActivity.netInfoShares < 0 ? 'INSIDERS ARE NET SELLERS — caution' : 'NEUTRAL insider activity'}`
+  : 'No insider purchase activity data'}
+
+## Insider Sentiment MSPR (FinnHub — Monthly Share Purchase Ratio)
+${insiderSentiment.length > 0
+  ? insiderSentiment.map((s) => `- ${s.year}-${String(s.month).padStart(2, '0')}: MSPR ${s.mspr.toFixed(2)} (${s.mspr > 0 ? 'NET BUYING' : s.mspr < 0 ? 'NET SELLING' : 'NEUTRAL'}) | Shares changed: ${s.change.toLocaleString()}`).join('\n')
+  : 'No MSPR data'}
+${insiderSentiment.length > 0 ? `Recent insider sentiment trend: ${insiderSentiment[insiderSentiment.length - 1].mspr > 0 ? 'BULLISH — insiders buying recently' : insiderSentiment[insiderSentiment.length - 1].mspr < 0 ? 'BEARISH — insiders selling recently' : 'NEUTRAL'}` : ''}
+
+## Technical Support & Resistance Levels (CRITICAL FOR ENTRY/EXIT)
+${supportResistance && supportResistance.levels.length > 0
+  ? `Key levels: ${supportResistance.levels.map((l) => `$${l.toFixed(2)}`).join(' | ')}
+${supportResistance.levels.filter((l) => l < currentPrice).length > 0 ? `Nearest support: $${Math.max(...supportResistance.levels.filter((l) => l < currentPrice)).toFixed(2)}` : 'No support levels below current price'}
+${supportResistance.levels.filter((l) => l > currentPrice).length > 0 ? `Nearest resistance: $${Math.min(...supportResistance.levels.filter((l) => l > currentPrice)).toFixed(2)}` : 'No resistance levels above current price'}
+USE THESE FOR STOP LOSS AND TARGET PLACEMENT.`
+  : 'No support/resistance data'}
+
+## Forward EPS Estimates (What Analysts EXPECT)
+${epsEstimates.length > 0
+  ? epsEstimates.map((e) => `- ${e.period}: EPS Est $${e.epsAvg?.toFixed(2) || 'N/A'} (Low: $${e.epsLow?.toFixed(2) || 'N/A'} — High: $${e.epsHigh?.toFixed(2) || 'N/A'}) | ${e.numberAnalysts} analysts`).join('\n')
+  : 'No EPS estimates'}
+
+## Forward Revenue Estimates
+${revenueEstimates.length > 0
+  ? revenueEstimates.map((r) => `- ${r.period}: Revenue Est $${r.revenueAvg ? (r.revenueAvg / 1e9).toFixed(2) + 'B' : 'N/A'} (Low: $${r.revenueLow ? (r.revenueLow / 1e9).toFixed(2) + 'B' : 'N/A'} — High: $${r.revenueHigh ? (r.revenueHigh / 1e9).toFixed(2) + 'B' : 'N/A'}) | ${r.numberAnalysts} analysts`).join('\n')
+  : 'No revenue estimates'}
+${epsEstimates.length >= 2 && epsEstimates[0].epsAvg && epsEstimates[1].epsAvg ? `EPS Growth Trajectory: ${epsEstimates[1].epsAvg > epsEstimates[0].epsAvg ? 'ACCELERATING' : 'DECELERATING'} — this matters more than current earnings` : ''}
+
+## Analyst Price Targets (Detailed Consensus)
+${priceTargets
+  ? `- Mean: $${priceTargets.targetMean.toFixed(2)} | Median: $${priceTargets.targetMedian.toFixed(2)} | Low: $${priceTargets.targetLow.toFixed(2)} | High: $${priceTargets.targetHigh.toFixed(2)}
+- Current price $${currentPrice.toFixed(2)} is ${currentPrice < priceTargets.targetMean ? `${((priceTargets.targetMean - currentPrice) / currentPrice * 100).toFixed(1)}% BELOW mean target — potential upside` : `${((currentPrice - priceTargets.targetMean) / currentPrice * 100).toFixed(1)}% ABOVE mean target — limited upside per analysts`}`
+  : 'No detailed price target data'}
+
+## Upcoming Economic Events (Macro Risk)
+${economicEvents.length > 0
+  ? economicEvents.filter((e) => e.impact === 'high' || e.impact === 'medium').slice(0, 8).map((e) => `- ${e.event} (${e.impact.toUpperCase()} impact) — Est: ${e.estimate ?? 'N/A'} | Prev: ${e.prev ?? 'N/A'}`).join('\n')
+  : 'No upcoming economic events'}
+${economicEvents.some((e) => e.impact === 'high') ? 'WARNING: High-impact economic event upcoming. Consider reducing position size or waiting for the release.' : ''}
 
 ## Upcoming Earnings
 ${earningsCal.length > 0
@@ -617,22 +749,43 @@ Guidelines:
   return assistantMessage;
 }
 
+// Yahoo Finance screener for finding opportunities
+async function getScreenerSymbols(screenerId: string, count: number = 3): Promise<string[]> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const YF = require("yahoo-finance2").default || require("yahoo-finance2");
+    const yf = new YF({ suppressNotices: ["ripHistorical"] });
+    const result = await yf.screener({ scrIds: screenerId, count });
+    if (!result?.quotes) return [];
+    return result.quotes
+      .filter((q: Record<string, unknown>) => q.quoteType === "EQUITY" && q.symbol && !(q.symbol as string).includes("."))
+      .map((q: Record<string, string>) => q.symbol)
+      .slice(0, count);
+  } catch {
+    return [];
+  }
+}
+
 // Scan market for opportunities
 export async function scanMarket(): Promise<AnalysisResult[]> {
   // Import here to avoid circular deps
   const { getTopMovers, getMostActives } = await import("./alpaca");
 
-  const [gainers, losers, active] = await Promise.all([
+  const [gainers, losers, active, mostShorted, undervalued] = await Promise.all([
     getTopMovers("gainers"),
     getTopMovers("losers"),
     getMostActives(),
+    getScreenerSymbols("most_shorted_stocks", 2).catch(() => []),
+    getScreenerSymbols("undervalued_growth_stocks", 2).catch(() => []),
   ]);
 
-  // Pick top candidates: biggest gainers + oversold losers + most active
+  // Pick top candidates from multiple sources
   const candidates = new Set<string>();
   gainers.slice(0, 3).forEach((m) => candidates.add(m.symbol));
   losers.slice(0, 2).forEach((m) => candidates.add(m.symbol));
   active.slice(0, 3).forEach((m) => candidates.add(m.symbol));
+  mostShorted.forEach((s) => candidates.add(s)); // short squeeze candidates
+  undervalued.forEach((s) => candidates.add(s)); // value plays
 
   const results: AnalysisResult[] = [];
   for (const symbol of candidates) {

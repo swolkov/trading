@@ -209,3 +209,118 @@ export async function getCompanyPeers(symbol: string): Promise<string[]> {
     return [];
   }
 }
+
+// ---------- Insider Sentiment (MSPR — aggregated monthly) ----------
+
+export interface InsiderSentimentData {
+  month: number;
+  year: number;
+  mspr: number; // monthly share purchase ratio (-100 to 100, positive = net buying)
+  change: number; // net shares changed
+}
+
+export async function getInsiderSentiment(symbol: string): Promise<InsiderSentimentData[]> {
+  try {
+    const today = new Date();
+    const from = `${today.getFullYear() - 1}-01-01`;
+    const to = today.toISOString().split("T")[0];
+    const data = await finnhubFetch(`/stock/insider-sentiment?symbol=${symbol}&from=${from}&to=${to}`);
+    return (data.data || []).slice(-6).map((d: Record<string, number>) => ({
+      month: d.month || 0,
+      year: d.year || 0,
+      mspr: d.mspr || 0,
+      change: d.change || 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Support & Resistance Levels ----------
+
+export interface SupportResistance {
+  levels: number[];
+}
+
+export async function getSupportResistance(symbol: string): Promise<SupportResistance | null> {
+  try {
+    const data = await finnhubFetch(`/scan/support-resistance?symbol=${symbol}&resolution=D`);
+    return { levels: (data.levels || []).slice(0, 8) };
+  } catch {
+    return null;
+  }
+}
+
+// ---------- EPS Estimates (Forward) ----------
+
+export interface EpsEstimate {
+  period: string;
+  epsAvg: number | null;
+  epsHigh: number | null;
+  epsLow: number | null;
+  numberAnalysts: number;
+}
+
+export async function getEpsEstimates(symbol: string): Promise<EpsEstimate[]> {
+  try {
+    const data = await finnhubFetch(`/stock/eps-estimate?symbol=${symbol}&freq=quarterly`);
+    return (data.data || []).slice(0, 4).map((d: Record<string, unknown>) => ({
+      period: (d.period as string) || "",
+      epsAvg: (d.epsAvg as number) ?? null,
+      epsHigh: (d.epsHigh as number) ?? null,
+      epsLow: (d.epsLow as number) ?? null,
+      numberAnalysts: (d.numberAnalysts as number) || 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Revenue Estimates (Forward) ----------
+
+export interface RevenueEstimate {
+  period: string;
+  revenueAvg: number | null;
+  revenueHigh: number | null;
+  revenueLow: number | null;
+  numberAnalysts: number;
+}
+
+export async function getRevenueEstimates(symbol: string): Promise<RevenueEstimate[]> {
+  try {
+    const data = await finnhubFetch(`/stock/revenue-estimate?symbol=${symbol}&freq=quarterly`);
+    return (data.data || []).slice(0, 4).map((d: Record<string, unknown>) => ({
+      period: (d.period as string) || "",
+      revenueAvg: (d.revenueAvg as number) ?? null,
+      revenueHigh: (d.revenueHigh as number) ?? null,
+      revenueLow: (d.revenueLow as number) ?? null,
+      numberAnalysts: (d.numberAnalysts as number) || 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Price Target Consensus ----------
+
+export interface PriceTargetConsensus {
+  targetHigh: number;
+  targetLow: number;
+  targetMean: number;
+  targetMedian: number;
+}
+
+export async function getPriceTargetConsensus(symbol: string): Promise<PriceTargetConsensus | null> {
+  try {
+    const data = await finnhubFetch(`/stock/price-target?symbol=${symbol}`);
+    if (!data.targetHigh) return null;
+    return {
+      targetHigh: data.targetHigh || 0,
+      targetLow: data.targetLow || 0,
+      targetMean: data.targetMean || 0,
+      targetMedian: data.targetMedian || 0,
+    };
+  } catch {
+    return null;
+  }
+}
