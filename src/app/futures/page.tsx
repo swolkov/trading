@@ -186,7 +186,7 @@ export default function FuturesPage() {
   const [result, setResult] = useState<FuturesResult | null>(null);
   const [running, setRunning] = useState(false);
   const [selectedContract, setSelectedContract] = useState("MES");
-  const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "history" | "backtest">("chart");
+  const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "history" | "backtest" | "reports">("chart");
   const [chartMode, setChartMode] = useState<"tradingview" | "lightweight">("lightweight");
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
@@ -377,7 +377,7 @@ export default function FuturesPage() {
         <div className="space-y-3">
           {/* Tab bar */}
           <div className="flex gap-1 border-b border-white/[0.06] pb-2">
-            {(["chart", "strategy", "backtest", "history"] as const).map((tab) => (
+            {(["chart", "strategy", "backtest", "history", "reports"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => {
@@ -397,7 +397,7 @@ export default function FuturesPage() {
                     : "text-muted-foreground/60 hover:text-foreground"
                 }`}
               >
-                {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : tab === "backtest" ? "Backtest" : "Trade History"}
+                {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : tab === "backtest" ? "Backtest" : tab === "reports" ? "Reports" : "Trade History"}
               </button>
             ))}
           </div>
@@ -691,6 +691,168 @@ export default function FuturesPage() {
                 ) : (
                   <p className="text-sm text-muted-foreground/40 text-center py-8">No futures trades yet — agent will log trades here once Tradovate is connected</p>
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Reports tab */}
+          {activeTab === "reports" && (
+            <Card className="border-white/[0.06]">
+              <CardContent className="pt-4 space-y-6">
+                {/* Equity Curve */}
+                <div>
+                  <p className="text-xs font-bold mb-3">Equity Curve (Cumulative P&L)</p>
+                  {closedTrades.length > 0 ? (
+                    <>
+                      <div className="bg-black/30 rounded-lg p-3 h-32 flex items-end gap-px">
+                        {(() => {
+                          const sorted = [...closedTrades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+                          let cumPnl = 0;
+                          const points = sorted.map((t) => { cumPnl += t.pnl || 0; return cumPnl; });
+                          const min = Math.min(...points, 0);
+                          const max = Math.max(...points, 1);
+                          const range = max - min || 1;
+                          return points.map((v, i) => {
+                            const height = ((v - min) / range) * 100;
+                            return (
+                              <div key={i} className={`flex-1 min-w-[3px] rounded-t ${v >= 0 ? "bg-emerald-500/60" : "bg-red-500/60"}`} style={{ height: `${Math.max(3, height)}%` }} />
+                            );
+                          });
+                        })()}
+                      </div>
+                      <div className="flex justify-between text-[9px] text-muted-foreground/30 mt-1">
+                        <span>Trade 1</span>
+                        <span>Trade {closedTrades.length}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground/30 text-center py-8">No closed trades yet</p>
+                  )}
+                </div>
+
+                {/* Per-Setup Performance */}
+                <div>
+                  <p className="text-xs font-bold mb-3">Performance by Setup</p>
+                  {(() => {
+                    // Parse setup type from reason/action
+                    const setupMap: Record<string, { wins: number; losses: number; pnl: number; trades: number }> = {};
+                    for (const t of closedTrades) {
+                      let setup = "Other";
+                      const action = t.action || "";
+                      const reason = (t.reason || "").toLowerCase();
+                      if (action.includes("scale_out")) setup = "Scale Out";
+                      else if (action.includes("trail_stop")) setup = "Trail Stop";
+                      else if (action.includes("breakeven")) setup = "Breakeven";
+                      else if (action.includes("take_profit")) setup = "Take Profit";
+                      else if (action.includes("emergency")) setup = "Emergency";
+                      else if (reason.includes("gap fill")) setup = "Gap Fill";
+                      else if (reason.includes("failed ib")) setup = "Failed IB";
+                      else if (reason.includes("or breakout") || reason.includes("ib breakout")) setup = "IB Breakout";
+                      else if (reason.includes("trend pullback") || reason.includes("trend continuation")) setup = "Trend Cont.";
+                      else if (reason.includes("rsi")) setup = "RSI Bounce";
+                      else if (action.includes("stop_loss")) setup = "Stop Loss";
+                      if (!setupMap[setup]) setupMap[setup] = { wins: 0, losses: 0, pnl: 0, trades: 0 };
+                      setupMap[setup].trades++;
+                      setupMap[setup].pnl += t.pnl || 0;
+                      if ((t.pnl || 0) > 0) setupMap[setup].wins++;
+                      else if ((t.pnl || 0) < 0) setupMap[setup].losses++;
+                    }
+                    const entries = Object.entries(setupMap).sort(([, a], [, b]) => b.pnl - a.pnl);
+                    return entries.length > 0 ? (
+                      <div className="space-y-2">
+                        {entries.map(([setup, data]) => (
+                          <div key={setup} className={`bg-white/[0.02] border rounded-lg p-3 ${data.pnl >= 0 ? "border-emerald-500/20" : "border-red-500/20"}`}>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-sm font-bold">{setup}</span>
+                              <span className={`text-sm font-bold tabular-nums ${pnlColor(data.pnl)}`}>
+                                {data.pnl >= 0 ? "+" : "-"}${Math.abs(data.pnl).toFixed(0)}
+                              </span>
+                            </div>
+                            <div className="flex gap-4 text-[10px] text-muted-foreground/60">
+                              <span>{data.trades} trades</span>
+                              <span>{data.wins}W / {data.losses}L</span>
+                              <span>{data.trades > 0 ? `${((data.wins / data.trades) * 100).toFixed(0)}%` : "—"} WR</span>
+                              <span>Avg: {data.trades > 0 ? `${data.pnl >= 0 ? "+" : "-"}$${Math.abs(data.pnl / data.trades).toFixed(0)}` : "—"}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground/30 text-center py-4">No data yet</p>
+                    );
+                  })()}
+                </div>
+
+                {/* Daily P&L Breakdown */}
+                <div>
+                  <p className="text-xs font-bold mb-3">Daily P&L</p>
+                  {(() => {
+                    const dayMap: Record<string, { pnl: number; trades: number; wins: number }> = {};
+                    for (const t of closedTrades) {
+                      const day = new Date(t.time).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                      if (!dayMap[day]) dayMap[day] = { pnl: 0, trades: 0, wins: 0 };
+                      dayMap[day].pnl += t.pnl || 0;
+                      dayMap[day].trades++;
+                      if ((t.pnl || 0) > 0) dayMap[day].wins++;
+                    }
+                    const days = Object.entries(dayMap);
+                    return days.length > 0 ? (
+                      <div className="space-y-1.5">
+                        {days.map(([day, data]) => (
+                          <div key={day} className="flex items-center justify-between bg-white/[0.02] rounded-lg px-3 py-2">
+                            <div>
+                              <span className="text-xs font-medium">{day}</span>
+                              <span className="text-[9px] text-muted-foreground/40 ml-2">{data.trades} trades ({data.wins}W)</span>
+                            </div>
+                            <span className={`text-sm font-bold tabular-nums ${pnlColor(data.pnl)}`}>
+                              {data.pnl >= 0 ? "+" : "-"}${Math.abs(data.pnl).toFixed(0)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground/30 text-center py-4">No data yet</p>
+                    );
+                  })()}
+                </div>
+
+                {/* Key Stats */}
+                <div>
+                  <p className="text-xs font-bold mb-3">Key Metrics</p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="bg-white/[0.03] rounded-lg p-3">
+                      <p className="text-[9px] text-muted-foreground/40 uppercase">Profit Factor</p>
+                      <p className={`text-xl font-bold ${(wins.reduce((s, t) => s + (t.pnl || 0), 0) / Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0) || 1)) >= 1 ? "text-emerald-400" : "text-red-400"}`}>
+                        {losses.length > 0 ? (wins.reduce((s, t) => s + (t.pnl || 0), 0) / Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0))).toFixed(2) : "—"}
+                      </p>
+                    </div>
+                    <div className="bg-white/[0.03] rounded-lg p-3">
+                      <p className="text-[9px] text-muted-foreground/40 uppercase">Expectancy</p>
+                      <p className={`text-xl font-bold ${closedTrades.length > 0 && totalPnl / closedTrades.length >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {closedTrades.length > 0 ? `${totalPnl / closedTrades.length >= 0 ? "+" : ""}$${(totalPnl / closedTrades.length).toFixed(0)}` : "—"}
+                      </p>
+                      <p className="text-[9px] text-muted-foreground/30">per trade</p>
+                    </div>
+                    <div className="bg-white/[0.03] rounded-lg p-3">
+                      <p className="text-[9px] text-muted-foreground/40 uppercase">Max Drawdown</p>
+                      <p className="text-xl font-bold text-red-400">
+                        {(() => {
+                          const sorted = [...closedTrades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+                          let peak = 0, maxDD = 0, cum = 0;
+                          for (const t of sorted) { cum += t.pnl || 0; peak = Math.max(peak, cum); maxDD = Math.min(maxDD, cum - peak); }
+                          return `$${Math.abs(maxDD).toFixed(0)}`;
+                        })()}
+                      </p>
+                    </div>
+                    <div className="bg-white/[0.03] rounded-lg p-3">
+                      <p className="text-[9px] text-muted-foreground/40 uppercase">Win/Loss Ratio</p>
+                      <p className={`text-xl font-bold ${avgWin > 0 && Math.abs(avgLoss) > 0 && avgWin / Math.abs(avgLoss) >= 1 ? "text-emerald-400" : "text-red-400"}`}>
+                        {avgWin > 0 && avgLoss < 0 ? (avgWin / Math.abs(avgLoss)).toFixed(2) : "—"}
+                      </p>
+                      <p className="text-[9px] text-muted-foreground/30">avg win / avg loss</p>
+                    </div>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
