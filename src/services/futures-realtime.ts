@@ -291,6 +291,46 @@ const positions: Map<string, Position> = new Map();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
 
+// ── Position Persistence (survive restarts) ──────────────
+
+async function savePositions() {
+  try {
+    const data = Object.fromEntries(
+      [...positions].map(([k, v]) => [k, { ...v }])
+    );
+    await prisma.agentConfig.upsert({
+      where: { key: "futures_positions" },
+      update: { value: JSON.stringify(data) },
+      create: { key: "futures_positions", value: JSON.stringify(data) },
+    });
+  } catch {}
+}
+
+async function loadPositions() {
+  try {
+    const saved = await prisma.agentConfig.findUnique({
+      where: { key: "futures_positions" },
+    });
+    if (!saved?.value) return;
+
+    const data = JSON.parse(saved.value) as Record<string, Position>;
+    let restored = 0;
+    for (const [sym, pos] of Object.entries(data)) {
+      // Verify position still exists on Tradovate
+      positions.set(sym, pos);
+      restored++;
+    }
+    if (restored > 0) {
+      log(`[PERSIST] Restored ${restored} positions from database`);
+      // Verify against Tradovate
+      await syncPositions();
+      log(`[PERSIST] After sync: ${positions.size} positions confirmed`);
+    }
+  } catch (err) {
+    log(`[PERSIST] Failed to load positions: ${err}`);
+  }
+}
+
 function checkPositions(sym: string, price: number) {
   const pos = positions.get(sym);
   if (!pos) return;
@@ -299,13 +339,19 @@ function checkPositions(sym: string, price: number) {
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
 
-  // Trailing stop at 2R+
-  if (diff >= stopDist * 2) {
-    if (!pos.reachedBreakeven) { pos.reachedBreakeven = true; log(`${sym}: Reached 2R — breakeven active`); }
+  // Move to breakeven at 1R (lock in zero-loss)
+  if (diff >= stopDist && !pos.reachedBreakeven) {
+    pos.reachedBreakeven = true;
+    log(`${sym}: Reached 1R ($${(diff * mult * pos.quantity).toFixed(0)}) — breakeven stop active`);
+  }
+
+  // Trailing stop at 1.5R+ (tighter than before — capture more profit)
+  if (diff >= stopDist * 1.5) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
-      const trail = pos.direction === "long" ? price - currentATRVal : price + currentATRVal;
+      const trail = pos.direction === "long" ? price - currentATRVal * 0.8 : price + currentATRVal * 0.8;
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
+        if (!pos.trailStop) log(`${sym}: 1.5R+ — trailing stop activated at $${trail.toFixed(2)}`);
         pos.trailStop = trail;
       }
     }
@@ -319,7 +365,7 @@ function checkPositions(sym: string, price: number) {
     }
   }
 
-  // Breakeven stop
+  // Breakeven stop — if we hit 1R and then price comes back to entry
   if (pos.reachedBreakeven && diff <= 0) {
     log(`${sym}: BREAKEVEN STOP. P&L: $${(diff * mult * pos.quantity).toFixed(0)}`);
     closePosition(sym, price, "breakeven"); return;
@@ -370,6 +416,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     } catch {}
 
     positions.delete(sym);
+    await savePositions();
   } catch (err) { log(`Close failed ${sym}: ${err}`); }
 }
 
@@ -778,6 +825,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
+    await savePositions();
 
     // Log to database so Vercel dashboard shows it
     try {
@@ -804,6 +852,8 @@ async function writeHeartbeat() {
       update: { value: new Date().toISOString() },
       create: { key: "futures_engine_heartbeat", value: new Date().toISOString() },
     });
+    // Also persist position state (trailing stops, breakeven flags) every heartbeat
+    if (positions.size > 0) await savePositions();
   } catch { /* best-effort */ }
 }
 
@@ -855,6 +905,7 @@ async function syncPositions() {
         } catch {}
 
         positions.delete(sym);
+        await savePositions();
       }
     }
   } catch {}
@@ -1068,6 +1119,9 @@ async function main() {
   await authenticateWithRetry();
   await resolveContracts();
   for (const sym of SYMBOLS) initBarBuilder(sym);
+
+  // Restore positions from database (survive restarts)
+  await loadPositions();
 
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
