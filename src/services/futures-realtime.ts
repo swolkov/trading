@@ -444,7 +444,7 @@ async function savePositions() {
       update: { value: JSON.stringify(data) },
       create: { key: "futures_positions", value: JSON.stringify(data) },
     });
-  } catch {}
+  } catch (err) { log(`[PERSIST] Failed to save positions: ${err}`); }
 }
 
 async function loadPositions() {
@@ -1379,7 +1379,7 @@ async function syncPositions() {
     }
 
     await savePositions();
-  } catch {}
+  } catch (err) { log(`[SYNC] Position sync failed: ${err}`); }
 }
 
 // ── Pre-load Historical Bars (so we can trade immediately) ──
@@ -1536,6 +1536,9 @@ function startHealthServer() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
+      yahoo: yahooCircuitOpen ? "circuit_open" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok",
+      tilt: tiltPauseUntil === Infinity ? "session_done" : Date.now() < tiltPauseUntil ? `paused(${consecutiveStops})` : "ok",
+      consecutiveStops,
       symbols: SYMBOLS.map(s => {
         const b = barBuilders.get(s);
         return { symbol: s, price: b?.lastPrice || 0, bars: b?.bars5m.length || 0 };
@@ -1619,7 +1622,7 @@ async function main() {
     const session = getSessionName();
     const vix = getVIXMultiplier();
     const yahooStatus = yahooCircuitOpen ? "CIRCUIT_OPEN" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok";
-    const tiltStatus = Date.now() < tiltPauseUntil ? `PAUSED(${consecutiveStops} stops)` : tiltPauseUntil === Infinity ? "SESSION_DONE" : "ok";
+    const tiltStatus = tiltPauseUntil === Infinity ? "SESSION_DONE" : Date.now() < tiltPauseUntil ? `PAUSED(${consecutiveStops} stops)` : "ok";
     const prices = SYMBOLS.map(s => {
       const b = barBuilders.get(s);
       return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
