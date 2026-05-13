@@ -799,6 +799,7 @@ export async function runFuturesAgent(): Promise<{
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
             reason: `Breakeven stop: Position was at 1R+, pulled back past entry. P&L: $${unrealizedPnl.toFixed(0)}`,
           }});
+          try { await logTradeToJournal({ tradeId: `BE-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "breakeven_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Breakeven stop — was at 1R+, pulled back" }, "futures-agent"); } catch {}
         } catch (err) { details.push(`    Breakeven close failed: ${err}`); }
         continue; // position closed, skip remaining checks
       }
@@ -825,6 +826,7 @@ export async function runFuturesAgent(): Promise<{
               qty: scaleQty, price: currentPrice, pnl: priceDiff * multiplier * scaleQty, orderId: null,
               reason: `Scale out: Closed ${scaleQty}/${absQty} at 1R ($${currentPrice.toFixed(2)}). Cancelled bracket. Remaining ${absQty - scaleQty} managed by trailing stop.`,
             }});
+            try { await logTradeToJournal({ tradeId: `SO-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${symbolMatch || pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "scale_out", contracts: scaleQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: priceDiff * multiplier * scaleQty, conviction: 0, exitReason: `Scale out ${scaleQty}/${absQty} at 1R` }, "futures-agent"); } catch {}
           } catch (err) { details.push(`    Scale out failed: ${err}`); }
         }
       }
@@ -841,6 +843,7 @@ export async function runFuturesAgent(): Promise<{
           qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
           reason: `Session close: EOD in choppy market. P&L: $${unrealizedPnl.toFixed(0)}`,
         }});
+        try { await logTradeToJournal({ tradeId: `EOD-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "session_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "EOD close — choppy market" }, "futures-agent"); } catch {}
       } catch (err) { details.push(`  Failed to close: ${err}`); }
       continue;
     }
@@ -856,6 +859,10 @@ export async function runFuturesAgent(): Promise<{
           qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
           reason: `EMERGENCY: Drawdown kill switch. P&L: $${unrealizedPnl.toFixed(0)} exceeds ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity.`,
         }});
+        try {
+          await logTradeToJournal({ tradeId: `EMRG-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "emergency_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: `EMERGENCY: Drawdown kill switch` }, "futures-agent");
+          await logObservation("futures-agent", `EMERGENCY CLOSE: ${pos.contractName} drawdown $${Math.abs(unrealizedPnl).toFixed(0)} exceeded ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity limit`);
+        } catch {}
       } catch (err) { details.push(`  Emergency close failed: ${err}`); }
     }
   }
@@ -977,10 +984,10 @@ export async function runFuturesAgent(): Promise<{
       const aiPrompt = `You are an expert ES/NQ futures scalper. Quick decision on this ${symbol} setup:
 
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}
-15m trend: ${trend15} | Session: ${session} | Regime: ${regime}
+15m trend: ${trend15} | Session: ${session} | Regime: ${regime} | Day type: ${dayType}
 Setup: ${setup.type} — ${setup.direction} — ${setup.reasoning}
 Key levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} PDL $${keyLevels.prevDayLow.toFixed(2)}
-
+${vaultContext}
 Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
@@ -1004,6 +1011,7 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
 
     if (setup.confidence < 55) {
       details.push(`  Final confidence ${setup.confidence}% — below threshold, skipping`);
+      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 55% threshold. ${setup.reasoning}`, 1); } catch {}
       continue;
     }
 
