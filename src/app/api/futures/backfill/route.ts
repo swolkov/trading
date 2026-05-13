@@ -1,28 +1,18 @@
 import { prisma } from "@/lib/db";
-import { checkTradovateAuth } from "@/lib/tradovate";
 
-// Tradovate contract symbol → our symbol mapping
-const CONTRACT_MAP: Record<string, string> = {
-  MES: "MES", MNQ: "MNQ", MYM: "MYM", M2K: "M2K",
-};
+const DEMO_URL = "https://demo.tradovateapi.com/v1";
 const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
 };
 
 function matchSymbol(contractName: string): string | null {
-  for (const sym of Object.keys(CONTRACT_MAP)) {
+  for (const sym of ["MES", "MNQ", "MYM", "M2K"]) {
     if (contractName.startsWith(sym)) return sym;
   }
   return null;
 }
 
-// Tradovate API fetch using auth from the lib
-async function tvApiFetch(path: string): Promise<unknown> {
-  const auth = await checkTradovateAuth();
-  if (!auth.authenticated) throw new Error("Tradovate not connected");
-
-  // We need a token — re-authenticate to get it
-  const DEMO_URL = "https://demo.tradovateapi.com/v1";
+async function tvAuth(): Promise<string> {
   const res = await fetch(`${DEMO_URL}/auth/accesstokenrequest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -36,53 +26,30 @@ async function tvApiFetch(path: string): Promise<unknown> {
       sec: process.env.TRADOVATE_SEC || "",
     }),
   });
-  if (!res.ok) throw new Error("Auth failed");
+  if (!res.ok) throw new Error("Tradovate auth failed");
   const data = await res.json();
+  return data.accessToken;
+}
 
-  const apiRes = await fetch(`${DEMO_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${data.accessToken}`,
-    },
+async function tvGet(token: string, path: string): Promise<unknown> {
+  const res = await fetch(`${DEMO_URL}${path}`, {
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(15000),
   });
-  if (!apiRes.ok) throw new Error(`API ${apiRes.status}`);
-  return apiRes.json();
+  if (!res.ok) throw new Error(`Tradovate ${path} → ${res.status}`);
+  return res.json();
 }
 
-interface TvOrder {
-  id: number;
-  action: string; // "Buy" | "Sell"
-  orderType: string; // "Market" | "Stop" | "Limit"
-  orderQty: number;
-  ordStatus: string; // "Filled" | "Working" | "Cancelled"
-  contractId: number;
-  fillPrice?: number;
-  timestamp: string;
-  isAutomated?: boolean;
-}
-
-interface TvFill {
-  id: number;
-  orderId: number;
-  contractId: number;
-  action: string;
-  qty: number;
-  price: number;
-  timestamp: string;
-}
-
-interface TvContract {
-  id: number;
-  name: string;
-}
+export const maxDuration = 60;
 
 export async function POST() {
   try {
-    // Get all fills and orders from Tradovate
-    const [fills, orders, contracts] = await Promise.all([
-      tvApiFetch("/fill/list") as Promise<TvFill[]>,
-      tvApiFetch("/order/list") as Promise<TvOrder[]>,
-      tvApiFetch("/contract/list") as Promise<TvContract[]>,
+    const token = await tvAuth();
+
+    // Get orders and contracts from Tradovate
+    const [orders, contracts] = await Promise.all([
+      tvGet(token, "/order/list") as Promise<{ id: number; accountId: number; contractId: number; action: string; orderType: string; orderQty: number; ordStatus: string; avgFillPrice?: number; filledQty?: number; timestamp: string; isAutomated?: boolean }[]>,
+      tvGet(token, "/contract/list") as Promise<{ id: number; name: string }[]>,
     ]);
 
     // Build contract ID → symbol map
@@ -92,112 +59,88 @@ export async function POST() {
       if (sym) contractIdToSym[c.id] = sym;
     }
 
-    // Get existing trade logs to avoid duplicates
+    // Get existing trade logs
     const existingLogs = await prisma.autoTradeLog.findMany({
       where: { symbol: { startsWith: "FUT:" } },
       orderBy: { createdAt: "desc" },
-      take: 100,
+      take: 200,
     });
 
-    // Find entry order IDs we already logged
-    const loggedOrderIds = new Set(
-      existingLogs.filter(l => l.orderId).map(l => l.orderId)
+    // Build set of already-logged close order IDs
+    const loggedOrderIds = new Set(existingLogs.filter(l => l.orderId).map(l => l.orderId));
+
+    // Find entry logs (to match closes against)
+    const entryLogs = existingLogs.filter(l =>
+      l.action === "futures_long" || l.action === "futures_short"
     );
 
-    // Find close actions we already logged
-    const loggedCloseActions = new Set(
-      existingLogs
-        .filter(l => l.action.includes("stop_loss") || l.action.includes("take_profit") ||
-                     l.action.includes("trail_stop") || l.action.includes("breakeven") ||
-                     l.action.includes("scale_out") || l.action.includes("bracket_close"))
-        .map(l => `${l.symbol}:${l.price}:${l.createdAt.toISOString().slice(0, 16)}`)
-    );
-
-    // Group fills by order
-    const fillsByOrder: Record<number, TvFill[]> = {};
-    for (const fill of fills) {
-      if (!fillsByOrder[fill.orderId]) fillsByOrder[fill.orderId] = [];
-      fillsByOrder[fill.orderId].push(fill);
-    }
-
-    // Find filled orders that are our automated closes (Stop or Limit type, automated)
-    const filledOrders = orders.filter(o =>
+    // Find filled bracket orders (Stop or Limit, automated) that we haven't logged
+    const filledBrackets = orders.filter(o =>
       o.ordStatus === "Filled" &&
       (o.orderType === "Stop" || o.orderType === "Limit") &&
-      o.isAutomated
+      o.isAutomated &&
+      o.avgFillPrice &&
+      o.avgFillPrice > 0 &&
+      !loggedOrderIds.has(String(o.id))
     );
 
     let backfilled = 0;
     const details: string[] = [];
 
-    for (const order of filledOrders) {
+    for (const order of filledBrackets) {
       const sym = contractIdToSym[order.contractId];
       if (!sym) continue;
 
       const mult = MULTIPLIERS[sym] || 5;
-      const orderFills = fillsByOrder[order.id] || [];
-      if (orderFills.length === 0) continue;
+      const fillPrice = order.avgFillPrice!;
+      const fillQty = order.filledQty || order.orderQty;
+      const fillTime = order.timestamp;
 
-      // Get fill price (average if multiple fills)
-      const totalQty = orderFills.reduce((s, f) => s + f.qty, 0);
-      const avgPrice = orderFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
-      const fillTime = orderFills[0].timestamp;
-
-      // Check if we already logged this close
-      const closeKey = `FUT:${sym}:${avgPrice.toFixed(2)}:${fillTime.slice(0, 16)}`;
-      if (loggedCloseActions.has(closeKey)) continue;
-
-      // Find the matching entry in our database
-      const entry = existingLogs.find(l =>
+      // Check for approximate duplicate by price+time
+      const isDup = existingLogs.some(l =>
         l.symbol === `FUT:${sym}` &&
-        (l.action === "futures_long" || l.action === "futures_short") &&
-        l.orderId &&
+        !l.action.includes("long") && !l.action.includes("short") &&
+        l.price && Math.abs(l.price - fillPrice) < 2 &&
+        Math.abs(new Date(l.createdAt).getTime() - new Date(fillTime).getTime()) < 300000
+      );
+      if (isDup) continue;
+
+      // Find matching entry — most recent entry for this symbol before the fill
+      const entry = entryLogs.find(l =>
+        l.symbol === `FUT:${sym}` &&
         new Date(l.createdAt) < new Date(fillTime)
       );
-
       if (!entry) continue;
 
-      // Calculate P&L
       const entryPrice = entry.price || 0;
       const isLong = entry.action === "futures_long";
-      const diff = isLong ? avgPrice - entryPrice : entryPrice - avgPrice;
-      const pnl = diff * mult * totalQty;
-
-      // Determine close type
+      const diff = isLong ? fillPrice - entryPrice : entryPrice - fillPrice;
+      const pnl = diff * mult * fillQty;
       const closeType = order.orderType === "Stop" ? "stop_loss" : "take_profit";
 
-      // Check for approximate duplicate (same symbol, similar price, similar time)
-      const isDuplicate = existingLogs.some(l =>
-        l.symbol === `FUT:${sym}` &&
-        (l.action.includes("stop_loss") || l.action.includes("take_profit") || l.action.includes("bracket_close")) &&
-        l.price && Math.abs(l.price - avgPrice) < 1 &&
-        Math.abs(new Date(l.createdAt).getTime() - new Date(fillTime).getTime()) < 120000
-      );
-      if (isDuplicate) continue;
-
-      // Create the missing close log
       await prisma.autoTradeLog.create({
         data: {
           symbol: `FUT:${sym}`,
           action: `futures_${closeType}`,
-          qty: totalQty,
-          price: avgPrice,
+          qty: fillQty,
+          price: fillPrice,
           pnl,
-          reason: `[FUTURES ${sym}] ${closeType} (backfill): Closed ${totalQty}x @ $${avgPrice.toFixed(2)}. Entry: $${entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`,
+          reason: `[FUTURES ${sym}] ${closeType} (backfill): ${fillQty}x @ $${fillPrice.toFixed(2)}. Entry: $${entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`,
           orderId: String(order.id),
           createdAt: new Date(fillTime),
         },
       });
 
       backfilled++;
-      details.push(`${sym} ${closeType}: ${totalQty}x @ $${avgPrice.toFixed(2)} = ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
+      details.push(`${sym} ${closeType}: ${fillQty}x @ $${fillPrice.toFixed(2)} = ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
     }
 
     return Response.json({
       backfilled,
       details,
-      totalFills: fills.length,
-      totalOrders: filledOrders.length,
+      filledBrackets: filledBrackets.length,
+      totalOrders: orders.length,
+      entryLogsFound: entryLogs.length,
     });
   } catch (error) {
     console.error("[/api/futures/backfill]", error);
