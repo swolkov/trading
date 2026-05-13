@@ -406,31 +406,41 @@ function onBarClose(sym: string, bar: Bar) {
   const outsideRange = (b.prevDayHigh > 0 && price > b.prevDayHigh) || (b.prevDayLow > 0 && price < b.prevDayLow);
   const dayType = outsideRange || orSize > currentATR * 0.5 ? "trend" : "range";
 
-  log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | ${dayType} | ${session} | ${b.bars5m.length} bars`);
+  const vix = getVIXMultiplier();
+  const adjustedATR = currentATR * vix.stopMult;
+
+  log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | ${dayType} day | ${session} | ${b.bars5m.length} bars | ${vix.label}`);
+
+  // Apply VIX multiplier to position sizing
+  const effectiveSizeMult = sizeMult * vix.sizeMult;
 
   // SETUP 1: Opening Range Breakout (trend days, morning)
   if (dayType === "trend" && session === "morning" && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
     if (price > b.openingRangeHigh && volRatio > 1.5) {
-      executeTrade(sym, "long", price, Math.max(orSize * 0.5, currentATR), orSize * 1.5, sizeMult,
-        `OR breakout long $${price.toFixed(2)} > $${b.openingRangeHigh.toFixed(2)}`); return;
+      log(`  → SETUP: OR Breakout LONG | OR high: $${b.openingRangeHigh.toFixed(2)} | Vol: ${volRatio.toFixed(1)}x`);
+      executeTrade(sym, "long", price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult,
+        `OR breakout long $${price.toFixed(2)} > $${b.openingRangeHigh.toFixed(2)}, vol ${volRatio.toFixed(1)}x`); return;
     }
     if (price < b.openingRangeLow && volRatio > 1.5) {
-      executeTrade(sym, "short", price, Math.max(orSize * 0.5, currentATR), orSize * 1.5, sizeMult,
-        `OR breakout short $${price.toFixed(2)} < $${b.openingRangeLow.toFixed(2)}`); return;
+      log(`  → SETUP: OR Breakout SHORT | OR low: $${b.openingRangeLow.toFixed(2)} | Vol: ${volRatio.toFixed(1)}x`);
+      executeTrade(sym, "short", price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult,
+        `OR breakout short $${price.toFixed(2)} < $${b.openingRangeLow.toFixed(2)}, vol ${volRatio.toFixed(1)}x`); return;
     }
   }
 
   // SETUP 2: Trend Continuation (pullback to EMA9)
   if ((dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
-      (session === "morning" || session === "afternoon" || session === "eth_europe")) {
+      (session === "morning" || session === "afternoon" || session === "eth_europe" || session === "eth_evening")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
     if (nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge") {
-      executeTrade(sym, "long", price, currentATR * 1.2, currentATR * 2.5, sizeMult,
-        `Trend pullback long near EMA9 $${fastEMA.toFixed(2)}`); return;
+      log(`  → SETUP: Trend Continuation LONG | EMA9: $${fastEMA.toFixed(2)} | EMA21: $${slowEMA.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
+      executeTrade(sym, "long", price, adjustedATR * 1.2, adjustedATR * 2.5, effectiveSizeMult,
+        `Trend pullback long near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
     }
     if (nearEMA && fastEMA < slowEMA && price < slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge") {
-      executeTrade(sym, "short", price, currentATR * 1.2, currentATR * 2.5, sizeMult,
-        `Trend pullback short near EMA9 $${fastEMA.toFixed(2)}`); return;
+      log(`  → SETUP: Trend Continuation SHORT | EMA9: $${fastEMA.toFixed(2)} | EMA21: $${slowEMA.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
+      executeTrade(sym, "short", price, adjustedATR * 1.2, adjustedATR * 2.5, effectiveSizeMult,
+        `Trend pullback short near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
     }
   }
 
@@ -439,12 +449,14 @@ function onBarClose(sym: string, bar: Bar) {
     const targetDist = Math.abs(price - vwapData.vwap) * 0.8;
     if (targetDist > currentATR * 0.3) {
       if (price > vwapData.upper && currentRSI > 65 && volTrend !== "surge") {
-        executeTrade(sym, "short", price, currentATR * 1.2, targetDist, sizeMult,
-          `VWAP fade short $${price.toFixed(2)} > upper $${vwapData.upper.toFixed(2)}`); return;
+        log(`  → SETUP: VWAP Reversion SHORT | VWAP: $${vwapData.vwap.toFixed(2)} | Upper: $${vwapData.upper.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
+        executeTrade(sym, "short", price, adjustedATR * 1.2, targetDist, effectiveSizeMult,
+          `VWAP fade short $${price.toFixed(2)} > upper $${vwapData.upper.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
       }
       if (price < vwapData.lower && currentRSI < 35 && volTrend !== "surge") {
-        executeTrade(sym, "long", price, currentATR * 1.2, targetDist, sizeMult,
-          `VWAP fade long $${price.toFixed(2)} < lower $${vwapData.lower.toFixed(2)}`); return;
+        log(`  → SETUP: VWAP Reversion LONG | VWAP: $${vwapData.vwap.toFixed(2)} | Lower: $${vwapData.lower.toFixed(2)} | RSI: ${currentRSI.toFixed(0)}`);
+        executeTrade(sym, "long", price, adjustedATR * 1.2, targetDist, effectiveSizeMult,
+          `VWAP fade long $${price.toFixed(2)} < lower $${vwapData.lower.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`); return;
       }
     }
   }
@@ -543,6 +555,99 @@ async function syncPositions() {
   } catch {}
 }
 
+// ── Pre-load Historical Bars (so we can trade immediately) ──
+
+async function preloadBars() {
+  log("Pre-loading historical bars from Yahoo Finance...");
+
+  for (const sym of SYMBOLS) {
+    const yahooSym = YAHOO_MAP[sym];
+    const b = barBuilders.get(sym);
+    if (!b) continue;
+
+    try {
+      // Fetch last 2 days of 5-min bars
+      const result = await yfEngine.chart(yahooSym, {
+        period1: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+        period2: new Date(),
+        interval: "5m",
+      });
+
+      if (result?.quotes) {
+        const bars: Bar[] = result.quotes
+          .filter((q: Record<string, number | null>) => q.close != null && q.close > 0)
+          .map((q: Record<string, number | Date | null>) => ({
+            t: q.date ? Math.floor(new Date(String(q.date)).getTime() / 1000) : 0,
+            o: Number(q.open) || 0,
+            h: Number(q.high) || 0,
+            l: Number(q.low) || 0,
+            c: Number(q.close) || 0,
+            v: Number(q.volume) || 0,
+          }));
+
+        // Load into bar builder (last 200 bars)
+        b.bars5m = bars.slice(-200);
+        b.lastPrice = bars.length > 0 ? bars[bars.length - 1].c : 0;
+
+        // Calculate prev day levels from the data
+        const today = new Date();
+        const todayStr = today.toISOString().split("T")[0];
+        const prevDayBars = bars.filter(bar => {
+          const d = new Date(bar.t * 1000).toISOString().split("T")[0];
+          return d < todayStr;
+        });
+        const todayBars = bars.filter(bar => {
+          const d = new Date(bar.t * 1000).toISOString().split("T")[0];
+          return d === todayStr;
+        });
+
+        if (prevDayBars.length > 0) {
+          b.prevDayHigh = Math.max(...prevDayBars.map(x => x.h));
+          b.prevDayLow = Math.min(...prevDayBars.map(x => x.l));
+          b.prevDayClose = prevDayBars[prevDayBars.length - 1].c;
+        }
+
+        // Session bars = today's bars
+        b.sessionBars = todayBars;
+        b.barCount = todayBars.length;
+
+        // Opening range from today's first 3 bars
+        if (todayBars.length >= 3) {
+          const orBars = todayBars.slice(0, 3);
+          b.openingRangeHigh = Math.max(...orBars.map(x => x.h));
+          b.openingRangeLow = Math.min(...orBars.map(x => x.l));
+        }
+
+        log(`  ${sym}: Loaded ${bars.length} bars | Last: $${b.lastPrice.toFixed(2)} | PDH:$${b.prevDayHigh.toFixed(2)} PDL:$${b.prevDayLow.toFixed(2)} | Today: ${todayBars.length} bars`);
+      }
+    } catch (err) {
+      log(`  ${sym}: Failed to pre-load: ${err}`);
+    }
+  }
+
+  log("Pre-load complete — engine ready to trade immediately");
+}
+
+// ── VIX Check (adjust risk based on volatility) ──
+
+let currentVIX = 20;
+
+async function updateVIX() {
+  try {
+    const q = await yfEngine.quote("^VIX");
+    if (q?.regularMarketPrice) {
+      currentVIX = q.regularMarketPrice;
+    }
+  } catch {}
+}
+
+function getVIXMultiplier(): { stopMult: number; sizeMult: number; label: string } {
+  if (currentVIX > 30) return { stopMult: 2.0, sizeMult: 0.5, label: `VIX ${currentVIX.toFixed(1)} EXTREME — half size, wide stops` };
+  if (currentVIX > 25) return { stopMult: 1.5, sizeMult: 0.7, label: `VIX ${currentVIX.toFixed(1)} HIGH — reduced size` };
+  if (currentVIX < 14) return { stopMult: 0.8, sizeMult: 1.0, label: `VIX ${currentVIX.toFixed(1)} LOW — tight stops` };
+  return { stopMult: 1.0, sizeMult: 1.0, label: `VIX ${currentVIX.toFixed(1)} normal` };
+}
+
 // ── Main ────────────────────────────────────────────────
 
 async function main() {
@@ -555,26 +660,34 @@ async function main() {
   await resolveContracts();
   for (const sym of SYMBOLS) initBarBuilder(sym);
 
+  // Pre-load historical bars so we can trade IMMEDIATELY
+  await preloadBars();
+
+  // Get initial VIX
+  await updateVIX();
+  log(`VIX: ${currentVIX.toFixed(1)}`);
+
   // Start polling
   setInterval(pollPrices, POLL_INTERVAL_MS);
   setInterval(checkSessionReset, 60_000);
   setInterval(syncPositions, 30_000);
+  setInterval(updateVIX, 300_000); // Update VIX every 5 min
 
   // Status log every 2 minutes
   setInterval(() => {
     const session = getSessionName();
+    const vix = getVIXMultiplier();
     const prices = SYMBOLS.map(s => {
       const b = barBuilders.get(s);
-      return `${s}:${b?.lastPrice ? "$" + b.lastPrice.toFixed(2) : "—"}/${b?.bars5m.length || 0}bars`;
+      return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
     }).join(" ");
-    log(`STATUS: ${session.toUpperCase()} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | ${prices}`);
+    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | ${prices}`);
   }, 120_000);
 
-  log("Polling started — fetching prices every 5s...");
+  log("Engine ready — scanning for setups on every 5-min bar close...");
 
   // First poll immediately
   await pollPrices();
-  log(`Initial prices loaded`);
 }
 
 main().catch(err => { console.error("Fatal:", err); process.exit(1); });
