@@ -57,8 +57,10 @@ function TradingViewChartInner({ symbol, height = 500 }: TradingViewChartProps) 
     script.async = true;
 
     // TradingView reads config from the script's text content
+    // Use explicit width/height instead of autosize — autosize doesn't respect container
     script.textContent = JSON.stringify({
-      autosize: true,
+      width: "100%",
+      height: height,
       symbol: tvSymbol,
       interval: "5",
       timezone: "America/New_York",
@@ -88,7 +90,7 @@ function TradingViewChartInner({ symbol, height = 500 }: TradingViewChartProps) 
       }
       scriptRef.current = null;
     };
-  }, [symbol]);
+  }, [symbol, height]);
 
   const label = TV_LABEL_MAP[symbol];
 
