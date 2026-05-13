@@ -2,18 +2,24 @@
 
 import { useEffect, useRef, memo } from "react";
 
-// Map internal contract symbols to TradingView symbols
-// Micro futures aren't available in TradingView's embedded widget,
-// so we map to full-size E-mini contracts (identical price action)
+// TradingView's free embedded widget doesn't support futures symbols.
+// Map to correlated ETFs — same price action, different price levels.
 const TV_SYMBOL_MAP: Record<string, string> = {
-  MES: "CME:ES1!",
-  MNQ: "CME:NQ1!",
-  MYM: "CBOT:YM1!",
-  M2K: "CME:RTY1!",
-  ES: "CME:ES1!",
-  NQ: "CME:NQ1!",
-  YM: "CBOT:YM1!",
-  RTY: "CME:RTY1!",
+  MES: "AMEX:SPY",
+  MNQ: "NASDAQ:QQQ",
+  MYM: "AMEX:DIA",
+  M2K: "AMEX:IWM",
+  ES: "AMEX:SPY",
+  NQ: "NASDAQ:QQQ",
+  YM: "AMEX:DIA",
+  RTY: "AMEX:IWM",
+};
+
+const TV_LABEL_MAP: Record<string, string> = {
+  MES: "SPY (S&P 500 ETF)",
+  MNQ: "QQQ (Nasdaq 100 ETF)",
+  MYM: "DIA (Dow ETF)",
+  M2K: "IWM (Russell 2000 ETF)",
 };
 
 interface TradingViewChartProps {
@@ -84,12 +90,21 @@ function TradingViewChartInner({ symbol, height = 500 }: TradingViewChartProps) 
     };
   }, [symbol]);
 
+  const label = TV_LABEL_MAP[symbol];
+
   return (
-    <div
-      ref={containerRef}
-      className="tradingview-widget-container w-full rounded-lg overflow-hidden"
-      style={{ height }}
-    />
+    <div className="relative">
+      {label && (
+        <p className="text-[10px] text-muted-foreground/40 mb-1">
+          Showing {label} — TradingView embed doesn&apos;t support futures. Use Lightweight for actual futures data.
+        </p>
+      )}
+      <div
+        ref={containerRef}
+        className="tradingview-widget-container w-full rounded-lg overflow-hidden"
+        style={{ height }}
+      />
+    </div>
   );
 }
 

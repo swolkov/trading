@@ -183,7 +183,7 @@ export default function FuturesPage() {
   const [running, setRunning] = useState(false);
   const [selectedContract, setSelectedContract] = useState("MES");
   const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "history" | "backtest">("chart");
-  const [chartMode, setChartMode] = useState<"tradingview" | "lightweight">("tradingview");
+  const [chartMode, setChartMode] = useState<"tradingview" | "lightweight">("lightweight");
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
 
@@ -401,9 +401,9 @@ export default function FuturesPage() {
                   </button>
                 </div>
                 {chartMode === "tradingview" ? (
-                  <TradingViewChart symbol={selectedContract} height={480} />
+                  <TradingViewChart symbol={selectedContract} height={560} />
                 ) : (
-                  <FuturesChart symbol={selectedContract} height={480} />
+                  <FuturesChart symbol={selectedContract} height={560} />
                 )}
               </CardContent>
             </Card>
