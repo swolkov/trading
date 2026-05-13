@@ -275,6 +275,18 @@ function checkSessionReset() {
     }
     dailyTradeCount = 0; dailyPnl = 0; stoppedSymbols.clear(); consecutiveStops = 0; tiltPauseUntil = 0;
   }
+
+  // EOD forced close: flatten all positions at 3:50 PM ET (19:50 UTC)
+  if (now.getUTCHours() === 19 && now.getUTCMinutes() >= 49 && now.getUTCMinutes() <= 51 && positions.size > 0) {
+    log(`[EOD] 3:50 PM ET — closing all ${positions.size} positions before market close`);
+    for (const [sym] of [...positions]) {
+      const b = barBuilders.get(sym);
+      const price = b?.lastPrice || 0;
+      if (price > 0) {
+        closePosition(sym, price, "eod_close").catch(err => log(`[EOD] Failed to close ${sym}: ${err}`));
+      }
+    }
+  }
 }
 
 // ── Position Tracking ───────────────────────────────────
@@ -633,7 +645,7 @@ Rate confidence 0-100 and respond ONLY with JSON: {"agree":true/false,"confidenc
         max_tokens: 100,
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(20000),
     });
 
     if (!res.ok) {
