@@ -3,13 +3,16 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   createChart,
+  createSeriesMarkers,
   CandlestickSeries,
   LineSeries,
   HistogramSeries,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type CandlestickData,
   type Time,
+  type SeriesMarker,
 } from "lightweight-charts";
 
 interface FuturesChartProps {
@@ -26,6 +29,23 @@ interface Bar {
   v: number;
 }
 
+interface TradeMarker {
+  symbol: string;
+  action: string;
+  price: number | null;
+  pnl: number | null;
+  time: string;
+  reason: string;
+}
+
+interface Position {
+  symbol: string;
+  direction: "long" | "short";
+  entryPrice: number;
+  stopLoss: number | null;
+  target: number | null;
+}
+
 const TIMEFRAMES = [
   { label: "5m", interval: "5m", intraday: true },
   { label: "15m", interval: "15m", intraday: true },
@@ -35,23 +55,25 @@ const TIMEFRAMES = [
   { label: "1Y", interval: "1Y", intraday: false },
 ];
 
-// Calculate EMA from candle data
 function calcEMA(data: { close: number; time: Time }[], period: number): { time: Time; value: number }[] {
   if (data.length < period) return [];
   const k = 2 / (period + 1);
   const result: { time: Time; value: number }[] = [];
-
-  // SMA for first value
   let sum = 0;
   for (let i = 0; i < period; i++) sum += data[i].close;
   let ema = sum / period;
   result.push({ time: data[period - 1].time, value: ema });
-
   for (let i = period; i < data.length; i++) {
     ema = data[i].close * k + ema * (1 - k);
     result.push({ time: data[i].time, value: ema });
   }
   return result;
+}
+
+// Match futures symbol variants (MES, MESM6, MYMM6, etc.)
+function matchesSymbol(tradeSymbol: string, chartSymbol: string): boolean {
+  const normalized = tradeSymbol.replace("FUT:", "");
+  return normalized === chartSymbol || normalized.startsWith(chartSymbol);
 }
 
 export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
@@ -65,9 +87,16 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
   const ema21Ref = useRef<ISeriesApi<any> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const volumeRef = useRef<ISeriesApi<any> | null>(null);
+  // Price lines for position
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const priceLinesRef = useRef<any[]>([]);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const barsRef = useRef<CandlestickData<Time>[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [showEMA, setShowEMA] = useState(true);
+  const [isLive, setIsLive] = useState(true);
+  const [lastUpdate, setLastUpdate] = useState<string>("");
   const [crosshairData, setCrosshairData] = useState<{
     time: string;
     open: number;
@@ -144,7 +173,6 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       scaleMargins: { top: 0.8, bottom: 0 },
     });
 
-    // Crosshair handler
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.seriesData) {
         setCrosshairData(null);
@@ -186,15 +214,22 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
     };
   }, [height]);
 
-  // Fetch data when symbol or timeframe changes
-  const loadBars = useCallback(async () => {
-    if (!candleRef.current) return;
+  // Load bars + trade markers + position lines
+  const loadBars = useCallback(async (isRefresh = false) => {
+    if (!candleRef.current || !chartRef.current) return;
     const tf = TIMEFRAMES[activeIdx];
-    setLoading(true);
+    if (!isRefresh) setLoading(true);
 
     try {
-      const res = await fetch(`/api/futures/bars?symbol=${symbol}&interval=${tf.interval}`);
-      const bars: Bar[] = await res.json();
+      // Fetch bars + positions/trades in parallel
+      const [barsRes, posRes] = await Promise.all([
+        fetch(`/api/futures/bars?symbol=${symbol}&interval=${tf.interval}`),
+        fetch("/api/futures/positions"),
+      ]);
+
+      const bars: Bar[] = await barsRes.json();
+      const posData = await posRes.json().catch(() => null);
+
       if (!Array.isArray(bars) || bars.length === 0) return;
 
       const candleData: CandlestickData<Time>[] = bars.map((bar) => {
@@ -204,6 +239,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         return { time, open: bar.o, high: bar.h, low: bar.l, close: bar.c };
       });
 
+      barsRef.current = candleData;
       const closeData = candleData.map((c) => ({ close: c.close, time: c.time }));
 
       candleRef.current!.setData(candleData);
@@ -225,17 +261,138 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         ema21Ref.current!.setData([]);
       }
 
-      chartRef.current?.timeScale().fitContent();
+      // ── TRADE MARKERS ──
+      if (posData?.activity && tf.intraday) {
+        const trades: TradeMarker[] = posData.activity;
+        const markers: SeriesMarker<Time>[] = [];
+
+        for (const trade of trades) {
+          if (!matchesSymbol(trade.symbol, symbol)) continue;
+          if (!trade.price || !trade.time) continue;
+
+          const tradeTime = Math.floor(new Date(trade.time).getTime() / 1000);
+          // Snap to nearest bar time
+          const barInterval = tf.interval === "5m" ? 300 : tf.interval === "15m" ? 900 : 3600;
+          const snappedTime = (Math.floor(tradeTime / barInterval) * barInterval) as Time;
+
+          // Check if this time is in our bar range
+          const firstBar = candleData[0]?.time as unknown as number;
+          const lastBar = candleData[candleData.length - 1]?.time as unknown as number;
+          if ((snappedTime as unknown as number) < firstBar || (snappedTime as unknown as number) > lastBar) continue;
+
+          const isEntry = trade.action.includes("long") || trade.action.includes("short");
+          const isWin = trade.pnl != null && trade.pnl > 0;
+          const isLoss = trade.pnl != null && trade.pnl < 0;
+
+          if (isEntry) {
+            const isLong = trade.action.includes("long");
+            markers.push({
+              time: snappedTime,
+              position: isLong ? "belowBar" : "aboveBar",
+              color: isLong ? "#10b981" : "#ef4444",
+              shape: isLong ? "arrowUp" : "arrowDown",
+              text: `${isLong ? "LONG" : "SHORT"} $${trade.price.toFixed(0)}`,
+            });
+          } else if (trade.pnl != null) {
+            markers.push({
+              time: snappedTime,
+              position: "aboveBar",
+              color: isWin ? "#10b981" : isLoss ? "#ef4444" : "#6b7280",
+              shape: "circle",
+              text: `${isWin ? "+" : ""}$${trade.pnl.toFixed(0)}`,
+            });
+          }
+        }
+
+        // Sort markers by time (required by lightweight-charts)
+        markers.sort((a, b) => (a.time as unknown as number) - (b.time as unknown as number));
+        // Clean up old markers plugin
+        if (markersRef.current) {
+          try { markersRef.current.setMarkers([]); } catch {}
+        }
+        if (markers.length > 0) {
+          markersRef.current = createSeriesMarkers(candleRef.current!, markers);
+        }
+      }
+
+      // ── POSITION PRICE LINES ──
+      // Clear old lines
+      for (const line of priceLinesRef.current) {
+        try { candleRef.current!.removePriceLine(line); } catch {}
+      }
+      priceLinesRef.current = [];
+
+      if (posData?.positions) {
+        const pos: Position | undefined = posData.positions.find(
+          (p: Position) => matchesSymbol(p.symbol, symbol)
+        );
+
+        if (pos) {
+          // Entry line
+          priceLinesRef.current.push(
+            candleRef.current!.createPriceLine({
+              price: pos.entryPrice,
+              color: "#3b82f6",
+              lineWidth: 2,
+              lineStyle: 0, // solid
+              axisLabelVisible: true,
+              title: `${pos.direction.toUpperCase()} @ ${pos.entryPrice.toFixed(2)}`,
+            })
+          );
+
+          // Stop loss line
+          if (pos.stopLoss) {
+            priceLinesRef.current.push(
+              candleRef.current!.createPriceLine({
+                price: pos.stopLoss,
+                color: "#ef4444",
+                lineWidth: 1,
+                lineStyle: 2, // dashed
+                axisLabelVisible: true,
+                title: `STOP ${pos.stopLoss.toFixed(2)}`,
+              })
+            );
+          }
+
+          // Target line
+          if (pos.target) {
+            priceLinesRef.current.push(
+              candleRef.current!.createPriceLine({
+                price: pos.target,
+                color: "#10b981",
+                lineWidth: 1,
+                lineStyle: 2, // dashed
+                axisLabelVisible: true,
+                title: `TARGET ${pos.target.toFixed(2)}`,
+              })
+            );
+          }
+        }
+      }
+
+      if (!isRefresh) {
+        chartRef.current?.timeScale().fitContent();
+      }
+
+      setLastUpdate(new Date().toLocaleTimeString());
     } catch (err) {
       console.error("Failed to load futures bars:", err);
     } finally {
-      setLoading(false);
+      if (!isRefresh) setLoading(false);
     }
   }, [symbol, activeIdx, showEMA]);
 
+  // Initial load
   useEffect(() => {
-    loadBars();
+    loadBars(false);
   }, [loadBars]);
+
+  // Auto-refresh: poll for new bars every 15s when live
+  useEffect(() => {
+    if (!isLive) return;
+    const interval = setInterval(() => loadBars(true), 15000);
+    return () => clearInterval(interval);
+  }, [isLive, loadBars]);
 
   return (
     <div>
@@ -267,6 +424,25 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
           >
             EMA 9/21
           </button>
+          <button
+            onClick={() => setIsLive(!isLive)}
+            className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+              isLive
+                ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {isLive ? "LIVE" : "PAUSED"}
+          </button>
+          {isLive && lastUpdate && (
+            <span className="text-[9px] text-muted-foreground/40 tabular-nums flex items-center gap-1">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+              </span>
+              {lastUpdate}
+            </span>
+          )}
           {loading && <span className="text-[10px] text-muted-foreground/50 animate-pulse">Loading...</span>}
         </div>
       </div>
@@ -288,16 +464,35 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       <div ref={containerRef} className="w-full rounded-lg overflow-hidden" />
 
       {/* Legend */}
-      {showEMA && (
-        <div className="flex gap-4 mt-2 text-[10px]">
+      <div className="flex items-center justify-between mt-2">
+        <div className="flex gap-4 text-[10px]">
+          {showEMA && (
+            <>
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-[2px] bg-blue-500 rounded" /> EMA 9
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-[2px] bg-amber-500 rounded" /> EMA 21
+              </span>
+            </>
+          )}
           <span className="flex items-center gap-1.5">
-            <span className="w-3 h-[2px] bg-blue-500 rounded" /> EMA 9
+            <span className="text-emerald-400">&#x25B2;</span> Long entry
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-3 h-[2px] bg-amber-500 rounded" /> EMA 21
+            <span className="text-red-400">&#x25BC;</span> Short entry
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> Win
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> Loss
           </span>
         </div>
-      )}
+        <span className="text-[9px] text-muted-foreground/30">
+          Auto-refresh every 15s
+        </span>
+      </div>
     </div>
   );
 }
