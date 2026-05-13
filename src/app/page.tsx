@@ -20,10 +20,12 @@ export default function DashboardPage() {
   const { data: positions } = usePositions();
   const [regime, setRegime] = useState<RegimeData | null>(null);
   const [recentReports, setRecentReports] = useState<{ symbol: string; score: number; signal: string; summary: string; createdAt: string }[]>([]);
+  const [futures, setFutures] = useState<{ connected: boolean; account: { balance: number; netLiq: number; realizedPnl: number; marginUsed: number } | null; positions: { symbol: string; direction: string; quantity: number; unrealizedPnl: number; currentPrice: number }[]; engineStatus?: { alive: boolean; ageMinutes: number } } | null>(null);
 
   useEffect(() => {
     fetch("/api/regime").then((r) => r.json()).then((d) => { if (!d.error) setRegime(d); }).catch(() => {});
     fetch("/api/ai/reports?limit=5").then((r) => r.json()).then((d) => { if (Array.isArray(d)) setRecentReports(d); }).catch(() => {});
+    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
   }, []);
 
   const equity = account ? parseFloat(account.equity) : 0;
@@ -47,22 +49,48 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Key Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {[
-          { label: "Portfolio Value", value: formatCurrency(equity), sub: null, color: "" },
-          { label: "Cash Available", value: formatCurrency(cash), sub: `${equity > 0 ? ((cash / equity) * 100).toFixed(0) : 0}% of portfolio`, color: "" },
-          { label: "Daily P&L", value: `${dailyPnl >= 0 ? "+" : ""}${formatCurrency(dailyPnl)}`, sub: `${dailyPnlPct >= 0 ? "+" : ""}${(dailyPnlPct * 100).toFixed(2)}%`, color: pnlColor(dailyPnl) },
-          { label: "Unrealized P&L", value: `${totalUnrealized >= 0 ? "+" : ""}${formatCurrency(totalUnrealized)}`, sub: `${positions?.length || 0} positions`, color: pnlColor(totalUnrealized) },
-          { label: "Buying Power", value: formatCurrency(account?.buying_power || 0), sub: null, color: "" },
-        ].map((m) => (
-          <div key={m.label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-            <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">{m.label}</p>
-            <p className={`text-xl font-bold mt-1 ${m.color}`}>{m.value}</p>
-            {m.sub && <p className={`text-[11px] mt-0.5 ${m.color || "text-muted-foreground/50"}`}>{m.sub}</p>}
+      {/* Combined Portfolio Metrics */}
+      {(() => {
+        const futuresEquity = futures?.account?.netLiq || 0;
+        const futuresUnrealized = futures?.positions?.reduce((s, p) => s + p.unrealizedPnl, 0) || 0;
+        const combinedEquity = equity + futuresEquity;
+        const combinedDailyPnl = dailyPnl + (futures?.account?.realizedPnl || 0);
+        const combinedUnrealized = totalUnrealized + futuresUnrealized;
+        const futuresPositionCount = futures?.positions?.length || 0;
+        const optionsPositionCount = positions?.length || 0;
+        return (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Total Portfolio</p>
+              <p className="text-xl font-bold mt-1">{formatCurrency(combinedEquity)}</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/50">Alpaca + Tradovate</p>
+            </div>
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Options Account</p>
+              <p className="text-xl font-bold mt-1">{formatCurrency(equity)}</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/50">{optionsPositionCount} positions</p>
+            </div>
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Futures Account</p>
+              <p className="text-xl font-bold mt-1">{formatCurrency(futuresEquity)}</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/50">
+                {futuresPositionCount} positions
+                {futures?.engineStatus?.alive && <span className="text-emerald-400 ml-1">Engine Live</span>}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Daily P&L</p>
+              <p className={`text-xl font-bold mt-1 ${pnlColor(combinedDailyPnl)}`}>{combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}</p>
+              <p className={`text-[11px] mt-0.5 ${pnlColor(combinedDailyPnl)}`}>Combined</p>
+            </div>
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Unrealized</p>
+              <p className={`text-xl font-bold mt-1 ${pnlColor(combinedUnrealized)}`}>{combinedUnrealized >= 0 ? "+" : ""}{formatCurrency(combinedUnrealized)}</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/50">{optionsPositionCount + futuresPositionCount} positions</p>
+            </div>
           </div>
-        ))}
-      </div>
+        );
+      })()}
 
       {/* Market Regime + Quick Actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -143,6 +171,50 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Futures Positions */}
+      {futures?.connected && (
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-medium">Futures Positions</p>
+              {futures.engineStatus?.alive && (
+                <span className="flex items-center gap-1 text-[10px] text-blue-400">
+                  <span className="relative flex h-1.5 w-1.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" /><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-400" /></span>
+                  Railway Engine Live
+                </span>
+              )}
+            </div>
+            <Link href="/futures" className="text-[10px] text-emerald-400 hover:underline">Futures Dashboard</Link>
+          </div>
+          {futures.positions && futures.positions.length > 0 ? (
+            <div className="divide-y divide-white/[0.04]">
+              {futures.positions.map((pos, i) => (
+                <div key={i} className="flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02] transition-colors">
+                  <div className="flex items-center gap-3">
+                    <span className="font-medium text-sm">{pos.symbol}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                      pos.direction === "long" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+                    }`}>
+                      {pos.direction.toUpperCase()} {pos.quantity}x
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4 text-sm">
+                    <span className="text-muted-foreground">${pos.currentPrice.toLocaleString()}</span>
+                    <span className={`font-medium ${pnlColor(pos.unrealizedPnl)}`}>
+                      {pos.unrealizedPnl >= 0 ? "+" : ""}${pos.unrealizedPnl.toFixed(0)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="px-4 py-4 text-center text-[11px] text-muted-foreground/50">
+              No futures positions. Agent trades 9:45 AM - 3:50 PM ET.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Recent AI Research */}
       {recentReports.length > 0 && (
