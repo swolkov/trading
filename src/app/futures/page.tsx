@@ -179,6 +179,7 @@ export default function FuturesPage() {
   const [chartMode, setChartMode] = useState<"tradingview" | "lightweight">("lightweight");
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
+  const [historyPeriod, setHistoryPeriod] = useState<"today" | "week" | "month" | "all">("today");
 
   // ── Data Loading ─────────────────────────────────────
 
@@ -384,6 +385,9 @@ export default function FuturesPage() {
                 }`}
               >
                 {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : tab === "backtest" ? "Backtest" : tab === "reports" ? "Reports" : "Trade History"}
+                {tab === "history" && allTrades.length > 0 && (
+                  <span className="ml-1 text-[9px] text-muted-foreground/40">({allTrades.length})</span>
+                )}
               </button>
             ))}
           </div>
@@ -632,60 +636,188 @@ export default function FuturesPage() {
           )}
 
           {/* History tab */}
-          {activeTab === "history" && (
-            <Card className="border-white/[0.06]">
-              <CardContent className="pt-4">
-                {allTrades.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <div className="flex items-center justify-between mb-3">
-                      <p className="text-xs text-muted-foreground/60">{allTrades.length} total trades ({closedTrades.length} closed)</p>
-                      <p className={`text-xs font-bold tabular-nums ${pnlColor(totalPnl)}`}>
-                        Net: {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
+          {activeTab === "history" && (() => {
+            const periodStart = historyPeriod === "today" ? todayStart
+              : historyPeriod === "week" ? weekStart
+              : historyPeriod === "month" ? monthStart
+              : new Date(0);
+            const periodTrades = allTrades.filter((t) => new Date(t.time) >= periodStart);
+            const periodClosed = periodTrades.filter((t) => t.pnl != null);
+            const periodWins = periodClosed.filter((t) => (t.pnl || 0) > 0);
+            const periodLosses = periodClosed.filter((t) => (t.pnl || 0) < 0);
+            const periodPnl = periodClosed.reduce((s, t) => s + (t.pnl || 0), 0);
+            const periodAvgWin = periodWins.length > 0 ? periodWins.reduce((s, t) => s + (t.pnl || 0), 0) / periodWins.length : 0;
+            const periodAvgLoss = periodLosses.length > 0 ? periodLosses.reduce((s, t) => s + (t.pnl || 0), 0) / periodLosses.length : 0;
+
+            // Group by day for daily breakdown
+            const dayMap: Record<string, { pnl: number; trades: number; wins: number; losses: number; date: Date }> = {};
+            for (const t of periodClosed) {
+              const d = new Date(t.time);
+              const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+              if (!dayMap[key]) dayMap[key] = { pnl: 0, trades: 0, wins: 0, losses: 0, date: d };
+              dayMap[key].pnl += t.pnl || 0;
+              dayMap[key].trades++;
+              if ((t.pnl || 0) > 0) dayMap[key].wins++;
+              else if ((t.pnl || 0) < 0) dayMap[key].losses++;
+            }
+            const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
+
+            return (
+            <div className="space-y-3">
+              {/* Period selector */}
+              <div className="flex gap-1">
+                {([["today", "Today"], ["week", "This Week"], ["month", "This Month"], ["all", "All Time"]] as const).map(([key, label]) => {
+                  const count = allTrades.filter((t) => {
+                    const start = key === "today" ? todayStart : key === "week" ? weekStart : key === "month" ? monthStart : new Date(0);
+                    return new Date(t.time) >= start;
+                  }).length;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setHistoryPeriod(key)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                        historyPeriod === key
+                          ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                          : "bg-white/[0.03] text-muted-foreground/60 hover:bg-white/[0.06] border border-white/[0.06]"
+                      }`}
+                    >
+                      {label} <span className="text-[9px] opacity-60">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Period summary stats */}
+              <Card className="border-white/[0.06]">
+                <CardContent className="pt-4">
+                  <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Net P&L</p>
+                      <p className={`text-lg font-bold tabular-nums ${pnlColor(periodPnl)}`}>
+                        {periodPnl >= 0 ? "+" : "-"}${Math.abs(periodPnl).toFixed(0)}
                       </p>
                     </div>
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-muted-foreground/40 border-b border-white/[0.06]">
-                          <th className="text-left py-2 font-medium">Symbol</th>
-                          <th className="text-left py-2 font-medium">Action</th>
-                          <th className="text-right py-2 font-medium">Qty</th>
-                          <th className="text-right py-2 font-medium">Price</th>
-                          <th className="text-right py-2 font-medium">P&L</th>
-                          <th className="text-left py-2 font-medium">Reason</th>
-                          <th className="text-right py-2 font-medium">Time</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {allTrades.slice(0, 100).map((t) => (
-                          <tr key={t.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                            <td className="py-2 font-bold">{t.symbol}</td>
-                            <td className="py-2">
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" :
-                                t.action.includes("short") ? "bg-red-500/15 text-red-400" :
-                                "bg-white/10 text-muted-foreground"
-                              }`}>{t.action.replace("futures_", "").toUpperCase()}</span>
-                            </td>
-                            <td className="py-2 text-right tabular-nums">{t.qty}</td>
-                            <td className="py-2 text-right tabular-nums">{t.price ? `$${t.price.toFixed(2)}` : "—"}</td>
-                            <td className={`py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnlColor(t.pnl) : ""}`}>
-                              {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "—"}
-                            </td>
-                            <td className="py-2 text-muted-foreground/60 max-w-[180px] truncate">{t.reason?.slice(0, 60)}</td>
-                            <td className="py-2 text-right text-muted-foreground/40 tabular-nums">
-                              {new Date(t.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
+                      <p className="text-lg font-bold">
+                        {periodClosed.length > 0 ? `${((periodWins.length / periodClosed.length) * 100).toFixed(0)}%` : "—"}
+                      </p>
+                      <p className="text-[9px] text-muted-foreground/30">{periodWins.length}W / {periodLosses.length}L</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Trades</p>
+                      <p className="text-lg font-bold">{periodClosed.length}</p>
+                      <p className="text-[9px] text-muted-foreground/30">{periodTrades.length} total entries</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Avg Win</p>
+                      <p className="text-sm font-bold text-emerald-400 tabular-nums">
+                        {periodWins.length > 0 ? `+$${periodAvgWin.toFixed(0)}` : "—"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Avg Loss</p>
+                      <p className="text-sm font-bold text-red-400 tabular-nums">
+                        {periodLosses.length > 0 ? `-$${Math.abs(periodAvgLoss).toFixed(0)}` : "—"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Profit Factor</p>
+                      <p className={`text-sm font-bold tabular-nums ${periodLosses.length > 0 && (periodWins.reduce((s, t) => s + (t.pnl || 0), 0) / Math.abs(periodLosses.reduce((s, t) => s + (t.pnl || 0), 0))) >= 1 ? "text-emerald-400" : "text-red-400"}`}>
+                        {periodLosses.length > 0
+                          ? (periodWins.reduce((s, t) => s + (t.pnl || 0), 0) / Math.abs(periodLosses.reduce((s, t) => s + (t.pnl || 0), 0))).toFixed(2)
+                          : "—"}
+                      </p>
+                    </div>
                   </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground/40 text-center py-8">No futures trades yet — agent will log trades here once Tradovate is connected</p>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                </CardContent>
+              </Card>
+
+              {/* Daily P&L breakdown */}
+              {days.length > 1 && (
+                <Card className="border-white/[0.06]">
+                  <CardContent className="pt-4">
+                    <p className="text-xs font-bold mb-2">Daily Breakdown</p>
+                    <div className="space-y-1">
+                      {days.map(([day, data]) => (
+                        <div key={day} className="flex items-center justify-between bg-white/[0.02] rounded-lg px-3 py-1.5">
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-medium tabular-nums w-24">
+                              {data.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground/40">
+                              {data.trades} trades ({data.wins}W / {data.losses}L)
+                            </span>
+                          </div>
+                          <span className={`text-sm font-bold tabular-nums ${pnlColor(data.pnl)}`}>
+                            {data.pnl >= 0 ? "+" : "-"}${Math.abs(data.pnl).toFixed(0)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Full trade log */}
+              <Card className="border-white/[0.06]">
+                <CardContent className="pt-4">
+                  <p className="text-xs font-bold mb-2">Trade Log</p>
+                  {periodTrades.length > 0 ? (
+                    <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="sticky top-0 bg-card z-10">
+                          <tr className="text-muted-foreground/40 border-b border-white/[0.06]">
+                            <th className="text-left py-2 font-medium">Time</th>
+                            <th className="text-left py-2 font-medium">Symbol</th>
+                            <th className="text-left py-2 font-medium">Action</th>
+                            <th className="text-right py-2 font-medium">Qty</th>
+                            <th className="text-right py-2 font-medium">Price</th>
+                            <th className="text-right py-2 font-medium">P&L</th>
+                            <th className="text-left py-2 font-medium">Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {periodTrades.map((t) => (
+                            <tr key={t.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                              <td className="py-2 text-muted-foreground/50 tabular-nums whitespace-nowrap">
+                                {new Date(t.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                              </td>
+                              <td className="py-2 font-bold">{t.symbol}</td>
+                              <td className="py-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" :
+                                  t.action.includes("short") ? "bg-red-500/15 text-red-400" :
+                                  t.action.includes("stop") ? "bg-red-500/15 text-red-400" :
+                                  t.action.includes("take_profit") ? "bg-emerald-500/15 text-emerald-400" :
+                                  t.action.includes("breakeven") ? "bg-amber-500/15 text-amber-400" :
+                                  t.action.includes("scale") ? "bg-blue-500/15 text-blue-400" :
+                                  t.action.includes("trail") ? "bg-purple-500/15 text-purple-400" :
+                                  t.action.includes("close") ? "bg-amber-500/15 text-amber-400" :
+                                  "bg-white/10 text-muted-foreground"
+                                }`}>{t.action.replace("futures_", "").replace(/_/g, " ").toUpperCase()}</span>
+                              </td>
+                              <td className="py-2 text-right tabular-nums">{t.qty}</td>
+                              <td className="py-2 text-right tabular-nums">{t.price ? `$${formatNum(t.price)}` : "—"}</td>
+                              <td className={`py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnlColor(t.pnl) : ""}`}>
+                                {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "—"}
+                              </td>
+                              <td className="py-2 text-muted-foreground/60 max-w-[220px]">
+                                <span className="block truncate" title={t.reason}>{t.reason?.slice(0, 80)}</span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground/40 text-center py-8">No trades in this period</p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+            );
+          })()}
 
           {/* Reports tab */}
           {activeTab === "reports" && (
