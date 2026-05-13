@@ -324,12 +324,11 @@ async function loadPositions() {
         log(`[PERSIST] Restored ${restored} positions from database`);
         await syncPositions();
         log(`[PERSIST] After sync: ${positions.size} positions confirmed`);
-        return;
       }
     }
 
-    // Fallback: bootstrap from Tradovate if DB has nothing
-    log(`[PERSIST] No saved positions — scanning Tradovate for open positions...`);
+    // Always check Tradovate for positions we don't have tracked
+    log(`[PERSIST] Scanning Tradovate for untracked positions...`);
     const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number; timestamp: string }[];
     const openPos = tvPos.filter(p => p.netPos !== 0);
 
@@ -340,6 +339,7 @@ async function loadPositions() {
         if (contract.id === tp.contractId) { sym = s; break; }
       }
       if (!sym) continue;
+      if (positions.has(sym)) continue; // Already tracked
 
       const direction: "long" | "short" = tp.netPos > 0 ? "long" : "short";
       const qty = Math.abs(tp.netPos);
