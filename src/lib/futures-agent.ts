@@ -948,7 +948,7 @@ Key levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} PDL $${keyLevels.prevDayLow
 Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-6-20250514",
+        model: "claude-sonnet-4-6",
         max_tokens: 150,
         messages: [{ role: "user", content: aiPrompt }],
       });
