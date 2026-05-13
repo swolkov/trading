@@ -4,7 +4,7 @@
 // This is the source of truth — Tradovate > DB estimates.
 
 import { prisma } from "./db";
-import { getTradovateFills, checkTradovateAuth, TRADOVATE_CONTRACTS, type TradovateFill } from "./tradovate";
+import { getTradovateFills, checkTradovateAuth, TRADOVATE_CONTRACTS, resolveContractSymbol, type TradovateFill } from "./tradovate";
 import { logTradeToJournal, logDecision } from "./vault";
 
 // Contract ID → symbol mapping (populated from fills + known contracts)
@@ -201,13 +201,11 @@ export async function reconcileFills(): Promise<ReconciliationResult> {
       }
     }
 
-    // If we still have unmapped contracts, try common micro futures contract IDs
-    // These change with expiry months, so we fall back to checking the name pattern
+    // Resolve unmapped contracts via Tradovate API
     for (const cid of uniqueContractIds) {
       if (!contractMap[cid]) {
-        // Default to MES if we can't determine — the P&L calc might be off but at least it's logged
-        // In production, we'd call /contract/item?id=${cid} to get the name
-        contractMap[cid] = "UNKNOWN";
+        const resolved = await resolveContractSymbol(cid);
+        contractMap[cid] = resolved || "UNKNOWN";
       }
     }
 

@@ -482,3 +482,18 @@ export async function getTradovateFills(): Promise<TradovateFill[]> {
     return [];
   }
 }
+
+// Resolve a Tradovate contractId to a symbol (MES, MNQ, etc.)
+export async function resolveContractSymbol(contractId: number): Promise<string | null> {
+  try {
+    const contract = await tvFetch(`/contract/item?id=${contractId}`) as { name: string };
+    if (contract?.name) {
+      for (const sym of Object.keys(TRADOVATE_CONTRACTS)) {
+        if (contract.name.startsWith(sym)) return sym;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

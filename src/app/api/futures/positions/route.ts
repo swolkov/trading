@@ -1,4 +1,4 @@
-import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, getOpenOrders, getTradovateFills, TRADOVATE_CONTRACTS } from "@/lib/tradovate";
+import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, getOpenOrders, getTradovateFills, TRADOVATE_CONTRACTS, resolveContractSymbol } from "@/lib/tradovate";
 import { prisma } from "@/lib/db";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -148,12 +148,18 @@ export async function GET() {
       };
     });
 
-    // Map fills with contract names
+    // Map fills with contract names — resolve via positions + Tradovate API
     const contractMap: Record<number, string> = {};
     for (const pos of positions) {
       contractMap[pos.contractId] = pos.contractName;
     }
-    // Also try to map from fills themselves
+    // Resolve any fill contractIds not in current positions
+    const unmappedIds = [...new Set(fills.map((f) => f.contractId))].filter((id) => !contractMap[id]);
+    for (const cid of unmappedIds) {
+      const resolved = await resolveContractSymbol(cid);
+      if (resolved) contractMap[cid] = resolved;
+    }
+
     const mappedFills = fills.map((f) => {
       const contractName = contractMap[f.contractId] || "";
       const sym = matchSymbol(contractName);
@@ -168,6 +174,61 @@ export async function GET() {
         tradeDate: f.tradeDate,
       };
     });
+
+    // Compute round-trip P&L from fills (source of truth)
+    const fillsByContract: Record<number, typeof fills> = {};
+    for (const f of fills) {
+      if (!fillsByContract[f.contractId]) fillsByContract[f.contractId] = [];
+      fillsByContract[f.contractId].push(f);
+    }
+
+    const roundTrips: { symbol: string; direction: string; qty: number; entryPrice: number; exitPrice: number; pnl: number; entryTime: string; exitTime: string }[] = [];
+    for (const [cidStr, cFills] of Object.entries(fillsByContract)) {
+      const cid = parseInt(cidStr);
+      const contractName = contractMap[cid] || "";
+      const sym = matchSymbol(contractName);
+      const multiplier = sym ? (TRADOVATE_CONTRACTS[sym]?.multiplier || 5) : 5;
+      const sorted = [...cFills].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      let position = 0;
+      let entryFills: typeof fills = [];
+      for (const fill of sorted) {
+        const fillQty = fill.action === "Buy" ? fill.qty : -fill.qty;
+        if (position === 0) {
+          position = fillQty;
+          entryFills = [fill];
+        } else if ((position > 0 && fillQty < 0) || (position < 0 && fillQty > 0)) {
+          const closeQty = Math.min(Math.abs(position), Math.abs(fillQty));
+          const direction = position > 0 ? "long" : "short";
+          const entryPrice = entryFills[0].price;
+          const exitPrice = fill.price;
+          const priceDiff = direction === "long" ? exitPrice - entryPrice : entryPrice - exitPrice;
+          roundTrips.push({
+            symbol: sym || contractName,
+            direction,
+            qty: closeQty,
+            entryPrice,
+            exitPrice,
+            pnl: priceDiff * multiplier * closeQty,
+            entryTime: entryFills[0].timestamp,
+            exitTime: fill.timestamp,
+          });
+          position += fillQty;
+          if (position === 0) entryFills = [];
+        } else {
+          position += fillQty;
+          entryFills.push(fill);
+        }
+      }
+    }
+
+    const fillBasedPnl = {
+      totalPnl: roundTrips.reduce((s, rt) => s + rt.pnl, 0),
+      tradeCount: roundTrips.length,
+      wins: roundTrips.filter((rt) => rt.pnl > 0).length,
+      losses: roundTrips.filter((rt) => rt.pnl < 0).length,
+      roundTrips,
+    };
 
     return Response.json({
       connected: true,
@@ -188,6 +249,7 @@ export async function GET() {
       })),
       fills: mappedFills,
       fillCount: fills.length,
+      fillBasedPnl,
       activity,
       engineStatus,
     });

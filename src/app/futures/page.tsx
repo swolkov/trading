@@ -91,6 +91,14 @@ interface TradovateFill {
   tradeDate: { year: number; month: number; day: number };
 }
 
+interface FillBasedPnl {
+  totalPnl: number;
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  roundTrips: { symbol: string; direction: string; qty: number; entryPrice: number; exitPrice: number; pnl: number; entryTime: string; exitTime: string }[];
+}
+
 interface PositionsData {
   connected: boolean;
   account: FuturesAccount | null;
@@ -98,6 +106,7 @@ interface PositionsData {
   orders: { id: number; action: string; type: string; qty: number; status: string }[];
   fills?: TradovateFill[];
   fillCount?: number;
+  fillBasedPnl?: FillBasedPnl;
   activity: ActivityLog[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
 }
@@ -247,22 +256,37 @@ export default function FuturesPage() {
 
   const selectedQuote = quotes.find((q) => q.symbol === selectedContract);
   const allTrades = posData?.activity || [];
+  const fillPnl = posData?.fillBasedPnl;
+
+  // Use fill-based round trips (from actual Tradovate fills) when available,
+  // fall back to DB-logged trades only when disconnected
   const closedTrades = allTrades.filter((t) => t.pnl != null);
+  const hasFillData = !!fillPnl && fillPnl.tradeCount > 0;
+  const tradeCount = hasFillData ? fillPnl.tradeCount : closedTrades.length;
+  const winCount = hasFillData ? fillPnl.wins : closedTrades.filter((t) => (t.pnl || 0) > 0).length;
+  const lossCount = hasFillData ? fillPnl.losses : closedTrades.filter((t) => (t.pnl || 0) < 0).length;
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
-  const totalPnl = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
-  const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0;
+  const totalPnl = hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const avgWin = hasFillData
+    ? (fillPnl.wins > 0 ? fillPnl.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / fillPnl.wins : 0)
+    : (wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0);
+  const avgLoss = hasFillData
+    ? (fillPnl.losses > 0 ? fillPnl.roundTrips.filter((rt) => rt.pnl < 0).reduce((s, rt) => s + rt.pnl, 0) / fillPnl.losses : 0)
+    : (losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0);
   const bestTrade = closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
   const worstTrade = closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
 
-  // Daily/Weekly/Monthly P&L
+  // Daily/Weekly/Monthly P&L — use fill-based data for today when available
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  const dailyPnl = closedTrades
+  // Fill-based daily P&L (from actual Tradovate fills — the source of truth)
+  const fillDailyPnl = hasFillData ? fillPnl.totalPnl : 0;
+
+  const dbDailyPnl = closedTrades
     .filter((t) => new Date(t.time) >= todayStart)
     .reduce((s, t) => s + (t.pnl || 0), 0);
   const weeklyPnl = closedTrades
@@ -271,14 +295,15 @@ export default function FuturesPage() {
   const monthlyPnl = closedTrades
     .filter((t) => new Date(t.time) >= monthStart)
     .reduce((s, t) => s + (t.pnl || 0), 0);
-  const dailyTrades = closedTrades.filter((t) => new Date(t.time) >= todayStart).length;
+  const dailyTrades = hasFillData ? fillPnl.tradeCount : closedTrades.filter((t) => new Date(t.time) >= todayStart).length;
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
-  // When Tradovate real-time data is available, use it for today's P&L in weekly/monthly
-  const todayRealPnl = posData?.account ? posData.account.realizedPnl : dailyPnl;
-  const adjustedWeeklyPnl = weeklyPnl - dailyPnl + todayRealPnl;
-  const adjustedMonthlyPnl = monthlyPnl - dailyPnl + todayRealPnl;
+  // Use Tradovate account realizedPnl (includes commissions), then fill-based, then DB
+  const todayRealPnl = posData?.account ? posData.account.realizedPnl : (hasFillData ? fillDailyPnl : dbDailyPnl);
+  const dailyPnl = todayRealPnl;
+  const adjustedWeeklyPnl = weeklyPnl - dbDailyPnl + todayRealPnl;
+  const adjustedMonthlyPnl = monthlyPnl - dbDailyPnl + todayRealPnl;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -964,24 +989,26 @@ export default function FuturesPage() {
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-white/[0.03] rounded-lg p-3">
                       <p className="text-[9px] text-muted-foreground/40 uppercase">Profit Factor</p>
-                      <p className={`text-xl font-bold ${(wins.reduce((s, t) => s + (t.pnl || 0), 0) / Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0) || 1)) >= 1 ? "text-emerald-400" : "text-red-400"}`}>
-                        {losses.length > 0 ? (wins.reduce((s, t) => s + (t.pnl || 0), 0) / Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0))).toFixed(2) : "—"}
+                      <p className={`text-xl font-bold ${avgWin > 0 && avgLoss < 0 ? ((avgWin * winCount) / Math.abs(avgLoss * lossCount) >= 1 ? "text-emerald-400" : "text-red-400") : "text-muted-foreground"}`}>
+                        {lossCount > 0 && winCount > 0 ? ((avgWin * winCount) / Math.abs(avgLoss * lossCount)).toFixed(2) : "—"}
                       </p>
                     </div>
                     <div className="bg-white/[0.03] rounded-lg p-3">
                       <p className="text-[9px] text-muted-foreground/40 uppercase">Expectancy</p>
-                      <p className={`text-xl font-bold ${closedTrades.length > 0 && totalPnl / closedTrades.length >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {closedTrades.length > 0 ? `${totalPnl / closedTrades.length >= 0 ? "+" : ""}$${(totalPnl / closedTrades.length).toFixed(0)}` : "—"}
+                      <p className={`text-xl font-bold ${tradeCount > 0 && totalPnl / tradeCount >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {tradeCount > 0 ? `${totalPnl / tradeCount >= 0 ? "+" : ""}$${(totalPnl / tradeCount).toFixed(0)}` : "—"}
                       </p>
-                      <p className="text-[9px] text-muted-foreground/30">per trade</p>
+                      <p className="text-[9px] text-muted-foreground/30">per trade{hasFillData ? " (fills)" : ""}</p>
                     </div>
                     <div className="bg-white/[0.03] rounded-lg p-3">
                       <p className="text-[9px] text-muted-foreground/40 uppercase">Max Drawdown</p>
                       <p className="text-xl font-bold text-red-400">
                         {(() => {
-                          const sorted = [...closedTrades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+                          const trades = hasFillData
+                            ? fillPnl.roundTrips.sort((a, b) => new Date(a.entryTime).getTime() - new Date(b.entryTime).getTime())
+                            : [...closedTrades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
                           let peak = 0, maxDD = 0, cum = 0;
-                          for (const t of sorted) { cum += t.pnl || 0; peak = Math.max(peak, cum); maxDD = Math.min(maxDD, cum - peak); }
+                          for (const t of trades) { cum += ("pnl" in t ? (t.pnl || 0) : 0); peak = Math.max(peak, cum); maxDD = Math.min(maxDD, cum - peak); }
                           return `$${Math.abs(maxDD).toFixed(0)}`;
                         })()}
                       </p>
@@ -1174,9 +1201,9 @@ export default function FuturesPage() {
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
                   <p className="text-lg font-bold">
-                    {closedTrades.length > 0 ? `${((wins.length / closedTrades.length) * 100).toFixed(0)}%` : "—"}
+                    {tradeCount > 0 ? `${((winCount / tradeCount) * 100).toFixed(0)}%` : "—"}
                   </p>
-                  <p className="text-[9px] text-muted-foreground/30">{wins.length}W / {losses.length}L</p>
+                  <p className="text-[9px] text-muted-foreground/30">{winCount}W / {lossCount}L{hasFillData ? " (fills)" : ""}</p>
                 </div>
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Fills</p>
