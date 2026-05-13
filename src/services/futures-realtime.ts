@@ -76,6 +76,19 @@ async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...options?.headers },
     signal: AbortSignal.timeout(15000),
   });
+  if (res.status === 401) {
+    // Token expired — force re-auth and retry once
+    accessToken = "";
+    tokenExpires = 0;
+    const newToken = await authenticate();
+    const retry = await fetch(`${ORDER_API}${path}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${newToken}`, ...options?.headers },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!retry.ok) throw new Error(`API ${retry.status}: ${await retry.text().catch(() => "")}`);
+    return retry.json();
+  }
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text().catch(() => "")}`);
   return res.json();
 }
