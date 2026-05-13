@@ -80,11 +80,24 @@ interface ActivityLog {
   time: string;
 }
 
+interface TradovateFill {
+  id: number;
+  orderId: number;
+  symbol: string;
+  action: string;
+  qty: number;
+  price: number;
+  time: string;
+  tradeDate: { year: number; month: number; day: number };
+}
+
 interface PositionsData {
   connected: boolean;
   account: FuturesAccount | null;
   positions: FuturesPosition[];
   orders: { id: number; action: string; type: string; qty: number; status: string }[];
+  fills?: TradovateFill[];
+  fillCount?: number;
   activity: ActivityLog[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
 }
@@ -1134,14 +1147,24 @@ export default function FuturesPage() {
               <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Performance</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* Total P&L */}
+              {/* Total P&L — use Tradovate as source of truth */}
               <div>
                 <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
-                <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
-                  {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
-                </p>
+                {posData?.account ? (
+                  <>
+                    <p className={`text-2xl font-bold tabular-nums ${pnlColor(posData.account.realizedPnl + posData.account.unrealizedPnl)}`}>
+                      {(posData.account.realizedPnl + posData.account.unrealizedPnl) >= 0 ? "+" : "-"}$
+                      {Math.abs(posData.account.realizedPnl + posData.account.unrealizedPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                    <p className="text-[9px] text-muted-foreground/30">from Tradovate</p>
+                  </>
+                ) : (
+                  <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
+                    {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
+                  </p>
+                )}
               </div>
-              {/* Win Rate + Trades */}
+              {/* Fills + Win Rate */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
@@ -1151,9 +1174,11 @@ export default function FuturesPage() {
                   <p className="text-[9px] text-muted-foreground/30">{wins.length}W / {losses.length}L</p>
                 </div>
                 <div>
-                  <p className="text-[10px] text-muted-foreground/40">Trades</p>
-                  <p className="text-lg font-bold">{closedTrades.length}</p>
-                  <p className="text-[9px] text-muted-foreground/30">closed total</p>
+                  <p className="text-[10px] text-muted-foreground/40">Fills</p>
+                  <p className="text-lg font-bold">{posData?.fillCount ?? closedTrades.length}</p>
+                  <p className="text-[9px] text-muted-foreground/30">
+                    {posData?.fillCount ? "from Tradovate" : "logged"}
+                  </p>
                 </div>
               </div>
               {/* Avg Win / Avg Loss */}
@@ -1188,15 +1213,24 @@ export default function FuturesPage() {
                   )}
                 </div>
               )}
-              {/* Daily / Weekly / Monthly P&L */}
+              {/* Today / Weekly / Monthly — Tradovate realized for today */}
               <div className="pt-2 border-t border-white/[0.06] space-y-2">
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-muted-foreground/40">Today</span>
                   <div className="text-right">
-                    <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
-                      {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toFixed(0)}
+                    {posData?.account ? (
+                      <span className={`text-sm font-bold tabular-nums ${pnlColor(posData.account.realizedPnl)}`}>
+                        {posData.account.realizedPnl >= 0 ? "+" : "-"}$
+                        {Math.abs(posData.account.realizedPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    ) : (
+                      <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+                        {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toFixed(0)}
+                      </span>
+                    )}
+                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">
+                      {posData?.fillCount ?? dailyTrades} fills
                     </span>
-                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{dailyTrades} trades</span>
                   </div>
                 </div>
                 <div className="flex justify-between items-center">
@@ -1205,7 +1239,7 @@ export default function FuturesPage() {
                     <span className={`text-sm font-bold tabular-nums ${pnlColor(weeklyPnl)}`}>
                       {weeklyPnl >= 0 ? "+" : "-"}${Math.abs(weeklyPnl).toFixed(0)}
                     </span>
-                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} trades</span>
+                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} logged</span>
                   </div>
                 </div>
                 <div className="flex justify-between items-center">
@@ -1214,7 +1248,7 @@ export default function FuturesPage() {
                     <span className={`text-sm font-bold tabular-nums ${pnlColor(monthlyPnl)}`}>
                       {monthlyPnl >= 0 ? "+" : "-"}${Math.abs(monthlyPnl).toFixed(0)}
                     </span>
-                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} trades</span>
+                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} logged</span>
                   </div>
                 </div>
               </div>

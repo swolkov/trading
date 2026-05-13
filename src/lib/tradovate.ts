@@ -446,3 +446,25 @@ export async function getOpenOrders(): Promise<{ id: number; action: string; ord
     .filter((o) => o.ordStatus === "Working" || o.ordStatus === "Accepted")
     .map((o) => ({ ...o, orderStatus: o.ordStatus }));
 }
+
+// Get fill history from Tradovate (actual executed trades)
+export interface TradovateFill {
+  id: number;
+  orderId: number;
+  contractId: number;
+  timestamp: string;
+  tradeDate: { year: number; month: number; day: number };
+  action: string; // "Buy" or "Sell"
+  qty: number;
+  price: number;
+  active: boolean;
+}
+
+export async function getTradovateFills(): Promise<TradovateFill[]> {
+  try {
+    const fills = await tvFetch("/fill/list") as TradovateFill[];
+    return Array.isArray(fills) ? fills : [];
+  } catch {
+    return [];
+  }
+}

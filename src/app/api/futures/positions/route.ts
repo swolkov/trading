@@ -1,4 +1,4 @@
-import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, getOpenOrders, TRADOVATE_CONTRACTS } from "@/lib/tradovate";
+import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, getOpenOrders, getTradovateFills, TRADOVATE_CONTRACTS } from "@/lib/tradovate";
 import { prisma } from "@/lib/db";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -64,11 +64,12 @@ export async function GET() {
       });
     }
 
-    // Fetch positions, account, and orders in parallel
-    const [positions, accountSummary, openOrders] = await Promise.all([
+    // Fetch positions, account, orders, and fills in parallel
+    const [positions, accountSummary, openOrders, fills] = await Promise.all([
       getTradovatePositions(),
       getTradovateAccountSummary(),
       getOpenOrders(),
+      getTradovateFills(),
     ]);
 
     // Get live quotes for position symbols
@@ -147,6 +148,27 @@ export async function GET() {
       };
     });
 
+    // Map fills with contract names
+    const contractMap: Record<number, string> = {};
+    for (const pos of positions) {
+      contractMap[pos.contractId] = pos.contractName;
+    }
+    // Also try to map from fills themselves
+    const mappedFills = fills.map((f) => {
+      const contractName = contractMap[f.contractId] || "";
+      const sym = matchSymbol(contractName);
+      return {
+        id: f.id,
+        orderId: f.orderId,
+        symbol: sym || contractName,
+        action: f.action,
+        qty: f.qty,
+        price: f.price,
+        time: f.timestamp,
+        tradeDate: f.tradeDate,
+      };
+    });
+
     return Response.json({
       connected: true,
       account: {
@@ -164,6 +186,8 @@ export async function GET() {
         qty: o.orderQty,
         status: o.orderStatus,
       })),
+      fills: mappedFills,
+      fillCount: fills.length,
       activity,
       engineStatus,
     });
