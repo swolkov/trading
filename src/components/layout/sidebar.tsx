@@ -21,6 +21,7 @@ const sections = [
     label: "AGENTS",
     links: [
       { href: "/agents", label: "Agent Hub" },
+      { href: "/command", label: "Command Center" },
       { href: "/ai", label: "AI Analyst" },
       { href: "/backtest", label: "Backtest" },
     ],
