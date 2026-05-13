@@ -932,13 +932,13 @@ async function evaluateAndTrade(
   }
 
   log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}%`);
-  await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult,
+  await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
     `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
 }
 
 // ── Trade Execution ─────────────────────────────────────
 
-async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, reasoning: string) {
+async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string) {
   const contract = contracts.get(sym);
   if (!contract) return;
 
@@ -1010,7 +1010,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
         qty,
         price,
         reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x`,
-        aiScore: Math.round(rr * 30), // use R:R as a proxy score
+        aiScore: confidenceScore,
         aiSignal: direction,
         orderId: String(entry.orderId),
       }});
