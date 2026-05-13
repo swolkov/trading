@@ -677,7 +677,7 @@ export default function FuturesPage() {
                             <td className="py-2 text-right tabular-nums">{t.qty}</td>
                             <td className="py-2 text-right tabular-nums">{t.price ? `$${t.price.toFixed(2)}` : "—"}</td>
                             <td className={`py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnlColor(t.pnl) : ""}`}>
-                              {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "Open"}
+                              {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "—"}
                             </td>
                             <td className="py-2 text-muted-foreground/60 max-w-[180px] truncate">{t.reason?.slice(0, 60)}</td>
                             <td className="py-2 text-right text-muted-foreground/40 tabular-nums">
