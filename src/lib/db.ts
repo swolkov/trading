@@ -8,7 +8,12 @@ function createPrismaClient() {
   if (!connectionString) {
     throw new Error("DATABASE_URL or POSTGRES_URL environment variable is required");
   }
-  const adapter = new PrismaPg({ connectionString });
+  // Ensure sslmode=verify-full to silence pg-connection-string security warnings
+  const url = new URL(connectionString);
+  if (url.searchParams.has("sslmode") && url.searchParams.get("sslmode") !== "verify-full") {
+    url.searchParams.set("sslmode", "verify-full");
+  }
+  const adapter = new PrismaPg({ connectionString: url.toString() });
   return new PrismaClient({ adapter });
 }
 

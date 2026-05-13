@@ -432,7 +432,7 @@ Rate confidence 0-100 and respond ONLY with JSON: {"agree":true/false,"confidenc
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6-20250514",
         max_tokens: 100,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -528,11 +528,48 @@ function onBarClose(sym: string, bar: Bar) {
   const vix = getVIXMultiplier();
   const adjustedATR = currentATR * vix.stopMult;
   const effectiveSizeMult = sizeMult * vix.sizeMult;
-  const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.7 ? "good" : "avoid";
+  const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.5 ? "good" : "avoid";
 
   log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
 
   // ── EVALUATE ALL SETUPS WITH CONFIDENCE SCORING ──
+
+  // Track near-misses for logging
+  let bestNearMiss = "";
+
+  // SETUP 0: Extreme RSI Bounce (any day type, any tradeable session)
+  // When RSI is deeply oversold (<25) or overbought (>75), a bounce/reversal is likely
+  // even on trend days. These are high-probability mean reversion trades.
+  if (currentRSI < 25 || currentRSI > 75) {
+    const isOversold = currentRSI < 25;
+    const dir = isOversold ? "long" : "short";
+    const targetDist = currentATR * 2.0; // target 2 ATR bounce
+    const stopDistRSI = adjustedATR * 1.5;
+
+    // Need declining volume (exhaustion, not capitulation)
+    if (volTrend !== "surge") {
+      const { score, reasons } = scoreSetup({
+        baseConfidence: 70,
+        volTrend, volRatio,
+        trend15Aligns: true, // RSI extremes override trend
+        rsiExtreme: true,
+        priceAboveVWAP: false,
+        dayTypeMatch: true,
+        sessionQuality,
+      });
+
+      log(`  → EXTREME RSI BOUNCE ${dir.toUpperCase()} | RSI:${currentRSI.toFixed(0)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+      if (score >= 65) {
+        evaluateAndTrade(sym, dir, price, stopDistRSI, targetDist, effectiveSizeMult, score,
+          `Extreme RSI ${isOversold ? "oversold" : "overbought"} bounce: RSI ${currentRSI.toFixed(0)}, ATR target ${targetDist.toFixed(2)}, conf ${score}%`,
+          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        return;
+      }
+    } else {
+      bestNearMiss = `RSI extreme (${currentRSI.toFixed(0)}) but volume surging — capitulation, not exhaustion`;
+    }
+  }
 
   // SETUP 1: Opening Range Breakout (trend days, morning)
   if (dayType === "trend" && session === "morning" && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
@@ -621,6 +658,19 @@ function onBarClose(sym: string, bar: Bar) {
         return;
       }
     }
+  }
+
+  // Log near-miss or why no setup triggered
+  if (bestNearMiss) {
+    log(`  ✗ Near miss: ${bestNearMiss}`);
+  } else {
+    // Quick summary of why nothing triggered
+    const reasons: string[] = [];
+    if (currentRSI > 25 && currentRSI < 75) reasons.push(`RSI ${currentRSI.toFixed(0)} not extreme`);
+    if (session !== "morning") reasons.push("not morning (no OR breakout)");
+    if (Math.abs(price - fastEMA) / price >= 0.003) reasons.push(`price ${((Math.abs(price - fastEMA) / price) * 100).toFixed(2)}% from EMA9 (need <0.3%)`);
+    if (dayType !== "range") reasons.push(`${dayType} day (VWAP reversion needs range)`);
+    if (reasons.length > 0) log(`  ✗ No setup: ${reasons.join(" | ")}`);
   }
 }
 
