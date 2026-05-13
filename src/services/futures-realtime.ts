@@ -273,7 +273,7 @@ function checkSessionReset() {
       b.sessionBars = []; b.openingRangeHigh = 0; b.openingRangeLow = 0; b.barCount = 0;
       log(`Session reset ${sym} — PDH:${b.prevDayHigh.toFixed(2)} PDL:${b.prevDayLow.toFixed(2)}`);
     }
-    dailyTradeCount = 0; dailyPnl = 0;
+    dailyTradeCount = 0; dailyPnl = 0; stoppedSymbols.clear(); consecutiveStops = 0; tiltPauseUntil = 0;
   }
 }
 
@@ -285,11 +285,17 @@ interface Position {
   trailStop: number | null; reachedBreakeven: boolean;
   stopOrderId: number | null; targetOrderId: number | null;
   entryTime: number;
+  scaledOut: boolean;
+  originalQty: number;
+  consecutiveStops: number;
 }
 
 const positions: Map<string, Position> = new Map();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
+const stoppedSymbols: Set<string> = new Set(); // symbols stopped out today — no re-entry
+let consecutiveStops = 0; // tilt protection counter
+let tiltPauseUntil = 0; // timestamp when tilt pause ends
 
 // ── Position Persistence (survive restarts) ──────────────
 
@@ -384,6 +390,7 @@ async function loadPositions() {
         stopOrderId: null,
         targetOrderId: null,
         entryTime: new Date(tp.timestamp).getTime(),
+        scaledOut: false, originalQty: qty, consecutiveStops: 0,
       });
 
       log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
@@ -410,13 +417,18 @@ function checkPositions(sym: string, price: number) {
   if (diff >= stopDist && !pos.reachedBreakeven) {
     pos.reachedBreakeven = true;
     log(`${sym}: Reached 1R ($${(diff * mult * pos.quantity).toFixed(0)}) — breakeven stop active`);
+    // Scale out 50% at 1R — lock in real profit
+    if (!pos.scaledOut && pos.quantity >= 2) {
+      const scaleQty = Math.floor(pos.quantity / 2);
+      scaleOutPosition(sym, price, scaleQty);
+    }
   }
 
   // Trailing stop at 1.5R+ (tighter than before — capture more profit)
   if (diff >= stopDist * 1.5) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
-      const trail = pos.direction === "long" ? price - currentATRVal * 0.8 : price + currentATRVal * 0.8;
+      const trail = pos.direction === "long" ? price - currentATRVal * 1.2 : price + currentATRVal * 1.2;
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
         if (!pos.trailStop) log(`${sym}: 1.5R+ — trailing stop activated at $${trail.toFixed(2)}`);
         pos.trailStop = trail;
@@ -445,6 +457,66 @@ function checkPositions(sym: string, price: number) {
   }
 }
 
+async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
+  const pos = positions.get(sym);
+  if (!pos || pos.scaledOut) return;
+
+  const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+  const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
+  const pnl = diff * mult * scaleQty;
+
+  try {
+    const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+    const acct = accounts.find(a => a.id === accountId) || accounts[0];
+
+    // Cancel the old target bracket (it's for full qty)
+    if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+
+    // Market close half
+    await apiFetch("/order/placeorder", {
+      method: "POST",
+      body: JSON.stringify({
+        accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
+        symbol: pos.contractId, orderQty: scaleQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+      }),
+    });
+
+    pos.quantity -= scaleQty;
+    pos.scaledOut = true;
+    dailyPnl += pnl;
+    log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${pnl.toFixed(0)}. ${pos.quantity}x remaining.`);
+
+    // Log to database
+    try {
+      await prisma.autoTradeLog.create({ data: {
+        symbol: `FUT:${sym}`,
+        action: "futures_scale_out",
+        qty: scaleQty,
+        price,
+        pnl,
+        reason: `[FUTURES ${sym}] Scale out 50% at 1R: ${scaleQty}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Remaining: ${pos.quantity}x`,
+        orderId: null,
+      }});
+    } catch {}
+
+    // Update the stop bracket for remaining qty
+    if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+    try {
+      const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+      const accounts2 = await apiFetch("/account/list") as { id: number; name: string }[];
+      const acct2 = accounts2.find(a => a.id === accountId) || accounts2[0];
+      const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        accountSpec: acct2.name, accountId, action: closeSide, symbol: pos.contractId,
+        orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.stopLoss, timeInForce: "GTC", isAutomated: true,
+      })}) as { orderId: number };
+      pos.stopOrderId = s.orderId;
+    } catch {}
+    pos.targetOrderId = null; // target removed, trail handles exit
+
+    await savePositions();
+  } catch (err) { log(`Scale out failed ${sym}: ${err}`); }
+}
+
 async function closePosition(sym: string, price: number, reason: string) {
   const pos = positions.get(sym);
   if (!pos) return;
@@ -467,6 +539,16 @@ async function closePosition(sym: string, price: number, reason: string) {
       }),
     });
     dailyPnl += pnl;
+    if (reason === "stop_loss" || reason === "emergency") {
+      stoppedSymbols.add(sym);
+      consecutiveStops++;
+      if (consecutiveStops >= 2) {
+        tiltPauseUntil = Date.now() + 30 * 60 * 1000;
+        log(`[TILT] ${consecutiveStops} consecutive stops — pausing 30 min until ${new Date(tiltPauseUntil).toISOString()}`);
+      }
+    } else {
+      consecutiveStops = 0; // reset on profitable exit
+    }
     log(`CLOSED ${sym}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
 
     // Log close to database
@@ -614,7 +696,11 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier();
-  if (sizeMult === 0 || positions.has(sym) || dailyTradeCount >= 10 || dailyPnl < -1500) return;
+  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 6 || dailyPnl < -1500) return;
+  // Tilt protection: pause after 2 consecutive stops
+  if (Date.now() < tiltPauseUntil) return;
+  // No re-entry on stopped-out symbols
+  if (stoppedSymbols.has(sym)) return;
 
   const bars = b.bars5m;
   const closes = bars.map(x => x.c);
@@ -698,7 +784,7 @@ function onBarClose(sym: string, bar: Bar) {
     if (isLong || isShort) {
       const dir = isLong ? "long" : "short";
       const { score, reasons } = scoreSetup({
-        baseConfidence: 70,
+        baseConfidence: 65,
         volTrend, volRatio,
         trend15Aligns: isLong ? tf15.trend === "up" : tf15.trend === "down",
         rsiExtreme: false,
@@ -709,7 +795,7 @@ function onBarClose(sym: string, bar: Bar) {
 
       log(`  → OR BREAKOUT ${dir.toUpperCase()} | Confidence: ${score}% | ${reasons.join(", ")}`);
 
-      if (score >= 65) {
+      if (score >= 75) {
         evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult, score,
           `OR breakout ${dir} $${price.toFixed(2)} ${isLong ? ">" : "<"} OR ${isLong ? "high" : "low"} $${(isLong ? b.openingRangeHigh : b.openingRangeLow).toFixed(2)}, vol ${volRatio.toFixed(1)}x, conf ${score}%`,
           currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
@@ -748,36 +834,7 @@ function onBarClose(sym: string, bar: Bar) {
     }
   }
 
-  // SETUP 3: VWAP Mean Reversion (range days)
-  if (dayType === "range" && (session === "morning" || session === "midday" || session === "afternoon")) {
-    const targetDist = Math.abs(price - vwapData.vwap) * 0.8;
-    if (targetDist > currentATR * 0.3) {
-      const isShort = price > vwapData.upper && currentRSI > 65 && volTrend !== "surge";
-      const isLong = price < vwapData.lower && currentRSI < 35 && volTrend !== "surge";
-
-      if (isLong || isShort) {
-        const dir = isLong ? "long" : "short";
-        const { score, reasons } = scoreSetup({
-          baseConfidence: 68,
-          volTrend, volRatio,
-          trend15Aligns: true, // mean reversion doesn't need trend alignment
-          rsiExtreme: true,
-          priceAboveVWAP: false, // by definition we're at the band
-          dayTypeMatch: true,
-          sessionQuality,
-        });
-
-        log(`  → VWAP REVERSION ${dir.toUpperCase()} | VWAP:$${vwapData.vwap.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
-
-        if (score >= 65) {
-          evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, targetDist, effectiveSizeMult, score,
-            `VWAP fade ${dir} $${price.toFixed(2)} ${isShort ? ">" : "<"} ${isShort ? "upper" : "lower"} $${(isShort ? vwapData.upper : vwapData.lower).toFixed(2)}, RSI ${currentRSI.toFixed(0)}, conf ${score}%`,
-            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
-        }
-        return;
-      }
-    }
-  }
+  // SETUP 3: VWAP Mean Reversion — DISABLED (backtest: 49 trades, 24% win rate, -99 pts)
 
   // Log near-miss or why no setup triggered
   if (bestNearMiss) {
@@ -816,8 +873,8 @@ async function evaluateAndTrade(
       finalScore += Math.min(10, Math.round(ai.confidence / 10));
       log(`  AI CONFIRMS (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
     } else {
-      finalScore -= 15;
-      log(`  AI DISAGREES (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
+      log(`  AI REJECTS (${ai.confidence}%): ${ai.reasoning} — trade blocked`);
+      return;
     }
   } else {
     log(`  AI: ${ai.reasoning}`);
@@ -893,6 +950,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       entryPrice: price, stopLoss: stopPrice, target: targetPrice,
       trailStop: null, reachedBreakeven: false,
       stopOrderId, targetOrderId, entryTime: Date.now(),
+      scaledOut: false, originalQty: qty, consecutiveStops: 0,
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
