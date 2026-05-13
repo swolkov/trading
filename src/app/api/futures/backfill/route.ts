@@ -154,12 +154,8 @@ export async function POST() {
       details.push(`${sym} ${closeType}: ${fillQty}x @ $${fillPrice.toFixed(2)} = ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
     }
 
-    // Debug: sample orders for troubleshooting
-    const sampleOrders = orders.slice(0, 5).map(o => ({
-      id: o.id, type: o.orderType, status: o.ordStatus,
-      contractId: o.contractId, avgFillPrice: o.avgFillPrice,
-      qty: o.orderQty, action: o.action,
-    }));
+    // Debug: raw first 3 orders
+    const sampleOrders = orders.slice(0, 3);
 
     return Response.json({
       backfilled,
