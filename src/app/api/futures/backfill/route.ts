@@ -75,7 +75,7 @@ export async function POST() {
 
     // Build contractId → symbol map from our DB entries matched to Market orders
     const contractIdToSym: Record<number, string> = {};
-    for (const eo of orders.filter(o => o.orderType === "Market" && o.isAutomated)) {
+    for (const eo of orders.filter(o => o.orderType === "Market")) {
       if (contractIdToSym[eo.contractId]) continue;
       // Match by order ID in our DB
       const dbEntry = entryLogs.find(l => l.orderId === String(eo.id));
@@ -98,7 +98,6 @@ export async function POST() {
     const filledBrackets = orders.filter(o =>
       o.ordStatus === "Filled" &&
       (o.orderType === "Stop" || o.orderType === "Limit") &&
-      o.isAutomated &&
       o.avgFillPrice &&
       o.avgFillPrice > 0 &&
       !loggedOrderIds.has(String(o.id))
@@ -155,12 +154,22 @@ export async function POST() {
       details.push(`${sym} ${closeType}: ${fillQty}x @ $${fillPrice.toFixed(2)} = ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
     }
 
+    // Debug: sample orders for troubleshooting
+    const sampleOrders = orders.slice(0, 5).map(o => ({
+      id: o.id, type: o.orderType, status: o.ordStatus,
+      contractId: o.contractId, avgFillPrice: o.avgFillPrice,
+      qty: o.orderQty, action: o.action,
+    }));
+
     return Response.json({
       backfilled,
       details,
       filledBrackets: filledBrackets.length,
       totalOrders: orders.length,
       contractMap: contractIdToSym,
+      entryLogs: entryLogs.length,
+      loggedOrderIds: [...loggedOrderIds].slice(0, 10),
+      sampleOrders,
     });
   } catch (error) {
     console.error("[/api/futures/backfill]", error);
