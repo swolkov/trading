@@ -541,6 +541,18 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   } catch (err) { log(`TRADE FAILED: ${err}`); }
 }
 
+// ── Heartbeat (tells dashboard the engine is alive) ─────
+
+async function writeHeartbeat() {
+  try {
+    await prisma.agentConfig.upsert({
+      where: { key: "futures_engine_heartbeat" },
+      update: { value: new Date().toISOString() },
+      create: { key: "futures_engine_heartbeat", value: new Date().toISOString() },
+    });
+  } catch { /* best-effort */ }
+}
+
 // ── Position Sync ───────────────────────────────────────
 
 async function syncPositions() {
@@ -671,6 +683,7 @@ async function main() {
   setInterval(pollPrices, POLL_INTERVAL_MS);
   setInterval(checkSessionReset, 60_000);
   setInterval(syncPositions, 30_000);
+  setInterval(writeHeartbeat, 60_000); // Heartbeat every 60s
   setInterval(updateVIX, 300_000); // Update VIX every 5 min
 
   // Status log every 2 minutes
