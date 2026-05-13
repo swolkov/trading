@@ -202,7 +202,7 @@ function onPrice(sym: string, price: number, volume: number) {
       if (b.sessionBars.length > MAX_SESSION_BARS) b.sessionBars.shift();
       b.barCount++;
 
-      if (b.barCount <= 3) {
+      if (b.barCount <= 12) {  // Initial Balance is first 60 min (institutional standard)
         b.openingRangeHigh = Math.max(b.openingRangeHigh, completed.h);
         b.openingRangeLow = b.openingRangeLow === 0 ? completed.l : Math.min(b.openingRangeLow, completed.l);
       }
@@ -267,7 +267,7 @@ function getSizeMultiplier(): number {
   const s = getSessionName();
   if (s === "morning") return 1.0;
   if (s === "afternoon") return 0.8;
-  if (s === "midday") return 0.5;
+  if (s === "midday") return 0;  // lunch doldrums, lowest volume, most losses
   if (s === "eth_europe") return 0.6;
   if (s === "eth_evening") return 0.4;
   if (s === "eth_asia") return 0.3;
@@ -655,16 +655,19 @@ async function getAIConfirmation(setup: {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return { agree: true, confidence: 0, reasoning: "AI unavailable" };
 
-    const prompt = `You are an expert micro E-mini futures day trader with 15 years of experience. Evaluate this setup in 1 sentence.
+    const prompt = `You are an elite micro E-mini futures day trader. You only take A+ setups with clear edge.
 
 ${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()}
 Setup: ${setup.reasoning}
 RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
 15m trend: ${setup.trend15} | Day type: ${setup.dayType} | Session: ${setup.session}
-Prev day: H $${setup.prevDayHigh.toFixed(2)} L $${setup.prevDayLow.toFixed(2)}
+Key levels: PDH $${setup.prevDayHigh.toFixed(2)} | PDL $${setup.prevDayLow.toFixed(2)}
 VIX: ${currentVIX.toFixed(1)}
 
-Rate confidence 0-100 and respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
+REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), or R:R < 2:1.
+ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session.
+
+Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -777,7 +780,9 @@ function onBarClose(sym: string, bar: Bar) {
   // VIX
   const vix = getVIXMultiplier();
   const adjustedATR = currentATR * vix.stopMult;
-  const effectiveSizeMult = sizeMult * vix.sizeMult;
+  let effectiveSizeMult = sizeMult * vix.sizeMult;
+  const dayOfWeek = new Date().getUTCDay();
+  if (dayOfWeek === 1 || dayOfWeek === 5) effectiveSizeMult *= 0.5; // half size Mon/Fri
   const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.5 ? "good" : "avoid";
 
   log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
@@ -821,8 +826,43 @@ function onBarClose(sym: string, bar: Bar) {
     }
   }
 
-  // SETUP 1: Opening Range Breakout (trend days, morning)
-  if (dayType === "trend" && session === "morning" && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
+  // SETUP: GAP FILL (highest statistical edge — 78% fill rate on small gaps)
+  const GAP_THRESHOLDS: Record<string, number> = { MES: 10, MNQ: 50, MYM: 100, M2K: 10 };
+  if (b.barCount >= 1 && b.barCount <= 6 && b.prevDayClose > 0 && (session === "open" || session === "morning")) {
+    const gap = b.sessionBars.length > 0 ? b.sessionBars[0].o - b.prevDayClose : 0;
+    const absGap = Math.abs(gap);
+    const maxGap = GAP_THRESHOLDS[sym] || 10;
+
+    if (absGap > 1 && absGap < maxGap) {
+      const dir = gap > 0 ? "short" : "long"; // fade the gap
+      const gapTarget = Math.abs(price - b.prevDayClose) * 0.8; // target 80% gap fill
+      const gapStop = absGap * 1.5;
+
+      if (gapTarget > currentATR * 0.3) {
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 75,
+          volTrend, volRatio,
+          trend15Aligns: true, // gap fills override trend
+          rsiExtreme: false,
+          priceAboveVWAP: false,
+          dayTypeMatch: true,
+          sessionQuality,
+        });
+
+        log(`  → GAP FILL ${dir.toUpperCase()} | Gap: ${gap.toFixed(2)} pts | Target: PDC $${b.prevDayClose.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+        if (score >= 75) {
+          evaluateAndTrade(sym, dir, price, gapStop, gapTarget, effectiveSizeMult, score,
+            `Gap fill ${dir}: gap ${gap.toFixed(1)} pts, targeting PDC $${b.prevDayClose.toFixed(2)}, 78% fill rate, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        }
+        return;
+      }
+    }
+  }
+
+  // SETUP 1: Opening Range (IB) Breakout (trend days, morning, after IB complete)
+  if (dayType === "trend" && session === "morning" && b.barCount >= 12 && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
     const isLong = price > b.openingRangeHigh && volRatio > 1.5;
     const isShort = price < b.openingRangeLow && volRatio > 1.5;
 
@@ -846,6 +886,43 @@ function onBarClose(sym: string, bar: Bar) {
           currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
       }
       return;
+    }
+  }
+
+  // SETUP: FAILED IB BREAKOUT (fade the failure — high edge reversal)
+  if (b.barCount >= 13 && b.openingRangeHigh > 0 && (session === "morning" || session === "midday" || session === "afternoon")) {
+    // Check if we recently tested above IB high or below IB low (within last 6 bars)
+    const recentBars = bars.slice(-6);
+    const testedHigh = recentBars.some(x => x.h > b.openingRangeHigh);
+    const testedLow = recentBars.some(x => x.l < b.openingRangeLow);
+    const backInRange = price < b.openingRangeHigh && price > b.openingRangeLow;
+
+    if (backInRange && (testedHigh || testedLow) && volTrend !== "surge") {
+      const dir = testedHigh ? "short" : "long"; // fade the failed break
+      const ibMid = (b.openingRangeHigh + b.openingRangeLow) / 2;
+      const failTarget = Math.abs(price - ibMid);
+      const failStop = testedHigh ? Math.abs(b.openingRangeHigh - price) + currentATR * 0.5 : Math.abs(price - b.openingRangeLow) + currentATR * 0.5;
+
+      if (failTarget / failStop >= 1.5) {
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 73,
+          volTrend, volRatio,
+          trend15Aligns: dir === "short" ? tf15.trend === "down" : tf15.trend === "up",
+          rsiExtreme: testedHigh ? currentRSI > 65 : currentRSI < 35,
+          priceAboveVWAP: dir === "short" ? price > vwapData.vwap : price < vwapData.vwap,
+          dayTypeMatch: true,
+          sessionQuality,
+        });
+
+        log(`  → FAILED IB BREAKOUT ${dir.toUpperCase()} | Tested ${testedHigh ? "high" : "low"}, back in range | Target: IB mid $${ibMid.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+        if (score >= 75) {
+          evaluateAndTrade(sym, dir, price, failStop, failTarget, effectiveSizeMult, score,
+            `Failed IB breakout ${dir}: price tested ${testedHigh ? "IB high" : "IB low"} and returned, fading to mid $${ibMid.toFixed(2)}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        }
+        return;
+      }
     }
   }
 
@@ -944,7 +1021,9 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = 50000;
-  const maxRisk = equity * 0.005 * sizeMult; // 0.5% per trade on demo — faster validation
+  // Dynamic position sizing: A+ setups get more size
+  const riskPct = confidenceScore >= 90 ? 0.01 : confidenceScore >= 80 ? 0.005 : 0.0025;
+  const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
   const qty = Math.max(1, Math.min(10, Math.floor(maxRisk / riskPer)));
   const rr = targetDist / stopDist;
@@ -1194,9 +1273,9 @@ async function preloadBars() {
         b.sessionBars = todayBars;
         b.barCount = todayBars.length;
 
-        // Opening range from today's first 3 bars
-        if (todayBars.length >= 3) {
-          const orBars = todayBars.slice(0, 3);
+        // Opening range (Initial Balance) from today's first 12 bars (60 min)
+        if (todayBars.length >= 12) {
+          const orBars = todayBars.slice(0, 12);
           b.openingRangeHigh = Math.max(...orBars.map(x => x.h));
           b.openingRangeLow = Math.min(...orBars.map(x => x.l));
         }
