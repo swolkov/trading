@@ -5,9 +5,9 @@ const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
 };
 
-function matchSymbol(contractName: string): string | null {
+function matchSymbol(name: string): string | null {
   for (const sym of ["MES", "MNQ", "MYM", "M2K"]) {
-    if (contractName.startsWith(sym)) return sym;
+    if (name.startsWith(sym)) return sym;
   }
   return null;
 }
@@ -40,24 +40,27 @@ async function tvGet(token: string, path: string): Promise<unknown> {
   return res.json();
 }
 
+interface TvOrder {
+  id: number;
+  contractId: number;
+  action: string;
+  orderType: string;
+  orderQty: number;
+  ordStatus: string;
+  avgFillPrice?: number;
+  filledQty?: number;
+  timestamp: string;
+  isAutomated?: boolean;
+}
+
 export const maxDuration = 60;
 
 export async function POST() {
   try {
     const token = await tvAuth();
 
-    // Get orders and contracts from Tradovate
-    const [orders, contracts] = await Promise.all([
-      tvGet(token, "/order/list") as Promise<{ id: number; accountId: number; contractId: number; action: string; orderType: string; orderQty: number; ordStatus: string; avgFillPrice?: number; filledQty?: number; timestamp: string; isAutomated?: boolean }[]>,
-      tvGet(token, "/contract/list") as Promise<{ id: number; name: string }[]>,
-    ]);
-
-    // Build contract ID → symbol map
-    const contractIdToSym: Record<number, string> = {};
-    for (const c of contracts) {
-      const sym = matchSymbol(c.name);
-      if (sym) contractIdToSym[c.id] = sym;
-    }
+    // Get all orders from Tradovate
+    const orders = await tvGet(token, "/order/list") as TvOrder[];
 
     // Get existing trade logs
     const existingLogs = await prisma.autoTradeLog.findMany({
@@ -66,15 +69,32 @@ export async function POST() {
       take: 200,
     });
 
-    // Build set of already-logged close order IDs
-    const loggedOrderIds = new Set(existingLogs.filter(l => l.orderId).map(l => l.orderId));
-
-    // Find entry logs (to match closes against)
     const entryLogs = existingLogs.filter(l =>
       l.action === "futures_long" || l.action === "futures_short"
     );
 
-    // Find filled bracket orders (Stop or Limit, automated) that we haven't logged
+    // Build contractId → symbol map from our DB entries matched to Market orders
+    const contractIdToSym: Record<number, string> = {};
+    for (const eo of orders.filter(o => o.orderType === "Market" && o.isAutomated)) {
+      if (contractIdToSym[eo.contractId]) continue;
+      // Match by order ID in our DB
+      const dbEntry = entryLogs.find(l => l.orderId === String(eo.id));
+      if (dbEntry) {
+        contractIdToSym[eo.contractId] = dbEntry.symbol.replace("FUT:", "");
+        continue;
+      }
+      // Fallback: resolve contract name from Tradovate
+      try {
+        const item = await tvGet(token, `/contract/item?id=${eo.contractId}`) as { name: string };
+        const sym = matchSymbol(item.name);
+        if (sym) contractIdToSym[eo.contractId] = sym;
+      } catch {}
+    }
+
+    // Set of already-logged order IDs
+    const loggedOrderIds = new Set(existingLogs.filter(l => l.orderId).map(l => l.orderId));
+
+    // Find filled bracket orders (Stop/Limit, automated) not yet in our DB
     const filledBrackets = orders.filter(o =>
       o.ordStatus === "Filled" &&
       (o.orderType === "Stop" || o.orderType === "Limit") &&
@@ -96,7 +116,7 @@ export async function POST() {
       const fillQty = order.filledQty || order.orderQty;
       const fillTime = order.timestamp;
 
-      // Check for approximate duplicate by price+time
+      // Check for approximate duplicate
       const isDup = existingLogs.some(l =>
         l.symbol === `FUT:${sym}` &&
         !l.action.includes("long") && !l.action.includes("short") &&
@@ -140,7 +160,7 @@ export async function POST() {
       details,
       filledBrackets: filledBrackets.length,
       totalOrders: orders.length,
-      entryLogsFound: entryLogs.length,
+      contractMap: contractIdToSym,
     });
   } catch (error) {
     console.error("[/api/futures/backfill]", error);
