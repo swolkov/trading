@@ -85,6 +85,20 @@ function log(msg: string) {
   console.log(`[${ts}] ${msg}`);
 }
 
+// Best-effort notification for critical events (trades, closes, errors)
+async function notify(msg: string) {
+  try {
+    const config = await prisma.agentConfig.findUnique({ where: { key: "notification_webhook" } });
+    if (!config?.value) return;
+    await fetch(config.value, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: `[FUTURES] ${msg}` }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {}
+}
+
 // ── Contract Resolution ─────────────────────────────────
 
 interface ContractInfo { id: number; name: string; tickSize: number; symbol: string; }
@@ -497,6 +511,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     pos.scaledOut = true;
     dailyPnl += pnl;
     log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${pnl.toFixed(0)}. ${pos.quantity}x remaining.`);
+    notify(`SCALE OUT ${sym}: +$${pnl.toFixed(0)} locked (${scaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
 
     // Log to database
     try {
@@ -536,20 +551,37 @@ async function closePosition(sym: string, price: number, reason: string) {
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
   const pnl = diff * mult * pos.quantity;
 
-  try {
-    // Cancel bracket orders
-    if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
-    if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+  // Retry up to 3 times — critical for EOD close and emergency exits
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      // Cancel bracket orders
+      if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+      if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
 
-    const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-    const acct = accounts.find(a => a.id === accountId) || accounts[0];
-    await apiFetch("/order/placeorder", {
-      method: "POST",
-      body: JSON.stringify({
-        accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
-        symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
-      }),
-    });
+      const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+      const acct = accounts.find(a => a.id === accountId) || accounts[0];
+      await apiFetch("/order/placeorder", {
+        method: "POST",
+        body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
+          symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
+        }),
+      });
+      // Success — break out of retry loop
+      break;
+    } catch (err) {
+      log(`[CLOSE] Attempt ${attempt}/3 failed for ${sym}: ${err}`);
+      if (attempt === 3) {
+        log(`[CLOSE] CRITICAL: Could not close ${sym} after 3 attempts!`);
+        notify(`CRITICAL: Failed to close ${sym} after 3 retries! Manual intervention needed.`);
+        return; // Don't remove from tracking — retry next tick
+      }
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+      continue;
+    }
+  }
+
+  try {
     dailyPnl += pnl;
     if (reason === "stop_loss" || reason === "emergency") {
       stoppedSymbols.add(sym);
@@ -562,6 +594,7 @@ async function closePosition(sym: string, price: number, reason: string) {
       consecutiveStops = 0; // reset on profitable exit
     }
     log(`CLOSED ${sym}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
+    notify(`CLOSED ${sym}: ${reason} | ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)} | Daily: ${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(0)}`);
 
     // Log close to database
     try {
@@ -966,6 +999,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
+    notify(`${side} ${qty}x ${sym} @ $${price.toFixed(2)} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
     await savePositions();
 
     // Log to database so Vercel dashboard shows it
