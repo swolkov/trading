@@ -30,6 +30,7 @@ import { analyzeVolatility } from "./options-intelligence";
 import { checkCorrelationWithPortfolio, clearCorrelationCache } from "./correlation";
 import { scoreLiquidity } from "./liquidity-agent";
 import { getExecutionAdvice } from "./execution-quality";
+import { evaluateDrawdownState, getDrawdownOverrides, isStrategyAllowed } from "./drawdown-protocol";
 import { scanSector, type SectorScanResult } from "./sector-scanner";
 import { getOptionsSnapshots } from "./alpaca";
 import { prisma } from "./db";
@@ -274,6 +275,22 @@ export async function runTradingAgent(): Promise<AgentResult> {
       if (eventOverride !== 1.0) details.push(`EVENT CATALYST: size override ${eventOverride}x`);
     } catch { /* use defaults */ }
 
+    // Step 1d: Evaluate drawdown protocol
+    let drawdownMultiplier = 1.0;
+    let drawdownMinScore = 0;
+    try {
+      const ddState = await evaluateDrawdownState();
+      if (ddState.mode !== "NORMAL") {
+        drawdownMultiplier = ddState.overrides.sizeMultiplier;
+        drawdownMinScore = ddState.overrides.minScoreOverride;
+        details.push(`DRAWDOWN: ${ddState.mode} — ${ddState.reason}`);
+        details.push(`  DD overrides: size ${(drawdownMultiplier * 100).toFixed(0)}%, min score ${drawdownMinScore}, max pos ${ddState.overrides.maxPositions}`);
+        if (ddState.mode === "LOCKDOWN") {
+          details.push("LOCKDOWN: No new trades — managing existing positions only");
+        }
+      }
+    } catch { /* use defaults */ }
+
     // Step 2: Get account state
     const account = await getAccount();
     const equity = parseFloat(account.equity);
@@ -374,8 +391,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     } catch { /* ignore */ }
 
-    // Apply loss multiplier + regime transition + event catalyst to sizing
-    const effectiveSizeMultiplier = regime.positionSizeMultiplier * lossMultiplier * regimeOverride * eventOverride;
+    // Apply loss multiplier + regime transition + event catalyst + drawdown protocol to sizing
+    const effectiveSizeMultiplier = regime.positionSizeMultiplier * lossMultiplier * regimeOverride * eventOverride * drawdownMultiplier;
 
     details.push(`Portfolio: $${equity.toFixed(2)} equity, $${cash.toFixed(2)} cash, ${positions.length} positions (regime: ${regime.regime}, sizing: ${effectiveSizeMultiplier.toFixed(2)}x${lossMultiplier < 1 ? " [loss protected]" : ""})`);
 

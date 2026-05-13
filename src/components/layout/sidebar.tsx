@@ -7,34 +7,32 @@ import { useState, useEffect } from "react";
 
 const sections = [
   {
-    label: "TRADING",
+    label: "OVERVIEW",
     links: [
       { href: "/", label: "Dashboard" },
+      { href: "/command", label: "Command Center" },
+    ],
+  },
+  {
+    label: "TRADE",
+    links: [
       { href: "/trade", label: "Trade" },
       { href: "/options", label: "Options" },
       { href: "/futures", label: "Futures" },
-      { href: "/positions", label: "Positions" },
-      { href: "/orders", label: "Orders" },
     ],
   },
   {
     label: "AGENTS",
     links: [
       { href: "/agents", label: "Agent Hub" },
-      { href: "/command", label: "Command Center" },
-      { href: "/ai", label: "AI Analyst" },
-      { href: "/backtest", label: "Backtest" },
+      { href: "/ai", label: "Research" },
     ],
   },
   {
     label: "ANALYTICS",
     links: [
       { href: "/performance", label: "Performance" },
-      { href: "/market", label: "Market Intel" },
-      { href: "/calendar", label: "Calendar" },
-      { href: "/insider", label: "Insider Trades" },
-      { href: "/research", label: "Research" },
-      { href: "/watchlist", label: "Watchlist" },
+      { href: "/market", label: "Market" },
     ],
   },
 ];
