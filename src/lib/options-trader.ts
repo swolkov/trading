@@ -36,7 +36,9 @@ const OPTIONS_RULES = {
   MAX_DTE: 45,                       // Never buy > 45 days (capital inefficient)
 
   // Exit rules — take money fast, cut losers faster
-  PROFIT_TARGET_PCT: 0.75,           // Take full profit at +75%
+  PROFIT_TARGET_PCT: 0.50,           // Take full profit at +50% (was 75% — too greedy)
+  PARTIAL_PROFIT_PCT: 0.25,          // Scale out 50% at +25% (was 40% — too late)
+  BREAKEVEN_TRIGGER_PCT: 0.20,       // Activate breakeven stop at +20% (protect ALL winners)
   STOP_LOSS_PCT: 0.25,               // Cut FAST at -25% (don't hope, cut)
   CLOSE_BEFORE_EXPIRY_DAYS: 7,       // Close if < 7 days to expiry (don't let theta crush you)
 
@@ -479,52 +481,17 @@ export async function manageOptionsPositions(
       dte = Math.floor((expiry.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
     }
 
-    // PARTIAL PROFIT-TAKING: at +30%, sell half; at full target, sell rest
+    // Track if we already took partial profit
     const hasOptPartial = await prisma.autoTradeLog.count({
       where: { symbol: pos.symbol, action: "partial_profit" },
     });
 
-    if (pnlPct >= 0.40 && pnlPct < OPTIONS_RULES.PROFIT_TARGET_PCT && hasOptPartial === 0 && qty >= 2) {
-      const sellQty = Math.max(1, Math.floor(qty / 2));
-      try {
-        const order = await placeOrder({ symbol: pos.symbol, qty: String(sellQty), side: "sell", type: "market", time_in_force: "day" });
-        await prisma.autoTradeLog.create({
-          data: {
-            symbol: pos.symbol,
-            action: "partial_profit",
-            qty: sellQty,
-            price: parseFloat(pos.current_price),
-            reason: `Options partial take: sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%. Remaining ${qty - sellQty} contracts with breakeven stop.`,
-            pnl: parseFloat(pos.unrealized_pl) * (sellQty / qty),
-            orderId: order.id,
-          },
-        });
-        actions.push({ action: "partial_profit", symbol: pos.symbol, reason: `Sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%` });
-      } catch { /* ignore */ }
-      continue;
-    }
+    // Track if this position ever reached the breakeven trigger (persisted via DB flag)
+    const hasReachedBreakeven = await prisma.autoTradeLog.count({
+      where: { symbol: pos.symbol, action: "breakeven_activated" },
+    });
 
-    // BREAKEVEN STOP: after partial take, don't let winner become loser
-    if (hasOptPartial > 0 && pnlPct <= 0) {
-      try {
-        const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
-        await prisma.autoTradeLog.create({
-          data: {
-            symbol: pos.symbol,
-            action: "breakeven_stop",
-            qty,
-            price: parseFloat(pos.current_price),
-            reason: `Options breakeven stop after partial take: ${(pnlPct * 100).toFixed(1)}%`,
-            pnl: parseFloat(pos.unrealized_pl),
-            orderId: order.id,
-          },
-        });
-        actions.push({ action: "breakeven_stop", symbol: pos.symbol, reason: `${(pnlPct * 100).toFixed(1)}% after partial` });
-      } catch { /* ignore */ }
-      continue;
-    }
-
-    // TAKE PROFIT (full exit)
+    // ── TAKE PROFIT: full exit at target ──
     if (pnlPct >= OPTIONS_RULES.PROFIT_TARGET_PCT) {
       try {
         const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
@@ -540,6 +507,66 @@ export async function manageOptionsPositions(
           },
         });
         actions.push({ action: "take_profit", symbol: pos.symbol, reason: `+${(pnlPct * 100).toFixed(1)}%` });
+      } catch { /* ignore */ }
+      continue;
+    }
+
+    // ── SCALE OUT: sell 50% at +25% to lock in real profit ──
+    if (pnlPct >= OPTIONS_RULES.PARTIAL_PROFIT_PCT && hasOptPartial === 0 && qty >= 2) {
+      const sellQty = Math.max(1, Math.floor(qty / 2));
+      try {
+        const order = await placeOrder({ symbol: pos.symbol, qty: String(sellQty), side: "sell", type: "market", time_in_force: "day" });
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: pos.symbol,
+            action: "partial_profit",
+            qty: sellQty,
+            price: parseFloat(pos.current_price),
+            reason: `Options scale-out: sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%. Locked in $${(parseFloat(pos.unrealized_pl) * (sellQty / qty)).toFixed(0)}. Remainder trails.`,
+            pnl: parseFloat(pos.unrealized_pl) * (sellQty / qty),
+            orderId: order.id,
+          },
+        });
+        actions.push({ action: "partial_profit", symbol: pos.symbol, reason: `Sold ${sellQty}/${qty} at +${(pnlPct * 100).toFixed(1)}%` });
+      } catch { /* ignore */ }
+      continue;
+    }
+
+    // ── BREAKEVEN ACTIVATION: mark position as protected at +20% ──
+    if (pnlPct >= OPTIONS_RULES.BREAKEVEN_TRIGGER_PCT && hasReachedBreakeven === 0) {
+      try {
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: pos.symbol,
+            action: "breakeven_activated",
+            qty,
+            price: parseFloat(pos.current_price),
+            reason: `Options breakeven activated at +${(pnlPct * 100).toFixed(1)}% — will close if returns to 0%`,
+            pnl: null,
+            orderId: null,
+          },
+        });
+        actions.push({ action: "breakeven_activated", symbol: pos.symbol, reason: `+${(pnlPct * 100).toFixed(1)}% — breakeven protection on` });
+      } catch { /* ignore */ }
+      continue;
+    }
+
+    // ── BREAKEVEN STOP: position was up 20%+ and came back to 0% ──
+    if ((hasReachedBreakeven > 0 || hasOptPartial > 0) && pnlPct <= 0.02) {
+      try {
+        const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: pos.symbol,
+            action: "breakeven_stop",
+            qty,
+            price: parseFloat(pos.current_price),
+            reason: `Options breakeven stop: was up ${hasOptPartial > 0 ? "(partial taken)" : "20%+"}, now at ${(pnlPct * 100).toFixed(1)}%. Protecting capital.`,
+            pnl: parseFloat(pos.unrealized_pl),
+            orderId: order.id,
+          },
+        });
+        actions.push({ action: "breakeven_stop", symbol: pos.symbol, reason: `${(pnlPct * 100).toFixed(1)}% — breakeven triggered` });
       } catch { /* ignore */ }
       continue;
     }
