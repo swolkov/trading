@@ -308,23 +308,90 @@ async function savePositions() {
 
 async function loadPositions() {
   try {
+    // Try loading from database first
     const saved = await prisma.agentConfig.findUnique({
       where: { key: "futures_positions" },
     });
-    if (!saved?.value) return;
 
-    const data = JSON.parse(saved.value) as Record<string, Position>;
-    let restored = 0;
-    for (const [sym, pos] of Object.entries(data)) {
-      // Verify position still exists on Tradovate
-      positions.set(sym, pos);
-      restored++;
+    if (saved?.value) {
+      const data = JSON.parse(saved.value) as Record<string, Position>;
+      let restored = 0;
+      for (const [sym, pos] of Object.entries(data)) {
+        positions.set(sym, pos);
+        restored++;
+      }
+      if (restored > 0) {
+        log(`[PERSIST] Restored ${restored} positions from database`);
+        await syncPositions();
+        log(`[PERSIST] After sync: ${positions.size} positions confirmed`);
+        return;
+      }
     }
-    if (restored > 0) {
-      log(`[PERSIST] Restored ${restored} positions from database`);
-      // Verify against Tradovate
-      await syncPositions();
-      log(`[PERSIST] After sync: ${positions.size} positions confirmed`);
+
+    // Fallback: bootstrap from Tradovate if DB has nothing
+    log(`[PERSIST] No saved positions — scanning Tradovate for open positions...`);
+    const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number; timestamp: string }[];
+    const openPos = tvPos.filter(p => p.netPos !== 0);
+
+    for (const tp of openPos) {
+      // Find which symbol this contractId belongs to
+      let sym: string | null = null;
+      for (const [s, contract] of contracts) {
+        if (contract.id === tp.contractId) { sym = s; break; }
+      }
+      if (!sym) continue;
+
+      const direction: "long" | "short" = tp.netPos > 0 ? "long" : "short";
+      const qty = Math.abs(tp.netPos);
+
+      // Try to find entry details from our trade log
+      const entryLog = await prisma.autoTradeLog.findFirst({
+        where: {
+          symbol: `FUT:${sym}`,
+          action: direction === "long" ? "futures_long" : "futures_short",
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      // Parse stop/target from entry log reason
+      let stopLoss = 0;
+      let target = 0;
+      if (entryLog?.reason) {
+        const stopMatch = entryLog.reason.match(/Stop:\s*\$?([\d,.]+)/);
+        const targetMatch = entryLog.reason.match(/Target:\s*\$?([\d,.]+)/);
+        if (stopMatch) stopLoss = parseFloat(stopMatch[1].replace(",", ""));
+        if (targetMatch) target = parseFloat(targetMatch[1].replace(",", ""));
+      }
+
+      // If no stop/target from logs, estimate from ATR
+      if (!stopLoss || !target) {
+        const b = barBuilders.get(sym);
+        const currentATR = b ? atr(b.bars5m) : 5;
+        stopLoss = direction === "long" ? tp.netPrice - currentATR * 1.5 : tp.netPrice + currentATR * 1.5;
+        target = direction === "long" ? tp.netPrice + currentATR * 3 : tp.netPrice - currentATR * 3;
+      }
+
+      positions.set(sym, {
+        symbol: sym,
+        contractId: tp.contractId,
+        direction,
+        quantity: qty,
+        entryPrice: tp.netPrice,
+        stopLoss,
+        target,
+        trailStop: null,
+        reachedBreakeven: false,
+        stopOrderId: null,
+        targetOrderId: null,
+        entryTime: new Date(tp.timestamp).getTime(),
+      });
+
+      log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
+    }
+
+    if (positions.size > 0) {
+      await savePositions();
+      log(`[PERSIST] Bootstrapped ${positions.size} positions from Tradovate`);
     }
   } catch (err) {
     log(`[PERSIST] Failed to load positions: ${err}`);
@@ -487,7 +554,11 @@ Rate confidence 0-100 and respond ONLY with JSON: {"agree":true/false,"confidenc
       signal: AbortSignal.timeout(10000),
     });
 
-    if (!res.ok) return { agree: true, confidence: 0, reasoning: "AI call failed" };
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      log(`[AI] Call failed (${res.status}): ${errBody.slice(0, 200)}`);
+      return { agree: true, confidence: 0, reasoning: `AI ${res.status}` };
+    }
 
     const data = await res.json() as { content: { type: string; text: string }[] };
     const text = data.content?.find(b => b.type === "text")?.text || "";
