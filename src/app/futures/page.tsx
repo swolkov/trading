@@ -298,11 +298,12 @@ export default function FuturesPage() {
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
-  // Use Tradovate account realizedPnl when connected (source of truth, includes commissions), else DB
-  const todayRealPnl = posData?.account ? posData.account.realizedPnl : dbDailyPnl;
-  const dailyPnl = todayRealPnl;
-  const adjustedWeeklyPnl = weeklyPnl - dbDailyPnl + todayRealPnl;
-  const adjustedMonthlyPnl = monthlyPnl - dbDailyPnl + todayRealPnl;
+  // Use reconciled DB data for all P&L periods — Tradovate's realizedPnl resets at
+  // 5 PM CT (session boundary) which doesn't align with calendar day, causing
+  // massive errors in the blending formula. DB is accurate after reconciliation.
+  const dailyPnl = dbDailyPnl;
+  const adjustedWeeklyPnl = weeklyPnl;
+  const adjustedMonthlyPnl = monthlyPnl;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -1176,22 +1177,13 @@ export default function FuturesPage() {
               <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Performance</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* Total P&L — use Tradovate as source of truth */}
+              {/* Total P&L — from reconciled DB trades */}
               <div>
                 <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
-                {posData?.account ? (
-                  <>
-                    <p className={`text-2xl font-bold tabular-nums ${pnlColor(posData.account.realizedPnl + posData.account.unrealizedPnl)}`}>
-                      {(posData.account.realizedPnl + posData.account.unrealizedPnl) >= 0 ? "+" : "-"}$
-                      {Math.abs(posData.account.realizedPnl + posData.account.unrealizedPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </p>
-                    <p className="text-[9px] text-muted-foreground/30">from Tradovate</p>
-                  </>
-                ) : (
-                  <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
-                    {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
-                  </p>
-                )}
+                <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
+                  {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+                <p className="text-[9px] text-muted-foreground/30">{tradeCount} trades</p>
               </div>
               {/* Fills + Win Rate */}
               <div className="grid grid-cols-2 gap-3">
@@ -1247,18 +1239,11 @@ export default function FuturesPage() {
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-muted-foreground/40">Today</span>
                   <div className="text-right">
-                    {posData?.account ? (
-                      <span className={`text-sm font-bold tabular-nums ${pnlColor(posData.account.realizedPnl)}`}>
-                        {posData.account.realizedPnl >= 0 ? "+" : "-"}$
-                        {Math.abs(posData.account.realizedPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    ) : (
-                      <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
-                        {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toFixed(0)}
-                      </span>
-                    )}
+                    <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+                      {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
                     <span className="text-[9px] text-muted-foreground/30 ml-1.5">
-                      {posData?.fillCount ?? dailyTrades} fills
+                      {dailyTrades} trades
                     </span>
                   </div>
                 </div>
