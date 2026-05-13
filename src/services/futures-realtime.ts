@@ -185,6 +185,7 @@ function onPrice(sym: string, price: number, volume: number) {
       b.bars5m.push(completed);
       b.sessionBars.push(completed);
       if (b.bars5m.length > 200) b.bars5m.shift();
+      if (b.sessionBars.length > MAX_SESSION_BARS) b.sessionBars.shift();
       b.barCount++;
 
       if (b.barCount <= 3) {
@@ -913,6 +914,107 @@ function getVIXMultiplier(): { stopMult: number; sizeMult: number; label: string
   return { stopMult: 1.0, sizeMult: 1.0, label: `VIX ${currentVIX.toFixed(1)} normal` };
 }
 
+// ── Reliability: Safe interval wrapper ───────────────────
+
+function safeInterval(fn: () => void | Promise<void>, ms: number, label: string): NodeJS.Timeout {
+  return setInterval(async () => {
+    try {
+      await fn();
+    } catch (err) {
+      log(`[SAFE-INTERVAL] ${label} threw: ${err}`);
+    }
+  }, ms);
+}
+
+// ── Reliability: Watchdog ────────────────────────────────
+
+let lastTickCount = 0;
+let lastTickCheckTime = Date.now();
+let pollIntervalRef: NodeJS.Timeout | null = null;
+
+function startWatchdog() {
+  safeInterval(() => {
+    const now = Date.now();
+    const elapsed = now - lastTickCheckTime;
+
+    if (tickCount === lastTickCount && elapsed > 60_000) {
+      log(`[WATCHDOG] Poll loop stalled — no new ticks in ${Math.round(elapsed / 1000)}s. Restarting poll interval...`);
+      if (pollIntervalRef) clearInterval(pollIntervalRef);
+      pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
+      // Force an immediate poll
+      pollPrices().catch(err => log(`[WATCHDOG] Recovery poll failed: ${err}`));
+    }
+
+    if (tickCount !== lastTickCount) {
+      lastTickCount = tickCount;
+      lastTickCheckTime = now;
+    }
+  }, 15_000, "watchdog");
+}
+
+// ── Reliability: Health check HTTP server ────────────────
+
+function startHealthServer() {
+  // Dynamic import to avoid issues if http is somehow unavailable
+  const http = require("http");
+  const port = parseInt(process.env.PORT || "3001", 10);
+  const startTime = Date.now();
+
+  const server = http.createServer((_req: unknown, res: { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }) => {
+    const now = Date.now();
+    const uptimeSeconds = Math.round((now - startTime) / 1000);
+    const lastTickAge = tickCount > 0 ? Math.round((now - lastTickCheckTime) / 1000) : -1;
+    const healthy = tickCount > 0 && (now - lastTickCheckTime) < 120_000;
+
+    const status = {
+      status: healthy ? "healthy" : "degraded",
+      uptime: uptimeSeconds,
+      tickCount,
+      lastTickAgeSec: lastTickAge,
+      positions: positions.size,
+      dailyPnl: Math.round(dailyPnl),
+      dailyTrades: dailyTradeCount,
+      session: getSessionName(),
+      symbols: SYMBOLS.map(s => {
+        const b = barBuilders.get(s);
+        return { symbol: s, price: b?.lastPrice || 0, bars: b?.bars5m.length || 0 };
+      }),
+    };
+
+    res.writeHead(healthy ? 200 : 503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(status));
+  });
+
+  server.listen(port, () => {
+    log(`Health server listening on port ${port}`);
+  });
+
+  server.on("error", (err: Error) => {
+    log(`[HEALTH] Server error (non-fatal): ${err.message}`);
+  });
+}
+
+// ── Reliability: Auth with retries ───────────────────────
+
+async function authenticateWithRetry(maxRetries = 5): Promise<string> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await authenticate();
+    } catch (err) {
+      log(`[AUTH] Attempt ${attempt}/${maxRetries} failed: ${err}`);
+      if (attempt === maxRetries) throw err;
+      const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60_000);
+      log(`[AUTH] Retrying in ${Math.round(delay / 1000)}s...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw new Error("Auth retry exhausted"); // unreachable, satisfies TS
+}
+
+// ── Reliability: Session bars cap ────────────────────────
+
+const MAX_SESSION_BARS = 500; // ~41 hours of 5-min bars, more than a full session
+
 // ── Main ────────────────────────────────────────────────
 
 async function main() {
@@ -921,7 +1023,10 @@ async function main() {
   log("╚══════════════════════════════════════════════╝");
   log("Mode: DEMO | Data: Yahoo Finance (5s poll) | Orders: Tradovate");
 
-  await authenticate();
+  // Start health server first — Railway can ping us even during init
+  startHealthServer();
+
+  await authenticateWithRetry();
   await resolveContracts();
   for (const sym of SYMBOLS) initBarBuilder(sym);
 
@@ -932,15 +1037,18 @@ async function main() {
   await updateVIX();
   log(`VIX: ${currentVIX.toFixed(1)}`);
 
-  // Start polling
-  setInterval(pollPrices, POLL_INTERVAL_MS);
-  setInterval(checkSessionReset, 60_000);
-  setInterval(syncPositions, 30_000);
-  setInterval(writeHeartbeat, 60_000); // Heartbeat every 60s
-  setInterval(updateVIX, 300_000); // Update VIX every 5 min
+  // Start polling — all wrapped in safe intervals
+  pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
+  safeInterval(checkSessionReset, 60_000, "checkSessionReset");
+  safeInterval(syncPositions, 30_000, "syncPositions");
+  safeInterval(writeHeartbeat, 60_000, "writeHeartbeat");
+  safeInterval(updateVIX, 300_000, "updateVIX");
+
+  // Watchdog: monitors tickCount and restarts poll if stalled
+  startWatchdog();
 
   // Status log every 2 minutes
-  setInterval(() => {
+  safeInterval(() => {
     const session = getSessionName();
     const vix = getVIXMultiplier();
     const prices = SYMBOLS.map(s => {
@@ -948,7 +1056,7 @@ async function main() {
       return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
     }).join(" ");
     log(`STATUS: ${session.toUpperCase()} | ${vix.label} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | ${prices}`);
-  }, 120_000);
+  }, 120_000, "statusLog");
 
   log("Engine ready — scanning for setups on every 5-min bar close...");
 
@@ -956,4 +1064,42 @@ async function main() {
   await pollPrices();
 }
 
-main().catch(err => { console.error("Fatal:", err); process.exit(1); });
+// ── Global error handlers (MUST NOT exit) ────────────────
+
+process.on("uncaughtException", (err) => {
+  try {
+    log(`[FATAL] Uncaught exception (process kept alive): ${err?.message || err}`);
+    console.error(err);
+  } catch {
+    console.error("uncaughtException:", err);
+  }
+});
+
+process.on("unhandledRejection", (reason) => {
+  try {
+    log(`[FATAL] Unhandled rejection (process kept alive): ${reason}`);
+  } catch {
+    console.error("unhandledRejection:", reason);
+  }
+});
+
+// ── Startup with auto-restart ────────────────────────────
+
+const MAX_RESTART_DELAY = 120_000;
+
+(async function startWithRetry() {
+  let restartCount = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      await main();
+      break; // main() sets up intervals and returns — success
+    } catch (err) {
+      restartCount++;
+      const delay = Math.min(5000 * Math.pow(2, restartCount - 1), MAX_RESTART_DELAY);
+      log(`[STARTUP] main() failed (attempt ${restartCount}): ${err}`);
+      log(`[STARTUP] Retrying in ${Math.round(delay / 1000)}s...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+})();

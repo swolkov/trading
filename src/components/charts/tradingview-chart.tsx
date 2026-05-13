@@ -4,14 +4,14 @@ import { useEffect, useRef, memo } from "react";
 
 // Map internal contract symbols to TradingView symbols
 const TV_SYMBOL_MAP: Record<string, string> = {
-  MES: "CME_MINI:MES1!",
-  MNQ: "CME_MINI:MNQ1!",
-  MYM: "CBOT_MINI:MYM1!",
-  M2K: "CME_MINI:M2K1!",
-  ES: "CME_MINI:ES1!",
-  NQ: "CME_MINI:NQ1!",
-  YM: "CBOT_MINI:YM1!",
-  RTY: "CME_MINI:RTY1!",
+  MES: "CME:MES1!",
+  MNQ: "CME:MNQ1!",
+  MYM: "CBOT:MYM1!",
+  M2K: "CME:M2K1!",
+  ES: "CME:ES1!",
+  NQ: "CME:NQ1!",
+  YM: "CBOT:YM1!",
+  RTY: "CME:RTY1!",
 };
 
 interface TradingViewChartProps {
