@@ -610,7 +610,11 @@ async function closePosition(sym: string, price: number, reason: string) {
       log(`[CLOSE] Attempt ${attempt}/3 failed for ${sym}: ${err}`);
       if (attempt === 3) {
         log(`[CLOSE] CRITICAL: Could not close ${sym} after 3 attempts!`);
-        notify(`CRITICAL: Failed to close ${sym} after 3 retries! Manual intervention needed.`);
+        // Only notify once per symbol to prevent Slack spam
+        if (!stoppedSymbols.has(`close_failed_${sym}`)) {
+          stoppedSymbols.add(`close_failed_${sym}`);
+          notify(`CRITICAL: Failed to close ${sym} after 3 retries! Manual intervention needed.`);
+        }
         return; // Don't remove from tracking — retry next tick
       }
       await new Promise(r => setTimeout(r, 2000 * attempt));
