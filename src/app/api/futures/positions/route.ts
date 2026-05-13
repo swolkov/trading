@@ -27,7 +27,7 @@ export async function GET() {
     const recentLogs = await prisma.autoTradeLog.findMany({
       where: { symbol: { startsWith: "FUT:" } },
       orderBy: { createdAt: "desc" },
-      take: 20,
+      take: 200,
     });
 
     const activity = recentLogs.map((log) => ({
