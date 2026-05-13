@@ -258,15 +258,17 @@ export default function FuturesPage() {
   const allTrades = posData?.activity || [];
   const fillPnl = posData?.fillBasedPnl;
 
-  // Use fill-based round trips (from actual Tradovate fills) when available,
-  // fall back to DB-logged trades only when disconnected
+  // DB trades (reconciliation keeps these accurate)
   const closedTrades = allTrades.filter((t) => t.pnl != null);
-  const hasFillData = !!fillPnl && fillPnl.tradeCount > 0;
-  const tradeCount = hasFillData ? fillPnl.tradeCount : closedTrades.length;
-  const winCount = hasFillData ? fillPnl.wins : closedTrades.filter((t) => (t.pnl || 0) > 0).length;
-  const lossCount = hasFillData ? fillPnl.losses : closedTrades.filter((t) => (t.pnl || 0) < 0).length;
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
+
+  // Use fill-based data ONLY when it has more trades than DB (catches gaps between reconciliation runs)
+  // After reconciliation runs, DB is authoritative (fills rotate out of Tradovate's /fill/list)
+  const hasFillData = !!fillPnl && fillPnl.tradeCount > closedTrades.length;
+  const tradeCount = hasFillData ? fillPnl.tradeCount : closedTrades.length;
+  const winCount = hasFillData ? fillPnl.wins : wins.length;
+  const lossCount = hasFillData ? fillPnl.losses : losses.length;
   const totalPnl = hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
   const avgWin = hasFillData
     ? (fillPnl.wins > 0 ? fillPnl.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / fillPnl.wins : 0)
@@ -277,14 +279,11 @@ export default function FuturesPage() {
   const bestTrade = closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
   const worstTrade = closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
 
-  // Daily/Weekly/Monthly P&L — use fill-based data for today when available
+  // Daily/Weekly/Monthly P&L
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-  // Fill-based daily P&L (from actual Tradovate fills — the source of truth)
-  const fillDailyPnl = hasFillData ? fillPnl.totalPnl : 0;
 
   const dbDailyPnl = closedTrades
     .filter((t) => new Date(t.time) >= todayStart)
@@ -295,12 +294,12 @@ export default function FuturesPage() {
   const monthlyPnl = closedTrades
     .filter((t) => new Date(t.time) >= monthStart)
     .reduce((s, t) => s + (t.pnl || 0), 0);
-  const dailyTrades = hasFillData ? fillPnl.tradeCount : closedTrades.filter((t) => new Date(t.time) >= todayStart).length;
+  const dailyTrades = closedTrades.filter((t) => new Date(t.time) >= todayStart).length;
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
-  // Use Tradovate account realizedPnl (includes commissions), then fill-based, then DB
-  const todayRealPnl = posData?.account ? posData.account.realizedPnl : (hasFillData ? fillDailyPnl : dbDailyPnl);
+  // Use Tradovate account realizedPnl when connected (source of truth, includes commissions), else DB
+  const todayRealPnl = posData?.account ? posData.account.realizedPnl : dbDailyPnl;
   const dailyPnl = todayRealPnl;
   const adjustedWeeklyPnl = weeklyPnl - dbDailyPnl + todayRealPnl;
   const adjustedMonthlyPnl = monthlyPnl - dbDailyPnl + todayRealPnl;
@@ -1004,11 +1003,9 @@ export default function FuturesPage() {
                       <p className="text-[9px] text-muted-foreground/40 uppercase">Max Drawdown</p>
                       <p className="text-xl font-bold text-red-400">
                         {(() => {
-                          const trades = hasFillData
-                            ? fillPnl.roundTrips.sort((a, b) => new Date(a.entryTime).getTime() - new Date(b.entryTime).getTime())
-                            : [...closedTrades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+                          const sorted = [...closedTrades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
                           let peak = 0, maxDD = 0, cum = 0;
-                          for (const t of trades) { cum += ("pnl" in t ? (t.pnl || 0) : 0); peak = Math.max(peak, cum); maxDD = Math.min(maxDD, cum - peak); }
+                          for (const t of sorted) { cum += t.pnl || 0; peak = Math.max(peak, cum); maxDD = Math.min(maxDD, cum - peak); }
                           return `$${Math.abs(maxDD).toFixed(0)}`;
                         })()}
                       </p>
