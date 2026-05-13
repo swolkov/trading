@@ -95,6 +95,7 @@ interface PositionsData {
   positions: FuturesPosition[];
   orders: { id: number; action: string; type: string; qty: number; status: string }[];
   activity: ActivityLog[];
+  engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
 }
 
 interface BacktestSetup {
@@ -254,6 +255,12 @@ export default function FuturesPage() {
             Micro futures — live data via Yahoo Finance
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
+            )}
+            {posData?.engineStatus?.alive && (
+              <span className="text-blue-400 ml-2 inline-flex items-center gap-1">
+                <span className="relative flex h-1.5 w-1.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" /><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-400" /></span>
+                Railway Engine Live
+              </span>
             )}
           </p>
         </div>

@@ -44,6 +44,16 @@ export async function GET() {
       time: log.createdAt.toISOString(),
     }));
 
+    // Check Railway engine heartbeat
+    let engineStatus: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number } = { alive: false, lastHeartbeat: null, ageMinutes: 999 };
+    try {
+      const heartbeat = await prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat" } });
+      if (heartbeat?.value) {
+        const age = (Date.now() - new Date(heartbeat.value).getTime()) / 60000;
+        engineStatus = { alive: age < 5, lastHeartbeat: heartbeat.value, ageMinutes: Math.round(age) };
+      }
+    } catch {}
+
     if (!auth.authenticated) {
       return Response.json({
         connected: false,
@@ -51,6 +61,7 @@ export async function GET() {
         positions: [],
         orders: [],
         activity,
+        engineStatus,
       });
     }
 
@@ -155,6 +166,7 @@ export async function GET() {
         status: o.orderStatus,
       })),
       activity,
+      engineStatus,
     });
   } catch (error) {
     console.error("[/api/futures/positions]", error);
