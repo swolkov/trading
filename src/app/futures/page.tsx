@@ -35,16 +35,6 @@ interface FuturesStatus {
   message?: string;
 }
 
-interface FuturesTrade {
-  symbol: string;
-  action: string;
-  qty: number;
-  price: number | null;
-  pnl: number | null;
-  reason: string;
-  time: string;
-}
-
 interface FuturesResult {
   trades: { symbol: string; action: string; contracts: number; price: number; stopLoss: number; target: number; reasoning: string; success: boolean }[];
   managed: number;
@@ -181,7 +171,6 @@ function formatVol(v: number) {
 export default function FuturesPage() {
   const [quotes, setQuotes] = useState<FuturesQuote[]>([]);
   const [status, setStatus] = useState<FuturesStatus | null>(null);
-  const [trades, setTrades] = useState<FuturesTrade[]>([]);
   const [posData, setPosData] = useState<PositionsData | null>(null);
   const [result, setResult] = useState<FuturesResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -211,12 +200,8 @@ export default function FuturesPage() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const [statusRes, tradesRes] = await Promise.all([
-        fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false })),
-        fetch("/api/agent/activity?filter=futures").then((r) => r.json()).catch(() => []),
-      ]);
+      const statusRes = await fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false }));
       setStatus(statusRes);
-      if (Array.isArray(tradesRes)) setTrades(tradesRes.filter((t: FuturesTrade) => t.symbol?.startsWith("FUT:")));
     } catch { /* ignore */ }
   }, []);
 
@@ -247,7 +232,8 @@ export default function FuturesPage() {
   // ── Derived data ─────────────────────────────────────
 
   const selectedQuote = quotes.find((q) => q.symbol === selectedContract);
-  const closedTrades = trades.filter((t) => t.pnl != null);
+  const allTrades = posData?.activity || [];
+  const closedTrades = allTrades.filter((t) => t.pnl != null);
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
   const totalPnl = closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
@@ -649,8 +635,14 @@ export default function FuturesPage() {
           {activeTab === "history" && (
             <Card className="border-white/[0.06]">
               <CardContent className="pt-4">
-                {trades.length > 0 ? (
+                {allTrades.length > 0 ? (
                   <div className="overflow-x-auto">
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-xs text-muted-foreground/60">{allTrades.length} total trades ({closedTrades.length} closed)</p>
+                      <p className={`text-xs font-bold tabular-nums ${pnlColor(totalPnl)}`}>
+                        Net: {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toFixed(0)}
+                      </p>
+                    </div>
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="text-muted-foreground/40 border-b border-white/[0.06]">
@@ -664,9 +656,9 @@ export default function FuturesPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {trades.slice(0, 50).map((t, i) => (
-                          <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                            <td className="py-2 font-bold">{t.symbol.replace("FUT:", "")}</td>
+                        {allTrades.slice(0, 100).map((t) => (
+                          <tr key={t.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                            <td className="py-2 font-bold">{t.symbol}</td>
                             <td className="py-2">
                               <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                                 t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" :
@@ -858,8 +850,47 @@ export default function FuturesPage() {
           )}
         </div>
 
-        {/* Right sidebar: Positions + Stats + Activity */}
+        {/* Right sidebar: Account + Positions + Stats + Activity */}
         <div className="space-y-3">
+          {/* ── TRADOVATE ACCOUNT ── */}
+          {posData?.account && (
+            <Card className="border-emerald-500/20 bg-emerald-500/[0.03]">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-[11px] text-emerald-400/60 uppercase tracking-wider font-bold">Tradovate Account</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Net Liquidation</p>
+                    <p className="text-xl font-bold tabular-nums">${posData.account.netLiq.toLocaleString()}</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div>
+                      <span className="text-muted-foreground/40">Balance</span>
+                      <p className="font-bold tabular-nums">${posData.account.balance.toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground/40">Unrealized P&L</span>
+                      <p className={`font-bold tabular-nums ${pnlColor(posData.account.unrealizedPnl)}`}>
+                        {posData.account.unrealizedPnl >= 0 ? "+" : ""}${posData.account.unrealizedPnl.toLocaleString()}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground/40">Realized P&L</span>
+                      <p className={`font-bold tabular-nums ${pnlColor(posData.account.realizedPnl)}`}>
+                        {posData.account.realizedPnl >= 0 ? "+" : ""}${posData.account.realizedPnl.toLocaleString()}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground/40">Margin Used</span>
+                      <p className="font-bold tabular-nums">${posData.account.marginUsed.toLocaleString()}</p>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* ── LIVE POSITIONS ── */}
           <Card className={`border-white/[0.06] ${posData?.positions?.length ? "border-emerald-500/20" : ""}`}>
             <CardHeader className="pb-2">
@@ -956,47 +987,11 @@ export default function FuturesPage() {
                     );
                   })}
 
-                  {/* Account summary when positions exist */}
-                  {posData.account && (
-                    <div className="pt-2 border-t border-white/[0.06] grid grid-cols-2 gap-2 text-[10px]">
-                      <div>
-                        <span className="text-muted-foreground/40">Net Liq</span>
-                        <p className="font-bold">${posData.account.netLiq.toLocaleString()}</p>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground/40">Margin Used</span>
-                        <p className="font-bold">${posData.account.marginUsed.toLocaleString()}</p>
-                      </div>
-                    </div>
-                  )}
                 </div>
               ) : (
                 <p className="text-[11px] text-muted-foreground/30 text-center py-4">
                   {posData?.connected ? "No open positions" : "Positions will appear once Tradovate is connected"}
                 </p>
-              )}
-              {/* Account summary — always visible */}
-              {posData?.account && (
-                <div className="pt-2 mt-2 border-t border-white/[0.06] grid grid-cols-2 gap-2 text-[10px]">
-                  <div>
-                    <span className="text-muted-foreground/40">Balance</span>
-                    <p className="font-bold">${posData.account.balance.toLocaleString()}</p>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground/40">Net Liq</span>
-                    <p className="font-bold">${posData.account.netLiq.toLocaleString()}</p>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground/40">Realized P&L</span>
-                    <p className={`font-bold ${pnlColor(posData.account.realizedPnl)}`}>
-                      {posData.account.realizedPnl >= 0 ? "+" : ""}${posData.account.realizedPnl.toLocaleString()}
-                    </p>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground/40">Margin Used</span>
-                    <p className="font-bold">${posData.account.marginUsed.toLocaleString()}</p>
-                  </div>
-                </div>
               )}
             </CardContent>
           </Card>
@@ -1050,13 +1045,13 @@ export default function FuturesPage() {
                   <div>
                     <p className="text-[10px] text-muted-foreground/40">Best Trade</p>
                     <p className="text-[11px] font-bold text-emerald-400 tabular-nums">+${(bestTrade.pnl || 0).toFixed(0)}</p>
-                    <p className="text-[9px] text-muted-foreground/30">{bestTrade.symbol.replace("FUT:", "")}</p>
+                    <p className="text-[9px] text-muted-foreground/30">{bestTrade.symbol}</p>
                   </div>
                   {worstTrade && (
                     <div>
                       <p className="text-[10px] text-muted-foreground/40">Worst Trade</p>
                       <p className="text-[11px] font-bold text-red-400 tabular-nums">-${Math.abs(worstTrade.pnl || 0).toFixed(0)}</p>
-                      <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol.replace("FUT:", "")}</p>
+                      <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol}</p>
                     </div>
                   )}
                 </div>
