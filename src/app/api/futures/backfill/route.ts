@@ -1,171 +1,157 @@
 import { prisma } from "@/lib/db";
+import { checkTradovateAuth, getTradovatePositions } from "@/lib/tradovate";
 
-const DEMO_URL = "https://demo.tradovateapi.com/v1";
 const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
 };
-
-function matchSymbol(name: string): string | null {
-  for (const sym of ["MES", "MNQ", "MYM", "M2K"]) {
-    if (name.startsWith(sym)) return sym;
-  }
-  return null;
-}
-
-async function tvAuth(): Promise<string> {
-  const res = await fetch(`${DEMO_URL}/auth/accesstokenrequest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: process.env.TRADOVATE_USERNAME || "",
-      password: process.env.TRADOVATE_PASSWORD || "",
-      appId: process.env.TRADOVATE_APP_ID || "",
-      appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
-      deviceId: "esbueno-backfill",
-      cid: parseInt(process.env.TRADOVATE_CID || "0"),
-      sec: process.env.TRADOVATE_SEC || "",
-    }),
-  });
-  if (!res.ok) throw new Error("Tradovate auth failed");
-  const data = await res.json();
-  return data.accessToken;
-}
-
-async function tvGet(token: string, path: string): Promise<unknown> {
-  const res = await fetch(`${DEMO_URL}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!res.ok) throw new Error(`Tradovate ${path} → ${res.status}`);
-  return res.json();
-}
-
-interface TvOrder {
-  id: number;
-  contractId: number;
-  action: string;
-  orderType: string;
-  orderQty: number;
-  ordStatus: string;
-  avgFillPrice?: number;
-  filledQty?: number;
-  timestamp: string;
-  isAutomated?: boolean;
-}
 
 export const maxDuration = 60;
 
 export async function POST() {
   try {
-    const token = await tvAuth();
-
-    // Get all orders from Tradovate
-    const orders = await tvGet(token, "/order/list") as TvOrder[];
-
-    // Get existing trade logs
-    const existingLogs = await prisma.autoTradeLog.findMany({
+    // 1. Get all futures trade logs
+    const allLogs = await prisma.autoTradeLog.findMany({
       where: { symbol: { startsWith: "FUT:" } },
-      orderBy: { createdAt: "desc" },
-      take: 200,
+      orderBy: { createdAt: "asc" },
     });
 
-    const entryLogs = existingLogs.filter(l =>
-      l.action === "futures_long" || l.action === "futures_short"
-    );
-
-    // Build contractId → symbol map from our DB entries matched to Market orders
-    const contractIdToSym: Record<number, string> = {};
-    for (const eo of orders.filter(o => o.orderType === "Market")) {
-      if (contractIdToSym[eo.contractId]) continue;
-      // Match by order ID in our DB
-      const dbEntry = entryLogs.find(l => l.orderId === String(eo.id));
-      if (dbEntry) {
-        contractIdToSym[eo.contractId] = dbEntry.symbol.replace("FUT:", "");
-        continue;
+    // 2. Get currently open positions from Tradovate
+    const auth = await checkTradovateAuth();
+    let openSymbols: Set<string> = new Set();
+    if (auth.authenticated) {
+      const positions = await getTradovatePositions();
+      for (const pos of positions) {
+        if (pos.netPos !== 0) {
+          for (const sym of ["MES", "MNQ", "MYM", "M2K"]) {
+            if (pos.contractName.startsWith(sym)) openSymbols.add(sym);
+          }
+        }
       }
-      // Fallback: resolve contract name from Tradovate
-      try {
-        const item = await tvGet(token, `/contract/item?id=${eo.contractId}`) as { name: string };
-        const sym = matchSymbol(item.name);
-        if (sym) contractIdToSym[eo.contractId] = sym;
-      } catch {}
     }
 
-    // Set of already-logged order IDs
-    const loggedOrderIds = new Set(existingLogs.filter(l => l.orderId).map(l => l.orderId));
-
-    // Find filled bracket orders (Stop/Limit, automated) not yet in our DB
-    const filledBrackets = orders.filter(o =>
-      o.ordStatus === "Filled" &&
-      (o.orderType === "Stop" || o.orderType === "Limit") &&
-      o.avgFillPrice &&
-      o.avgFillPrice > 0 &&
-      !loggedOrderIds.has(String(o.id))
+    // 3. Find entries without matching closes
+    const entries = allLogs.filter(l => l.action === "futures_long" || l.action === "futures_short");
+    const closes = allLogs.filter(l =>
+      l.action.includes("stop_loss") || l.action.includes("take_profit") ||
+      l.action.includes("trail_stop") || l.action.includes("breakeven") ||
+      l.action.includes("scale_out") || l.action.includes("bracket_close")
     );
+
+    // Match entries to closes by symbol + time ordering
+    // For each symbol, pair entries with closes chronologically
+    const symbolEntries: Record<string, typeof entries> = {};
+    const symbolCloses: Record<string, typeof closes> = {};
+
+    for (const e of entries) {
+      const sym = e.symbol;
+      if (!symbolEntries[sym]) symbolEntries[sym] = [];
+      symbolEntries[sym].push(e);
+    }
+    for (const c of closes) {
+      const sym = c.symbol;
+      if (!symbolCloses[sym]) symbolCloses[sym] = [];
+      symbolCloses[sym].push(c);
+    }
 
     let backfilled = 0;
     const details: string[] = [];
 
-    for (const order of filledBrackets) {
-      const sym = contractIdToSym[order.contractId];
-      if (!sym) continue;
+    for (const sym of Object.keys(symbolEntries)) {
+      const symEntries = symbolEntries[sym] || [];
+      const symCloses = symbolCloses[sym] || [];
+      const baseSym = sym.replace("FUT:", "");
 
-      const mult = MULTIPLIERS[sym] || 5;
-      const fillPrice = order.avgFillPrice!;
-      const fillQty = order.filledQty || order.orderQty;
-      const fillTime = order.timestamp;
+      // For each entry, check if there's a close after it
+      for (let i = 0; i < symEntries.length; i++) {
+        const entry = symEntries[i];
+        const entryTime = new Date(entry.createdAt).getTime();
+        const nextEntry = symEntries[i + 1];
+        const nextEntryTime = nextEntry ? new Date(nextEntry.createdAt).getTime() : Date.now();
 
-      // Check for approximate duplicate
-      const isDup = existingLogs.some(l =>
-        l.symbol === `FUT:${sym}` &&
-        !l.action.includes("long") && !l.action.includes("short") &&
-        l.price && Math.abs(l.price - fillPrice) < 2 &&
-        Math.abs(new Date(l.createdAt).getTime() - new Date(fillTime).getTime()) < 300000
-      );
-      if (isDup) continue;
+        // Find a close between this entry and the next entry
+        const matchingClose = symCloses.find(c => {
+          const closeTime = new Date(c.createdAt).getTime();
+          return closeTime > entryTime && closeTime < nextEntryTime;
+        });
 
-      // Find matching entry — most recent entry for this symbol before the fill
-      const entry = entryLogs.find(l =>
-        l.symbol === `FUT:${sym}` &&
-        new Date(l.createdAt) < new Date(fillTime)
-      );
-      if (!entry) continue;
+        if (matchingClose) continue; // Already has a close logged
 
-      const entryPrice = entry.price || 0;
-      const isLong = entry.action === "futures_long";
-      const diff = isLong ? fillPrice - entryPrice : entryPrice - fillPrice;
-      const pnl = diff * mult * fillQty;
-      const closeType = order.orderType === "Stop" ? "stop_loss" : "take_profit";
+        // Check if this position is currently open on Tradovate
+        if (openSymbols.has(baseSym) && i === symEntries.length - 1) continue; // Latest entry, still open
 
-      await prisma.autoTradeLog.create({
-        data: {
-          symbol: `FUT:${sym}`,
-          action: `futures_${closeType}`,
-          qty: fillQty,
-          price: fillPrice,
-          pnl,
-          reason: `[FUTURES ${sym}] ${closeType} (backfill): ${fillQty}x @ $${fillPrice.toFixed(2)}. Entry: $${entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`,
-          orderId: String(order.id),
-          createdAt: new Date(fillTime),
-        },
-      });
+        // This entry has no close and isn't currently open — it was closed by a bracket order
+        // Parse stop and target from the entry's reason text
+        const reason = entry.reason || "";
+        const stopMatch = reason.match(/Stop:\s*\$?([\d,.]+)/);
+        const targetMatch = reason.match(/Target:\s*\$?([\d,.]+)/);
+        const stopPrice = stopMatch ? parseFloat(stopMatch[1].replace(",", "")) : null;
+        const targetPrice = targetMatch ? parseFloat(targetMatch[1].replace(",", "")) : null;
 
-      backfilled++;
-      details.push(`${sym} ${closeType}: ${fillQty}x @ $${fillPrice.toFixed(2)} = ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
+        if (!stopPrice && !targetPrice) continue; // Can't determine close price
+
+        const entryPrice = entry.price || 0;
+        const isLong = entry.action === "futures_long";
+        const mult = MULTIPLIERS[baseSym] || 5;
+        const qty = entry.qty;
+
+        // Estimate close: if there's a next entry at a worse price, probably stopped out
+        // Otherwise check if P&L lines up with target
+        // Simple heuristic: assume stop loss (conservative estimate)
+        // We could check the next entry's time — if it was soon after, likely stopped out
+        let closePrice: number;
+        let closeType: string;
+
+        if (nextEntry) {
+          const timeDiff = nextEntryTime - entryTime;
+          // If re-entered quickly (< 30 min), likely stopped out then re-entered
+          if (timeDiff < 30 * 60 * 1000 && stopPrice) {
+            closePrice = stopPrice;
+            closeType = "stop_loss";
+          } else if (targetPrice) {
+            closePrice = targetPrice;
+            closeType = "take_profit";
+          } else {
+            closePrice = stopPrice!;
+            closeType = "stop_loss";
+          }
+        } else {
+          // Last entry for this symbol, no longer open — assume stop
+          closePrice = stopPrice || targetPrice!;
+          closeType = stopPrice ? "stop_loss" : "take_profit";
+        }
+
+        const diff = isLong ? closePrice - entryPrice : entryPrice - closePrice;
+        const pnl = diff * mult * qty;
+
+        // Create close time: midway between entry and next entry (or 5 min after entry)
+        const closeTime = nextEntry
+          ? new Date(entryTime + Math.min(nextEntryTime - entryTime, 5 * 60 * 1000))
+          : new Date(entryTime + 5 * 60 * 1000);
+
+        await prisma.autoTradeLog.create({
+          data: {
+            symbol: sym,
+            action: `futures_${closeType}`,
+            qty,
+            price: closePrice,
+            pnl,
+            reason: `[FUTURES ${baseSym}] ${closeType} (backfill): ${qty}x @ $${closePrice.toFixed(2)}. Entry: $${entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`,
+            orderId: null,
+            createdAt: closeTime,
+          },
+        });
+
+        backfilled++;
+        details.push(`${baseSym} ${closeType}: ${qty}x @ $${closePrice.toFixed(2)} = ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
+      }
     }
-
-    // Debug: raw first 3 orders
-    const sampleOrders = orders.slice(0, 3);
 
     return Response.json({
       backfilled,
       details,
-      filledBrackets: filledBrackets.length,
-      totalOrders: orders.length,
-      contractMap: contractIdToSym,
-      entryLogs: entryLogs.length,
-      loggedOrderIds: [...loggedOrderIds].slice(0, 10),
-      sampleOrders,
+      totalEntries: entries.length,
+      totalCloses: closes.length,
+      openPositions: [...openSymbols],
     });
   } catch (error) {
     console.error("[/api/futures/backfill]", error);
