@@ -9,7 +9,7 @@ export async function GET() {
       prisma.autoTradeLog.findMany({
         where: { createdAt: { gte: since } },
         orderBy: { createdAt: "desc" },
-        take: 30,
+        take: 200,
       }),
       prisma.agentRun.findMany({
         where: { createdAt: { gte: since } },
