@@ -168,7 +168,7 @@ export async function GET(request: Request) {
     }
 
     if (actions > 0) {
-      await sendNotification(`Position Monitor: ${actions} action(s) taken\n${details.join("\n")}`);
+      await sendNotification(`Position Monitor: ${actions} action(s) taken\n${details.join("\n")}`, "options");
     }
 
     // Log every run so it shows in activity feed

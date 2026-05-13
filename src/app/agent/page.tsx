@@ -70,6 +70,9 @@ interface AgentSettings {
   blacklist: string;
   cooldown_hours: string;
   notification_webhook: string;
+  webhook_futures: string;
+  webhook_options: string;
+  webhook_general: string;
   daily_loss_limit: string;
   daily_spend_cap: string;
   max_options_exposure: string;
@@ -772,16 +775,32 @@ export default function AgentPage() {
                 <CardHeader>
                   <CardTitle className="text-sm">Notifications</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-2">
+                <CardContent className="space-y-3">
                   <div className="space-y-1">
-                    <label className="text-xs font-medium">Slack/Discord Webhook URL</label>
+                    <label className="text-xs font-medium">#futures Channel Webhook</label>
                     <Input
                       placeholder="https://hooks.slack.com/services/..."
-                      value={settings.notification_webhook}
-                      onChange={(e) => updateSetting("notification_webhook", e.target.value)}
+                      value={settings.webhook_futures}
+                      onChange={(e) => updateSetting("webhook_futures", e.target.value)}
                     />
-                    <p className="text-xs text-muted-foreground">Get notified when the agent places trades. Create a Slack webhook at api.slack.com/messaging/webhooks</p>
                   </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium">#options Channel Webhook</label>
+                    <Input
+                      placeholder="https://hooks.slack.com/services/..."
+                      value={settings.webhook_options}
+                      onChange={(e) => updateSetting("webhook_options", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium">#general Channel Webhook (errors + stocks)</label>
+                    <Input
+                      placeholder="https://hooks.slack.com/services/..."
+                      value={settings.webhook_general}
+                      onChange={(e) => updateSetting("webhook_general", e.target.value)}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">Create Slack webhooks at api.slack.com/messaging/webhooks — one per channel</p>
                 </CardContent>
               </Card>
 

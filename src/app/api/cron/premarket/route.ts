@@ -133,7 +133,7 @@ export async function GET(request: Request) {
 
     // Send notification
     try {
-      await sendNotification(briefing.slice(0, 2000));
+      await sendNotification(briefing.slice(0, 2000), "general");
     } catch { /* ignore */ }
 
     // Log the pre-market run

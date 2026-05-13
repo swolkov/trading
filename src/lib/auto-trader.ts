@@ -23,7 +23,7 @@ import { reviewTrade } from "./risk-agent";
 import { scanGaps } from "./gap-scanner";
 import { reviewClosedTrades } from "./trade-reviewer";
 import { scanRelativeValue } from "./relative-value";
-import { sendNotification } from "./notifications";
+import { sendNotification, type NotifyChannel } from "./notifications";
 import { analyzeStock } from "./ai-analyst";
 import { getScoreAdjustment } from "./learning-engine";
 import { analyzeVolatility } from "./options-intelligence";
@@ -294,7 +294,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
     if (drawdownPct >= drawdownKillPct) {
       const summary = `KILL SWITCH: Account down ${drawdownPct.toFixed(1)}% from peak (limit: ${drawdownKillPct}%). Agent paused.`;
       details.push(summary);
-      await sendNotification(`🛑 ${summary}`);
+      await sendNotification(`🛑 ${summary}`, "general");
       await logRun("full", 0, 0, 0, 0, summary, startTime);
       return { runType: "full", stocksScanned: 0, tradesPlaced: 0, positionsManaged: 0, errors: 0, summary, details };
     }
@@ -1418,8 +1418,15 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     // Send notification if trades were placed or positions were closed
     if (tradesPlaced > 0) {
-      const tradeDetails = details.filter((d) => d.includes("BUY") || d.includes("STOP") || d.includes("TAKE PROFIT") || d.includes("TRAILING") || d.includes("THESIS") || d.includes("OPTIONS")).join("\n");
-      await sendNotification(`🤖 Trading Agent: ${summary}\n\n${tradeDetails}`);
+      const optionsDetails = details.filter((d) => d.includes("OPTIONS") || d.includes("CALL") || d.includes("PUT") || d.includes("SPREAD") || d.includes("STRADDLE")).join("\n");
+      const stockDetails = details.filter((d) => !optionsDetails.includes(d) && (d.includes("BUY") || d.includes("STOP") || d.includes("TAKE PROFIT") || d.includes("TRAILING") || d.includes("THESIS"))).join("\n");
+
+      if (optionsDetails) {
+        await sendNotification(`🤖 Options Agent: ${summary}\n\n${optionsDetails}`, "options");
+      }
+      if (stockDetails) {
+        await sendNotification(`🤖 Trading Agent: ${summary}\n\n${stockDetails}`, "general");
+      }
     }
 
     return { runType: "full", stocksScanned, tradesPlaced, positionsManaged, errors, summary, details };

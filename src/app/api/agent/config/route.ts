@@ -18,7 +18,10 @@ const DEFAULTS: Record<string, string> = {
   focus_symbols: "", // comma-separated watchlist for agent to prioritize
   blacklist: "", // comma-separated symbols to never trade
   cooldown_hours: "12",
-  notification_webhook: "", // Slack/Discord webhook URL
+  notification_webhook: "", // Legacy: Slack/Discord webhook URL (fallback)
+  webhook_futures: "", // Slack webhook for #futures channel
+  webhook_options: "", // Slack webhook for #options channel
+  webhook_general: "", // Slack webhook for #general channel (errors + stocks)
   daily_loss_limit: "500", // Stop trading if daily loss exceeds this $
   daily_spend_cap: "2000", // Max $ spent on new trades per day
   max_options_exposure: "5000", // Max total $ in options at any time

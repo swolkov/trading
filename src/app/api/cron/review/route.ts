@@ -86,7 +86,7 @@ export async function GET(request: Request) {
 
     // Send notification
     try {
-      await sendNotification(review.slice(0, 2000));
+      await sendNotification(review.slice(0, 2000), "general");
     } catch { /* ignore */ }
 
     // Log the review run

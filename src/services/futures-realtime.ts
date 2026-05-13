@@ -117,9 +117,13 @@ async function cancelAllOrders() {
 }
 
 // Best-effort notification for critical events (trades, closes, errors)
-async function notify(msg: string) {
+async function notify(msg: string, channel: "futures" | "general" = "futures") {
   try {
-    const config = await prisma.agentConfig.findUnique({ where: { key: "notification_webhook" } });
+    const keys = { futures: "webhook_futures", general: "webhook_general" } as const;
+    let config = await prisma.agentConfig.findUnique({ where: { key: keys[channel] } });
+    if (!config?.value) {
+      config = await prisma.agentConfig.findUnique({ where: { key: "notification_webhook" } });
+    }
     if (!config?.value) return;
     await fetch(config.value, {
       method: "POST",
@@ -613,7 +617,7 @@ async function closePosition(sym: string, price: number, reason: string) {
         // Only notify once per symbol to prevent Slack spam
         if (!stoppedSymbols.has(`close_failed_${sym}`)) {
           stoppedSymbols.add(`close_failed_${sym}`);
-          notify(`CRITICAL: Failed to close ${sym} after 3 retries! Manual intervention needed.`);
+          notify(`CRITICAL: Failed to close ${sym} after 3 retries! Manual intervention needed.`, "general");
         }
         return; // Don't remove from tracking — retry next tick
       }
