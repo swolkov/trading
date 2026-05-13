@@ -24,9 +24,11 @@ const ORDER_API = DEMO_API;
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
-const SYMBOLS = ["MES", "MNQ", "MYM", "M2K"];
+// Only trade MES ($5/pt) and MNQ ($2/pt) — best profit potential
+// MYM ($0.50/pt) and M2K ($5/pt but choppy) dropped: too little profit per point
+const SYMBOLS = ["MES", "MNQ"];
 const YAHOO_MAP: Record<string, string> = {
-  MES: "ES=F", MNQ: "NQ=F", MYM: "YM=F", M2K: "RTY=F",
+  MES: "ES=F", MNQ: "NQ=F",
 };
 const CONTRACT_MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
@@ -509,7 +511,7 @@ async function loadPositions() {
         const b = barBuilders.get(sym);
         const currentATR = b ? atr(b.bars5m) : 5;
         stopLoss = direction === "long" ? tp.netPrice - currentATR * 1.5 : tp.netPrice + currentATR * 1.5;
-        target = direction === "long" ? tp.netPrice + currentATR * 3 : tp.netPrice - currentATR * 3;
+        target = direction === "long" ? tp.netPrice + currentATR * 4 : tp.netPrice - currentATR * 4;
       }
 
       positions.set(sym, {
@@ -547,25 +549,28 @@ function checkPositions(sym: string, price: number) {
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
+  const pnlDollars = diff * mult * pos.quantity;
 
-  // Move to breakeven at 1R (lock in zero-loss)
+  // 1R: Move stop to breakeven — protect capital, NO scale out yet
   if (diff >= stopDist && !pos.reachedBreakeven) {
     pos.reachedBreakeven = true;
-    log(`${sym}: Reached 1R ($${(diff * mult * pos.quantity).toFixed(0)}) — breakeven stop active`);
-    // Scale out 50% at 1R — lock in real profit
-    if (!pos.scaledOut && pos.quantity >= 2) {
-      const scaleQty = Math.floor(pos.quantity / 2);
-      scaleOutPosition(sym, price, scaleQty);
-    }
+    log(`${sym}: Reached 1R ($${pnlDollars.toFixed(0)}) — breakeven stop active, letting winner run`);
   }
 
-  // Trailing stop at 1.5R+ (tighter than before — capture more profit)
-  if (diff >= stopDist * 1.5) {
+  // 3R: Scale out 33% — lock in meaningful profit, let the rest ride
+  if (diff >= stopDist * 3 && !pos.scaledOut && pos.quantity >= 2) {
+    const scaleQty = Math.max(1, Math.floor(pos.quantity / 3));
+    log(`${sym}: Reached 3R ($${pnlDollars.toFixed(0)}) — scaling out ${scaleQty} of ${pos.quantity} contracts`);
+    scaleOutPosition(sym, price, scaleQty);
+  }
+
+  // 2.5R+: Activate trailing stop with WIDE trail (2x ATR) — don't get whipsawed
+  if (diff >= stopDist * 2.5) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
-      const trail = pos.direction === "long" ? price - currentATRVal * 1.2 : price + currentATRVal * 1.2;
+      const trail = pos.direction === "long" ? price - currentATRVal * 2.0 : price + currentATRVal * 2.0;
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
-        if (!pos.trailStop) log(`${sym}: 1.5R+ — trailing stop activated at $${trail.toFixed(2)}`);
+        if (!pos.trailStop) log(`${sym}: 2.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop activated at $${trail.toFixed(2)} (2x ATR)`);
         pos.trailStop = trail;
       }
     }
@@ -907,7 +912,7 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier();
-  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 6 || dailyPnl < -1500) return;
+  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 8 || dailyPnl < -2000) return;
   // Tilt protection: pause after 2 consecutive stops
   if (Date.now() < tiltPauseUntil) return;
   // No re-entry on stopped-out symbols
@@ -971,7 +976,7 @@ function onBarClose(sym: string, bar: Bar) {
   if (currentRSI < 25 || currentRSI > 75) {
     const isOversold = currentRSI < 25;
     const dir = isOversold ? "long" : "short";
-    const targetDist = currentATR * 2.0; // target 2 ATR bounce
+    const targetDist = currentATR * 3.5; // target 3.5 ATR bounce — bigger moves
     const stopDistRSI = adjustedATR * 1.5;
 
     // Need declining volume (exhaustion, not capitulation)
@@ -1000,7 +1005,7 @@ function onBarClose(sym: string, bar: Bar) {
   }
 
   // SETUP: GAP FILL (highest statistical edge — 78% fill rate on small gaps)
-  const GAP_THRESHOLDS: Record<string, number> = { MES: 10, MNQ: 50, MYM: 100, M2K: 10 };
+  const GAP_THRESHOLDS: Record<string, number> = { MES: 10, MNQ: 50 };
   if (b.barCount >= 1 && b.barCount <= 6 && b.prevDayClose > 0 && (session === "open" || session === "morning")) {
     const gap = b.sessionBars.length > 0 ? b.sessionBars[0].o - b.prevDayClose : 0;
     const absGap = Math.abs(gap);
@@ -1054,7 +1059,7 @@ function onBarClose(sym: string, bar: Bar) {
       log(`  → OR BREAKOUT ${dir.toUpperCase()} | Confidence: ${score}% | ${reasons.join(", ")}`);
 
       if (score >= 75) {
-        evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), orSize * 1.5, effectiveSizeMult, score,
+        evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), orSize * 2.5, effectiveSizeMult, score,
           `OR breakout ${dir} $${price.toFixed(2)} ${isLong ? ">" : "<"} OR ${isLong ? "high" : "low"} $${(isLong ? b.openingRangeHigh : b.openingRangeLow).toFixed(2)}, vol ${volRatio.toFixed(1)}x, conf ${score}%`,
           currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
       }
@@ -1076,7 +1081,7 @@ function onBarClose(sym: string, bar: Bar) {
       const failTarget = Math.abs(price - ibMid);
       const failStop = testedHigh ? Math.abs(b.openingRangeHigh - price) + currentATR * 0.5 : Math.abs(price - b.openingRangeLow) + currentATR * 0.5;
 
-      if (failTarget / failStop >= 1.5) {
+      if (failTarget / failStop >= 2.0) {
         const { score, reasons } = scoreSetup({
           baseConfidence: 73,
           volTrend, volRatio,
@@ -1121,7 +1126,7 @@ function onBarClose(sym: string, bar: Bar) {
       log(`  → TREND CONTINUATION ${dir.toUpperCase()} | EMA9:$${fastEMA.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
 
       if (score >= 65) {
-        evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, adjustedATR * 2.5, effectiveSizeMult, score,
+        evaluateAndTrade(sym, dir, price, adjustedATR * 1.5, adjustedATR * 4.0, effectiveSizeMult, score,
           `Trend pullback ${dir} near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, 15m ${tf15.trend}, conf ${score}%`,
           currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
       }
@@ -1193,14 +1198,15 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   if (!contract) return;
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  const equity = 50000;
-  // Dynamic position sizing: A+ setups get more size
-  const riskPct = confidenceScore >= 90 ? 0.01 : confidenceScore >= 80 ? 0.005 : 0.0025;
+  const equity = 88000; // Current account equity — update as it grows
+  // Aggressive sizing: A+ setups get REAL size to make $100-$1000 per trade
+  // 90+ confidence = 2% risk ($1,760), 80+ = 1% ($880), <80 = 0.5% ($440)
+  const riskPct = confidenceScore >= 90 ? 0.02 : confidenceScore >= 80 ? 0.01 : 0.005;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  const qty = Math.max(1, Math.min(10, Math.floor(maxRisk / riskPer)));
+  const qty = Math.max(1, Math.min(20, Math.floor(maxRisk / riskPer)));
   const rr = targetDist / stopDist;
-  if (rr < 1.5) { log(`${sym}: R:R ${rr.toFixed(1)} too low`); return; }
+  if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
 
   const stopPrice = direction === "long" ? price - stopDist : price + stopDist;
   const targetPrice = direction === "long" ? price + targetDist : price - targetDist;
@@ -1364,7 +1370,7 @@ async function syncPositions() {
         quantity: qty,
         entryPrice: tp.netPrice,
         stopLoss: direction === "long" ? tp.netPrice - currentATR * 1.5 : tp.netPrice + currentATR * 1.5,
-        target: direction === "long" ? tp.netPrice + currentATR * 3 : tp.netPrice - currentATR * 3,
+        target: direction === "long" ? tp.netPrice + currentATR * 4 : tp.netPrice - currentATR * 4,
         trailStop: null,
         reachedBreakeven: false,
         scaledOut: false,
