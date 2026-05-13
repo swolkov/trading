@@ -1,15 +1,20 @@
 #!/usr/bin/env tsx
 // Seeds the VaultDocument table with all current Obsidian vault files.
-// Run once: DATABASE_URL="..." npx tsx scripts/vault-seed.ts
+// Run once: DATABASE_URL="postgresql://..." npx tsx scripts/vault-seed.ts
 
 import * as fs from "fs";
 import * as path from "path";
+import { PrismaClient } from "../src/generated/prisma/client.js";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 const VAULT_PATH = path.join(process.env.HOME || "/Users/user", "Desktop/Trading/Trading");
 
 async function main() {
-  const { PrismaClient } = await import("../src/generated/prisma/client.js");
-  const prisma = new PrismaClient();
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!connectionString) throw new Error("DATABASE_URL required");
+
+  const adapter = new PrismaPg({ connectionString });
+  const prisma = new PrismaClient({ adapter });
 
   const documents: { path: string; content: string }[] = [];
 

@@ -15,6 +15,7 @@ const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
 const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] });
 
 import { prisma } from "../lib/db";
+import { logTradeToJournal, logDecision } from "../lib/vault";
 
 // ── Config ──────────────────────────────────────────────
 
@@ -71,21 +72,30 @@ async function authenticate(): Promise<string> {
 
 async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
   const token = await authenticate();
-  const res = await fetch(`${ORDER_API}${path}`, {
+  const makeRequest = (t: string) => fetch(`${ORDER_API}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...options?.headers },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}`, ...options?.headers },
     signal: AbortSignal.timeout(15000),
   });
+
+  const res = await makeRequest(token);
+
+  // Rate limit handling — wait and retry
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("Retry-After") || "5", 10);
+    log(`[API] Rate limited on ${path} — waiting ${retryAfter}s`);
+    await new Promise(r => setTimeout(r, retryAfter * 1000));
+    const retry = await makeRequest(token);
+    if (!retry.ok) throw new Error(`API ${retry.status} after rate limit wait: ${await retry.text().catch(() => "")}`);
+    return retry.json();
+  }
+
   if (res.status === 401) {
     // Token expired — force re-auth and retry once
     accessToken = "";
     tokenExpires = 0;
     const newToken = await authenticate();
-    const retry = await fetch(`${ORDER_API}${path}`, {
-      ...options,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${newToken}`, ...options?.headers },
-      signal: AbortSignal.timeout(15000),
-    });
+    const retry = await makeRequest(newToken);
     if (!retry.ok) throw new Error(`API ${retry.status}: ${await retry.text().catch(() => "")}`);
     return retry.json();
   }
@@ -133,6 +143,40 @@ async function notify(msg: string, channel: "futures" | "general" = "futures") {
     });
   } catch {}
 }
+
+// ── Startup Validation ──────────────────────────────────
+
+function validateEnvironment() {
+  const required = [
+    ["TRADOVATE_USERNAME", process.env.TRADOVATE_USERNAME],
+    ["TRADOVATE_PASSWORD", process.env.TRADOVATE_PASSWORD],
+    ["TRADOVATE_APP_ID", process.env.TRADOVATE_APP_ID],
+    ["TRADOVATE_CID", process.env.TRADOVATE_CID],
+    ["TRADOVATE_SEC", process.env.TRADOVATE_SEC],
+    ["DATABASE_URL", process.env.DATABASE_URL],
+  ] as const;
+
+  const missing = required.filter(([, v]) => !v).map(([k]) => k);
+  if (missing.length > 0) {
+    const msg = `Missing required env vars: ${missing.join(", ")}`;
+    log(`[FATAL] ${msg}`);
+    throw new Error(msg);
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    log("[WARN] ANTHROPIC_API_KEY not set — AI confirmation disabled, all setups will auto-approve");
+  }
+
+  log("[ENV] All required environment variables present");
+}
+
+// ── Yahoo Finance Circuit Breaker ───────────────────────
+
+let yahooConsecutiveFailures = 0;
+let yahooCircuitOpen = false;
+let yahooCircuitResetAt = 0;
+const YAHOO_MAX_FAILURES = 5;
+const YAHOO_CIRCUIT_BASE_MS = 30_000;
 
 // ── Contract Resolution ─────────────────────────────────
 
@@ -258,19 +302,43 @@ function onPrice(sym: string, price: number, volume: number) {
 }
 
 async function pollPrices() {
+  // Circuit breaker: skip polls while circuit is open
+  if (yahooCircuitOpen) {
+    if (Date.now() < yahooCircuitResetAt) return;
+    yahooCircuitOpen = false;
+    log(`[YAHOO] Circuit half-open — attempting recovery poll`);
+  }
+
   try {
     const yahooSymbols = SYMBOLS.map(s => YAHOO_MAP[s]);
     const quotes = await yfEngine.quote(yahooSymbols);
     const arr = Array.isArray(quotes) ? quotes : [quotes];
 
+    let received = 0;
     for (let i = 0; i < SYMBOLS.length; i++) {
       const q = arr[i];
       if (q?.regularMarketPrice) {
         onPrice(SYMBOLS[i], q.regularMarketPrice, q.regularMarketVolume || 0);
+        received++;
       }
     }
+
+    if (received > 0 && yahooConsecutiveFailures > 0) {
+      log(`[YAHOO] Recovered after ${yahooConsecutiveFailures} failures — ${received} quotes received`);
+      yahooConsecutiveFailures = 0;
+    }
   } catch (err) {
-    // Yahoo occasionally fails — just skip this poll
+    yahooConsecutiveFailures++;
+    log(`[YAHOO] Poll failed (${yahooConsecutiveFailures}/${YAHOO_MAX_FAILURES}): ${err instanceof Error ? err.message : err}`);
+
+    if (yahooConsecutiveFailures >= YAHOO_MAX_FAILURES) {
+      const backoffMultiplier = Math.min(yahooConsecutiveFailures - YAHOO_MAX_FAILURES + 1, 10);
+      const cooldownMs = YAHOO_CIRCUIT_BASE_MS * backoffMultiplier;
+      yahooCircuitOpen = true;
+      yahooCircuitResetAt = Date.now() + cooldownMs;
+      log(`[YAHOO] Circuit OPEN — pausing polls for ${Math.round(cooldownMs / 1000)}s (backoff x${backoffMultiplier})`);
+      notify(`Yahoo Finance down (${yahooConsecutiveFailures} failures) — market data paused ${Math.round(cooldownMs / 1000)}s`, "general");
+    }
   }
 }
 
@@ -614,10 +682,22 @@ async function closePosition(sym: string, price: number, reason: string) {
       log(`[CLOSE] Attempt ${attempt}/3 failed for ${sym}: ${err}`);
       if (attempt === 3) {
         log(`[CLOSE] CRITICAL: Could not close ${sym} after 3 attempts!`);
-        // Only notify once per symbol to prevent Slack spam
+        // Persist failed close to database — survives restarts, visible on dashboard
+        try {
+          await prisma.autoTradeLog.create({ data: {
+            symbol: `FUT:${sym}`,
+            action: "futures_close_failed",
+            qty: pos.quantity,
+            price,
+            pnl: 0,
+            reason: `CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 attempts. Entry: $${pos.entryPrice.toFixed(2)}. Current: $${price.toFixed(2)}. Manual intervention required.`,
+            orderId: null,
+          }});
+        } catch {}
+        // Notify once per symbol to prevent Slack spam
         if (!stoppedSymbols.has(`close_failed_${sym}`)) {
           stoppedSymbols.add(`close_failed_${sym}`);
-          notify(`CRITICAL: Failed to close ${sym} after 3 retries! Manual intervention needed.`, "general");
+          notify(`CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 retries! Manual intervention needed.`, "general");
         }
         return; // Don't remove from tracking — retry next tick
       }
@@ -631,9 +711,17 @@ async function closePosition(sym: string, price: number, reason: string) {
     if (reason === "stop_loss" || reason === "emergency") {
       stoppedSymbols.add(sym);
       consecutiveStops++;
-      if (consecutiveStops >= 2) {
-        tiltPauseUntil = Date.now() + 30 * 60 * 1000;
-        log(`[TILT] ${consecutiveStops} consecutive stops — pausing 30 min until ${new Date(tiltPauseUntil).toISOString()}`);
+
+      // Escalating tilt protection: progressive pause durations
+      // 2 stops → 30min, 3 → 60min, 4 → 2hr, 5+ → rest of session
+      const pauseSchedule = [0, 0, 30, 60, 120]; // minutes per consecutive stop count
+      const pauseMin = consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0);
+
+      if (pauseMin > 0) {
+        tiltPauseUntil = pauseMin === Infinity ? Infinity : Date.now() + pauseMin * 60_000;
+        const label = pauseMin === Infinity ? "rest of session" : `${pauseMin} min`;
+        log(`[TILT] Level ${consecutiveStops - 1}: ${consecutiveStops} consecutive stops — pausing ${label}`);
+        notify(`TILT L${consecutiveStops - 1}: ${consecutiveStops} stops → pausing ${label}. Daily P&L: $${dailyPnl.toFixed(0)}`, "general");
       }
     } else {
       consecutiveStops = 0; // reset on profitable exit
@@ -653,6 +741,29 @@ async function closePosition(sym: string, price: number, reason: string) {
         orderId: null,
       }});
     } catch {}
+
+    // Log exit to Obsidian vault
+    try {
+      await logTradeToJournal({
+        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${sym}`,
+        timestamp: new Date().toISOString(),
+        instrument: `FUT:${sym}`,
+        direction: pos.direction === "long" ? "LONG" : "SHORT",
+        strategy: "futures-scalping",
+        setupType: "realtime",
+        contracts: pos.quantity,
+        entryPrice: pos.entryPrice,
+        stopPrice: pos.stopLoss,
+        targetPrice: pos.target,
+        exitPrice: price,
+        pnlDollars: pnl,
+        rMultiple: pos.stopLoss ? (price - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
+        conviction: 3,
+        exitReason: reason,
+        followedPlan: true,
+      }, "futures-realtime");
+      await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `${reason}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
+    } catch { /* vault optional */ }
 
     positions.delete(sym);
     await savePositions();
@@ -1146,10 +1257,19 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
 async function writeHeartbeat() {
   try {
+    const payload = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      tickCount,
+      positions: positions.size,
+      dailyPnl: Math.round(dailyPnl),
+      dailyTrades: dailyTradeCount,
+      session: getSessionName(),
+      yahooHealth: yahooCircuitOpen ? "circuit_open" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok",
+    });
     await prisma.agentConfig.upsert({
       where: { key: "futures_engine_heartbeat" },
-      update: { value: new Date().toISOString() },
-      create: { key: "futures_engine_heartbeat", value: new Date().toISOString() },
+      update: { value: payload },
+      create: { key: "futures_engine_heartbeat", value: payload },
     });
     // Also persist position state (trailing stops, breakeven flags) every heartbeat
     if (positions.size > 0) await savePositions();
@@ -1464,6 +1584,9 @@ async function main() {
   log("╚══════════════════════════════════════════════╝");
   log("Mode: DEMO | Data: Yahoo Finance (5s poll) | Orders: Tradovate");
 
+  // Validate all required env vars BEFORE doing anything else
+  validateEnvironment();
+
   // Start health server first — Railway can ping us even during init
   startHealthServer();
 
@@ -1495,11 +1618,13 @@ async function main() {
   safeInterval(() => {
     const session = getSessionName();
     const vix = getVIXMultiplier();
+    const yahooStatus = yahooCircuitOpen ? "CIRCUIT_OPEN" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok";
+    const tiltStatus = Date.now() < tiltPauseUntil ? `PAUSED(${consecutiveStops} stops)` : tiltPauseUntil === Infinity ? "SESSION_DONE" : "ok";
     const prices = SYMBOLS.map(s => {
       const b = barBuilders.get(s);
       return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
     }).join(" ");
-    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | ${prices}`);
+    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | Yahoo:${yahooStatus} | Tilt:${tiltStatus} | ${prices}`);
   }, 120_000, "statusLog");
 
   log("Engine ready — scanning for setups on every 5-min bar close...");

@@ -17,6 +17,7 @@ export interface MacroBriefing {
   sectorAvoids: string[];
   keyRisks: string[];
   tradingRules: string[];
+  keyEvents?: string[];
 }
 
 export async function generateMacroBriefing(): Promise<MacroBriefing> {

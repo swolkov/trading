@@ -33,6 +33,7 @@ import { getExecutionAdvice } from "./execution-quality";
 import { scanSector, type SectorScanResult } from "./sector-scanner";
 import { getOptionsSnapshots } from "./alpaca";
 import { prisma } from "./db";
+import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation } from "./vault";
 
 // ============ DEFAULT RULES (overridden by database config) ============
 const DEFAULT_RULES = {
@@ -232,6 +233,13 @@ export async function runTradingAgent(): Promise<AgentResult> {
         details.push(`LESSONS LEARNED: ${lessons.length} insights from past trades`);
       }
     } catch { /* ignore */ }
+
+    // Step 0c: Load Obsidian vault intelligence
+    let vaultContext = "";
+    try {
+      vaultContext = await getVaultContextForAI("options-agent", "premium-selling.md");
+      if (vaultContext) details.push("VAULT BRAIN: Loaded regime, lessons, anti-patterns from Obsidian");
+    } catch { /* vault optional */ }
 
     // Load permanent lessons from our first week of trading
     try {
@@ -652,6 +660,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
           await logTrade(pos.symbol, "stop_loss", qty, currentPrice, `ATR stop: down ${(pnlPct * 100).toFixed(1)}% (limit: -${(stopPct * 100).toFixed(1)}%)`, null, null, order.id, parseFloat(pos.unrealized_pl));
           tradesPlaced++;
+          try { await logDecision("auto-trader", "EXIT", pos.symbol, `STOP LOSS: down ${(pnlPct * 100).toFixed(1)}%`, 1); } catch {}
         } catch (err) { errors++; details.push(`  Failed: ${err}`); }
         continue;
       }
@@ -663,6 +672,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
           const order = await placeOrder({ symbol: pos.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" });
           await logTrade(pos.symbol, "take_profit", qty, currentPrice, `Up ${(pnlPct * 100).toFixed(1)}%`, null, null, order.id, parseFloat(pos.unrealized_pl));
           tradesPlaced++;
+          try { await logDecision("auto-trader", "EXIT", pos.symbol, `TAKE PROFIT: up ${(pnlPct * 100).toFixed(1)}%`, 5); } catch {}
         } catch (err) { errors++; details.push(`  Failed: ${err}`); }
         continue;
       }
@@ -1291,6 +1301,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
               order.id
             );
             tradesPlaced++;
+
+              // Log to Obsidian vault
+              try {
+                await logTradeToJournal({
+                  tradeId: `${new Date().toISOString().slice(0, 10)}-STK-${order.id.slice(-4)}`,
+                  timestamp: new Date().toISOString(),
+                  instrument: symbol,
+                  direction: "LONG",
+                  strategy: reason.includes("premium") ? "premium-selling" : "swing",
+                  setupType: reason,
+                  contracts: qty,
+                  entryPrice: price,
+                  stopPrice: parseFloat(stopPrice),
+                  targetPrice,
+                  conviction: Math.round(analysis.score / 20),
+                }, "auto-trader");
+                await logDecision("auto-trader", "ENTRY", symbol,
+                  `${reason}: Score ${analysis.score}, ${analysis.signal}, ${analysis.confidence}% conf`,
+                  Math.round(analysis.score / 20));
+              } catch { /* vault optional */ }
             } else if (optionsOnlyMode || isBearish) {
               details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
             }

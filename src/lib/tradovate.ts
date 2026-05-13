@@ -65,15 +65,29 @@ async function tvFetch(path: string, options?: RequestInit): Promise<unknown> {
   const baseUrl = await getBaseUrl();
   const url = `${baseUrl}${path}`;
 
-  const res = await fetch(url, {
+  const makeReq = (t: string) => fetch(url, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
+      "Authorization": `Bearer ${t}`,
       ...options?.headers,
     },
     signal: AbortSignal.timeout(15000),
   });
+
+  const res = await makeReq(token);
+
+  // Rate limit handling — wait and retry
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("Retry-After") || "5", 10);
+    await new Promise(r => setTimeout(r, retryAfter * 1000));
+    const retryRes = await makeReq(token);
+    if (!retryRes.ok) {
+      const body = await retryRes.text().catch(() => "");
+      throw new Error(`Tradovate API error ${retryRes.status} after rate limit wait: ${body}`);
+    }
+    return retryRes.json();
+  }
 
   if (res.status === 401) {
     // Token expired, re-auth and retry
