@@ -28,6 +28,8 @@ import { analyzeStock } from "./ai-analyst";
 import { getScoreAdjustment } from "./learning-engine";
 import { analyzeVolatility } from "./options-intelligence";
 import { checkCorrelationWithPortfolio, clearCorrelationCache } from "./correlation";
+import { scoreLiquidity } from "./liquidity-agent";
+import { getExecutionAdvice } from "./execution-quality";
 import { scanSector, type SectorScanResult } from "./sector-scanner";
 import { getOptionsSnapshots } from "./alpaca";
 import { prisma } from "./db";
@@ -250,6 +252,20 @@ export async function runTradingAgent(): Promise<AgentResult> {
       details.push("REGIME: Unable to detect, using conservative defaults");
     }
 
+    // Step 1c: Load regime transition + event catalyst overrides
+    let regimeOverride = 1.0;
+    let eventOverride = 1.0;
+    try {
+      const [regimeConfig, eventConfig] = await Promise.all([
+        prisma.agentConfig.findUnique({ where: { key: "regime_size_override" } }),
+        prisma.agentConfig.findUnique({ where: { key: "event_size_override" } }),
+      ]);
+      if (regimeConfig?.value) regimeOverride = parseFloat(regimeConfig.value) || 1.0;
+      if (eventConfig?.value) eventOverride = parseFloat(eventConfig.value) || 1.0;
+      if (regimeOverride !== 1.0) details.push(`REGIME TRANSITION: size override ${regimeOverride}x`);
+      if (eventOverride !== 1.0) details.push(`EVENT CATALYST: size override ${eventOverride}x`);
+    } catch { /* use defaults */ }
+
     // Step 2: Get account state
     const account = await getAccount();
     const equity = parseFloat(account.equity);
@@ -350,8 +366,8 @@ export async function runTradingAgent(): Promise<AgentResult> {
       }
     } catch { /* ignore */ }
 
-    // Apply loss multiplier to regime sizing
-    const effectiveSizeMultiplier = regime.positionSizeMultiplier * lossMultiplier;
+    // Apply loss multiplier + regime transition + event catalyst to sizing
+    const effectiveSizeMultiplier = regime.positionSizeMultiplier * lossMultiplier * regimeOverride * eventOverride;
 
     details.push(`Portfolio: $${equity.toFixed(2)} equity, $${cash.toFixed(2)} cash, ${positions.length} positions (regime: ${regime.regime}, sizing: ${effectiveSizeMultiplier.toFixed(2)}x${lossMultiplier < 1 ? " [loss protected]" : ""})`);
 
@@ -1227,18 +1243,32 @@ export async function runTradingAgent(): Promise<AgentResult> {
             } catch { /* default false */ }
 
             if (!optionsOnlyMode && isBullish) {
-              // Place stock limit order (only for bullish — can't short stocks easily)
-              const limitPrice = (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
+              // EXECUTION QUALITY — get optimal order type and limit price
+              let execType: "market" | "limit" = "limit";
+              let limitPrice: string;
+              try {
+                const quote = await getQuote(symbol);
+                const advice = getExecutionAdvice(symbol, "buy", quote.bp, quote.ap, qty);
+                execType = advice.recommendedType;
+                limitPrice = advice.limitPrice
+                  ? advice.limitPrice.toFixed(2)
+                  : (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
+                if (advice.recommendedType === "limit" && advice.limitPrice) {
+                  details.push(`  EXEC: ${advice.reason}`);
+                }
+              } catch {
+                limitPrice = (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
+              }
 
-              details.push(`  BUY ${symbol}: ${qty} shares, limit $${limitPrice} (score: ${analysis.score}, ${reason})`);
+              details.push(`  BUY ${symbol}: ${qty} shares, ${execType} $${limitPrice} (score: ${analysis.score}, ${reason})`);
 
               const order = await placeOrder({
                 symbol,
                 qty: String(qty),
                 side: "buy",
-                type: "limit",
+                type: execType,
                 time_in_force: "day",
-                limit_price: limitPrice,
+                ...(execType === "limit" ? { limit_price: limitPrice } : {}),
               });
 
               // Update sector map
@@ -1358,6 +1388,19 @@ export async function runTradingAgent(): Promise<AgentResult> {
                 }
                 const { contract, snapshot, reasoning } = await findBestContract(symbol, direction, price, analysis.confidence, conviction);
                 if (contract) {
+                  // LIQUIDITY CHECK — reject illiquid options before execution
+                  try {
+                    const liq = await scoreLiquidity(contract.symbol, true);
+                    if (!liq.tradeable) {
+                      details.push(`  ${symbol}: LIQUIDITY VETO — ${liq.warnings[0] || "illiquid"} (score: ${liq.score})`);
+                      await logTrade(symbol, "liquidity_veto", 0, null, `Option ${contract.symbol} rejected: ${liq.recommendation}`, analysis.score, analysis.signal);
+                      continue;
+                    }
+                    if (liq.score < 40) {
+                      details.push(`  ${symbol}: LIQUIDITY WARNING — score ${liq.score}/100, ${liq.recommendation}`);
+                    }
+                  } catch { /* liquidity check optional — proceed */ }
+
                   const optResult = await executeOptionsTrade(symbol, contract, snapshot, equity, analysis.score, analysis.signal, analysis.summary);
                   if (optResult.success) {
                     details.push(`  OPTIONS: ${optResult.reasoning}`);

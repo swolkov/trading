@@ -19,6 +19,26 @@
     {
       "path": "/api/cron/futures",
       "schedule": "*/10 * * * 0-5"
+    },
+    {
+      "path": "/api/cron/watchdog",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/risk",
+      "schedule": "*/10 13-21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/regime-transition",
+      "schedule": "0 13,15,17,19 * * 1-5"
+    },
+    {
+      "path": "/api/cron/events",
+      "schedule": "0 12 * * 1-5"
+    },
+    {
+      "path": "/api/cron/execution-review",
+      "schedule": "0 21 * * 1-5"
     }
   ]
 }

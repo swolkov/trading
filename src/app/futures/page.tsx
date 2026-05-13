@@ -275,6 +275,11 @@ export default function FuturesPage() {
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
+  // When Tradovate real-time data is available, use it for today's P&L in weekly/monthly
+  const todayRealPnl = posData?.account ? posData.account.realizedPnl : dailyPnl;
+  const adjustedWeeklyPnl = weeklyPnl - dailyPnl + todayRealPnl;
+  const adjustedMonthlyPnl = monthlyPnl - dailyPnl + todayRealPnl;
+
   return (
     <div className="space-y-4 animate-fade-up">
       {/* ── Header ── */}
@@ -1236,8 +1241,8 @@ export default function FuturesPage() {
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-muted-foreground/40">This Week</span>
                   <div className="text-right">
-                    <span className={`text-sm font-bold tabular-nums ${pnlColor(weeklyPnl)}`}>
-                      {weeklyPnl >= 0 ? "+" : "-"}${Math.abs(weeklyPnl).toFixed(0)}
+                    <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedWeeklyPnl)}`}>
+                      {adjustedWeeklyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedWeeklyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                     <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} logged</span>
                   </div>
@@ -1245,8 +1250,8 @@ export default function FuturesPage() {
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-muted-foreground/40">This Month</span>
                   <div className="text-right">
-                    <span className={`text-sm font-bold tabular-nums ${pnlColor(monthlyPnl)}`}>
-                      {monthlyPnl >= 0 ? "+" : "-"}${Math.abs(monthlyPnl).toFixed(0)}
+                    <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedMonthlyPnl)}`}>
+                      {adjustedMonthlyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedMonthlyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                     <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} logged</span>
                   </div>

@@ -105,3 +105,14 @@ model AgentConfig {
   key   String @unique
   value String
 }
+
+model VaultDocument {
+  id        Int      @id @default(autoincrement())
+  path      String   @unique // e.g., "Brain/market-regime.md"
+  content   String   // full markdown content
+  updatedAt DateTime @updatedAt
+  updatedBy String   @default("system") // which agent last wrote
+
+  @@index([path])
+  @@index([updatedAt])
+}

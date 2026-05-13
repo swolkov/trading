@@ -2,6 +2,7 @@ import { getPositions, getAccount } from "@/lib/alpaca";
 import { generateLearningInsights } from "@/lib/learning-engine";
 import { sendNotification } from "@/lib/notifications";
 import { prisma } from "@/lib/db";
+import { runSynthesis, logObservation } from "@/lib/vault";
 
 export const maxDuration = 120;
 
@@ -69,6 +70,20 @@ export async function GET(request: Request) {
       }
     } catch { /* ignore */ }
 
+    // 5. Run vault synthesis — updates Performance, Lessons, Anti-Patterns in Obsidian brain
+    let synthesisUpdate = "";
+    try {
+      const synthesis = await runSynthesis();
+      synthesisUpdate = `Vault Synthesis: ${synthesis.totalTrades} trades analyzed, ${(synthesis.winRate * 100).toFixed(0)}% WR, PF ${synthesis.profitFactor.toFixed(2)}, ${synthesis.lessonsExtracted} lessons, ${synthesis.antiPatternsFound} anti-patterns`;
+
+      // Log notable observations
+      if (todayPnl > 0 && todayWins > todayLosses) {
+        await logObservation("review-agent", `Positive day: +$${todayPnl.toFixed(0)}, ${todayWins}W/${todayLosses}L`);
+      } else if (todayPnl < -100) {
+        await logObservation("review-agent", `Rough day: -$${Math.abs(todayPnl).toFixed(0)}, ${todayWins}W/${todayLosses}L — review trade quality`);
+      }
+    } catch { /* synthesis optional */ }
+
     // 5. Build end-of-day review
     const review = [
       `END OF DAY REVIEW — ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`,
@@ -82,6 +97,7 @@ export async function GET(request: Request) {
       totalErrors > 0 ? `  Errors: ${totalErrors}` : "",
       "",
       learningUpdate ? `Learning Engine:\n  ${learningUpdate}` : "",
+      synthesisUpdate ? `Vault Brain:\n  ${synthesisUpdate}` : "",
     ].filter(Boolean).join("\n");
 
     // Send notification

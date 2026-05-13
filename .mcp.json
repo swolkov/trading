@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "obsidian-trading": {
+      "command": "node",
+      "args": ["/Users/user/.npm-global/lib/node_modules/obsidian-mcp/build/main.js", "/Users/user/Desktop/Trading/Trading"]
+    }
+  }
+}

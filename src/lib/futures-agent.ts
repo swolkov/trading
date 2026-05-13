@@ -14,6 +14,7 @@ import { getHistoricalBars, getIntradayBars } from "./yahoo";
 import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
+import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, updateMarketRegime, updateVolatilityEnvironment } from "./vault";
 
 // Yahoo Finance symbols for micro futures (use the full-size contract as proxy)
 const YAHOO_FUTURES_MAP: Record<string, string> = {
@@ -602,11 +603,31 @@ export async function runFuturesAgent(): Promise<{
     details.push("REGIME: Unknown — using conservative defaults");
   }
 
-  // Macro context
+  // Macro context + vault brain update
+  let vixValue = 0;
   try {
     const signals = await getCrossAssetSignals();
+    vixValue = signals.vix;
     details.push(`MACRO: VIX: ${signals.vix.toFixed(1)} (${signals.vixSignal}) | Macro: ${signals.macroSignal}`);
+
+    // Update vault brain with live data
+    try {
+      await updateMarketRegime(regime, {
+        trend: regime === "bull" ? "Uptrend" : regime === "bear" ? "Downtrend" : "Sideways/Choppy",
+        volatility: `VIX ${signals.vix.toFixed(1)}`,
+        implications: `Macro signal: ${signals.macroSignal}. VIX signal: ${signals.vixSignal}.`,
+      });
+      const volRegime = signals.vix > 30 ? "HIGH" : signals.vix > 25 ? "ELEVATED" : signals.vix > 18 ? "NORMAL" : "LOW";
+      await updateVolatilityEnvironment(signals.vix, "", signals.vixSignal, volRegime);
+    } catch { /* vault update optional */ }
   } catch { /* ignore */ }
+
+  // Load vault intelligence for AI context
+  let vaultContext = "";
+  try {
+    vaultContext = await getVaultContextForAI("futures-agent", "futures-scalping.md");
+    if (vaultContext) details.push("VAULT: Loaded brain context (regime, lessons, anti-patterns)");
+  } catch { /* vault optional */ }
 
   // Account state
   let equity = 0;
@@ -620,10 +641,25 @@ export async function runFuturesAgent(): Promise<{
     return { trades, managed, details };
   }
 
-  // Calculate risk limits based on equity
-  const maxRiskPerTrade = equity * FUTURES_RULES.RISK_PER_TRADE_PCT;
+  // Load regime transition + event catalyst overrides
+  let sizeOverride = 1.0;
+  try {
+    const [regimeConfig, eventConfig] = await Promise.all([
+      prisma.agentConfig.findUnique({ where: { key: "regime_size_override" } }),
+      prisma.agentConfig.findUnique({ where: { key: "event_size_override" } }),
+    ]);
+    const regimeOverride = regimeConfig?.value ? parseFloat(regimeConfig.value) || 1.0 : 1.0;
+    const eventOverride = eventConfig?.value ? parseFloat(eventConfig.value) || 1.0 : 1.0;
+    sizeOverride = regimeOverride * eventOverride;
+    if (sizeOverride !== 1.0) {
+      details.push(`OVERRIDES: regime ${regimeOverride}x × event ${eventOverride}x = ${sizeOverride.toFixed(2)}x sizing`);
+    }
+  } catch { /* use defaults */ }
+
+  // Calculate risk limits based on equity (adjusted by overrides)
+  const maxRiskPerTrade = equity * FUTURES_RULES.RISK_PER_TRADE_PCT * sizeOverride;
   const dailyLossLimit = equity * FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
-  details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade | $${dailyLossLimit.toFixed(0)} daily limit`);
+  details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade${sizeOverride !== 1.0 ? ` (${sizeOverride.toFixed(2)}x adjusted)` : ""} | $${dailyLossLimit.toFixed(0)} daily limit`);
 
   // Check daily P&L
   const todayStart = new Date();
@@ -1038,6 +1074,29 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
       });
 
       details.push(`  ORDER PLACED with bracket (stop + target). Order ID: ${order.orderId}`);
+
+      // Log to Obsidian vault
+      try {
+        await logTradeToJournal({
+          tradeId: `${new Date().toISOString().slice(0, 10)}-FUT-${String(order.orderId).slice(-4)}`,
+          timestamp: new Date().toISOString(),
+          instrument: `FUT:${symbol}`,
+          direction: setup.direction === "long" ? "LONG" : "SHORT",
+          strategy: "futures-scalping",
+          setupType: setup.type,
+          contracts,
+          entryPrice: price,
+          stopPrice,
+          targetPrice,
+          conviction: Math.round(setup.confidence / 20), // convert 0-100 to 1-5
+        }, "futures-agent");
+
+        await logDecision(
+          "futures-agent", "ENTRY", `FUT:${symbol}`,
+          `${setup.type}: ${setup.reasoning}. R:R ${riskReward.toFixed(1)}, Risk $${(riskPerContract * contracts).toFixed(0)}`,
+          Math.round(setup.confidence / 20),
+        );
+      } catch { /* vault logging optional */ }
     } catch (err) {
       details.push(`  ORDER FAILED: ${err}`);
       trades.push({

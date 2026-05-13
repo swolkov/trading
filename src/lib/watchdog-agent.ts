@@ -1,0 +1,291 @@
+import { prisma } from "./db";
+import { getAccount, getPositions, getMarketClock } from "./alpaca";
+import { sendNotification } from "./notifications";
+
+// ============ SYSTEM HEALTH WATCHDOG ============
+// Monitors infrastructure health so we never lose money to failures.
+// Checks: cron heartbeats, API connectivity, DB health, position reconciliation.
+// Alerts via notification webhook on any failure.
+
+interface HealthCheck {
+  name: string;
+  status: "ok" | "warning" | "critical";
+  message: string;
+  lastSeen?: string;
+}
+
+interface WatchdogResult {
+  runType: string;
+  checksRun: number;
+  warnings: number;
+  criticals: number;
+  summary: string;
+  checks: HealthCheck[];
+}
+
+// Expected intervals for each cron (in minutes)
+const CRON_EXPECTATIONS: Record<string, { maxStaleMinutes: number; description: string }> = {
+  // Equities crons run during market hours only
+  trade_last_run: { maxStaleMinutes: 40, description: "Auto-trader (runs every 20-30min during market hours)" },
+  monitor_last_run: { maxStaleMinutes: 15, description: "Position monitor (every 5min during market hours)" },
+  premarket_last_run: { maxStaleMinutes: 1500, description: "Pre-market research (once daily at 9AM ET)" },
+  review_last_run: { maxStaleMinutes: 1500, description: "Post-market review (once daily at 4:30PM ET)" },
+  // Futures runs 24/5
+  futures_engine_heartbeat: { maxStaleMinutes: 15, description: "Futures real-time engine (every 5s on Railway)" },
+  futures_cron_last_run: { maxStaleMinutes: 20, description: "Futures cron fallback (every 10min)" },
+};
+
+export async function runWatchdog(): Promise<WatchdogResult> {
+  const startTime = Date.now();
+  const checks: HealthCheck[] = [];
+  let warnings = 0;
+  let criticals = 0;
+
+  // === CHECK 1: Database connectivity ===
+  try {
+    await prisma.agentConfig.count();
+    checks.push({ name: "Database", status: "ok", message: "Connected" });
+  } catch (err) {
+    criticals++;
+    checks.push({ name: "Database", status: "critical", message: `Connection failed: ${err}` });
+  }
+
+  // === CHECK 2: Alpaca API connectivity ===
+  try {
+    const account = await getAccount();
+    const equity = parseFloat(account.equity);
+    const lastEquity = parseFloat(account.last_equity);
+    const dayChange = ((equity - lastEquity) / lastEquity) * 100;
+
+    checks.push({
+      name: "Alpaca API",
+      status: "ok",
+      message: `Connected — Equity: $${equity.toFixed(0)} (${dayChange >= 0 ? "+" : ""}${dayChange.toFixed(2)}% today)`,
+    });
+
+    // Alert on large drawdowns
+    if (dayChange < -3) {
+      criticals++;
+      checks.push({
+        name: "Alpaca Drawdown",
+        status: "critical",
+        message: `DOWN ${dayChange.toFixed(2)}% TODAY ($${(equity - lastEquity).toFixed(0)}) — exceeds 3% daily limit`,
+      });
+    } else if (dayChange < -1.5) {
+      warnings++;
+      checks.push({
+        name: "Alpaca Drawdown",
+        status: "warning",
+        message: `Down ${dayChange.toFixed(2)}% today ($${(equity - lastEquity).toFixed(0)})`,
+      });
+    }
+  } catch (err) {
+    criticals++;
+    checks.push({ name: "Alpaca API", status: "critical", message: `Connection failed: ${err}` });
+  }
+
+  // === CHECK 3: Tradovate API connectivity ===
+  try {
+    const { checkTradovateAuth } = await import("./tradovate");
+    await checkTradovateAuth();
+    checks.push({ name: "Tradovate API", status: "ok", message: "Authenticated" });
+  } catch (err) {
+    // Only warn — Tradovate may be intentionally unconfigured
+    warnings++;
+    checks.push({ name: "Tradovate API", status: "warning", message: `Auth failed: ${err}` });
+  }
+
+  // === CHECK 4: Cron heartbeat checks ===
+  const clock = await getMarketClock().catch(() => null);
+  const isMarketOpen = clock?.is_open ?? false;
+
+  const configs = await prisma.agentConfig.findMany().catch(() => []);
+  const configMap: Record<string, string> = {};
+  for (const c of configs) configMap[c.key] = c.value;
+
+  for (const [key, expectation] of Object.entries(CRON_EXPECTATIONS)) {
+    const lastRun = configMap[key];
+
+    // Skip market-hours-only crons when market is closed
+    const isMarketHoursCron = !key.startsWith("futures");
+    if (isMarketHoursCron && !isMarketOpen) {
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "ok",
+        message: "Skipped — market closed",
+        lastSeen: lastRun || "never",
+      });
+      continue;
+    }
+
+    if (!lastRun) {
+      warnings++;
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "warning",
+        message: `No heartbeat found (key: ${key})`,
+      });
+      continue;
+    }
+
+    const ageMinutes = (Date.now() - new Date(lastRun).getTime()) / 60000;
+
+    if (ageMinutes > expectation.maxStaleMinutes * 2) {
+      criticals++;
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "critical",
+        message: `STALE — last ran ${ageMinutes.toFixed(0)}min ago (limit: ${expectation.maxStaleMinutes}min)`,
+        lastSeen: lastRun,
+      });
+    } else if (ageMinutes > expectation.maxStaleMinutes) {
+      warnings++;
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "warning",
+        message: `Overdue — last ran ${ageMinutes.toFixed(0)}min ago (expected every ${expectation.maxStaleMinutes}min)`,
+        lastSeen: lastRun,
+      });
+    } else {
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "ok",
+        message: `Healthy — last ran ${ageMinutes.toFixed(0)}min ago`,
+        lastSeen: lastRun,
+      });
+    }
+  }
+
+  // === CHECK 5: Position reconciliation (Alpaca) ===
+  try {
+    const positions = await getPositions();
+    const recentTrades = await prisma.autoTradeLog.findMany({
+      where: { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+
+    // Check for phantom positions — positions we hold but never logged buying
+    const loggedSymbols = new Set(
+      recentTrades.filter((t) => t.action === "buy" || t.action === "buy_call" || t.action === "buy_put").map((t) => t.symbol)
+    );
+    const untracked = positions.filter((p) => {
+      // Only flag if we have no record of this position at all
+      const base = p.symbol.replace(/\d.*$/, "");
+      return !loggedSymbols.has(p.symbol) && !loggedSymbols.has(base);
+    });
+
+    if (untracked.length > 3) {
+      warnings++;
+      checks.push({
+        name: "Position Reconciliation",
+        status: "warning",
+        message: `${untracked.length} positions have no matching trade log entry (may be manual or pre-existing)`,
+      });
+    } else {
+      checks.push({
+        name: "Position Reconciliation",
+        status: "ok",
+        message: `${positions.length} positions tracked, ${recentTrades.length} trades logged in 24h`,
+      });
+    }
+  } catch (err) {
+    warnings++;
+    checks.push({ name: "Position Reconciliation", status: "warning", message: `Check failed: ${err}` });
+  }
+
+  // === CHECK 6: Recent agent errors ===
+  try {
+    const recentRuns = await prisma.agentRun.findMany({
+      where: { createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+
+    const errorRuns = recentRuns.filter((r) => r.errors > 0);
+    const totalErrors = errorRuns.reduce((sum, r) => sum + r.errors, 0);
+
+    if (totalErrors > 5) {
+      criticals++;
+      checks.push({
+        name: "Agent Error Rate",
+        status: "critical",
+        message: `${totalErrors} errors across ${errorRuns.length} runs in the last hour — agents may be broken`,
+      });
+    } else if (totalErrors > 0) {
+      warnings++;
+      checks.push({
+        name: "Agent Error Rate",
+        status: "warning",
+        message: `${totalErrors} error(s) in last hour across ${recentRuns.length} runs`,
+      });
+    } else {
+      checks.push({
+        name: "Agent Error Rate",
+        status: "ok",
+        message: `${recentRuns.length} runs in last hour, 0 errors`,
+      });
+    }
+  } catch {
+    checks.push({ name: "Agent Error Rate", status: "warning", message: "Could not check agent runs" });
+  }
+
+  // === CHECK 7: Disk / environment sanity ===
+  const requiredEnvVars = ["ALPACA_API_KEY", "ALPACA_API_SECRET", "ANTHROPIC_API_KEY", "DATABASE_URL"];
+  const missingVars = requiredEnvVars.filter((v) => !process.env[v]);
+  if (missingVars.length > 0) {
+    criticals++;
+    checks.push({
+      name: "Environment",
+      status: "critical",
+      message: `Missing env vars: ${missingVars.join(", ")}`,
+    });
+  } else {
+    checks.push({ name: "Environment", status: "ok", message: "All required env vars present" });
+  }
+
+  // === SEND ALERTS ===
+  if (criticals > 0) {
+    const criticalChecks = checks.filter((c) => c.status === "critical");
+    await sendNotification(
+      `🚨 WATCHDOG CRITICAL (${criticals} issue${criticals > 1 ? "s" : ""}):\n${criticalChecks.map((c) => `• ${c.name}: ${c.message}`).join("\n")}`,
+      "general"
+    );
+  } else if (warnings > 2) {
+    const warnChecks = checks.filter((c) => c.status === "warning");
+    await sendNotification(
+      `⚠️ Watchdog: ${warnings} warnings\n${warnChecks.map((c) => `• ${c.name}: ${c.message}`).join("\n")}`,
+      "general"
+    );
+  }
+
+  // === LOG HEARTBEAT ===
+  await prisma.agentConfig.upsert({
+    where: { key: "watchdog_last_run" },
+    update: { value: new Date().toISOString() },
+    create: { key: "watchdog_last_run", value: new Date().toISOString() },
+  });
+
+  const summary = `Watchdog: ${checks.length} checks — ${criticals} critical, ${warnings} warnings, ${checks.length - criticals - warnings} ok`;
+
+  await prisma.agentRun.create({
+    data: {
+      runType: "watchdog",
+      stocksScanned: 0,
+      tradesPlaced: 0,
+      positionsManaged: checks.length,
+      errors: criticals,
+      summary,
+      durationMs: Date.now() - startTime,
+    },
+  });
+
+  return {
+    runType: "watchdog",
+    checksRun: checks.length,
+    warnings,
+    criticals,
+    summary,
+    checks,
+  };
+}
