@@ -3,11 +3,13 @@
 import { useEffect, useRef, memo } from "react";
 
 // Map internal contract symbols to TradingView symbols
+// Micro futures aren't available in TradingView's embedded widget,
+// so we map to full-size E-mini contracts (identical price action)
 const TV_SYMBOL_MAP: Record<string, string> = {
-  MES: "CME:MES1!",
-  MNQ: "CME:MNQ1!",
-  MYM: "CBOT:MYM1!",
-  M2K: "CME:M2K1!",
+  MES: "CME:ES1!",
+  MNQ: "CME:NQ1!",
+  MYM: "CBOT:YM1!",
+  M2K: "CME:RTY1!",
   ES: "CME:ES1!",
   NQ: "CME:NQ1!",
   YM: "CBOT:YM1!",
