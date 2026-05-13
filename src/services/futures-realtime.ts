@@ -814,7 +814,46 @@ async function syncPositions() {
     const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number }[];
     for (const [sym, pos] of positions) {
       if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
-        log(`SYNC: ${sym} closed at exchange (stop/target hit)`);
+        // Position closed at exchange by bracket order — figure out if it was stop or target
+        const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+        const b = barBuilders.get(sym);
+        const lastPrice = b?.lastPrice || 0;
+
+        // Determine close type and estimate P&L
+        let closePrice = lastPrice;
+        let closeType = "bracket_close";
+        const stopDist = Math.abs(lastPrice - pos.stopLoss);
+        const targetDist = Math.abs(lastPrice - pos.target);
+
+        if (stopDist < targetDist) {
+          // Closer to stop — likely stopped out
+          closePrice = pos.stopLoss;
+          closeType = "stop_loss";
+        } else {
+          // Closer to target — likely hit target
+          closePrice = pos.target;
+          closeType = "take_profit";
+        }
+
+        const diff = pos.direction === "long" ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
+        const pnl = diff * mult * pos.quantity;
+        dailyPnl += pnl;
+
+        log(`SYNC: ${sym} ${closeType} at exchange | Close: $${closePrice.toFixed(2)} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
+
+        // Log to database so dashboard shows the close
+        try {
+          await prisma.autoTradeLog.create({ data: {
+            symbol: `FUT:${sym}`,
+            action: `futures_${closeType}`,
+            qty: pos.quantity,
+            price: closePrice,
+            pnl,
+            reason: `[FUTURES ${sym}] ${closeType}: Closed ${pos.quantity}x @ $${closePrice.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Daily: $${dailyPnl.toFixed(0)}`,
+            orderId: null,
+          }});
+        } catch {}
+
         positions.delete(sym);
       }
     }
