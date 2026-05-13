@@ -1036,26 +1036,24 @@ async function writeHeartbeat() {
 
 async function syncPositions() {
   try {
-    const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number }[];
-    for (const [sym, pos] of positions) {
+    const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number; timestamp: string }[];
+
+    // Step 1: Remove engine positions that no longer exist on Tradovate
+    for (const [sym, pos] of [...positions]) {
       if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
-        // Position closed at exchange by bracket order — figure out if it was stop or target
         const mult = CONTRACT_MULTIPLIERS[sym] || 5;
         const b = barBuilders.get(sym);
         const lastPrice = b?.lastPrice || 0;
 
-        // Determine close type and estimate P&L
         let closePrice = lastPrice;
         let closeType = "bracket_close";
         const stopDist = Math.abs(lastPrice - pos.stopLoss);
         const targetDist = Math.abs(lastPrice - pos.target);
 
         if (stopDist < targetDist) {
-          // Closer to stop — likely stopped out
           closePrice = pos.stopLoss;
           closeType = "stop_loss";
         } else {
-          // Closer to target — likely hit target
           closePrice = pos.target;
           closeType = "take_profit";
         }
@@ -1066,7 +1064,6 @@ async function syncPositions() {
 
         log(`SYNC: ${sym} ${closeType} at exchange | Close: $${closePrice.toFixed(2)} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
 
-        // Log to database so dashboard shows the close
         try {
           await prisma.autoTradeLog.create({ data: {
             symbol: `FUT:${sym}`,
@@ -1080,9 +1077,64 @@ async function syncPositions() {
         } catch {}
 
         positions.delete(sym);
-        await savePositions();
       }
     }
+
+    // Step 2: Adopt Tradovate positions the engine doesn't know about
+    for (const tp of tvPos) {
+      if (tp.netPos === 0) continue;
+
+      let sym: string | null = null;
+      for (const [s, contract] of contracts) {
+        if (contract.id === tp.contractId) { sym = s; break; }
+      }
+      if (!sym || positions.has(sym)) continue;
+
+      // Orphaned position on Tradovate — adopt it
+      const direction: "long" | "short" = tp.netPos > 0 ? "long" : "short";
+      const qty = Math.abs(tp.netPos);
+      const b = barBuilders.get(sym);
+      const currentATR = b ? atr(b.bars5m) : 5;
+
+      positions.set(sym, {
+        symbol: sym,
+        contractId: tp.contractId,
+        direction,
+        quantity: qty,
+        entryPrice: tp.netPrice,
+        stopLoss: direction === "long" ? tp.netPrice - currentATR * 1.5 : tp.netPrice + currentATR * 1.5,
+        target: direction === "long" ? tp.netPrice + currentATR * 3 : tp.netPrice - currentATR * 3,
+        trailStop: null,
+        reachedBreakeven: false,
+        scaledOut: false,
+        originalQty: qty,
+        consecutiveStops: 0,
+        stopOrderId: null,
+        targetOrderId: null,
+        entryTime: Date.now(),
+      });
+
+      log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)}`);
+      notify(`ADOPTED orphaned ${sym} ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)} — managing now`);
+    }
+
+    // Step 3: Update direction/qty if Tradovate net differs from engine's view
+    for (const [sym, pos] of [...positions]) {
+      const tvMatch = tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0);
+      if (!tvMatch) continue;
+
+      const tvDirection: "long" | "short" = tvMatch.netPos > 0 ? "long" : "short";
+      const tvQty = Math.abs(tvMatch.netPos);
+
+      if (tvDirection !== pos.direction || tvQty !== pos.quantity) {
+        log(`[SYNC] Position mismatch ${sym}: engine=${pos.direction} ${pos.quantity}x, Tradovate=${tvDirection} ${tvQty}x — updating`);
+        pos.direction = tvDirection;
+        pos.quantity = tvQty;
+        pos.entryPrice = tvMatch.netPrice;
+      }
+    }
+
+    await savePositions();
   } catch {}
 }
 
