@@ -115,6 +115,20 @@ ${briefing.tradingRules.map((r: string) => `- ${r}`).join("\n")}
           details.push(`TOP CANDIDATES: ${topCandidates.map((c) => `${c.symbol} (score ${c.score}, ${c.direction})`).join(", ")}`);
         }
       }
+
+      // Write sectors to DB vault so all agents can read them
+      if (sectorInsights.length > 0) {
+        const today = new Date().toISOString().slice(0, 10);
+        await vaultWrite("Research/sectors.md", `---
+last_updated: "${today}"
+updated_by: "research-agent"
+---
+
+# Sector Analysis
+
+${sectorInsights.map((s) => `- ${s}`).join("\n")}
+`, "research-agent");
+      }
     } catch { /* ignore */ }
 
     // 5. Overnight futures gap — ES/NQ tell us market direction before open

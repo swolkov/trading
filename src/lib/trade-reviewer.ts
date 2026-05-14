@@ -79,8 +79,26 @@ JSON array only, no markdown:`,
   return JSON.parse(existingLessons?.value || "[]");
 }
 
-// Get accumulated lessons for AI prompt injection
+// Get accumulated lessons for AI prompt injection — reads from VAULT + DB
 export async function getTradeLessons(): Promise<string> {
+  const parts: string[] = [];
+
+  // 1. Read vault lessons (synthesis agent writes these from 84+ trade analysis)
+  try {
+    const { vaultRead } = await import("./vault");
+    const vaultLessons = await vaultRead("Lessons/active-lessons.md");
+    if (vaultLessons && !vaultLessons.includes("No lessons yet")) {
+      parts.push(`\n## VAULT BRAIN — LESSONS FROM TRADE HISTORY (MUST APPLY)\n${vaultLessons}`);
+    }
+
+    // Also read anti-patterns
+    const antiPatterns = await vaultRead("Rules/anti-patterns.md");
+    if (antiPatterns && !antiPatterns.includes("No anti-patterns identified yet")) {
+      parts.push(`\n## ANTI-PATTERNS — AVOID THESE SETUPS\n${antiPatterns}`);
+    }
+  } catch { /* vault unavailable */ }
+
+  // 2. Read DB trade lessons (trade reviewer writes these)
   try {
     const config = await prisma.agentConfig.findUnique({
       where: { key: "trade_lessons" },
@@ -88,9 +106,10 @@ export async function getTradeLessons(): Promise<string> {
     if (config?.value) {
       const lessons = JSON.parse(config.value);
       if (Array.isArray(lessons) && lessons.length > 0) {
-        return `\n## LESSONS FROM OUR PAST TRADES (APPLY THESE)\n${lessons.map((l: string, i: number) => `${i + 1}. ${l}`).join("\n")}`;
+        parts.push(`\n## AI TRADE REVIEW LESSONS\n${lessons.map((l: string, i: number) => `${i + 1}. ${l}`).join("\n")}`);
       }
     }
   } catch { /* ignore */ }
-  return "";
+
+  return parts.join("\n");
 }
