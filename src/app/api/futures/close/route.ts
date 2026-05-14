@@ -104,13 +104,25 @@ export async function POST(request: Request) {
       } catch {}
     }
 
-    // Also cancel all working orders
+    // Cancel working orders ONLY for the closed symbols (not all orders!)
     try {
       const ordersRes = await fetch(`${DEMO_URL}/order/list`, {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       });
-      const orders = await ordersRes.json() as { id: number; ordStatus: string }[];
-      const working = orders.filter(o => o.ordStatus === "Working" || o.ordStatus === "Accepted");
+      const orders = await ordersRes.json() as { id: number; ordStatus: string; contractId?: number }[];
+      const closedContractIds = new Set(openPos
+        .filter(p => {
+          let sym = "";
+          for (const s of ["MES", "MNQ", "MYM", "M2K"]) {
+            if (p.contractName.startsWith(s)) { sym = s; break; }
+          }
+          return targetSymbol === "all" || sym === targetSymbol.toUpperCase();
+        })
+        .map(p => p.contractId));
+      const working = orders.filter(o =>
+        (o.ordStatus === "Working" || o.ordStatus === "Accepted") &&
+        (targetSymbol === "all" || (o.contractId != null && closedContractIds.has(o.contractId)))
+      );
       for (const order of working) {
         try {
           await fetch(`${DEMO_URL}/order/cancelorder`, {
@@ -120,7 +132,7 @@ export async function POST(request: Request) {
           });
         } catch {}
       }
-      if (working.length > 0) closed.push(`Cancelled ${working.length} orders`);
+      if (working.length > 0) closed.push(`Cancelled ${working.length} orders for ${targetSymbol}`);
     } catch {}
 
     return Response.json({ closed, count: closed.length });
