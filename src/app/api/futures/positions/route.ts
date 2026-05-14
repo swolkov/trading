@@ -253,6 +253,12 @@ export async function GET() {
       fillBasedPnl,
       activity,
       engineStatus,
+      startOfDayBalance: await (async () => {
+        try {
+          const sod = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+          return sod?.value ? parseFloat(sod.value) : null;
+        } catch { return null; }
+      })(),
     });
   } catch (error) {
     console.error("[/api/futures/positions]", error);

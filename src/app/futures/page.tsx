@@ -109,6 +109,7 @@ interface PositionsData {
   fillBasedPnl?: FillBasedPnl;
   activity: ActivityLog[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
+  startOfDayBalance?: number | null;
 }
 
 interface BacktestSetup {
@@ -301,10 +302,17 @@ export default function FuturesPage() {
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
-  // Tradovate's realizedPnl is the BROKER's actual P&L — always trust it over DB sums.
-  // DB trade P&L values are estimates from bar prices, not actual fills.
+  // Tradovate's realizedPnl resets to $0 at 5 PM CT (session boundary).
+  // Use it when it's nonzero (mid-session), fall back to DB sums otherwise.
+  // For true calendar-day P&L: balance - start-of-day balance (stored in DB).
   const tradovateRealizedPnl = posData?.account?.realizedPnl;
-  const dailyPnl = tradovateRealizedPnl ?? dbDailyPnl;
+  const startOfDayBalance = posData?.startOfDayBalance;
+  const currentBalance = posData?.account?.balance;
+  const calendarDayPnl = (startOfDayBalance != null && currentBalance != null)
+    ? currentBalance - startOfDayBalance
+    : null;
+  // Priority: calendar-day balance delta > Tradovate session (if nonzero) > DB sums
+  const dailyPnl = calendarDayPnl ?? (tradovateRealizedPnl && tradovateRealizedPnl !== 0 ? tradovateRealizedPnl : dbDailyPnl);
   const adjustedWeeklyPnl = accountPnl ?? weeklyPnl;
   const adjustedMonthlyPnl = accountPnl ?? monthlyPnl;
 
@@ -692,9 +700,11 @@ export default function FuturesPage() {
             const periodWins = periodClosed.filter((t) => (t.pnl || 0) > 0);
             const periodLosses = periodClosed.filter((t) => (t.pnl || 0) < 0);
             const dbPeriodPnl = periodClosed.reduce((s, t) => s + (t.pnl || 0), 0);
-            // For "today": use Tradovate's realized P&L (broker's actual number, not DB estimates)
-            const periodPnl = historyPeriod === "today" && tradovateRealizedPnl != null ? tradovateRealizedPnl
+            // For "today": use calendar-day balance delta (survives session resets)
+            const periodPnl = historyPeriod === "today" ? (calendarDayPnl ?? dailyPnl)
               : historyPeriod === "all" ? totalPnl
+              : historyPeriod === "week" ? adjustedWeeklyPnl
+              : historyPeriod === "month" ? adjustedMonthlyPnl
               : dbPeriodPnl;
             const periodAvgWin = periodWins.length > 0 ? periodWins.reduce((s, t) => s + (t.pnl || 0), 0) / periodWins.length : 0;
             const periodAvgLoss = periodLosses.length > 0 ? periodLosses.reduce((s, t) => s + (t.pnl || 0), 0) / periodLosses.length : 0;

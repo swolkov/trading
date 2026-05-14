@@ -410,6 +410,17 @@ function checkSessionReset() {
       log(`Session reset ${sym} — PDH:${b.prevDayHigh.toFixed(2)} PDL:${b.prevDayLow.toFixed(2)}`);
     }
     dailyTradeCount = 0; dailyPnl = 0; stoppedSymbols.clear(); consecutiveStops = 0; tiltPauseUntil = 0;
+    // Save start-of-day balance for calendar-day P&L calculation
+    (async () => {
+      try {
+        await prisma.agentConfig.upsert({
+          where: { key: "start_of_day_balance" },
+          update: { value: String(tradovateEquity) },
+          create: { key: "start_of_day_balance", value: String(tradovateEquity) },
+        });
+        log(`[RESET] Saved start-of-day balance: $${tradovateEquity.toFixed(2)}`);
+      } catch {}
+    })();
     // Clean slate: cancel any orphaned orders from yesterday
     cancelAllOrders().catch(err => log(`[RESET] Order cleanup failed: ${err}`));
   }
