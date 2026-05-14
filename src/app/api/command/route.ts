@@ -58,7 +58,7 @@ export async function GET() {
       // Agent heartbeats
       heartbeats: {
         watchdog: configMap.watchdog_last_run || null,
-        futuresEngine: configMap.futures_engine_heartbeat || null,
+        futuresEngine: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat || "{}").timestamp || null; } catch { return null; } })(),
         futuresCron: configMap.futures_cron_last_run || null,
         tradeCron: configMap.trade_last_run || null,
         monitorCron: configMap.monitor_last_run || null,
