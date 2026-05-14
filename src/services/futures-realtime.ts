@@ -1287,7 +1287,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const riskPct = (confidenceScore >= 90 ? 0.015 : confidenceScore >= 80 ? 0.01 : 0.005) * metalPenalty;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  const qty = Math.max(1, Math.min(20, Math.floor(maxRisk / riskPer)));
+  const qty = Math.max(1, Math.min(2, Math.floor(maxRisk / riskPer))); // HARD CAP: 2 contracts max (was 20 — caused 16-contract emergency exits)
   const rr = targetDist / stopDist;
   if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
 
