@@ -5,6 +5,7 @@ const FUTURES_MAP: Record<string, string> = {
   MNQ: "NQ=F",
   MYM: "YM=F",
   M2K: "RTY=F",
+  MGC: "GC=F",
 };
 
 export async function GET(request: Request) {

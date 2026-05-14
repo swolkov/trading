@@ -23,6 +23,7 @@ const YAHOO_FUTURES_MAP: Record<string, string> = {
   MNQ: "NQ=F",   // E-mini Nasdaq 100
   MYM: "YM=F",   // E-mini Dow
   M2K: "RTY=F",  // E-mini Russell 2000
+  MGC: "GC=F",   // Micro Gold
 };
 
 // Alias for backward compatibility
