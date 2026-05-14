@@ -41,8 +41,8 @@ const FUTURES_RULES = {
   RISK_PER_TRADE_PCT: 0.002,       // 0.2% of equity per trade ($2k on $1M, $200 on $100k)
   DAILY_LOSS_LIMIT_PCT: 0.01,      // 1% daily max loss
   MAX_DRAWDOWN_PCT: 0.05,          // 5% drawdown kill switch
-  MAX_CONTRACTS_PER_TRADE: 10,
-  MAX_TOTAL_CONTRACTS: 20,
+  MAX_CONTRACTS_PER_TRADE: 2,      // HARD CAP: 2 contracts max (was 10 — position sizing escalated to 16 and caused emergency exits)
+  MAX_TOTAL_CONTRACTS: 4,           // Max 4 total across all instruments (was 20)
   MAX_TRADES_PER_DAY: 6,
 
   // Technical

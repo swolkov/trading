@@ -1270,6 +1270,11 @@ export async function runTradingAgent(): Promise<AgentResult> {
             } catch { /* default false */ }
 
             if (!optionsOnlyMode && isBullish) {
+              // STOCK TRADING DISABLED — 0/10 win rate, signal generator is broken
+              // Re-enable after debugging stock signal quality (need >50% win rate on paper trades)
+              details.push(`  ${symbol}: STOCK TRADING DISABLED — signal generator under review (0% win rate on last 10 trades)`);
+              await logTrade(symbol, "stock_disabled", 0, null, "Stock trading disabled — 0% historical win rate, signal needs debugging", analysis.score, analysis.signal);
+              continue;
               // EXECUTION QUALITY — get optimal order type and limit price
               let execType: "market" | "limit" = "limit";
               let limitPrice: string;
@@ -1278,7 +1283,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
                 const advice = getExecutionAdvice(symbol, "buy", quote.bp, quote.ap, qty);
                 execType = advice.recommendedType;
                 limitPrice = advice.limitPrice
-                  ? advice.limitPrice.toFixed(2)
+                  ? advice.limitPrice!.toFixed(2)
                   : (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
                 if (advice.recommendedType === "limit" && advice.limitPrice) {
                   details.push(`  EXEC: ${advice.reason}`);
@@ -1376,15 +1381,23 @@ export async function runTradingAgent(): Promise<AgentResult> {
               }
             } catch { /* correlation check optional */ }
 
-            // === CONVICTION-BASED STRATEGY SELECTION ===
-            // HIGH conviction (score 70+): straight calls/puts — maximize upside
-            // MEDIUM conviction (55-69): straight calls/puts but smaller size
-            // Only use spreads when AI specifically recommends it
+            // === REGIME-GATED STRATEGY SELECTION ===
+            // CHOPPY/RANGE_BOUND regime: BLOCK directional option buys — theta kills you
+            // Only allow premium selling (iron condors, credit spreads) in choppy markets
             const direction = isBearish ? "bearish" as const : "bullish" as const;
             const absScore = Math.abs(analysis.score);
             const isHighConviction = absScore >= 70 && analysis.confidence >= 75;
+            const isChoppyRegime = regime.regime === "choppy";
 
-            // Default: straight directional trade
+            if (isChoppyRegime) {
+              // In choppy markets, ONLY allow premium selling strategies
+              // Directional option buying = donating to theta decay
+              details.push(`  ${symbol}: REGIME BLOCK — ${regime.regime.toUpperCase()} market, skipping directional options (theta trap). Only premium selling allowed.`);
+              await logTrade(symbol, "regime_block", 0, null, `Blocked directional options in ${regime.regime} regime — theta decay risk`, analysis.score, analysis.signal);
+              continue;
+            }
+
+            // Default: straight directional trade (only in TRENDING regimes)
             let optStrategy = direction === "bullish" ? "buy_call" : "buy_put";
 
             // Only override to spread if AI specifically recommended it AND conviction is low
