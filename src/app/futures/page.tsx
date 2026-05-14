@@ -301,11 +301,10 @@ export default function FuturesPage() {
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
-  // Use DB trade sums for period P&L — individual values are now recalculated from
-  // engine entry/exit prices. DO NOT use Tradovate's realizedPnl for daily —
-  // it's session-based (resets 5 PM CT), not calendar-day-based.
-  // Total/Week/Month P&L uses account balance (source of truth).
-  const dailyPnl = dbDailyPnl;
+  // Tradovate's realizedPnl is the BROKER's actual P&L — always trust it over DB sums.
+  // DB trade P&L values are estimates from bar prices, not actual fills.
+  const tradovateRealizedPnl = posData?.account?.realizedPnl;
+  const dailyPnl = tradovateRealizedPnl ?? dbDailyPnl;
   const adjustedWeeklyPnl = accountPnl ?? weeklyPnl;
   const adjustedMonthlyPnl = accountPnl ?? monthlyPnl;
 
@@ -692,7 +691,11 @@ export default function FuturesPage() {
             const periodClosed = periodTrades.filter((t) => t.pnl != null);
             const periodWins = periodClosed.filter((t) => (t.pnl || 0) > 0);
             const periodLosses = periodClosed.filter((t) => (t.pnl || 0) < 0);
-            const periodPnl = periodClosed.reduce((s, t) => s + (t.pnl || 0), 0);
+            const dbPeriodPnl = periodClosed.reduce((s, t) => s + (t.pnl || 0), 0);
+            // For "today": use Tradovate's realized P&L (broker's actual number, not DB estimates)
+            const periodPnl = historyPeriod === "today" && tradovateRealizedPnl != null ? tradovateRealizedPnl
+              : historyPeriod === "all" ? totalPnl
+              : dbPeriodPnl;
             const periodAvgWin = periodWins.length > 0 ? periodWins.reduce((s, t) => s + (t.pnl || 0), 0) / periodWins.length : 0;
             const periodAvgLoss = periodLosses.length > 0 ? periodLosses.reduce((s, t) => s + (t.pnl || 0), 0) / periodLosses.length : 0;
 
