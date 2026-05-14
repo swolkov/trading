@@ -59,8 +59,18 @@ export async function POST(request: Request) {
       const closeSide = direction === "long" ? "Sell" : "Buy";
       const mult = MULTIPLIERS[sym] || 5;
 
+      // Get a live quote for P&L calculation
+      let closePrice = pos.netPrice;
+      try {
+        const YF = require("yahoo-finance2").default || require("yahoo-finance2");
+        const yf = new YF({ suppressNotices: ["ripHistorical"] });
+        const yahooSymbols: Record<string, string> = { MES: "ES=F", MNQ: "NQ=F", MYM: "YM=F", M2K: "RTY=F" };
+        const q = await yf.quote(yahooSymbols[sym] || "ES=F");
+        if (q?.regularMarketPrice) closePrice = q.regularMarketPrice;
+      } catch {}
+
       // Market close
-      await fetch(`${DEMO_URL}/order/placeorder`, {
+      const orderRes = await fetch(`${DEMO_URL}/order/placeorder`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -69,22 +79,26 @@ export async function POST(request: Request) {
           timeInForce: "Day", isAutomated: true,
         }),
       });
+      const orderData = await orderRes.json().catch(() => ({})) as { orderId?: number };
 
-      // Estimate P&L
-      const currentPrice = pos.netPrice; // best we have without a live quote
-      closed.push(`Closed ${sym} ${direction} ${qty}x`);
+      // Calculate P&L from entry to current price
+      const entryPrice = pos.netPrice;
+      const priceDiff = direction === "long" ? closePrice - entryPrice : entryPrice - closePrice;
+      const pnl = priceDiff * mult * qty;
 
-      // Log to DB
+      closed.push(`Closed ${sym} ${direction} ${qty}x @ $${closePrice.toFixed(2)} | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)}`);
+
+      // Log to DB with actual P&L
       try {
         await prisma.autoTradeLog.create({
           data: {
             symbol: `FUT:${sym}`,
             action: "futures_manual_close",
             qty,
-            price: currentPrice,
-            pnl: null, // will be reconciled by syncPositions
-            reason: `[FUTURES ${sym}] Manual close: ${qty}x ${direction} @ market`,
-            orderId: null,
+            price: closePrice,
+            pnl: Math.round(pnl * 100) / 100,
+            reason: `[FUTURES ${sym}] Manual close: ${qty}x ${direction} @ $${closePrice.toFixed(2)}. Entry: $${entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`,
+            orderId: orderData.orderId ? String(orderData.orderId) : null,
           },
         });
       } catch {}
