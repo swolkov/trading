@@ -877,7 +877,7 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         max_tokens: 100,
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(30000),
     });
 
     if (!res.ok) {
@@ -890,7 +890,9 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
     const text = data.content?.find(b => b.type === "text")?.text || "";
     const parsed = JSON.parse(text.trim());
     return { agree: !!parsed.agree, confidence: parsed.confidence || 50, reasoning: parsed.reasoning || "" };
-  } catch {
+  } catch (err) {
+    log(`[AI] Error: ${err instanceof Error ? err.message : err}`);
+    // AI unavailable: still allow high-confidence equity trades, but block gold (less tested)
     return { agree: true, confidence: 0, reasoning: "AI unavailable" };
   }
 }
@@ -955,8 +957,11 @@ function onBarClose(sym: string, bar: Bar) {
   const bars = b.bars5m;
   const closes = bars.map(x => x.c);
   const price = bar.c;
-  const currentATR = atr(bars);
-  if (currentATR <= 0) return;
+  const rawATR = atr(bars);
+  if (rawATR <= 0) return;
+  // Gold needs wider stops — swings more than equity indices on 5-min bars
+  const atrScale = METALS.has(sym) ? 1.5 : 1.0;
+  const currentATR = rawATR * atrScale;
 
   const currentRSI = rsi(closes) || 50;
   const fast = ema(closes, 9);
