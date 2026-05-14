@@ -200,6 +200,7 @@ export async function getTradovatePositions(): Promise<TradovatePosition[]> {
 export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: string; multiplier: number; tickSize: number }> = {
   MES: { name: "Micro E-mini S&P 500", exchange: "CME", multiplier: 5, tickSize: 0.25 },
   MNQ: { name: "Micro E-mini Nasdaq 100", exchange: "CME", multiplier: 2, tickSize: 0.25 },
+  MGC: { name: "Micro Gold", exchange: "COMEX", multiplier: 10, tickSize: 0.1 },
   MYM: { name: "Micro E-mini Dow", exchange: "CBOT", multiplier: 0.5, tickSize: 1 },
   M2K: { name: "Micro E-mini Russell 2000", exchange: "CME", multiplier: 5, tickSize: 0.1 },
 };

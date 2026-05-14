@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db";
 import { checkTradovateAuth, getTradovatePositions } from "@/lib/tradovate";
 
 const MULTIPLIERS: Record<string, number> = {
-  MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
+  MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
 };
 
 export const maxDuration = 60;
