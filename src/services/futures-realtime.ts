@@ -24,15 +24,17 @@ const ORDER_API = DEMO_API;
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
-// Only trade MES ($5/pt) and MNQ ($2/pt) — best profit potential
-// MYM ($0.50/pt) and M2K ($5/pt but choppy) dropped: too little profit per point
-const SYMBOLS = ["MES", "MNQ"];
+// MES ($5/pt), MNQ ($2/pt) — equity indices
+// MGC ($10/pt) — micro gold, diversification + risk-off hedge
+const SYMBOLS = ["MES", "MNQ", "MGC"];
 const YAHOO_MAP: Record<string, string> = {
-  MES: "ES=F", MNQ: "NQ=F",
+  MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F",
 };
 const CONTRACT_MULTIPLIERS: Record<string, number> = {
-  MES: 5, MNQ: 2, MYM: 0.5, M2K: 5,
+  MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
 };
+// Symbols that are metals (different session timing + strategy)
+const METALS = new Set(["MGC"]);
 
 // ── Tradovate Auth (for order execution only) ───────────
 
@@ -368,8 +370,23 @@ function getMinutesSinceRTHOpen(): number {
   return Math.max(0, (now.getUTCHours() + now.getUTCMinutes() / 60 - 13.5) * 60);
 }
 
-function getSizeMultiplier(): number {
+function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
+
+  // Gold has different prime hours: COMEX 8:20 AM - 1:30 PM ET = UTC 12:20 - 17:30
+  // London overlap 8-12 ET is best for gold
+  if (sym && METALS.has(sym)) {
+    const now = new Date();
+    const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
+    if (utcH >= 12.33 && utcH < 14) return 1.0;   // COMEX open + London overlap = prime
+    if (utcH >= 14 && utcH < 16) return 0.8;       // Mid-COMEX
+    if (utcH >= 16 && utcH < 17.5) return 0.6;     // Late COMEX
+    if (utcH >= 7 && utcH < 12.33) return 0.7;     // London pre-COMEX
+    if (utcH >= 17.5 && utcH < 21) return 0.3;     // After COMEX
+    return 0.2; // Overnight — thin
+  }
+
+  // Equities session sizing
   if (s === "morning") return 1.0;
   if (s === "afternoon") return 0.8;
   if (s === "midday") return 0;  // lunch doldrums, lowest volume, most losses
@@ -819,9 +836,19 @@ async function getAIConfirmation(setup: {
     const macroCtx = crossAssetSummary || "No macro data";
     const eventCtx = macroBlockReason || "No macro events nearby";
 
-    const prompt = `You are an elite micro E-mini futures day trader. You only take A+ setups with clear edge.
+    const isMetal = METALS.has(setup.sym);
+    const metalContext = isMetal ? `
+GOLD-SPECIFIC RULES:
+- Gold is INVERSE to USD. Dollar down = gold up. Dollar up = gold down.
+- Gold rallies on RISK-OFF (VIX spike, fear). Goes flat/down on RISK-ON.
+- LONG gold when: USD weakening, VIX rising, bonds rallying, geopolitical tension
+- SHORT gold when: USD strengthening, VIX falling, risk appetite strong
+- Gold trends for HOURS — let winners run, wide stops needed
+- COMEX open (8:20 AM ET) is the most important session for gold` : "";
 
-${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()}
+    const prompt = `You are an elite futures day trader. You only take A+ setups with clear edge.
+
+${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()} | ${isMetal ? "MICRO GOLD" : "EQUITY INDEX"}
 Setup: ${setup.reasoning}
 RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
 15m trend: ${setup.trend15} | Day type: ${setup.dayType} | Session: ${setup.session}
@@ -831,9 +858,10 @@ ${macroCtx}
 ${sectorContext || "No sector data"}
 Earnings week: ${earningsWeekSymbols.length > 0 ? earningsWeekSymbols.join(", ") + " reporting — elevated vol" : "no mega-cap earnings"}
 Macro events: ${eventCtx}
+${metalContext}
 
-REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), R:R < 2:1, or macro signals strongly oppose direction (risk_off + long, risk_on + short).
-ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session, and macro confirms or is neutral.
+REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), R:R < 2:1${isMetal ? ", or USD strengthening while going long gold" : ", or macro signals strongly oppose direction (risk_off + long, risk_on + short)"}.
+ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session${isMetal ? ", and USD/macro confirms gold direction" : ", and macro confirms or is neutral"}.
 
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
 
@@ -911,7 +939,7 @@ function onBarClose(sym: string, bar: Bar) {
   if (!b || b.bars5m.length < 25) return;
 
   const session = getSessionName();
-  const sizeMult = getSizeMultiplier();
+  const sizeMult = getSizeMultiplier(sym);
   if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 8 || dailyPnl < -2000) return;
   // Tilt protection: pause after 2 consecutive stops
   if (Date.now() < tiltPauseUntil) return;
@@ -955,8 +983,8 @@ function onBarClose(sym: string, bar: Bar) {
   const vix = getVIXMultiplier();
   const adjustedATR = currentATR * vix.stopMult;
   let effectiveSizeMult = sizeMult * vix.sizeMult * macro.multiplier;
-  // Earnings week: reduce NQ/MNQ when mega-caps reporting
-  if ((sym === "MNQ" || sym === "MES") && earningsWeekNQPenalty < 1.0) {
+  // Earnings week: reduce equity indices when mega-caps reporting (gold unaffected)
+  if (!METALS.has(sym) && earningsWeekNQPenalty < 1.0) {
     effectiveSizeMult *= earningsWeekNQPenalty;
   }
   const dayOfWeek = new Date().getUTCDay();
@@ -1005,7 +1033,7 @@ function onBarClose(sym: string, bar: Bar) {
   }
 
   // SETUP: GAP FILL (highest statistical edge — 78% fill rate on small gaps)
-  const GAP_THRESHOLDS: Record<string, number> = { MES: 10, MNQ: 50 };
+  const GAP_THRESHOLDS: Record<string, number> = { MES: 10, MNQ: 50, MGC: 15 };
   if (b.barCount >= 1 && b.barCount <= 6 && b.prevDayClose > 0 && (session === "open" || session === "morning")) {
     const gap = b.sessionBars.length > 0 ? b.sessionBars[0].o - b.prevDayClose : 0;
     const absGap = Math.abs(gap);
@@ -1039,8 +1067,9 @@ function onBarClose(sym: string, bar: Bar) {
     }
   }
 
-  // SETUP 1: Opening Range (IB) Breakout (trend days, morning, after IB complete)
-  if (dayType === "trend" && session === "morning" && b.barCount >= 12 && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
+  // SETUP 1: Opening Range (IB) Breakout (trend days, morning/COMEX open, after IB complete)
+  const isMorningSession = session === "morning" || (METALS.has(sym) && sizeMult >= 0.7);
+  if (dayType === "trend" && isMorningSession && b.barCount >= 12 && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
     const isLong = price > b.openingRangeHigh && volRatio > 1.5;
     const isShort = price < b.openingRangeLow && volRatio > 1.5;
 
@@ -1201,7 +1230,9 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const equity = tradovateEquity; // Live from Tradovate demo account
   // Sizing: A+ setups get more size to make $100-$1000 per trade
   // 90+ confidence = 1.5% risk, 80+ = 1%, <80 = 0.5%
-  const riskPct = confidenceScore >= 90 ? 0.015 : confidenceScore >= 80 ? 0.01 : 0.005;
+  // Gold: half size for first week while we validate setups
+  const metalPenalty = METALS.has(sym) ? 0.5 : 1.0;
+  const riskPct = (confidenceScore >= 90 ? 0.015 : confidenceScore >= 80 ? 0.01 : 0.005) * metalPenalty;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
   const qty = Math.max(1, Math.min(20, Math.floor(maxRisk / riskPer)));

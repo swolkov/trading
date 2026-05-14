@@ -48,7 +48,7 @@ export async function POST(request: Request) {
     for (const pos of openPos) {
       // Match symbol
       let sym = "";
-      for (const s of ["MES", "MNQ", "MYM", "M2K"]) {
+      for (const s of ["MES", "MNQ", "MGC", "MYM", "M2K"]) {
         if (pos.contractName.startsWith(s)) { sym = s; break; }
       }
       if (!sym) continue;
@@ -64,7 +64,7 @@ export async function POST(request: Request) {
       try {
         const YF = require("yahoo-finance2").default || require("yahoo-finance2");
         const yf = new YF({ suppressNotices: ["ripHistorical"] });
-        const yahooSymbols: Record<string, string> = { MES: "ES=F", MNQ: "NQ=F", MYM: "YM=F", M2K: "RTY=F" };
+        const yahooSymbols: Record<string, string> = { MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F", MYM: "YM=F", M2K: "RTY=F" };
         const q = await yf.quote(yahooSymbols[sym] || "ES=F");
         if (q?.regularMarketPrice) closePrice = q.regularMarketPrice;
       } catch {}
@@ -113,7 +113,7 @@ export async function POST(request: Request) {
       const closedContractIds = new Set(openPos
         .filter(p => {
           let sym = "";
-          for (const s of ["MES", "MNQ", "MYM", "M2K"]) {
+          for (const s of ["MES", "MNQ", "MGC", "MYM", "M2K"]) {
             if (p.contractName.startsWith(s)) { sym = s; break; }
           }
           return targetSymbol === "all" || sym === targetSymbol.toUpperCase();
