@@ -683,19 +683,38 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
 
     // Market close half
-    await apiFetch("/order/placeorder", {
+    const scaleOrder = await apiFetch("/order/placeorder", {
       method: "POST",
       body: JSON.stringify({
         accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
         symbol: pos.contractId, orderQty: scaleQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
       }),
-    });
+    }) as { orderId: number };
+
+    // Get actual fill price from Tradovate
+    try {
+      await new Promise(r => setTimeout(r, 1500));
+      const fills = await apiFetch("/fill/list") as { orderId: number; price: number; qty: number }[];
+      const myFills = fills.filter(f => f.orderId === scaleOrder.orderId);
+      if (myFills.length > 0) {
+        const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
+        const actualPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
+        if (Math.abs(actualPrice - price) > 0.01) {
+          log(`${sym}: Scale-out actual fill $${actualPrice.toFixed(2)} (bar was $${price.toFixed(2)})`);
+          price = actualPrice;
+        }
+      }
+    } catch { /* use bar price */ }
+
+    // Recalculate P&L with actual fill price
+    const actualDiff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
+    const actualPnl = actualDiff * mult * scaleQty;
 
     pos.quantity -= scaleQty;
     pos.scaledOut = true;
-    dailyPnl += pnl;
-    log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${pnl.toFixed(0)}. ${pos.quantity}x remaining.`);
-    notify(`SCALE OUT ${sym}: +$${pnl.toFixed(0)} locked (${scaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
+    dailyPnl += actualPnl;
+    log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`);
+    notify(`SCALE OUT ${sym}: +$${actualPnl.toFixed(0)} locked (${scaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
 
     // Log to database
     try {
@@ -704,8 +723,8 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         action: "futures_scale_out",
         qty: scaleQty,
         price,
-        pnl,
-        reason: `[FUTURES ${sym}] Scale out 50% at 1R: ${scaleQty}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Remaining: ${pos.quantity}x`,
+        pnl: actualPnl,
+        reason: `[FUTURES ${sym}] Scale out 50% at 1R: ${scaleQty}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${actualPnl.toFixed(0)}. Remaining: ${pos.quantity}x`,
         orderId: null,
       }});
     } catch {}
@@ -732,10 +751,9 @@ async function closePosition(sym: string, price: number, reason: string) {
   const pos = positions.get(sym);
   if (!pos) return;
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
-  const pnl = diff * mult * pos.quantity;
 
   // Retry up to 3 times — critical for EOD close and emergency exits
+  let closeOrderId: number | null = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       // Cancel bracket orders
@@ -744,13 +762,14 @@ async function closePosition(sym: string, price: number, reason: string) {
 
       const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
       const acct = accounts.find(a => a.id === accountId) || accounts[0];
-      await apiFetch("/order/placeorder", {
+      const orderResult = await apiFetch("/order/placeorder", {
         method: "POST",
         body: JSON.stringify({
           accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
           symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
         }),
-      });
+      }) as { orderId: number };
+      closeOrderId = orderResult.orderId;
       // Success — break out of retry loop
       break;
     } catch (err) {
@@ -782,6 +801,29 @@ async function closePosition(sym: string, price: number, reason: string) {
   }
 
   try {
+    // Get ACTUAL fill price from Tradovate instead of using bar price estimate
+    let actualExitPrice = price;
+    if (closeOrderId) {
+      try {
+        await new Promise(r => setTimeout(r, 1500)); // wait for fill
+        const fills = await apiFetch("/fill/list") as { orderId: number; price: number; qty: number; timestamp: string }[];
+        const myFills = fills.filter(f => f.orderId === closeOrderId);
+        if (myFills.length > 0) {
+          // Weighted average fill price if multiple fills
+          const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
+          actualExitPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
+          if (Math.abs(actualExitPrice - price) > 0.01) {
+            log(`${sym}: Actual fill $${actualExitPrice.toFixed(2)} (bar was $${price.toFixed(2)}, diff: ${(actualExitPrice - price).toFixed(2)})`);
+          }
+        }
+      } catch { /* use bar price as fallback */ }
+    }
+
+    // Calculate P&L from actual fill price
+    const diff = pos.direction === "long" ? actualExitPrice - pos.entryPrice : pos.entryPrice - actualExitPrice;
+    const pnl = diff * mult * pos.quantity;
+    price = actualExitPrice; // update for logging
+
     dailyPnl += pnl;
     if (reason === "stop_loss" || reason === "emergency") {
       stoppedSymbols.add(sym);
@@ -1420,21 +1462,36 @@ async function syncPositions() {
         } catch {}
 
         if (!alreadyLogged) {
-          // Position closed but not logged — figure out how (stop vs target vs manual)
-          const b = barBuilders.get(sym);
-          const lastPrice = b?.lastPrice || 0;
-
-          let closePrice = lastPrice;
+          // Position closed but not logged — get actual exit from Tradovate fills
+          let closePrice = 0;
           let closeType = "bracket_close";
-          const stopDist = Math.abs(lastPrice - pos.stopLoss);
-          const targetDist = Math.abs(lastPrice - pos.target);
 
-          if (stopDist < targetDist) {
-            closePrice = pos.stopLoss;
-            closeType = "stop_loss";
-          } else {
-            closePrice = pos.target;
-            closeType = "take_profit";
+          // Query recent fills to find the actual exit price
+          try {
+            const fills = await apiFetch("/fill/list") as { contractId: number; action: string; price: number; qty: number; timestamp: string }[];
+            const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+            const recentFills = fills
+              .filter(f => f.contractId === pos.contractId && f.action === closeSide)
+              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+            if (recentFills.length > 0) {
+              closePrice = recentFills[0].price;
+              // Determine close type from price proximity
+              const stopDist = Math.abs(closePrice - pos.stopLoss);
+              const targetDist = Math.abs(closePrice - pos.target);
+              closeType = stopDist < targetDist ? "stop_loss" : "take_profit";
+              log(`SYNC: Found actual fill for ${sym}: ${closeSide} @ $${closePrice.toFixed(2)}`);
+            }
+          } catch {}
+
+          // Fallback if no fill found
+          if (closePrice === 0) {
+            const b = barBuilders.get(sym);
+            closePrice = b?.lastPrice || pos.entryPrice;
+            const stopDist = Math.abs(closePrice - pos.stopLoss);
+            const targetDist = Math.abs(closePrice - pos.target);
+            closeType = stopDist < targetDist ? "stop_loss" : "take_profit";
+            log(`SYNC: No fill found for ${sym}, using last price $${closePrice.toFixed(2)}`);
           }
 
           const diff = pos.direction === "long" ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;

@@ -301,12 +301,13 @@ export default function FuturesPage() {
   const weeklyTrades = closedTrades.filter((t) => new Date(t.time) >= weekStart).length;
   const monthlyTrades = closedTrades.filter((t) => new Date(t.time) >= monthStart).length;
 
-  // Use reconciled DB data for all P&L periods — Tradovate's realizedPnl resets at
-  // 5 PM CT (session boundary) which doesn't align with calendar day, causing
-  // massive errors in the blending formula. DB is accurate after reconciliation.
-  const dailyPnl = dbDailyPnl;
-  const adjustedWeeklyPnl = weeklyPnl;
-  const adjustedMonthlyPnl = monthlyPnl;
+  // Use account balance as source of truth for aggregate P&L
+  // DB trade sums are unreliable — reconciliation bugs corrupt individual values.
+  // For daily P&L: use Tradovate's realizedPnl (session-based, close enough for intraday)
+  // For week/month: use account balance - starting capital (most accurate)
+  const dailyPnl = posData?.account?.realizedPnl ?? dbDailyPnl;
+  const adjustedWeeklyPnl = accountPnl ?? weeklyPnl;
+  const adjustedMonthlyPnl = accountPnl ?? monthlyPnl;
 
   return (
     <div className="space-y-4 animate-fade-up">

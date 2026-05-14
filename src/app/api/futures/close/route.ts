@@ -81,7 +81,23 @@ export async function POST(request: Request) {
       });
       const orderData = await orderRes.json().catch(() => ({})) as { orderId?: number };
 
-      // Calculate P&L from entry to current price
+      // Get ACTUAL fill price from Tradovate instead of Yahoo quote
+      if (orderData.orderId) {
+        try {
+          await new Promise(r => setTimeout(r, 1500));
+          const fillsRes = await fetch(`${DEMO_URL}/fill/list`, {
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          });
+          const fills = await fillsRes.json() as { orderId: number; price: number; qty: number }[];
+          const myFills = fills.filter(f => f.orderId === orderData.orderId);
+          if (myFills.length > 0) {
+            const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
+            closePrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
+          }
+        } catch { /* keep Yahoo quote as fallback */ }
+      }
+
+      // Calculate P&L from entry to ACTUAL fill price
       const entryPrice = pos.netPrice;
       const priceDiff = direction === "long" ? closePrice - entryPrice : entryPrice - closePrice;
       const pnl = priceDiff * mult * qty;
