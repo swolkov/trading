@@ -1098,9 +1098,31 @@ export default function FuturesPage() {
                               {pos.direction.toUpperCase()} {pos.quantity}x
                             </span>
                           </div>
-                          <span className={`text-sm font-bold tabular-nums ${pnlColor(pos.unrealizedPnl)}`}>
-                            {pos.unrealizedPnl >= 0 ? "+" : ""}${pos.unrealizedPnl.toFixed(0)}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm font-bold tabular-nums ${pnlColor(pos.unrealizedPnl)}`}>
+                              {pos.unrealizedPnl >= 0 ? "+" : ""}${pos.unrealizedPnl.toFixed(0)}
+                            </span>
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Close ${pos.symbol} ${pos.direction} ${pos.quantity}x at market?`)) return;
+                                try {
+                                  const res = await fetch("/api/futures/close", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ symbol: pos.symbol }),
+                                  });
+                                  const data = await res.json();
+                                  if (data.closed?.length) alert(`Closed: ${data.closed.join(", ")}`);
+                                  else alert(data.error || "Failed to close");
+                                } catch (err) {
+                                  alert(`Error: ${err}`);
+                                }
+                              }}
+                              className="text-[9px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 hover:bg-red-500/30 transition-colors font-medium"
+                            >
+                              CLOSE
+                            </button>
+                          </div>
                         </div>
 
                         {/* Prices row */}
