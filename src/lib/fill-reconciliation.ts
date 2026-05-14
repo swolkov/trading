@@ -242,21 +242,10 @@ export async function reconcileFills(): Promise<ReconciliationResult> {
       if (matchingExit) {
         result.alreadyLogged++;
 
-        // Check if the P&L is accurate (within $5 tolerance for rounding)
-        const pnlDiff = Math.abs((matchingExit.pnl || 0) - rt.pnl);
-        if (pnlDiff > 5) {
-          // Correct the P&L
-          await prisma.autoTradeLog.update({
-            where: { id: matchingExit.id },
-            data: {
-              pnl: rt.pnl,
-              price: rt.exitPrice,
-              reason: `${matchingExit.reason} [P&L corrected: was $${(matchingExit.pnl || 0).toFixed(0)}, actual $${rt.pnl.toFixed(0)}]`,
-            },
-          });
-          result.pnlCorrections++;
-          details.push(`Corrected P&L on ${rt.symbol} exit: $${(matchingExit.pnl || 0).toFixed(0)} → $${rt.pnl.toFixed(0)}`);
-        }
+        // P&L correction DISABLED — the FIFO matching here doesn't handle scale-outs
+        // and partial fills correctly, producing wrong values that overwrite correct ones.
+        // Total P&L now uses account equity (source of truth) instead of DB trade sums.
+        // Only backfill MISSING trades, never overwrite existing P&L values.
       } else {
         // Missing exit — backfill it
         const exitAction = rt.pnl >= 0 ? "take_profit" : "stop_loss";

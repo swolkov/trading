@@ -269,7 +269,10 @@ export default function FuturesPage() {
   const tradeCount = hasFillData ? fillPnl.tradeCount : closedTrades.length;
   const winCount = hasFillData ? fillPnl.wins : wins.length;
   const lossCount = hasFillData ? fillPnl.losses : losses.length;
-  const totalPnl = hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  // Total P&L: use Tradovate account equity as source of truth (DB trade sums are unreliable due to reconciliation bugs)
+  const STARTING_CAPITAL = 50_000;
+  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
+  const totalPnl = accountPnl ?? (hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
   const avgWin = hasFillData
     ? (fillPnl.wins > 0 ? fillPnl.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / fillPnl.wins : 0)
     : (wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0);
