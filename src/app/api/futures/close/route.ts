@@ -1,5 +1,6 @@
 import { checkTradovateAuth, getTradovatePositions } from "@/lib/tradovate";
 import { prisma } from "@/lib/db";
+import { logTradeToJournal, logDecision } from "@/lib/vault";
 
 const DEMO_URL = "https://demo.tradovateapi.com/v1";
 const MULTIPLIERS: Record<string, number> = { MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5 };
@@ -118,6 +119,27 @@ export async function POST(request: Request) {
           },
         });
       } catch {}
+
+      // Log to Obsidian vault (learning loop)
+      try {
+        await logTradeToJournal({
+          tradeId: `${new Date().toISOString().slice(0, 10)}-MANUAL-${sym}`,
+          timestamp: new Date().toISOString(),
+          instrument: `FUT:${sym}`,
+          direction: direction === "long" ? "LONG" : "SHORT",
+          strategy: "futures-scalping",
+          setupType: "manual_close",
+          contracts: qty,
+          entryPrice,
+          stopPrice: 0,
+          targetPrice: 0,
+          exitPrice: closePrice,
+          pnlDollars: pnl,
+          conviction: 3,
+          exitReason: "manual_close",
+        }, "manual");
+        await logDecision("manual", "EXIT", `FUT:${sym}`, `Manual close: ${qty}x ${direction} @ $${closePrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
+      } catch { /* vault optional */ }
     }
 
     // Cancel working orders ONLY for the closed symbols (not all orders!)

@@ -318,6 +318,9 @@ export async function runSynthesis(): Promise<SynthesisResult> {
   const grossProfit = winners.reduce((s, t) => s + (t.pnl || 0), 0);
   const grossLoss = Math.abs(losers.reduce((s, t) => s + (t.pnl || 0), 0));
   const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
+  // NOTE: DB trade P&L values are estimates (bar prices, not actual fills) for historical trades.
+  // Win/loss classification is correct but dollar totals may be approximate.
+  // For accurate total P&L, use account balance - starting capital.
   const totalPnl = allTrades.reduce((s, t) => s + (t.pnl || 0), 0);
 
   // Break down by action type (strategy proxy)

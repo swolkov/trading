@@ -743,6 +743,28 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     } catch {}
     pos.targetOrderId = null; // target removed, trail handles exit
 
+    // Log scale-out to Obsidian vault (learning loop)
+    try {
+      await logTradeToJournal({
+        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${sym}-SCALE`,
+        timestamp: new Date().toISOString(),
+        instrument: `FUT:${sym}`,
+        direction: pos.direction === "long" ? "LONG" : "SHORT",
+        strategy: "futures-scalping",
+        setupType: "scale_out",
+        contracts: scaleQty,
+        entryPrice: pos.entryPrice,
+        stopPrice: pos.stopLoss,
+        targetPrice: pos.target,
+        exitPrice: price,
+        pnlDollars: actualPnl,
+        rMultiple: pos.stopLoss ? (price - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
+        conviction: 3,
+        exitReason: "scale_out",
+      }, "futures-realtime");
+      await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `Scale out ${scaleQty}x @ $${price.toFixed(2)}: P&L $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`, actualPnl > 0 ? 4 : 2);
+    } catch { /* vault optional */ }
+
     await savePositions();
   } catch (err) { log(`Scale out failed ${sym}: ${err}`); }
 }
@@ -1511,6 +1533,28 @@ async function syncPositions() {
               orderId: null,
             }});
           } catch {}
+
+          // Log synced close to Obsidian vault (learning loop)
+          try {
+            await logTradeToJournal({
+              tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${sym}`,
+              timestamp: new Date().toISOString(),
+              instrument: `FUT:${sym}`,
+              direction: pos.direction === "long" ? "LONG" : "SHORT",
+              strategy: "futures-scalping",
+              setupType: "realtime",
+              contracts: pos.quantity,
+              entryPrice: pos.entryPrice,
+              stopPrice: pos.stopLoss,
+              targetPrice: pos.target,
+              exitPrice: closePrice,
+              pnlDollars: pnl,
+              rMultiple: pos.stopLoss ? (closePrice - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
+              conviction: 3,
+              exitReason: closeType,
+            }, "futures-realtime");
+            await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `${closeType}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
+          } catch { /* vault optional */ }
         }
 
         positions.delete(sym);
