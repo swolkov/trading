@@ -10,6 +10,7 @@ const YAHOO_MAP: Record<string, string> = {
   MNQ: "NQ=F",
   MYM: "YM=F",
   M2K: "RTY=F",
+  MGC: "GC=F",
 };
 
 function matchSymbol(contractName: string): string | null {
