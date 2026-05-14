@@ -1477,10 +1477,11 @@ async function syncPositions() {
       const tvQty = Math.abs(tvMatch.netPos);
 
       if (tvDirection !== pos.direction || tvQty !== pos.quantity) {
-        log(`[SYNC] Position mismatch ${sym}: engine=${pos.direction} ${pos.quantity}x, Tradovate=${tvDirection} ${tvQty}x — updating`);
+        log(`[SYNC] Position mismatch ${sym}: engine=${pos.direction} ${pos.quantity}x @ $${pos.entryPrice.toFixed(2)}, Tradovate=${tvDirection} ${tvQty}x @ $${tvMatch.netPrice.toFixed(2)} — updating qty/direction only, keeping original entry`);
         pos.direction = tvDirection;
         pos.quantity = tvQty;
-        pos.entryPrice = tvMatch.netPrice;
+        // DO NOT overwrite entryPrice — Tradovate netPrice is the average of all fills
+        // which corrupts P&L calculations after partial fills or scale-outs
       }
     }
 
