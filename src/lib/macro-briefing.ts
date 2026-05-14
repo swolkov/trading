@@ -81,18 +81,48 @@ The tradingRules should be SPECIFIC: e.g. "Sell premium on tech names — IV ele
       .map((b) => b.text)
       .join("");
 
-    const briefing = JSON.parse(text.trim());
+    // Handle Claude wrapping JSON in code fences
+    let jsonStr = text.trim();
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) jsonStr = jsonMatch[0];
 
-    cachedBriefing = { text: JSON.stringify(briefing), timestamp: Date.now() };
-    return briefing;
-  } catch {
-    return {
-      summary: "Unable to generate macro briefing. Trade with caution.",
-      bias: "neutral",
+    const briefing = JSON.parse(jsonStr);
+
+    // Validate required fields with defaults
+    const result: MacroBriefing = {
+      summary: briefing.summary || "Markets are mixed. Trade with normal caution.",
+      bias: ["risk_on", "risk_off", "neutral"].includes(briefing.bias) ? briefing.bias : "neutral",
+      sectorFavors: Array.isArray(briefing.sectorFavors) ? briefing.sectorFavors : [],
+      sectorAvoids: Array.isArray(briefing.sectorAvoids) ? briefing.sectorAvoids : [],
+      keyRisks: Array.isArray(briefing.keyRisks) ? briefing.keyRisks : [],
+      tradingRules: Array.isArray(briefing.tradingRules) ? briefing.tradingRules : [],
+    };
+
+    cachedBriefing = { text: JSON.stringify(result), timestamp: Date.now() };
+    return result;
+  } catch (err) {
+    console.error("[macro-briefing] Failed:", err instanceof Error ? err.message : err);
+
+    // Build a basic briefing from the data we already have instead of giving up
+    const fallbackBias = crossAsset?.macroSignal === "risk_on" ? "risk_on" : crossAsset?.macroSignal === "risk_off" ? "risk_off" : "neutral";
+    const fallbackRules: string[] = [];
+    if (regime?.regime === "choppy") fallbackRules.push("Choppy regime — sell premium, tighter stops, trade less");
+    if (regime?.regime === "bull") fallbackRules.push("Bull regime — favor calls, buy dips, ride momentum");
+    if (regime?.regime === "bear") fallbackRules.push("Bear regime — favor puts, sell rallies, reduce size");
+    if (crossAsset?.macroSignal === "risk_off") fallbackRules.push("Risk-off signals — reduce position sizes, favor defensive sectors");
+    if (crossAsset?.macroSignal === "risk_on") fallbackRules.push("Risk-on signals — full size on high-conviction trades");
+    if (fallbackRules.length === 0) fallbackRules.push("No clear macro signal — use spreads for defined risk");
+
+    const fallback: MacroBriefing = {
+      summary: `Market regime: ${regime?.regime?.toUpperCase() || "UNKNOWN"}. Macro stance: ${fallbackBias.toUpperCase()}. SPY 1M: ${regime ? (regime.spy1mReturn * 100).toFixed(1) + "%" : "N/A"}. Trade with caution — AI briefing unavailable.`,
+      bias: fallbackBias as MacroBriefing["bias"],
       sectorFavors: [],
       sectorAvoids: [],
-      keyRisks: ["Briefing generation failed"],
-      tradingRules: ["Use spreads for defined risk", "Reduce position sizes"],
+      keyRisks: ["AI macro briefing failed — using data-only fallback"],
+      tradingRules: fallbackRules,
     };
+
+    cachedBriefing = { text: JSON.stringify(fallback), timestamp: Date.now() };
+    return fallback;
   }
 }
