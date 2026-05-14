@@ -1,0 +1,26 @@
+name: Deploy Futures Engine to Railway
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/services/futures-realtime.ts'
+      - 'src/lib/tradovate.ts'
+      - 'src/lib/fill-reconciliation.ts'
+      - 'prisma/**'
+      - 'Dockerfile.futures'
+      - 'package.json'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        run: railway up --service futures-engine --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
