@@ -1198,10 +1198,10 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   if (!contract) return;
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  const equity = 88000; // Current account equity — update as it grows
-  // Aggressive sizing: A+ setups get REAL size to make $100-$1000 per trade
-  // 90+ confidence = 2% risk ($1,760), 80+ = 1% ($880), <80 = 0.5% ($440)
-  const riskPct = confidenceScore >= 90 ? 0.02 : confidenceScore >= 80 ? 0.01 : 0.005;
+  const equity = tradovateEquity; // Live from Tradovate demo account
+  // Sizing: A+ setups get more size to make $100-$1000 per trade
+  // 90+ confidence = 1.5% risk, 80+ = 1%, <80 = 0.5%
+  const riskPct = confidenceScore >= 90 ? 0.015 : confidenceScore >= 80 ? 0.01 : 0.005;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
   const qty = Math.max(1, Math.min(20, Math.floor(maxRisk / riskPer)));
@@ -1479,6 +1479,25 @@ async function preloadBars() {
 }
 
 // ── VIX Check (adjust risk based on volatility) ──
+
+let tradovateEquity = 50000; // Will be fetched from Tradovate on startup
+
+async function updateTradovateEquity() {
+  try {
+    const cashBalances = await apiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${accountId}`) as Record<string, number>;
+    if (cashBalances?.totalCashValue) {
+      tradovateEquity = cashBalances.totalCashValue;
+      log(`[EQUITY] Tradovate account equity: $${tradovateEquity.toLocaleString()}`);
+    }
+  } catch {
+    // Try alternate endpoint
+    try {
+      const balances = await apiFetch(`/account/item?id=${accountId}`) as Record<string, unknown>;
+      // Demo accounts may not expose balance — keep last known value
+      log(`[EQUITY] Using cached equity: $${tradovateEquity.toLocaleString()}`);
+    } catch {}
+  }
+}
 
 let currentVIX = 20;
 let vix3m = 20;
@@ -1901,7 +1920,8 @@ async function main() {
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
 
-  // Get initial VIX + macro intelligence
+  // Get account equity + VIX + macro intelligence
+  await updateTradovateEquity();
   await updateVIX();
   log(`VIX: ${currentVIX.toFixed(1)}`);
   await updateEconomicCalendar();
@@ -1915,6 +1935,7 @@ async function main() {
   safeInterval(syncPositions, 30_000, "syncPositions");
   safeInterval(writeHeartbeat, 60_000, "writeHeartbeat");
   safeInterval(updateVIX, 300_000, "updateVIX");
+  safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
   safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
   safeInterval(updateEarningsWeekFilter, 3600_000, "updateEarningsWeekFilter"); // hourly
