@@ -5,6 +5,7 @@ const yf = new YF({ suppressNotices: ["ripHistorical"] });
 const FUTURES_MAP: Record<string, string> = {
   MES: "ES=F",
   MNQ: "NQ=F",
+  MGC: "GC=F",
   MYM: "YM=F",
   M2K: "RTY=F",
 };
@@ -12,6 +13,7 @@ const FUTURES_MAP: Record<string, string> = {
 const CONTRACT_META: Record<string, { name: string; multiplier: number; tickSize: number; margin: number }> = {
   MES: { name: "Micro E-mini S&P 500", multiplier: 5, tickSize: 0.25, margin: 1320 },
   MNQ: { name: "Micro E-mini Nasdaq 100", multiplier: 2, tickSize: 0.25, margin: 1630 },
+  MGC: { name: "Micro Gold", multiplier: 10, tickSize: 0.1, margin: 1000 },
   MYM: { name: "Micro E-mini Dow", multiplier: 0.5, tickSize: 1, margin: 880 },
   M2K: { name: "Micro E-mini Russell 2000", multiplier: 5, tickSize: 0.1, margin: 730 },
 };

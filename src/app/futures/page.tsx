@@ -149,7 +149,7 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-const CONTRACTS = ["MES", "MNQ", "MYM", "M2K"];
+const CONTRACTS = ["MES", "MNQ", "MGC", "MYM", "M2K"];
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
