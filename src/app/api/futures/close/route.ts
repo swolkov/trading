@@ -2,7 +2,7 @@ import { checkTradovateAuth, getTradovatePositions } from "@/lib/tradovate";
 import { prisma } from "@/lib/db";
 
 const DEMO_URL = "https://demo.tradovateapi.com/v1";
-const MULTIPLIERS: Record<string, number> = { MES: 5, MNQ: 2, MYM: 0.5, M2K: 5 };
+const MULTIPLIERS: Record<string, number> = { MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5 };
 
 export async function POST(request: Request) {
   try {

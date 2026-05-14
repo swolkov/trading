@@ -531,12 +531,18 @@ async function loadPositions() {
         target = direction === "long" ? tp.netPrice + currentATR * 4 : tp.netPrice - currentATR * 4;
       }
 
+      // Use entry log price instead of Tradovate netPrice (which is averaged and can be wrong after partial fills)
+      const entryPrice = entryLog?.price || tp.netPrice;
+      if (entryLog?.price && Math.abs(entryLog.price - tp.netPrice) > 0.5) {
+        log(`[PERSIST] Entry price: using DB log $${entryLog.price.toFixed(2)} (Tradovate netPrice $${tp.netPrice.toFixed(2)} differs — likely averaged)`);
+      }
+
       positions.set(sym, {
         symbol: sym,
         contractId: tp.contractId,
         direction,
         quantity: qty,
-        entryPrice: tp.netPrice,
+        entryPrice,
         stopLoss,
         target,
         trailStop: null,
@@ -547,7 +553,7 @@ async function loadPositions() {
         scaledOut: false, originalQty: qty, consecutiveStops: 0,
       });
 
-      log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
+      log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
     }
 
     if (positions.size > 0) {
@@ -1392,41 +1398,66 @@ async function syncPositions() {
     for (const [sym, pos] of [...positions]) {
       if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
         const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-        const b = barBuilders.get(sym);
-        const lastPrice = b?.lastPrice || 0;
 
-        let closePrice = lastPrice;
-        let closeType = "bracket_close";
-        const stopDist = Math.abs(lastPrice - pos.stopLoss);
-        const targetDist = Math.abs(lastPrice - pos.target);
-
-        if (stopDist < targetDist) {
-          closePrice = pos.stopLoss;
-          closeType = "stop_loss";
-        } else {
-          closePrice = pos.target;
-          closeType = "take_profit";
-        }
-
-        const diff = pos.direction === "long" ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
-        const pnl = diff * mult * pos.quantity;
-        dailyPnl += pnl;
-
-        log(`SYNC: ${sym} ${closeType} at exchange | Close: $${closePrice.toFixed(2)} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
-
+        // Check if this close was already logged (manual close from UI, or bracket order fill)
+        // to avoid double-logging P&L
+        let alreadyLogged = false;
         try {
-          await prisma.autoTradeLog.create({ data: {
-            symbol: `FUT:${sym}`,
-            action: `futures_${closeType}`,
-            qty: pos.quantity,
-            price: closePrice,
-            pnl,
-            reason: `[FUTURES ${sym}] ${closeType}: Closed ${pos.quantity}x @ $${closePrice.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Daily: $${dailyPnl.toFixed(0)}`,
-            orderId: null,
-          }});
+          const recentClose = await prisma.autoTradeLog.findFirst({
+            where: {
+              symbol: `FUT:${sym}`,
+              action: { in: ["futures_manual_close", "futures_take_profit", "futures_stop_loss", "futures_trail_stop", "futures_breakeven", "futures_emergency", "futures_bracket_close"] },
+              createdAt: { gte: new Date(Date.now() - 120_000) }, // within last 2 minutes
+            },
+            orderBy: { createdAt: "desc" },
+          });
+          if (recentClose) {
+            alreadyLogged = true;
+            const loggedPnl = recentClose.pnl || 0;
+            dailyPnl += loggedPnl;
+            log(`SYNC: ${sym} closed externally — already logged as ${recentClose.action} (P&L: $${loggedPnl.toFixed(0)}). Skipping duplicate log.`);
+          }
         } catch {}
 
+        if (!alreadyLogged) {
+          // Position closed but not logged — figure out how (stop vs target vs manual)
+          const b = barBuilders.get(sym);
+          const lastPrice = b?.lastPrice || 0;
+
+          let closePrice = lastPrice;
+          let closeType = "bracket_close";
+          const stopDist = Math.abs(lastPrice - pos.stopLoss);
+          const targetDist = Math.abs(lastPrice - pos.target);
+
+          if (stopDist < targetDist) {
+            closePrice = pos.stopLoss;
+            closeType = "stop_loss";
+          } else {
+            closePrice = pos.target;
+            closeType = "take_profit";
+          }
+
+          const diff = pos.direction === "long" ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
+          const pnl = diff * mult * pos.quantity;
+          dailyPnl += pnl;
+
+          log(`SYNC: ${sym} ${closeType} at exchange | Close: $${closePrice.toFixed(2)} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
+
+          try {
+            await prisma.autoTradeLog.create({ data: {
+              symbol: `FUT:${sym}`,
+              action: `futures_${closeType}`,
+              qty: pos.quantity,
+              price: closePrice,
+              pnl,
+              reason: `[FUTURES ${sym}] ${closeType}: Closed ${pos.quantity}x @ $${closePrice.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Daily: $${dailyPnl.toFixed(0)}`,
+              orderId: null,
+            }});
+          } catch {}
+        }
+
         positions.delete(sym);
+        await savePositions();
       }
     }
 
@@ -1440,20 +1471,47 @@ async function syncPositions() {
       }
       if (!sym || positions.has(sym)) continue;
 
-      // Orphaned position on Tradovate — adopt it
+      // Orphaned position on Tradovate — adopt it with correct entry price from DB
       const direction: "long" | "short" = tp.netPos > 0 ? "long" : "short";
       const qty = Math.abs(tp.netPos);
       const b = barBuilders.get(sym);
       const currentATR = b ? atr(b.bars5m) : 5;
+
+      // Get real entry price + stop/target from trade log
+      let entryPrice = tp.netPrice;
+      let stopLoss = 0;
+      let target = 0;
+      try {
+        const entryLog = await prisma.autoTradeLog.findFirst({
+          where: {
+            symbol: `FUT:${sym}`,
+            action: direction === "long" ? "futures_long" : "futures_short",
+          },
+          orderBy: { createdAt: "desc" },
+        });
+        if (entryLog?.price) {
+          entryPrice = entryLog.price;
+          log(`[SYNC] Using DB entry price $${entryPrice.toFixed(2)} instead of Tradovate netPrice $${tp.netPrice.toFixed(2)}`);
+        }
+        if (entryLog?.reason) {
+          const stopMatch = entryLog.reason.match(/Stop:\s*\$?([\d,.]+)/);
+          const targetMatch = entryLog.reason.match(/Target:\s*\$?([\d,.]+)/);
+          if (stopMatch) stopLoss = parseFloat(stopMatch[1].replace(",", ""));
+          if (targetMatch) target = parseFloat(targetMatch[1].replace(",", ""));
+        }
+      } catch {}
+
+      if (!stopLoss) stopLoss = direction === "long" ? entryPrice - currentATR * 1.5 : entryPrice + currentATR * 1.5;
+      if (!target) target = direction === "long" ? entryPrice + currentATR * 4 : entryPrice - currentATR * 4;
 
       positions.set(sym, {
         symbol: sym,
         contractId: tp.contractId,
         direction,
         quantity: qty,
-        entryPrice: tp.netPrice,
-        stopLoss: direction === "long" ? tp.netPrice - currentATR * 1.5 : tp.netPrice + currentATR * 1.5,
-        target: direction === "long" ? tp.netPrice + currentATR * 4 : tp.netPrice - currentATR * 4,
+        entryPrice,
+        stopLoss,
+        target,
         trailStop: null,
         reachedBreakeven: false,
         scaledOut: false,
@@ -1464,8 +1522,8 @@ async function syncPositions() {
         entryTime: Date.now(),
       });
 
-      log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)}`);
-      notify(`ADOPTED orphaned ${sym} ${direction} ${qty}x @ $${tp.netPrice.toFixed(2)} — managing now`);
+      log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
+      notify(`ADOPTED orphaned ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} — managing now`);
     }
 
     // Step 3: Update direction/qty if Tradovate net differs from engine's view
