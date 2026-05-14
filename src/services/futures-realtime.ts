@@ -568,10 +568,35 @@ function checkPositions(sym: string, price: number) {
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
   const pnlDollars = diff * mult * pos.quantity;
 
-  // 1R: Move stop to breakeven — protect capital, NO scale out yet
+  // 1R: Move stop to breakeven ON THE BROKER — protect capital, NO scale out yet
   if (diff >= stopDist && !pos.reachedBreakeven) {
     pos.reachedBreakeven = true;
-    log(`${sym}: Reached 1R ($${pnlDollars.toFixed(0)}) — breakeven stop active, letting winner run`);
+    const breakevenPrice = pos.entryPrice;
+    log(`${sym}: Reached 1R ($${pnlDollars.toFixed(0)}) — moving broker stop to breakeven $${breakevenPrice.toFixed(2)}`);
+
+    // CRITICAL: Cancel old stop and place new one at breakeven on the broker
+    // This protects against fast moves between bar closes
+    (async () => {
+      try {
+        // Cancel existing broker stop
+        if (pos.stopOrderId) {
+          await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+        }
+        // Place new stop at breakeven
+        const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+        const acct = accounts.find(a => a.id === accountId) || accounts[0];
+        const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+          orderQty: pos.quantity, orderType: "Stop", stopPrice: breakevenPrice, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        pos.stopOrderId = s.orderId;
+        pos.stopLoss = breakevenPrice;
+        log(`${sym}: Broker stop moved to breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
+      } catch (err) {
+        log(`${sym}: WARNING — failed to move broker stop to breakeven: ${err}`);
+      }
+    })();
   }
 
   // 3R: Scale out 33% — lock in meaningful profit, let the rest ride
@@ -581,14 +606,36 @@ function checkPositions(sym: string, price: number) {
     scaleOutPosition(sym, price, scaleQty);
   }
 
-  // 2.5R+: Activate trailing stop with WIDE trail (2x ATR) — don't get whipsawed
+  // 2.5R+: Activate trailing stop with WIDE trail (2x ATR) — place on broker
   if (diff >= stopDist * 2.5) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
-      const trail = pos.direction === "long" ? price - currentATRVal * 2.0 : price + currentATRVal * 2.0;
+      const atrMult = METALS.has(sym) ? 1.5 : 1.0;
+      const trail = pos.direction === "long" ? price - currentATRVal * atrMult * 2.0 : price + currentATRVal * atrMult * 2.0;
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
-        if (!pos.trailStop) log(`${sym}: 2.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop activated at $${trail.toFixed(2)} (2x ATR)`);
+        const isNew = !pos.trailStop;
+        if (isNew) log(`${sym}: 2.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop at $${trail.toFixed(2)} (2x ATR)`);
         pos.trailStop = trail;
+
+        // Move broker stop to trail level
+        (async () => {
+          try {
+            if (pos.stopOrderId) {
+              await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+            }
+            const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+            const acct = accounts.find(a => a.id === accountId) || accounts[0];
+            const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+            const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+              accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+              orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
+            })}) as { orderId: number };
+            pos.stopOrderId = s.orderId;
+            if (isNew) log(`${sym}: Broker trailing stop placed at $${trail.toFixed(2)} (order #${s.orderId})`);
+          } catch (err) {
+            log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
+          }
+        })();
       }
     }
   }
