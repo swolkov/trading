@@ -1262,9 +1262,10 @@ ${sectorContext || "No sector data"}
 Earnings week: ${earningsWeekSymbols.length > 0 ? earningsWeekSymbols.join(", ") + " reporting — elevated vol" : "no mega-cap earnings"}
 Macro events: ${eventCtx}
 ${metalContext}
-
-REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), R:R < 2:1${isMetal ? ", or USD strengthening while going long gold" : ", or macro signals strongly oppose direction (risk_off + long, risk_on + short)"}.
-ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session${isMetal ? ", and USD/macro confirms gold direction" : ", and macro confirms or is neutral"}.
+${vaultLessonsCache?.lessons ? `\nLESSONS FROM PAST TRADES (apply these):\n${vaultLessonsCache.lessons.match(/\*\*LESSON\*\*:\s*(.+)/g)?.slice(0, 5).map(l => "- " + l.replace("**LESSON**: ", "")).join("\n") || "none"}\n` : ""}
+${vaultLessonsCache?.antiPatterns ? `ANTI-PATTERNS (avoid these proven losers):\n${vaultLessonsCache.antiPatterns.match(/\*\*PATTERN\*\*:\s*(.+)/g)?.slice(0, 5).map(l => "- " + l.replace("**PATTERN**: ", "")).join("\n") || "none"}\n` : ""}
+REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), R:R < 2:1${isMetal ? ", or USD strengthening while going long gold" : ", or macro signals strongly oppose direction (risk_off + long, risk_on + short)"}, or matches any ANTI-PATTERN above.
+ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session${isMetal ? ", and USD/macro confirms gold direction" : ", and macro confirms or is neutral"}, and aligns with LESSONS above.
 
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
 
@@ -1372,10 +1373,39 @@ function onBarClose(sym: string, bar: Bar) {
   // Cache refreshes hourly in the background, check is synchronous
   if (vaultLessonsCache?.antiPatterns) {
     const ap = vaultLessonsCache.antiPatterns.toLowerCase();
-    // Check time-of-day anti-patterns from synthesis agent
-    if (ap.includes("first_30_min") && ap.includes("0% win rate") && session === "open") {
-      log(`${sym}: VAULT BLOCK — anti-pattern: 0% win rate in first 30 min`);
-      return;
+
+    // Map synthesis agent time buckets to engine session names
+    const sessionAntiPatterns: { pattern: string; sessions: string[]; label: string }[] = [
+      { pattern: "first_30_min", sessions: ["open"], label: "first 30 min" },
+      { pattern: "mid_morning", sessions: ["morning"], label: "mid-morning" },
+      { pattern: "midday", sessions: ["midday"], label: "midday/lunch" },
+      { pattern: "afternoon", sessions: ["afternoon"], label: "afternoon" },
+      { pattern: "last_30_min", sessions: ["close"], label: "last 30 min" },
+    ];
+
+    for (const rule of sessionAntiPatterns) {
+      if (!ap.includes(rule.pattern)) continue;
+      if (!rule.sessions.includes(session)) continue;
+
+      // Extract the win rate from the anti-pattern text (e.g. "29% win rate" or "0% win rate")
+      const wrMatch = ap.match(new RegExp(`${rule.pattern}[^\\n]*?(\\d+)%\\s*win\\s*rate`));
+      const winRate = wrMatch ? parseInt(wrMatch[1]) : null;
+
+      // Block if win rate < 30%, reduce size if < 40%
+      if (winRate !== null && winRate < 30) {
+        log(`${sym}: VAULT BLOCK — anti-pattern: ${rule.label} has ${winRate}% win rate`);
+        return;
+      }
+    }
+
+    // Check instrument-specific anti-patterns (e.g. "MGC has only 15% win rate")
+    const instMatch = ap.match(new RegExp(`${sym.toLowerCase()}[^\\n]*?(\\d+)%\\s*win\\s*rate`));
+    if (instMatch) {
+      const instWR = parseInt(instMatch[1]);
+      if (instWR < 25) {
+        log(`${sym}: VAULT BLOCK — anti-pattern: ${sym} has ${instWR}% win rate over many trades`);
+        return;
+      }
     }
   }
 
