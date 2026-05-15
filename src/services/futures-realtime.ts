@@ -382,8 +382,8 @@ function getSizeMultiplier(sym?: string): number {
     if (utcH >= 14 && utcH < 16) return 0.8;       // Mid-COMEX
     if (utcH >= 16 && utcH < 17.5) return 0.5;     // Late COMEX — reduced
     if (utcH >= 7 && utcH < 12.33) return 0.4;     // London pre-COMEX — reduced
-    if (utcH >= 17.5 && utcH < 21) return 0;       // After COMEX — no edge
-    return 0; // Overnight — no trading
+    if (utcH >= 17.5 && utcH < 21) return 0.2;     // After COMEX — thin but gold can trend
+    return 0.15; // Overnight — minimal size, gold trends hard overnight
   }
 
   // Equities session sizing — RTH only, ETH has no edge for equity indices
@@ -949,6 +949,17 @@ async function closePosition(sym: string, price: number, reason: string) {
 
     positions.delete(sym);
     await savePositions();
+
+    // Save balance snapshot after every close — ensures accurate daily P&L even with overnight trades or engine restarts
+    try {
+      await updateTradovateEquity();
+      const today = new Date().toISOString().slice(0, 10);
+      await prisma.agentConfig.upsert({
+        where: { key: `eod_balance_${today}` },
+        update: { value: String(tradovateEquity) },
+        create: { key: `eod_balance_${today}`, value: String(tradovateEquity) },
+      });
+    } catch {}
   } catch (err) { log(`Close failed ${sym}: ${err}`); }
 }
 
@@ -1103,7 +1114,7 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier(sym);
-  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 4 || dailyPnl < -500) return;
+  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 6 || dailyPnl < -500) return;
   // Tilt protection: pause after 2 consecutive stops
   if (Date.now() < tiltPauseUntil) return;
   // No re-entry on stopped-out symbols
@@ -2232,6 +2243,29 @@ async function main() {
 
   // Get account equity + VIX + macro intelligence
   await updateTradovateEquity();
+  // Save balance snapshot on startup — ensures we always have a recent reference point
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    // Only save as SOD if we don't already have one for today (don't overwrite the 9:30 AM snapshot)
+    const existing = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
+    if (!existing) {
+      await prisma.agentConfig.upsert({
+        where: { key: `daily_balance_${today}` },
+        update: { value: String(tradovateEquity) },
+        create: { key: `daily_balance_${today}`, value: String(tradovateEquity) },
+      });
+      log(`[STARTUP] Saved initial balance snapshot: $${tradovateEquity.toFixed(2)} (${today})`);
+    }
+    // Always update start_of_day_balance if not set
+    const sod = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+    if (!sod) {
+      await prisma.agentConfig.upsert({
+        where: { key: "start_of_day_balance" },
+        update: { value: String(tradovateEquity) },
+        create: { key: "start_of_day_balance", value: String(tradovateEquity) },
+      });
+    }
+  } catch {}
   await updateVIX();
   log(`VIX: ${currentVIX.toFixed(1)}`);
   await updateEconomicCalendar();
