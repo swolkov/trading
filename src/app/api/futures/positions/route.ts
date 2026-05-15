@@ -269,6 +269,10 @@ export async function GET() {
       engineStatus,
       startOfDayBalance: await (async () => {
         try {
+          // Prefer today's date-keyed snapshot (most reliable), fall back to global
+          const today = new Date().toISOString().slice(0, 10);
+          const todaySnapshot = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
+          if (todaySnapshot?.value) return parseFloat(todaySnapshot.value);
           const sod = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
           return sod?.value ? parseFloat(sod.value) : null;
         } catch { return null; }
