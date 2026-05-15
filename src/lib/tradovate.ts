@@ -485,6 +485,16 @@ export async function getTradovateFills(): Promise<TradovateFill[]> {
 }
 
 // Resolve a Tradovate contractId to a symbol (MES, MNQ, etc.)
+// Get historical cash balance logs (daily settlement records)
+export async function getCashBalanceLogs(): Promise<{ id: number; accountId: number; timestamp: string; tradeDate: { year: number; month: number; day: number }; currencyId: number; amount: number; realizedPnL: number; weekRealizedPnL: number }[]> {
+  try {
+    const logs = await tvFetch(`/cashBalanceLog/ldeps?masterid=${_accountId}`) as unknown[];
+    return (Array.isArray(logs) ? logs : []) as { id: number; accountId: number; timestamp: string; tradeDate: { year: number; month: number; day: number }; currencyId: number; amount: number; realizedPnL: number; weekRealizedPnL: number }[];
+  } catch {
+    return [];
+  }
+}
+
 export async function resolveContractSymbol(contractId: number): Promise<string | null> {
   try {
     const contract = await tvFetch(`/contract/item?id=${contractId}`) as { name: string };

@@ -259,6 +259,31 @@ export async function GET() {
           return sod?.value ? parseFloat(sod.value) : null;
         } catch { return null; }
       })(),
+      // Historical daily balance snapshots for accurate Daily Breakdown
+      balanceHistory: await (async () => {
+        try {
+          const dailyBalances = await prisma.agentConfig.findMany({
+            where: { key: { startsWith: "daily_balance_" } },
+          });
+          const eodBalances = await prisma.agentConfig.findMany({
+            where: { key: { startsWith: "eod_balance_" } },
+          });
+          const history: Record<string, { sod?: number; eod?: number }> = {};
+          for (const b of dailyBalances) {
+            const date = b.key.replace("daily_balance_", "");
+            if (!history[date]) history[date] = {};
+            history[date].sod = parseFloat(b.value);
+          }
+          for (const b of eodBalances) {
+            const date = b.key.replace("eod_balance_", "");
+            if (!history[date]) history[date] = {};
+            history[date].eod = parseFloat(b.value);
+          }
+          return Object.entries(history)
+            .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
+            .sort((a, b) => a.date.localeCompare(b.date));
+        } catch { return []; }
+      })(),
     });
   } catch (error) {
     console.error("[/api/futures/positions]", error);

@@ -110,6 +110,7 @@ interface PositionsData {
   activity: ActivityLog[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
   startOfDayBalance?: number | null;
+  balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
 }
 
 interface BacktestSetup {
@@ -313,8 +314,20 @@ export default function FuturesPage() {
     : null;
   // Priority: calendar-day balance delta > Tradovate session (if nonzero) > DB sums
   const dailyPnl = calendarDayPnl ?? (tradovateRealizedPnl && tradovateRealizedPnl !== 0 ? tradovateRealizedPnl : dbDailyPnl);
-  const adjustedWeeklyPnl = accountPnl ?? weeklyPnl;
-  const adjustedMonthlyPnl = accountPnl ?? monthlyPnl;
+
+  // Weekly/Monthly: use balance history deltas when available, fall back to DB sums
+  const balanceHistory = posData?.balanceHistory || [];
+  const computePeriodPnlFromBalance = (periodStartDate: Date): number | null => {
+    if (balanceHistory.length === 0 || currentBalance == null) return null;
+    const periodKey = `${periodStartDate.getFullYear()}-${String(periodStartDate.getMonth() + 1).padStart(2, "0")}-${String(periodStartDate.getDate()).padStart(2, "0")}`;
+    // Find the earliest balance snapshot on or after the period start
+    const sorted = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
+    const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null);
+    if (startSnapshot?.startBalance != null) return currentBalance - startSnapshot.startBalance;
+    return null;
+  };
+  const adjustedWeeklyPnl = computePeriodPnlFromBalance(weekStart) ?? weeklyPnl;
+  const adjustedMonthlyPnl = computePeriodPnlFromBalance(monthStart) ?? monthlyPnl;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -699,28 +712,63 @@ export default function FuturesPage() {
             const periodClosed = periodTrades.filter((t) => t.pnl != null);
             const periodWins = periodClosed.filter((t) => (t.pnl || 0) > 0);
             const periodLosses = periodClosed.filter((t) => (t.pnl || 0) < 0);
-            const dbPeriodPnl = periodClosed.reduce((s, t) => s + (t.pnl || 0), 0);
-            // For "today": use calendar-day balance delta (survives session resets)
-            const periodPnl = historyPeriod === "today" ? (calendarDayPnl ?? dailyPnl)
-              : historyPeriod === "all" ? totalPnl
-              : historyPeriod === "week" ? adjustedWeeklyPnl
-              : historyPeriod === "month" ? adjustedMonthlyPnl
-              : dbPeriodPnl;
             const periodAvgWin = periodWins.length > 0 ? periodWins.reduce((s, t) => s + (t.pnl || 0), 0) / periodWins.length : 0;
             const periodAvgLoss = periodLosses.length > 0 ? periodLosses.reduce((s, t) => s + (t.pnl || 0), 0) / periodLosses.length : 0;
 
-            // Group by day for daily breakdown
-            const dayMap: Record<string, { pnl: number; trades: number; wins: number; losses: number; date: Date }> = {};
+            // Group by day for daily breakdown — use Tradovate balance deltas as source of truth
+            const balHist = posData?.balanceHistory || [];
+            const balByDate: Record<string, { sod?: number; eod?: number }> = {};
+            for (const b of balHist) {
+              balByDate[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
+            }
+            // Build day map from trades (for trade counts) and overlay balance-based P&L
+            const dayMap: Record<string, { pnl: number; trades: number; wins: number; losses: number; date: Date; fromBalance: boolean }> = {};
             for (const t of periodClosed) {
               const d = new Date(t.time);
               const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-              if (!dayMap[key]) dayMap[key] = { pnl: 0, trades: 0, wins: 0, losses: 0, date: d };
+              if (!dayMap[key]) dayMap[key] = { pnl: 0, trades: 0, wins: 0, losses: 0, date: d, fromBalance: false };
               dayMap[key].pnl += t.pnl || 0;
               dayMap[key].trades++;
               if ((t.pnl || 0) > 0) dayMap[key].wins++;
               else if ((t.pnl || 0) < 0) dayMap[key].losses++;
             }
+            // Override P&L with balance deltas when available (source of truth from Tradovate)
+            const sortedDates = Object.keys(balByDate).sort();
+            for (let i = 0; i < sortedDates.length; i++) {
+              const date = sortedDates[i];
+              const bal = balByDate[date];
+              // Daily P&L = next day's start balance - this day's start balance
+              // (start of next day = end of this day, since session reset saves both)
+              const nextDate = sortedDates[i + 1];
+              const nextBal = nextDate ? balByDate[nextDate] : null;
+              let balancePnl: number | null = null;
+              if (bal.eod != null && bal.sod != null) {
+                // Best: have both SOD and EOD for same day
+                balancePnl = bal.eod - bal.sod;
+              } else if (nextBal?.sod != null && bal.sod != null) {
+                // Next best: start of next day minus start of this day
+                balancePnl = nextBal.sod - bal.sod;
+              }
+              if (balancePnl != null && dayMap[date]) {
+                dayMap[date].pnl = balancePnl;
+                dayMap[date].fromBalance = true;
+              }
+            }
+            // For today: use live calendarDayPnl (current balance - start of day)
+            const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+            if (calendarDayPnl != null && dayMap[todayKey]) {
+              dayMap[todayKey].pnl = calendarDayPnl;
+              dayMap[todayKey].fromBalance = true;
+            }
             const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
+
+            // Period P&L: sum the (balance-corrected) daily P&Ls from dayMap
+            const periodPnl = (() => {
+              if (historyPeriod === "today") return calendarDayPnl ?? dailyPnl;
+              if (historyPeriod === "all") return totalPnl;
+              // Sum the daily P&Ls (which now use balance deltas where available)
+              return days.reduce((s, [, d]) => s + d.pnl, 0);
+            })();
 
             return (
             <div className="space-y-3">
@@ -967,22 +1015,50 @@ export default function FuturesPage() {
                   })()}
                 </div>
 
-                {/* Daily P&L Breakdown */}
+                {/* Daily P&L Breakdown — uses Tradovate balance deltas as source of truth */}
                 <div>
                   <p className="text-xs font-bold mb-3">Daily P&L</p>
                   {(() => {
-                    const dayMap: Record<string, { pnl: number; trades: number; wins: number }> = {};
-                    for (const t of closedTrades) {
-                      const day = new Date(t.time).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-                      if (!dayMap[day]) dayMap[day] = { pnl: 0, trades: 0, wins: 0 };
-                      dayMap[day].pnl += t.pnl || 0;
-                      dayMap[day].trades++;
-                      if ((t.pnl || 0) > 0) dayMap[day].wins++;
+                    const balHist = posData?.balanceHistory || [];
+                    const balByDate: Record<string, { sod?: number; eod?: number }> = {};
+                    for (const b of balHist) {
+                      balByDate[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
                     }
-                    const days = Object.entries(dayMap);
-                    return days.length > 0 ? (
+                    const reportDayMap: Record<string, { pnl: number; trades: number; wins: number; dateKey: string }> = {};
+                    for (const t of closedTrades) {
+                      const d = new Date(t.time);
+                      const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                      const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                      if (!reportDayMap[day]) reportDayMap[day] = { pnl: 0, trades: 0, wins: 0, dateKey };
+                      reportDayMap[day].pnl += t.pnl || 0;
+                      reportDayMap[day].trades++;
+                      if ((t.pnl || 0) > 0) reportDayMap[day].wins++;
+                    }
+                    // Override with balance deltas
+                    const sortedBalDates = Object.keys(balByDate).sort();
+                    for (let i = 0; i < sortedBalDates.length; i++) {
+                      const date = sortedBalDates[i];
+                      const bal = balByDate[date];
+                      const nextDate = sortedBalDates[i + 1];
+                      const nextBal = nextDate ? balByDate[nextDate] : null;
+                      let balPnl: number | null = null;
+                      if (bal.eod != null && bal.sod != null) balPnl = bal.eod - bal.sod;
+                      else if (nextBal?.sod != null && bal.sod != null) balPnl = nextBal.sod - bal.sod;
+                      if (balPnl != null) {
+                        const d = new Date(date + "T12:00:00");
+                        const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                        if (reportDayMap[day]) reportDayMap[day].pnl = balPnl;
+                      }
+                    }
+                    // Today: use live balance delta
+                    if (calendarDayPnl != null) {
+                      const todayLabel = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                      if (reportDayMap[todayLabel]) reportDayMap[todayLabel].pnl = calendarDayPnl;
+                    }
+                    const reportDays = Object.entries(reportDayMap);
+                    return reportDays.length > 0 ? (
                       <div className="space-y-1.5">
-                        {days.map(([day, data]) => (
+                        {reportDays.map(([day, data]) => (
                           <div key={day} className="flex items-center justify-between bg-white/[0.02] rounded-lg px-3 py-2">
                             <div>
                               <span className="text-xs font-medium">{day}</span>

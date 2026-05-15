@@ -380,21 +380,21 @@ function getSizeMultiplier(sym?: string): number {
     const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
     if (utcH >= 12.33 && utcH < 14) return 1.0;   // COMEX open + London overlap = prime
     if (utcH >= 14 && utcH < 16) return 0.8;       // Mid-COMEX
-    if (utcH >= 16 && utcH < 17.5) return 0.6;     // Late COMEX
-    if (utcH >= 7 && utcH < 12.33) return 0.7;     // London pre-COMEX
-    if (utcH >= 17.5 && utcH < 21) return 0.3;     // After COMEX
-    return 0.2; // Overnight — thin
+    if (utcH >= 16 && utcH < 17.5) return 0.5;     // Late COMEX — reduced
+    if (utcH >= 7 && utcH < 12.33) return 0.4;     // London pre-COMEX — reduced
+    if (utcH >= 17.5 && utcH < 21) return 0;       // After COMEX — no edge
+    return 0; // Overnight — no trading
   }
 
-  // Equities session sizing
+  // Equities session sizing — RTH only, ETH has no edge for equity indices
   if (s === "morning") return 1.0;
-  if (s === "afternoon") return 0.8;
+  if (s === "afternoon") return 0.6;
   if (s === "midday") return 0;  // lunch doldrums, lowest volume, most losses
-  if (s === "eth_europe") return 0.6;
-  if (s === "eth_evening") return 0.4;
-  if (s === "eth_asia") return 0.3;
+  if (s === "eth_europe") return 0;  // no edge — thin volume, unreliable signals
+  if (s === "eth_evening") return 0;  // post-close chop
+  if (s === "eth_asia") return 0;     // worst session
   if (s === "close" || s === "halt" || s === "open") return 0;
-  return 0.7;
+  return 0;
 }
 
 function checkSessionReset() {
@@ -413,12 +413,26 @@ function checkSessionReset() {
     // Save start-of-day balance for calendar-day P&L calculation
     (async () => {
       try {
+        const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
+        // Save today's start-of-day balance (keyed by date for history)
         await prisma.agentConfig.upsert({
           where: { key: "start_of_day_balance" },
           update: { value: String(tradovateEquity) },
           create: { key: "start_of_day_balance", value: String(tradovateEquity) },
         });
-        log(`[RESET] Saved start-of-day balance: $${tradovateEquity.toFixed(2)}`);
+        await prisma.agentConfig.upsert({
+          where: { key: `daily_balance_${today}` },
+          update: { value: String(tradovateEquity) },
+          create: { key: `daily_balance_${today}`, value: String(tradovateEquity) },
+        });
+        // Also save yesterday's end-of-day balance (session reset = end of previous day)
+        const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+        await prisma.agentConfig.upsert({
+          where: { key: `eod_balance_${yesterday}` },
+          update: { value: String(tradovateEquity) },
+          create: { key: `eod_balance_${yesterday}`, value: String(tradovateEquity) },
+        });
+        log(`[RESET] Saved start-of-day balance: $${tradovateEquity.toFixed(2)} (${today}), EOD yesterday (${yesterday})`);
       } catch {}
     })();
     // Clean slate: cancel any orphaned orders from yesterday
@@ -439,6 +453,20 @@ function checkSessionReset() {
     }
     // Cancel ALL working orders to prevent orphaned fills overnight
     cancelAllOrders().catch(err => log(`[EOD] Failed to cancel orders: ${err}`));
+    // Save end-of-day balance snapshot for historical daily P&L
+    (async () => {
+      try {
+        await new Promise(r => setTimeout(r, 3000)); // wait for close fills to settle
+        await updateTradovateEquity();
+        const today = now.toISOString().slice(0, 10);
+        await prisma.agentConfig.upsert({
+          where: { key: `eod_balance_${today}` },
+          update: { value: String(tradovateEquity) },
+          create: { key: `eod_balance_${today}`, value: String(tradovateEquity) },
+        });
+        log(`[EOD] Saved end-of-day balance: $${tradovateEquity.toFixed(2)} (${today})`);
+      } catch {}
+    })();
   }
 }
 
@@ -620,22 +648,22 @@ function checkPositions(sym: string, price: number) {
     })();
   }
 
-  // 3R: Scale out 33% — lock in meaningful profit, let the rest ride
-  if (diff >= stopDist * 3 && !pos.scaledOut && pos.quantity >= 2) {
-    const scaleQty = Math.max(1, Math.floor(pos.quantity / 3));
+  // 1.5R: Scale out 50% — lock in profit before it rides back to breakeven
+  if (diff >= stopDist * 1.5 && !pos.scaledOut && pos.quantity >= 2) {
+    const scaleQty = Math.max(1, Math.floor(pos.quantity / 2));
     log(`${sym}: Reached 3R ($${pnlDollars.toFixed(0)}) — scaling out ${scaleQty} of ${pos.quantity} contracts`);
     scaleOutPosition(sym, price, scaleQty);
   }
 
-  // 2.5R+: Activate trailing stop with WIDE trail (2x ATR) — place on broker
-  if (diff >= stopDist * 2.5) {
+  // 1.5R+: Activate trailing stop with 1.5x ATR trail — capture profit tighter
+  if (diff >= stopDist * 1.5) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
       const atrMult = METALS.has(sym) ? 1.5 : 1.0;
-      const trail = pos.direction === "long" ? price - currentATRVal * atrMult * 2.0 : price + currentATRVal * atrMult * 2.0;
+      const trail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
         const isNew = !pos.trailStop;
-        if (isNew) log(`${sym}: 2.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop at $${trail.toFixed(2)} (2x ATR)`);
+        if (isNew) log(`${sym}: 1.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop at $${trail.toFixed(2)} (1.5x ATR)`);
         pos.trailStop = trail;
 
         // Move broker stop to trail level
@@ -652,7 +680,7 @@ function checkPositions(sym: string, price: number) {
               orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
             })}) as { orderId: number };
             pos.stopOrderId = s.orderId;
-            if (isNew) log(`${sym}: Broker trailing stop placed at $${trail.toFixed(2)} (order #${s.orderId})`);
+            if (isNew) log(`${sym}: Broker trail stop at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
           } catch (err) {
             log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
           }
@@ -1075,7 +1103,7 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier(sym);
-  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 8 || dailyPnl < -2000) return;
+  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 4 || dailyPnl < -500) return;
   // Tilt protection: pause after 2 consecutive stops
   if (Date.now() < tiltPauseUntil) return;
   // No re-entry on stopped-out symbols
@@ -1173,7 +1201,7 @@ function onBarClose(sym: string, bar: Bar) {
       const { score, reasons } = scoreSetup({
         baseConfidence: 70,
         volTrend, volRatio,
-        trend15Aligns: true, // RSI extremes override trend
+        trend15Aligns: isOversold ? tf15.trend !== "down" : tf15.trend !== "up", // don't fade strong 15m trends
         rsiExtreme: true,
         priceAboveVWAP: false,
         dayTypeMatch: true,
@@ -1182,7 +1210,7 @@ function onBarClose(sym: string, bar: Bar) {
 
       log(`  → EXTREME RSI BOUNCE ${dir.toUpperCase()} | RSI:${currentRSI.toFixed(0)} | Confidence: ${score}% | ${reasons.join(", ")}`);
 
-      if (score >= 65) {
+      if (score >= 75) {
         evaluateAndTrade(sym, dir, price, stopDistRSI, targetDist, effectiveSizeMult, score,
           `Extreme RSI ${isOversold ? "oversold" : "overbought"} bounce: RSI ${currentRSI.toFixed(0)}, ATR target ${targetDist.toFixed(2)}, conf ${score}%`,
           currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
@@ -1294,9 +1322,9 @@ function onBarClose(sym: string, bar: Bar) {
     }
   }
 
-  // SETUP 2: Trend Continuation (pullback to EMA9)
+  // SETUP 2: Trend Continuation (pullback to EMA9) — RTH only
   if ((dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
-      (session === "morning" || session === "afternoon" || session === "eth_europe" || session === "eth_evening")) {
+      (session === "morning" || session === "afternoon")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
     const isLong = nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
     const isShort = nearEMA && fastEMA < slowEMA && price < slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
@@ -1315,7 +1343,7 @@ function onBarClose(sym: string, bar: Bar) {
 
       log(`  → TREND CONTINUATION ${dir.toUpperCase()} | EMA9:$${fastEMA.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
 
-      if (score >= 65) {
+      if (score >= 75) {
         evaluateAndTrade(sym, dir, price, adjustedATR * 1.5, adjustedATR * 4.0, effectiveSizeMult, score,
           `Trend pullback ${dir} near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, 15m ${tf15.trend}, conf ${score}%`,
           currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
