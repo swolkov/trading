@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Esbueno Trades — AI-Powered Options Intelligence",
-  description: "Autonomous AI trading agent with deep research, options intelligence, and risk management",
+  title: "Esbueno Trades — Multi-Asset Trading Dashboard",
+  description: "Unified multi-asset dashboard — Alpaca stocks/options + Tradovate futures with AI-powered trading agents",
 };
 
 export default function RootLayout({

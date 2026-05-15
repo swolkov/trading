@@ -4,37 +4,37 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
+import {
+  LayoutDashboard,
+  BarChart3,
+  LineChart,
+  Layers,
+  ClipboardList,
+  BookOpen,
+  TrendingUp,
+} from "lucide-react";
 
 const sections = [
   {
     label: "OVERVIEW",
     links: [
-      { href: "/", label: "Dashboard" },
-      { href: "/command", label: "Command Center" },
+      { href: "/", label: "Dashboard", icon: LayoutDashboard },
     ],
   },
   {
-    label: "TRADE",
+    label: "MARKETS",
     links: [
-      { href: "/trade", label: "Trade" },
-      { href: "/options", label: "Options" },
-      { href: "/futures", label: "Futures" },
-      { href: "/positions", label: "Positions" },
-      { href: "/orders", label: "Orders" },
+      { href: "/futures", label: "Futures", icon: BarChart3 },
+      { href: "/stocks", label: "Stocks", icon: LineChart },
+      { href: "/options", label: "Options", icon: Layers },
     ],
   },
   {
-    label: "AGENTS",
+    label: "ACTIVITY",
     links: [
-      { href: "/agents", label: "Agent Hub" },
-      { href: "/ai", label: "Research" },
-    ],
-  },
-  {
-    label: "ANALYTICS",
-    links: [
-      { href: "/performance", label: "Performance" },
-      { href: "/market", label: "Market" },
+      { href: "/orders", label: "Orders", icon: ClipboardList },
+      { href: "/journal", label: "Journal", icon: BookOpen },
+      { href: "/performance", label: "Performance", icon: TrendingUp },
     ],
   },
 ];
@@ -43,7 +43,6 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Close mobile menu on navigation
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
@@ -68,37 +67,39 @@ export function Sidebar() {
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
               </span>
-              <span className="text-[9px] text-emerald-400/80 font-semibold tracking-[0.15em] uppercase">Paper Live</span>
+              <span className="text-[9px] text-emerald-400/80 font-semibold tracking-[0.15em] uppercase">Demo</span>
             </div>
           </div>
         </Link>
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 py-2 overflow-auto">
+      <nav className="flex-1 py-3 overflow-auto">
         {sections.map((section) => (
-          <div key={section.label} className="mb-3">
+          <div key={section.label} className="mb-4">
             <p className="px-4 py-1 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground/40 uppercase">
               {section.label}
             </p>
-            <div className="px-2 space-y-px">
-              {section.links.map((link) => (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  className={cn(
-                    "flex items-center gap-2 px-2.5 py-[7px] rounded-md text-[12.5px] font-medium transition-all duration-100",
-                    isActive(link.href)
-                      ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:text-foreground hover:bg-accent"
-                  )}
-                >
-                  {isActive(link.href) && (
-                    <span className="w-1 h-1 rounded-full bg-primary shrink-0" />
-                  )}
-                  {link.label}
-                </Link>
-              ))}
+            <div className="px-2 space-y-0.5">
+              {section.links.map((link) => {
+                const Icon = link.icon;
+                const active = isActive(link.href);
+                return (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    className={cn(
+                      "flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-[12.5px] font-medium transition-all duration-100",
+                      active
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                    )}
+                  >
+                    <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : "text-muted-foreground/50")} />
+                    {link.label}
+                  </Link>
+                );
+              })}
             </div>
           </div>
         ))}
@@ -107,7 +108,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
         <p className="text-[9px] text-muted-foreground/30 tracking-wider uppercase text-center">
-          Alpaca · Yahoo · Finnhub · Claude
+          Alpaca · Tradovate · Claude
         </p>
       </div>
     </>

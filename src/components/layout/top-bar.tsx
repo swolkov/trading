@@ -2,72 +2,194 @@
 
 import { useAccount } from "@/hooks/use-account";
 import { formatCurrency, pnlColor } from "@/lib/utils";
+import { Clock } from "lucide-react";
+import useSWR from "swr";
+import { useEffect, useState } from "react";
+
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+interface FuturesAccount {
+  balance: number;
+  netLiq: number;
+  realizedPnl: number;
+  marginUsed: number;
+}
+
+interface FuturesData {
+  connected: boolean;
+  account: FuturesAccount | null;
+  startOfDayBalance?: number | null;
+}
+
+interface MarketClock {
+  is_open: boolean;
+  next_open: string;
+  next_close: string;
+}
+
+function useMarketClock() {
+  const [clock, setClock] = useState<MarketClock | null>(null);
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const fetchClock = () => {
+      fetch("/api/clock").then((r) => r.json()).then((d) => { if (!d.error) setClock(d); }).catch(() => {});
+    };
+    fetchClock();
+    const tickInterval = setInterval(() => setNow(new Date()), 1000);
+    // Re-fetch clock data every 5 minutes to handle market open/close transitions
+    const clockInterval = setInterval(fetchClock, 300000);
+    return () => { clearInterval(tickInterval); clearInterval(clockInterval); };
+  }, []);
+
+  if (!clock) return { label: "", isOpen: false, countdown: "" };
+
+  const isOpen = clock.is_open;
+  const targetTime = isOpen ? new Date(clock.next_close) : new Date(clock.next_open);
+  const diff = Math.max(0, targetTime.getTime() - now.getTime());
+  const hours = Math.floor(diff / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+
+  const countdown = hours > 0
+    ? `${hours}h ${minutes}m`
+    : `${minutes}m ${seconds}s`;
+
+  return {
+    label: isOpen ? "Market Open" : "Market Closed",
+    isOpen,
+    countdown: isOpen ? `Closes in ${countdown}` : `Opens in ${countdown}`,
+  };
+}
 
 export function TopBar() {
-  const { data: account, error, isLoading } = useAccount();
+  const { data: account, error: alpacaError, isLoading: alpacaLoading } = useAccount();
+  const { data: futuresData, isLoading: futuresLoading } = useSWR<FuturesData>(
+    "/api/futures/positions",
+    fetcher,
+    { refreshInterval: 15000 }
+  );
+  const marketClock = useMarketClock();
+
+  const isLoading = alpacaLoading || futuresLoading;
 
   if (isLoading) {
     return (
       <header className="h-11 border-b border-border bg-sidebar flex items-center px-3 md:px-5 gap-3 md:gap-6">
-        <div className="skeleton h-3 w-24" />
-        <div className="skeleton h-3 w-20" />
+        <div className="w-8 md:hidden shrink-0" />
+        <div className="skeleton h-3.5 w-28 rounded" />
+        <div className="skeleton h-3 w-20 rounded" />
+        <div className="skeleton h-3 w-24 rounded" />
+        <div className="ml-auto skeleton h-3 w-32 rounded" />
       </header>
     );
   }
 
-  if (error || !account) {
-    return (
-      <header className="h-11 border-b border-border bg-sidebar flex items-center px-3 md:px-5">
-        <span className="text-[11px] text-destructive ml-10 md:ml-0">Check Alpaca API keys</span>
-      </header>
-    );
-  }
+  // Alpaca data
+  const alpacaEquity = account ? parseFloat(account.equity) : 0;
+  const alpacaLastEquity = account ? parseFloat(account.last_equity) : 0;
+  const alpacaDailyPnl = alpacaEquity - alpacaLastEquity;
 
-  const equity = parseFloat(account.equity);
-  const lastEquity = parseFloat(account.last_equity);
-  const dailyPnl = equity - lastEquity;
-  const dailyPnlPct = lastEquity > 0 ? dailyPnl / lastEquity : 0;
+  // Tradovate data
+  const futuresEquity = futuresData?.account?.netLiq || 0;
+  const futuresBalance = futuresData?.account?.balance || 0;
+  const futuresSOD = futuresData?.startOfDayBalance;
+  const futuresDailyPnl = (futuresSOD != null && futuresBalance)
+    ? futuresBalance - futuresSOD
+    : (futuresData?.account?.realizedPnl || 0);
+
+  // Combined
+  const combinedEquity = alpacaEquity + futuresEquity;
+  const combinedDailyPnl = alpacaDailyPnl + futuresDailyPnl;
+  const combinedDailyPct = (alpacaLastEquity + (futuresSOD || futuresBalance)) > 0
+    ? combinedDailyPnl / (alpacaLastEquity + (futuresSOD || futuresBalance || 1))
+    : 0;
+
+  const hasAlpaca = !alpacaError && account;
+  const hasFutures = futuresData?.connected && futuresData.account;
 
   return (
-    <header className="h-11 border-b border-border bg-sidebar flex items-center px-3 md:px-5 gap-3 md:gap-6 overflow-x-auto">
+    <header className="h-11 border-b border-border bg-sidebar flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto">
       {/* Spacer for mobile hamburger */}
       <div className="w-8 md:hidden shrink-0" />
 
-      {/* Desktop: show all items */}
-      <div className="hidden md:flex items-center gap-6">
+      {/* Desktop: combined metrics */}
+      <div className="hidden md:flex items-center gap-5">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Equity</span>
-          <span className="text-[12px] font-semibold tabular-nums">{formatCurrency(equity)}</span>
+          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Portfolio</span>
+          <span className="text-[13px] font-bold tabular-nums">{formatCurrency(combinedEquity)}</span>
         </div>
+
+        {/* Separator */}
+        <div className="w-px h-4 bg-border" />
+
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Cash</span>
-          <span className="text-[12px] font-semibold tabular-nums">{formatCurrency(account.cash)}</span>
+          <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium">Day</span>
+          <span className={`text-[12px] font-bold tabular-nums ${pnlColor(combinedDailyPnl)}`}>
+            {combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}
+          </span>
+          <span className={`text-[10px] font-medium tabular-nums opacity-60 ${pnlColor(combinedDailyPnl)}`}>
+            ({combinedDailyPct >= 0 ? "+" : ""}{(combinedDailyPct * 100).toFixed(2)}%)
+          </span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Buying Power</span>
-          <span className="text-[12px] font-semibold tabular-nums">{formatCurrency(account.buying_power)}</span>
+
+        {/* Separator */}
+        <div className="w-px h-4 bg-border" />
+
+        {/* Per-broker breakdown */}
+        <div className="flex items-center gap-3">
+          {hasAlpaca && (
+            <div className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span className="text-[10px] text-muted-foreground/50 font-medium">ALP</span>
+              <span className="text-[10px] font-medium tabular-nums text-muted-foreground/70">{formatCurrency(alpacaEquity)}</span>
+            </div>
+          )}
+          {hasFutures && (
+            <div className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+              <span className="text-[10px] text-muted-foreground/50 font-medium">TDV</span>
+              <span className="text-[10px] font-medium tabular-nums text-muted-foreground/70">{formatCurrency(futuresEquity)}</span>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Mobile: compact view */}
-      <div className="flex md:hidden items-center gap-3">
-        <span className="text-[12px] font-bold tabular-nums">{formatCurrency(equity)}</span>
-      </div>
-
-      {/* Daily P&L — always visible */}
-      <div className="flex items-center gap-1.5 shrink-0">
-        <span className="hidden md:inline text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Daily P&L</span>
-        <span className={`text-[12px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
-          {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
-          <span className="text-[10px] font-medium ml-0.5 opacity-70">
-            ({dailyPnlPct >= 0 ? "+" : ""}{(dailyPnlPct * 100).toFixed(2)}%)
-          </span>
+      <div className="flex md:hidden items-center gap-2">
+        <span className="text-[12px] font-bold tabular-nums">{formatCurrency(combinedEquity)}</span>
+        <span className={`text-[11px] font-bold tabular-nums ${pnlColor(combinedDailyPnl)}`}>
+          {combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}
         </span>
       </div>
 
-      <div className="ml-auto flex items-center gap-1.5 shrink-0">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" />
-        <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider font-medium">Paper</span>
+      {/* Right side: market clock + status */}
+      <div className="ml-auto flex items-center gap-3 shrink-0">
+        {/* Market clock */}
+        {marketClock.label && (
+          <div className="hidden md:flex items-center gap-1.5">
+            <Clock className="w-3 h-3 text-muted-foreground/40" />
+            <span className={`text-[10px] font-medium ${marketClock.isOpen ? "text-emerald-400" : "text-muted-foreground/50"}`}>
+              {marketClock.countdown}
+            </span>
+          </div>
+        )}
+
+        {/* Connection indicators */}
+        <div className="flex items-center gap-2">
+          {hasAlpaca && (
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" title="Alpaca connected" />
+          )}
+          {hasFutures && (
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 live-dot" title="Tradovate connected" />
+          )}
+          {!hasAlpaca && !hasFutures && (
+            <div className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider font-medium">Demo</span>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );
