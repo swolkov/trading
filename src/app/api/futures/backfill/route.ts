@@ -79,24 +79,41 @@ export async function PUT(req: NextRequest) {
       }
 
       // Work backwards from current balance to reconstruct historical
+      // NEVER overwrite existing balance entries — they may have been manually verified
+      const existingKeys = new Set(
+        (await prisma.agentConfig.findMany({ where: { key: { startsWith: "daily_balance_" } }, select: { key: true } }))
+          .map((r) => r.key)
+      );
+      const existingEodKeys = new Set(
+        (await prisma.agentConfig.findMany({ where: { key: { startsWith: "eod_balance_" } }, select: { key: true } }))
+          .map((r) => r.key)
+      );
       const dates = Object.keys(dailyPnls).sort().reverse();
       let runningBalance = account.balance;
       for (const date of dates) {
-        if (date === today) continue; // already saved
-        // Start-of-day balance = end-of-day balance - that day's P&L
-        // end-of-day balance = start of next day = runningBalance
+        if (date === today) continue;
         const eodBalance = runningBalance;
         const sodBalance = eodBalance - dailyPnls[date];
+        // Skip if already has a manually-seeded value
+        if (existingKeys.has(`daily_balance_${date}`)) {
+          results.push(`skipped: ${date} (already has balance)`);
+          // Use the existing SOD as the running balance for the next iteration
+          const existing = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${date}` } });
+          if (existing) runningBalance = parseFloat(existing.value);
+          continue;
+        }
         await prisma.agentConfig.upsert({
           where: { key: `daily_balance_${date}` },
           update: { value: String(sodBalance) },
           create: { key: `daily_balance_${date}`, value: String(sodBalance) },
         });
-        await prisma.agentConfig.upsert({
-          where: { key: `eod_balance_${date}` },
-          update: { value: String(eodBalance) },
-          create: { key: `eod_balance_${date}`, value: String(eodBalance) },
-        });
+        if (!existingEodKeys.has(`eod_balance_${date}`)) {
+          await prisma.agentConfig.upsert({
+            where: { key: `eod_balance_${date}` },
+            update: { value: String(eodBalance) },
+            create: { key: `eod_balance_${date}`, value: String(eodBalance) },
+          });
+        }
         results.push(`reconstructed: ${date} SOD=$${sodBalance.toFixed(0)} EOD=$${eodBalance.toFixed(0)} (day P&L: $${dailyPnls[date].toFixed(0)})`);
         runningBalance = sodBalance;
       }
