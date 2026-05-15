@@ -267,15 +267,13 @@ export async function GET() {
       fillBasedPnl,
       activity,
       engineStatus,
-      startOfDayBalance: await (async () => {
-        try {
-          // Prefer today's date-keyed snapshot (most reliable), fall back to global
-          const today = new Date().toISOString().slice(0, 10);
-          const todaySnapshot = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
-          if (todaySnapshot?.value) return parseFloat(todaySnapshot.value);
-          const sod = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
-          return sod?.value ? parseFloat(sod.value) : null;
-        } catch { return null; }
+      startOfDayBalance: (() => {
+        // Most reliable: current balance minus today's realized P&L from Tradovate
+        // This always gives the correct SOD regardless of snapshot timing issues
+        if (accountSummary?.balance != null && accountSummary?.realizedPnl != null) {
+          return accountSummary.balance - accountSummary.realizedPnl;
+        }
+        return null;
       })(),
       // Historical daily balance snapshots for accurate Daily Breakdown
       balanceHistory: await (async () => {
