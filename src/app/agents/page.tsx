@@ -179,7 +179,7 @@ export default function AgentHubPage() {
       details: [
         futuresStatus?.connected ? `Tradovate DEMO: ${futuresStatus.accountName}` : "Tradovate not connected",
         "Real-time engine: Railway (24/7)",
-        "Risk: 0.2% equity per trade ($100 on $50k)",
+        "Risk: 7% per trade (~$490 on $7K) — 6-10 MES = ES equivalent",
         "Trailing stops + scale out + breakeven protection",
       ],
       endpoint: "/api/futures",

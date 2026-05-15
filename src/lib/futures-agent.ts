@@ -32,16 +32,20 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 // Multi-timeframe analysis, key levels, VWAP bands, session awareness,
 // bracket orders (stop + target placed with entry), equity-based sizing.
 
-// ============ RULES — SCALE WITH EQUITY ============
+// ============ RULES — $7K ACCOUNT, ES-EQUIVALENT VIA MICROS ============
+// Trade 6-10 MES per trade to match ES-level P&L ($50/pt at 10 MES).
+// Aggressive sizing with ironclad daily/drawdown limits.
+// Scale-out advantage: 10 MES lets you sell 5 at 1R, trail 5 for runners.
 
 const FUTURES_RULES = {
-  // Risk as % of equity — sized to make real money
-  RISK_PER_TRADE_PCT: 0.01,         // 1% of equity per trade ($500 on $50k, $1k on $100k)
-  DAILY_LOSS_LIMIT_PCT: 0.025,      // 2.5% daily max loss (allows 2-3 full losses before stopping)
-  MAX_DRAWDOWN_PCT: 0.05,           // 5% drawdown kill switch
-  MAX_CONTRACTS_PER_TRADE: 5,       // Up to 5 contracts per trade (was 2 — too conservative for full-size)
-  MAX_TOTAL_CONTRACTS: 10,          // Max 10 total across all instruments
-  MAX_TRADES_PER_DAY: 8,
+  // Risk per trade: 7% = $490 on $7K → sizes to 6-10 MES depending on stop distance
+  // This matches the old 1% on $50K (= $500 risk) that produced the $1,200 trades
+  RISK_PER_TRADE_PCT: 0.07,         // 7% of equity per trade ($490 on $7K)
+  DAILY_LOSS_LIMIT_PCT: 0.14,       // 14% daily max ($980 on $7K — 2 full losses then STOP)
+  MAX_DRAWDOWN_PCT: 0.20,           // 20% drawdown kill switch ($1,400 on $7K — 3 bad days → lockdown)
+  MAX_CONTRACTS_PER_TRADE: 10,      // 10 MES = 1 ES equivalent
+  MAX_TOTAL_CONTRACTS: 15,          // Can hold multiple symbols (e.g. 10 MES + 5 MNQ)
+  MAX_TRADES_PER_DAY: 4,            // Fewer trades, higher quality — only A/A+ setups
 
   // Technical
   ATR_STOP_MULTIPLIER: 1.5,
@@ -52,12 +56,14 @@ const FUTURES_RULES = {
   RTH_END_ET: 16,                   // 4:00 PM ET
   AVOID_FIRST_MINUTES: 15,          // Avoid first 15 min (opening chaos)
   AVOID_LAST_MINUTES: 15,           // Avoid last 15 min (closing chaos)
+
+  // Simulated live capital — agent uses this instead of actual demo equity
+  SIMULATED_EQUITY: 7_000,          // $7K live capital
 };
 
 // ============ WHICH CONTRACTS TO TRADE ============
-// Auto-selects full-size vs micro based on account equity.
-// $25k+ = full-size (ES $50/pt, NQ $20/pt, GC $100/pt) — real money
-// <$25k = micros (MES $5/pt, MNQ $2/pt, MGC $10/pt) — grind it up
+// DEMO MODE: Force micros to mirror $5K live conditions.
+// When live and scaled to $25k+, switch to full-size.
 const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
 
 const FULL_SIZE_PRIORITY: { symbol: string; when: string }[] = [
@@ -72,7 +78,9 @@ const MICRO_PRIORITY: { symbol: string; when: string }[] = [
 ];
 
 function getTradePriority(equity: number): { symbol: string; when: string }[] {
-  return equity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_PRIORITY : MICRO_PRIORITY;
+  // Force micros when simulating small account (demo or live under threshold)
+  const effectiveEquity = FUTURES_RULES.SIMULATED_EQUITY || equity;
+  return effectiveEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_PRIORITY : MICRO_PRIORITY;
 }
 
 // ============ TECHNICAL INDICATORS ============
@@ -241,31 +249,44 @@ function classifyDayType(
 // Not all hours are equal. This adjusts confidence and position size.
 
 function getTimeQuality(session: Session, minutesSinceOpen: number): { quality: "prime" | "good" | "avoid"; sizeMultiplier: number } {
-  // RTH prime: 9:45-11:30 AM ET (post-opening-range, best setups)
+  // ============ TWO WINDOWS ONLY ============
+  // The edge lives in two places. Everything else is noise that bleeds money.
+  //
+  // WINDOW 1: 9:45-11:30 AM ET — Morning prime. 80% of daily P&L comes from here.
+  //   Volume is highest, setups follow through, institutions are active.
+  //
+  // WINDOW 2: 2:00-3:30 PM ET — Afternoon flow. Second best window.
+  //   Institutional rebalancing, trend resumption after lunch chop.
+  //
+  // EVERYTHING ELSE: Manage existing positions only. No new entries.
+  //   Lunch (11:30-2:00) = chop that erases morning gains.
+  //   Overnight = thin liquidity, wide spreads, fake moves, not worth $490 risk.
+
+  // WINDOW 1: Morning prime — FULL SIZE
   if (session === "morning" && minutesSinceOpen >= 15) return { quality: "prime", sizeMultiplier: 1.0 };
 
-  // RTH afternoon: 1:30-3:45 PM ET (second best window)
+  // WINDOW 2: Afternoon — 80% size (slightly less reliable than morning)
   if (session === "afternoon") return { quality: "good", sizeMultiplier: 0.8 };
 
-  // RTH lunch: 11:30 AM - 1:30 PM = chop — reduce size
-  if (session === "midday") return { quality: "avoid", sizeMultiplier: 0.5 };
+  // ── BLOCKED SESSIONS — position management only, no new entries ──
 
-  // RTH close: 3:45-4:00 PM = don't open new trades
+  // Lunch: the account killer. Volume drops 40-60%, everything mean-reverts.
+  if (session === "midday") return { quality: "avoid", sizeMultiplier: 0 };
+
+  // Close: too chaotic for new entries
   if (session === "close") return { quality: "avoid", sizeMultiplier: 0 };
 
-  // ETH Europe/London: 3 AM - 9 AM ET = good liquidity, real setups
-  if (session === "eth_europe") return { quality: "good", sizeMultiplier: 0.6 };
-
-  // ETH evening: 6 PM - 10 PM ET = thin but can trend
-  if (session === "eth_evening") return { quality: "good", sizeMultiplier: 0.4 };
-
-  // ETH Asia: 10 PM - 3 AM ET = thinnest liquidity, reduce heavily
-  if (session === "eth_asia") return { quality: "avoid", sizeMultiplier: 0.3 };
+  // All ETH sessions: not worth the risk on a $7K account.
+  // The agent still manages positions (trailing stops, scale-outs) during ETH,
+  // but will not open new trades.
+  if (session === "eth_europe") return { quality: "avoid", sizeMultiplier: 0 };
+  if (session === "eth_evening") return { quality: "avoid", sizeMultiplier: 0 };
+  if (session === "eth_asia") return { quality: "avoid", sizeMultiplier: 0 };
 
   // Halt
   if (session === "halt") return { quality: "avoid", sizeMultiplier: 0 };
 
-  return { quality: "good", sizeMultiplier: 0.7 };
+  return { quality: "avoid", sizeMultiplier: 0 };
 }
 
 // ============ VOLUME ANALYSIS ============
@@ -555,12 +576,17 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Determine if we should scan for NEW trades (vs just managing positions)
-  // Position management ALWAYS runs regardless of session
+  // Position management ALWAYS runs regardless of session.
+  // New entries ONLY during the two prime windows (morning + afternoon).
   const totalRTHMinutes = (FUTURES_RULES.RTH_END_ET - FUTURES_RULES.RTH_START_ET) * 60; // 390 min
   const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (totalRTHMinutes - FUTURES_RULES.AVOID_LAST_MINUTES));
-  const canScanNewTrades = session !== "close" && !isFirstLast15;
+  const timeQuality = getTimeQuality(session, minutesSinceOpen);
+  const canScanNewTrades = timeQuality.sizeMultiplier > 0 && !isFirstLast15;
   if (!canScanNewTrades) {
-    details.push(`New trade scanning paused (${isFirstLast15 ? "first/last 15 min RTH" : session}) — position management still active`);
+    const reason = timeQuality.sizeMultiplier === 0
+      ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
+      : "first/last 15 min RTH";
+    details.push(`New trade scanning BLOCKED (${reason}) — position management still active`);
   }
 
   // Market regime
@@ -599,18 +625,19 @@ export async function runFuturesAgent(): Promise<{
     if (vaultContext) details.push("VAULT: Loaded brain context (regime, lessons, anti-patterns)");
   } catch { /* vault optional */ }
 
-  // Account state
+  // Account state — use simulated equity for risk sizing, actual for monitoring
   let equity = 0;
+  let actualEquity = 0;
   try {
     const summary = await getTradovateAccountSummary();
-    equity = summary.netLiq || summary.balance || 0;
-    if (equity <= 0 || equity > 10_000_000) {
-      const reported = equity;
-      equity = 50_000; // conservative default for demo
-      details.push(`WARNING: Equity reported as $${reported.toLocaleString()} — using conservative $50k default`);
-      try { await sendNotification(`Futures agent equity anomaly: reported $${reported}. Using $50k default.`, "futures"); } catch {}
+    actualEquity = summary.netLiq || summary.balance || 0;
+    if (actualEquity <= 0 || actualEquity > 10_000_000) {
+      actualEquity = 50_000;
+      details.push(`WARNING: Equity anomaly — using $50k actual default`);
     }
-    details.push(`ACCOUNT: $${equity.toLocaleString()} (Unrealized: $${summary.unrealizedPnl.toFixed(0)})`);
+    // Use simulated equity for all risk calculations (mirrors $5K live)
+    equity = FUTURES_RULES.SIMULATED_EQUITY || actualEquity;
+    details.push(`ACCOUNT: Actual $${actualEquity.toLocaleString()} | Risk-sizing as $${equity.toLocaleString()} (Unrealized: $${summary.unrealizedPnl.toFixed(0)})`);
   } catch (err) {
     details.push(`Account error: ${err}`);
     return { trades, managed, details };
@@ -658,13 +685,12 @@ export async function runFuturesAgent(): Promise<{
   const todayPnl = todayTrades.filter((t) => t.pnl != null).reduce((s, t) => s + (t.pnl || 0), 0);
   const todayTradeCount = todayTrades.filter((t) => t.action.startsWith("futures_")).length;
 
+  // These limits block REAL trades but the agent keeps scanning in paper/learning mode
   if (todayPnl < -dailyLossLimit) {
-    details.push(`DAILY LOSS LIMIT: Down $${Math.abs(todayPnl).toFixed(0)} (limit: $${dailyLossLimit.toFixed(0)}). Stopping.`);
-    return { trades, managed, details };
+    details.push(`DAILY LOSS LIMIT: Down $${Math.abs(todayPnl).toFixed(0)} (limit: $${dailyLossLimit.toFixed(0)}). Real trades blocked — learning mode active.`);
   }
   if (todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY) {
-    details.push(`DAILY TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY} trades today. Stopping.`);
-    return { trades, managed, details };
+    details.push(`DAILY TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY} trades today. Real trades blocked — learning mode active.`);
   }
 
   // Get existing futures positions
@@ -842,12 +868,13 @@ export async function runFuturesAgent(): Promise<{
       }
     }
 
-    // ── SCALE OUT at 1R (close half) ──
-    // Only if 2+ contracts AND haven't already scaled today
+    // ── SCALE OUT at 1R (close half, or full close if only 1 contract) ──
+    // If 2+ contracts: close half, breakeven stop on rest (classic scale-out)
+    // If 1 contract: close entire position at 1R (can't split 1 contract)
     // IMPORTANT: After scaling, we cancel original bracket and let remaining ride without bracket
     // (the trailing stop logic above handles the exit for remaining contracts)
-    if (absQty >= 2 && priceDiff >= stopDistance && priceDiff < stopDistance * 2) {
-      const scaleQty = Math.floor(absQty / 2);
+    if (priceDiff >= stopDistance && priceDiff < stopDistance * 2) {
+      const scaleQty = absQty === 1 ? 1 : Math.floor(absQty / 2);
       if (scaleQty >= 1) {
         const alreadyScaled = await prisma.autoTradeLog.findFirst({
           where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out", createdAt: { gte: todayStart } },
@@ -923,10 +950,14 @@ export async function runFuturesAgent(): Promise<{
     }
   }
 
-  // ============ SCAN FOR NEW TRADES ============
-  if (!canScanNewTrades) {
-    details.push("Scan paused — positions managed, returning");
-    return { trades, managed, details };
+  // ============ SCAN FOR NEW TRADES (or paper-track if outside windows) ============
+  // LEARNING MODE: Even when we can't trade (lunch, overnight, daily limit hit, tilt),
+  // we still scan for setups and log them as "paper trades" with hypothetical entry/stop/target.
+  // The post-market review tracks whether these would have won or lost.
+  // This is how the brain learns 24/7 — studying setups even when it can't act.
+  const paperTradeMode = !canScanNewTrades || todayPnl < -dailyLossLimit || todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY;
+  if (paperTradeMode && !canScanNewTrades) {
+    details.push(`LEARNING MODE: Scanning for paper trades (${session} session) — no real entries`);
   }
 
   const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(p.netPos), 0);
@@ -963,14 +994,11 @@ export async function runFuturesAgent(): Promise<{
     }
   }
 
-  // Tilt pause: 2 consecutive stops = skip this scan, 3+ = skip entirely
+  // Tilt pause: 2+ consecutive stops = paper mode only (still scans for learning)
   if (consecutiveStops >= 3) {
-    details.push(`TILT L2: ${consecutiveStops} consecutive stops today — no new trades for rest of session`);
-    return { trades, managed, details };
-  }
-  if (consecutiveStops >= 2) {
-    details.push(`TILT L1: ${consecutiveStops} consecutive stops — pausing new entries this cycle`);
-    return { trades, managed, details };
+    details.push(`TILT L2: ${consecutiveStops} consecutive stops today — real trades blocked, learning mode`);
+  } else if (consecutiveStops >= 2) {
+    details.push(`TILT L1: ${consecutiveStops} consecutive stops — real trades blocked, learning mode`);
   }
 
   if (stoppedSymbols.size > 0) {
@@ -1073,7 +1101,7 @@ export async function runFuturesAgent(): Promise<{
     }
 
     if (setup.confidence < 55) {
-      details.push(`  Setup found (${setup.type}) but confidence too low: ${setup.confidence}%`);
+      details.push(`  Setup found (${setup.type}) but pre-AI confidence too low: ${setup.confidence}% — not worth AI call`);
       continue;
     }
 
@@ -1082,16 +1110,19 @@ export async function runFuturesAgent(): Promise<{
 
     // AI confirmation — Opus with extended thinking for decisive, opinionated calls
     try {
-      const aiPrompt = `You are an elite futures trader who makes thousands per trade. Be OPINIONATED. No hedging, no "it depends." You either love this trade or you kill it.
+      const aiPrompt = `You are an elite futures scalper trading a $7K account with 6-10 MES contracts per trade (ES-equivalent exposure). Every trade risks ~$500. You need to be RIGHT.
+
+CRITICAL CONTEXT: This is a small account going for big percentage gains. We can only afford 2 losses per day before the kill switch stops us. So ONLY approve trades where the edge is clear and the R:R is compelling. Kill anything marginal.
 
 ${symbol} setup:
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}
 15m trend: ${trend15} | Session: ${session} | Regime: ${regime} | Day type: ${dayType}
 Setup: ${setup.type} — ${setup.direction} — ${setup.reasoning}
 Key levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} PDL $${keyLevels.prevDayLow.toFixed(2)}
+Stop distance: ${setup.stopDistance.toFixed(2)} pts ($${(setup.stopDistance * contractInfo.multiplier).toFixed(0)}/contract) | Target: ${setup.targetDistance.toFixed(2)} pts | R:R: ${(setup.targetDistance / setup.stopDistance).toFixed(1)}
 ${vaultContext}
 
-Take the trade or don't. If the setup is A+, say so and size up. If it's mediocre, kill it — we only want high conviction trades that make real money.
+A+ = textbook setup, take max size. A = solid, full size. B = decent but not worth $500 risk. C = kill it.
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
@@ -1110,9 +1141,13 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       if (!ai.agree) {
         setup.confidence -= 30;
         details.push(`  AI KILLS TRADE: ${ai.reasoning}`);
+      } else if (ai.conviction === "C") {
+        // C-grade = AI technically agrees but isn't confident. Kill it — not worth $500 risk.
+        setup.confidence -= 20;
+        details.push(`  AI WEAK CONFIRM (C): ${ai.reasoning} — killing, not worth the risk`);
       } else {
-        // Conviction-based boost: A+ setups get major confidence bump
-        const convictionBoost = ai.conviction === "A+" ? 25 : ai.conviction === "A" ? 15 : ai.conviction === "B" ? 5 : -10;
+        // Conviction-based boost: A+ and A get big bumps, B is neutral
+        const convictionBoost = ai.conviction === "A+" ? 30 : ai.conviction === "A" ? 20 : 0;
         setup.confidence += convictionBoost;
         details.push(`  AI CONFIRMS (${ai.conviction || "?"}): ${ai.reasoning} [+${convictionBoost}]`);
       }
@@ -1120,9 +1155,9 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       details.push(`  AI unavailable — proceeding on technicals alone`);
     }
 
-    if (setup.confidence < 55) {
-      details.push(`  Final confidence ${setup.confidence}% — below threshold, skipping`);
-      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 55% threshold. ${setup.reasoning}`, 1); } catch {}
+    if (setup.confidence < 60) {
+      details.push(`  Final confidence ${setup.confidence}% — below 60% threshold, skipping`);
+      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 60% threshold. ${setup.reasoning}`, 1); } catch {}
       continue;
     }
 
@@ -1142,17 +1177,17 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
 
     const riskPerContract = stopDistance * contractInfo.multiplier;
 
-    // Sanity: if risk per contract exceeds 1% of equity, cap at 1 contract
+    // Size by risk budget: how many contracts fit within maxRiskPerTrade?
     const maxByRisk = Math.floor(maxRiskPerTrade / riskPerContract);
     const contracts = Math.max(1, Math.min(
       FUTURES_RULES.MAX_CONTRACTS_PER_TRADE,
       maxByRisk,
     ));
 
-    // Final sanity: never risk more than 2% on a single trade
+    // Hard ceiling: never risk more than 10% on a single trade (absolute safety net)
     const totalRisk = riskPerContract * contracts;
-    if (totalRisk > equity * 0.02) {
-      details.push(`  Risk too high ($${totalRisk.toFixed(0)} = ${((totalRisk / equity) * 100).toFixed(2)}% of equity) — capping at 1 contract`);
+    if (totalRisk > equity * 0.10) {
+      details.push(`  HARD CAP: Risk $${totalRisk.toFixed(0)} (${((totalRisk / equity) * 100).toFixed(1)}%) exceeds 10% ceiling — capping at 1 contract`);
     }
 
     const side = setup.direction === "long" ? "BUY" as const : "SELL" as const;
@@ -1160,10 +1195,32 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     const targetPrice = setup.direction === "long" ? price + targetDistance : price - targetDistance;
     const riskReward = targetDistance / stopDistance;
 
-    details.push(`  TRADE: ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)}`);
+    details.push(`  ${paperTradeMode ? "PAPER " : ""}TRADE: ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)}`);
     details.push(`  Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${riskReward.toFixed(1)} | Risk: $${(riskPerContract * contracts).toFixed(0)}`);
 
-    // ============ EXECUTE WITH BRACKET ORDER ============
+    // ============ PAPER TRADE MODE — LOG FOR LEARNING, DON'T EXECUTE ============
+    // The brain tracks these hypothetical trades. The post-market review checks if
+    // price hit the target or stop, scoring the setup's accuracy over time.
+    // This is how the agent learns 24/7 — even during lunch, overnight, after tilt, after daily limit.
+    if (paperTradeMode) {
+      details.push(`  PAPER TRADE LOGGED — would have entered ${side} ${contracts}x ${symbol}`);
+      const paperReason = `[PAPER] ${setup.type.replace(/_/g, " ").toUpperCase()}: ${side} ${contracts}x @ $${price.toFixed(2)}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${riskReward.toFixed(1)}. Session: ${session}. ${setup.reasoning}`;
+      try {
+        await prisma.autoTradeLog.create({ data: {
+          symbol: `FUT:${symbol}`, action: `paper_${setup.direction}`,
+          qty: contracts, price,
+          reason: paperReason,
+          aiScore: setup.confidence, aiSignal: setup.direction,
+        }});
+      } catch {}
+      try {
+        await logDecision("futures-agent", "PAPER", `FUT:${symbol}`, paperReason, setup.confidence);
+        await logObservation("futures-agent", `PAPER TRADE: ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)} | Stop $${stopPrice.toFixed(2)} Target $${targetPrice.toFixed(2)} | Session: ${session} | Setup: ${setup.type} | Would check at EOD if target/stop hit`);
+      } catch {}
+      continue; // Don't execute — just log and move to next symbol
+    }
+
+    // ============ EXECUTE WITH BRACKET ORDER (real trade) ============
     try {
       const order = await placeBracketOrder({
         contractId: contract.id,
