@@ -263,10 +263,10 @@ export default function DashboardPage() {
             ))
           ) : (
             <>
-              <div className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/[0.06] to-transparent p-4">
-                <p className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-bold">Total Portfolio</p>
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.03] p-4">
+                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-bold">Total Equity</p>
                 <p className="text-2xl font-black mt-1 tabular-nums">{formatCurrency(combinedEquity)}</p>
-                <p className="text-[11px] mt-0.5 text-muted-foreground/50">{totalPositions} positions</p>
+                <p className="text-[11px] mt-0.5 text-muted-foreground/40">{totalPositions} positions · 2 accounts</p>
               </div>
               <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
                 <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Daily P&L</p>

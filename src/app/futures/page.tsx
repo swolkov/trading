@@ -169,15 +169,15 @@ const STRATEGIES = [
 ];
 
 const RISK_RULES = [
-  "1% risk per trade ($50 on $5K)",
-  "Scale out 50% at 1R (or full close if 1 lot)",
-  "Breakeven stop at 1R profit",
-  "$250 daily loss kill switch (5%)",
-  "Max 3 contracts, 6 trades/day",
-  "AI hard gate (Claude confirms)",
-  "Tilt: 30min pause after 2 stops",
-  "EOD forced close at 3:50 PM",
-  "Micros only (MES/MNQ/MGC)",
+  "7% risk/trade ($490) — 6-10 MES per trade",
+  "Scale out 50% at 1R, trail rest for runners",
+  "TWO WINDOWS: 9:45-11:30 AM + 2:00-3:30 PM",
+  "$980 daily loss limit (2 full losses → stop)",
+  "Max 10 MES/trade, 4 trades/day",
+  "AI hard gate — only A/A+ setups (60%+ conf)",
+  "Tilt: pause after 2 stops, halt after 3",
+  "Paper trades outside windows (learning mode)",
+  "20% drawdown kill ($1,400) → lockdown",
   "No re-entry on stopped symbols",
 ];
 
@@ -213,7 +213,7 @@ export default function FuturesPage() {
   const [result, setResult] = useState<FuturesResult | null>(null);
   const [running, setRunning] = useState(false);
   const [selectedContract, setSelectedContract] = useState("MES");
-  const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "history" | "backtest" | "reports">("chart");
+  const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
@@ -286,7 +286,7 @@ export default function FuturesPage() {
   const winCount = hasFillData ? fillPnl.wins : wins.length;
   const lossCount = hasFillData ? fillPnl.losses : losses.length;
   // Total P&L: use Tradovate account equity as source of truth (DB trade sums are unreliable due to reconciliation bugs)
-  const STARTING_CAPITAL = 5_000;
+  const STARTING_CAPITAL = 7_000;
   const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
   const totalPnl = accountPnl ?? (hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
   const avgWin = hasFillData
@@ -439,7 +439,7 @@ export default function FuturesPage() {
         <div className="space-y-3">
           {/* Tab bar */}
           <div className="flex gap-1 border-b border-white/[0.06] pb-2">
-            {(["chart", "strategy", "backtest", "history", "reports"] as const).map((tab) => (
+            {(["chart", "strategy", "backtest"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => {
@@ -459,10 +459,7 @@ export default function FuturesPage() {
                     : "text-muted-foreground/60 hover:text-foreground"
                 }`}
               >
-                {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : tab === "backtest" ? "Backtest" : tab === "reports" ? "Reports" : "Trade History"}
-                {tab === "history" && allTrades.length > 0 && (
-                  <span className="ml-1 text-[9px] text-muted-foreground/40">({allTrades.length})</span>
-                )}
+                {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : "Backtest"}
               </button>
             ))}
           </div>
@@ -684,8 +681,8 @@ export default function FuturesPage() {
             </Card>
           )}
 
-          {/* History tab */}
-          {activeTab === "history" && (() => {
+          {/* History/Reports removed — use Journal + Orders pages */}
+          {false && (() => {
             const periodStart = historyPeriod === "today" ? todayStart
               : historyPeriod === "week" ? weekStart
               : historyPeriod === "month" ? monthStart
@@ -701,7 +698,7 @@ export default function FuturesPage() {
 
             // Group by day for daily breakdown — use Tradovate balance deltas as source of truth
             const balHist = posData?.balanceHistory || [];
-            const balByDate: Record<string, { sod?: number; eod?: number }> = {};
+            const balByDate: Record<string, { sod: number | undefined; eod: number | undefined }> = {};
             for (const b of balHist) {
               balByDate[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
             }
@@ -725,10 +722,10 @@ export default function FuturesPage() {
               const nextDate = sortedBalDates[i + 1];
               const nextBal = nextDate ? balByDate[nextDate] : null;
               let balancePnl: number | null = null;
-              if (bal.eod != null && bal.sod != null) {
-                balancePnl = bal.eod - bal.sod;
-              } else if (nextBal?.sod != null && bal.sod != null) {
-                balancePnl = nextBal.sod - bal.sod;
+              if (bal?.eod !== undefined && bal?.sod !== undefined) {
+                balancePnl = (bal.eod as number) - (bal.sod as number);
+              } else if (nextBal?.sod !== undefined && bal?.sod !== undefined) {
+                balancePnl = (nextBal.sod as number) - (bal.sod as number);
               }
               if (balancePnl != null && dayMap[date]) {
                 dayMap[date].pnl = balancePnl;
@@ -926,8 +923,7 @@ export default function FuturesPage() {
             );
           })()}
 
-          {/* Reports tab */}
-          {activeTab === "reports" && (
+          {false && (
             <Card className="border-white/[0.06]">
               <CardContent className="pt-4 space-y-6">
                 {/* Equity Curve */}
@@ -1019,9 +1015,9 @@ export default function FuturesPage() {
                   <p className="text-xs font-bold mb-3">Daily P&L</p>
                   {(() => {
                     const balHist = posData?.balanceHistory || [];
-                    const balByDate: Record<string, { sod?: number; eod?: number }> = {};
+                    const balByDate2: Record<string, { sod: number | undefined; eod: number | undefined }> = {};
                     for (const b of balHist) {
-                      balByDate[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
+                      balByDate2[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
                     }
                     const reportDayMap: Record<string, { pnl: number; trades: number; wins: number; dateKey: string }> = {};
                     for (const t of closedTrades) {
@@ -1034,15 +1030,15 @@ export default function FuturesPage() {
                       if ((t.pnl || 0) > 0) reportDayMap[day].wins++;
                     }
                     // Override with balance deltas
-                    const sortedBalDates = Object.keys(balByDate).sort();
-                    for (let i = 0; i < sortedBalDates.length; i++) {
-                      const date = sortedBalDates[i];
-                      const bal = balByDate[date];
-                      const nextDate = sortedBalDates[i + 1];
-                      const nextBal = nextDate ? balByDate[nextDate] : null;
+                    const sortedBalDates2 = Object.keys(balByDate2).sort();
+                    for (let i = 0; i < sortedBalDates2.length; i++) {
+                      const date = sortedBalDates2[i];
+                      const bal2 = balByDate2[date];
+                      const nextDate = sortedBalDates2[i + 1];
+                      const nextBal = nextDate ? balByDate2[nextDate] : null;
                       let balPnl: number | null = null;
-                      if (bal.eod != null && bal.sod != null) balPnl = bal.eod - bal.sod;
-                      else if (nextBal?.sod != null && bal.sod != null) balPnl = nextBal.sod - bal.sod;
+                      if (bal2?.eod !== undefined && bal2?.sod !== undefined) balPnl = (bal2.eod as number) - (bal2.sod as number);
+                      else if (nextBal?.sod !== undefined && bal2?.sod !== undefined) balPnl = (nextBal.sod as number) - (bal2.sod as number);
                       if (balPnl != null) {
                         const d = new Date(date + "T12:00:00Z");
                         const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });

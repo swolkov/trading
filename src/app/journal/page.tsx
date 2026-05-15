@@ -37,6 +37,9 @@ interface FuturesActivity {
 interface FuturesData {
   connected: boolean;
   activity: FuturesActivity[];
+  account?: { balance: number } | null;
+  startOfDayBalance?: number | null;
+  balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
 }
 
 interface JournalDay {
@@ -234,6 +237,9 @@ export default function JournalPage() {
       }
     }
 
+    // Futures activity: use trades for counts, but P&L from balance history (source of truth)
+    // DB trade P&L values are unreliable (double-logging inflates them).
+    // Tradovate account balance deltas are the only accurate P&L source.
     for (const t of (futuresData?.activity || [])) {
       const dateKey = new Date(t.time).toISOString().slice(0, 10);
       if (!dayMap[dateKey]) {
@@ -248,10 +254,38 @@ export default function JournalPage() {
       dayMap[dateKey].futuresTrades.push(t);
       dayMap[dateKey].tradeCount++;
       if (t.pnl != null) {
-        dayMap[dateKey].totalPnl += t.pnl;
+        // Only count wins/losses for display, NOT for P&L total
         if (t.pnl > 0) dayMap[dateKey].winCount++;
         else if (t.pnl < 0) dayMap[dateKey].lossCount++;
       }
+    }
+
+    // Override futures daily P&L with Tradovate balance deltas (source of truth)
+    const balHist = futuresData?.balanceHistory || [];
+    const balByDate: Record<string, { sod?: number; eod?: number }> = {};
+    for (const b of balHist) {
+      balByDate[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
+    }
+    const sortedBalDates = Object.keys(balByDate).sort();
+    for (let i = 0; i < sortedBalDates.length; i++) {
+      const date = sortedBalDates[i];
+      const bal = balByDate[date];
+      const nextDate = sortedBalDates[i + 1];
+      const nextBal = nextDate ? balByDate[nextDate] : null;
+      let balancePnl: number | null = null;
+      if (bal.eod != null && bal.sod != null) {
+        balancePnl = bal.eod - bal.sod;
+      } else if (nextBal?.sod != null && bal.sod != null) {
+        balancePnl = nextBal.sod - bal.sod;
+      }
+      if (balancePnl != null && dayMap[date]) {
+        dayMap[date].totalPnl += balancePnl;
+      }
+    }
+    // Today: use live balance delta
+    const todayKey = new Date().toISOString().slice(0, 10);
+    if (futuresData?.startOfDayBalance != null && futuresData?.account?.balance != null && dayMap[todayKey]) {
+      dayMap[todayKey].totalPnl += futuresData.account.balance - futuresData.startOfDayBalance;
     }
 
     return Object.values(dayMap).sort((a, b) => b.date.localeCompare(a.date));
