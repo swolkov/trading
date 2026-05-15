@@ -926,6 +926,48 @@ export async function runFuturesAgent(): Promise<{
     return { trades, managed, details };
   }
 
+  // ── TILT PROTECTION: No re-entry on recently stopped symbols ──
+  // Query today's stops to build stopped-symbol set and consecutive-stop count
+  const stoppedSymbols = new Set<string>();
+  let consecutiveStops = 0;
+  {
+    const recentCloses = todayTrades
+      .filter((t) => t.action.startsWith("futures_") && t.action !== "futures_long" && t.action !== "futures_short")
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    // Track symbols that were stopped out today — no re-entry
+    for (const t of recentCloses) {
+      const sym = t.symbol.replace("FUT:", "");
+      if (t.action.includes("stop_loss") || t.action.includes("emergency")) {
+        stoppedSymbols.add(sym);
+      }
+    }
+
+    // Count consecutive stops from the tail (most recent trades)
+    for (let i = recentCloses.length - 1; i >= 0; i--) {
+      const a = recentCloses[i].action;
+      if (a.includes("stop_loss") || a.includes("emergency")) {
+        consecutiveStops++;
+      } else {
+        break; // streak broken by a profitable exit
+      }
+    }
+  }
+
+  // Tilt pause: 2 consecutive stops = skip this scan, 3+ = skip entirely
+  if (consecutiveStops >= 3) {
+    details.push(`TILT L2: ${consecutiveStops} consecutive stops today — no new trades for rest of session`);
+    return { trades, managed, details };
+  }
+  if (consecutiveStops >= 2) {
+    details.push(`TILT L1: ${consecutiveStops} consecutive stops — pausing new entries this cycle`);
+    return { trades, managed, details };
+  }
+
+  if (stoppedSymbols.size > 0) {
+    details.push(`STOPPED SYMBOLS (no re-entry): ${[...stoppedSymbols].join(", ")}`);
+  }
+
   // Determine which symbols to trade based on regime
   const symbolsToTrade = TRADE_PRIORITY
     .filter((s) => s.when === "always" || (s.when === "trending" && (regime === "bull" || regime === "bear")))
@@ -935,6 +977,12 @@ export async function runFuturesAgent(): Promise<{
     // Skip if already have position in this symbol
     if (futuresPositions.some((p) => p.contractName.startsWith(symbol))) {
       details.push(`${symbol}: Already have position — skipping`);
+      continue;
+    }
+
+    // Skip if stopped out of this symbol today
+    if (stoppedSymbols.has(symbol)) {
+      details.push(`${symbol}: Stopped out today — no re-entry`);
       continue;
     }
 

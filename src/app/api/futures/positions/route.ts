@@ -241,37 +241,45 @@ export async function GET() {
     };
 
     // ── Reconciliation: cross-check DB trade P&L against fill-based round trips ──
-    // When Tradovate fills show a different P&L than what's in the DB, correct the DB.
-    // This runs on every positions fetch (~10s) but only writes when mismatches are found.
+    // IMPORTANT: Match by closest exit time AND exit price to avoid cross-contamination
+    // when multiple trades on the same symbol happen within minutes of each other.
     if (roundTrips.length > 0) {
       try {
+        const matchedDbIds = new Set<number>(); // prevent one round-trip from stealing another's match
         for (const rt of roundTrips) {
-          // Find the matching DB close entry by symbol + exit time (within 5 min window)
-          const exitTime = new Date(rt.exitTime);
-          const windowStart = new Date(exitTime.getTime() - 5 * 60 * 1000);
-          const windowEnd = new Date(exitTime.getTime() + 5 * 60 * 1000);
-          const dbMatch = recentLogs.find((log) => {
-            if (log.symbol !== `FUT:${rt.symbol}`) return false;
-            if (!log.pnl) return false;
-            // Must be a close action (not an entry)
-            if (log.action === "futures_long" || log.action === "futures_short") return false;
-            const logTime = new Date(log.createdAt);
-            return logTime >= windowStart && logTime <= windowEnd;
-          });
+          const exitTime = new Date(rt.exitTime).getTime();
+          // Find the BEST matching DB close entry: same symbol, close action, closest in time + price
+          let bestMatch: typeof recentLogs[0] | null = null;
+          let bestScore = Infinity;
+          for (const log of recentLogs) {
+            if (log.symbol !== `FUT:${rt.symbol}`) continue;
+            if (log.pnl == null) continue;
+            if (log.action === "futures_long" || log.action === "futures_short") continue;
+            if (matchedDbIds.has(log.id)) continue; // already matched to a different round-trip
+            const logTime = new Date(log.createdAt).getTime();
+            const timeDiff = Math.abs(logTime - exitTime);
+            if (timeDiff > 2 * 60 * 1000) continue; // tighten window to 2 min (was 5)
+            // Score by time proximity + price proximity (lower = better)
+            const priceDiff = log.price ? Math.abs(log.price - rt.exitPrice) : 0;
+            const score = timeDiff + priceDiff * 60000; // weight price match heavily
+            if (score < bestScore) {
+              bestScore = score;
+              bestMatch = log;
+            }
+          }
 
-          if (dbMatch && dbMatch.pnl != null) {
-            const diff = Math.abs(dbMatch.pnl - rt.pnl);
-            // Only correct if the difference is significant (> $1)
+          if (bestMatch && bestMatch.pnl != null) {
+            matchedDbIds.add(bestMatch.id);
+            const diff = Math.abs(bestMatch.pnl - rt.pnl);
             if (diff > 1) {
               await prisma.autoTradeLog.update({
-                where: { id: dbMatch.id },
+                where: { id: bestMatch.id },
                 data: {
                   pnl: rt.pnl,
-                  reason: dbMatch.reason + ` [reconciled: was $${dbMatch.pnl.toFixed(0)}, fills show $${rt.pnl.toFixed(0)}]`,
+                  reason: bestMatch.reason + ` [reconciled: was $${bestMatch.pnl.toFixed(0)}, fills show $${rt.pnl.toFixed(0)}]`,
                 },
               });
-              // Update the activity entry in-memory too so the current response is correct
-              const activityMatch = activity.find((a) => a.id === dbMatch.id);
+              const activityMatch = activity.find((a) => a.id === bestMatch.id);
               if (activityMatch) activityMatch.pnl = rt.pnl;
             }
           }
