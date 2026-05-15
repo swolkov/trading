@@ -208,8 +208,9 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
 
   // Call Claude for analysis
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 4000,
+    model: "claude-opus-4-6",
+    max_tokens: 16000,
+    thinking: { type: "enabled", budget_tokens: 10000 },
     messages: [{ role: "user", content: prompt }],
   });
 
@@ -730,8 +731,9 @@ Guidelines:
   ];
 
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 2000,
+    model: "claude-opus-4-6",
+    max_tokens: 16000,
+    thinking: { type: "enabled", budget_tokens: 10000 },
     system: systemPrompt,
     messages,
   });

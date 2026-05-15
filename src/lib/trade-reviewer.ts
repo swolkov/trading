@@ -38,8 +38,9 @@ export async function reviewClosedTrades(): Promise<string[]> {
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
+      model: "claude-opus-4-6",
+      max_tokens: 12000,
+      thinking: { type: "enabled", budget_tokens: 8000 },
       messages: [{
         role: "user",
         content: `Review these closed trades and extract SPECIFIC, ACTIONABLE lessons. What patterns do you see? What should we do differently?

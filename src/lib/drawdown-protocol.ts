@@ -68,39 +68,39 @@ const MODE_CONFIGS: Record<DrawdownMode, {
     description: "Normal operations. All strategies available.",
   },
   CAUTION: {
-    triggers: { drawdownPct: 3, consecutiveLosses: 3 },
+    triggers: { drawdownPct: 5, consecutiveLosses: 4 },
     overrides: {
-      sizeMultiplier: 0.6,
-      minScoreOverride: 60, // raise from default 55
-      minConfidenceOverride: 70,
-      stopMultiplier: 0.85, // 15% tighter stops
-      profitTargetMultiplier: 0.8, // take profits sooner
-      allowedStrategies: ["premium_selling", "credit_spread", "iron_condor", "directional_high_conviction"],
-      bannedStrategies: ["quick_play", "gap_play", "momentum"],
+      sizeMultiplier: 0.75,
+      minScoreOverride: 60,
+      minConfidenceOverride: 65,
+      stopMultiplier: 0.9, // 10% tighter stops
+      profitTargetMultiplier: 0.85,
+      allowedStrategies: ["all"],
+      bannedStrategies: ["quick_play"],
       maxCorrelation: 0.5,
-      maxPositions: 5,
+      maxPositions: 6,
       winsToRecover: 2,
     },
-    description: "Elevated caution. Only high-quality setups. No speculative plays.",
+    description: "Caution. Slightly tighter risk, still trading all setups.",
   },
   RECOVERY: {
-    triggers: { drawdownPct: 5, consecutiveLosses: 5, winRate: 30 },
+    triggers: { drawdownPct: 8, consecutiveLosses: 6, winRate: 25 },
     overrides: {
-      sizeMultiplier: 0.3,
-      minScoreOverride: 70, // only A+ setups
-      minConfidenceOverride: 80,
-      stopMultiplier: 0.7, // 30% tighter stops
-      profitTargetMultiplier: 0.6, // lock in profits fast
-      allowedStrategies: ["premium_selling", "iron_condor"], // theta strategies ONLY
-      bannedStrategies: ["buy_call", "buy_put", "quick_play", "gap_play", "momentum", "earnings", "straddle"],
-      maxCorrelation: 0.3,
-      maxPositions: 3,
+      sizeMultiplier: 0.5,
+      minScoreOverride: 65,
+      minConfidenceOverride: 70,
+      stopMultiplier: 0.8, // 20% tighter stops
+      profitTargetMultiplier: 0.7,
+      allowedStrategies: ["premium_selling", "credit_spread", "iron_condor", "directional_high_conviction"],
+      bannedStrategies: ["quick_play", "gap_play", "momentum"],
+      maxCorrelation: 0.4,
+      maxPositions: 4,
       winsToRecover: 3,
     },
-    description: "Recovery mode. Theta-only strategies. Tiny positions. Prove the system works before scaling back up.",
+    description: "Recovery mode. High conviction only. Reduced size but still trading.",
   },
   LOCKDOWN: {
-    triggers: { drawdownPct: 8, consecutiveLosses: 7 },
+    triggers: { drawdownPct: 12, consecutiveLosses: 8 },
     overrides: {
       sizeMultiplier: 0,
       minScoreOverride: 100, // effectively blocks all trades

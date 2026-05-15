@@ -25,17 +25,40 @@ const ORDER_API = DEMO_API;
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
-// MES ($5/pt), MNQ ($2/pt) — equity indices
-// MGC ($10/pt) — micro gold, diversification + risk-off hedge
-const SYMBOLS = ["MES", "MNQ", "MGC"];
+// Subscribe to both full-size and micro — trade whichever fits account equity
+// Full-size: ES ($50/pt), NQ ($20/pt), GC ($100/pt) — need $25k+
+// Micro: MES ($5/pt), MNQ ($2/pt), MGC ($10/pt) — works with any account
+const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC"];
+const MICRO_SYMBOLS = ["MES", "MNQ", "MGC"];
+// Map full-size to micro equivalents
+const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC" };
+const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC" };
+// $25k threshold: below this, trade micros. Above, trade full-size.
+const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
+
+// Active trading symbols — recalculated when equity updates
+let SYMBOLS = MICRO_SYMBOLS; // default to micros, upgraded on startup after equity fetch
+
+function updateTradingSymbols() {
+  const prev = SYMBOLS;
+  SYMBOLS = tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS;
+  if (prev !== SYMBOLS) {
+    log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ")} (${tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? "full-size" : "micros"})`);
+  }
+}
+
 const YAHOO_MAP: Record<string, string> = {
+  ES: "ES=F", NQ: "NQ=F", GC: "GC=F",
   MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F",
 };
 const CONTRACT_MULTIPLIERS: Record<string, number> = {
+  // Full-size
+  ES: 50, NQ: 20, GC: 100, YM: 5, RTY: 50,
+  // Micros
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
 };
 // Symbols that are metals (different session timing + strategy)
-const METALS = new Set(["MGC"]);
+const METALS = new Set(["MGC", "GC"]);
 
 // ── Tradovate Auth (for order execution only) ───────────
 
@@ -189,7 +212,8 @@ interface ContractInfo { id: number; name: string; tickSize: number; symbol: str
 const contracts: Map<string, ContractInfo> = new Map();
 
 async function resolveContracts() {
-  for (const sym of SYMBOLS) {
+  // Resolve both full-size and micro contracts so we can switch dynamically
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
     try {
       const results = await apiFetch(`/contract/suggest?t=${sym}&l=5`) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
       if (results.length > 0) {
@@ -1158,8 +1182,9 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 100,
+        model: "claude-opus-4-6",
+        max_tokens: 8000,
+        thinking: { type: "enabled", budget_tokens: 5000 },
         messages: [{ role: "user", content: prompt }],
       }),
       signal: AbortSignal.timeout(30000),
@@ -1239,12 +1264,12 @@ function onBarClose(sym: string, bar: Bar) {
   if (stoppedSymbols.has(sym)) return;
 
   // CORRELATION GATE: don't hold two equity index positions simultaneously
-  // MES and MNQ are 90%+ correlated — holding both is doubling the same bet
-  const EQUITY_INDICES = new Set(["MES", "MNQ", "MYM", "M2K"]);
+  // ES and NQ are 90%+ correlated — holding both is doubling the same bet
+  const EQUITY_INDICES = new Set(["ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K"]);
   if (EQUITY_INDICES.has(sym)) {
     const holdingEquityIndex = [...positions.keys()].some(s => EQUITY_INDICES.has(s));
     if (holdingEquityIndex) {
-      // Already holding an equity index — only allow MGC (uncorrelated) or same-symbol addition
+      // Already holding an equity index — only allow GC/MGC (uncorrelated) or same-symbol addition
       return;
     }
   }
@@ -1351,7 +1376,7 @@ function onBarClose(sym: string, bar: Bar) {
   }
 
   // SETUP: GAP FILL (highest statistical edge — 78% fill rate on small gaps)
-  const GAP_THRESHOLDS: Record<string, number> = { MES: 10, MNQ: 50, MGC: 15 };
+  const GAP_THRESHOLDS: Record<string, number> = { ES: 10, NQ: 50, GC: 15, MES: 10, MNQ: 50, MGC: 15 };
   if (b.barCount >= 1 && b.barCount <= 6 && b.prevDayClose > 0 && (session === "open" || session === "morning")) {
     const gap = b.sessionBars.length > 0 ? b.sessionBars[0].o - b.prevDayClose : 0;
     const absGap = Math.abs(gap);
@@ -1545,15 +1570,12 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   if (!contract) return;
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  const equity = tradovateEquity; // Live from Tradovate demo account
-  // Sizing: A+ setups get more size to make $100-$1000 per trade
-  // 90+ confidence = 1.5% risk, 80+ = 1%, <80 = 0.5%
-  // Gold: half size for first week while we validate setups
-  const metalPenalty = METALS.has(sym) ? 0.5 : 1.0;
-  const riskPct = (confidenceScore >= 90 ? 0.015 : confidenceScore >= 80 ? 0.01 : 0.005) * metalPenalty;
+  const equity = tradovateEquity;
+  // 1% risk per trade, consistent with futures-agent.ts FUTURES_RULES
+  const riskPct = 0.01;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  const qty = Math.max(1, Math.min(2, Math.floor(maxRisk / riskPer))); // HARD CAP: 2 contracts max (was 20 — caused 16-contract emergency exits)
+  const qty = Math.max(1, Math.min(5, Math.floor(maxRisk / riskPer))); // Max 5 contracts per trade (matches futures-agent)
   const rr = targetDist / stopDist;
   if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
 
@@ -1861,7 +1883,8 @@ async function syncPositions() {
 async function preloadBars() {
   log("Pre-loading historical bars from Yahoo Finance...");
 
-  for (const sym of SYMBOLS) {
+  // Preload for ALL symbols (both full-size and micro share Yahoo feeds, but we need bar builders for each)
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
     const yahooSym = YAHOO_MAP[sym];
     const b = barBuilders.get(sym);
     if (!b) continue;
@@ -1938,6 +1961,7 @@ async function updateTradovateEquity() {
     const cashBalances = await apiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${accountId}`) as Record<string, number>;
     if (cashBalances?.totalCashValue) {
       tradovateEquity = cashBalances.totalCashValue;
+      updateTradingSymbols();
       log(`[EQUITY] Tradovate account equity: $${tradovateEquity.toLocaleString()}`);
     }
   } catch {
@@ -2122,7 +2146,7 @@ async function updateEarningsWeekFilter() {
     }
 
     if (earningsWeekSymbols.length > 0) {
-      log(`[EARNINGS] Mega-cap earnings this week: ${earningsWeekSymbols.join(", ")} — MNQ size ${(earningsWeekNQPenalty * 100).toFixed(0)}%`);
+      log(`[EARNINGS] Mega-cap earnings this week: ${earningsWeekSymbols.join(", ")} — NQ size ${(earningsWeekNQPenalty * 100).toFixed(0)}%`);
     }
   } catch (err) {
     log(`[EARNINGS] Filter fetch failed: ${err}`);
@@ -2363,7 +2387,8 @@ async function main() {
 
   await authenticateWithRetry();
   await resolveContracts();
-  for (const sym of SYMBOLS) initBarBuilder(sym);
+  // Init bar builders for ALL symbols (both full-size and micro) so we can switch dynamically
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) initBarBuilder(sym);
 
   // Restore positions from database (survive restarts)
   await loadPositions();
@@ -2371,12 +2396,12 @@ async function main() {
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
 
-  // Get account equity + VIX + macro intelligence
+  // Get account equity + VIX + macro intelligence — this also sets SYMBOLS based on equity
   await updateTradovateEquity();
-  // Save balance snapshot on startup — ensures we always have a recent reference point
+  // Save balance snapshot on startup — ensures we always have today's reference point
   try {
     const today = new Date().toISOString().slice(0, 10);
-    // Only save as SOD if we don't already have one for today (don't overwrite the 9:30 AM snapshot)
+    // If no SOD snapshot for today, save one now (catches deploys/restarts after 9:29 AM)
     const existing = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
     if (!existing) {
       await prisma.agentConfig.upsert({
@@ -2384,16 +2409,24 @@ async function main() {
         update: { value: String(tradovateEquity) },
         create: { key: `daily_balance_${today}`, value: String(tradovateEquity) },
       });
-      log(`[STARTUP] Saved initial balance snapshot: $${tradovateEquity.toFixed(2)} (${today})`);
-    }
-    // Always update start_of_day_balance if not set
-    const sod = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
-    if (!sod) {
+      // Also update the global start_of_day_balance (may be stale from yesterday after a deploy)
       await prisma.agentConfig.upsert({
         where: { key: "start_of_day_balance" },
         update: { value: String(tradovateEquity) },
         create: { key: "start_of_day_balance", value: String(tradovateEquity) },
       });
+      log(`[STARTUP] Saved SOD balance snapshot: $${tradovateEquity.toFixed(2)} (${today})`);
+    } else {
+      // SOD snapshot exists for today — make sure start_of_day_balance matches it (not stale from prior day)
+      const sodGlobal = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+      if (!sodGlobal || sodGlobal.value !== existing.value) {
+        await prisma.agentConfig.upsert({
+          where: { key: "start_of_day_balance" },
+          update: { value: existing.value },
+          create: { key: "start_of_day_balance", value: existing.value },
+        });
+        log(`[STARTUP] Synced start_of_day_balance to today's snapshot: $${existing.value}`);
+      }
     }
   } catch {}
   await updateVIX();

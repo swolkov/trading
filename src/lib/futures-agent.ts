@@ -21,12 +21,17 @@ import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, u
 import { evaluateDrawdownState } from "./drawdown-protocol";
 import { getSessionInfo, getETDateString, getRTHStartUTC, type Session } from "./session-time";
 
-// Yahoo Finance symbols for micro futures (use the full-size contract as proxy)
+// Yahoo Finance symbols for futures (full-size and micro share the same price feed)
 const YAHOO_FUTURES_MAP: Record<string, string> = {
-  MES: "ES=F",   // E-mini S&P 500
-  MNQ: "NQ=F",   // E-mini Nasdaq 100
-  MYM: "YM=F",   // E-mini Dow
-  M2K: "RTY=F",  // E-mini Russell 2000
+  ES: "ES=F",    // E-mini S&P 500 (full-size, $50/pt)
+  NQ: "NQ=F",    // E-mini Nasdaq 100 (full-size, $20/pt)
+  YM: "YM=F",    // E-mini Dow (full-size, $5/pt)
+  RTY: "RTY=F",  // E-mini Russell 2000 (full-size, $50/pt)
+  GC: "GC=F",    // Gold (full-size, $100/pt)
+  MES: "ES=F",   // Micro S&P 500
+  MNQ: "NQ=F",   // Micro Nasdaq 100
+  MYM: "YM=F",   // Micro Dow
+  M2K: "RTY=F",  // Micro Russell 2000
   MGC: "GC=F",   // Micro Gold
 };
 
@@ -42,32 +47,45 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 // ============ RULES — SCALE WITH EQUITY ============
 
 const FUTURES_RULES = {
-  // Risk as % of equity (works same for $1M paper and any live account)
-  RISK_PER_TRADE_PCT: 0.002,       // 0.2% of equity per trade ($2k on $1M, $200 on $100k)
-  DAILY_LOSS_LIMIT_PCT: 0.01,      // 1% daily max loss
-  MAX_DRAWDOWN_PCT: 0.05,          // 5% drawdown kill switch
-  MAX_CONTRACTS_PER_TRADE: 2,      // HARD CAP: 2 contracts max (was 10 — position sizing escalated to 16 and caused emergency exits)
-  MAX_TOTAL_CONTRACTS: 4,           // Max 4 total across all instruments (was 20)
-  MAX_TRADES_PER_DAY: 6,
+  // Risk as % of equity — sized to make real money
+  RISK_PER_TRADE_PCT: 0.01,         // 1% of equity per trade ($500 on $50k, $1k on $100k)
+  DAILY_LOSS_LIMIT_PCT: 0.025,      // 2.5% daily max loss (allows 2-3 full losses before stopping)
+  MAX_DRAWDOWN_PCT: 0.05,           // 5% drawdown kill switch
+  MAX_CONTRACTS_PER_TRADE: 5,       // Up to 5 contracts per trade (was 2 — too conservative for full-size)
+  MAX_TOTAL_CONTRACTS: 10,          // Max 10 total across all instruments
+  MAX_TRADES_PER_DAY: 8,
 
   // Technical
   ATR_STOP_MULTIPLIER: 1.5,
-  ATR_TARGET_MULTIPLIER: 2.5,      // 1.67 R:R minimum
+  ATR_TARGET_MULTIPLIER: 2.5,       // 1.67 R:R minimum
 
   // Session times (ET hours — DST-aware via session-time.ts)
-  RTH_START_ET: 9.5,               // 9:30 AM ET
-  RTH_END_ET: 16,                  // 4:00 PM ET
-  AVOID_FIRST_MINUTES: 15,         // Avoid first 15 min (opening chaos)
-  AVOID_LAST_MINUTES: 15,          // Avoid last 15 min (closing chaos)
+  RTH_START_ET: 9.5,                // 9:30 AM ET
+  RTH_END_ET: 16,                   // 4:00 PM ET
+  AVOID_FIRST_MINUTES: 15,          // Avoid first 15 min (opening chaos)
+  AVOID_LAST_MINUTES: 15,           // Avoid last 15 min (closing chaos)
 };
 
 // ============ WHICH CONTRACTS TO TRADE ============
-const TRADE_PRIORITY: { symbol: string; when: string }[] = [
-  { symbol: "MES", when: "always" },    // Most liquid, tightest spreads — primary
-  { symbol: "MNQ", when: "trending" },  // Most volatile — only in trending markets
-  { symbol: "MYM", when: "always" },    // Cheapest margin — good for extra exposure
-  { symbol: "M2K", when: "trending" },  // Small cap, high vol — only trending
+// Auto-selects full-size vs micro based on account equity.
+// $25k+ = full-size (ES $50/pt, NQ $20/pt, GC $100/pt) — real money
+// <$25k = micros (MES $5/pt, MNQ $2/pt, MGC $10/pt) — grind it up
+const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
+
+const FULL_SIZE_PRIORITY: { symbol: string; when: string }[] = [
+  { symbol: "ES", when: "always" },     // $50/pt — primary money maker
+  { symbol: "NQ", when: "trending" },   // $20/pt — best in trends, volatile
+  { symbol: "GC", when: "always" },     // $100/pt — uncorrelated to equities
 ];
+const MICRO_PRIORITY: { symbol: string; when: string }[] = [
+  { symbol: "MES", when: "always" },    // $5/pt — S&P micro
+  { symbol: "MNQ", when: "trending" },  // $2/pt — Nasdaq micro
+  { symbol: "MGC", when: "always" },    // $10/pt — Gold micro
+];
+
+function getTradePriority(equity: number): { symbol: string; when: string }[] {
+  return equity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_PRIORITY : MICRO_PRIORITY;
+}
 
 // ============ TECHNICAL INDICATORS ============
 
@@ -807,7 +825,10 @@ export async function runFuturesAgent(): Promise<{
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
             reason: `Breakeven stop: Position was at 1R+, pulled back past entry. P&L: $${unrealizedPnl.toFixed(0)}`,
           }});
-          try { await logTradeToJournal({ tradeId: `BE-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "breakeven_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Breakeven stop — was at 1R+, pulled back" }, "futures-agent"); } catch {}
+          try {
+            await logTradeToJournal({ tradeId: `BE-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "breakeven_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Breakeven stop — was at 1R+, pulled back" }, "futures-agent");
+            await logObservation("futures-agent", `BREAKEVEN EXIT ${pos.contractName} | Was at 1R+ but pulled back to ${(priceDiff / stopDistance).toFixed(2)}R | P&L: $${unrealizedPnl.toFixed(0)} | Review: was the target too ambitious?`);
+          } catch {}
         } catch (err) { details.push(`    Breakeven close failed: ${err}`); }
         continue; // position closed, skip remaining checks
       }
@@ -827,7 +848,10 @@ export async function runFuturesAgent(): Promise<{
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
             reason: `HARD STOP: Price $${currentPrice.toFixed(2)} past stop $${origStop.toFixed(2)}. Broker stop may have failed. P&L: $${unrealizedPnl.toFixed(0)}`,
           }});
-          try { await logTradeToJournal({ tradeId: `HS-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "hard_stop", contracts: absQty, entryPrice: avgPrice, stopPrice: origStop, targetPrice: origTarget, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Hard stop — broker stop failed" }, "futures-agent"); } catch {}
+          try {
+            await logTradeToJournal({ tradeId: `HS-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "hard_stop", contracts: absQty, entryPrice: avgPrice, stopPrice: origStop, targetPrice: origTarget, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Hard stop — broker stop failed" }, "futures-agent");
+            await logObservation("futures-agent", `HARD STOP ${pos.contractName} — broker stop FAILED at $${origStop.toFixed(2)}, closed at $${currentPrice.toFixed(2)} | P&L: $${unrealizedPnl.toFixed(0)} | INVESTIGATE: broker order reliability`);
+          } catch {}
         } catch (err) { details.push(`    Hard stop close FAILED: ${err}`); }
         continue; // position closed, skip remaining checks
       }
@@ -868,7 +892,10 @@ export async function runFuturesAgent(): Promise<{
               qty: scaleQty, price: currentPrice, pnl: priceDiff * multiplier * scaleQty, orderId: null,
               reason: `Scale out: Closed ${scaleQty}/${absQty} at 1R ($${currentPrice.toFixed(2)}). Remaining ${remainingQty} protected with breakeven stop.`,
             }});
-            try { await logTradeToJournal({ tradeId: `SO-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${symbolMatch || pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "scale_out", contracts: scaleQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: priceDiff * multiplier * scaleQty, conviction: 0, exitReason: `Scale out ${scaleQty}/${absQty} at 1R` }, "futures-agent"); } catch {}
+            try {
+              await logTradeToJournal({ tradeId: `SO-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${symbolMatch || pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "scale_out", contracts: scaleQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: priceDiff * multiplier * scaleQty, conviction: 0, exitReason: `Scale out ${scaleQty}/${absQty} at 1R` }, "futures-agent");
+              await logObservation("futures-agent", `SCALE OUT ${scaleQty}/${absQty} ${pos.contractName} at 1R | P&L: $${(priceDiff * multiplier * scaleQty).toFixed(0)} | Remaining ${absQty - scaleQty}x protected at breakeven`);
+            } catch {}
           } catch (err) { details.push(`    Scale out failed: ${err}`); }
         }
       }
@@ -965,8 +992,10 @@ export async function runFuturesAgent(): Promise<{
     details.push(`STOPPED SYMBOLS (no re-entry): ${[...stoppedSymbols].join(", ")}`);
   }
 
-  // Determine which symbols to trade based on regime
-  const symbolsToTrade = TRADE_PRIORITY
+  // Determine which symbols to trade based on equity + regime
+  const tradePriority = getTradePriority(equity);
+  details.push(`CONTRACTS: ${equity >= FULL_SIZE_EQUITY_THRESHOLD ? "FULL-SIZE" : "MICROS"} (equity $${equity.toLocaleString()})`);
+  const symbolsToTrade = tradePriority
     .filter((s) => s.when === "always" || (s.when === "trending" && (regime === "bull" || regime === "bear")))
     .map((s) => s.symbol);
 
@@ -1069,20 +1098,24 @@ export async function runFuturesAgent(): Promise<{
     details.push(`  SETUP: ${setup.type.replace(/_/g, " ").toUpperCase()} — ${setup.direction.toUpperCase()} (${setup.confidence}%)`);
     details.push(`  ${setup.reasoning}`);
 
-    // AI confirmation (optional — adds conviction but not required)
+    // AI confirmation — Opus with extended thinking for decisive, opinionated calls
     try {
-      const aiPrompt = `You are an expert ES/NQ futures scalper. Quick decision on this ${symbol} setup:
+      const aiPrompt = `You are an elite futures trader who makes thousands per trade. Be OPINIONATED. No hedging, no "it depends." You either love this trade or you kill it.
 
+${symbol} setup:
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}
 15m trend: ${trend15} | Session: ${session} | Regime: ${regime} | Day type: ${dayType}
 Setup: ${setup.type} — ${setup.direction} — ${setup.reasoning}
 Key levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} PDL $${keyLevels.prevDayLow.toFixed(2)}
 ${vaultContext}
-Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
+
+Take the trade or don't. If the setup is A+, say so and size up. If it's mediocre, kill it — we only want high conviction trades that make real money.
+Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 150,
+        model: "claude-opus-4-6",
+        max_tokens: 8000,
+        thinking: { type: "enabled", budget_tokens: 5000 },
         messages: [{ role: "user", content: aiPrompt }],
       });
       const text = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
@@ -1093,11 +1126,13 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
       const ai = JSON.parse(jsonText);
 
       if (!ai.agree) {
-        setup.confidence -= 15;
-        details.push(`  AI DISAGREES: ${ai.reasoning}`);
+        setup.confidence -= 30;
+        details.push(`  AI KILLS TRADE: ${ai.reasoning}`);
       } else {
-        setup.confidence += 5;
-        details.push(`  AI CONFIRMS: ${ai.reasoning}`);
+        // Conviction-based boost: A+ setups get major confidence bump
+        const convictionBoost = ai.conviction === "A+" ? 25 : ai.conviction === "A" ? 15 : ai.conviction === "B" ? 5 : -10;
+        setup.confidence += convictionBoost;
+        details.push(`  AI CONFIRMS (${ai.conviction || "?"}): ${ai.reasoning} [+${convictionBoost}]`);
       }
     } catch {
       details.push(`  AI unavailable — proceeding on technicals alone`);
@@ -1132,9 +1167,9 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
       maxByRisk,
     ));
 
-    // Final sanity: never risk more than 0.5% on a single trade
+    // Final sanity: never risk more than 2% on a single trade
     const totalRisk = riskPerContract * contracts;
-    if (totalRisk > equity * 0.005) {
+    if (totalRisk > equity * 0.02) {
       details.push(`  Risk too high ($${totalRisk.toFixed(0)} = ${((totalRisk / equity) * 100).toFixed(2)}% of equity) — capping at 1 contract`);
     }
 
@@ -1211,6 +1246,9 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
           `${setup.type}: ${setup.reasoning}. R:R ${riskReward.toFixed(1)}, Risk $${(riskPerContract * contracts).toFixed(0)}`,
           Math.round(setup.confidence / 20),
         );
+
+        await logObservation("futures-agent",
+          `ENTRY ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)} | Setup: ${setup.type} | Confidence: ${setup.confidence}% | Risk: $${(riskPerContract * contracts).toFixed(0)} | R:R ${riskReward.toFixed(1)} | Regime: ${regime} | Session: ${session}`);
       } catch { /* vault logging optional */ }
     } catch (err) {
       details.push(`  ORDER FAILED: ${err}`);

@@ -199,6 +199,13 @@ export async function getTradovatePositions(): Promise<TradovatePosition[]> {
 // ============ CONTRACT SEARCH ============
 
 export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: string; multiplier: number; tickSize: number }> = {
+  // Full-size contracts — real money makers
+  ES: { name: "E-mini S&P 500", exchange: "CME", multiplier: 50, tickSize: 0.25 },
+  NQ: { name: "E-mini Nasdaq 100", exchange: "CME", multiplier: 20, tickSize: 0.25 },
+  GC: { name: "Gold", exchange: "COMEX", multiplier: 100, tickSize: 0.1 },
+  YM: { name: "E-mini Dow", exchange: "CBOT", multiplier: 5, tickSize: 1 },
+  RTY: { name: "E-mini Russell 2000", exchange: "CME", multiplier: 50, tickSize: 0.1 },
+  // Micros — for scaling in or lower conviction
   MES: { name: "Micro E-mini S&P 500", exchange: "CME", multiplier: 5, tickSize: 0.25 },
   MNQ: { name: "Micro E-mini Nasdaq 100", exchange: "CME", multiplier: 2, tickSize: 0.25 },
   MGC: { name: "Micro Gold", exchange: "COMEX", multiplier: 10, tickSize: 0.1 },
