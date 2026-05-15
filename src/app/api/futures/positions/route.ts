@@ -231,6 +231,45 @@ export async function GET() {
       roundTrips,
     };
 
+    // ── Reconciliation: cross-check DB trade P&L against fill-based round trips ──
+    // When Tradovate fills show a different P&L than what's in the DB, correct the DB.
+    // This runs on every positions fetch (~10s) but only writes when mismatches are found.
+    if (roundTrips.length > 0) {
+      try {
+        for (const rt of roundTrips) {
+          // Find the matching DB close entry by symbol + exit time (within 5 min window)
+          const exitTime = new Date(rt.exitTime);
+          const windowStart = new Date(exitTime.getTime() - 5 * 60 * 1000);
+          const windowEnd = new Date(exitTime.getTime() + 5 * 60 * 1000);
+          const dbMatch = recentLogs.find((log) => {
+            if (log.symbol !== `FUT:${rt.symbol}`) return false;
+            if (!log.pnl) return false;
+            // Must be a close action (not an entry)
+            if (log.action === "futures_long" || log.action === "futures_short") return false;
+            const logTime = new Date(log.createdAt);
+            return logTime >= windowStart && logTime <= windowEnd;
+          });
+
+          if (dbMatch && dbMatch.pnl != null) {
+            const diff = Math.abs(dbMatch.pnl - rt.pnl);
+            // Only correct if the difference is significant (> $1)
+            if (diff > 1) {
+              await prisma.autoTradeLog.update({
+                where: { id: dbMatch.id },
+                data: {
+                  pnl: rt.pnl,
+                  reason: dbMatch.reason + ` [reconciled: was $${dbMatch.pnl.toFixed(0)}, fills show $${rt.pnl.toFixed(0)}]`,
+                },
+              });
+              // Update the activity entry in-memory too so the current response is correct
+              const activityMatch = activity.find((a) => a.id === dbMatch.id);
+              if (activityMatch) activityMatch.pnl = rt.pnl;
+            }
+          }
+        }
+      } catch { /* reconciliation is best-effort */ }
+    }
+
     return Response.json({
       connected: true,
       account: {
