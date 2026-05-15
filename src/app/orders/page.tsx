@@ -1,20 +1,18 @@
 "use client";
 
 import { OrdersTable } from "@/components/orders/orders-table";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function OrdersPage() {
   return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Orders</h2>
-      <Card>
-        <CardHeader>
-          <CardTitle>Order History</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <OrdersTable />
-        </CardContent>
-      </Card>
+    <div className="space-y-5 animate-fade-up">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">Orders</h1>
+          <p className="text-[11px] text-muted-foreground/50">Unified order history — Alpaca + Tradovate</p>
+        </div>
+      </div>
+
+      <OrdersTable />
     </div>
   );
 }
