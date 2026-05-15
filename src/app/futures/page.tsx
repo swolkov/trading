@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FuturesChart } from "@/components/charts/futures-chart";
-import { TradingViewChart } from "@/components/charts/tradingview-chart";
+// TradingView chart removed — using Lightweight only
 
 // ── Types ──────────────────────────────────────────────
 
@@ -207,7 +207,7 @@ export default function FuturesPage() {
   const [running, setRunning] = useState(false);
   const [selectedContract, setSelectedContract] = useState("MES");
   const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "history" | "backtest" | "reports">("chart");
-  const [chartMode, setChartMode] = useState<"tradingview" | "lightweight">("lightweight");
+  // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [historyPeriod, setHistoryPeriod] = useState<"today" | "week" | "month" | "all">("today");
@@ -464,33 +464,7 @@ export default function FuturesPage() {
           {activeTab === "chart" && (
             <Card className="border-white/[0.06]">
               <CardContent className="pt-4">
-                <div className="flex items-center justify-end gap-1 mb-3">
-                  <button
-                    onClick={() => setChartMode("tradingview")}
-                    className={`px-2.5 py-1 rounded text-[11px] font-bold tracking-wide transition-colors ${
-                      chartMode === "tradingview"
-                        ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
-                        : "text-muted-foreground hover:text-foreground hover:bg-white/5"
-                    }`}
-                  >
-                    TradingView
-                  </button>
-                  <button
-                    onClick={() => setChartMode("lightweight")}
-                    className={`px-2.5 py-1 rounded text-[11px] font-bold tracking-wide transition-colors ${
-                      chartMode === "lightweight"
-                        ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                        : "text-muted-foreground hover:text-foreground hover:bg-white/5"
-                    }`}
-                  >
-                    Lightweight
-                  </button>
-                </div>
-                {chartMode === "tradingview" ? (
-                  <TradingViewChart symbol={selectedContract} height={560} />
-                ) : (
-                  <FuturesChart symbol={selectedContract} height={560} />
-                )}
+                <FuturesChart symbol={selectedContract} height={560} />
               </CardContent>
             </Card>
           )}
