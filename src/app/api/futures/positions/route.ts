@@ -255,37 +255,40 @@ export async function GET() {
       activity,
       engineStatus,
       startOfDayBalance: await (async () => {
-        // 1. Best source: DB snapshot taken at start of day
         const todayKey = new Date().toISOString().slice(0, 10);
+        // 1. Best source: vault daily-balances.md (Railway engine writes SOD before trading)
+        try {
+          const vaultDoc = await prisma.vaultDocument.findUnique({
+            where: { path: "Performance/daily-balances.md" },
+          });
+          if (vaultDoc?.content) {
+            // Parse today's SOD from the YAML block
+            const todayRegex = new RegExp(`${todayKey}:\\s*\\n\\s*sod:\\s*(\\d+(?:\\.\\d+)?)`);
+            const match = vaultDoc.content.match(todayRegex);
+            if (match) {
+              const sodVal = parseFloat(match[1]);
+              if (!isNaN(sodVal) && sodVal > 0) return sodVal;
+            }
+            // Fallback: yesterday's EOD from vault
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const ydKey = yesterday.toISOString().slice(0, 10);
+            const ydRegex = new RegExp(`${ydKey}:\\s*\\n\\s*sod:\\s*\\S+\\s*\\n\\s*eod:\\s*(\\d+(?:\\.\\d+)?)`);
+            const ydMatch = vaultDoc.content.match(ydRegex);
+            if (ydMatch) {
+              const eodVal = parseFloat(ydMatch[1]);
+              if (!isNaN(eodVal) && eodVal > 0) return eodVal;
+            }
+          }
+        } catch {}
+        // 2. Fallback: agentConfig snapshots
         try {
           const sodSnapshot = await prisma.agentConfig.findUnique({
             where: { key: `daily_balance_${todayKey}` },
           });
           if (sodSnapshot?.value) {
             const sodVal = parseFloat(sodSnapshot.value);
-            // Only use if it differs from current balance (proves it was a real SOD snapshot)
             if (!isNaN(sodVal) && sodVal !== accountSummary.balance) return sodVal;
-          }
-        } catch {}
-        // 2. Use previous day's EOD balance
-        try {
-          const yesterday = new Date();
-          yesterday.setDate(yesterday.getDate() - 1);
-          const ydKey = yesterday.toISOString().slice(0, 10);
-          const eodSnapshot = await prisma.agentConfig.findUnique({
-            where: { key: `eod_balance_${ydKey}` },
-          });
-          if (eodSnapshot?.value) {
-            const eodVal = parseFloat(eodSnapshot.value);
-            if (!isNaN(eodVal)) return eodVal;
-          }
-          // Also check yesterday's SOD + look at day before for EOD
-          const sodSnapshot = await prisma.agentConfig.findUnique({
-            where: { key: `daily_balance_${ydKey}` },
-          });
-          if (sodSnapshot?.value) {
-            const sodVal = parseFloat(sodSnapshot.value);
-            if (!isNaN(sodVal)) return sodVal;
           }
         } catch {}
         // 3. Fallback: balance minus realized P&L (works during active trading only)
@@ -294,27 +297,48 @@ export async function GET() {
         }
         return null;
       })(),
-      // Historical daily balance snapshots for accurate Daily Breakdown
+      // Historical daily balance snapshots — vault is source of truth
       balanceHistory: await (async () => {
         try {
+          // Primary: parse from vault daily-balances.md
+          const vaultDoc = await prisma.vaultDocument.findUnique({
+            where: { path: "Performance/daily-balances.md" },
+          });
+          if (vaultDoc?.content) {
+            const vaultHistory: Record<string, { sod?: number; eod?: number }> = {};
+            const dayRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)\s*\n\s*eod:\s*(\d+(?:\.\d+)?|null)/g;
+            let m;
+            while ((m = dayRegex.exec(vaultDoc.content)) !== null) {
+              vaultHistory[m[1]] = {
+                sod: m[2] === "null" ? undefined : parseFloat(m[2]),
+                eod: m[3] === "null" ? undefined : parseFloat(m[3]),
+              };
+            }
+            if (Object.keys(vaultHistory).length > 0) {
+              return Object.entries(vaultHistory)
+                .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
+                .sort((a, b) => a.date.localeCompare(b.date));
+            }
+          }
+          // Fallback: agentConfig table
           const dailyBalances = await prisma.agentConfig.findMany({
             where: { key: { startsWith: "daily_balance_" } },
           });
           const eodBalances = await prisma.agentConfig.findMany({
             where: { key: { startsWith: "eod_balance_" } },
           });
-          const history: Record<string, { sod?: number; eod?: number }> = {};
+          const configHistory: Record<string, { sod?: number; eod?: number }> = {};
           for (const b of dailyBalances) {
             const date = b.key.replace("daily_balance_", "");
-            if (!history[date]) history[date] = {};
-            history[date].sod = parseFloat(b.value);
+            if (!configHistory[date]) configHistory[date] = {};
+            configHistory[date].sod = parseFloat(b.value);
           }
           for (const b of eodBalances) {
             const date = b.key.replace("eod_balance_", "");
-            if (!history[date]) history[date] = {};
-            history[date].eod = parseFloat(b.value);
+            if (!configHistory[date]) configHistory[date] = {};
+            configHistory[date].eod = parseFloat(b.value);
           }
-          return Object.entries(history)
+          return Object.entries(configHistory)
             .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
             .sort((a, b) => a.date.localeCompare(b.date));
         } catch { return []; }
