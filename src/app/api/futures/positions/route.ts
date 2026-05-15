@@ -1,20 +1,11 @@
 import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, getOpenOrders, getTradovateFills, TRADOVATE_CONTRACTS, resolveContractSymbol } from "@/lib/tradovate";
+import { getFuturesQuotes } from "@/lib/futures-data";
 import { prisma } from "@/lib/db";
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const YF = require("yahoo-finance2").default || require("yahoo-finance2");
-const yf = new YF({ suppressNotices: ["ripHistorical"] });
-
-const YAHOO_MAP: Record<string, string> = {
-  MES: "ES=F",
-  MNQ: "NQ=F",
-  MYM: "YM=F",
-  M2K: "RTY=F",
-  MGC: "GC=F",
-};
+const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "ES", "NQ", "YM", "RTY", "GC"];
 
 function matchSymbol(contractName: string): string | null {
-  for (const sym of Object.keys(YAHOO_MAP)) {
+  for (const sym of KNOWN_SYMBOLS) {
     if (contractName.startsWith(sym)) return sym;
   }
   return null;
@@ -73,22 +64,19 @@ export async function GET() {
       getTradovateFills(),
     ]);
 
-    // Get live quotes for position symbols
-    const symbolsNeeded = new Set<string>();
+    // Get live quotes for position symbols (Tradovate primary, Yahoo fallback)
+    const symbolsNeeded: string[] = [];
     for (const pos of positions) {
       const sym = matchSymbol(pos.contractName);
-      if (sym) symbolsNeeded.add(YAHOO_MAP[sym]);
+      if (sym && !symbolsNeeded.includes(sym)) symbolsNeeded.push(sym);
     }
 
     let quotes: Record<string, number> = {};
-    if (symbolsNeeded.size > 0) {
+    if (symbolsNeeded.length > 0) {
       try {
-        const yahooQuotes = await yf.quote([...symbolsNeeded]);
-        const arr = Array.isArray(yahooQuotes) ? yahooQuotes : [yahooQuotes];
-        for (const q of arr) {
-          if (q?.symbol && q?.regularMarketPrice) {
-            quotes[q.symbol] = q.regularMarketPrice;
-          }
+        const futuresQuotes = await getFuturesQuotes(symbolsNeeded);
+        for (const [sym, q] of Object.entries(futuresQuotes)) {
+          if (q.price > 0) quotes[sym] = q.price;
         }
       } catch { /* fall back to entry price */ }
     }
@@ -96,8 +84,7 @@ export async function GET() {
     // Match positions with trade logs for stop/target info
     const enrichedPositions = positions.map((pos) => {
       const sym = matchSymbol(pos.contractName);
-      const yahooSym = sym ? YAHOO_MAP[sym] : null;
-      const currentPrice = yahooSym ? quotes[yahooSym] || pos.netPrice : pos.netPrice;
+      const currentPrice = sym ? quotes[sym] || pos.netPrice : pos.netPrice;
       const contractSpec = sym ? TRADOVATE_CONTRACTS[sym] : null;
       const multiplier = contractSpec?.multiplier || 5;
 

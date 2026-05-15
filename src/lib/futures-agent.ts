@@ -13,7 +13,7 @@ import {
   type TradovatePosition,
 } from "./tradovate";
 import { sendNotification } from "./notifications";
-import { getHistoricalBars, getIntradayBars } from "./yahoo";
+import { getFuturesIntradayBars, getFuturesDailyBars } from "./futures-data";
 import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
@@ -21,19 +21,7 @@ import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, u
 import { evaluateDrawdownState } from "./drawdown-protocol";
 import { getSessionInfo, getETDateString, getRTHStartUTC, type Session } from "./session-time";
 
-// Yahoo Finance symbols for futures (full-size and micro share the same price feed)
-const YAHOO_FUTURES_MAP: Record<string, string> = {
-  ES: "ES=F",    // E-mini S&P 500 (full-size, $50/pt)
-  NQ: "NQ=F",    // E-mini Nasdaq 100 (full-size, $20/pt)
-  YM: "YM=F",    // E-mini Dow (full-size, $5/pt)
-  RTY: "RTY=F",  // E-mini Russell 2000 (full-size, $50/pt)
-  GC: "GC=F",    // Gold (full-size, $100/pt)
-  MES: "ES=F",   // Micro S&P 500
-  MNQ: "NQ=F",   // Micro Nasdaq 100
-  MYM: "YM=F",   // Micro Dow
-  M2K: "RTY=F",  // Micro Russell 2000
-  MGC: "GC=F",   // Micro Gold
-};
+// Market data now flows through futures-data.ts (Tradovate primary, Yahoo fallback)
 
 // Alias for backward compatibility
 const FUTURES_CONTRACTS = TRADOVATE_CONTRACTS;
@@ -691,22 +679,19 @@ export async function runFuturesAgent(): Promise<{
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
 
   // ============ MANAGE EXISTING POSITIONS ============
-  // Pre-fetch Yahoo bars for each unique symbol (avoid duplicate API calls)
+  // Pre-fetch bars for each unique symbol (Tradovate primary, Yahoo fallback)
   const posBarCache: Record<string, { bars: { t: number; o: number; h: number; l: number; c: number; v: number }[]; price: number; atrVal: number }> = {};
   for (const pos of futuresPositions) {
     const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
     if (sym && !posBarCache[sym]) {
-      const yahooSym = YAHOO_FUTURES_MAP[sym];
-      if (yahooSym) {
-        try {
-          const bars = await getIntradayBars(yahooSym, "5m", "1d");
-          posBarCache[sym] = {
-            bars,
-            price: bars.length > 0 ? bars[bars.length - 1].c : 0,
-            atrVal: atr(bars.map((b) => ({ h: b.h, l: b.l, c: b.c }))),
-          };
-        } catch { posBarCache[sym] = { bars: [], price: 0, atrVal: 5 }; }
-      }
+      try {
+        const bars = await getFuturesIntradayBars(sym, "5m", "1d");
+        posBarCache[sym] = {
+          bars,
+          price: bars.length > 0 ? bars[bars.length - 1].c : 0,
+          atrVal: atr(bars.map((b) => ({ h: b.h, l: b.l, c: b.c }))),
+        };
+      } catch { posBarCache[sym] = { bars: [], price: 0, atrVal: 5 }; }
     }
   }
 
@@ -1021,19 +1006,16 @@ export async function runFuturesAgent(): Promise<{
       continue;
     }
 
-    // Get multi-timeframe data from Yahoo Finance (free intraday + daily)
-    const yahooSymbol = YAHOO_FUTURES_MAP[symbol];
-    if (!yahooSymbol) { details.push(`  No Yahoo symbol for ${symbol}`); continue; }
-
+    // Get multi-timeframe data (Tradovate primary, Yahoo fallback via futures-data)
     let bars5min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
     let bars15min: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
     let barsDailyRaw: { t: string; o: number; h: number; l: number; c: number; v: number }[] = [];
 
     try {
       [bars5min, bars15min, barsDailyRaw] = await Promise.all([
-        getIntradayBars(yahooSymbol, "5m", "1d"),
-        getIntradayBars(yahooSymbol, "15m", "5d"),
-        getHistoricalBars(yahooSymbol, 60),
+        getFuturesIntradayBars(symbol, "5m", "1d"),
+        getFuturesIntradayBars(symbol, "15m", "5d"),
+        getFuturesDailyBars(symbol, 60),
       ]);
     } catch (err) {
       details.push(`  Data error: ${err}`);

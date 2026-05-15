@@ -234,46 +234,83 @@ export async function findContract(symbol: string): Promise<{ id: number; name: 
 }
 
 // ============ MARKET DATA ============
+// Uses Tradovate md/getChart REST endpoint for OHLCV bars and quotes.
+// The md/ endpoints may live on the main API server or a dedicated MD server.
 
-export async function getQuote(contractId: number): Promise<{ last: number; bid: number; ask: number; volume: number }> {
-  const quote = await tvFetch(`/md/getChart?contractId=${contractId}&chartDescription=%7B%22underlyingType%22%3A%22MinuteBar%22%2C%22elementSize%22%3A1%2C%22elementSizeUnit%22%3A%22UnderlyingUnits%22%7D&timeRange=%7B%22asMuchAsElements%22%3A1%7D`) as {
-    charts?: { bp?: number; ap?: number; lp?: number; vs?: number }[];
-  };
+const DEMO_MD_URL = "https://md-demo.tradovateapi.com/v1";
+const LIVE_MD_URL = "https://md.tradovateapi.com/v1";
 
-  // Simpler approach: use the contract's last quote
-  const q = await tvFetch(`/contract/item?id=${contractId}`) as { lastPrice?: number };
-  return {
-    last: q.lastPrice || 0,
-    bid: 0,
-    ask: 0,
-    volume: 0,
-  };
+async function getMdBaseUrl(): Promise<string> {
+  const mode = await getTradingMode("futures");
+  return mode === "live" ? LIVE_MD_URL : DEMO_MD_URL;
 }
 
-export async function getBars(contractId: number, count: number = 100, barSize: string = "5min"): Promise<{ t: number; o: number; h: number; l: number; c: number; v: number }[]> {
-  const elementSize = barSize === "5min" ? 5 : barSize === "15min" ? 15 : barSize === "1d" ? 1440 : 5;
+// Fetch from the dedicated MD server (falls back to main API server)
+async function mdFetch(path: string): Promise<unknown> {
+  const token = await authenticate();
+  const mdUrl = await getMdBaseUrl();
 
-  const chartDesc = JSON.stringify({
-    underlyingType: elementSize >= 1440 ? "DailyBar" : "MinuteBar",
-    elementSize: elementSize >= 1440 ? 1 : elementSize,
+  // Try dedicated MD server first
+  try {
+    const res = await fetch(`${mdUrl}${path}`, {
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) return res.json();
+  } catch { /* MD server unavailable, fall through */ }
+
+  // Fall back to main API server (works on some Tradovate plans)
+  return tvFetch(path);
+}
+
+export type BarData = { t: number; o: number; h: number; l: number; c: number; v: number };
+
+export async function getBars(contractId: number, count: number = 100, barSize: string = "5min"): Promise<BarData[]> {
+  const elementSize = barSize === "5min" ? 5 : barSize === "15min" ? 15 : barSize === "1h" ? 60 : barSize === "1d" ? 1 : 5;
+  const underlyingType = barSize === "1d" ? "DailyBar" : "MinuteBar";
+
+  const chartDesc = encodeURIComponent(JSON.stringify({
+    underlyingType,
+    elementSize,
     elementSizeUnit: "UnderlyingUnits",
-  });
-  const timeRange = JSON.stringify({ asMuchAsElements: count });
+  }));
+  const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: count }));
 
-  const data = await tvFetch(
-    `/md/getChart?contractId=${contractId}&chartDescription=${encodeURIComponent(chartDesc)}&timeRange=${encodeURIComponent(timeRange)}`
+  const data = await mdFetch(
+    `/md/getChart?contractId=${contractId}&chartDescription=${chartDesc}&timeRange=${timeRange}`
   ) as { charts?: { id: number; td: number; bars: { timestamp: string; open: number; high: number; low: number; close: number; upVolume: number; downVolume: number }[] }[] };
 
-  if (!data.charts || data.charts.length === 0) return [];
+  if (!data?.charts || data.charts.length === 0 || !data.charts[0]?.bars) return [];
 
-  return data.charts[0].bars.map((b) => ({
-    t: new Date(b.timestamp).getTime() / 1000,
-    o: b.open,
-    h: b.high,
-    l: b.low,
-    c: b.close,
-    v: (b.upVolume || 0) + (b.downVolume || 0),
-  }));
+  return data.charts[0].bars
+    .filter((b) => b.close > 0)
+    .map((b) => ({
+      t: new Date(b.timestamp).getTime() / 1000,
+      o: b.open,
+      h: b.high,
+      l: b.low,
+      c: b.close,
+      v: (b.upVolume || 0) + (b.downVolume || 0),
+    }));
+}
+
+export async function getQuote(contractId: number): Promise<{ last: number; bid: number; ask: number; volume: number }> {
+  // Get the latest 1-minute bar for a near-real-time price snapshot
+  try {
+    const bars = await getBars(contractId, 1, "5min");
+    if (bars.length > 0) {
+      const bar = bars[bars.length - 1];
+      return { last: bar.c, bid: 0, ask: 0, volume: bar.v };
+    }
+  } catch { /* fall through to contract lookup */ }
+
+  // Fallback: contract item (may have stale lastPrice)
+  try {
+    const q = await tvFetch(`/contract/item?id=${contractId}`) as { lastPrice?: number };
+    return { last: q.lastPrice || 0, bid: 0, ask: 0, volume: 0 };
+  } catch {
+    return { last: 0, bid: 0, ask: 0, volume: 0 };
+  }
 }
 
 // ============ ORDER MANAGEMENT ============

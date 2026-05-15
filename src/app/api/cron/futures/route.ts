@@ -50,14 +50,14 @@ export async function GET(request: Request) {
     if (heartbeat?.value) {
       let lastBeat: number;
       let currentTickCount: number | null = null;
-      let yahooHealth: string | null = null;
+      let mdHealth: string | null = null;
 
       try {
-        // Enhanced heartbeat: JSON with tickCount, positions, yahoo health, etc.
+        // Enhanced heartbeat: JSON with tickCount, positions, market data health, etc.
         const parsed = JSON.parse(heartbeat.value);
         lastBeat = new Date(parsed.timestamp).getTime();
         currentTickCount = parsed.tickCount ?? null;
-        yahooHealth = parsed.yahooHealth ?? null;
+        mdHealth = parsed.mdHealth ?? parsed.yahooHealth ?? null;
       } catch {
         // Legacy format: plain ISO string
         lastBeat = new Date(heartbeat.value).getTime();
@@ -94,7 +94,7 @@ export async function GET(request: Request) {
         if (!engineStalled) {
           return Response.json({
             status: "deferred",
-            reason: `Real-time engine alive (heartbeat ${ageMinutes.toFixed(1)} min ago, ticks: ${currentTickCount ?? "?"}, yahoo: ${yahooHealth ?? "?"}).`,
+            reason: `Real-time engine alive (heartbeat ${ageMinutes.toFixed(1)} min ago, ticks: ${currentTickCount ?? "?"}, md: ${mdHealth ?? "?"}).`,
             reconciliation,
           });
         }

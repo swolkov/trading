@@ -1,18 +1,11 @@
 #!/usr/bin/env node
 // ============ REAL-TIME FUTURES TRADING ENGINE ============
-// Persistent process — polls Yahoo Finance every 5s for prices,
+// Persistent process — polls Tradovate md/getChart every 5s for prices,
 // builds bars, detects setups on bar close, executes via Tradovate.
 // Deploy on Railway.
 //
-// WHY YAHOO POLLING (not Tradovate WebSocket):
-// Tradovate demo accounts don't provide market data via WebSocket.
-// Yahoo Finance gives us ~5s delayed quotes for ES=F, NQ=F, YM=F, RTY=F.
-// For demo testing with 5-min bars, this is more than adequate.
-// When live account is funded, switch to Tradovate WebSocket for tick data.
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
-const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] });
+// DATA SOURCE: Tradovate md/getChart REST (same broker = most reliable).
+// Falls back to Yahoo Finance if Tradovate MD is unavailable.
 
 import { prisma } from "../lib/db";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite } from "../lib/vault";
@@ -47,10 +40,22 @@ function updateTradingSymbols() {
   }
 }
 
+// Yahoo fallback symbol mapping (used only if Tradovate MD fails)
 const YAHOO_MAP: Record<string, string> = {
   ES: "ES=F", NQ: "NQ=F", GC: "GC=F",
   MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F",
 };
+// Lazy-load Yahoo only when needed (fallback path)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _yfEngine: { quote: (symbols: string[] | string) => Promise<any>; chart: (symbol: string, opts: Record<string, unknown>) => Promise<any> } | null = null;
+function getYfEngine() {
+  if (!_yfEngine) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
+    _yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] }) as typeof _yfEngine;
+  }
+  return _yfEngine!;
+}
 const CONTRACT_MULTIPLIERS: Record<string, number> = {
   // Full-size
   ES: 50, NQ: 20, GC: 100, YM: 5, RTY: 50,
@@ -198,13 +203,20 @@ function validateEnvironment() {
   log("[ENV] All required environment variables present");
 }
 
-// ── Yahoo Finance Circuit Breaker ───────────────────────
+// ── Market Data Circuit Breaker ──────────────────────────
 
-let yahooConsecutiveFailures = 0;
-let yahooCircuitOpen = false;
-let yahooCircuitResetAt = 0;
-const YAHOO_MAX_FAILURES = 5;
-const YAHOO_CIRCUIT_BASE_MS = 30_000;
+let mdConsecutiveFailures = 0;
+let mdCircuitOpen = false;
+let mdCircuitResetAt = 0;
+const MD_MAX_FAILURES = 5;
+const MD_CIRCUIT_BASE_MS = 30_000;
+// Tradovate MD base URLs (try dedicated MD server, fall back to main API)
+const DEMO_MD_URL = "https://md-demo.tradovateapi.com/v1";
+const LIVE_MD_URL = "https://md.tradovateapi.com/v1";
+function getMdUrl(): string {
+  // Default to demo; override when live mode is detected
+  return ORDER_API.includes("live") ? LIVE_MD_URL : DEMO_MD_URL;
+}
 
 // ── Contract Resolution ─────────────────────────────────
 
@@ -334,49 +346,131 @@ function onPrice(sym: string, price: number, volume: number) {
   checkPositions(sym, price);
 }
 
+async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume: number } | null> {
+  const contract = contracts.get(sym);
+  if (!contract) return null;
+
+  const chartDesc = encodeURIComponent(JSON.stringify({
+    underlyingType: "MinuteBar", elementSize: 1, elementSizeUnit: "UnderlyingUnits",
+  }));
+  const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: 1 }));
+  const mdUrl = getMdUrl();
+  const token = await authenticate();
+
+  // Try dedicated MD server first
+  try {
+    const res = await fetch(
+      `${mdUrl}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) },
+    );
+    if (res.ok) {
+      const data = await res.json() as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
+      const bars = data?.charts?.[0]?.bars;
+      if (bars && bars.length > 0) {
+        const bar = bars[bars.length - 1];
+        return { price: bar.close, volume: (bar.upVolume || 0) + (bar.downVolume || 0) };
+      }
+    }
+  } catch { /* MD server unavailable, try main API */ }
+
+  // Fallback: main API server
+  try {
+    const data = await apiFetch(
+      `/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`
+    ) as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
+    const bars = data?.charts?.[0]?.bars;
+    if (bars && bars.length > 0) {
+      const bar = bars[bars.length - 1];
+      return { price: bar.close, volume: (bar.upVolume || 0) + (bar.downVolume || 0) };
+    }
+  } catch { /* fall through */ }
+
+  return null;
+}
+
+async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: number }>> {
+  const result = new Map<string, { price: number; volume: number }>();
+  try {
+    const yahooSymbols = SYMBOLS.map(s => YAHOO_MAP[s]);
+    const quotes = await getYfEngine().quote(yahooSymbols);
+    const arr = Array.isArray(quotes) ? quotes : [quotes];
+    for (const sym of SYMBOLS) {
+      const yahooSym = YAHOO_MAP[sym];
+      const q = (arr as Record<string, unknown>[]).find(item => item?.symbol === yahooSym);
+      if (q?.regularMarketPrice) {
+        result.set(sym, { price: q.regularMarketPrice as number, volume: (q.regularMarketVolume || 0) as number });
+      }
+    }
+  } catch (err) {
+    log(`[YAHOO-FALLBACK] Failed: ${err instanceof Error ? err.message : err}`);
+  }
+  return result;
+}
+
 async function pollPrices() {
   // Circuit breaker: skip polls while circuit is open
-  if (yahooCircuitOpen) {
-    if (Date.now() < yahooCircuitResetAt) return;
-    yahooCircuitOpen = false;
-    log(`[YAHOO] Circuit half-open — attempting recovery poll`);
+  if (mdCircuitOpen) {
+    if (Date.now() < mdCircuitResetAt) return;
+    mdCircuitOpen = false;
+    log(`[MD] Circuit half-open — attempting recovery poll`);
   }
 
   try {
-    const yahooSymbols = SYMBOLS.map(s => YAHOO_MAP[s]);
-    const quotes = await yfEngine.quote(yahooSymbols);
-    const arr = Array.isArray(quotes) ? quotes : [quotes];
+    // Primary: Tradovate md/getChart (parallel per symbol)
+    const tradovateResults = await Promise.allSettled(
+      SYMBOLS.map(async (sym) => {
+        const quote = await fetchTradovateQuote(sym);
+        return quote ? { sym, ...quote } : null;
+      })
+    );
 
     let received = 0;
-    // Match by symbol instead of array index (prevents misalignment if Yahoo returns fewer/different results)
-    for (const sym of SYMBOLS) {
-      const yahooSym = YAHOO_MAP[sym];
-      const q = arr.find((item: Record<string, unknown>) => item?.symbol === yahooSym);
-      if (q?.regularMarketPrice) {
-        onPrice(sym, q.regularMarketPrice as number, (q.regularMarketVolume || 0) as number);
+    const needYahoo: string[] = [];
+
+    for (const r of tradovateResults) {
+      if (r.status === "fulfilled" && r.value) {
+        onPrice(r.value.sym, r.value.price, r.value.volume);
         received++;
+      } else {
+        const sym = SYMBOLS[tradovateResults.indexOf(r)];
+        needYahoo.push(sym);
       }
     }
 
-    // Zero quotes = silent failure — count it
+    // Fallback: Yahoo for any symbols Tradovate couldn't serve
+    if (needYahoo.length > 0) {
+      const yahooQuotes = await fetchYahooQuotes();
+      for (const sym of needYahoo) {
+        const yq = yahooQuotes.get(sym);
+        if (yq) {
+          onPrice(sym, yq.price, yq.volume);
+          received++;
+        }
+      }
+      if (yahooQuotes.size > 0) {
+        log(`[MD] Tradovate missed ${needYahoo.join(",")}, Yahoo fallback served ${yahooQuotes.size}`);
+      }
+    }
+
+    // Track failures
     if (received === 0) {
-      yahooConsecutiveFailures++;
-      log(`[YAHOO] Zero quotes received (${yahooConsecutiveFailures}/${YAHOO_MAX_FAILURES})`);
-    } else if (yahooConsecutiveFailures > 0) {
-      log(`[YAHOO] Recovered after ${yahooConsecutiveFailures} failures — ${received} quotes received`);
-      yahooConsecutiveFailures = 0;
+      mdConsecutiveFailures++;
+      log(`[MD] Zero quotes received (${mdConsecutiveFailures}/${MD_MAX_FAILURES})`);
+    } else if (mdConsecutiveFailures > 0) {
+      log(`[MD] Recovered after ${mdConsecutiveFailures} failures — ${received} quotes received`);
+      mdConsecutiveFailures = 0;
     }
   } catch (err) {
-    yahooConsecutiveFailures++;
-    log(`[YAHOO] Poll failed (${yahooConsecutiveFailures}/${YAHOO_MAX_FAILURES}): ${err instanceof Error ? err.message : err}`);
+    mdConsecutiveFailures++;
+    log(`[MD] Poll failed (${mdConsecutiveFailures}/${MD_MAX_FAILURES}): ${err instanceof Error ? err.message : err}`);
 
-    if (yahooConsecutiveFailures >= YAHOO_MAX_FAILURES) {
-      const backoffMultiplier = Math.min(yahooConsecutiveFailures - YAHOO_MAX_FAILURES + 1, 10);
-      const cooldownMs = YAHOO_CIRCUIT_BASE_MS * backoffMultiplier;
-      yahooCircuitOpen = true;
-      yahooCircuitResetAt = Date.now() + cooldownMs;
-      log(`[YAHOO] Circuit OPEN — pausing polls for ${Math.round(cooldownMs / 1000)}s (backoff x${backoffMultiplier})`);
-      notify(`Yahoo Finance down (${yahooConsecutiveFailures} failures) — market data paused ${Math.round(cooldownMs / 1000)}s`, "general");
+    if (mdConsecutiveFailures >= MD_MAX_FAILURES) {
+      const backoffMultiplier = Math.min(mdConsecutiveFailures - MD_MAX_FAILURES + 1, 10);
+      const cooldownMs = MD_CIRCUIT_BASE_MS * backoffMultiplier;
+      mdCircuitOpen = true;
+      mdCircuitResetAt = Date.now() + cooldownMs;
+      log(`[MD] Circuit OPEN — pausing polls for ${Math.round(cooldownMs / 1000)}s (backoff x${backoffMultiplier})`);
+      notify(`Market data down (${mdConsecutiveFailures} failures) — polls paused ${Math.round(cooldownMs / 1000)}s`, "general");
     }
   }
 }
@@ -1658,7 +1752,7 @@ async function writeHeartbeat() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
-      yahooHealth: yahooCircuitOpen ? "circuit_open" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok",
+      mdHealth: mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok",
     });
     await prisma.agentConfig.upsert({
       where: { key: "futures_engine_heartbeat" },
@@ -1880,73 +1974,121 @@ async function syncPositions() {
 
 // ── Pre-load Historical Bars (so we can trade immediately) ──
 
-async function preloadBars() {
-  log("Pre-loading historical bars from Yahoo Finance...");
+async function preloadBarsForSymbol(sym: string): Promise<void> {
+  const b = barBuilders.get(sym);
+  if (!b) return;
+  const contract = contracts.get(sym);
 
-  // Preload for ALL symbols (both full-size and micro share Yahoo feeds, but we need bar builders for each)
-  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
-    const yahooSym = YAHOO_MAP[sym];
-    const b = barBuilders.get(sym);
-    if (!b) continue;
+  let bars: Bar[] = [];
 
+  // Primary: Tradovate md/getChart (2 days of 5-min bars ≈ 156 bars)
+  if (contract) {
     try {
-      // Fetch last 2 days of 5-min bars
-      const result = await yfEngine.chart(yahooSym, {
-        period1: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
-        period2: new Date(),
-        interval: "5m",
-      });
+      const chartDesc = encodeURIComponent(JSON.stringify({
+        underlyingType: "MinuteBar", elementSize: 5, elementSizeUnit: "UnderlyingUnits",
+      }));
+      const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: 200 }));
+      const token = await authenticate();
+      const mdUrl = getMdUrl();
 
-      if (result?.quotes) {
-        const bars: Bar[] = result.quotes
-          .filter((q: Record<string, number | null>) => q.close != null && q.close > 0)
-          .map((q: Record<string, number | Date | null>) => ({
-            t: q.date ? Math.floor(new Date(String(q.date)).getTime() / 1000) : 0,
-            o: Number(q.open) || 0,
-            h: Number(q.high) || 0,
-            l: Number(q.low) || 0,
-            c: Number(q.close) || 0,
-            v: Number(q.volume) || 0,
+      let data: { charts?: { bars: { timestamp: string; open: number; high: number; low: number; close: number; upVolume: number; downVolume: number }[] }[] } | null = null;
+
+      // Try dedicated MD server
+      try {
+        const res = await fetch(
+          `${mdUrl}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) },
+        );
+        if (res.ok) data = await res.json();
+      } catch { /* try main API */ }
+
+      // Fallback: main API
+      if (!data?.charts) {
+        try {
+          data = await apiFetch(
+            `/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`
+          ) as typeof data;
+        } catch { /* fall through to Yahoo */ }
+      }
+
+      if (data?.charts?.[0]?.bars) {
+        bars = data.charts[0].bars
+          .filter(b => b.close > 0)
+          .map(b => ({
+            t: Math.floor(new Date(b.timestamp).getTime() / 1000),
+            o: b.open, h: b.high, l: b.low, c: b.close,
+            v: (b.upVolume || 0) + (b.downVolume || 0),
           }));
-
-        // Load into bar builder (last 200 bars)
-        b.bars5m = bars.slice(-200);
-        b.lastPrice = bars.length > 0 ? bars[bars.length - 1].c : 0;
-
-        // Calculate prev day levels from the data
-        const today = new Date();
-        const todayStr = today.toISOString().split("T")[0];
-        const prevDayBars = bars.filter(bar => {
-          const d = new Date(bar.t * 1000).toISOString().split("T")[0];
-          return d < todayStr;
-        });
-        const todayBars = bars.filter(bar => {
-          const d = new Date(bar.t * 1000).toISOString().split("T")[0];
-          return d === todayStr;
-        });
-
-        if (prevDayBars.length > 0) {
-          b.prevDayHigh = Math.max(...prevDayBars.map(x => x.h));
-          b.prevDayLow = Math.min(...prevDayBars.map(x => x.l));
-          b.prevDayClose = prevDayBars[prevDayBars.length - 1].c;
-        }
-
-        // Session bars = today's bars
-        b.sessionBars = todayBars;
-        b.barCount = todayBars.length;
-
-        // Opening range (Initial Balance) from today's first 12 bars (60 min)
-        if (todayBars.length >= 12) {
-          const orBars = todayBars.slice(0, 12);
-          b.openingRangeHigh = Math.max(...orBars.map(x => x.h));
-          b.openingRangeLow = Math.min(...orBars.map(x => x.l));
-        }
-
-        log(`  ${sym}: Loaded ${bars.length} bars | Last: $${b.lastPrice.toFixed(2)} | PDH:$${b.prevDayHigh.toFixed(2)} PDL:$${b.prevDayLow.toFixed(2)} | Today: ${todayBars.length} bars`);
       }
     } catch (err) {
-      log(`  ${sym}: Failed to pre-load: ${err}`);
+      log(`  ${sym}: Tradovate preload failed: ${err instanceof Error ? err.message : err}`);
     }
+  }
+
+  // Fallback: Yahoo Finance
+  if (bars.length === 0) {
+    try {
+      const yahooSym = YAHOO_MAP[sym];
+      if (yahooSym) {
+        const result = await getYfEngine().chart(yahooSym, {
+          period1: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+          period2: new Date(),
+          interval: "5m",
+        });
+        if (result?.quotes) {
+          bars = result.quotes
+            .filter((q: Record<string, number | null>) => q.close != null && q.close > 0)
+            .map((q: Record<string, number | Date | null>) => ({
+              t: q.date ? Math.floor(new Date(String(q.date)).getTime() / 1000) : 0,
+              o: Number(q.open) || 0, h: Number(q.high) || 0, l: Number(q.low) || 0,
+              c: Number(q.close) || 0, v: Number(q.volume) || 0,
+            }));
+          if (bars.length > 0) log(`  ${sym}: Tradovate unavailable, loaded ${bars.length} bars from Yahoo`);
+        }
+      }
+    } catch (err) {
+      log(`  ${sym}: Yahoo fallback also failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (bars.length === 0) {
+    log(`  ${sym}: No historical data available — will build bars from live polls`);
+    return;
+  }
+
+  // Load into bar builder
+  b.bars5m = bars.slice(-200);
+  b.lastPrice = bars[bars.length - 1].c;
+
+  const today = new Date();
+  const todayStr = today.toISOString().split("T")[0];
+  const prevDayBars = bars.filter(bar => new Date(bar.t * 1000).toISOString().split("T")[0] < todayStr);
+  const todayBars = bars.filter(bar => new Date(bar.t * 1000).toISOString().split("T")[0] === todayStr);
+
+  if (prevDayBars.length > 0) {
+    b.prevDayHigh = Math.max(...prevDayBars.map(x => x.h));
+    b.prevDayLow = Math.min(...prevDayBars.map(x => x.l));
+    b.prevDayClose = prevDayBars[prevDayBars.length - 1].c;
+  }
+
+  b.sessionBars = todayBars;
+  b.barCount = todayBars.length;
+
+  if (todayBars.length >= 12) {
+    const orBars = todayBars.slice(0, 12);
+    b.openingRangeHigh = Math.max(...orBars.map(x => x.h));
+    b.openingRangeLow = Math.min(...orBars.map(x => x.l));
+  }
+
+  log(`  ${sym}: Loaded ${bars.length} bars | Last: $${b.lastPrice.toFixed(2)} | PDH:$${b.prevDayHigh.toFixed(2)} PDL:$${b.prevDayLow.toFixed(2)} | Today: ${todayBars.length} bars`);
+}
+
+async function preloadBars() {
+  log("Pre-loading historical bars (Tradovate primary, Yahoo fallback)...");
+
+  // Preload for ALL symbols (both full-size and micro)
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
+    await preloadBarsForSymbol(sym);
   }
 
   log("Pre-load complete — engine ready to trade immediately");
@@ -1981,8 +2123,8 @@ let vixTermStructure: "contango" | "backwardation" | "flat" = "contango";
 async function updateVIX() {
   try {
     const [vixQ, vix3mQ] = await Promise.all([
-      yfEngine.quote("^VIX").catch(() => null),
-      yfEngine.quote("^VIX3M").catch(() => null),
+      getYfEngine().quote("^VIX").catch(() => null),
+      getYfEngine().quote("^VIX3M").catch(() => null),
     ]);
     if (vixQ?.regularMarketPrice) currentVIX = vixQ.regularMarketPrice;
     if (vix3mQ?.regularMarketPrice) vix3m = vix3mQ.regularMarketPrice;
@@ -2161,7 +2303,7 @@ async function updateCrossAssetSignals() {
   try {
     const symbols = ["^VIX", "UUP", "TLT", "USO", "GLD"];
     const quotes = await Promise.all(
-      symbols.map(s => yfEngine.quote(s).catch(() => null))
+      symbols.map(s => getYfEngine().quote(s).catch(() => null))
     );
 
     const data: Record<string, { price: number; change: number }> = {};
@@ -2232,7 +2374,7 @@ async function updateSectorRotation() {
     ];
 
     const quotes = await Promise.all(
-      sectors.map(s => yfEngine.quote(s.sym).catch(() => null))
+      sectors.map(s => getYfEngine().quote(s.sym).catch(() => null))
     );
 
     const results: { name: string; change: number }[] = [];
@@ -2328,7 +2470,7 @@ function startHealthServer() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
-      yahoo: yahooCircuitOpen ? "circuit_open" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok",
+      md: mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok",
       tilt: tiltPauseUntil === Infinity ? "session_done" : Date.now() < tiltPauseUntil ? `paused(${consecutiveStops})` : "ok",
       consecutiveStops,
       symbols: SYMBOLS.map(s => {
@@ -2477,14 +2619,14 @@ async function main() {
   safeInterval(() => {
     const session = getSessionName();
     const vix = getVIXMultiplier();
-    const yahooStatus = yahooCircuitOpen ? "CIRCUIT_OPEN" : yahooConsecutiveFailures > 0 ? `degraded(${yahooConsecutiveFailures})` : "ok";
+    const mdStatus = mdCircuitOpen ? "CIRCUIT_OPEN" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok";
     const tiltStatus = tiltPauseUntil === Infinity ? "SESSION_DONE" : Date.now() < tiltPauseUntil ? `PAUSED(${consecutiveStops} stops)` : "ok";
     const prices = SYMBOLS.map(s => {
       const b = barBuilders.get(s);
       return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
     }).join(" ");
     const macroStatus = macroBlockReason || "clear";
-    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | Yahoo:${yahooStatus} | Tilt:${tiltStatus} | ${prices}`);
+    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | MD:${mdStatus} | Tilt:${tiltStatus} | ${prices}`);
   }, 120_000, "statusLog");
 
   log("Engine ready — scanning for setups on every 5-min bar close...");

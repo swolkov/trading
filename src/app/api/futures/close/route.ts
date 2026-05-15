@@ -33,14 +33,12 @@ export async function POST(request: Request) {
       const qty = Math.abs(pos.netPos);
       const mult = MULTIPLIERS[sym] || 5;
 
-      // Get a live quote for P&L calculation
+      // Get a live quote for P&L calculation (Tradovate primary, Yahoo fallback)
       let closePrice = pos.netPrice;
       try {
-        const YF = require("yahoo-finance2").default || require("yahoo-finance2");
-        const yf = new YF({ suppressNotices: ["ripHistorical"] });
-        const yahooSymbols: Record<string, string> = { MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F", MYM: "YM=F", M2K: "RTY=F" };
-        const q = await yf.quote(yahooSymbols[sym] || "ES=F");
-        if (q?.regularMarketPrice) closePrice = q.regularMarketPrice;
+        const { getFuturesQuote } = await import("@/lib/futures-data");
+        const q = await getFuturesQuote(sym);
+        if (q.price > 0) closePrice = q.price;
       } catch {}
 
       // Market close via centralized client (has timeout, rate limit handling)
