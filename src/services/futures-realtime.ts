@@ -1023,9 +1023,10 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
     const parsed = JSON.parse(text.trim());
     return { agree: !!parsed.agree, confidence: parsed.confidence || 50, reasoning: parsed.reasoning || "" };
   } catch (err) {
-    log(`[AI] Error: ${err instanceof Error ? err.message : err}`);
-    // AI unavailable: still allow high-confidence equity trades, but block gold (less tested)
-    return { agree: true, confidence: 0, reasoning: "AI unavailable" };
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    log(`[AI] ERROR — ${msg}`);
+    // AI unavailable: still allow trades but with reduced confidence (no AI boost)
+    return { agree: true, confidence: 0, reasoning: `AI error: ${msg.slice(0, 80)}` };
   }
 }
 
