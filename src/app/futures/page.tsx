@@ -1,10 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { FuturesChart } from "@/components/charts/futures-chart";
-// TradingView chart removed — using Lightweight only
+
+const FuturesChart = dynamic(
+  () => import("@/components/charts/futures-chart").then((m) => m.FuturesChart),
+  { ssr: false, loading: () => <div className="h-[560px] flex items-center justify-center text-muted-foreground/40 animate-pulse">Loading chart...</div> }
+);
 
 // ── Types ──────────────────────────────────────────────
 
