@@ -6,8 +6,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 const FuturesChart = dynamic(
-  () => import("@/components/charts/futures-chart").then((m) => m.FuturesChart),
-  { ssr: false, loading: () => <div className="h-[560px] flex items-center justify-center text-muted-foreground/40 animate-pulse">Loading chart...</div> }
+  () =>
+    import("@/components/charts/futures-chart").then((mod) => ({
+      default: mod.FuturesChart,
+    })),
+  { ssr: false }
 );
 
 // ── Types ──────────────────────────────────────────────
