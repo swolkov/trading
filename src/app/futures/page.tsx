@@ -184,6 +184,13 @@ function formatNum(n: number, decimals = 2) {
   return n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+/** Format a date/time string in Eastern Time (futures market timezone) */
+function formatET(iso: string, opts?: { dateOnly?: boolean }) {
+  const d = new Date(iso);
+  if (opts?.dateOnly) return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+}
+
 function formatVol(v: number) {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
   if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
@@ -862,7 +869,7 @@ export default function FuturesPage() {
                         <div key={day} className="flex items-center justify-between bg-white/[0.02] rounded-lg px-3 py-1.5">
                           <div className="flex items-center gap-3">
                             <span className="text-xs font-medium tabular-nums w-24">
-                              {new Date(day + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" })}
+                              {new Date(day + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" })}
                             </span>
                             <span className="text-[10px] text-muted-foreground/40">
                               {data.trades} trades ({data.wins}W / {data.losses}L)
@@ -900,7 +907,7 @@ export default function FuturesPage() {
                           {periodTrades.map((t) => (
                             <tr key={t.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
                               <td className="py-2 text-muted-foreground/50 tabular-nums whitespace-nowrap">
-                                {new Date(t.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                {formatET(t.time)}
                               </td>
                               <td className="py-2 font-bold">{t.symbol}</td>
                               <td className="py-2">
@@ -1039,7 +1046,7 @@ export default function FuturesPage() {
                     for (const t of closedTrades) {
                       const d = new Date(t.time);
                       const dateKey = d.toISOString().slice(0, 10); // UTC
-                      const day = new Date(dateKey + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+                      const day = new Date(dateKey + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
                       if (!reportDayMap[day]) reportDayMap[day] = { pnl: 0, trades: 0, wins: 0, dateKey };
                       reportDayMap[day].pnl += t.pnl || 0;
                       reportDayMap[day].trades++;
@@ -1056,14 +1063,14 @@ export default function FuturesPage() {
                       if (bal.eod != null && bal.sod != null) balPnl = bal.eod - bal.sod;
                       else if (nextBal?.sod != null && bal.sod != null) balPnl = nextBal.sod - bal.sod;
                       if (balPnl != null) {
-                        const d = new Date(date + "T12:00:00");
-                        const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                        const d = new Date(date + "T12:00:00Z");
+                        const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
                         if (reportDayMap[day]) reportDayMap[day].pnl = balPnl;
                       }
                     }
                     // Today: use live balance delta
                     if (calendarDayPnl != null) {
-                      const todayLabel = new Date(todayUTC + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+                      const todayLabel = new Date(todayUTC + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
                       if (reportDayMap[todayLabel]) reportDayMap[todayLabel].pnl = calendarDayPnl;
                     }
                     const reportDays = Object.entries(reportDayMap);
@@ -1282,7 +1289,7 @@ export default function FuturesPage() {
                         {/* Setup name + time */}
                         <div className="flex justify-between text-[9px] text-muted-foreground/30">
                           {pos.setup && <span>{pos.setup}</span>}
-                          <span>{new Date(pos.openedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                          <span>{formatET(pos.openedAt)}</span>
                         </div>
                       </div>
                     );
@@ -1433,7 +1440,7 @@ export default function FuturesPage() {
                         </div>
                         <p className="text-muted-foreground/30 truncate">{log.reason?.slice(0, 80)}</p>
                         <p className="text-muted-foreground/20 tabular-nums">
-                          {new Date(log.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                          {formatET(log.time)}
                         </p>
                       </div>
                     </div>
