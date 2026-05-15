@@ -137,7 +137,13 @@ function OptionsPageInner() {
   const allStrikes = [...new Set([...calls.map((c) => c.strike_price), ...puts.map((c) => c.strike_price)])].sort((a, b) => parseFloat(a) - parseFloat(b));
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 animate-fade-up">
+      {/* Page title */}
+      <div>
+        <h1 className="text-xl font-bold tracking-tight">Options</h1>
+        <p className="text-[11px] text-muted-foreground/50">Alpaca options chain — search, analyze, and trade</p>
+      </div>
+
       {/* Header: Search + Price + IV Rank */}
       <div className="flex items-start gap-6">
         <div className="flex-1">
@@ -469,7 +475,16 @@ function OptionsPageInner() {
 
 export default function OptionsPageWrapper() {
   return (
-    <Suspense fallback={<div className="text-muted-foreground p-6">Loading options...</div>}>
+    <Suspense fallback={
+      <div className="space-y-5 animate-fade-up p-6">
+        <div>
+          <div className="skeleton h-6 w-24 rounded mb-2" />
+          <div className="skeleton h-3 w-48 rounded" />
+        </div>
+        <div className="skeleton h-10 w-64 rounded" />
+        <div className="skeleton h-64 w-full rounded-xl" />
+      </div>
+    }>
       <OptionsPageInner />
     </Suspense>
   );

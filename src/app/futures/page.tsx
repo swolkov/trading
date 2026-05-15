@@ -169,15 +169,15 @@ const STRATEGIES = [
 ];
 
 const RISK_RULES = [
-  "Dynamic sizing: 0.25-1% per trade",
-  "Scale out 50% at 1R, trail rest",
+  "1% risk per trade ($50 on $5K)",
+  "Scale out 50% at 1R (or full close if 1 lot)",
   "Breakeven stop at 1R profit",
-  "$1,500 daily loss kill switch",
-  "Max 2 positions, 6 trades/day",
+  "$250 daily loss kill switch (5%)",
+  "Max 3 contracts, 6 trades/day",
   "AI hard gate (Claude confirms)",
   "Tilt: 30min pause after 2 stops",
   "EOD forced close at 3:50 PM",
-  "Skip lunch 12-2 PM, half Mon/Fri",
+  "Micros only (MES/MNQ/MGC)",
   "No re-entry on stopped symbols",
 ];
 
@@ -286,7 +286,7 @@ export default function FuturesPage() {
   const winCount = hasFillData ? fillPnl.wins : wins.length;
   const lossCount = hasFillData ? fillPnl.losses : losses.length;
   // Total P&L: use Tradovate account equity as source of truth (DB trade sums are unreliable due to reconciliation bugs)
-  const STARTING_CAPITAL = 50_000;
+  const STARTING_CAPITAL = 5_000;
   const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
   const totalPnl = accountPnl ?? (hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
   const avgWin = hasFillData
@@ -342,9 +342,9 @@ export default function FuturesPage() {
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Futures Command Center</h1>
-          <p className="text-[11px] text-muted-foreground/60">
-            Micro futures — live data via Yahoo Finance
+          <h1 className="text-xl font-bold tracking-tight">Futures</h1>
+          <p className="text-[11px] text-muted-foreground/50">
+            Tradovate micro futures — MES, MNQ, MGC, MYM, M2K
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
@@ -1481,7 +1481,7 @@ export default function FuturesPage() {
                 <CardTitle className="text-[11px] text-amber-400 uppercase tracking-wider font-bold">Setup Required</CardTitle>
               </CardHeader>
               <CardContent className="text-[11px] space-y-2 text-muted-foreground/60">
-                <p>Tradovate deposit clears ~May 14. Then:</p>
+                <p>Tradovate setup needed:</p>
                 <div className="space-y-1 ml-2">
                   <p>1. Subscribe to API ($25/mo)</p>
                   <p>2. Create API keys (CID + SEC)</p>

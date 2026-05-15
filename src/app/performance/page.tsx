@@ -89,7 +89,23 @@ export default function PerformancePage() {
     fetch("/api/positions").then((r) => r.json()).then((p) => { if (Array.isArray(p)) setPositions(p); }).catch(() => {});
   }, []);
 
-  if (!data) return <div className="p-6 text-muted-foreground">Loading...</div>;
+  if (!data) return (
+    <div className="space-y-5 animate-fade-up">
+      <div>
+        <div className="skeleton h-6 w-48 rounded mb-2" />
+        <div className="skeleton h-3 w-64 rounded" />
+      </div>
+      <div className="skeleton h-32 w-full rounded-xl" />
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+            <div className="skeleton h-3 w-14 rounded mb-2" />
+            <div className="skeleton h-6 w-20 rounded" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
   const s = data.stats;
 
@@ -107,8 +123,8 @@ export default function PerformancePage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div>
-        <h1 className="text-2xl font-bold">How Is The Agent Doing?</h1>
-        <p className="text-sm text-muted-foreground">Complete breakdown of every trade, profit, and loss</p>
+        <h1 className="text-xl font-bold tracking-tight">Performance</h1>
+        <p className="text-[11px] text-muted-foreground/50">Alpaca trade analysis — every trade, profit, and loss</p>
       </div>
 
       {/* Big P&L */}
