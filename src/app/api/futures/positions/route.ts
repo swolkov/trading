@@ -240,52 +240,10 @@ export async function GET() {
       roundTrips,
     };
 
-    // ── Reconciliation: cross-check DB trade P&L against fill-based round trips ──
-    // IMPORTANT: Match by closest exit time AND exit price to avoid cross-contamination
-    // when multiple trades on the same symbol happen within minutes of each other.
-    if (roundTrips.length > 0) {
-      try {
-        const matchedDbIds = new Set<number>(); // prevent one round-trip from stealing another's match
-        for (const rt of roundTrips) {
-          const exitTime = new Date(rt.exitTime).getTime();
-          // Find the BEST matching DB close entry: same symbol, close action, closest in time + price
-          let bestMatch: typeof recentLogs[0] | null = null;
-          let bestScore = Infinity;
-          for (const log of recentLogs) {
-            if (log.symbol !== `FUT:${rt.symbol}`) continue;
-            if (log.pnl == null) continue;
-            if (log.action === "futures_long" || log.action === "futures_short") continue;
-            if (matchedDbIds.has(log.id)) continue; // already matched to a different round-trip
-            const logTime = new Date(log.createdAt).getTime();
-            const timeDiff = Math.abs(logTime - exitTime);
-            if (timeDiff > 2 * 60 * 1000) continue; // tighten window to 2 min (was 5)
-            // Score by time proximity + price proximity (lower = better)
-            const priceDiff = log.price ? Math.abs(log.price - rt.exitPrice) : 0;
-            const score = timeDiff + priceDiff * 60000; // weight price match heavily
-            if (score < bestScore) {
-              bestScore = score;
-              bestMatch = log;
-            }
-          }
-
-          if (bestMatch && bestMatch.pnl != null) {
-            matchedDbIds.add(bestMatch.id);
-            const diff = Math.abs(bestMatch.pnl - rt.pnl);
-            if (diff > 1) {
-              await prisma.autoTradeLog.update({
-                where: { id: bestMatch.id },
-                data: {
-                  pnl: rt.pnl,
-                  reason: bestMatch.reason + ` [reconciled: was $${bestMatch.pnl.toFixed(0)}, fills show $${rt.pnl.toFixed(0)}]`,
-                },
-              });
-              const activityMatch = activity.find((a) => a.id === bestMatch.id);
-              if (activityMatch) activityMatch.pnl = rt.pnl;
-            }
-          }
-        }
-      } catch { /* reconciliation is best-effort */ }
-    }
+    // P&L reconciliation DISABLED — the agent calculates P&L correctly at trade time
+    // (entry × multiplier × qty). Fill-based round-trip matching cross-contaminates when
+    // multiple trades on the same symbol happen within minutes. Aggregate P&L uses broker
+    // account balance (source of truth), so per-trade reconciliation is not needed.
 
     return Response.json({
       connected: true,
