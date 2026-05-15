@@ -15,7 +15,7 @@ const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
 const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] });
 
 import { prisma } from "../lib/db";
-import { logTradeToJournal, logDecision } from "../lib/vault";
+import { logTradeToJournal, logDecision, vaultRead } from "../lib/vault";
 
 // ── Config ──────────────────────────────────────────────
 
@@ -461,6 +461,10 @@ let dailyPnl = 0;
 const stoppedSymbols: Set<string> = new Set(); // symbols stopped out today — no re-entry
 let consecutiveStops = 0; // tilt protection counter
 let tiltPauseUntil = 0; // timestamp when tilt pause ends
+
+// Vault lessons cache — refreshed hourly, read before each trade
+let vaultLessonsCache: { lessons: string | null; antiPatterns: string | null } | null = null;
+let vaultLessonsCacheTime = 0;
 
 // ── Position Persistence (survive restarts) ──────────────
 
@@ -1075,6 +1079,29 @@ function onBarClose(sym: string, bar: Bar) {
   if (Date.now() < tiltPauseUntil) return;
   // No re-entry on stopped-out symbols
   if (stoppedSymbols.has(sym)) return;
+
+  // CORRELATION GATE: don't hold two equity index positions simultaneously
+  // MES and MNQ are 90%+ correlated — holding both is doubling the same bet
+  const EQUITY_INDICES = new Set(["MES", "MNQ", "MYM", "M2K"]);
+  if (EQUITY_INDICES.has(sym)) {
+    const holdingEquityIndex = [...positions.keys()].some(s => EQUITY_INDICES.has(s));
+    if (holdingEquityIndex) {
+      // Already holding an equity index — only allow MGC (uncorrelated) or same-symbol addition
+      return;
+    }
+  }
+
+  // VAULT LESSONS GATE: check anti-patterns before trading
+  // Cache refreshes hourly in the background, check is synchronous
+  if (vaultLessonsCache?.antiPatterns) {
+    const ap = vaultLessonsCache.antiPatterns.toLowerCase();
+    // Check time-of-day anti-patterns from synthesis agent
+    if (ap.includes("first_30_min") && ap.includes("0% win rate") && session === "open") {
+      log(`${sym}: VAULT BLOCK — anti-pattern: 0% win rate in first 30 min`);
+      return;
+    }
+  }
+
   // MACRO EVENT GATE: reduce/block trading around CPI, FOMC, jobs reports
   const macro = getMacroMultiplier();
   if (macro.multiplier === 0) {
@@ -2194,6 +2221,28 @@ async function main() {
   safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
   safeInterval(updateEarningsWeekFilter, 3600_000, "updateEarningsWeekFilter"); // hourly
   safeInterval(updateSectorRotation, 600_000, "updateSectorRotation"); // every 10min
+
+  // Load vault lessons (anti-patterns, active lessons) on startup + refreshed hourly
+  try {
+    const [lessons, antiPatterns] = await Promise.all([
+      vaultRead("Lessons/active-lessons.md"),
+      vaultRead("Rules/anti-patterns.md"),
+    ]);
+    vaultLessonsCache = { lessons, antiPatterns };
+    vaultLessonsCacheTime = Date.now();
+    if (lessons || antiPatterns) log("[VAULT] Loaded lessons + anti-patterns from brain");
+  } catch { /* vault read optional */ }
+  safeInterval(async () => {
+    try {
+      const [lessons, antiPatterns] = await Promise.all([
+        vaultRead("Lessons/active-lessons.md"),
+        vaultRead("Rules/anti-patterns.md"),
+      ]);
+      vaultLessonsCache = { lessons, antiPatterns };
+      vaultLessonsCacheTime = Date.now();
+      if (lessons || antiPatterns) log("[VAULT] Loaded lessons + anti-patterns from brain");
+    } catch { /* vault read optional */ }
+  }, 3600_000, "loadVaultLessons");
 
   // Watchdog: monitors tickCount and restarts poll if stalled
   startWatchdog();
