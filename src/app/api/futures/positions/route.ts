@@ -125,6 +125,15 @@ export async function GET() {
         if (targetMatch) target = parseFloat(targetMatch[1].replace(",", ""));
       }
 
+      // SANITY: Stop must be on correct side of entry (slippage can push fill past calculated stop)
+      if (stopLoss && direction === "long" && stopLoss >= pos.netPrice) {
+        // Recalculate: use ~1.3% of entry as fallback stop distance
+        stopLoss = pos.netPrice * 0.987;
+      }
+      if (stopLoss && direction === "short" && stopLoss <= pos.netPrice) {
+        stopLoss = pos.netPrice * 1.013;
+      }
+
       // Calculate % to stop and target
       const pctToStop = stopLoss ? ((currentPrice - stopLoss) / currentPrice * 100) * (direction === "long" ? 1 : -1) : null;
       const pctToTarget = target ? ((target - currentPrice) / currentPrice * 100) * (direction === "long" ? 1 : -1) : null;

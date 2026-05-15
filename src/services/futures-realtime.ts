@@ -15,7 +15,7 @@ const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
 const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] });
 
 import { prisma } from "../lib/db";
-import { logTradeToJournal, logDecision, vaultRead } from "../lib/vault";
+import { logTradeToJournal, logDecision, vaultRead, vaultWrite } from "../lib/vault";
 
 // ── Config ──────────────────────────────────────────────
 
@@ -433,6 +433,25 @@ function checkSessionReset() {
           create: { key: `eod_balance_${yesterday}`, value: String(tradovateEquity) },
         });
         log(`[RESET] Saved start-of-day balance: $${tradovateEquity.toFixed(2)} (${today}), EOD yesterday (${yesterday})`);
+
+        // Write to Obsidian vault — persistent brain for agents
+        try {
+          const balancesDoc = await vaultRead("Performance/daily-balances.md");
+          if (balancesDoc) {
+            // Update today's SOD and yesterday's EOD in the vault
+            const sodEntry = `\n${today}:\n  sod: ${Math.round(tradovateEquity)}\n  eod: null\n  day_pnl: null\n  notes: "Auto-tracked by engine"`;
+            // Only append if today isn't already in the doc
+            if (!balancesDoc.includes(today + ":")) {
+              const updatedDoc = balancesDoc.replace(
+                "```\n\n## Cumulative",
+                sodEntry + "\n```\n\n## Cumulative"
+              );
+              if (updatedDoc !== balancesDoc) {
+                await vaultWrite("Performance/daily-balances.md", updatedDoc, "futures-realtime");
+              }
+            }
+          }
+        } catch { /* vault write optional */ }
       } catch {}
     })();
     // Clean slate: cancel any orphaned orders from yesterday
@@ -465,6 +484,36 @@ function checkSessionReset() {
           create: { key: `eod_balance_${today}`, value: String(tradovateEquity) },
         });
         log(`[EOD] Saved end-of-day balance: $${tradovateEquity.toFixed(2)} (${today})`);
+
+        // Write EOD to vault + reconciliation check
+        try {
+          const sodKey = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
+          const sodBalance = sodKey ? parseFloat(sodKey.value) : null;
+          const eodBalance = tradovateEquity;
+          const balanceDelta = sodBalance != null ? eodBalance - sodBalance : null;
+
+          // Reconciliation: compare engine dailyPnl vs actual balance delta
+          if (balanceDelta != null) {
+            const discrepancy = Math.abs(dailyPnl - balanceDelta);
+            if (discrepancy > 50) {
+              log(`[RECONCILE] WARNING: Engine dailyPnl=$${dailyPnl.toFixed(0)} but balance delta=$${balanceDelta.toFixed(0)} (discrepancy: $${discrepancy.toFixed(0)})`);
+              notify(`RECONCILE WARNING: Engine tracked $${dailyPnl.toFixed(0)} but Tradovate balance moved $${balanceDelta.toFixed(0)} today. Discrepancy: $${discrepancy.toFixed(0)}`, "general");
+            }
+          }
+
+          // Update vault daily-balances.md with EOD
+          const balancesDoc = await vaultRead("Performance/daily-balances.md");
+          if (balancesDoc && sodBalance != null) {
+            const dayPnl = Math.round(eodBalance - sodBalance);
+            const updatedDoc = balancesDoc
+              .replace(new RegExp(`(${today}:[\\s\\S]*?eod:)\\s*null`), `$1 ${Math.round(eodBalance)}`)
+              .replace(new RegExp(`(${today}:[\\s\\S]*?day_pnl:)\\s*null`), `$1 ${dayPnl >= 0 ? "+" : ""}${dayPnl}`);
+            if (updatedDoc !== balancesDoc) {
+              await vaultWrite("Performance/daily-balances.md", updatedDoc, "futures-realtime");
+              log(`[EOD] Updated vault: ${today} SOD=$${sodBalance.toFixed(0)} EOD=$${Math.round(eodBalance)} P&L=${dayPnl >= 0 ? "+" : ""}$${dayPnl}`);
+            }
+          }
+        } catch { /* vault/reconciliation optional */ }
       } catch {}
     })();
   }
@@ -572,6 +621,23 @@ async function loadPositions() {
         const currentATR = b ? atr(b.bars5m) : 5;
         stopLoss = direction === "long" ? tp.netPrice - currentATR * 1.5 : tp.netPrice + currentATR * 1.5;
         target = direction === "long" ? tp.netPrice + currentATR * 4 : tp.netPrice - currentATR * 4;
+      }
+
+      // SANITY: Stop must be on correct side of entry (slippage can push fill past calculated stop)
+      const actualEntry = entryLog?.price || tp.netPrice;
+      if (direction === "long" && stopLoss >= actualEntry) {
+        const b = barBuilders.get(sym);
+        const currentATR = b ? atr(b.bars5m) : 5;
+        const corrected = actualEntry - currentATR * 1.5;
+        log(`[PERSIST] WARNING: Stop $${stopLoss.toFixed(2)} was ABOVE entry $${actualEntry.toFixed(2)} for LONG — corrected to $${corrected.toFixed(2)}`);
+        stopLoss = corrected;
+      }
+      if (direction === "short" && stopLoss <= actualEntry) {
+        const b = barBuilders.get(sym);
+        const currentATR = b ? atr(b.bars5m) : 5;
+        const corrected = actualEntry + currentATR * 1.5;
+        log(`[PERSIST] WARNING: Stop $${stopLoss.toFixed(2)} was BELOW entry $${actualEntry.toFixed(2)} for SHORT — corrected to $${corrected.toFixed(2)}`);
+        stopLoss = corrected;
       }
 
       // Use entry log price instead of Tradovate netPrice (which is averaged and can be wrong after partial fills)
@@ -701,6 +767,16 @@ function checkPositions(sym: string, price: number) {
   if (pos.reachedBreakeven && diff <= 0) {
     log(`${sym}: BREAKEVEN STOP. P&L: $${(diff * mult * pos.quantity).toFixed(0)}`);
     closePosition(sym, price, "breakeven"); return;
+  }
+
+  // HARD STOP: Fallback when broker stop order fails or was never placed
+  // Only fires if we haven't already moved to trail/breakeven (those manage their own exits)
+  if (!pos.trailStop && !pos.reachedBreakeven && pos.stopLoss > 0) {
+    const pastStop = pos.direction === "long" ? price <= pos.stopLoss : price >= pos.stopLoss;
+    if (pastStop) {
+      log(`${sym}: HARD STOP — price $${price.toFixed(2)} past stop $${pos.stopLoss.toFixed(2)}. Broker stop may have failed. P&L: $${pnlDollars.toFixed(0)}`);
+      closePosition(sym, price, "stop_loss"); return;
+    }
   }
 
   // Emergency
@@ -1682,6 +1758,18 @@ async function syncPositions() {
 
       if (!stopLoss) stopLoss = direction === "long" ? entryPrice - currentATR * 1.5 : entryPrice + currentATR * 1.5;
       if (!target) target = direction === "long" ? entryPrice + currentATR * 4 : entryPrice - currentATR * 4;
+
+      // SANITY: Stop must be on correct side of entry
+      if (direction === "long" && stopLoss >= entryPrice) {
+        const corrected = entryPrice - currentATR * 1.5;
+        log(`[SYNC] WARNING: Stop $${stopLoss.toFixed(2)} above entry $${entryPrice.toFixed(2)} for LONG — corrected to $${corrected.toFixed(2)}`);
+        stopLoss = corrected;
+      }
+      if (direction === "short" && stopLoss <= entryPrice) {
+        const corrected = entryPrice + currentATR * 1.5;
+        log(`[SYNC] WARNING: Stop $${stopLoss.toFixed(2)} below entry $${entryPrice.toFixed(2)} for SHORT — corrected to $${corrected.toFixed(2)}`);
+        stopLoss = corrected;
+      }
 
       positions.set(sym, {
         symbol: sym,

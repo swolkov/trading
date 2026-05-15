@@ -351,7 +351,9 @@ export async function placeBracketOrder(params: {
         isAutomated: true,
       }),
     });
-  } catch { /* stop order optional — agent monitors positions */ }
+  } catch (err) {
+    console.error(`[bracket] FAILED to place broker stop at $${params.stopLoss}: ${err}. Agent hard stop will backstop.`);
+  }
 
   // Step 3: Place take profit
   try {
@@ -369,7 +371,9 @@ export async function placeBracketOrder(params: {
         isAutomated: true,
       }),
     });
-  } catch { /* target order optional — agent monitors positions */ }
+  } catch (err) {
+    console.error(`[bracket] FAILED to place broker target at $${params.takeProfit}: ${err}. Agent will manage exit.`);
+  }
 
   return { orderId: entryData.orderId, status: "submitted" };
 }

@@ -753,6 +753,19 @@ export async function runFuturesAgent(): Promise<{
       if (sm) origStop = parseFloat(sm[1].replace(",", ""));
       if (tm) origTarget = parseFloat(tm[1].replace(",", ""));
     }
+
+    // SANITY: Stop must be on correct side of entry (slippage can push fill past calculated stop)
+    if (origStop > 0 && direction === "long" && origStop >= avgPrice) {
+      const corrected = avgPrice - currentATRVal * 1.5;
+      details.push(`    WARNING: Stop $${origStop.toFixed(2)} was ABOVE entry $${avgPrice.toFixed(2)} for LONG — corrected to $${corrected.toFixed(2)}`);
+      origStop = corrected;
+    }
+    if (origStop > 0 && direction === "short" && origStop <= avgPrice) {
+      const corrected = avgPrice + currentATRVal * 1.5;
+      details.push(`    WARNING: Stop $${origStop.toFixed(2)} was BELOW entry $${avgPrice.toFixed(2)} for SHORT — corrected to $${corrected.toFixed(2)}`);
+      origStop = corrected;
+    }
+
     const stopDistance = origStop > 0 ? Math.abs(avgPrice - origStop) : currentATRVal * 1.5;
 
     // Helper: cancel bracket orders for this contract before manual close
@@ -816,6 +829,25 @@ export async function runFuturesAgent(): Promise<{
           }});
           try { await logTradeToJournal({ tradeId: `BE-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "breakeven_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Breakeven stop — was at 1R+, pulled back" }, "futures-agent"); } catch {}
         } catch (err) { details.push(`    Breakeven close failed: ${err}`); }
+        continue; // position closed, skip remaining checks
+      }
+    }
+
+    // ── HARD STOP: Fallback when broker stop order fails or was never placed ──
+    if (origStop > 0) {
+      const pastStop = direction === "long" ? currentPrice <= origStop : currentPrice >= origStop;
+      if (pastStop) {
+        details.push(`    HARD STOP: Price $${currentPrice.toFixed(2)} past stop $${origStop.toFixed(2)} — broker stop may have failed. P&L: $${unrealizedPnl.toFixed(0)}`);
+        try {
+          await cancelBracketOrders();
+          await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: absQty });
+          await prisma.autoTradeLog.create({ data: {
+            symbol: `FUT:${pos.contractName}`, action: "futures_stop_loss",
+            qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
+            reason: `HARD STOP: Price $${currentPrice.toFixed(2)} past stop $${origStop.toFixed(2)}. Broker stop may have failed. P&L: $${unrealizedPnl.toFixed(0)}`,
+          }});
+          try { await logTradeToJournal({ tradeId: `HS-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "hard_stop", contracts: absQty, entryPrice: avgPrice, stopPrice: origStop, targetPrice: origTarget, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Hard stop — broker stop failed" }, "futures-agent"); } catch {}
+        } catch (err) { details.push(`    Hard stop close FAILED: ${err}`); }
         continue; // position closed, skip remaining checks
       }
     }
