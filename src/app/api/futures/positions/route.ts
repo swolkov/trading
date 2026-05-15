@@ -254,10 +254,42 @@ export async function GET() {
       fillBasedPnl,
       activity,
       engineStatus,
-      startOfDayBalance: (() => {
-        // Most reliable: current balance minus today's realized P&L from Tradovate
-        // This always gives the correct SOD regardless of snapshot timing issues
-        if (accountSummary?.balance != null && accountSummary?.realizedPnl != null) {
+      startOfDayBalance: await (async () => {
+        // 1. Best source: DB snapshot taken at start of day
+        const todayKey = new Date().toISOString().slice(0, 10);
+        try {
+          const sodSnapshot = await prisma.agentConfig.findUnique({
+            where: { key: `daily_balance_${todayKey}` },
+          });
+          if (sodSnapshot?.value) {
+            const sodVal = parseFloat(sodSnapshot.value);
+            // Only use if it differs from current balance (proves it was a real SOD snapshot)
+            if (!isNaN(sodVal) && sodVal !== accountSummary.balance) return sodVal;
+          }
+        } catch {}
+        // 2. Use previous day's EOD balance
+        try {
+          const yesterday = new Date();
+          yesterday.setDate(yesterday.getDate() - 1);
+          const ydKey = yesterday.toISOString().slice(0, 10);
+          const eodSnapshot = await prisma.agentConfig.findUnique({
+            where: { key: `eod_balance_${ydKey}` },
+          });
+          if (eodSnapshot?.value) {
+            const eodVal = parseFloat(eodSnapshot.value);
+            if (!isNaN(eodVal)) return eodVal;
+          }
+          // Also check yesterday's SOD + look at day before for EOD
+          const sodSnapshot = await prisma.agentConfig.findUnique({
+            where: { key: `daily_balance_${ydKey}` },
+          });
+          if (sodSnapshot?.value) {
+            const sodVal = parseFloat(sodSnapshot.value);
+            if (!isNaN(sodVal)) return sodVal;
+          }
+        } catch {}
+        // 3. Fallback: balance minus realized P&L (works during active trading only)
+        if (accountSummary?.balance != null && accountSummary?.realizedPnl != null && accountSummary.realizedPnl !== 0) {
           return accountSummary.balance - accountSummary.realizedPnl;
         }
         return null;
