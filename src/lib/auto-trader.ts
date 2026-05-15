@@ -1270,11 +1270,51 @@ export async function runTradingAgent(): Promise<AgentResult> {
             } catch { /* default false */ }
 
             if (!optionsOnlyMode && isBullish) {
-              // STOCK TRADING DISABLED — 0/10 win rate, signal generator is broken
-              // Re-enable after debugging stock signal quality (need >50% win rate on paper trades)
-              details.push(`  ${symbol}: STOCK TRADING DISABLED — signal generator under review (0% win rate on last 10 trades)`);
-              await logTrade(symbol, "stock_disabled", 0, null, "Stock trading disabled — 0% historical win rate, signal needs debugging", analysis.score, analysis.signal);
-              continue;
+              // === STOCK ENTRY GATE ===
+              // Stocks require HIGHER conviction than options — 0% WR in first 10 trades was due to
+              // low-conviction entries. Now require: score ≥ 65, conf ≥ 70, above 20-SMA, volume surge.
+              // Can be toggled via DB config: stocks_enabled = "true"/"false"/"paper"
+
+              let stocksMode: "disabled" | "paper" | "live" = "paper";
+              try {
+                const stockConfig = await prisma.agentConfig.findUnique({ where: { key: "stocks_enabled" } });
+                const val = stockConfig?.value?.toLowerCase();
+                if (val === "true" || val === "live") stocksMode = "live";
+                else if (val === "paper") stocksMode = "paper";
+                else if (val === "false" || val === "disabled") stocksMode = "disabled";
+              } catch { /* default paper */ }
+
+              if (stocksMode === "disabled") {
+                details.push(`  ${symbol}: STOCKS DISABLED (set stocks_enabled=paper or live to enable)`);
+                continue;
+              }
+
+              // Higher bar for stocks: score ≥ 65, confidence ≥ 70%
+              const STOCK_MIN_SCORE = 65;
+              const STOCK_MIN_CONF = 70;
+              if (analysis.score < STOCK_MIN_SCORE || analysis.confidence < STOCK_MIN_CONF) {
+                details.push(`  ${symbol}: STOCK SKIP — score ${analysis.score} (need ${STOCK_MIN_SCORE}), conf ${analysis.confidence}% (need ${STOCK_MIN_CONF}%)`);
+                continue;
+              }
+
+              // Technical confirmation: must be above 20-SMA and showing volume surge
+              const sma20 = sma(closes, 20);
+              const volumeSurge = avgVolume > 0 ? recentVolume / avgVolume : 0;
+              if (sma20 && currentClose < sma20) {
+                details.push(`  ${symbol}: STOCK SKIP — below 20-SMA ($${currentClose.toFixed(2)} < $${sma20.toFixed(2)})`);
+                continue;
+              }
+              if (volumeSurge < 1.2) {
+                details.push(`  ${symbol}: STOCK SKIP — no volume confirmation (${(volumeSurge * 100).toFixed(0)}% of avg, need 120%+)`);
+                continue;
+              }
+
+              // RSI sanity: don't buy overbought stocks (>75)
+              if (rsi && rsi > 75) {
+                details.push(`  ${symbol}: STOCK SKIP — RSI overbought (${rsi.toFixed(0)})`);
+                continue;
+              }
+
               // EXECUTION QUALITY — get optimal order type and limit price
               let execType: "market" | "limit" = "limit";
               let limitPrice: string;
@@ -1292,57 +1332,69 @@ export async function runTradingAgent(): Promise<AgentResult> {
                 limitPrice = (price * (1 - RULES.LIMIT_ORDER_DISCOUNT)).toFixed(2);
               }
 
-              details.push(`  BUY ${symbol}: ${qty} shares, ${execType} $${limitPrice} (score: ${analysis.score}, ${reason})`);
-
-              const order = await placeOrder({
-                symbol,
-                qty: String(qty),
-                side: "buy",
-                type: execType,
-                time_in_force: "day",
-                ...(execType === "limit" ? { limit_price: limitPrice } : {}),
-              });
-
-              // Update sector map
-              heldSectors[sector] = (heldSectors[sector] || 0) + 1;
-
-              // Calculate ATR-based stop for logging
+              // Calculate ATR-based stop and target
               const atr = calculateATR(bars);
               const stopDistance = atr * RULES.STOP_ATR_MULTIPLIER;
               const stopPrice = (price - stopDistance).toFixed(2);
               const targetPrice = analysis.priceTarget || price * 1.15;
+              const riskReward = stopDistance > 0 ? ((targetPrice as number) - price) / stopDistance : 0;
 
-              await logTrade(
-                symbol,
-                "buy",
-              qty,
-              price,
-              `[${reason}] Score: ${analysis.score}, Signal: ${analysis.signal}, Conf: ${analysis.confidence}%. Stop: $${stopPrice} (ATR: $${atr.toFixed(2)}). Target: $${targetPrice.toFixed(2)}. ${analysis.summary.slice(0, 150)}`,
-              analysis.score,
-              analysis.signal,
-              order.id
-            );
-            tradesPlaced++;
+              // Require minimum 1.5:1 risk/reward
+              if (riskReward < 1.5) {
+                details.push(`  ${symbol}: STOCK SKIP — R:R too low (${riskReward.toFixed(1)}:1, need 1.5:1+)`);
+                continue;
+              }
 
-              // Log to Obsidian vault
-              try {
-                await logTradeToJournal({
-                  tradeId: `${new Date().toISOString().slice(0, 10)}-STK-${order.id.slice(-4)}`,
-                  timestamp: new Date().toISOString(),
-                  instrument: symbol,
-                  direction: "LONG",
-                  strategy: reason.includes("premium") ? "premium-selling" : "swing",
-                  setupType: reason,
-                  contracts: qty,
-                  entryPrice: price,
-                  stopPrice: parseFloat(stopPrice),
-                  targetPrice,
-                  conviction: Math.round(analysis.score / 20),
-                }, "auto-trader");
-                await logDecision("auto-trader", "ENTRY", symbol,
-                  `${reason}: Score ${analysis.score}, ${analysis.signal}, ${analysis.confidence}% conf`,
-                  Math.round(analysis.score / 20));
-              } catch { /* vault optional */ }
+              if (stocksMode === "paper") {
+                // Paper trade mode: log what WOULD have happened without executing
+                details.push(`  ${symbol}: STOCK PAPER TRADE — BUY ${qty} @ $${price.toFixed(2)}, Stop $${stopPrice}, Target $${(targetPrice as number).toFixed(2)}, R:R ${riskReward.toFixed(1)}:1 (score: ${analysis.score}, conf: ${analysis.confidence}%)`);
+                await logTrade(
+                  symbol, "stock_paper", qty, price,
+                  `[PAPER] [${reason}] Score: ${analysis.score}, Conf: ${analysis.confidence}%. Stop: $${stopPrice}. Target: $${(targetPrice as number).toFixed(2)}. R:R: ${riskReward.toFixed(1)}:1. ${analysis.summary.slice(0, 120)}`,
+                  analysis.score, analysis.signal
+                );
+              } else {
+                // Live stock execution
+                details.push(`  BUY ${symbol}: ${qty} shares, ${execType} $${limitPrice} (score: ${analysis.score}, R:R ${riskReward.toFixed(1)}:1, ${reason})`);
+
+                const order = await placeOrder({
+                  symbol,
+                  qty: String(qty),
+                  side: "buy",
+                  type: execType,
+                  time_in_force: "day",
+                  ...(execType === "limit" ? { limit_price: limitPrice } : {}),
+                });
+
+                heldSectors[sector] = (heldSectors[sector] || 0) + 1;
+
+                await logTrade(
+                  symbol, "buy", qty, price,
+                  `[${reason}] Score: ${analysis.score}, Signal: ${analysis.signal}, Conf: ${analysis.confidence}%. Stop: $${stopPrice} (ATR: $${atr.toFixed(2)}). Target: $${(targetPrice as number).toFixed(2)}. R:R: ${riskReward.toFixed(1)}:1. ${analysis.summary.slice(0, 150)}`,
+                  analysis.score, analysis.signal, order.id
+                );
+                tradesPlaced++;
+
+                // Log to Obsidian vault
+                try {
+                  await logTradeToJournal({
+                    tradeId: `${new Date().toISOString().slice(0, 10)}-STK-${order.id.slice(-4)}`,
+                    timestamp: new Date().toISOString(),
+                    instrument: symbol,
+                    direction: "LONG",
+                    strategy: reason.includes("premium") ? "premium-selling" : "swing",
+                    setupType: reason,
+                    contracts: qty,
+                    entryPrice: price,
+                    stopPrice: parseFloat(stopPrice),
+                    targetPrice: targetPrice as number,
+                    conviction: Math.round(analysis.score / 20),
+                  }, "auto-trader");
+                  await logDecision("auto-trader", "ENTRY", symbol,
+                    `${reason}: Score ${analysis.score}, ${analysis.signal}, ${analysis.confidence}% conf, R:R ${riskReward.toFixed(1)}:1`,
+                    Math.round(analysis.score / 20));
+                } catch { /* vault optional */ }
+              }
             } else if (optionsOnlyMode || isBearish) {
               details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
             }

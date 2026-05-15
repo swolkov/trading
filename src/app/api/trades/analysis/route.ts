@@ -120,8 +120,13 @@ export async function GET() {
     }
 
     // Add historical wins from agent database (trades that span across the fresh start cutoff)
+    // Exclude futures trades (FUT: prefix) — those are tracked separately via Tradovate
     const historicalWins = await prisma.autoTradeLog.findMany({
-      where: { pnl: { gt: 0 }, orderId: "historical" },
+      where: {
+        pnl: { gt: 0 },
+        orderId: "historical",
+        NOT: { symbol: { startsWith: "FUT:" } },
+      },
     });
     for (const hw of historicalWins) {
       roundTrips.push({

@@ -12,6 +12,7 @@ import {
   ClipboardList,
   BookOpen,
   TrendingUp,
+  Bot,
 } from "lucide-react";
 
 const sections = [
@@ -27,6 +28,12 @@ const sections = [
       { href: "/futures", label: "Futures", icon: BarChart3 },
       { href: "/stocks", label: "Stocks", icon: LineChart },
       { href: "/options", label: "Options", icon: Layers },
+    ],
+  },
+  {
+    label: "CONTROL",
+    links: [
+      { href: "/agents", label: "Agent Hub", icon: Bot },
     ],
   },
   {

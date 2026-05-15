@@ -171,7 +171,7 @@ agent: "${agentName}"
 
 export async function logDecision(
   agentName: string,
-  type: "ENTRY" | "EXIT" | "SKIP" | "ADJUSTMENT",
+  type: "ENTRY" | "EXIT" | "SKIP" | "ADJUSTMENT" | "PAPER",
   instrument: string,
   rationale: string,
   confidence: number,

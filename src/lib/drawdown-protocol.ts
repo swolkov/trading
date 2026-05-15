@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { getAccount } from "./alpaca";
+import { getTradovateAccountSummary } from "./tradovate";
 import { sendNotification } from "./notifications";
 
 // ============ DRAWDOWN RECOVERY PROTOCOL ============
@@ -118,8 +119,16 @@ const MODE_CONFIGS: Record<DrawdownMode, {
 };
 
 export async function evaluateDrawdownState(): Promise<DrawdownState> {
-  const account = await getAccount();
-  const currentEquity = parseFloat(account.equity);
+  // Try Tradovate first (futures account), fall back to Alpaca (stocks/options)
+  let currentEquity = 0;
+  try {
+    const tradovate = await getTradovateAccountSummary();
+    currentEquity = tradovate.netLiq || tradovate.balance || 0;
+  } catch {
+    // Fallback to Alpaca if Tradovate unavailable
+    const account = await getAccount();
+    currentEquity = parseFloat(account.equity);
+  }
 
   // Get peak equity from stored state
   const storedState = await prisma.agentConfig.findUnique({ where: { key: "drawdown_state" } });
@@ -162,13 +171,10 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
   const recentWins = recentTrades.filter((t) => (t.pnl || 0) > 0).length;
   const recentWinRate = recentTrades.length > 0 ? (recentWins / recentTrades.length) * 100 : 50;
 
-  // Days since new equity high
+  // Days since new equity high (rough estimate from drawdown depth)
   let daysSinceNewHigh = 0;
   if (currentEquity < peakEquity) {
-    // Approximate: check last equity from Alpaca
-    const lastEquity = parseFloat(account.last_equity);
-    if (lastEquity >= peakEquity) daysSinceNewHigh = 0;
-    else daysSinceNewHigh = Math.ceil(currentDrawdownPct * 2); // rough estimate
+    daysSinceNewHigh = Math.ceil(currentDrawdownPct * 2); // rough estimate
   }
 
   // Determine mode based on triggers

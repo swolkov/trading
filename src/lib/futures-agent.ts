@@ -38,18 +38,19 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 // Scale-out advantage: 10 MES lets you sell 5 at 1R, trail 5 for runners.
 
 const FUTURES_RULES = {
-  // Risk per trade: 7% = $490 on $7K → sizes to 6-10 MES depending on stop distance
-  // This matches the old 1% on $50K (= $500 risk) that produced the $1,200 trades
-  RISK_PER_TRADE_PCT: 0.07,         // 7% of equity per trade ($490 on $7K)
-  DAILY_LOSS_LIMIT_PCT: 0.14,       // 14% daily max ($980 on $7K — 2 full losses then STOP)
-  MAX_DRAWDOWN_PCT: 0.20,           // 20% drawdown kill switch ($1,400 on $7K — 3 bad days → lockdown)
-  MAX_CONTRACTS_PER_TRADE: 10,      // 10 MES = 1 ES equivalent
-  MAX_TOTAL_CONTRACTS: 15,          // Can hold multiple symbols (e.g. 10 MES + 5 MNQ)
-  MAX_TRADES_PER_DAY: 4,            // Fewer trades, higher quality — only A/A+ setups
+  // Risk per trade: 5% = $350 on $7K — reduced from 7% while fixing edge
+  // At 35% WR + 2.3 R:R target, this yields ~+$50-150/trade expected value
+  RISK_PER_TRADE_PCT: 0.05,         // 5% of equity per trade ($350 on $7K)
+  DAILY_LOSS_LIMIT_PCT: 0.10,       // 10% daily max ($700 on $7K — 2 full losses then STOP)
+  MAX_DRAWDOWN_PCT: 0.15,           // 15% drawdown kill switch ($1,050 on $7K)
+  MAX_CONTRACTS_PER_TRADE: 6,       // 6 MES max — enough for 3+3 scale-out, limits blowup
+  MAX_TOTAL_CONTRACTS: 10,          // Tighter total cap across all symbols
+  MAX_TRADES_PER_DAY: 3,            // Base limit — only A/A+ setups
+  MAX_TRADES_APLUS_OVERRIDE: 5,     // A+ setups can push past base limit up to this cap
 
   // Technical
   ATR_STOP_MULTIPLIER: 1.5,
-  ATR_TARGET_MULTIPLIER: 2.5,       // 1.67 R:R minimum
+  ATR_TARGET_MULTIPLIER: 3.5,       // 2.33 R:R minimum — need >2.0 to have edge at current WR
 
   // Session times (ET hours — DST-aware via session-time.ts)
   RTH_START_ET: 9.5,                // 9:30 AM ET
@@ -268,13 +269,15 @@ function getTimeQuality(session: Session, minutesSinceOpen: number): { quality: 
   // WINDOW 2: Afternoon — 80% size (slightly less reliable than morning)
   if (session === "afternoon") return { quality: "good", sizeMultiplier: 0.8 };
 
+  // WINDOW 3: Late afternoon (3:30-3:45 PM) — 60% size
+  // Data shows last_30_min has BEST win rate (36% on 25 trades).
+  // Institutional MOC rebalancing creates clean, directional moves.
+  if (session === "close") return { quality: "good", sizeMultiplier: 0.6 };
+
   // ── BLOCKED SESSIONS — position management only, no new entries ──
 
   // Lunch: the account killer. Volume drops 40-60%, everything mean-reverts.
   if (session === "midday") return { quality: "avoid", sizeMultiplier: 0 };
-
-  // Close: too chaotic for new entries
-  if (session === "close") return { quality: "avoid", sizeMultiplier: 0 };
 
   // All ETH sessions: not worth the risk on a $7K account.
   // The agent still manages positions (trailing stops, scale-outs) during ETH,
@@ -686,11 +689,17 @@ export async function runFuturesAgent(): Promise<{
   const todayTradeCount = todayTrades.filter((t) => t.action.startsWith("futures_")).length;
 
   // These limits block REAL trades but the agent keeps scanning in paper/learning mode
+  // Daily loss limit is absolute — no override
   if (todayPnl < -dailyLossLimit) {
     details.push(`DAILY LOSS LIMIT: Down $${Math.abs(todayPnl).toFixed(0)} (limit: $${dailyLossLimit.toFixed(0)}). Real trades blocked — learning mode active.`);
   }
-  if (todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY) {
-    details.push(`DAILY TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY} trades today. Real trades blocked — learning mode active.`);
+  // Trade count limit: base cap of 3, but A+ setups can push to 5
+  const atBaseTradeLimit = todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY;
+  const atHardTradeLimit = todayTradeCount >= FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
+  if (atHardTradeLimit) {
+    details.push(`HARD TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE} trades today (including A+ overrides). All trades blocked.`);
+  } else if (atBaseTradeLimit) {
+    details.push(`BASE TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY} trades today. Only A+ setups can still execute (up to ${FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE} total).`);
   }
 
   // Get existing futures positions
@@ -868,12 +877,12 @@ export async function runFuturesAgent(): Promise<{
       }
     }
 
-    // ── SCALE OUT at 1R (close half, or full close if only 1 contract) ──
+    // ── SCALE OUT at 1.5R (close half, or full close if only 1 contract) ──
+    // Moved from 1R → 1.5R: at sub-35% WR, we need winners to run bigger.
+    // Breakeven stop protects the remaining contracts.
     // If 2+ contracts: close half, breakeven stop on rest (classic scale-out)
-    // If 1 contract: close entire position at 1R (can't split 1 contract)
-    // IMPORTANT: After scaling, we cancel original bracket and let remaining ride without bracket
-    // (the trailing stop logic above handles the exit for remaining contracts)
-    if (priceDiff >= stopDistance && priceDiff < stopDistance * 2) {
+    // If 1 contract: close entire position at 1.5R (can't split 1 contract)
+    if (priceDiff >= stopDistance * 1.5 && priceDiff < stopDistance * 2) {
       const scaleQty = absQty === 1 ? 1 : Math.floor(absQty / 2);
       if (scaleQty >= 1) {
         const alreadyScaled = await prisma.autoTradeLog.findFirst({
@@ -955,8 +964,9 @@ export async function runFuturesAgent(): Promise<{
   // we still scan for setups and log them as "paper trades" with hypothetical entry/stop/target.
   // The post-market review tracks whether these would have won or lost.
   // This is how the brain learns 24/7 — studying setups even when it can't act.
-  const paperTradeMode = !canScanNewTrades || todayPnl < -dailyLossLimit || todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY;
-  if (paperTradeMode && !canScanNewTrades) {
+  // Paper mode for non-trade-count reasons (session, loss limit). Trade count is checked per-trade with A+ override.
+  const paperTradeBase = !canScanNewTrades || todayPnl < -dailyLossLimit || atHardTradeLimit;
+  if (paperTradeBase && !canScanNewTrades) {
     details.push(`LEARNING MODE: Scanning for paper trades (${session} session) — no real entries`);
   }
 
@@ -1100,7 +1110,7 @@ export async function runFuturesAgent(): Promise<{
       details.push(`  Counter-trend warning: 15m trend is ${trend15}, setup is ${setup.direction}`);
     }
 
-    if (setup.confidence < 55) {
+    if (setup.confidence < 60) {
       details.push(`  Setup found (${setup.type}) but pre-AI confidence too low: ${setup.confidence}% — not worth AI call`);
       continue;
     }
@@ -1109,10 +1119,11 @@ export async function runFuturesAgent(): Promise<{
     details.push(`  ${setup.reasoning}`);
 
     // AI confirmation — Opus with extended thinking for decisive, opinionated calls
+    let aiConviction = "";
     try {
-      const aiPrompt = `You are an elite futures scalper trading a $7K account with 6-10 MES contracts per trade (ES-equivalent exposure). Every trade risks ~$500. You need to be RIGHT.
+      const aiPrompt = `You are an elite futures scalper trading a $7K account with up to 6 MES contracts per trade. Every trade risks ~$350. Base limit: 3 trades/day, but A+ setups can override up to 5. Only A+ and A execute — B and C are killed.
 
-CRITICAL CONTEXT: This is a small account going for big percentage gains. We can only afford 2 losses per day before the kill switch stops us. So ONLY approve trades where the edge is clear and the R:R is compelling. Kill anything marginal.
+CRITICAL CONTEXT: Current win rate is ~30%. We MUST be selective. Only approve trades with clear edge, strong R:R (2:1+), and alignment across timeframes. The math: at 30% WR we need 2.3+ R:R to make money. Kill anything marginal — a skipped trade costs $0, a bad trade costs $350.
 
 ${symbol} setup:
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}
@@ -1122,7 +1133,7 @@ Key levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} PDL $${keyLevels.prevDayLow
 Stop distance: ${setup.stopDistance.toFixed(2)} pts ($${(setup.stopDistance * contractInfo.multiplier).toFixed(0)}/contract) | Target: ${setup.targetDistance.toFixed(2)} pts | R:R: ${(setup.targetDistance / setup.stopDistance).toFixed(1)}
 ${vaultContext}
 
-A+ = textbook setup, take max size. A = solid, full size. B = decent but not worth $500 risk. C = kill it.
+A+ = textbook, high conviction. A = solid edge, clear R:R. B = marginal, will be KILLED. C = no edge, will be KILLED.
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
@@ -1142,23 +1153,40 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
         setup.confidence -= 30;
         details.push(`  AI KILLS TRADE: ${ai.reasoning}`);
       } else if (ai.conviction === "C") {
-        // C-grade = AI technically agrees but isn't confident. Kill it — not worth $500 risk.
-        setup.confidence -= 20;
+        // C-grade = not worth the risk at any WR
+        setup.confidence -= 25;
         details.push(`  AI WEAK CONFIRM (C): ${ai.reasoning} — killing, not worth the risk`);
+      } else if (ai.conviction === "B") {
+        // B-grade = marginal. At sub-35% WR, only A/A+ setups have edge. Kill B.
+        setup.confidence -= 15;
+        details.push(`  AI MARGINAL (B): ${ai.reasoning} — killing, only A/A+ setups trade`);
       } else {
-        // Conviction-based boost: A+ and A get big bumps, B is neutral
-        const convictionBoost = ai.conviction === "A+" ? 30 : ai.conviction === "A" ? 20 : 0;
+        // Only A+ and A pass — these are the setups that justify $350 risk
+        aiConviction = ai.conviction || "A";
+        const convictionBoost = aiConviction === "A+" ? 30 : 20; // A+ or A only
         setup.confidence += convictionBoost;
-        details.push(`  AI CONFIRMS (${ai.conviction || "?"}): ${ai.reasoning} [+${convictionBoost}]`);
+        details.push(`  AI CONFIRMS (${aiConviction}): ${ai.reasoning} [+${convictionBoost}]`);
       }
     } catch {
       details.push(`  AI unavailable — proceeding on technicals alone`);
     }
 
-    if (setup.confidence < 60) {
-      details.push(`  Final confidence ${setup.confidence}% — below 60% threshold, skipping`);
-      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 60% threshold. ${setup.reasoning}`, 1); } catch {}
+    if (setup.confidence < 72) {
+      details.push(`  Final confidence ${setup.confidence}% — below 72% threshold, skipping`);
+      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 72% threshold. ${setup.reasoning}`, 1); } catch {}
       continue;
+    }
+
+    // ============ TRADE COUNT CHECK (A+ override) ============
+    // Base limit: 3 trades/day for A/A+ setups
+    // A+ override: if past base limit, only A+ can trade (up to hard cap of 5)
+    if (atBaseTradeLimit && aiConviction !== "A+") {
+      details.push(`  BASE LIMIT HIT (${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY}) — need A+ to override, got ${aiConviction || "no AI grade"}. Paper mode.`);
+      // Fall through to paper trade logging below
+    }
+    const isAplusOverride = atBaseTradeLimit && aiConviction === "A+";
+    if (isAplusOverride) {
+      details.push(`  A+ OVERRIDE: Past base limit (${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY}) but AI says A+ — allowing trade ${todayTradeCount + 1}/${FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE}`);
     }
 
     // ============ POSITION SIZING (equity-based) ============
@@ -1170,8 +1198,8 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       details.push(`  Invalid stop/target distance — skipping`);
       continue;
     }
-    if (targetDistance / stopDistance < 1.5) {
-      details.push(`  R:R too low (${(targetDistance / stopDistance).toFixed(1)}) — need 1.5+ — skipping`);
+    if (targetDistance / stopDistance < 2.0) {
+      details.push(`  R:R too low (${(targetDistance / stopDistance).toFixed(1)}) — need 2.0+ — skipping`);
       continue;
     }
 
@@ -1194,6 +1222,9 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     const stopPrice = setup.direction === "long" ? price - stopDistance : price + stopDistance;
     const targetPrice = setup.direction === "long" ? price + targetDistance : price - targetDistance;
     const riskReward = targetDistance / stopDistance;
+
+    // Per-trade paper mode: base reasons OR hit base limit without A+ override
+    const paperTradeMode = paperTradeBase || (atBaseTradeLimit && aiConviction !== "A+");
 
     details.push(`  ${paperTradeMode ? "PAPER " : ""}TRADE: ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)}`);
     details.push(`  Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${riskReward.toFixed(1)} | Risk: $${(riskPerContract * contracts).toFixed(0)}`);

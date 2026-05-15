@@ -6,11 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface AgentConfig {
-  enabled: string;
-  strategy: string;
-  min_score: string;
-  min_confidence: string;
-  trade_options: string;
   [key: string]: string;
 }
 
@@ -34,25 +29,84 @@ interface AgentRun {
   details: string[];
 }
 
-function pnl(val: number) {
-  return val > 0 ? "text-emerald-500" : val < 0 ? "text-red-500" : "text-muted-foreground";
-}
-
 interface TradingModes {
   modes: Record<string, string>;
   hasLiveKeys: Record<string, boolean>;
 }
 
+function pnlColor(val: number) {
+  return val > 0 ? "text-emerald-500" : val < 0 ? "text-red-500" : "text-muted-foreground";
+}
+
+// Config groups for the settings panel
+const CONFIG_GROUPS = [
+  {
+    label: "Strategy",
+    icon: "S",
+    color: "from-blue-500 to-indigo-500",
+    fields: [
+      { key: "strategy", label: "Strategy Mode", type: "select" as const, options: ["conservative", "balanced", "aggressive"] },
+      { key: "enabled", label: "Trading Agent", type: "toggle" as const },
+      { key: "trade_options", label: "Options-Only Mode", type: "toggle" as const },
+      { key: "stocks_enabled", label: "Stocks Mode", type: "select" as const, options: ["disabled", "paper", "live"] },
+      { key: "focus_symbols", label: "Focus Watchlist", type: "text" as const, placeholder: "AAPL,TSLA,NVDA" },
+      { key: "blacklist", label: "Blacklisted Symbols", type: "text" as const, placeholder: "GME,AMC" },
+    ],
+  },
+  {
+    label: "Risk Limits",
+    icon: "R",
+    color: "from-red-500 to-orange-500",
+    fields: [
+      { key: "daily_loss_limit", label: "Daily Loss Limit ($)", type: "number" as const },
+      { key: "daily_spend_cap", label: "Daily Spend Cap ($)", type: "number" as const },
+      { key: "max_options_exposure", label: "Max Options Exposure ($)", type: "number" as const },
+      { key: "per_trade_max", label: "Per Trade Max ($)", type: "number" as const },
+      { key: "drawdown_kill_pct", label: "Drawdown Kill (%)", type: "number" as const },
+      { key: "cash_reserve_pct", label: "Cash Reserve (%)", type: "number" as const },
+    ],
+  },
+  {
+    label: "Entry Rules",
+    icon: "E",
+    color: "from-emerald-500 to-teal-500",
+    fields: [
+      { key: "min_score", label: "Min Analysis Score", type: "number" as const },
+      { key: "min_confidence", label: "Min Confidence (%)", type: "number" as const },
+      { key: "stock_min_score", label: "Stock Min Score", type: "number" as const },
+      { key: "stock_min_confidence", label: "Stock Min Conf (%)", type: "number" as const },
+      { key: "max_daily_trades", label: "Max Trades / Day", type: "number" as const },
+      { key: "cooldown_hours", label: "Cooldown Between Trades (hrs)", type: "number" as const },
+    ],
+  },
+  {
+    label: "Position Sizing",
+    icon: "P",
+    color: "from-purple-500 to-pink-500",
+    fields: [
+      { key: "max_positions", label: "Max Open Positions", type: "number" as const },
+      { key: "max_per_sector", label: "Max Per Sector", type: "number" as const },
+      { key: "max_position_pct", label: "Max Position Size (%)", type: "number" as const },
+      { key: "stop_loss_atr", label: "Stop Loss (ATR multiplier)", type: "number" as const },
+      { key: "take_profit_pct", label: "Take Profit (%)", type: "number" as const },
+      { key: "options_stop_loss_pct", label: "Options Stop Loss (%)", type: "number" as const },
+      { key: "options_profit_pct", label: "Options Profit Target (%)", type: "number" as const },
+    ],
+  },
+];
+
 export default function AgentHubPage() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
+  const [editConfig, setEditConfig] = useState<AgentConfig>({});
   const [activity, setActivity] = useState<Activity[]>([]);
-  const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<AgentRun | null>(null);
   const [futuresStatus, setFuturesStatus] = useState<{ connected: boolean; message?: string; accountName?: string } | null>(null);
   const [tradingModes, setTradingModes] = useState<TradingModes | null>(null);
   const [modePassword, setModePassword] = useState("");
   const [modeMessage, setModeMessage] = useState("");
-  const [showModePanel, setShowModePanel] = useState(false);
+  const [runningAgent, setRunningAgent] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState("");
 
   const loadData = useCallback(async () => {
     const [configRes, activityRes, futuresRes, modesRes] = await Promise.all([
@@ -61,7 +115,10 @@ export default function AgentHubPage() {
       fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false })),
       fetch("/api/trading-mode").then((r) => r.json()).catch(() => null),
     ]);
-    if (configRes) setConfig(configRes);
+    if (configRes) {
+      setConfig(configRes);
+      setEditConfig(configRes);
+    }
     if (Array.isArray(activityRes)) setActivity(activityRes);
     if (futuresRes) setFuturesStatus(futuresRes);
     if (modesRes) setTradingModes(modesRes);
@@ -89,8 +146,6 @@ export default function AgentHubPage() {
     } catch { setModeMessage("Failed to switch mode"); }
   };
 
-  const [runningAgent, setRunningAgent] = useState<string | null>(null);
-
   const runAgent = async (endpoint: string, agentId: string) => {
     setRunningAgent(agentId);
     try {
@@ -102,240 +157,402 @@ export default function AgentHubPage() {
     loadData();
   };
 
-  const agents = [
+  const saveConfig = async () => {
+    setSaving(true);
+    setSaveMessage("");
+    try {
+      const changed: Record<string, string> = {};
+      for (const [key, value] of Object.entries(editConfig)) {
+        if (config && value !== config[key]) changed[key] = value;
+      }
+      if (Object.keys(changed).length === 0) {
+        setSaveMessage("No changes");
+        setSaving(false);
+        return;
+      }
+      const res = await fetch("/api/agent/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changed),
+      });
+      const data = await res.json();
+      if (data.error) { setSaveMessage(data.error); }
+      else { setSaveMessage(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length > 1 ? "s" : ""}`); loadData(); }
+    } catch { setSaveMessage("Failed to save"); }
+    setSaving(false);
+    setTimeout(() => setSaveMessage(""), 3000);
+  };
+
+  const hasChanges = config && Object.entries(editConfig).some(([k, v]) => config[k] !== v);
+
+  const coreAgents = [
     {
       id: "premarket",
       name: "Pre-Market Research",
-      description: "Scans overnight news, sector health, gap alerts on held positions",
-      status: "active",
-      schedule: "9:00 AM ET (before open)",
-      strategy: "News analysis, sector scanning, gap detection, morning briefing",
-      details: [
-        "Overnight news for focus symbols",
-        "Sector breakout/weakness detection",
-        "Gap alerts on existing positions",
-        "Sends morning briefing notification",
-      ],
+      desc: "Overnight news, sector scans, gap alerts",
+      schedule: "9:00 AM ET",
       endpoint: "/api/cron/premarket",
       canRun: true,
     },
     {
       id: "trading",
       name: "Trading Agent",
-      description: "Full scan — finds new trades, AI analysis, executes buys/sells",
-      status: config?.enabled === "true" ? "active" : "paused",
-      schedule: "Every 30 min during market hours (16x/day)",
-      strategy: "Premium Selling + Sector Breakouts + Quick Plays + High Conviction",
-      details: [
-        `Min Score: ${config?.min_score || "55"}`,
-        `Strategy: ${config?.strategy || "balanced"}`,
-        "Iron condors, credit spreads, directional calls/puts",
-        "Sector scanner, relative value, gap plays",
-        "5-expert AI committee with adversarial review",
-      ],
+      desc: "AI analysis, entry signals, order execution",
+      schedule: "Every 30m (market hrs)",
       endpoint: "/api/cron/trade",
       canRun: true,
+      status: config?.enabled === "true" ? "active" : "paused",
     },
     {
       id: "monitor",
       name: "Position Monitor",
-      description: "Watches positions for stops, profits, premium defense",
-      status: "active",
-      schedule: "Every 15 min during market hours (36x/day)",
-      strategy: "Stop losses, partial profits, breakeven stops, premium defense, dead money",
-      details: [
-        "Spread-aware management (never splits legs)",
-        "Partial profit-taking (+30% sell half)",
-        "Breakeven stop after partial take",
-        "Premium defense: roll tested strikes",
-        "Dead money exits (>7d, <10% move)",
-      ],
+      desc: "Stops, profits, premium defense, dead money",
+      schedule: "Every 15m (market hrs)",
       endpoint: "/api/cron/monitor",
       canRun: true,
     },
     {
       id: "review",
       name: "Post-Market Review",
-      description: "End-of-day summary, learning engine update, performance report",
-      status: "active",
-      schedule: "4:30 PM ET (after close)",
-      strategy: "Daily P&L review, lesson extraction, performance notification",
-      details: [
-        "Daily win/loss summary",
-        "Updates learning engine",
-        "Extracts patterns from trades",
-        "Sends EOD notification",
-      ],
+      desc: "EOD summary, lesson extraction, perf report",
+      schedule: "4:30 PM ET",
       endpoint: "/api/cron/review",
       canRun: true,
     },
     {
       id: "futures",
-      name: "Futures Agent",
-      description: "Micro futures (MES, MNQ, MYM, M2K) via Tradovate — real-time engine on Railway",
-      status: futuresStatus?.connected ? "active" : "waiting",
-      schedule: futuresStatus?.connected ? "Real-time (5s polling) + 10-min cron safety net" : "Waiting for Tradovate connection",
-      strategy: "Day type classifier + 3 setups: OR Breakout, Trend Continuation, VWAP Reversion",
-      details: [
-        futuresStatus?.connected ? `Tradovate DEMO: ${futuresStatus.accountName}` : "Tradovate not connected",
-        "Real-time engine: Railway (24/7)",
-        "Risk: 7% per trade (~$490 on $7K) — 6-10 MES = ES equivalent",
-        "Trailing stops + scale out + breakeven protection",
-      ],
+      name: "Futures Engine",
+      desc: "MES/MNQ/MYM/M2K via Tradovate (Railway)",
+      schedule: futuresStatus?.connected ? "Real-time 5s" : "Waiting",
       endpoint: "/api/futures",
       canRun: futuresStatus?.connected || false,
+      status: futuresStatus?.connected ? "active" : "waiting",
+    },
+  ];
+
+  const supportAgents = [
+    {
+      id: "synthesis",
+      name: "Synthesis",
+      desc: "Pattern extraction, lesson updates, anti-patterns",
+      schedule: "3x daily + every 10 trades",
+      endpoint: "/api/cron/synthesis",
+      canRun: true,
+    },
+    {
+      id: "watchdog",
+      name: "Watchdog",
+      desc: "System health, heartbeat checks, stale data alerts",
+      schedule: "Every 5m",
+      endpoint: "/api/cron/watchdog",
+      canRun: true,
+    },
+    {
+      id: "risk",
+      name: "Portfolio Risk",
+      desc: "Correlation, drawdown, exposure, sector concentration",
+      schedule: "Every 30m",
+      endpoint: "/api/cron/risk",
+      canRun: true,
+    },
+    {
+      id: "events",
+      name: "Event Catalyst",
+      desc: "Earnings, Fed, economic calendar, IV analysis",
+      schedule: "Daily",
+      endpoint: "/api/cron/events",
+      canRun: true,
+    },
+    {
+      id: "regime",
+      name: "Regime Transition",
+      desc: "Market regime shifts, VIX spikes, breadth thrusts",
+      schedule: "Daily",
+      endpoint: "/api/cron/regime-transition",
+      canRun: true,
+    },
+    {
+      id: "walk-forward",
+      name: "Walk-Forward",
+      desc: "Strategy backtesting, edge decay detection",
+      schedule: "Weekly",
+      endpoint: "/api/cron/walk-forward",
+      canRun: true,
+    },
+    {
+      id: "execution",
+      name: "Execution Quality",
+      desc: "Fill quality grading, slippage tracking, A-F scores",
+      schedule: "Daily",
+      endpoint: "/api/cron/execution-review",
+      canRun: true,
+    },
+  ];
+
+  const brokers = [
+    {
+      name: "Alpaca",
+      types: ["options", "stocks"] as const,
+      desc: "Options & Stocks",
+      color: "emerald",
+    },
+    {
+      name: "Tradovate",
+      types: ["futures"] as const,
+      desc: "Micro Futures",
+      color: "blue",
+      extra: futuresStatus?.connected
+        ? `Connected: ${futuresStatus.accountName}`
+        : "Not connected",
     },
   ];
 
   return (
-    <div className="space-y-6 animate-fade-up">
+    <div className="space-y-5 animate-fade-up">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Agent Hub</h1>
-          <p className="text-sm text-muted-foreground">All AI agents in one place — status, controls, activity</p>
+          <p className="text-sm text-muted-foreground">Command center — agents, brokers, risk controls</p>
         </div>
-        <Button onClick={() => runAgent("/api/cron/trade", "trading")} disabled={runningAgent !== null} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-          {runningAgent === "trading" ? "Running..." : "Run Trading Agent"}
-        </Button>
-      </div>
-
-      {/* Agent Cards */}
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {agents.map((agent) => (
-          <Card key={agent.id} className={`relative overflow-hidden ${agent.status === "active" ? "border-emerald-500/20" : agent.status === "waiting" ? "border-yellow-500/20" : "border-red-500/20"}`}>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-bold">{agent.name}</CardTitle>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                  agent.status === "active" ? "bg-emerald-500/15 text-emerald-600" :
-                  agent.status === "waiting" ? "bg-yellow-500/15 text-yellow-600" :
-                  "bg-red-500/15 text-red-600"
-                }`}>
-                  {agent.status.toUpperCase()}
-                </span>
-              </div>
-              <p className="text-[11px] text-muted-foreground">{agent.description}</p>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <p className="text-[10px] text-blue-400 font-medium">{agent.schedule}</p>
-              <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Strategy</p>
-              <p className="text-xs">{agent.strategy}</p>
-              <div className="space-y-1 mt-2">
-                {agent.details.map((d, i) => (
-                  <p key={i} className="text-[11px] text-muted-foreground">{d}</p>
-                ))}
-              </div>
-              {agent.canRun && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="w-full mt-2 text-xs"
-                  disabled={runningAgent !== null}
-                  onClick={() => runAgent(agent.endpoint, agent.id)}
-                >
-                  {runningAgent === agent.id ? "Running..." : `Run ${agent.name}`}
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      {/* Trading Mode — Paper vs Live */}
-      <Card className="border-2 border-yellow-500/20">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-sm">Trading Mode</CardTitle>
-              <p className="text-[11px] text-muted-foreground">Paper = simulated money. Live = real money. Password required to switch.</p>
-            </div>
-            <Button size="sm" variant="outline" className="text-xs" onClick={() => setShowModePanel(!showModePanel)}>
-              {showModePanel ? "Hide" : "Manage"}
+        <div className="flex gap-2">
+          {hasChanges && (
+            <Button onClick={saveConfig} disabled={saving} className="bg-blue-600 hover:bg-blue-700 text-white text-xs">
+              {saving ? "Saving..." : "Save Changes"}
             </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {/* Current modes — always visible */}
-          <div className="flex gap-4">
-            {(["options", "futures", "stocks"] as const).map((type) => {
-              const mode = tradingModes?.modes?.[type] || "paper";
-              const isPaper = mode === "paper";
-              return (
-                <div key={type} className="flex items-center gap-2">
-                  <span className="text-xs capitalize font-medium">{type}:</span>
-                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                    isPaper ? "bg-emerald-500/15 text-emerald-500" : "bg-red-500/15 text-red-500"
+          )}
+          <Button
+            onClick={() => runAgent("/api/cron/trade", "trading")}
+            disabled={runningAgent !== null}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+          >
+            {runningAgent === "trading" ? "Running..." : "Run Trading Agent"}
+          </Button>
+        </div>
+      </div>
+      {saveMessage && (
+        <p className={`text-xs ${saveMessage.includes("Failed") || saveMessage.includes("error") ? "text-red-400" : "text-emerald-400"}`}>
+          {saveMessage}
+        </p>
+      )}
+
+      {/* Row 1: Agents + Brokers */}
+      <div className="grid lg:grid-cols-[1fr_340px] gap-4">
+        {/* Agent Cards */}
+        <div className="space-y-4">
+          {/* Core Agents */}
+          <div>
+            <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">Core Agents</p>
+            <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+              {coreAgents.map((agent) => {
+                const status = agent.status || "active";
+                return (
+                  <div key={agent.id} className={`rounded-xl border bg-white/[0.02] p-3.5 space-y-2 ${
+                    status === "active" ? "border-emerald-500/20" :
+                    status === "waiting" ? "border-yellow-500/20" :
+                    "border-red-500/20"
                   }`}>
-                    {mode.toUpperCase()}
-                  </span>
-                </div>
-              );
-            })}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold">{agent.name}</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold ${
+                        status === "active" ? "bg-emerald-500/15 text-emerald-500" :
+                        status === "waiting" ? "bg-yellow-500/15 text-yellow-500" :
+                        "bg-red-500/15 text-red-500"
+                      }`}>
+                        {status === "active" && <span className="inline-block w-1 h-1 rounded-full bg-emerald-500 mr-1 animate-pulse" />}
+                        {status.toUpperCase()}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/60">{agent.desc}</p>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] text-blue-400 font-medium">{agent.schedule}</span>
+                      {agent.canRun && (
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          className="text-[9px] h-5 px-2"
+                          disabled={runningAgent !== null}
+                          onClick={() => runAgent(agent.endpoint, agent.id)}
+                        >
+                          {runningAgent === agent.id ? "..." : "Run"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
-          {/* Password-protected switch panel */}
-          {showModePanel && (
-            <div className="mt-4 pt-4 border-t border-white/10 space-y-3">
-              <div className="flex items-center gap-2">
-                <input
-                  type="password"
-                  placeholder="Enter password to switch modes"
-                  value={modePassword}
-                  onChange={(e) => setModePassword(e.target.value)}
-                  className="flex-1 bg-muted/50 border border-white/10 rounded px-3 py-1.5 text-xs"
-                />
-              </div>
+          {/* Support Agents */}
+          <div>
+            <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">Support Agents</p>
+            <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-2">
+              {supportAgents.map((agent) => (
+                <div key={agent.id} className="rounded-lg border border-white/[0.04] bg-white/[0.01] px-3 py-2 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold">{agent.name}</span>
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      className="text-[8px] h-4 px-1.5 text-muted-foreground/50 hover:text-foreground"
+                      disabled={runningAgent !== null}
+                      onClick={() => runAgent(agent.endpoint, agent.id)}
+                    >
+                      {runningAgent === agent.id ? "..." : "Run"}
+                    </Button>
+                  </div>
+                  <p className="text-[9px] text-muted-foreground/40">{agent.desc}</p>
+                  <span className="text-[8px] text-blue-400/50 font-medium">{agent.schedule}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
 
-              {modeMessage && (
-                <p className={`text-xs ${modeMessage.includes("switched") ? "text-emerald-400" : "text-red-400"}`}>
-                  {modeMessage}
-                </p>
-              )}
-
-              <div className="grid grid-cols-3 gap-3">
-                {(["options", "futures", "stocks"] as const).map((type) => {
-                  const currentMode = tradingModes?.modes?.[type] || "paper";
-                  const hasKeys = tradingModes?.hasLiveKeys?.[type] || false;
-                  const isPaper = currentMode === "paper";
-
-                  return (
-                    <div key={type} className="space-y-1.5">
-                      <p className="text-xs font-medium capitalize">{type}</p>
-                      <div className="flex gap-1">
-                        <Button
-                          size="sm"
-                          variant={isPaper ? "default" : "outline"}
-                          className="flex-1 text-[10px] h-7"
-                          disabled={isPaper}
-                          onClick={() => switchMode(type, "paper")}
-                        >
-                          Paper
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={!isPaper ? "default" : "outline"}
-                          className={`flex-1 text-[10px] h-7 ${!isPaper ? "bg-red-600 hover:bg-red-700" : ""}`}
-                          disabled={!isPaper || !hasKeys}
-                          onClick={() => switchMode(type, "live")}
-                        >
-                          Live
-                        </Button>
+        {/* Broker Panel */}
+        <div>
+          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">Brokers & Mode</p>
+          <div className="space-y-3">
+            {brokers.map((broker) => (
+              <div key={broker.name} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3.5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold">{broker.name}</span>
+                    <span className="text-[10px] text-muted-foreground/50 ml-2">{broker.desc}</span>
+                  </div>
+                  {broker.extra && (
+                    <span className={`text-[9px] ${broker.extra.includes("Connected") ? "text-emerald-400" : "text-muted-foreground/40"}`}>
+                      {broker.extra}
+                    </span>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {broker.types.map((type) => {
+                    const mode = tradingModes?.modes?.[type] || "paper";
+                    const hasKeys = tradingModes?.hasLiveKeys?.[type] || false;
+                    return (
+                      <div key={type} className="flex-1 space-y-1.5">
+                        <p className="text-[9px] text-muted-foreground/50 uppercase tracking-wider font-semibold">{type}</p>
+                        <div className="flex gap-1">
+                          {["paper", "live"].map((m) => {
+                            const active = mode === m;
+                            const isLive = m === "live";
+                            return (
+                              <button
+                                key={m}
+                                disabled={active || (isLive && !hasKeys) || !modePassword}
+                                onClick={() => switchMode(type, m)}
+                                className={`flex-1 text-[9px] font-semibold py-1 rounded transition-all ${
+                                  active
+                                    ? isLive
+                                      ? "bg-red-500/20 text-red-400 ring-1 ring-red-500/30"
+                                      : "bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30"
+                                    : "bg-white/[0.04] text-muted-foreground/40 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed"
+                                }`}
+                              >
+                                {m === "paper" ? "DEMO" : "LIVE"}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {!hasKeys && <p className="text-[8px] text-muted-foreground/30">No live keys</p>}
                       </div>
-                      {!hasKeys && <p className="text-[9px] text-muted-foreground/50">Live keys not configured</p>}
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {/* Password input */}
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                placeholder="Mode password to switch"
+                value={modePassword}
+                onChange={(e) => setModePassword(e.target.value)}
+                className="flex-1 bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1.5 text-[10px] placeholder:text-muted-foreground/30 focus:outline-none focus:ring-1 focus:ring-primary/30"
+              />
+              {modePassword && <span className="text-[9px] text-emerald-400/60">Unlocked</span>}
+            </div>
+            {modeMessage && (
+              <p className={`text-[10px] ${modeMessage.includes("switched") ? "text-emerald-400" : "text-red-400"}`}>
+                {modeMessage}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Row 2: Config Settings */}
+      <div>
+        <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">Configuration</p>
+        <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-3">
+          {CONFIG_GROUPS.map((group) => (
+            <div key={group.label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3.5 space-y-3">
+              <div className="flex items-center gap-2">
+                <div className={`w-5 h-5 rounded-md bg-gradient-to-br ${group.color} flex items-center justify-center`}>
+                  <span className="text-[9px] text-white font-black">{group.icon}</span>
+                </div>
+                <span className="text-xs font-bold">{group.label}</span>
+              </div>
+              <div className="space-y-2">
+                {group.fields.map((field) => {
+                  const value = editConfig[field.key] ?? "";
+                  const changed = config && value !== config[field.key];
+                  return (
+                    <div key={field.key} className="flex items-center justify-between gap-2">
+                      <label className="text-[10px] text-muted-foreground/70 shrink-0">{field.label}</label>
+                      {field.type === "toggle" ? (
+                        <button
+                          onClick={() => setEditConfig({ ...editConfig, [field.key]: value === "true" ? "false" : "true" })}
+                          className={`w-8 h-4 rounded-full transition-all relative ${
+                            value === "true" ? "bg-emerald-500/40" : "bg-white/[0.08]"
+                          } ${changed ? "ring-1 ring-blue-400/50" : ""}`}
+                        >
+                          <span className={`absolute top-0.5 w-3 h-3 rounded-full transition-all ${
+                            value === "true" ? "left-4 bg-emerald-400" : "left-0.5 bg-muted-foreground/40"
+                          }`} />
+                        </button>
+                      ) : field.type === "select" ? (
+                        <select
+                          value={value}
+                          onChange={(e) => setEditConfig({ ...editConfig, [field.key]: e.target.value })}
+                          className={`bg-white/[0.04] border border-white/[0.06] rounded px-1.5 py-0.5 text-[10px] text-right max-w-[100px] focus:outline-none focus:ring-1 focus:ring-primary/30 ${changed ? "ring-1 ring-blue-400/50" : ""}`}
+                        >
+                          {field.options?.map((opt) => (
+                            <option key={opt} value={opt} className="bg-[#1a1a2e]">{opt}</option>
+                          ))}
+                        </select>
+                      ) : field.type === "text" ? (
+                        <input
+                          type="text"
+                          value={value}
+                          placeholder={field.placeholder}
+                          onChange={(e) => setEditConfig({ ...editConfig, [field.key]: e.target.value })}
+                          className={`bg-white/[0.04] border border-white/[0.06] rounded px-1.5 py-0.5 text-[10px] text-right max-w-[120px] placeholder:text-muted-foreground/20 focus:outline-none focus:ring-1 focus:ring-primary/30 ${changed ? "ring-1 ring-blue-400/50" : ""}`}
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          value={value}
+                          onChange={(e) => setEditConfig({ ...editConfig, [field.key]: e.target.value })}
+                          className={`bg-white/[0.04] border border-white/[0.06] rounded px-1.5 py-0.5 text-[10px] text-right w-16 tabular-nums focus:outline-none focus:ring-1 focus:ring-primary/30 ${changed ? "ring-1 ring-blue-400/50" : ""}`}
+                        />
+                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          ))}
+        </div>
+      </div>
 
+      {/* Row 3: Activity + Output */}
       <Tabs defaultValue="activity">
         <TabsList>
           <TabsTrigger value="activity">Live Activity</TabsTrigger>
-          <TabsTrigger value="output">Last Run Output</TabsTrigger>
-          <TabsTrigger value="lessons">Permanent Lessons</TabsTrigger>
+          <TabsTrigger value="output">Last Run</TabsTrigger>
         </TabsList>
 
         <TabsContent value="activity">
@@ -343,20 +560,20 @@ export default function AgentHubPage() {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                Live Activity (Last 24h) — Auto-refreshes every 60s
+                Live Activity (24h)
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-2 max-h-96 overflow-y-auto">
+              <div className="space-y-1.5 max-h-72 overflow-y-auto">
                 {activity.length === 0 && <p className="text-xs text-muted-foreground">No recent activity</p>}
-                {activity.slice(0, 30).map((a, i) => (
+                {activity.slice(0, 40).map((a, i) => (
                   <div key={i} className={`flex items-start gap-3 text-xs border-l-2 pl-3 py-1 ${
                     a.type === "success" ? "border-emerald-500" :
                     a.type === "loss" ? "border-red-500" :
                     a.type === "trade" ? "border-blue-500" :
                     "border-muted"
                   }`}>
-                    <span className="text-muted-foreground/50 whitespace-nowrap min-w-[60px]">
+                    <span className="text-muted-foreground/50 whitespace-nowrap min-w-[52px] text-[10px]">
                       {new Date(a.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
                     <div className="flex-1">
@@ -367,6 +584,7 @@ export default function AgentHubPage() {
                           <span className={`font-medium ${
                             a.action.includes("buy") ? "text-emerald-600" :
                             a.action.includes("sell") || a.action.includes("stop") ? "text-red-600" :
+                            a.action.includes("paper") ? "text-yellow-500" :
                             "text-muted-foreground"
                           }`}>
                             {a.action.replace(/_/g, " ").toUpperCase()}
@@ -374,7 +592,7 @@ export default function AgentHubPage() {
                           {a.symbol && <span className="ml-1 font-bold">{a.symbol}</span>}
                           {a.qty > 0 && <span className="text-muted-foreground ml-1">{a.qty}x</span>}
                           {a.pnl != null && (
-                            <span className={`ml-2 font-medium ${pnl(a.pnl)}`}>
+                            <span className={`ml-2 font-medium ${pnlColor(a.pnl)}`}>
                               P&L: ${a.pnl.toFixed(0)}
                             </span>
                           )}
@@ -406,6 +624,7 @@ export default function AgentHubPage() {
                         d.includes("BUY") || d.includes("Bought") ? "text-emerald-600 font-medium" :
                         d.includes("STOP") || d.includes("LOSS") ? "text-red-600" :
                         d.includes("PREMIUM") || d.includes("QUICK") ? "text-blue-600 font-medium" :
+                        d.includes("PAPER") ? "text-yellow-500 font-medium" :
                         d.includes("MACRO") ? "text-purple-600" :
                         ""
                       }>{d}</div>
@@ -413,36 +632,8 @@ export default function AgentHubPage() {
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-muted-foreground">Click "Run Options Agent" to see output</p>
+                <p className="text-xs text-muted-foreground">Run an agent to see output here</p>
               )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="lessons">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">What The Agent Has Learned</CardTitle>
-              <p className="text-xs text-muted-foreground">Permanent rules from our first week of trading — never forgotten</p>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {[
-                  "NEVER buy naked options in a choppy market — theta decay kills you. Only sell premium via credit spreads and iron condors.",
-                  "Premium selling made +$2,517. Directional buying lost -$9,906. Sell premium is the edge.",
-                  "TSLA short put was our best trade (+$1,145). Stock staying flat = profit when you sell premium.",
-                  "Spreads that were too wide ($10) risked too much. Keep spreads $2.50-$5 wide, scale with account size.",
-                  "PDT restriction locked us out for days. NEVER open and close positions same day. Hold overnight minimum.",
-                  "Penny stock options went to zero instantly. Minimum $20 stock price for any trade.",
-                  "The AI committee scores everything bearish in choppy markets. Don't fight this — sell premium instead.",
-                  "Focus on 65-70% probability trades. Win rate matters more than win size.",
-                ].map((lesson, i) => (
-                  <div key={i} className="flex gap-3 text-xs">
-                    <span className="text-emerald-500 font-bold shrink-0">{i + 1}.</span>
-                    <span>{lesson}</span>
-                  </div>
-                ))}
-              </div>
             </CardContent>
           </Card>
         </TabsContent>

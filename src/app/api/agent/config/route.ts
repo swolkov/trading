@@ -27,6 +27,9 @@ const DEFAULTS: Record<string, string> = {
   max_options_exposure: "5000", // Max total $ in options at any time
   per_trade_max: "500", // Never spend more than this on one trade
   drawdown_kill_pct: "10", // Pause agent if account drops this % from peak
+  stocks_enabled: "paper", // disabled, paper, live — stock entry gate mode
+  stock_min_score: "65", // Min analysis score for stock entries
+  stock_min_confidence: "70", // Min confidence % for stock entries
 };
 
 export async function GET() {
