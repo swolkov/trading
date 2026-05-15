@@ -35,6 +35,7 @@ async function authenticate(): Promise<string> {
 
   const res = await fetch(`${baseUrl}/auth/accesstokenrequest`, {
     method: "POST",
+    signal: AbortSignal.timeout(15000),
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       name: TRADOVATE_USERNAME,
@@ -273,6 +274,7 @@ export async function getBars(contractId: number, count: number = 100, barSize: 
 export interface TradovateOrderResult {
   orderId: number;
   status: string;
+  warnings?: string[];
 }
 
 // Place a simple market order
@@ -332,8 +334,31 @@ export async function placeBracketOrder(params: {
     }),
   }) as { orderId: number };
 
-  // Wait for fill
+  // Wait for fill then verify
   await new Promise((r) => setTimeout(r, 2000));
+
+  // Verify entry actually filled before placing brackets
+  let entryFilled = false;
+  try {
+    const fills = await tvFetch("/fill/list") as { orderId: number; price: number; qty: number }[];
+    const entryFills = fills.filter((f) => f.orderId === entryData.orderId);
+    entryFilled = entryFills.length > 0 && entryFills.reduce((s, f) => s + f.qty, 0) >= params.quantity;
+  } catch {
+    // Fallback: check order status
+    try {
+      const order = await tvFetch(`/order/item?id=${entryData.orderId}`) as { ordStatus: string };
+      entryFilled = order.ordStatus === "Filled";
+    } catch {}
+  }
+
+  if (!entryFilled) {
+    // Cancel unfilled entry and abort — no brackets placed
+    try { await tvFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: entryData.orderId }) }); } catch {}
+    console.error(`[bracket] Entry order ${entryData.orderId} not filled after 2s — cancelled. No brackets placed.`);
+    return { orderId: entryData.orderId, status: "entry_not_filled" };
+  }
+
+  const warnings: string[] = [];
 
   // Step 2: Place stop loss
   try {
@@ -352,7 +377,9 @@ export async function placeBracketOrder(params: {
       }),
     });
   } catch (err) {
-    console.error(`[bracket] FAILED to place broker stop at $${params.stopLoss}: ${err}. Agent hard stop will backstop.`);
+    const msg = `Stop placement FAILED at $${params.stopLoss}: ${err}. Agent hard stop will backstop.`;
+    console.error(`[bracket] ${msg}`);
+    warnings.push(msg);
   }
 
   // Step 3: Place take profit
@@ -372,10 +399,12 @@ export async function placeBracketOrder(params: {
       }),
     });
   } catch (err) {
-    console.error(`[bracket] FAILED to place broker target at $${params.takeProfit}: ${err}. Agent will manage exit.`);
+    const msg = `Target placement FAILED at $${params.takeProfit}: ${err}. Agent will manage exit.`;
+    console.error(`[bracket] ${msg}`);
+    warnings.push(msg);
   }
 
-  return { orderId: entryData.orderId, status: "submitted" };
+  return { orderId: entryData.orderId, status: "submitted", warnings: warnings.length > 0 ? warnings : undefined };
 }
 
 // Place a limit entry with stop + target (bracket)
@@ -450,12 +479,54 @@ export async function placeLimitBracketOrder(params: {
   return { orderId: entryData.orderId, status: "limit_submitted" };
 }
 
-// Cancel an order
+// Cancel an order (with single retry)
 export async function cancelOrder(orderId: number): Promise<void> {
-  await tvFetch(`/order/cancelorder`, {
+  try {
+    await tvFetch(`/order/cancelorder`, {
+      method: "POST",
+      body: JSON.stringify({ orderId }),
+    });
+  } catch (firstErr) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      await tvFetch(`/order/cancelorder`, {
+        method: "POST",
+        body: JSON.stringify({ orderId }),
+      });
+    } catch {
+      throw firstErr;
+    }
+  }
+}
+
+// Place a stop order (for protecting positions after scale-out etc.)
+export async function placeStopOrder(params: {
+  contractId: number;
+  action: "Buy" | "Sell";
+  quantity: number;
+  stopPrice: number;
+}): Promise<TradovateOrderResult> {
+  if (!_accountId) await checkTradovateAuth();
+  const accounts = await tvFetch("/account/list") as { id: number; name: string }[];
+  const account = accounts.find((a) => a.id === _accountId) || accounts[0];
+  const accountSpec = account?.name || String(_accountId);
+
+  const data = await tvFetch("/order/placeorder", {
     method: "POST",
-    body: JSON.stringify({ orderId }),
-  });
+    body: JSON.stringify({
+      accountSpec,
+      accountId: _accountId,
+      action: params.action,
+      symbol: params.contractId,
+      orderQty: params.quantity,
+      orderType: "Stop",
+      stopPrice: params.stopPrice,
+      timeInForce: "GTC",
+      isAutomated: true,
+    }),
+  }) as { orderId: number; orderStatus?: string };
+
+  return { orderId: data.orderId, status: data.orderStatus || "submitted" };
 }
 
 // Get open orders

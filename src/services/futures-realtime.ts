@@ -15,7 +15,8 @@ const YFEngine = require("yahoo-finance2").default || require("yahoo-finance2");
 const yfEngine = new YFEngine({ suppressNotices: ["ripHistorical", "yahooSurvey"] });
 
 import { prisma } from "../lib/db";
-import { logTradeToJournal, logDecision, vaultRead, vaultWrite } from "../lib/vault";
+import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite } from "../lib/vault";
+import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 
 // ── Config ──────────────────────────────────────────────
 
@@ -265,6 +266,10 @@ function initBarBuilder(sym: string) {
 
 let tickCount = 0;
 
+// Date-based flags to ensure exactly one session reset and one EOD close per day
+let lastResetDate = "";
+let lastEODDate = "";
+
 function onPrice(sym: string, price: number, volume: number) {
   const b = barBuilders.get(sym);
   if (!b || price <= 0) return;
@@ -319,15 +324,21 @@ async function pollPrices() {
     const arr = Array.isArray(quotes) ? quotes : [quotes];
 
     let received = 0;
-    for (let i = 0; i < SYMBOLS.length; i++) {
-      const q = arr[i];
+    // Match by symbol instead of array index (prevents misalignment if Yahoo returns fewer/different results)
+    for (const sym of SYMBOLS) {
+      const yahooSym = YAHOO_MAP[sym];
+      const q = arr.find((item: Record<string, unknown>) => item?.symbol === yahooSym);
       if (q?.regularMarketPrice) {
-        onPrice(SYMBOLS[i], q.regularMarketPrice, q.regularMarketVolume || 0);
+        onPrice(sym, q.regularMarketPrice as number, (q.regularMarketVolume || 0) as number);
         received++;
       }
     }
 
-    if (received > 0 && yahooConsecutiveFailures > 0) {
+    // Zero quotes = silent failure — count it
+    if (received === 0) {
+      yahooConsecutiveFailures++;
+      log(`[YAHOO] Zero quotes received (${yahooConsecutiveFailures}/${YAHOO_MAX_FAILURES})`);
+    } else if (yahooConsecutiveFailures > 0) {
       log(`[YAHOO] Recovered after ${yahooConsecutiveFailures} failures — ${received} quotes received`);
       yahooConsecutiveFailures = 0;
     }
@@ -349,40 +360,40 @@ async function pollPrices() {
 // ── Session Management ──────────────────────────────────
 
 function getSessionName(): string {
-  const now = new Date();
-  const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
-  if (utcH >= 21 && utcH < 22) return "halt";
-  if (now.getUTCDay() === 6 || (now.getUTCDay() === 0 && utcH < 22)) return "halt";
-  if (utcH >= 13.5 && utcH < 14) return "open";
-  if (utcH >= 14 && utcH < 16) return "morning";
-  if (utcH >= 16 && utcH < 18) return "midday";
-  if (utcH >= 18 && utcH < 19.75) return "afternoon";
-  if (utcH >= 19.75 && utcH < 20) return "close";
-  if (utcH >= 20 && utcH < 21) return "eth_evening";
-  if (utcH >= 22 || utcH < 2) return "eth_evening";
-  if (utcH >= 2 && utcH < 7) return "eth_asia";
-  if (utcH >= 7 && utcH < 13) return "eth_europe";
+  // DST-aware session detection via shared helper
+  if (isWeekendET() || isHaltET()) return "halt";
+  const etH = getETHour();
+  if (etH >= 9.5 && etH < 16) {
+    const minSinceOpen = (etH - 9.5) * 60;
+    if (minSinceOpen < 15) return "open";
+    if (etH < 12) return "morning";
+    if (etH < 14) return "midday";
+    if (etH < 15.75) return "afternoon";
+    return "close";
+  }
+  if (etH >= 16 && etH < 17) return "eth_evening";
+  if (etH >= 18 && etH < 22) return "eth_evening";
+  if (etH >= 22 || etH < 3) return "eth_asia";
+  if (etH >= 3 && etH < 9) return "eth_europe";
   return "pre_market";
 }
 
 function getMinutesSinceRTHOpen(): number {
-  const now = new Date();
-  return Math.max(0, (now.getUTCHours() + now.getUTCMinutes() / 60 - 13.5) * 60);
+  return Math.max(0, (getETHour() - 9.5) * 60);
 }
 
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
-  // Gold has different prime hours: COMEX 8:20 AM - 1:30 PM ET = UTC 12:20 - 17:30
-  // London overlap 8-12 ET is best for gold
+  // Gold has different prime hours: COMEX 8:20 AM - 1:30 PM ET
+  // London overlap 8-12 ET is best for gold (DST-aware)
   if (sym && METALS.has(sym)) {
-    const now = new Date();
-    const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
-    if (utcH >= 12.33 && utcH < 14) return 1.0;   // COMEX open + London overlap = prime
-    if (utcH >= 14 && utcH < 16) return 0.8;       // Mid-COMEX
-    if (utcH >= 16 && utcH < 17.5) return 0.5;     // Late COMEX — reduced
-    if (utcH >= 7 && utcH < 12.33) return 0.4;     // London pre-COMEX — reduced
-    if (utcH >= 17.5 && utcH < 21) return 0.2;     // After COMEX — thin but gold can trend
+    const etH = getETHour();
+    if (etH >= 8.33 && etH < 10) return 1.0;   // COMEX open + London overlap = prime
+    if (etH >= 10 && etH < 12) return 0.8;       // Mid-COMEX
+    if (etH >= 12 && etH < 13.5) return 0.5;     // Late COMEX — reduced
+    if (etH >= 3 && etH < 8.33) return 0.4;      // London pre-COMEX — reduced
+    if (etH >= 13.5 && etH < 17) return 0.2;     // After COMEX — thin but gold can trend
     return 0.15; // Overnight — minimal size, gold trends hard overnight
   }
 
@@ -399,7 +410,12 @@ function getSizeMultiplier(sym?: string): number {
 
 function checkSessionReset() {
   const now = new Date();
-  if (now.getUTCHours() === 13 && now.getUTCMinutes() >= 29 && now.getUTCMinutes() <= 31) {
+  const todayET = getETDateString();
+  const etH = getETHour();
+
+  // Session reset at 9:29 AM ET — once per day (DST-aware, date-flag ensures no misses)
+  if (lastResetDate !== todayET && etH >= 9.483) { // 9:29 AM ET
+    lastResetDate = todayET;
     for (const [sym, b] of barBuilders) {
       if (b.sessionBars.length > 0) {
         b.prevDayHigh = Math.max(...b.sessionBars.map(x => x.h));
@@ -458,8 +474,9 @@ function checkSessionReset() {
     cancelAllOrders().catch(err => log(`[RESET] Order cleanup failed: ${err}`));
   }
 
-  // EOD forced close: flatten all positions AND cancel all orders at 3:50 PM ET (19:50 UTC)
-  if (now.getUTCHours() === 19 && now.getUTCMinutes() >= 49 && now.getUTCMinutes() <= 51) {
+  // EOD forced close: flatten all positions AND cancel all orders at 3:50 PM ET (DST-aware)
+  if (lastEODDate !== todayET && etH >= 15.833) { // 3:50 PM ET
+    lastEODDate = todayET;
     if (positions.size > 0) {
       log(`[EOD] 3:50 PM ET — closing all ${positions.size} positions before market close`);
       for (const [sym] of [...positions]) {
@@ -533,6 +550,8 @@ interface Position {
 }
 
 const positions: Map<string, Position> = new Map();
+// Per-symbol lock to prevent concurrent async stop modifications
+const stopMoveLocks = new Map<string, boolean>();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
 const stoppedSymbols: Set<string> = new Set(); // symbols stopped out today — no re-entry
@@ -691,27 +710,32 @@ function checkPositions(sym: string, price: number) {
 
     // CRITICAL: Cancel old stop and place new one at breakeven on the broker
     // This protects against fast moves between bar closes
-    (async () => {
-      try {
-        // Cancel existing broker stop
-        if (pos.stopOrderId) {
-          await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+    if (!stopMoveLocks.get(sym)) {
+      stopMoveLocks.set(sym, true);
+      (async () => {
+        try {
+          // Cancel existing broker stop
+          if (pos.stopOrderId) {
+            await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+          }
+          // Place new stop at breakeven
+          const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+          const acct = accounts.find(a => a.id === accountId) || accounts[0];
+          const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+          const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+            accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+            orderQty: pos.quantity, orderType: "Stop", stopPrice: breakevenPrice, timeInForce: "GTC", isAutomated: true,
+          })}) as { orderId: number };
+          pos.stopOrderId = s.orderId;
+          pos.stopLoss = breakevenPrice;
+          log(`${sym}: Broker stop moved to breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
+        } catch (err) {
+          log(`${sym}: WARNING — failed to move broker stop to breakeven: ${err}`);
+        } finally {
+          stopMoveLocks.set(sym, false);
         }
-        // Place new stop at breakeven
-        const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-        const acct = accounts.find(a => a.id === accountId) || accounts[0];
-        const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-          orderQty: pos.quantity, orderType: "Stop", stopPrice: breakevenPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        pos.stopOrderId = s.orderId;
-        pos.stopLoss = breakevenPrice;
-        log(`${sym}: Broker stop moved to breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
-      } catch (err) {
-        log(`${sym}: WARNING — failed to move broker stop to breakeven: ${err}`);
-      }
-    })();
+      })();
+    }
   }
 
   // 1.5R: Scale out 50% — lock in profit before it rides back to breakeven
@@ -732,25 +756,30 @@ function checkPositions(sym: string, price: number) {
         if (isNew) log(`${sym}: 1.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop at $${trail.toFixed(2)} (1.5x ATR)`);
         pos.trailStop = trail;
 
-        // Move broker stop to trail level
-        (async () => {
-          try {
-            if (pos.stopOrderId) {
-              await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+        // Move broker stop to trail level (locked to prevent concurrent modifications)
+        if (!stopMoveLocks.get(sym)) {
+          stopMoveLocks.set(sym, true);
+          (async () => {
+            try {
+              if (pos.stopOrderId) {
+                await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+              }
+              const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+              const acct = accounts.find(a => a.id === accountId) || accounts[0];
+              const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+              const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+                accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+                orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
+              })}) as { orderId: number };
+              pos.stopOrderId = s.orderId;
+              if (isNew) log(`${sym}: Broker trail stop at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
+            } catch (err) {
+              log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
+            } finally {
+              stopMoveLocks.set(sym, false);
             }
-            const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-            const acct = accounts.find(a => a.id === accountId) || accounts[0];
-            const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-            const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-              accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-              orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
-            })}) as { orderId: number };
-            pos.stopOrderId = s.orderId;
-            if (isNew) log(`${sym}: Broker trail stop at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
-          } catch (err) {
-            log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
-          }
-        })();
+          })();
+        }
       }
     }
   }
@@ -1021,6 +1050,15 @@ async function closePosition(sym: string, price: number, reason: string) {
         followedPlan: true,
       }, "futures-realtime");
       await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `${reason}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
+      // Log observations for notable trades (big wins, big losses, emergencies)
+      const rMult = pos.stopLoss ? Math.abs((price - pos.entryPrice) / (pos.entryPrice - pos.stopLoss)) * (pnl > 0 ? 1 : -1) : null;
+      if (rMult != null && rMult >= 2) {
+        await logObservation("futures-realtime", `BIG WIN: ${sym} ${pos.direction} +$${pnl.toFixed(0)} (${rMult.toFixed(1)}R) — ${reason}`);
+      } else if (pnl < -200) {
+        await logObservation("futures-realtime", `BIG LOSS: ${sym} ${pos.direction} -$${Math.abs(pnl).toFixed(0)} — ${reason}`);
+      } else if (reason.includes("emergency") || reason.includes("kill")) {
+        await logObservation("futures-realtime", `EMERGENCY: ${sym} ${pos.direction} $${pnl.toFixed(0)} — ${reason}`);
+      }
     } catch { /* vault optional */ }
 
     positions.delete(sym);
@@ -1135,7 +1173,11 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
 
     const data = await res.json() as { content: { type: string; text: string }[] };
     const text = data.content?.find(b => b.type === "text")?.text || "";
-    const parsed = JSON.parse(text.trim());
+    // Handle Claude sometimes wrapping JSON in markdown code blocks
+    let jsonText = text.trim();
+    const jsonMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (jsonMatch) jsonText = jsonMatch[1].trim();
+    const parsed = JSON.parse(jsonText);
     return { agree: !!parsed.agree, confidence: parsed.confidence || 50, reasoning: parsed.reasoning || "" };
   } catch (err) {
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);

@@ -1,8 +1,7 @@
-import { checkTradovateAuth, getTradovatePositions } from "@/lib/tradovate";
+import { checkTradovateAuth, getTradovatePositions, placeMarketOrder, getOpenOrders, cancelOrder, getTradovateFills } from "@/lib/tradovate";
 import { prisma } from "@/lib/db";
 import { logTradeToJournal, logDecision } from "@/lib/vault";
 
-const DEMO_URL = "https://demo.tradovateapi.com/v1";
 const MULTIPLIERS: Record<string, number> = { MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5 };
 
 export async function POST(request: Request) {
@@ -15,32 +14,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "Tradovate not connected" }, { status: 400 });
     }
 
-    // Get fresh token
-    const tokenRes = await fetch(`${DEMO_URL}/auth/accesstokenrequest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: process.env.TRADOVATE_USERNAME || "",
-        password: process.env.TRADOVATE_PASSWORD || "",
-        appId: process.env.TRADOVATE_APP_ID || "",
-        appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
-        deviceId: "esbueno-manual-close",
-        cid: parseInt(process.env.TRADOVATE_CID || "0"),
-        sec: process.env.TRADOVATE_SEC || "",
-      }),
-    });
-    if (!tokenRes.ok) return Response.json({ error: "Auth failed" }, { status: 500 });
-    const tokenData = await tokenRes.json();
-    const token = tokenData.accessToken;
-
-    // Get accounts
-    const acctRes = await fetch(`${DEMO_URL}/account/list`, {
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    });
-    const accounts = await acctRes.json() as { id: number; name: string }[];
-    const acct = accounts[0];
-
-    // Get positions
+    // Get positions via centralized client (with timeout, rate limit, token refresh)
     const positions = await getTradovatePositions();
     const openPos = positions.filter(p => p.netPos !== 0);
 
@@ -57,7 +31,6 @@ export async function POST(request: Request) {
 
       const direction = pos.netPos > 0 ? "long" : "short";
       const qty = Math.abs(pos.netPos);
-      const closeSide = direction === "long" ? "Sell" : "Buy";
       const mult = MULTIPLIERS[sym] || 5;
 
       // Get a live quote for P&L calculation
@@ -70,27 +43,26 @@ export async function POST(request: Request) {
         if (q?.regularMarketPrice) closePrice = q.regularMarketPrice;
       } catch {}
 
-      // Market close
-      const orderRes = await fetch(`${DEMO_URL}/order/placeorder`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accountSpec: acct.name, accountId: acct.id, action: closeSide,
-          symbol: pos.contractId, orderQty: qty, orderType: "Market",
-          timeInForce: "Day", isAutomated: true,
-        }),
-      });
-      const orderData = await orderRes.json().catch(() => ({})) as { orderId?: number };
+      // Market close via centralized client (has timeout, rate limit handling)
+      let orderId: number | null = null;
+      try {
+        const result = await placeMarketOrder({
+          contractId: pos.contractId,
+          action: direction === "long" ? "Sell" : "Buy",
+          quantity: qty,
+        });
+        orderId = result.orderId;
+      } catch (err) {
+        closed.push(`FAILED to close ${sym} ${direction} ${qty}x: ${err}`);
+        continue;
+      }
 
-      // Get ACTUAL fill price from Tradovate instead of Yahoo quote
-      if (orderData.orderId) {
+      // Get ACTUAL fill price from Tradovate
+      if (orderId) {
         try {
           await new Promise(r => setTimeout(r, 1500));
-          const fillsRes = await fetch(`${DEMO_URL}/fill/list`, {
-            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          });
-          const fills = await fillsRes.json() as { orderId: number; price: number; qty: number }[];
-          const myFills = fills.filter(f => f.orderId === orderData.orderId);
+          const fills = await getTradovateFills();
+          const myFills = fills.filter(f => f.orderId === orderId);
           if (myFills.length > 0) {
             const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
             closePrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
@@ -115,12 +87,12 @@ export async function POST(request: Request) {
             price: closePrice,
             pnl: Math.round(pnl * 100) / 100,
             reason: `[FUTURES ${sym}] Manual close: ${qty}x ${direction} @ $${closePrice.toFixed(2)}. Entry: $${entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}`,
-            orderId: orderData.orderId ? String(orderData.orderId) : null,
+            orderId: orderId ? String(orderId) : null,
           },
         });
       } catch {}
 
-      // Log to Obsidian vault (learning loop)
+      // Log to Obsidian vault
       try {
         await logTradeToJournal({
           tradeId: `${new Date().toISOString().slice(0, 10)}-MANUAL-${sym}`,
@@ -142,12 +114,9 @@ export async function POST(request: Request) {
       } catch { /* vault optional */ }
     }
 
-    // Cancel working orders ONLY for the closed symbols (not all orders!)
+    // Cancel working orders for closed symbols via centralized client
     try {
-      const ordersRes = await fetch(`${DEMO_URL}/order/list`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      });
-      const orders = await ordersRes.json() as { id: number; ordStatus: string; contractId?: number }[];
+      const orders = await getOpenOrders();
       const closedContractIds = new Set(openPos
         .filter(p => {
           let sym = "";
@@ -158,17 +127,10 @@ export async function POST(request: Request) {
         })
         .map(p => p.contractId));
       const working = orders.filter(o =>
-        (o.ordStatus === "Working" || o.ordStatus === "Accepted") &&
-        (targetSymbol === "all" || (o.contractId != null && closedContractIds.has(o.contractId)))
+        targetSymbol === "all" || (o.contractId != null && closedContractIds.has(o.contractId))
       );
       for (const order of working) {
-        try {
-          await fetch(`${DEMO_URL}/order/cancelorder`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ orderId: order.id }),
-          });
-        } catch {}
+        try { await cancelOrder(order.id); } catch {}
       }
       if (working.length > 0) closed.push(`Cancelled ${working.length} orders for ${targetSymbol}`);
     } catch {}

@@ -1,4 +1,5 @@
 import { getPositions, getAccount } from "@/lib/alpaca";
+import { getTradovateAccountSummary, getTradovatePositions } from "@/lib/tradovate";
 import { generateLearningInsights } from "@/lib/learning-engine";
 import { sendNotification } from "@/lib/notifications";
 import { prisma } from "@/lib/db";
@@ -12,7 +13,7 @@ export const maxDuration = 120;
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -26,7 +27,7 @@ export async function GET(request: Request) {
       orderBy: { createdAt: "desc" },
     });
 
-    const buys = todayTrades.filter((t) => t.action.includes("buy") || t.action.includes("iron") || t.action.includes("sell_bull") || t.action.includes("sell_bear"));
+    const entries = todayTrades.filter((t) => t.action.includes("entry") || t.action.includes("buy") || t.action.includes("iron") || t.action.includes("sell_bull") || t.action.includes("sell_bear"));
     const closes = todayTrades.filter((t) => t.pnl != null);
     const todayPnl = closes.reduce((s, t) => s + (t.pnl || 0), 0);
     const todayWins = closes.filter((t) => (t.pnl || 0) > 0).length;
@@ -41,22 +42,46 @@ export async function GET(request: Request) {
     const totalScanned = todayRuns.reduce((s, r) => s + r.stocksScanned, 0);
     const totalErrors = todayRuns.reduce((s, r) => s + r.errors, 0);
 
-    // 3. Current portfolio state
+    // 3. Current portfolio state — both brokers
     let portfolioSummary = "";
+
+    // Tradovate (futures)
     try {
-      const account = await getAccount();
-      const positions = await getPositions();
-      const equity = parseFloat(account.equity);
-      const dailyChange = equity - parseFloat(account.last_equity);
-      const dailyPct = (dailyChange / parseFloat(account.last_equity)) * 100;
+      const tvAccount = await getTradovateAccountSummary();
+      const tvPositions = await getTradovatePositions();
+      const tvEquity = tvAccount.netLiq || tvAccount.balance;
 
-      const posWinners = positions.filter((p) => parseFloat(p.unrealized_pl) > 0).length;
-      const posLosers = positions.filter((p) => parseFloat(p.unrealized_pl) < 0).length;
-      const totalUnrealized = positions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0);
+      const today = new Date().toISOString().slice(0, 10);
+      const sodRecord = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
+      const sodBalance = sodRecord ? parseFloat(sodRecord.value) : null;
+      const tvDailyChange = sodBalance != null ? tvEquity - sodBalance : null;
+      const tvDailyPct = sodBalance != null && sodBalance > 0 ? ((tvEquity - sodBalance) / sodBalance) * 100 : null;
+      const tvOpen = tvPositions.filter((p) => p.netPos !== 0);
 
-      portfolioSummary = `Portfolio: $${equity.toLocaleString()} (${dailyChange >= 0 ? "+" : ""}$${dailyChange.toFixed(0)}, ${dailyPct >= 0 ? "+" : ""}${dailyPct.toFixed(2)}%)\nPositions: ${positions.length} (${posWinners} winning, ${posLosers} losing)\nUnrealized: ${totalUnrealized >= 0 ? "+" : ""}$${totalUnrealized.toFixed(0)}`;
+      portfolioSummary = `FUTURES (Tradovate): $${tvEquity.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+      if (tvDailyChange != null) portfolioSummary += ` (${tvDailyChange >= 0 ? "+" : ""}$${tvDailyChange.toFixed(0)}, ${tvDailyPct != null ? (tvDailyPct >= 0 ? "+" : "") + tvDailyPct.toFixed(2) + "%" : ""})`;
+      portfolioSummary += `\n  Positions: ${tvOpen.length}, Unrealized: ${tvAccount.unrealizedPnl >= 0 ? "+" : ""}$${tvAccount.unrealizedPnl.toFixed(0)}, Margin: $${tvAccount.marginUsed.toFixed(0)}`;
     } catch {
-      portfolioSummary = "Could not fetch portfolio state";
+      portfolioSummary = "FUTURES (Tradovate): Could not fetch";
+    }
+
+    // Alpaca (stocks/options)
+    try {
+      const alpAccount = await getAccount();
+      const alpPositions = await getPositions();
+      const alpEquity = parseFloat(alpAccount.equity);
+      const alpDailyChange = alpEquity - parseFloat(alpAccount.last_equity);
+      const alpDailyPct = (alpDailyChange / parseFloat(alpAccount.last_equity)) * 100;
+      const alpWinners = alpPositions.filter((p) => parseFloat(p.unrealized_pl) > 0).length;
+      const alpLosers = alpPositions.filter((p) => parseFloat(p.unrealized_pl) < 0).length;
+      const alpUnrealized = alpPositions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0);
+
+      portfolioSummary += `\nSTOCKS/OPTIONS (Alpaca): $${alpEquity.toLocaleString("en-US", { maximumFractionDigits: 0 })} (${alpDailyChange >= 0 ? "+" : ""}$${alpDailyChange.toFixed(0)}, ${alpDailyPct >= 0 ? "+" : ""}${alpDailyPct.toFixed(2)}%)`;
+      if (alpPositions.length > 0) {
+        portfolioSummary += `\n  Positions: ${alpPositions.length} (${alpWinners}W/${alpLosers}L), Unrealized: ${alpUnrealized >= 0 ? "+" : ""}$${alpUnrealized.toFixed(0)}`;
+      }
+    } catch {
+      portfolioSummary += "\nSTOCKS/OPTIONS (Alpaca): Could not fetch";
     }
 
     // 4. Learning insights
@@ -84,7 +109,7 @@ export async function GET(request: Request) {
       }
     } catch { /* synthesis optional */ }
 
-    // 5. Build end-of-day review
+    // 6. Build end-of-day review
     const review = [
       `END OF DAY REVIEW — ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`,
       "",
@@ -92,7 +117,7 @@ export async function GET(request: Request) {
       "",
       `Today's Activity:`,
       `  Agent ran ${todayRuns.length} times, scanned ${totalScanned} stocks`,
-      `  Opened ${buys.length} new positions`,
+      `  Opened ${entries.length} new positions`,
       `  Closed ${closes.length} trades: ${todayWins}W / ${todayLosses}L, P&L ${todayPnl >= 0 ? "+" : ""}$${todayPnl.toFixed(0)}`,
       totalErrors > 0 ? `  Errors: ${totalErrors}` : "",
       "",
@@ -110,10 +135,10 @@ export async function GET(request: Request) {
       data: {
         runType: "review",
         stocksScanned: totalScanned,
-        tradesPlaced: buys.length,
+        tradesPlaced: entries.length,
         positionsManaged: closes.length,
         errors: totalErrors,
-        summary: `EOD: ${todayWins}W/${todayLosses}L, P&L ${todayPnl >= 0 ? "+" : ""}$${todayPnl.toFixed(0)}, ${buys.length} new, ${closes.length} closed`,
+        summary: `EOD: ${todayWins}W/${todayLosses}L, P&L ${todayPnl >= 0 ? "+" : ""}$${todayPnl.toFixed(0)}, ${entries.length} new, ${closes.length} closed`,
         durationMs: 0,
       },
     });

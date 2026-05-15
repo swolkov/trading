@@ -4,18 +4,22 @@ import {
   findContract,
   placeBracketOrder,
   placeMarketOrder,
+  placeStopOrder,
   getTradovatePositions,
   getTradovateAccountSummary,
   getOpenOrders,
   cancelOrder,
   TRADOVATE_CONTRACTS,
+  type TradovatePosition,
 } from "./tradovate";
+import { sendNotification } from "./notifications";
 import { getHistoricalBars, getIntradayBars } from "./yahoo";
 import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
 import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, updateMarketRegime, updateVolatilityEnvironment } from "./vault";
 import { evaluateDrawdownState } from "./drawdown-protocol";
+import { getSessionInfo, getETDateString, getRTHStartUTC, type Session } from "./session-time";
 
 // Yahoo Finance symbols for micro futures (use the full-size contract as proxy)
 const YAHOO_FUTURES_MAP: Record<string, string> = {
@@ -50,12 +54,9 @@ const FUTURES_RULES = {
   ATR_STOP_MULTIPLIER: 1.5,
   ATR_TARGET_MULTIPLIER: 2.5,      // 1.67 R:R minimum
 
-  // Session times (ET hours in UTC)
-  // Pre-market: 13:00-13:30 UTC (9:00-9:30 ET)
-  // RTH: 13:30-20:00 UTC (9:30-4:00 ET)
-  // ETH: 22:00-13:30 UTC (6:00PM-9:30AM ET next day)
-  RTH_START_UTC: 13.5,
-  RTH_END_UTC: 20,
+  // Session times (ET hours — DST-aware via session-time.ts)
+  RTH_START_ET: 9.5,               // 9:30 AM ET
+  RTH_END_ET: 16,                  // 4:00 PM ET
   AVOID_FIRST_MINUTES: 15,         // Avoid first 15 min (opening chaos)
   AVOID_LAST_MINUTES: 15,          // Avoid last 15 min (closing chaos)
 };
@@ -155,51 +156,11 @@ function calcKeyLevels(dailyBars: { h: number; l: number; c: number }[], intrada
   };
 }
 
-// ============ SESSION DETECTION ============
-
-type Session = "pre_market" | "open" | "morning" | "midday" | "afternoon" | "close" | "eth_evening" | "eth_overnight" | "eth_asia" | "eth_europe" | "halt";
+// ============ SESSION DETECTION (DST-aware via session-time.ts) ============
+// Session type imported from session-time.ts
 
 function getSession(): { session: Session; isRTH: boolean; isETH: boolean; minutesSinceOpen: number } {
-  const now = new Date();
-  const utcHour = now.getUTCHours() + now.getUTCMinutes() / 60;
-  const dayOfWeek = now.getUTCDay(); // 0=Sun, 6=Sat
-
-  const minutesSinceOpen = Math.max(0, (utcHour - FUTURES_RULES.RTH_START_UTC) * 60);
-  const isRTH = utcHour >= FUTURES_RULES.RTH_START_UTC && utcHour < FUTURES_RULES.RTH_END_UTC;
-
-  // Futures halt: daily 5:00-6:00 PM ET = 21:00-22:00 UTC
-  const isHalt = utcHour >= 21 && utcHour < 22;
-
-  // Weekend: Sat all day, Sun before 6PM ET (22:00 UTC)
-  const isWeekend = dayOfWeek === 6 || (dayOfWeek === 0 && utcHour < 22);
-
-  if (isWeekend || isHalt) {
-    return { session: "halt", isRTH: false, isETH: false, minutesSinceOpen: 0 };
-  }
-
-  // ETH sessions (outside RTH 9:30 AM - 4:00 PM ET)
-  const isETH = !isRTH;
-
-  let session: Session;
-  if (isRTH) {
-    if (minutesSinceOpen < 15) session = "open";
-    else if (utcHour < 16) session = "morning";         // 9:45 AM - 12 PM ET
-    else if (utcHour < 18) session = "midday";           // 12 PM - 2 PM ET
-    else if (utcHour < 19.75) session = "afternoon";     // 2 PM - 3:45 PM ET
-    else session = "close";                               // 3:45 PM - 4 PM ET
-  } else if (utcHour >= 20 && utcHour < 21) {
-    session = "eth_evening";                              // 4 PM - 5 PM ET (post-close)
-  } else if (utcHour >= 22 || utcHour < 2) {
-    session = "eth_evening";                              // 6 PM - 10 PM ET
-  } else if (utcHour >= 2 && utcHour < 7) {
-    session = "eth_asia";                                 // 10 PM - 3 AM ET (Asia session)
-  } else if (utcHour >= 7 && utcHour < 13) {
-    session = "eth_europe";                               // 3 AM - 9 AM ET (Europe/London)
-  } else {
-    session = "pre_market";                               // 9 AM - 9:30 AM ET
-  }
-
-  return { session, isRTH, isETH, minutesSinceOpen };
+  return getSessionInfo();
 }
 
 // ============ DAY TYPE CLASSIFIER ============
@@ -589,7 +550,8 @@ export async function runFuturesAgent(): Promise<{
 
   // Determine if we should scan for NEW trades (vs just managing positions)
   // Position management ALWAYS runs regardless of session
-  const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (6.5 * 60 - FUTURES_RULES.AVOID_LAST_MINUTES));
+  const totalRTHMinutes = (FUTURES_RULES.RTH_END_ET - FUTURES_RULES.RTH_START_ET) * 60; // 390 min
+  const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (totalRTHMinutes - FUTURES_RULES.AVOID_LAST_MINUTES));
   const canScanNewTrades = session !== "close" && !isFirstLast15;
   if (!canScanNewTrades) {
     details.push(`New trade scanning paused (${isFirstLast15 ? "first/last 15 min RTH" : session}) — position management still active`);
@@ -636,7 +598,12 @@ export async function runFuturesAgent(): Promise<{
   try {
     const summary = await getTradovateAccountSummary();
     equity = summary.netLiq || summary.balance || 0;
-    if (equity === 0) equity = 1000000; // paper trading default
+    if (equity <= 0 || equity > 10_000_000) {
+      const reported = equity;
+      equity = 50_000; // conservative default for demo
+      details.push(`WARNING: Equity reported as $${reported.toLocaleString()} — using conservative $50k default`);
+      try { await sendNotification(`Futures agent equity anomaly: reported $${reported}. Using $50k default.`, "futures"); } catch {}
+    }
     details.push(`ACCOUNT: $${equity.toLocaleString()} (Unrealized: $${summary.unrealizedPnl.toFixed(0)})`);
   } catch (err) {
     details.push(`Account error: ${err}`);
@@ -676,9 +643,9 @@ export async function runFuturesAgent(): Promise<{
   const dailyLossLimit = equity * FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
   details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade${sizeOverride !== 1.0 ? ` (${sizeOverride.toFixed(2)}x adjusted)` : ""} | $${dailyLossLimit.toFixed(0)} daily limit`);
 
-  // Check daily P&L
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
+  // Check daily P&L (ET-aware day boundary)
+  const etDateStr = getETDateString();
+  const todayStart = new Date(`${etDateStr}T00:00:00`);
   const todayTrades = await prisma.autoTradeLog.findMany({
     where: { symbol: { startsWith: "FUT:" }, createdAt: { gte: todayStart } },
   });
@@ -695,7 +662,14 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Get existing futures positions
-  const futuresPositions = await getTradovatePositions();
+  let futuresPositions: TradovatePosition[] = [];
+  try {
+    futuresPositions = await getTradovatePositions();
+  } catch (err) {
+    details.push(`CRITICAL: Failed to fetch positions from Tradovate: ${err}`);
+    try { await sendNotification(`FUTURES AGENT: Cannot fetch positions — ${err}. Position management skipped.`, "futures"); } catch {}
+    return { trades, managed, details };
+  }
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
 
   // ============ MANAGE EXISTING POSITIONS ============
@@ -719,7 +693,12 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Get all open orders so we can cancel brackets when we manually close
-  const openOrders = await getOpenOrders();
+  let openOrders: { id: number; action: string; orderType: string; orderQty: number; orderStatus: string; contractId: number }[] = [];
+  try {
+    openOrders = await getOpenOrders();
+  } catch (err) {
+    details.push(`WARNING: Failed to fetch open orders: ${err}. Bracket cancellation may fail.`);
+  }
 
   for (const pos of futuresPositions) {
     managed++;
@@ -730,10 +709,10 @@ export async function runFuturesAgent(): Promise<{
     const symbolMatch = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
     const multiplier = symbolMatch ? FUTURES_CONTRACTS[symbolMatch].multiplier : 5;
 
-    // Use cached bars
+    // Use cached bars (guard: ATR must be positive, default to 5 if zero/missing)
     const cached = symbolMatch ? posBarCache[symbolMatch] : null;
     const currentPrice = cached?.price || avgPrice;
-    const currentATRVal = cached?.atrVal || 5;
+    const currentATRVal = cached?.atrVal && cached.atrVal > 0 ? cached.atrVal : 5;
 
     const priceDiff = direction === "long" ? currentPrice - avgPrice : avgPrice - currentPrice;
     const unrealizedPnl = priceDiff * multiplier * absQty;
@@ -820,8 +799,9 @@ export async function runFuturesAgent(): Promise<{
       if (everReached1R) {
         details.push(`    BREAKEVEN STOP: Was at 1R+, pulled back to ${(priceDiff / stopDistance).toFixed(2)}R — closing to protect`);
         try {
-          await cancelBracketOrders();
+          // Close FIRST, then cancel brackets (if close fails, brackets still protect)
           await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: absQty });
+          await cancelBracketOrders();
           await prisma.autoTradeLog.create({ data: {
             symbol: `FUT:${pos.contractName}`, action: "futures_breakeven_close",
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
@@ -839,8 +819,9 @@ export async function runFuturesAgent(): Promise<{
       if (pastStop) {
         details.push(`    HARD STOP: Price $${currentPrice.toFixed(2)} past stop $${origStop.toFixed(2)} — broker stop may have failed. P&L: $${unrealizedPnl.toFixed(0)}`);
         try {
-          await cancelBracketOrders();
+          // Close FIRST, then cancel brackets (if close fails, brackets still protect)
           await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: absQty });
+          await cancelBracketOrders();
           await prisma.autoTradeLog.create({ data: {
             symbol: `FUT:${pos.contractName}`, action: "futures_stop_loss",
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
@@ -865,13 +846,27 @@ export async function runFuturesAgent(): Promise<{
         if (!alreadyScaled) {
           details.push(`    SCALE OUT: Taking profit on ${scaleQty}/${absQty} at 1R`);
           try {
-            // Cancel bracket orders first to avoid quantity mismatch
-            await cancelBracketOrders();
+            // Close partial FIRST, then cancel old brackets, then place new stop for remaining
             await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: scaleQty });
+            await cancelBracketOrders();
+            // Place breakeven stop for remaining contracts
+            const remainingQty = absQty - scaleQty;
+            try {
+              await placeStopOrder({
+                contractId: pos.contractId,
+                action: direction === "long" ? "Sell" : "Buy",
+                quantity: remainingQty,
+                stopPrice: parseFloat(avgPrice.toFixed(2)),
+              });
+              details.push(`    Placed breakeven stop for remaining ${remainingQty}x at $${avgPrice.toFixed(2)}`);
+            } catch (stopErr) {
+              details.push(`    WARNING: Failed to place breakeven stop for remaining: ${stopErr}`);
+              try { await sendNotification(`Scale-out stop FAILED for ${pos.contractName}. ${remainingQty}x UNPROTECTED.`, "futures"); } catch {}
+            }
             await prisma.autoTradeLog.create({ data: {
               symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out",
               qty: scaleQty, price: currentPrice, pnl: priceDiff * multiplier * scaleQty, orderId: null,
-              reason: `Scale out: Closed ${scaleQty}/${absQty} at 1R ($${currentPrice.toFixed(2)}). Cancelled bracket. Remaining ${absQty - scaleQty} managed by trailing stop.`,
+              reason: `Scale out: Closed ${scaleQty}/${absQty} at 1R ($${currentPrice.toFixed(2)}). Remaining ${remainingQty} protected with breakeven stop.`,
             }});
             try { await logTradeToJournal({ tradeId: `SO-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${symbolMatch || pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "scale_out", contracts: scaleQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: priceDiff * multiplier * scaleQty, conviction: 0, exitReason: `Scale out ${scaleQty}/${absQty} at 1R` }, "futures-agent"); } catch {}
           } catch (err) { details.push(`    Scale out failed: ${err}`); }
@@ -883,8 +878,9 @@ export async function runFuturesAgent(): Promise<{
     if (session === "close" && regime === "choppy") {
       details.push(`  ${pos.contractName}: CLOSING before EOD (choppy)`);
       try {
-        await cancelBracketOrders();
+        // Close FIRST, then cancel brackets
         await placeMarketOrder({ contractId: pos.contractId, action: qty > 0 ? "Sell" : "Buy", quantity: absQty });
+        await cancelBracketOrders();
         await prisma.autoTradeLog.create({ data: {
           symbol: `FUT:${pos.contractName}`, action: "futures_session_close",
           qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
@@ -899,8 +895,9 @@ export async function runFuturesAgent(): Promise<{
     if (unrealizedPnl < -(equity * FUTURES_RULES.MAX_DRAWDOWN_PCT)) {
       details.push(`  EMERGENCY: ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% drawdown kill switch — CLOSING`);
       try {
-        await cancelBracketOrders();
+        // Close FIRST, then cancel brackets
         await placeMarketOrder({ contractId: pos.contractId, action: qty > 0 ? "Sell" : "Buy", quantity: absQty });
+        await cancelBracketOrders();
         await prisma.autoTradeLog.create({ data: {
           symbol: `FUT:${pos.contractName}`, action: "futures_emergency_close",
           qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
@@ -1029,10 +1026,8 @@ export async function runFuturesAgent(): Promise<{
     const closes5 = bars5min.map((b) => b.c);
     const closes15 = bars15min.map((b) => b.c);
 
-    // Calculate indicators — VWAP anchored to session open (RTH bars only)
-    const rthStartToday = new Date();
-    rthStartToday.setUTCHours(13, 30, 0, 0);
-    const rthStartTs = rthStartToday.getTime() / 1000;
+    // Calculate indicators — VWAP anchored to session open (RTH bars only, DST-aware)
+    const rthStartTs = getRTHStartUTC() / 1000;
     const sessionBars = bars5min.filter((b) => b.t >= rthStartTs);
     const vwapData = vwap(sessionBars.length >= 3 ? sessionBars : bars5min.slice(-78));
     const keyLevels = calcKeyLevels(barsDaily, bars5min);
@@ -1091,7 +1086,11 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
         messages: [{ role: "user", content: aiPrompt }],
       });
       const text = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
-      const ai = JSON.parse(text.trim());
+      // Handle Claude sometimes wrapping JSON in markdown code blocks
+      let jsonText = text.trim();
+      const jsonMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+      if (jsonMatch) jsonText = jsonMatch[1].trim();
+      const ai = JSON.parse(jsonText);
 
       if (!ai.agree) {
         setup.confidence -= 15;
@@ -1175,6 +1174,19 @@ Reply ONLY with JSON: {"agree": true/false, "reasoning": "one sentence"}`;
         stopLoss: stopPrice, target: targetPrice,
         reasoning: setup.reasoning, orderId: String(order.orderId), success: true,
       });
+
+      if (order.status === "entry_not_filled") {
+        details.push(`  ORDER CANCELLED — entry did not fill within 2s`);
+        continue;
+      }
+
+      // Alert if broker stop/target failed
+      if (order.warnings?.length) {
+        for (const w of order.warnings) {
+          details.push(`  WARNING: ${w}`);
+        }
+        try { await sendNotification(`Bracket warning for ${symbol}: ${order.warnings.join("; ")}`, "futures"); } catch {}
+      }
 
       details.push(`  ORDER PLACED with bracket (stop + target). Order ID: ${order.orderId}`);
 

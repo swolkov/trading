@@ -293,6 +293,66 @@ ${vix <= 20 ? "- NORMAL/LOW: Standard parameters, tight stops acceptable" : ""}
   await vaultWrite("Brain/volatility-environment.md", content, "research-agent");
 }
 
+// ============ DAILY BALANCES PARSER ============
+// Parses Performance/daily-balances.md for true P&L (Tradovate source of truth)
+
+interface DailyBalanceEntry {
+  date: string;
+  sod: number | null;
+  eod: number | null;
+  dayPnl: number | null;
+}
+
+async function parseDailyBalances(): Promise<{
+  startingCapital: number;
+  entries: DailyBalanceEntry[];
+  cumulative: { date: string; pnl: number }[];
+  latestBalance: number | null;
+  totalPnl: number | null;
+}> {
+  const doc = await vaultRead("Performance/daily-balances.md");
+  if (!doc) return { startingCapital: 50000, entries: [], cumulative: [], latestBalance: null, totalPnl: null };
+
+  const capMatch = doc.match(/starting_capital:\s*(\d+)/);
+  const startingCapital = capMatch ? parseInt(capMatch[1]) : 50000;
+
+  const entries: DailyBalanceEntry[] = [];
+  const dailyRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+|null)\s*\n\s*eod:\s*(\d+|null)\s*\n\s*day_pnl:\s*([+\-]?\d+|null)/g;
+  let match;
+  while ((match = dailyRegex.exec(doc)) !== null) {
+    entries.push({
+      date: match[1],
+      sod: match[2] === "null" ? null : parseInt(match[2]),
+      eod: match[3] === "null" ? null : parseInt(match[3]),
+      dayPnl: match[4] === "null" ? null : parseInt(match[4]),
+    });
+  }
+
+  const cumulative: { date: string; pnl: number }[] = [];
+  const cumulSection = doc.match(/## Cumulative P&L\s*```yaml\s*([\s\S]*?)```/);
+  if (cumulSection) {
+    const cumulRegex = /(\d{4}-\d{2}-\d{2}):\s*([+\-]?\d+)/g;
+    while ((match = cumulRegex.exec(cumulSection[1])) !== null) {
+      cumulative.push({ date: match[1], pnl: parseInt(match[2]) });
+    }
+  }
+
+  let latestBalance: number | null = null;
+  let totalPnl: number | null = null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.eod != null) { latestBalance = e.eod; break; }
+    if (e.sod != null) { latestBalance = e.sod; break; }
+  }
+  if (latestBalance != null) totalPnl = latestBalance - startingCapital;
+  if (cumulative.length > 0) {
+    const lastCumul = cumulative[cumulative.length - 1];
+    if (lastCumul.pnl !== null) totalPnl = lastCumul.pnl;
+  }
+
+  return { startingCapital, entries, cumulative, latestBalance, totalPnl };
+}
+
 // ============ SYNTHESIS ENGINE ============
 // Run after every 10 trades or at end of day
 
@@ -305,7 +365,7 @@ export interface SynthesisResult {
 }
 
 export async function runSynthesis(): Promise<SynthesisResult> {
-  // Get all closed trades from DB
+  // Get all closed trades from DB (reliable for counts, win/loss, timing — NOT for dollar P&L totals)
   const allTrades = await prisma.autoTradeLog.findMany({
     where: { pnl: { not: null } },
     orderBy: { createdAt: "desc" },
@@ -318,10 +378,10 @@ export async function runSynthesis(): Promise<SynthesisResult> {
   const grossProfit = winners.reduce((s, t) => s + (t.pnl || 0), 0);
   const grossLoss = Math.abs(losers.reduce((s, t) => s + (t.pnl || 0), 0));
   const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
-  // NOTE: DB trade P&L values are estimates (bar prices, not actual fills) for historical trades.
-  // Win/loss classification is correct but dollar totals may be approximate.
-  // For accurate total P&L, use account balance - starting capital.
-  const totalPnl = allTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const dbTotalPnl = allTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+
+  // TRUE P&L: Read from daily-balances.md (Tradovate balance deltas)
+  const balances = await parseDailyBalances();
 
   // Break down by action type (strategy proxy)
   const futuresTrades = allTrades.filter((t) => t.symbol.startsWith("FUT:"));
@@ -344,6 +404,35 @@ export async function runSynthesis(): Promise<SynthesisResult> {
   const futuresStats = calcStats(futuresTrades);
   const optionsStats = calcStats(optionsTrades);
   const stockStats = calcStats(stockTrades);
+
+  // Per-instrument breakdown (e.g. MES, MNQ, MGC)
+  const instrumentGroups: Record<string, typeof allTrades> = {};
+  for (const t of futuresTrades) {
+    const instrument = t.symbol.replace("FUT:", "");
+    if (!instrumentGroups[instrument]) instrumentGroups[instrument] = [];
+    instrumentGroups[instrument].push(t);
+  }
+  const instrumentStats: Record<string, ReturnType<typeof calcStats>> = {};
+  for (const [inst, trades] of Object.entries(instrumentGroups)) {
+    instrumentStats[inst] = calcStats(trades);
+  }
+
+  // Weekly stats (current week Mon-Sun)
+  const now = new Date();
+  const dayOfWeek = now.getDay();
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - ((dayOfWeek + 6) % 7));
+  monday.setHours(0, 0, 0, 0);
+  const weekTrades = allTrades.filter((t) => t.createdAt >= monday);
+  const weekStats = calcStats(weekTrades);
+  const weekWins = weekTrades.filter((t) => (t.pnl || 0) > 0).length;
+  const weekLosses = weekTrades.filter((t) => (t.pnl || 0) <= 0).length;
+  const weekByInst: Record<string, number> = {};
+  for (const t of weekTrades) {
+    const inst = t.symbol.replace("FUT:", "");
+    weekByInst[inst] = (weekByInst[inst] || 0) + (t.pnl || 0);
+  }
+  const bestWeekInst = Object.entries(weekByInst).sort((a, b) => b[1] - a[1])[0];
 
   // Time-of-day analysis
   const hourBuckets: Record<string, { trades: number; wins: number }> = {};
@@ -370,6 +459,20 @@ export async function runSynthesis(): Promise<SynthesisResult> {
     if ((t.pnl || 0) > 0) scoreGroups[bucket].wins++;
   }
 
+  // Build equity curve from daily-balances.md (preserves history)
+  const equityCurveLines = balances.entries
+    .filter((e) => e.sod != null || e.eod != null)
+    .map((e) => {
+      const balance = e.eod ?? e.sod!;
+      const pnl = balance - balances.startingCapital;
+      return `${e.date},${balance},${pnl}`;
+    });
+
+  // Format week date range
+  const weekEnd = new Date(monday);
+  weekEnd.setDate(monday.getDate() + 6);
+  const weekLabel = `${monday.toISOString().slice(5, 10)} — ${weekEnd.toISOString().slice(5, 10)}`;
+
   // Update Performance/statistics.md
   const today = new Date().toISOString().slice(0, 10);
   const statsContent = `---
@@ -379,14 +482,22 @@ updated_by: "synthesis-agent"
 
 # Performance Statistics
 
-## Lifetime Stats
+> **SOURCE OF TRUTH**: Total P&L from Tradovate balance deltas in daily-balances.md.
+> DB trade stats (win rate, counts) are reliable. DB dollar P&L totals are approximate.
+
+## Lifetime Stats (Tradovate Balance — SOURCE OF TRUTH)
+\`\`\`yaml
+starting_capital: ${balances.startingCapital}
+total_pnl: ${balances.totalPnl ?? "null  # Check daily-balances.md"}
+last_known_balance: ${balances.latestBalance ?? "null  # Check dashboard"}
+\`\`\`
+
+## Trade Stats (from DB — counts/rates reliable, dollar amounts approximate)
 \`\`\`yaml
 total_trades: ${totalTrades}
-total_pnl: ${totalPnl.toFixed(2)}
 win_rate: ${(winRate * 100).toFixed(1)}
 profit_factor: ${profitFactor.toFixed(2)}
-max_consecutive_wins: 0
-max_consecutive_losses: 0
+db_total_pnl: ${dbTotalPnl.toFixed(2)}  # APPROXIMATE — do not use for decisions
 \`\`\`
 
 ## By Strategy
@@ -394,20 +505,35 @@ max_consecutive_losses: 0
 futures:
   trades: ${futuresStats.trades}
   win_rate: ${(futuresStats.winRate * 100).toFixed(1)}
-  avg_pnl: ${futuresStats.avgPnl.toFixed(2)}
-  total_pnl: ${futuresStats.totalPnl.toFixed(2)}
+  db_total_pnl: ${futuresStats.totalPnl.toFixed(2)}  # approximate
 
 options:
   trades: ${optionsStats.trades}
   win_rate: ${(optionsStats.winRate * 100).toFixed(1)}
-  avg_pnl: ${optionsStats.avgPnl.toFixed(2)}
-  total_pnl: ${optionsStats.totalPnl.toFixed(2)}
+  db_total_pnl: ${optionsStats.totalPnl.toFixed(2)}  # approximate
 
 stocks:
   trades: ${stockStats.trades}
   win_rate: ${(stockStats.winRate * 100).toFixed(1)}
-  avg_pnl: ${stockStats.avgPnl.toFixed(2)}
-  total_pnl: ${stockStats.totalPnl.toFixed(2)}
+  db_total_pnl: ${stockStats.totalPnl.toFixed(2)}  # approximate
+\`\`\`
+
+## By Instrument
+\`\`\`yaml
+${Object.entries(instrumentStats).sort((a, b) => b[1].trades - a[1].trades).map(([inst, s]) => `${inst}:
+  trades: ${s.trades}
+  win_rate: ${(s.winRate * 100).toFixed(1)}
+  avg_pnl: ${s.avgPnl.toFixed(2)}
+  db_total_pnl: ${s.totalPnl.toFixed(2)}`).join("\n\n")}
+\`\`\`
+
+## This Week (${weekLabel})
+\`\`\`yaml
+trades: ${weekStats.trades}
+wins: ${weekWins}
+losses: ${weekLosses}
+db_pnl: ${weekStats.totalPnl.toFixed(2)}  # approximate
+${bestWeekInst ? `best_instrument: ${bestWeekInst[0]} ($${bestWeekInst[1].toFixed(0)})` : "best_instrument: null"}
 \`\`\`
 
 ## By Conviction/Score Level
@@ -420,10 +546,10 @@ ${Object.entries(scoreGroups).map(([k, v]) => `conviction_${k}: { trades: ${v.tr
 ${Object.entries(hourBuckets).map(([k, v]) => `${k}: { trades: ${v.trades}, win_rate: ${v.trades > 0 ? ((v.wins / v.trades) * 100).toFixed(1) : 0} }`).join("\n")}
 \`\`\`
 
-## Equity Curve Data Points
+## Equity Curve (from Tradovate daily balances)
 \`\`\`csv
-date,cumulative_pnl
-${today},${totalPnl.toFixed(2)}
+date,balance,cumulative_pnl
+${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balances.latestBalance ?? "null"},${balances.totalPnl ?? "null"}`}
 \`\`\`
 `;
 
@@ -469,6 +595,19 @@ ${today},${totalPnl.toFixed(2)}
   if (optionsStats.trades >= 10 && optionsStats.winRate > 0.6) {
     lessons.push(`Options strategy performing well (${(optionsStats.winRate * 100).toFixed(0)}% WR) — consider increasing allocation.`);
     lessonsExtracted++;
+  }
+
+  // Lesson: Per-instrument insights
+  for (const [inst, stats] of Object.entries(instrumentStats)) {
+    if (stats.trades >= 10) {
+      if (stats.winRate > 0.5) {
+        lessons.push(`${inst} is your best futures instrument (${(stats.winRate * 100).toFixed(0)}% WR over ${stats.trades} trades) — favor it.`);
+        lessonsExtracted++;
+      } else if (stats.winRate < 0.25) {
+        antiPatterns.push(`${inst} has only ${(stats.winRate * 100).toFixed(0)}% win rate over ${stats.trades} trades — reduce size or avoid.`);
+        antiPatternsFound++;
+      }
+    }
   }
 
   // Update active lessons (only if we have enough data)
@@ -517,6 +656,36 @@ ${antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}
       await vaultWrite("Rules/anti-patterns.md", antiPatternsContent, "synthesis-agent");
     }
   }
+
+  // Update strategy files with per-instrument performance
+  try {
+    const futuresStrategy = await vaultRead("Strategies/futures-scalping.md");
+    if (futuresStrategy && Object.keys(instrumentStats).length > 0) {
+      const perfTable = Object.entries(instrumentStats)
+        .sort((a, b) => b[1].trades - a[1].trades)
+        .map(([inst, s]) => `| ${inst} | ${s.trades} | ${(s.winRate * 100).toFixed(1)}% | ${s.avgPnl.toFixed(2)} | ${s.totalPnl.toFixed(2)} |`)
+        .join("\n");
+      const futuresLessons = [...lessons, ...antiPatterns].filter((l) =>
+        l.toLowerCase().includes("futures") || Object.keys(instrumentStats).some((inst) => l.includes(inst)),
+      );
+
+      let updated = futuresStrategy;
+      const lessonsText = futuresLessons.length > 0
+        ? futuresLessons.map((l, i) => `${i + 1}. ${l}`).join("\n") + `\n\n_Last updated: ${today}_`
+        : `_No instrument-specific lessons yet (need more data)._`;
+      updated = updated.replace(
+        /## Lessons Learned\n[\s\S]*?(?=\n## |$)/,
+        `## Lessons Learned\n${lessonsText}\n\n`,
+      );
+      updated = updated.replace(
+        /## Performance by (?:Setup Type|Instrument)\n[\s\S]*?(?=\n## |$)/,
+        `## Performance by Instrument\n| Instrument | Trades | Win Rate | Avg P&L | Total P&L |\n|------------|--------|----------|---------|----------|\n${perfTable}\n\n_Last updated: ${today} — DB P&L values are approximate_\n\n`,
+      );
+      if (updated !== futuresStrategy) {
+        await vaultWrite("Strategies/futures-scalping.md", updated, "synthesis-agent");
+      }
+    }
+  } catch { /* strategy update optional */ }
 
   return { totalTrades, winRate, profitFactor, lessonsExtracted, antiPatternsFound };
 }
