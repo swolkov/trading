@@ -227,11 +227,18 @@ export async function getFuturesQuotes(symbols: string[]): Promise<Record<string
 
 // ── Dashboard-friendly quote (matches old Yahoo route shape) ──
 
+// Day-trade margins (approximate, broker-dependent)
+const DAY_MARGINS: Record<string, number> = {
+  ES: 12_650, NQ: 18_700, GC: 10_200, YM: 9_900, RTY: 7_150,
+  MES: 1_265, MNQ: 1_870, MGC: 1_020, MYM: 990, M2K: 715,
+};
+
 export interface DashboardQuote {
   symbol: string;
   name: string;
   multiplier: number;
   tickSize: number;
+  margin: number;
   price: number;
   change: number;
   changePercent: number;
@@ -296,7 +303,7 @@ export async function getDashboardQuotes(symbols: string[]): Promise<DashboardQu
     const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
 
     results.push({
-      symbol: sym, name: spec.name, multiplier: spec.multiplier, tickSize: spec.tickSize,
+      symbol: sym, name: spec.name, multiplier: spec.multiplier, tickSize: spec.tickSize, margin: DAY_MARGINS[sym] || 0,
       price, change, changePercent, prevClose, open, high, low, volume, bid, ask,
       timestamp: new Date().toISOString(), source,
     });
