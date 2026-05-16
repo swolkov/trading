@@ -1,4 +1,5 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 
 // Public routes that don't require auth
 const isPublicRoute = createRouteMatcher([
@@ -8,11 +9,18 @@ const isPublicRoute = createRouteMatcher([
   "/api/futures/(.*)",   // Internal engine endpoints
 ]);
 
-export default clerkMiddleware(async (auth, request) => {
-  if (!isPublicRoute(request)) {
-    await auth.protect();
-  }
-});
+// If Clerk keys are not configured, skip auth entirely (site runs without auth)
+const hasClerkKeys = !!(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY);
+
+export default hasClerkKeys
+  ? clerkMiddleware(async (auth, request) => {
+      if (!isPublicRoute(request)) {
+        await auth.protect();
+      }
+    })
+  : function noAuthMiddleware() {
+      return NextResponse.next();
+    };
 
 export const config = {
   matcher: [
