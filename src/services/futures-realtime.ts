@@ -1770,20 +1770,12 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const contract = contracts.get(sym);
   if (!contract) return;
 
-  // MODE GATE: if not live, log as paper trade only
+  // MODE: Both DEMO and LIVE execute trades — the difference is which Tradovate server
+  // DEMO → demo.tradovateapi.com (fake $50K account, real execution, validates system)
+  // LIVE → live.tradovateapi.com (real $1K account, real money)
+  // The ORDER_API variable already points to the correct server based on mode.
   if (!isLiveMode) {
-    const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-    const qty = Math.max(1, Math.min(5, Math.floor((tradovateEquity * 0.05 * sizeMult) / (stopDist * mult))));
-    log(`[PAPER] Would ${direction.toUpperCase()} ${qty}x ${sym} @ $${price.toFixed(2)} | ${reasoning}`);
-    try {
-      await prisma.autoTradeLog.create({ data: {
-        symbol: `FUT:${sym}`, action: `paper_${direction}`, qty, price,
-        reason: `[PAPER] ${reasoning}. Stop: ${stopDist.toFixed(1)}pts, Target: ${targetDist.toFixed(1)}pts, R:R ${(targetDist/stopDist).toFixed(1)}`,
-        aiScore: confidenceScore, aiSignal: direction,
-      }});
-    } catch {}
-    dailyTradeCount++;
-    return;
+    log(`[DEMO TRADE] Executing on demo account — not real money`);
   }
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
