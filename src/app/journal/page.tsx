@@ -374,56 +374,6 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {/* Stats Row */}
-      <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Total P&L</p>
-          <p className={`text-lg font-black tabular-nums ${pnlColor(totalPnl)}`}>
-            {totalPnl >= 0 ? "+" : ""}{formatCurrency(totalPnl)}
-          </p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Days</p>
-          <p className="text-lg font-black">{totalDays}</p>
-          <p className="text-[9px] text-muted-foreground/30">{winningDays}W / {losingDays}L</p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Trades</p>
-          <p className="text-lg font-black">{totalTrades}</p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Avg Day</p>
-          <p className={`text-lg font-black tabular-nums ${pnlColor(totalDays > 0 ? totalPnl / totalDays : 0)}`}>
-            {totalDays > 0 ? `${(totalPnl / totalDays) >= 0 ? "+" : ""}${formatCurrency(totalPnl / totalDays)}` : "—"}
-          </p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Best</p>
-          <p className="text-lg font-black text-emerald-400 tabular-nums">
-            {bestDay ? `+${formatCurrency(bestDay.totalPnl)}` : "—"}
-          </p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Worst</p>
-          <p className="text-lg font-black text-red-400 tabular-nums">
-            {worstDay && worstDay.totalPnl < 0 ? formatCurrency(worstDay.totalPnl) : "—"}
-          </p>
-        </div>
-        <div className={`rounded-xl border p-3 ${
-          currentStreak.type === "win" ? "border-emerald-500/20 bg-emerald-500/[0.03]" :
-          currentStreak.type === "loss" ? "border-red-500/20 bg-red-500/[0.03]" :
-          "border-white/[0.06] bg-white/[0.02]"
-        }`}>
-          <p className="text-[10px] text-muted-foreground/40 uppercase">Streak</p>
-          <p className={`text-lg font-black ${
-            currentStreak.type === "win" ? "text-emerald-400" :
-            currentStreak.type === "loss" ? "text-red-400" : ""
-          }`}>
-            {currentStreak.count > 0 ? `${currentStreak.count}${currentStreak.type === "win" ? "W" : "L"}` : "—"}
-          </p>
-        </div>
-      </div>
-
       {/* P&L Calendar Heatmap + Cumulative Line */}
       <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr] gap-3">
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">

@@ -127,13 +127,11 @@ export default function DashboardPage() {
   const [regime, setRegime] = useState<RegimeData | null>(null);
   const [futures, setFutures] = useState<FuturesData | null>(null);
   const [futuresQuotes, setFuturesQuotes] = useState<FuturesQuote[]>([]);
-  const [portfolioHistory, setPortfolioHistory] = useState<{ timestamp: number[]; equity: number[] } | null>(null);
 
   useEffect(() => {
     fetch("/api/regime").then((r) => r.json()).then((d) => { if (!d.error) setRegime(d); }).catch(() => {});
     fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
     fetch("/api/futures/quotes").then((r) => r.json()).then((d) => { if (Array.isArray(d)) setFuturesQuotes(d); }).catch(() => {});
-    fetch("/api/portfolio-history?period=1M&timeframe=1D").then((r) => r.json()).then((d) => { if (!d.error && d.timestamp) setPortfolioHistory(d); }).catch(() => {});
 
     const futuresInterval = setInterval(() => {
       fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
@@ -198,26 +196,6 @@ export default function DashboardPage() {
     ];
   }, [stockMktVal, optionMktVal, futuresNotional, freeCash]);
 
-  // Recent activity (combined from both brokers, sorted by time)
-  const recentActivity = useMemo(() => {
-    const items: { id: string; symbol: string; action: string; pnl: number | null; time: string; source: "alpaca" | "futures" }[] = [];
-    if (futures?.activity) {
-      for (const a of futures.activity.slice(0, 10)) {
-        items.push({ id: a.id, symbol: a.symbol, action: a.action.replace("futures_", "").replace(/_/g, " "), pnl: a.pnl, time: a.time, source: "futures" });
-      }
-    }
-    return items.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 8);
-  }, [futures?.activity]);
-
-  // Equity sparkline data
-  const sparkline = useMemo(() => {
-    if (!portfolioHistory?.equity?.length) return null;
-    const eq = portfolioHistory.equity;
-    const min = Math.min(...eq);
-    const max = Math.max(...eq);
-    const range = max - min || 1;
-    return eq.map((v) => ((v - min) / range) * 100);
-  }, [portfolioHistory]);
 
   // Loading state
   const isLoading = accountLoading || positionsLoading;
@@ -295,39 +273,6 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Sparkline card */}
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 flex flex-col justify-between">
-          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-2">30-Day Equity</p>
-          {sparkline ? (
-            <div className="flex items-end gap-[2px] h-16 mt-auto">
-              {sparkline.map((h, i) => {
-                const isLast = i === sparkline.length - 1;
-                const prevH = i > 0 ? sparkline[i - 1] : h;
-                const isUp = h >= prevH;
-                return (
-                  <div
-                    key={i}
-                    className={`flex-1 min-w-[2px] rounded-t transition-all ${
-                      isLast ? (isUp ? "bg-emerald-400" : "bg-red-400") :
-                      isUp ? "bg-emerald-500/40" : "bg-red-500/40"
-                    }`}
-                    style={{ height: `${Math.max(3, h)}%` }}
-                  />
-                );
-              })}
-            </div>
-          ) : (
-            <div className="flex items-end gap-[2px] h-16 mt-auto">
-              {Array.from({ length: 20 }).map((_, i) => (
-                <div key={i} className="flex-1 skeleton rounded-t" style={{ height: `${35 + ((i * 17 + 7) % 45)}%` }} />
-              ))}
-            </div>
-          )}
-          <div className="flex justify-between mt-1.5 text-[9px] text-muted-foreground/30">
-            <span>30d ago</span>
-            <span>Today</span>
-          </div>
-        </div>
       </div>
 
       {/* ── Per-Broker Breakdown ── */}
@@ -395,53 +340,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Portfolio Allocation + Risk ── */}
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-3">
-        {/* Allocation */}
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-3">Portfolio Allocation</p>
-          {allocSegments.length > 0 ? (
-            <AllocationBar segments={allocSegments} />
-          ) : (
-            <p className="text-[11px] text-muted-foreground/30">No positions to display</p>
-          )}
-        </div>
-
-        {/* Risk panel */}
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium mb-3">Risk Overview</p>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Leverage</p>
-              <p className={`text-lg font-bold tabular-nums ${leverageRatio > 2 ? "text-red-400" : leverageRatio > 1 ? "text-amber-400" : "text-emerald-400"}`}>
-                {leverageRatio.toFixed(2)}x
-              </p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Buying Power</p>
-              <p className="text-lg font-bold tabular-nums">{formatCurrency(alpacaBuyingPower)}</p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Exposure</p>
-              <p className="text-sm font-bold tabular-nums">{formatCurrency(totalExposure)}</p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Max Position</p>
-              <p className="text-sm font-bold tabular-nums">
-                {(() => {
-                  const allValues = [
-                    ...stockPositions.map(p => Math.abs(parseFloat(p.market_value))),
-                    ...(futures?.positions?.map(p => p.currentPrice * p.multiplier * p.quantity) || []),
-                  ];
-                  if (allValues.length === 0) return "—";
-                  const maxVal = Math.max(...allValues);
-                  return combinedEquity > 0 ? `${((maxVal / combinedEquity) * 100).toFixed(0)}%` : "—";
-                })()}
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* ── Market Regime ── */}
       {regime && (
@@ -501,9 +399,8 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Positions + Activity ── */}
-      <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3">
-        {/* All Open Positions */}
+      {/* ── Open Positions ── */}
+      <div>
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
             <div className="flex items-center gap-2">
@@ -647,50 +544,6 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Recent Activity Feed */}
-        <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
-          <div className="px-4 py-3 border-b border-white/[0.06]">
-            <p className="text-xs font-medium">Recent Activity</p>
-          </div>
-          {recentActivity.length > 0 ? (
-            <div className="divide-y divide-white/[0.04]">
-              {recentActivity.map((item) => (
-                <div key={item.id} className="px-4 py-2 hover:bg-white/[0.02] transition-colors">
-                  <div className="flex items-center justify-between mb-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className={`w-1.5 h-1.5 rounded-full ${
-                        item.action.includes("long") ? "bg-emerald-500" :
-                        item.action.includes("short") ? "bg-red-500" :
-                        item.pnl != null && item.pnl > 0 ? "bg-emerald-500" :
-                        item.pnl != null && item.pnl < 0 ? "bg-red-500" :
-                        "bg-white/20"
-                      }`} />
-                      <span className="text-[11px] font-bold">{item.symbol}</span>
-                      <span className={`text-[9px] px-1 py-0.5 rounded font-bold ${
-                        item.source === "futures" ? "bg-amber-500/10 text-amber-400" : "bg-blue-500/10 text-blue-400"
-                      }`}>{item.action.toUpperCase()}</span>
-                    </div>
-                    {item.pnl != null && (
-                      <span className={`text-[11px] font-bold tabular-nums ${pnlColor(item.pnl)}`}>
-                        {item.pnl >= 0 ? "+" : ""}${item.pnl.toFixed(0)}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[9px] text-muted-foreground/30 tabular-nums">
-                    {new Date(item.time).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })}
-                  </p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="px-4 py-8 text-center">
-              <p className="text-[11px] text-muted-foreground/30">No recent activity</p>
-            </div>
-          )}
-          <div className="px-4 py-2 border-t border-white/[0.06]">
-            <Link href="/journal" className="text-[10px] text-emerald-400 hover:underline">View Full Journal</Link>
-          </div>
-        </div>
       </div>
     </div>
   );
