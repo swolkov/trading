@@ -559,7 +559,106 @@ export default function PerformancePage() {
               </Card>
             </div>
 
-            {/* Futures Daily Breakdown */}
+            {/* Futures Account Value */}
+            {futures?.account && (
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <div className="grid grid-cols-3 gap-4">
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Account Balance</p>
+                      <p className="text-xl font-bold mt-1">{fmt(Math.round(futures.account.balance))}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Net Liquidation</p>
+                      <p className="text-xl font-bold mt-1">{fmt(Math.round(futures.account.netLiq))}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Today Realized</p>
+                      <p className={`text-xl font-bold mt-1 ${pnl(futures.account.realizedPnl)}`}>{fmt(Math.round(futures.account.realizedPnl))}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Futures Daily / Weekly / Monthly P&L */}
+            {roundTrips.length > 0 && (() => {
+              // Weekly breakdown
+              const weekMap: Record<string, { pnl: number; label: string }> = {};
+              for (const rt of roundTrips) {
+                const d = new Date(rt.exitTime);
+                const weekStart = new Date(d);
+                weekStart.setDate(d.getDate() - d.getDay());
+                const key = weekStart.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+                const label = `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}`;
+                if (!weekMap[key]) weekMap[key] = { pnl: 0, label };
+                weekMap[key].pnl += rt.pnl;
+              }
+              const weeks = Object.entries(weekMap).sort(([a], [b]) => b.localeCompare(a));
+
+              // Monthly breakdown
+              const monthMap: Record<string, { pnl: number; label: string }> = {};
+              for (const rt of roundTrips) {
+                const d = new Date(rt.exitTime);
+                const key = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 7);
+                const label = d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" });
+                if (!monthMap[key]) monthMap[key] = { pnl: 0, label };
+                monthMap[key].pnl += rt.pnl;
+              }
+              const months = Object.entries(monthMap).sort(([a], [b]) => b.localeCompare(a));
+
+              return (
+                <div className="grid md:grid-cols-3 gap-4">
+                  <Card>
+                    <CardHeader><CardTitle className="text-sm">Daily P&L</CardTitle></CardHeader>
+                    <CardContent>
+                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                        {days.map(([dateKey, d]) => (
+                          <div key={dateKey} className="flex justify-between text-xs">
+                            <span className="text-muted-foreground">{d.label}</span>
+                            <span className={`font-medium ${pnl(d.totalPnl)}`}>
+                              {d.totalPnl >= 0 ? "+" : "-"}${Math.abs(d.totalPnl).toFixed(0)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader><CardTitle className="text-sm">Weekly P&L</CardTitle></CardHeader>
+                    <CardContent>
+                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                        {weeks.map(([key, w]) => (
+                          <div key={key} className="flex justify-between text-xs">
+                            <span className="text-muted-foreground">{w.label}</span>
+                            <span className={`font-medium ${pnl(w.pnl)}`}>
+                              {w.pnl >= 0 ? "+" : "-"}${Math.abs(w.pnl).toFixed(0)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader><CardTitle className="text-sm">Monthly P&L</CardTitle></CardHeader>
+                    <CardContent>
+                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                        {months.map(([key, m]) => (
+                          <div key={key} className="flex justify-between text-xs">
+                            <span className="text-muted-foreground">{m.label}</span>
+                            <span className={`font-medium ${pnl(m.pnl)}`}>
+                              {m.pnl >= 0 ? "+" : "-"}${Math.abs(m.pnl).toFixed(0)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              );
+            })()}
+
+            {/* Futures Daily Breakdown Table */}
             {days.length > 0 && (
               <Card>
                 <CardHeader>
