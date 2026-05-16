@@ -536,6 +536,14 @@ export default function DashboardPage() {
           ) : totalPositions > 0 ? (
             <div className="divide-y divide-white/[0.04]">
               {/* Stock positions */}
+              {stockPositions.length > 0 && (
+                <div className="flex items-center gap-2 px-4 py-1.5 bg-blue-500/[0.03]">
+                  <span className="text-[9px] font-bold text-blue-400 uppercase tracking-wider">Stocks</span>
+                  <span className="text-[9px] text-muted-foreground/30">{stockPositions.length}</span>
+                  <div className="flex-1 border-t border-blue-500/10" />
+                  <Link href="/stocks" className="text-[9px] text-blue-400/60 hover:text-blue-400">View all</Link>
+                </div>
+              )}
               {stockPositions.map((pos) => {
                 const pl = parseFloat(pos.unrealized_pl);
                 const plPct = parseFloat(pos.unrealized_plpc) * 100;
@@ -561,6 +569,14 @@ export default function DashboardPage() {
               })}
 
               {/* Options positions */}
+              {optionPositions.length > 0 && (
+                <div className="flex items-center gap-2 px-4 py-1.5 bg-purple-500/[0.03]">
+                  <span className="text-[9px] font-bold text-purple-400 uppercase tracking-wider">Options</span>
+                  <span className="text-[9px] text-muted-foreground/30">{optionPositions.length}</span>
+                  <div className="flex-1 border-t border-purple-500/10" />
+                  <Link href="/options" className="text-[9px] text-purple-400/60 hover:text-purple-400">View all</Link>
+                </div>
+              )}
               {optionPositions.map((pos) => {
                 const opt = parseOptionSymbol(pos.symbol);
                 const pl = parseFloat(pos.unrealized_pl);
@@ -591,6 +607,14 @@ export default function DashboardPage() {
               })}
 
               {/* Futures positions */}
+              {futures?.positions && futures.positions.length > 0 && (
+                <div className="flex items-center gap-2 px-4 py-1.5 bg-amber-500/[0.03]">
+                  <span className="text-[9px] font-bold text-amber-400 uppercase tracking-wider">Futures</span>
+                  <span className="text-[9px] text-muted-foreground/30">{futures.positions.length}</span>
+                  <div className="flex-1 border-t border-amber-500/10" />
+                  <Link href="/futures" className="text-[9px] text-amber-400/60 hover:text-amber-400">View all</Link>
+                </div>
+              )}
               {futures?.positions?.map((pos, i) => (
                 <div key={`fut-${i}`} className="flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02] transition-colors">
                   <div className="flex items-center gap-2.5">
