@@ -2,7 +2,7 @@
 
 import { useAccount } from "@/hooks/use-account";
 import { formatCurrency, pnlColor } from "@/lib/utils";
-import { Clock, Shield, Zap } from "lucide-react";
+import { Clock } from "lucide-react";
 import useSWR from "swr";
 import { useEffect, useState } from "react";
 
@@ -70,8 +70,7 @@ export function TopBar() {
     { refreshInterval: 15000 }
   );
   const marketClock = useMarketClock();
-  // Mode-aware visual styling — entire header shifts color when LIVE
-  // MUST be called before any early returns (rules of hooks)
+  // Check if live trading is active for visual styling
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
 
@@ -183,8 +182,8 @@ export function TopBar() {
           </div>
         )}
 
-        {/* Master Mode Switch */}
-        <ModeSwitch />
+        {/* View Toggle: Demo / Live */}
+        <ViewToggle />
 
         {/* Connection indicators */}
         <div className="flex items-center gap-1.5">
@@ -200,112 +199,54 @@ export function TopBar() {
   );
 }
 
-// ── Master Mode Switch ──────────────────────────────────
-function ModeSwitch() {
-  const { data, mutate } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  const [switching, setSwitching] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+// ── View Toggle (Demo / Live data) ──────────────────────
+// This ONLY controls what data you SEE — not what the engine does.
+// Live trading activation is on the Agent Hub.
+function ViewToggle() {
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
+  const isLiveActive = modeData?.modes?.futures === "live";
 
-  // Derive global mode from individual modes
-  const modes = data?.modes || {};
-  const isAnyLive = Object.values(modes).some((m) => m === "live");
-  const globalMode: "demo" | "live" = isAnyLive ? "live" : "demo";
+  // View state stored in localStorage so it persists across pages
+  const [view, setView] = useState<"demo" | "live">("demo");
+  useEffect(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem("dashboard_view") : null;
+    if (saved === "live" || saved === "demo") setView(saved);
+  }, []);
 
-  const handleSwitch = async () => {
-    if (globalMode === "demo") {
-      // Switching TO live — require confirmation
-      setShowConfirm(true);
-      setError("");
-      return;
-    }
-    // Switching to demo — no password needed, instant
-    setSwitching(true);
-    try {
-      // Switch ALL types to paper
-      for (const type of ["futures", "options", "stocks"]) {
-        await fetch("/api/trading-mode", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type, mode: "paper", password: "demo-switch" }),
-        });
-      }
-      mutate();
-    } catch {}
-    setSwitching(false);
-  };
-
-  const confirmLive = async () => {
-    if (!password) { setError("Password required"); return; }
-    setSwitching(true);
-    setError("");
-    try {
-      // Switch futures to live (primary — that's where the $1K is)
-      const res = await fetch("/api/trading-mode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "futures", mode: "live", password }),
-      });
-      const result = await res.json();
-      if (result.error) { setError(result.error); setSwitching(false); return; }
-      setShowConfirm(false);
-      setPassword("");
-      mutate();
-    } catch { setError("Failed"); }
-    setSwitching(false);
+  const switchView = (v: "demo" | "live") => {
+    setView(v);
+    localStorage.setItem("dashboard_view", v);
+    // Update the trading_mode_futures key so API calls return the right data
+    // This does NOT activate/deactivate live trading — just changes which server we READ from
+    fetch("/api/trading-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "futures", mode: v === "live" ? "live" : "paper", password: "view-switch" }),
+    });
   };
 
   return (
-    <div className="relative">
+    <div className="flex items-center bg-white/[0.04] rounded-full p-0.5">
       <button
-        onClick={handleSwitch}
-        disabled={switching}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all ${
-          globalMode === "live"
-            ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/25"
-            : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30 hover:bg-emerald-500/25"
+        onClick={() => switchView("demo")}
+        className={`px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider transition-all ${
+          view === "demo"
+            ? "bg-emerald-500/20 text-emerald-400"
+            : "text-muted-foreground/40 hover:text-muted-foreground/60"
         }`}
       >
-        {globalMode === "live" ? (
-          <><Zap className="w-2.5 h-2.5" /> Live</>
-        ) : (
-          <><Shield className="w-2.5 h-2.5" /> Demo</>
-        )}
+        Demo
       </button>
-
-      {/* Live confirmation popover */}
-      {showConfirm && (
-        <div className="absolute top-full right-0 mt-2 z-50 w-56 rounded-xl border border-red-500/20 bg-[#0a0a0f] shadow-2xl p-3 space-y-2">
-          <p className="text-[10px] text-red-400 font-bold uppercase tracking-wider">Switch to Live Trading</p>
-          <p className="text-[9px] text-muted-foreground/60">Real money. Real risk. Confirm with password.</p>
-          <input
-            type="password"
-            placeholder="Trading password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && confirmLive()}
-            autoFocus
-            className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-[10px] placeholder:text-muted-foreground/30 focus:outline-none focus:ring-1 focus:ring-red-500/30"
-          />
-          {error && <p className="text-[9px] text-red-400">{error}</p>}
-          <div className="flex gap-1.5">
-            <button
-              onClick={() => { setShowConfirm(false); setPassword(""); setError(""); }}
-              className="flex-1 text-[9px] font-semibold py-1.5 rounded-lg bg-white/[0.04] text-muted-foreground/60 hover:bg-white/[0.08]"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={confirmLive}
-              disabled={switching}
-              className="flex-1 text-[9px] font-bold py-1.5 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 ring-1 ring-red-500/20"
-            >
-              {switching ? "..." : "GO LIVE"}
-            </button>
-          </div>
-        </div>
-      )}
+      <button
+        onClick={() => switchView("live")}
+        className={`px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider transition-all ${
+          view === "live"
+            ? "bg-red-500/20 text-red-400"
+            : "text-muted-foreground/40 hover:text-muted-foreground/60"
+        }`}
+      >
+        Live{isLiveActive && " ●"}
+      </button>
     </div>
   );
 }
