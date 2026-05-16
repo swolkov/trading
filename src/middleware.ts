@@ -13,7 +13,6 @@ export default async function middleware(request: NextRequest, event: NextFetchE
 
     const isPublicRoute = createRouteMatcher([
       "/sign-in(.*)",
-      "/sign-up(.*)",
       "/api/cron/(.*)",      // Cron jobs use CRON_SECRET, not user auth
       "/api/futures/(.*)",   // Internal engine endpoints
     ]);

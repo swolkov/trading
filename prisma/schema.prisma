@@ -117,24 +117,20 @@ model VaultDocument {
   @@index([updatedAt])
 }
 
-// ─── Multi-User SaaS Models ─────────────────────────────────────────────────
+// ─── Fund Infrastructure ─────────────────────────────────────────────────────
 
 model User {
-  id              String   @id // Clerk user ID (e.g., "user_2abc123")
+  id              String   @id // Clerk user ID
   email           String   @unique
   name            String?
   avatarUrl       String?
-  plan            String   @default("free") // free, pro, elite
-  planExpiresAt   DateTime?
+  role            String   @default("owner") // owner, investor (future: investor portal)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   connections     BrokerConnection[]
-  agentConfigs    UserAgentConfig[]
-  tradeLogs       UserTradeLog[]
 
   @@index([email])
-  @@index([plan])
 }
 
 model BrokerConnection {
@@ -143,7 +139,7 @@ model BrokerConnection {
   broker        String   // "tradovate" | "alpaca"
   environment   String   @default("demo") // "demo" | "live"
 
-  // OAuth tokens (encrypted in production)
+  // Auth tokens
   accessToken   String?
   refreshToken  String?
   tokenExpires  DateTime?
@@ -163,50 +159,4 @@ model BrokerConnection {
   @@unique([userId, broker, environment])
   @@index([userId])
   @@index([broker])
-}
-
-model UserAgentConfig {
-  id      String @id @default(cuid())
-  userId  String
-  key     String
-  value   String
-
-  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, key])
-  @@index([userId])
-}
-
-model UserTradeLog {
-  id          String   @id @default(cuid())
-  userId      String
-  symbol      String
-  action      String
-  qty         Int      @default(0)
-  price       Float?
-  reason      String   @default("")
-  aiScore     Int?
-  pnl         Float?
-  orderId     String?
-  broker      String   @default("tradovate") // tradovate, alpaca
-  createdAt   DateTime @default(now())
-
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, createdAt])
-  @@index([userId, symbol])
-}
-
-model Subscription {
-  id              String   @id @default(cuid())
-  userId          String   @unique
-  stripeCustomerId String?
-  stripePriceId   String?
-  status          String   @default("active") // active, canceled, past_due
-  currentPeriodEnd DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@index([userId])
-  @@index([stripeCustomerId])
 }
