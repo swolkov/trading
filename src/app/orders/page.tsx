@@ -8,7 +8,7 @@ export default function OrdersPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Orders</h1>
-          <p className="text-[11px] text-muted-foreground/50">Unified order history — Alpaca + Tradovate</p>
+          <p className="text-[11px] text-muted-foreground/50">Futures order history — Tradovate</p>
         </div>
       </div>
 

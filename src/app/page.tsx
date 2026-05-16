@@ -113,18 +113,7 @@ export default function DashboardPage() {
     return () => { clearInterval(futuresInterval); clearInterval(quotesInterval); };
   }, []);
 
-  // ── Alpaca metrics ──
-  const alpacaEquity = account ? parseFloat(account.equity) : 0;
-  const alpacaLastEquity = account ? parseFloat(account.last_equity) : 0;
-  const alpacaDailyPnl = alpacaEquity - alpacaLastEquity;
-  const alpacaCash = account ? parseFloat(account.cash) : 0;
-  const alpacaUnrealized = positions?.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0) || 0;
-
-  // Split Alpaca positions
-  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol)) || [], [positions]);
-  const optionPositions = useMemo(() => positions?.filter((p) => !!parseOptionSymbol(p.symbol)) || [], [positions]);
-
-  // ── Futures metrics ──
+  // ── Futures metrics (primary — Tradovate) ──
   const futuresEquity = futures?.account?.netLiq || 0;
   const futuresBalance = futures?.account?.balance || 0;
   const futuresSOD = futures?.startOfDayBalance;
@@ -134,18 +123,23 @@ export default function DashboardPage() {
   const futuresUnrealized = futures?.account?.unrealizedPnl || 0;
   const futuresMargin = futures?.account?.marginUsed || 0;
 
-  // ── Combined metrics ──
-  const combinedEquity = alpacaEquity + futuresEquity;
-  const combinedDailyPnl = alpacaDailyPnl + futuresDailyPnl;
-  const combinedDailyPct = (alpacaLastEquity + (futuresSOD || futuresBalance)) > 0
-    ? combinedDailyPnl / (alpacaLastEquity + (futuresSOD || futuresBalance || 1))
+  // ── Portfolio metrics (futures-only for now) ──
+  const combinedEquity = futuresEquity;
+  const combinedDailyPnl = futuresDailyPnl;
+  const combinedDailyPct = (futuresSOD || futuresBalance) > 0
+    ? combinedDailyPnl / (futuresSOD || futuresBalance || 1)
     : 0;
-  const combinedUnrealized = alpacaUnrealized + futuresUnrealized;
-  const totalPositions = (positions?.length || 0) + (futures?.positions?.length || 0);
+  const combinedUnrealized = futuresUnrealized;
+  const totalPositions = futures?.positions?.length || 0;
+
+  // ── Alpaca (dormant — for future stock holds) ──
+  const alpacaEquity = account ? parseFloat(account.equity) : 0;
+  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol)) || [], [positions]);
+  const optionPositions = useMemo(() => positions?.filter((p) => !!parseOptionSymbol(p.symbol)) || [], [positions]);
 
   // ── Risk / Allocation ──
   const marginUtilization = futuresEquity > 0 ? (futuresMargin / futuresEquity) * 100 : 0;
-  const freeCash = alpacaCash + Math.max(0, futuresBalance - futuresMargin);
+  const freeCash = Math.max(0, futuresBalance - futuresMargin);
   const cashPct = combinedEquity > 0 ? (freeCash / combinedEquity) * 100 : 100;
 
 
@@ -159,7 +153,7 @@ export default function DashboardPage() {
         <div>
           <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
           <p className="text-[11px] text-muted-foreground/50">
-            Unified portfolio — Alpaca + Tradovate
+            Futures portfolio — Tradovate
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -231,35 +225,8 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* ── Per-Broker Breakdown ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div className="rounded-xl border border-blue-500/15 bg-gradient-to-br from-blue-500/[0.04] to-transparent p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-blue-400" />
-              <span className="text-xs font-bold">Alpaca</span>
-              <span className="text-[10px] text-muted-foreground/40">Stocks & Options</span>
-            </div>
-            <Link href="/stocks" className="text-[10px] text-blue-400 hover:underline">View</Link>
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Equity</p>
-              <p className="text-sm font-bold tabular-nums">{formatCurrency(alpacaEquity)}</p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Day P&L</p>
-              <p className={`text-sm font-bold tabular-nums ${pnlColor(alpacaDailyPnl)}`}>
-                {alpacaDailyPnl >= 0 ? "+" : ""}{formatCurrency(alpacaDailyPnl)}
-              </p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Positions</p>
-              <p className="text-sm font-bold">{stockPositions.length} stk · {optionPositions.length} opt</p>
-            </div>
-          </div>
-        </div>
-
+      {/* ── Tradovate Account ── */}
+      <div className="grid grid-cols-1 gap-3">
         <div className="rounded-xl border border-amber-500/15 bg-gradient-to-br from-amber-500/[0.04] to-transparent p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
@@ -495,7 +462,7 @@ export default function DashboardPage() {
           ) : (
             <div className="px-4 py-10 text-center">
               <p className="text-sm text-muted-foreground/40">No open positions</p>
-              <p className="text-[11px] text-muted-foreground/25 mt-1">Positions from Alpaca and Tradovate will appear here</p>
+              <p className="text-[11px] text-muted-foreground/25 mt-1">Futures positions from Tradovate will appear here</p>
             </div>
           )}
         </div>

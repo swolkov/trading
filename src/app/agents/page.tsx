@@ -56,21 +56,6 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Options",
-    icon: "O",
-    color: "from-purple-500 to-pink-500",
-    fields: [
-      { key: "options_mode", label: "Options Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
-      { key: "min_score", label: "Min AI Score", type: "number" as const },
-      { key: "min_confidence", label: "Min Confidence (%)", type: "number" as const },
-      { key: "max_options_exposure", label: "Max Exposure ($)", type: "number" as const },
-      { key: "per_trade_max", label: "Per Trade Max ($)", type: "number" as const },
-      { key: "daily_spend_cap", label: "Daily Spend Cap ($)", type: "number" as const },
-      { key: "options_stop_loss_pct", label: "Stop Loss (%)", type: "number" as const },
-      { key: "options_profit_pct", label: "Profit Target (%)", type: "number" as const },
-    ],
-  },
-  {
     label: "Futures",
     icon: "F",
     color: "from-amber-500 to-orange-500",
@@ -283,12 +268,6 @@ export default function AgentHubPage() {
   ];
 
   const brokers = [
-    {
-      name: "Alpaca",
-      types: ["options", "stocks"] as const,
-      desc: "Options & Stocks",
-      color: "emerald",
-    },
     {
       name: "Tradovate",
       types: ["futures"] as const,

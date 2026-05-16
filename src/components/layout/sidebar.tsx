@@ -122,7 +122,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
         <p className="text-[9px] text-muted-foreground/30 tracking-wider uppercase text-center">
-          Alpaca · Tradovate · Claude
+          Tradovate · Claude AI
         </p>
       </div>
     </>

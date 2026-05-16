@@ -164,7 +164,7 @@ export default function PerformancePage() {
               : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
           }`}
         >
-          Options / Alpaca
+          Stocks (Long-term)
         </button>
         <button
           onClick={() => setActiveTab("futures")}
