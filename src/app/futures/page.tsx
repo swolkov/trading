@@ -682,9 +682,12 @@ export default function FuturesPage() {
           )}
 
           {/* ── Daily Futures Performance ── */}
-          <Card className="border-white/[0.06]">
+          <Card className="border-amber-500/10 bg-gradient-to-br from-amber-500/[0.02] to-transparent">
             <CardHeader className="pb-2">
-              <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Daily Performance</CardTitle>
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                <CardTitle className="text-[11px] text-amber-400/60 uppercase tracking-wider font-bold">Daily Performance</CardTitle>
+              </div>
             </CardHeader>
             <CardContent>
               {(() => {

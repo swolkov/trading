@@ -359,19 +359,25 @@ export default function JournalPage() {
 
       {/* Broker Filter */}
       <div className="flex gap-1.5">
-        {(["all", "stocks", "futures"] as const).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => { setViewMode(mode); setSelectedDay(null); }}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-              viewMode === mode
-                ? "bg-primary/20 text-primary ring-1 ring-primary/40"
-                : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
-            }`}
-          >
-            {mode === "all" ? "All Brokers" : mode === "stocks" ? "Alpaca" : "Tradovate"}
-          </button>
-        ))}
+        {(["all", "stocks", "futures"] as const).map((mode) => {
+          const active = viewMode === mode;
+          const colors = mode === "all"
+            ? (active ? "bg-primary/20 text-primary ring-1 ring-primary/40" : "")
+            : mode === "stocks"
+            ? (active ? "bg-blue-500/15 text-blue-400 ring-1 ring-blue-500/30" : "")
+            : (active ? "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30" : "");
+          return (
+            <button
+              key={mode}
+              onClick={() => { setViewMode(mode); setSelectedDay(null); }}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                active ? colors : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
+              }`}
+            >
+              {mode === "all" ? "All Brokers" : mode === "stocks" ? "Alpaca" : "Tradovate"}
+            </button>
+          );
+        })}
       </div>
 
       {/* P&L Calendar Heatmap + Cumulative Line */}

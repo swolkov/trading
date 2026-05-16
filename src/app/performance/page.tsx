@@ -154,17 +154,20 @@ export default function PerformancePage() {
       </div>
 
       {/* ═══════════ OPTIONS SECTION ═══════════ */}
-      <div className="flex items-center gap-2 pt-2">
-        <span className="text-sm font-bold tracking-tight">Options</span>
+      <div className="flex items-center gap-3 pt-2">
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-purple-500/[0.08] border border-purple-500/20">
+          <span className="w-2 h-2 rounded-full bg-purple-400" />
+          <span className="text-sm font-bold tracking-tight text-purple-400">Options</span>
+        </div>
         <span className="text-[10px] text-muted-foreground/40">Alpaca account</span>
-        <div className="flex-1 border-t border-white/[0.06]" />
+        <div className="flex-1 border-t border-purple-500/10" />
       </div>
 
       {/* Big P&L */}
-      <Card className={`border-2 ${s.totalPnl >= 0 ? "border-emerald-500/30" : "border-red-500/30"}`}>
+      <Card className={`border-2 ${s.totalPnl >= 0 ? "border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.03] to-transparent" : "border-red-500/30 bg-gradient-to-br from-red-500/[0.03] to-transparent"}`}>
         <CardContent className="pt-6 pb-4 text-center">
           <p className="text-sm text-muted-foreground mb-1">Total Realized Profit / Loss</p>
-          <p className={`text-5xl font-bold ${pnl(s.totalPnl)}`}>{fmt(s.totalPnl)}</p>
+          <p className={`text-5xl font-black tracking-tight ${pnl(s.totalPnl)}`}>{fmt(s.totalPnl)}</p>
           <p className="text-sm text-muted-foreground mt-2">
             {s.winners} wins, {s.losers} losses from {s.totalTrades} completed trades ({s.openTrades} still open)
           </p>
@@ -462,10 +465,13 @@ export default function PerformancePage() {
       </Card>
 
       {/* ═══════════ FUTURES SECTION ═══════════ */}
-      <div className="flex items-center gap-2 pt-4">
-        <span className="text-sm font-bold tracking-tight">Futures</span>
+      <div className="flex items-center gap-3 pt-4">
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
+          <span className="w-2 h-2 rounded-full bg-amber-400" />
+          <span className="text-sm font-bold tracking-tight text-amber-400">Futures</span>
+        </div>
         <span className="text-[10px] text-muted-foreground/40">Tradovate account</span>
-        <div className="flex-1 border-t border-white/[0.06]" />
+        <div className="flex-1 border-t border-amber-500/10" />
       </div>
 
       {(() => {
@@ -513,10 +519,10 @@ export default function PerformancePage() {
         return (
           <>
             {/* Futures Big P&L */}
-            <Card className={`border-2 ${totalPnl >= 0 ? "border-emerald-500/30" : "border-red-500/30"}`}>
+            <Card className={`border-2 ${totalPnl >= 0 ? "border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.03] to-transparent" : "border-red-500/30 bg-gradient-to-br from-red-500/[0.03] to-transparent"}`}>
               <CardContent className="pt-6 pb-4 text-center">
                 <p className="text-sm text-muted-foreground mb-1">Futures Realized P&L</p>
-                <p className={`text-5xl font-bold ${pnl(totalPnl)}`}>{fmt(Math.round(totalPnl))}</p>
+                <p className={`text-5xl font-black tracking-tight ${pnl(totalPnl)}`}>{fmt(Math.round(totalPnl))}</p>
                 <p className="text-sm text-muted-foreground mt-2">
                   {winCount} wins, {lossCount} losses from {tradeCount} completed trades
                 </p>

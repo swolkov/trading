@@ -179,52 +179,56 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Hero: Combined Portfolio + Sparkline ── */}
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_280px] gap-3">
-        {/* Main metrics */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {isLoading ? (
-            Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-                <div className="skeleton h-3 w-16 rounded mb-2" />
-                <div className="skeleton h-6 w-24 rounded mb-1" />
-                <div className="skeleton h-3 w-20 rounded" />
-              </div>
-            ))
-          ) : (
-            <>
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.03] p-4">
-                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-bold">Total Equity</p>
-                <p className="text-2xl font-black mt-1 tabular-nums">{formatCurrency(combinedEquity)}</p>
-                <p className="text-[11px] mt-0.5 text-muted-foreground/40">{totalPositions} positions · 2 accounts</p>
-              </div>
-              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Daily P&L</p>
-                <p className={`text-2xl font-black mt-1 tabular-nums ${pnlColor(combinedDailyPnl)}`}>
-                  {combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}
-                </p>
-                <p className={`text-[11px] mt-0.5 tabular-nums ${pnlColor(combinedDailyPct)}`}>
-                  {combinedDailyPct >= 0 ? "+" : ""}{(combinedDailyPct * 100).toFixed(2)}%
-                </p>
-              </div>
-              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Unrealized</p>
-                <p className={`text-2xl font-black mt-1 tabular-nums ${pnlColor(combinedUnrealized)}`}>
-                  {combinedUnrealized >= 0 ? "+" : ""}{formatCurrency(combinedUnrealized)}
-                </p>
-                <p className="text-[11px] mt-0.5 text-muted-foreground/50">
-                  {totalPositions} across 2 brokers
-                </p>
-              </div>
-              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Cash</p>
-                <p className="text-2xl font-black mt-1 tabular-nums">{formatCurrency(freeCash)}</p>
-                <p className="text-[11px] mt-0.5 text-muted-foreground/50">{cashPct.toFixed(0)}% liquid</p>
-              </div>
-            </>
-          )}
-        </div>
-
+      {/* ── Hero Metrics ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {isLoading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <div className="skeleton h-3 w-16 rounded mb-2" />
+              <div className="skeleton h-6 w-24 rounded mb-1" />
+              <div className="skeleton h-3 w-20 rounded" />
+            </div>
+          ))
+        ) : (
+          <>
+            <div className="rounded-xl border border-white/[0.10] bg-gradient-to-br from-white/[0.05] to-white/[0.02] p-4 shadow-sm">
+              <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-bold">Total Equity</p>
+              <p className="text-3xl font-black mt-1 tabular-nums tracking-tight">{formatCurrency(combinedEquity)}</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/40">{totalPositions} positions across 2 accounts</p>
+            </div>
+            <div className={`rounded-xl border p-4 ${
+              combinedDailyPnl >= 0
+                ? "border-emerald-500/20 bg-gradient-to-br from-emerald-500/[0.04] to-transparent"
+                : "border-red-500/20 bg-gradient-to-br from-red-500/[0.04] to-transparent"
+            }`}>
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Daily P&L</p>
+              <p className={`text-2xl font-black mt-1 tabular-nums ${pnlColor(combinedDailyPnl)}`}>
+                {combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}
+              </p>
+              <p className={`text-[11px] mt-0.5 tabular-nums ${pnlColor(combinedDailyPct)}`}>
+                {combinedDailyPct >= 0 ? "+" : ""}{(combinedDailyPct * 100).toFixed(2)}%
+              </p>
+            </div>
+            <div className={`rounded-xl border p-4 ${
+              combinedUnrealized >= 0
+                ? "border-emerald-500/10 bg-gradient-to-br from-emerald-500/[0.02] to-transparent"
+                : "border-red-500/10 bg-gradient-to-br from-red-500/[0.02] to-transparent"
+            }`}>
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Unrealized</p>
+              <p className={`text-2xl font-black mt-1 tabular-nums ${pnlColor(combinedUnrealized)}`}>
+                {combinedUnrealized >= 0 ? "+" : ""}{formatCurrency(combinedUnrealized)}
+              </p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/50">
+                {totalPositions} across 2 brokers
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Cash</p>
+              <p className="text-2xl font-black mt-1 tabular-nums">{formatCurrency(freeCash)}</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/50">{cashPct.toFixed(0)}% liquid</p>
+            </div>
+          </>
+        )}
       </div>
 
       {/* ── Per-Broker Breakdown ── */}
