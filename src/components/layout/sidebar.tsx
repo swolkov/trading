@@ -25,15 +25,16 @@ const sections = [
   {
     label: "MARKETS",
     links: [
-      { href: "/futures", label: "Futures", icon: BarChart3 },
-      { href: "/stocks", label: "Stocks", icon: LineChart },
-      { href: "/options", label: "Options", icon: Layers },
+      { href: "/futures", label: "Futures", icon: BarChart3, active: true },
+      { href: "/stocks", label: "Stocks", icon: LineChart, active: false, phase: "Phase 2" },
+      { href: "/options", label: "Options", icon: Layers, active: false, phase: "Phase 2" },
     ],
   },
   {
     label: "CONTROL",
     links: [
       { href: "/agents", label: "Agent Hub", icon: Bot },
+      { href: "/connect", label: "Connections", icon: Layers },
     ],
   },
   {
@@ -91,6 +92,7 @@ export function Sidebar() {
               {section.links.map((link) => {
                 const Icon = link.icon;
                 const active = isActive(link.href);
+                const dimmed = "active" in link && !link.active;
                 return (
                   <Link
                     key={link.href}
@@ -99,11 +101,18 @@ export function Sidebar() {
                       "flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-[12.5px] font-medium transition-all duration-100",
                       active
                         ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                        : dimmed
+                          ? "text-muted-foreground/30 hover:text-muted-foreground/50 hover:bg-accent/50"
+                          : "text-muted-foreground hover:text-foreground hover:bg-accent"
                     )}
                   >
-                    <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : "text-muted-foreground/50")} />
-                    {link.label}
+                    <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : dimmed ? "text-muted-foreground/20" : "text-muted-foreground/50")} />
+                    <span className="flex-1">{link.label}</span>
+                    {"phase" in link && link.phase && (
+                      <span className="text-[7px] font-bold uppercase tracking-wider text-muted-foreground/25 bg-white/[0.03] px-1.5 py-0.5 rounded">
+                        {link.phase}
+                      </span>
+                    )}
                   </Link>
                 );
               })}
