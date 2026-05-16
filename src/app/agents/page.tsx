@@ -446,14 +446,23 @@ export default function AgentHubPage() {
                     onClick={async () => {
                       if (m === "live" && !modePassword) return;
                       setModeMessage("");
-                      // Switch ALL systems at once
-                      for (const type of ["futures", "options", "stocks"]) {
-                        const targetMode = m === "disabled" ? "paper" : m; // "disabled" mapped to paper with enabled=false
-                        await fetch("/api/trading-mode", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ type, mode: targetMode, password: modePassword || "demo-switch" }),
-                        });
+                      // Switch systems — only attempt live on brokers that have credentials
+                      const targetMode = m === "disabled" ? "paper" : m;
+                      // Futures (Tradovate) — primary, always switch
+                      await fetch("/api/trading-mode", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ type: "futures", mode: targetMode, password: modePassword || "demo-switch" }),
+                      });
+                      // Stocks/Options (Alpaca) — only switch if keys exist, otherwise stay paper
+                      if (tradingModes?.hasLiveKeys?.options || targetMode === "paper") {
+                        for (const type of ["options", "stocks"]) {
+                          await fetch("/api/trading-mode", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ type, mode: targetMode, password: modePassword || "demo-switch" }),
+                          });
+                        }
                       }
                       if (m === "disabled") {
                         // Also set enabled=false in config
