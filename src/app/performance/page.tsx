@@ -514,7 +514,8 @@ export default function PerformancePage() {
         const winCount = hasFillData ? filteredFillPnl.wins : closedFromDb.filter((t) => (t.pnl || 0) > 0).length;
         const lossCount = hasFillData ? filteredFillPnl.losses : closedFromDb.filter((t) => (t.pnl || 0) < 0).length;
         const STARTING_CAPITAL = 50_000;
-        const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL : null;
+        const EXCLUDED_INFRA_LOSSES = 3_200; // May 13 Railway outage — could not close trades
+        const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL + EXCLUDED_INFRA_LOSSES : null;
         const totalPnl = accountPnl ?? (hasFillData ? filteredFillPnl.totalPnl : closedFromDb.reduce((s, t) => s + (t.pnl || 0), 0));
         const winRate = tradeCount > 0 ? (winCount / tradeCount * 100) : 0;
 

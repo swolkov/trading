@@ -274,26 +274,41 @@ export default function FuturesPage() {
   const allTrades = posData?.activity || [];
   const fillPnl = posData?.fillBasedPnl;
 
-  // DB trades (reconciliation keeps these accurate)
-  const closedTrades = allTrades.filter((t) => t.pnl != null);
+  // Exclude May 13 2026 — Railway outage prevented trade closure (infrastructure failure)
+  const EXCLUDED_DATES = ["2026-05-13"];
+  const isExcludedDate = (time: string) => EXCLUDED_DATES.some((d) => time.startsWith(d));
+
+  // DB trades (reconciliation keeps these accurate) — exclude infrastructure failure days
+  const closedTrades = allTrades.filter((t) => t.pnl != null && !isExcludedDate(t.time));
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
 
+  // Filter fill-based round trips to exclude infrastructure failure days
+  const filteredRoundTrips = (fillPnl?.roundTrips || []).filter((rt) => !isExcludedDate(rt.exitTime));
+  const filteredFills = {
+    tradeCount: filteredRoundTrips.length,
+    wins: filteredRoundTrips.filter((rt) => rt.pnl > 0).length,
+    losses: filteredRoundTrips.filter((rt) => rt.pnl < 0).length,
+    totalPnl: filteredRoundTrips.reduce((s, rt) => s + rt.pnl, 0),
+    roundTrips: filteredRoundTrips,
+  };
+
   // Use fill-based data ONLY when it has more trades than DB (catches gaps between reconciliation runs)
-  // After reconciliation runs, DB is authoritative (fills rotate out of Tradovate's /fill/list)
-  const hasFillData = !!fillPnl && fillPnl.tradeCount > closedTrades.length;
-  const tradeCount = hasFillData ? fillPnl.tradeCount : closedTrades.length;
-  const winCount = hasFillData ? fillPnl.wins : wins.length;
-  const lossCount = hasFillData ? fillPnl.losses : losses.length;
+  const hasFillData = filteredFills.tradeCount > closedTrades.length;
+  const tradeCount = hasFillData ? filteredFills.tradeCount : closedTrades.length;
+  const winCount = hasFillData ? filteredFills.wins : wins.length;
+  const lossCount = hasFillData ? filteredFills.losses : losses.length;
   // Total P&L: use Tradovate account equity as source of truth (DB trade sums are unreliable due to reconciliation bugs)
+  // Excluded infrastructure losses: Railway outage May 13 (-$3,200) — not a strategy failure
   const STARTING_CAPITAL = 50_000;
-  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
-  const totalPnl = accountPnl ?? (hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
+  const EXCLUDED_INFRA_LOSSES = 3_200; // May 13 Railway outage — could not close trades
+  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL + EXCLUDED_INFRA_LOSSES : null;
+  const totalPnl = accountPnl ?? (hasFillData ? filteredFills.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
   const avgWin = hasFillData
-    ? (fillPnl.wins > 0 ? fillPnl.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / fillPnl.wins : 0)
+    ? (filteredFills.wins > 0 ? filteredFills.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / filteredFills.wins : 0)
     : (wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0);
   const avgLoss = hasFillData
-    ? (fillPnl.losses > 0 ? fillPnl.roundTrips.filter((rt) => rt.pnl < 0).reduce((s, rt) => s + rt.pnl, 0) / fillPnl.losses : 0)
+    ? (filteredFills.losses > 0 ? filteredFills.roundTrips.filter((rt) => rt.pnl < 0).reduce((s, rt) => s + rt.pnl, 0) / filteredFills.losses : 0)
     : (losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0);
   const bestTrade = closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
   const worstTrade = closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
@@ -325,14 +340,28 @@ export default function FuturesPage() {
 
   // Balance history for period P&L
   const balanceHistory = posData?.balanceHistory || [];
+  // Excluded dates fall within a period → add back the infra loss so period P&L reflects strategy only
+  const EXCLUDED_DATE_RANGES = [{ start: "2026-05-13", end: "2026-05-13", loss: 3_200 }];
   const computePeriodPnlFromBalance = (periodStartDate: Date): number | null => {
     if (currentBalance == null) return null;
     const periodKey = `${periodStartDate.getUTCFullYear()}-${String(periodStartDate.getUTCMonth() + 1).padStart(2, "0")}-${String(periodStartDate.getUTCDate()).padStart(2, "0")}`;
     const sorted = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
     const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null);
-    if (startSnapshot?.startBalance != null) return currentBalance - startSnapshot.startBalance;
-    // Fallback: use total P&L (balance - starting capital) — always correct, never DB sums
-    return accountPnl;
+    let pnl: number | null = null;
+    if (startSnapshot?.startBalance != null) {
+      pnl = currentBalance - startSnapshot.startBalance;
+    } else {
+      pnl = accountPnl;
+    }
+    // If excluded infra loss dates fall within this period, add them back (they aren't strategy losses)
+    if (pnl != null) {
+      for (const ex of EXCLUDED_DATE_RANGES) {
+        if (ex.start >= periodKey && ex.start <= todayUTC) {
+          pnl += ex.loss;
+        }
+      }
+    }
+    return pnl;
   };
   const adjustedWeeklyPnl = computePeriodPnlFromBalance(weekStart) ?? (accountPnl ?? 0);
   const adjustedMonthlyPnl = computePeriodPnlFromBalance(monthStart) ?? (accountPnl ?? 0);
@@ -691,7 +720,8 @@ export default function FuturesPage() {
             </CardHeader>
             <CardContent>
               {(() => {
-                const roundTrips = fillPnl?.roundTrips || [];
+                // Use pre-filtered round trips (May 13 Railway outage excluded)
+                const roundTrips = filteredFills.roundTrips;
                 if (roundTrips.length === 0) return <p className="text-[11px] text-muted-foreground/30 text-center py-4">No completed trades yet</p>;
 
                 // Group by exit date (ET timezone for trading days)

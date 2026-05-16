@@ -366,7 +366,7 @@ export interface SynthesisResult {
 
 export async function runSynthesis(): Promise<SynthesisResult> {
   // Get all closed trades from DB (reliable for counts, win/loss, timing — NOT for dollar P&L totals)
-  // EXCLUDE May 13, 2026: agent was broken (violated contract caps, 12-contract MES, massive overtrading)
+  // EXCLUDE May 13, 2026: Railway infrastructure outage prevented trade closure (not a strategy failure)
   const excludeDate = new Date("2026-05-13T00:00:00");
   const excludeEnd = new Date("2026-05-14T00:00:00");
   const allTrades = (await prisma.autoTradeLog.findMany({
