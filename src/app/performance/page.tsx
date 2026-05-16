@@ -107,7 +107,7 @@ export default function PerformancePage() {
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [futures, setFutures] = useState<FuturesPerfData | null>(null);
-  const [activeTab, setActiveTab] = useState<"options" | "futures" | "paper">("options");
+  const [activeTab, setActiveTab] = useState<"options" | "futures" | "paper">("futures");
 
   useEffect(() => {
     fetch("/api/trades/analysis").then((r) => r.json()).then(setData).catch(console.error);
@@ -151,7 +151,7 @@ export default function PerformancePage() {
     <div className="space-y-6 animate-fade-up">
       <div>
         <h1 className="text-xl font-bold tracking-tight">Performance</h1>
-        <p className="text-[11px] text-muted-foreground/50">Options &amp; Futures — trade analytics by account</p>
+        <p className="text-[11px] text-muted-foreground/50">Futures trading analytics</p>
       </div>
 
       {/* Account Tabs */}

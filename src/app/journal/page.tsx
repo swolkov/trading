@@ -206,17 +206,15 @@ function CumulativePnl({ days }: { days: JournalDay[] }) {
 // ── Main Page ──────────────────────────────────────────
 
 export default function JournalPage() {
-  const [alpacaData, setAlpacaData] = useState<{ trades: AlpacaTrade[] } | null>(null);
+  const [alpacaData] = useState<{ trades: AlpacaTrade[] } | null>(null); // Alpaca dormant — no fetch
   const [futuresData, setFuturesData] = useState<FuturesData | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"all" | "stocks" | "futures">("all");
+  const [viewMode, setViewMode] = useState<"all" | "stocks" | "futures">("futures");
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/trades/analysis").then((r) => r.json()).then((d) => { if (d && !d.error) setAlpacaData(d); }).catch(() => {}),
-      fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (d && !d.error) setFuturesData(d); }).catch(() => {}),
-    ]).finally(() => setIsLoading(false));
+    // Only fetch futures data — Alpaca is dormant (long-term holds only, no journal tracking)
+    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (d && !d.error) setFuturesData(d); }).catch(() => {}).finally(() => setIsLoading(false));
   }, []);
 
   // Build journal days
