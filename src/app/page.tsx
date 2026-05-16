@@ -75,36 +75,6 @@ function parseOptionSymbol(symbol: string) {
   return { underlying, type, strike, expiry: expiry.toLocaleDateString("en-US", { month: "short", day: "numeric" }), dte };
 }
 
-// ── Allocation Bar Component ───────────────────────────
-
-function AllocationBar({ segments }: { segments: { label: string; value: number; color: string; pct: number }[] }) {
-  const total = segments.reduce((s, seg) => s + seg.value, 0);
-  if (total === 0) return null;
-  return (
-    <div className="space-y-2">
-      <div className="flex h-2.5 rounded-full overflow-hidden bg-white/[0.04]">
-        {segments.filter(s => s.pct > 0).map((seg) => (
-          <div
-            key={seg.label}
-            className={`${seg.color} transition-all duration-500`}
-            style={{ width: `${seg.pct}%` }}
-            title={`${seg.label}: ${formatCurrency(seg.value)} (${seg.pct.toFixed(1)}%)`}
-          />
-        ))}
-      </div>
-      <div className="flex gap-4">
-        {segments.filter(s => s.pct > 0).map((seg) => (
-          <div key={seg.label} className="flex items-center gap-1.5">
-            <span className={`w-2 h-2 rounded-full ${seg.color}`} />
-            <span className="text-[10px] text-muted-foreground/60">{seg.label}</span>
-            <span className="text-[10px] font-bold tabular-nums">{seg.pct.toFixed(0)}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ── Position Row Component ─────────────────────────────
 
 function PositionWeight({ value, total }: { value: number; total: number }) {
@@ -148,7 +118,6 @@ export default function DashboardPage() {
   const alpacaLastEquity = account ? parseFloat(account.last_equity) : 0;
   const alpacaDailyPnl = alpacaEquity - alpacaLastEquity;
   const alpacaCash = account ? parseFloat(account.cash) : 0;
-  const alpacaBuyingPower = account ? parseFloat(account.buying_power) : 0;
   const alpacaUnrealized = positions?.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0) || 0;
 
   // Split Alpaca positions
@@ -175,26 +144,9 @@ export default function DashboardPage() {
   const totalPositions = (positions?.length || 0) + (futures?.positions?.length || 0);
 
   // ── Risk / Allocation ──
-  const stockMktVal = stockPositions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value)), 0);
-  const optionMktVal = optionPositions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value)), 0);
-  const futuresNotional = futures?.positions?.reduce((s, p) => s + (p.currentPrice * p.multiplier * p.quantity), 0) || 0;
-  const totalExposure = stockMktVal + optionMktVal + futuresNotional;
-  const leverageRatio = combinedEquity > 0 ? totalExposure / combinedEquity : 0;
   const marginUtilization = futuresEquity > 0 ? (futuresMargin / futuresEquity) * 100 : 0;
   const freeCash = alpacaCash + Math.max(0, futuresBalance - futuresMargin);
   const cashPct = combinedEquity > 0 ? (freeCash / combinedEquity) * 100 : 100;
-
-  // Allocation segments
-  const allocSegments = useMemo(() => {
-    const total = stockMktVal + optionMktVal + futuresNotional + freeCash;
-    if (total <= 0) return [];
-    return [
-      { label: "Stocks", value: stockMktVal, color: "bg-blue-500", pct: (stockMktVal / total) * 100 },
-      { label: "Options", value: optionMktVal, color: "bg-purple-500", pct: (optionMktVal / total) * 100 },
-      { label: "Futures", value: futuresNotional, color: "bg-amber-500", pct: (futuresNotional / total) * 100 },
-      { label: "Cash", value: freeCash, color: "bg-emerald-500/40", pct: (freeCash / total) * 100 },
-    ];
-  }, [stockMktVal, optionMktVal, futuresNotional, freeCash]);
 
 
   // Loading state
