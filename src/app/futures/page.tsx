@@ -1010,63 +1010,70 @@ export default function FuturesPage() {
                   })()}
                 </div>
 
-                {/* Daily P&L Breakdown — uses Tradovate balance deltas as source of truth */}
+                {/* Daily Performance — from completed round-trip fills */}
                 <div>
-                  <p className="text-xs font-bold mb-3">Daily P&L</p>
+                  <p className="text-xs font-bold mb-3">Daily Performance</p>
                   {(() => {
-                    const balHist = posData?.balanceHistory || [];
-                    const balByDate2: Record<string, { sod: number | undefined; eod: number | undefined }> = {};
-                    for (const b of balHist) {
-                      balByDate2[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
+                    const roundTrips = fillPnl?.roundTrips || [];
+                    if (roundTrips.length === 0) return <p className="text-[11px] text-muted-foreground/30 text-center py-4">No completed trades yet</p>;
+
+                    // Group by exit date (ET timezone for trading days)
+                    const dayMap: Record<string, { trades: number; wins: number; losses: number; totalPnl: number; label: string }> = {};
+                    for (const rt of roundTrips) {
+                      const d = new Date(rt.exitTime);
+                      const dateKey = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" }); // YYYY-MM-DD in ET
+                      const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
+                      if (!dayMap[dateKey]) dayMap[dateKey] = { trades: 0, wins: 0, losses: 0, totalPnl: 0, label };
+                      dayMap[dateKey].trades++;
+                      if (rt.pnl > 0) dayMap[dateKey].wins++;
+                      else dayMap[dateKey].losses++;
+                      dayMap[dateKey].totalPnl += rt.pnl;
                     }
-                    const reportDayMap: Record<string, { pnl: number; trades: number; wins: number; dateKey: string }> = {};
-                    for (const t of closedTrades) {
-                      const d = new Date(t.time);
-                      const dateKey = d.toISOString().slice(0, 10); // UTC
-                      const day = new Date(dateKey + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
-                      if (!reportDayMap[day]) reportDayMap[day] = { pnl: 0, trades: 0, wins: 0, dateKey };
-                      reportDayMap[day].pnl += t.pnl || 0;
-                      reportDayMap[day].trades++;
-                      if ((t.pnl || 0) > 0) reportDayMap[day].wins++;
-                    }
-                    // Override with balance deltas
-                    const sortedBalDates2 = Object.keys(balByDate2).sort();
-                    for (let i = 0; i < sortedBalDates2.length; i++) {
-                      const date = sortedBalDates2[i];
-                      const bal2 = balByDate2[date];
-                      const nextDate = sortedBalDates2[i + 1];
-                      const nextBal = nextDate ? balByDate2[nextDate] : null;
-                      let balPnl: number | null = null;
-                      if (bal2?.eod !== undefined && bal2?.sod !== undefined) balPnl = (bal2.eod as number) - (bal2.sod as number);
-                      else if (nextBal?.sod != null && bal2?.sod !== undefined) balPnl = (nextBal!.sod as number) - (bal2.sod as number);
-                      if (balPnl != null) {
-                        const d = new Date(date + "T12:00:00Z");
-                        const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
-                        if (reportDayMap[day]) reportDayMap[day].pnl = balPnl as number;
-                      }
-                    }
-                    // Today: use live balance delta
-                    if (calendarDayPnl != null) {
-                      const todayLabel = new Date(todayUTC + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
-                      if (reportDayMap[todayLabel]) reportDayMap[todayLabel].pnl = calendarDayPnl as number;
-                    }
-                    const reportDays = Object.entries(reportDayMap);
-                    return reportDays.length > 0 ? (
-                      <div className="space-y-1.5">
-                        {reportDays.map(([day, data]) => (
-                          <div key={day} className="flex items-center justify-between bg-white/[0.02] rounded-lg px-3 py-2">
-                            <div>
-                              <span className="text-xs font-medium">{day}</span>
-                              <span className="text-[9px] text-muted-foreground/40 ml-2">{data.trades} trades ({data.wins}W)</span>
-                            </div>
-                            <span className={`text-sm font-bold tabular-nums ${pnlColor(data.pnl)}`}>
-                              {data.pnl >= 0 ? "+" : "-"}${Math.abs(data.pnl).toFixed(0)}
-                            </span>
-                          </div>
-                        ))}
+                    const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
+
+                    return (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[11px]">
+                          <thead>
+                            <tr className="text-[9px] text-muted-foreground/40 border-b border-white/[0.06]">
+                              <th className="text-left py-1.5 font-medium">Date</th>
+                              <th className="text-center py-1.5 font-medium">Trades</th>
+                              <th className="text-center py-1.5 font-medium">W/L</th>
+                              <th className="text-center py-1.5 font-medium">Win%</th>
+                              <th className="text-right py-1.5 font-medium">P&L</th>
+                              <th className="text-right py-1.5 font-medium">Avg</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {days.map(([dateKey, d]) => {
+                              const winRate = d.trades > 0 ? (d.wins / d.trades * 100) : 0;
+                              const avg = d.trades > 0 ? d.totalPnl / d.trades : 0;
+                              return (
+                                <tr key={dateKey} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                                  <td className="py-1.5 font-medium">{d.label}</td>
+                                  <td className="text-center py-1.5">{d.trades}</td>
+                                  <td className="text-center py-1.5">
+                                    <span className="text-emerald-400">{d.wins}</span>
+                                    <span className="text-muted-foreground/30">/</span>
+                                    <span className="text-red-400">{d.losses}</span>
+                                  </td>
+                                  <td className="text-center py-1.5">
+                                    <span className={winRate >= 50 ? "text-emerald-400" : "text-red-400"}>
+                                      {winRate.toFixed(0)}%
+                                    </span>
+                                  </td>
+                                  <td className={`text-right py-1.5 font-bold tabular-nums ${pnlColor(d.totalPnl)}`}>
+                                    {d.totalPnl >= 0 ? "+" : "-"}${Math.abs(d.totalPnl).toFixed(0)}
+                                  </td>
+                                  <td className={`text-right py-1.5 tabular-nums ${pnlColor(avg)}`}>
+                                    {avg >= 0 ? "+" : "-"}${Math.abs(avg).toFixed(0)}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
                       </div>
-                    ) : (
-                      <p className="text-[11px] text-muted-foreground/30 text-center py-4">No data yet</p>
                     );
                   })()}
                 </div>

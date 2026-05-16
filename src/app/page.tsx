@@ -51,7 +51,6 @@ interface FuturesData {
   activity: { id: string; symbol: string; action: string; qty: number; price: number | null; pnl: number | null; reason: string; time: string }[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
   startOfDayBalance?: number | null;
-  fillBasedPnl?: { totalPnl: number; tradeCount: number; wins: number; losses: number; roundTrips: { symbol: string; direction: string; qty: number; entryPrice: number; exitPrice: number; pnl: number; entryTime: string; exitTime: string }[] };
 }
 
 interface FuturesQuote {
@@ -623,73 +622,6 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
-
-      {/* Daily Futures Performance */}
-      {futures?.fillBasedPnl && futures.fillBasedPnl.roundTrips.length > 0 && (() => {
-        // Group round trips by exit date
-        const dailyStats: Record<string, { trades: number; wins: number; losses: number; totalPnl: number }> = {};
-        for (const rt of futures.fillBasedPnl.roundTrips) {
-          const date = rt.exitTime.slice(0, 10);
-          if (!dailyStats[date]) dailyStats[date] = { trades: 0, wins: 0, losses: 0, totalPnl: 0 };
-          dailyStats[date].trades++;
-          if (rt.pnl > 0) dailyStats[date].wins++;
-          else dailyStats[date].losses++;
-          dailyStats[date].totalPnl += rt.pnl;
-        }
-        const days = Object.entries(dailyStats)
-          .sort(([a], [b]) => b.localeCompare(a)); // newest first
-
-        return (
-          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
-              <p className="text-xs font-medium">Daily Futures Performance</p>
-              <span className="text-[10px] text-muted-foreground/50">
-                {futures.fillBasedPnl.tradeCount} total trades &middot; {futures.fillBasedPnl.wins}W / {futures.fillBasedPnl.losses}L
-              </span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-white/[0.06] text-muted-foreground/50">
-                    <th className="text-left px-4 py-2 font-medium">Date</th>
-                    <th className="text-center px-2 py-2 font-medium">Trades</th>
-                    <th className="text-center px-2 py-2 font-medium">Wins</th>
-                    <th className="text-center px-2 py-2 font-medium">Losses</th>
-                    <th className="text-center px-2 py-2 font-medium">Win Rate</th>
-                    <th className="text-right px-2 py-2 font-medium">Total P&L</th>
-                    <th className="text-right px-4 py-2 font-medium">Avg P&L</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/[0.04]">
-                  {days.map(([date, stats]) => {
-                    const winRate = stats.trades > 0 ? (stats.wins / stats.trades * 100) : 0;
-                    const avgPnl = stats.trades > 0 ? stats.totalPnl / stats.trades : 0;
-                    return (
-                      <tr key={date} className="hover:bg-white/[0.02] transition-colors">
-                        <td className="px-4 py-2 font-medium">{date}</td>
-                        <td className="text-center px-2 py-2">{stats.trades}</td>
-                        <td className="text-center px-2 py-2 text-emerald-400">{stats.wins}</td>
-                        <td className="text-center px-2 py-2 text-red-400">{stats.losses}</td>
-                        <td className="text-center px-2 py-2">
-                          <span className={winRate >= 50 ? "text-emerald-400" : "text-red-400"}>
-                            {winRate.toFixed(0)}%
-                          </span>
-                        </td>
-                        <td className={`text-right px-2 py-2 font-medium ${pnlColor(stats.totalPnl)}`}>
-                          {stats.totalPnl >= 0 ? "+" : ""}{formatCurrency(stats.totalPnl)}
-                        </td>
-                        <td className={`text-right px-4 py-2 ${pnlColor(avgPnl)}`}>
-                          {avgPnl >= 0 ? "+" : ""}{formatCurrency(avgPnl)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        );
-      })()}
 
         {/* Recent Activity Feed */}
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
