@@ -523,24 +523,37 @@ function getMinutesSinceRTHOpen(): number {
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
-  // Gold has different prime hours: COMEX 8:20 AM - 1:30 PM ET
-  // London overlap 8-12 ET is best for gold (DST-aware)
-  // OVERNIGHT KILLED — was costing $800+/day in losses on small accounts
+  // DEMO MODE: trade 24/7 aggressively — learn from every session
+  // Data from all sessions feeds the brain. What works gets promoted to live.
+  if (!isLiveMode) {
+    if (s === "halt") return 0; // market actually closed (5-6 PM daily break)
+    // Vary size by session quality (even in demo, size signals confidence to synthesis)
+    if (sym && METALS.has(sym)) {
+      const etH = getETHour();
+      if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
+      return 0.5; // Off-COMEX — still trade, smaller size for learning
+    }
+    if (s === "morning" || s === "afternoon") return 1.0;  // RTH prime
+    if (s === "midday") return 0.5;  // Lunch — demo tests if midday works
+    if (s === "open" || s === "close") return 0.5;  // Open/close — learning
+    return 0.3; // ETH — minimal size, maximum learning
+  }
+
+  // LIVE MODE: conservative, only proven profitable windows
+  // Overnight/off-hours blocked — protect real capital
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
     if (etH >= 8.33 && etH < 10) return 1.0;   // COMEX open + London overlap = prime
     if (etH >= 10 && etH < 12) return 0.8;       // Mid-COMEX
-    if (etH >= 12 && etH < 13.5) return 0.6;     // Late COMEX — still tradeable
-    if (etH >= 13.5 && etH < 16) return 0.4;     // Afternoon gold — can still trend
-    return 0; // NO overnight/ETH gold — kills small accounts
+    if (etH >= 12 && etH < 13.5) return 0.6;     // Late COMEX
+    if (etH >= 13.5 && etH < 16) return 0.4;     // Afternoon gold
+    return 0; // NO overnight gold on live — protect capital
   }
 
-  // Equities: RTH morning + afternoon only (proven profit windows)
+  // Equities: RTH only on live
   if (s === "morning") return 1.0;
-  if (s === "afternoon") return 0.8;  // Raised from 0.6 — afternoon is your best WR (36%)
-  if (s === "midday") return 0;  // lunch doldrums, lowest volume, most losses
-  if (s === "close" || s === "halt" || s === "open") return 0;
-  return 0; // NO ETH for equities
+  if (s === "afternoon") return 0.8;
+  return 0; // NO ETH, midday, open/close on live
 }
 
 function checkSessionReset() {
@@ -1752,8 +1765,12 @@ async function evaluateAndTrade(
   }
 
   // Check if execution is allowed (session, limits, tilt) or paper-only (learning mode)
-  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < 2
-    && dailyTradeCount < 4 && dailyPnl >= -(startOfDayBalance || tradovateEquity) * 0.15
+  // DEMO mode: higher limits (more data = more learning). LIVE: conservative.
+  const maxDailyTrades = isLiveMode ? 4 : 10;
+  const maxPositions = isLiveMode ? 2 : 3;
+  const dailyLossLimitPct = isLiveMode ? 0.15 : 0.25; // demo can lose more (it's fake money)
+  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < maxPositions
+    && dailyTradeCount < maxDailyTrades && dailyPnl >= -(startOfDayBalance || tradovateEquity) * dailyLossLimitPct
     && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
 
   if (canExec) {
