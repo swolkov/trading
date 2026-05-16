@@ -1,4 +1,4 @@
-import { getPositions, getAccount } from "@/lib/alpaca";
+import { getPositions, getAccount, getBars } from "@/lib/alpaca";
 import { getTradovateAccountSummary, getTradovatePositions, TRADOVATE_CONTRACTS } from "@/lib/tradovate";
 import { getFuturesIntradayBars } from "@/lib/futures-data";
 import { generateLearningInsights } from "@/lib/learning-engine";
@@ -91,19 +91,20 @@ export async function GET(request: Request) {
     // overnight, after tilt, after daily limit). Now we check what actually happened.
     let paperTradeResults = "";
     try {
-      const paperTrades = todayTrades.filter((t) => t.action.startsWith("paper_"));
+      const paperTrades = todayTrades.filter((t) => t.action.startsWith("paper_") || t.action === "stock_paper");
       if (paperTrades.length > 0) {
         let paperWins = 0, paperLosses = 0, paperOpen = 0;
         const paperDetails: string[] = [];
 
-        // Fetch 5-min bars for each symbol to check price action after paper entry
+        // Fetch bars cache (futures use getFuturesIntradayBars, stocks use Alpaca getBars)
         const symbolBarsCache: Record<string, { t: number; o: number; h: number; l: number; c: number; v: number }[]> = {};
 
         for (const pt of paperTrades) {
+          const isFutures = pt.symbol.startsWith("FUT:");
           const symbol = pt.symbol.replace("FUT:", "");
           const entryPrice = pt.price || 0;
           const entryTime = new Date(pt.createdAt).getTime() / 1000;
-          const isLong = pt.action === "paper_long";
+          const isLong = pt.action === "paper_long" || pt.action === "stock_paper"; // stocks are always long
 
           // Parse stop and target from reason string
           const stopMatch = pt.reason?.match(/Stop:\s*\$?([\d,.]+)/);
@@ -113,10 +114,20 @@ export async function GET(request: Request) {
           const stopPrice = parseFloat(stopMatch[1].replace(",", ""));
           const targetPrice = parseFloat(targetMatch[1].replace(",", ""));
 
-          // Get bars (cache per symbol)
+          // Get bars (cache per symbol — different source for futures vs stocks)
           if (!symbolBarsCache[symbol]) {
             try {
-              symbolBarsCache[symbol] = await getFuturesIntradayBars(symbol, "5m", "1d");
+              if (isFutures) {
+                symbolBarsCache[symbol] = await getFuturesIntradayBars(symbol, "5m", "1d");
+              } else {
+                // Stock bars from Alpaca — get today's 5-min bars
+                const todayStr = new Date().toISOString().slice(0, 10);
+                const stockBars = await getBars(symbol, "5Min", `${todayStr}T00:00:00Z`);
+                symbolBarsCache[symbol] = stockBars.map((b) => ({
+                  t: new Date(b.t).getTime() / 1000,
+                  o: b.o, h: b.h, l: b.l, c: b.c, v: b.v,
+                }));
+              }
             } catch {
               continue;
             }
@@ -132,18 +143,15 @@ export async function GET(request: Request) {
           for (let i = 0; i < barsAfterEntry.length; i++) {
             const bar = barsAfterEntry[i];
             if (isLong) {
-              // Check stop first (conservative: assume worst case within bar)
               if (bar.l <= stopPrice) { result = "loss"; exitPrice = stopPrice; exitBar = i; break; }
               if (bar.h >= targetPrice) { result = "win"; exitPrice = targetPrice; exitBar = i; break; }
             } else {
-              // Short
               if (bar.h >= stopPrice) { result = "loss"; exitPrice = stopPrice; exitBar = i; break; }
               if (bar.l <= targetPrice) { result = "win"; exitPrice = targetPrice; exitBar = i; break; }
             }
           }
 
-          const contractInfo = TRADOVATE_CONTRACTS[symbol];
-          const multiplier = contractInfo?.multiplier || 5;
+          const multiplier = isFutures ? (TRADOVATE_CONTRACTS[symbol]?.multiplier || 5) : 1;
           const qty = pt.qty || 1;
           const priceDiff = isLong ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
           const hypotheticalPnl = result !== "open" ? priceDiff * multiplier * qty : 0;
@@ -262,9 +270,12 @@ export async function GET(request: Request) {
       },
     });
 
+    await prisma.agentConfig.upsert({ where: { key: "review_last_run" }, update: { value: new Date().toISOString() }, create: { key: "review_last_run", value: new Date().toISOString() } }).catch(() => {});
+
     return Response.json({ status: "ok", review, todayTrades: todayTrades.length, todayPnl });
   } catch (error) {
     console.error("[review]", error);
+    try { await sendNotification(`🚨 REVIEW CRON CRASH: ${error instanceof Error ? error.message : "Unknown"}`, "general"); } catch {}
     return Response.json({ error: String(error) }, { status: 500 });
   }
 }

@@ -1286,14 +1286,16 @@ export async function runTradingAgent(): Promise<AgentResult> {
               continue;
             }
 
-            // Check options_only mode (UI stores this as trade_options=true, legacy key: options_only)
+            // Check options mode — "disabled" skips options, "paper"/"live" enables them
             let optionsOnlyMode = false;
             try {
-              const [optOnlyConfig, tradeOptionsConfig] = await Promise.all([
-                prisma.agentConfig.findUnique({ where: { key: "options_only" } }),
+              const [optModeConfig, tradeOptionsConfig] = await Promise.all([
+                prisma.agentConfig.findUnique({ where: { key: "options_mode" } }),
                 prisma.agentConfig.findUnique({ where: { key: "trade_options" } }),
               ]);
-              optionsOnlyMode = optOnlyConfig?.value === "true" || tradeOptionsConfig?.value === "true";
+              // options_mode takes precedence, fall back to legacy trade_options
+              const optMode = optModeConfig?.value || (tradeOptionsConfig?.value === "true" ? "paper" : "disabled");
+              optionsOnlyMode = optMode !== "disabled";
             } catch { /* default false */ }
 
             if (!optionsOnlyMode && isBullish) {
