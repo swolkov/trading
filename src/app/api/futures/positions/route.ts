@@ -13,6 +13,8 @@ function matchSymbol(contractName: string): string | null {
 
 export async function GET() {
   try {
+    // Dashboard shows data from whichever Tradovate server trading_mode_futures points to.
+    // Demo mode → demo data. Live activated → live data. Controlled from Agent Hub.
     const auth = await checkTradovateAuth();
 
     // Get recent trade logs from DB regardless of Tradovate connection

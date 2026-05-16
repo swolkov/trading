@@ -199,54 +199,24 @@ export function TopBar() {
   );
 }
 
-// ── View Toggle (Demo / Live data) ──────────────────────
-// This ONLY controls what data you SEE — not what the engine does.
-// Live trading activation is on the Agent Hub.
+// ── Mode Indicator ──────────────────────────────────────
+// Shows which mode the system is in. Not a button — just a status badge.
+// Live activation controlled from Agent Hub only.
 function ViewToggle() {
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const isLiveActive = modeData?.modes?.futures === "live";
 
-  // View state stored in localStorage so it persists across pages
-  const [view, setView] = useState<"demo" | "live">("demo");
-  useEffect(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem("dashboard_view") : null;
-    if (saved === "live" || saved === "demo") setView(saved);
-  }, []);
-
-  const switchView = (v: "demo" | "live") => {
-    setView(v);
-    localStorage.setItem("dashboard_view", v);
-    // Update the trading_mode_futures key so API calls return the right data
-    // This does NOT activate/deactivate live trading — just changes which server we READ from
-    fetch("/api/trading-mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "futures", mode: v === "live" ? "live" : "paper", password: "view-switch" }),
-    });
-  };
-
   return (
-    <div className="flex items-center bg-white/[0.04] rounded-full p-0.5">
-      <button
-        onClick={() => switchView("demo")}
-        className={`px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider transition-all ${
-          view === "demo"
-            ? "bg-emerald-500/20 text-emerald-400"
-            : "text-muted-foreground/40 hover:text-muted-foreground/60"
-        }`}
-      >
-        Demo
-      </button>
-      <button
-        onClick={() => switchView("live")}
-        className={`px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider transition-all ${
-          view === "live"
-            ? "bg-red-500/20 text-red-400"
-            : "text-muted-foreground/40 hover:text-muted-foreground/60"
-        }`}
-      >
-        Live{isLiveActive && " ●"}
-      </button>
+    <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider ${
+      isLiveActive
+        ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30"
+        : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30"
+    }`}>
+      {isLiveActive ? (
+        <><span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" /> Live</>
+      ) : (
+        <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Demo</>
+      )}
     </div>
   );
 }
