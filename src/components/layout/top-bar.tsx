@@ -1,6 +1,5 @@
 "use client";
 
-import { useAccount } from "@/hooks/use-account";
 import { formatCurrency, pnlColor } from "@/lib/utils";
 import { Clock } from "lucide-react";
 import useSWR from "swr";
@@ -63,7 +62,6 @@ function useMarketClock() {
 }
 
 export function TopBar() {
-  const { data: account, error: alpacaError, isLoading: alpacaLoading } = useAccount();
   const { data: futuresData, isLoading: futuresLoading } = useSWR<FuturesData>(
     "/api/futures/positions",
     fetcher,
@@ -74,41 +72,23 @@ export function TopBar() {
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
 
-  const isLoading = alpacaLoading || futuresLoading;
-
-  if (isLoading) {
+  if (futuresLoading) {
     return (
       <header className="h-11 border-b border-border bg-sidebar flex items-center px-3 md:px-5 gap-3 md:gap-6">
         <div className="w-8 md:hidden shrink-0" />
         <div className="skeleton h-3.5 w-28 rounded" />
         <div className="skeleton h-3 w-20 rounded" />
-        <div className="skeleton h-3 w-24 rounded" />
         <div className="ml-auto skeleton h-3 w-32 rounded" />
       </header>
     );
   }
 
-  // Alpaca data
-  const alpacaEquity = account ? parseFloat(account.equity) : 0;
-  const alpacaLastEquity = account ? parseFloat(account.last_equity) : 0;
-  const alpacaDailyPnl = alpacaEquity - alpacaLastEquity;
-
-  // Tradovate data
-  const futuresEquity = futuresData?.account?.netLiq || 0;
-  const futuresBalance = futuresData?.account?.balance || 0;
-  const futuresSOD = futuresData?.startOfDayBalance;
-  const futuresDailyPnl = (futuresSOD != null && futuresBalance)
-    ? futuresBalance - futuresSOD
-    : (futuresData?.account?.realizedPnl || 0);
-
-  // Combined
-  const combinedEquity = alpacaEquity + futuresEquity;
-  const combinedDailyPnl = alpacaDailyPnl + futuresDailyPnl;
-  const combinedDailyPct = (alpacaLastEquity + (futuresSOD || futuresBalance)) > 0
-    ? combinedDailyPnl / (alpacaLastEquity + (futuresSOD || futuresBalance || 1))
-    : 0;
-
-  const hasAlpaca = !alpacaError && account;
+  // Tradovate data only — futures focused
+  const equity = futuresData?.account?.netLiq || futuresData?.account?.balance || 0;
+  const balance = futuresData?.account?.balance || 0;
+  const sod = futuresData?.startOfDayBalance;
+  const dailyPnl = (sod != null && balance) ? balance - sod : (futuresData?.account?.realizedPnl || 0);
+  const dailyPct = sod && sod > 0 ? dailyPnl / sod : 0;
   const hasFutures = futuresData?.connected && futuresData.account;
 
   return (
@@ -120,59 +100,46 @@ export function TopBar() {
       {/* Spacer for mobile hamburger */}
       <div className="w-8 md:hidden shrink-0" />
 
-      {/* Desktop: combined metrics */}
+      {/* Desktop: Futures metrics */}
       <div className="hidden md:flex items-center gap-5">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Portfolio</span>
-          <span className="text-[13px] font-bold tabular-nums">{formatCurrency(combinedEquity)}</span>
+          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Equity</span>
+          <span className="text-[13px] font-bold tabular-nums">{formatCurrency(equity)}</span>
         </div>
 
-        {/* Separator */}
         <div className="w-px h-4 bg-border" />
 
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium">Day</span>
-          <span className={`text-[12px] font-bold tabular-nums ${pnlColor(combinedDailyPnl)}`}>
-            {combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}
+          <span className={`text-[12px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+            {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
           </span>
-          <span className={`text-[10px] font-medium tabular-nums opacity-60 ${pnlColor(combinedDailyPnl)}`}>
-            ({combinedDailyPct >= 0 ? "+" : ""}{(combinedDailyPct * 100).toFixed(2)}%)
+          <span className={`text-[10px] font-medium tabular-nums opacity-60 ${pnlColor(dailyPnl)}`}>
+            ({dailyPct >= 0 ? "+" : ""}{(dailyPct * 100).toFixed(2)}%)
           </span>
         </div>
 
-        {/* Separator */}
-        <div className="w-px h-4 bg-border" />
-
-        {/* Per-broker breakdown */}
-        <div className="flex items-center gap-3">
-          {hasAlpaca && (
-            <div className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span className="text-[10px] text-muted-foreground/50 font-medium">ALP</span>
-              <span className="text-[10px] font-medium tabular-nums text-muted-foreground/70">{formatCurrency(alpacaEquity)}</span>
-            </div>
-          )}
-          {hasFutures && (
+        {hasFutures && (
+          <>
+            <div className="w-px h-4 bg-border" />
             <div className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
-              <span className="text-[10px] text-muted-foreground/50 font-medium">TDV</span>
-              <span className="text-[10px] font-medium tabular-nums text-muted-foreground/70">{formatCurrency(futuresEquity)}</span>
+              <span className="text-[10px] text-muted-foreground/50 font-medium">Tradovate</span>
             </div>
-          )}
-        </div>
+          </>
+        )}
       </div>
 
       {/* Mobile: compact view */}
       <div className="flex md:hidden items-center gap-2">
-        <span className="text-[12px] font-bold tabular-nums">{formatCurrency(combinedEquity)}</span>
-        <span className={`text-[11px] font-bold tabular-nums ${pnlColor(combinedDailyPnl)}`}>
-          {combinedDailyPnl >= 0 ? "+" : ""}{formatCurrency(combinedDailyPnl)}
+        <span className="text-[12px] font-bold tabular-nums">{formatCurrency(equity)}</span>
+        <span className={`text-[11px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+          {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
         </span>
       </div>
 
-      {/* Right side: mode switch + market clock + status */}
+      {/* Right side: mode indicator + market clock */}
       <div className="ml-auto flex items-center gap-3 shrink-0">
-        {/* Market clock */}
         {marketClock.label && (
           <div className="hidden md:flex items-center gap-1.5">
             <Clock className="w-3 h-3 text-muted-foreground/40" />
@@ -182,18 +149,8 @@ export function TopBar() {
           </div>
         )}
 
-        {/* View Toggle: Demo / Live */}
+        {/* Mode indicator */}
         <ViewToggle />
-
-        {/* Connection indicators */}
-        <div className="flex items-center gap-1.5">
-          {hasAlpaca && (
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" title="Alpaca connected" />
-          )}
-          {hasFutures && (
-            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 live-dot" title="Tradovate connected" />
-          )}
-        </div>
       </div>
     </header>
   );

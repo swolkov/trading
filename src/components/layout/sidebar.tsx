@@ -25,9 +25,8 @@ const sections = [
   {
     label: "MARKETS",
     links: [
-      { href: "/futures", label: "Futures", icon: BarChart3, active: true },
-      { href: "/stocks", label: "Stocks", icon: LineChart, active: false, phase: "Phase 2" },
-      { href: "/options", label: "Options", icon: Layers, active: false, phase: "Phase 2" },
+      { href: "/futures", label: "Futures", icon: BarChart3 },
+      { href: "/stocks", label: "Stocks", icon: LineChart, active: false, phase: "Long-term" },
     ],
   },
   {

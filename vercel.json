@@ -5,28 +5,16 @@
       "schedule": "0 13 * * 1-5"
     },
     {
-      "path": "/api/cron/trade",
-      "schedule": "30,50 13,14,15,16,17,18,19,20 * * 1-5"
-    },
-    {
-      "path": "/api/cron/monitor",
-      "schedule": "*/5 13-21 * * 1-5"
+      "path": "/api/cron/futures",
+      "schedule": "*/10 12-21 * * 1-5"
     },
     {
       "path": "/api/cron/review",
       "schedule": "30 20 * * 1-5"
     },
     {
-      "path": "/api/cron/futures",
-      "schedule": "*/10 12-21 * * 1-5"
-    },
-    {
       "path": "/api/cron/watchdog",
       "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/risk",
-      "schedule": "*/10 13-21 * * 1-5"
     },
     {
       "path": "/api/cron/regime-transition",
@@ -48,11 +36,5 @@
       "path": "/api/cron/synthesis",
       "schedule": "0 16,21,1 * * 1-5"
     }
-  ],
-  "experimentalServices": {
-    "web": {
-      "routePrefix": "/",
-      "framework": "nextjs"
-    }
-  }
+  ]
 }
