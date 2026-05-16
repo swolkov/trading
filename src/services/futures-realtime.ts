@@ -14,9 +14,28 @@ import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, i
 // ── Config ──────────────────────────────────────────────
 
 const DEMO_API = "https://demo.tradovateapi.com/v1";
-const ORDER_API = DEMO_API;
+const LIVE_API = "https://live.tradovateapi.com/v1";
+let ORDER_API = DEMO_API; // Updated dynamically from trading_mode_futures DB key
+let isLiveMode = false;
+let needsReauth = false; // Set true when mode changes — forces re-auth on next API call
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
+
+/** Read trading mode from DB and switch API endpoints accordingly */
+async function refreshTradingMode() {
+  try {
+    const config = await prisma.agentConfig.findUnique({ where: { key: "trading_mode_futures" } });
+    const mode = config?.value || "paper";
+    const wasLive = isLiveMode;
+    isLiveMode = mode === "live";
+    ORDER_API = isLiveMode ? LIVE_API : DEMO_API;
+    if (wasLive !== isLiveMode) {
+      log(`[MODE] Trading mode changed to ${isLiveMode ? "LIVE" : "DEMO"} (${ORDER_API})`);
+      // Force re-auth on next API call (token is for wrong environment)
+      needsReauth = true;
+    }
+  } catch { /* keep current mode */ }
+}
 
 // Subscribe to both full-size and micro — trade whichever fits account equity
 // Full-size: ES ($50/pt), NQ ($20/pt), GC ($100/pt) — need $25k+
@@ -73,6 +92,7 @@ let accountId = 0;
 let accountName = "";
 
 async function authenticate(): Promise<string> {
+  if (needsReauth) { accessToken = ""; tokenExpires = 0; needsReauth = false; }
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
   const res = await fetch(`${ORDER_API}/auth/accesstokenrequest`, {
@@ -1750,6 +1770,22 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const contract = contracts.get(sym);
   if (!contract) return;
 
+  // MODE GATE: if not live, log as paper trade only
+  if (!isLiveMode) {
+    const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+    const qty = Math.max(1, Math.min(5, Math.floor((tradovateEquity * 0.05 * sizeMult) / (stopDist * mult))));
+    log(`[PAPER] Would ${direction.toUpperCase()} ${qty}x ${sym} @ $${price.toFixed(2)} | ${reasoning}`);
+    try {
+      await prisma.autoTradeLog.create({ data: {
+        symbol: `FUT:${sym}`, action: `paper_${direction}`, qty, price,
+        reason: `[PAPER] ${reasoning}. Stop: ${stopDist.toFixed(1)}pts, Target: ${targetDist.toFixed(1)}pts, R:R ${(targetDist/stopDist).toFixed(1)}`,
+        aiScore: confidenceScore, aiSignal: direction,
+      }});
+    } catch {}
+    dailyTradeCount++;
+    return;
+  }
+
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = tradovateEquity;
   // Aggressive small-account sizing: 5% risk per trade for $500+/day potential
@@ -2674,6 +2710,10 @@ async function main() {
   await updateCrossAssetSignals();
   await updateEarningsWeekFilter();
   await updateSectorRotation();
+
+  // Load trading mode from DB (demo vs live) — refreshed every 30s
+  await refreshTradingMode();
+  safeInterval(refreshTradingMode, 30_000, "refreshTradingMode");
 
   // Start polling — all wrapped in safe intervals
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");

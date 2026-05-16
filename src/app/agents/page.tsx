@@ -420,72 +420,103 @@ export default function AgentHubPage() {
           </div>
         </div>
 
-        {/* Broker Panel */}
+        {/* System Mode — Master Control */}
         <div>
-          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">Brokers & Mode</p>
-          <div className="space-y-3">
-            {brokers.map((broker) => (
-              <div key={broker.name} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3.5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-xs font-bold">{broker.name}</span>
-                    <span className="text-[10px] text-muted-foreground/50 ml-2">{broker.desc}</span>
-                  </div>
-                  {broker.extra && (
-                    <span className={`text-[9px] ${broker.extra.includes("Connected") ? "text-emerald-400" : "text-muted-foreground/40"}`}>
-                      {broker.extra}
-                    </span>
-                  )}
+          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">System Mode</p>
+          <div className={`rounded-xl border p-4 space-y-4 ${
+            Object.values(tradingModes?.modes || {}).some((m) => m === "live")
+              ? "border-red-500/20 bg-red-500/[0.03]"
+              : "border-emerald-500/20 bg-emerald-500/[0.03]"
+          }`}>
+            {/* Mode selector — 3 big buttons */}
+            <div className="flex gap-2">
+              {(["disabled", "paper", "live"] as const).map((m) => {
+                const currentMode = tradingModes?.modes?.futures || "paper";
+                const isActive = m === "live" ? currentMode === "live" : m === "disabled" ? currentMode === "disabled" : currentMode === "paper";
+                const colors = {
+                  disabled: { active: "bg-zinc-500/20 text-zinc-400 ring-1 ring-zinc-500/30", label: "OFF", desc: "All agents paused" },
+                  paper: { active: "bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30", label: "DEMO", desc: "Trade on demo account" },
+                  live: { active: "bg-red-500/20 text-red-400 ring-1 ring-red-500/30", label: "LIVE", desc: "Real money — $1K account" },
+                };
+                const cfg = colors[m];
+                return (
+                  <button
+                    key={m}
+                    disabled={isActive || (m === "live" && !modePassword)}
+                    onClick={async () => {
+                      if (m === "live" && !modePassword) return;
+                      setModeMessage("");
+                      // Switch ALL systems at once
+                      for (const type of ["futures", "options", "stocks"]) {
+                        const targetMode = m === "disabled" ? "paper" : m; // "disabled" mapped to paper with enabled=false
+                        await fetch("/api/trading-mode", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ type, mode: targetMode, password: modePassword || "demo-switch" }),
+                        });
+                      }
+                      if (m === "disabled") {
+                        // Also set enabled=false in config
+                        await fetch("/api/agent/config", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${modePassword}` },
+                          body: JSON.stringify({ enabled: "false" }),
+                        });
+                      } else {
+                        await fetch("/api/agent/config", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${modePassword || "demo-switch"}` },
+                          body: JSON.stringify({ enabled: "true" }),
+                        });
+                      }
+                      setModeMessage(`System switched to ${cfg.label}`);
+                      loadData();
+                    }}
+                    className={`flex-1 py-3 rounded-lg text-center transition-all ${
+                      isActive ? cfg.active : "bg-white/[0.04] text-muted-foreground/40 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed"
+                    }`}
+                  >
+                    <p className="text-sm font-black">{cfg.label}</p>
+                    <p className="text-[8px] mt-0.5 opacity-60">{cfg.desc}</p>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Status line showing what's connected */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${tradingModes?.hasLiveKeys?.futures ? "bg-blue-400" : "bg-zinc-600"}`} />
+                  <span className="text-[9px] font-semibold text-muted-foreground/60">Tradovate</span>
+                  <span className="text-[8px] text-muted-foreground/40">{tradingModes?.modes?.futures === "live" ? "LIVE" : "DEMO"}</span>
                 </div>
-                <div className="flex gap-2">
-                  {broker.types.map((type) => {
-                    const mode = tradingModes?.modes?.[type] || "paper";
-                    const hasKeys = tradingModes?.hasLiveKeys?.[type] || false;
-                    return (
-                      <div key={type} className="flex-1 space-y-1.5">
-                        <p className="text-[9px] text-muted-foreground/50 uppercase tracking-wider font-semibold">{type}</p>
-                        <div className="flex gap-1">
-                          {["paper", "live"].map((m) => {
-                            const active = mode === m;
-                            const isLive = m === "live";
-                            return (
-                              <button
-                                key={m}
-                                disabled={active || (isLive && !hasKeys) || !modePassword}
-                                onClick={() => switchMode(type, m)}
-                                className={`flex-1 text-[9px] font-semibold py-1 rounded transition-all ${
-                                  active
-                                    ? isLive
-                                      ? "bg-red-500/20 text-red-400 ring-1 ring-red-500/30"
-                                      : "bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30"
-                                    : "bg-white/[0.04] text-muted-foreground/40 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed"
-                                }`}
-                              >
-                                {m === "paper" ? "DEMO" : "LIVE"}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        {!hasKeys && <p className="text-[8px] text-muted-foreground/30">No live keys</p>}
-                      </div>
-                    );
-                  })}
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${tradingModes?.hasLiveKeys?.options ? "bg-emerald-400" : "bg-zinc-600"}`} />
+                  <span className="text-[9px] font-semibold text-muted-foreground/60">Alpaca</span>
+                  <span className="text-[8px] text-muted-foreground/40">{tradingModes?.modes?.options === "live" ? "LIVE" : "PAPER"}</span>
                 </div>
               </div>
-            ))}
+              <div className="flex items-center gap-2">
+                {Object.values(tradingModes?.modes || {}).some((m) => m === "live") && (
+                  <span className="text-[9px] text-red-400 font-bold animate-pulse">● LIVE</span>
+                )}
+              </div>
+            </div>
+
             {/* Password input */}
             <div className="flex items-center gap-2">
               <input
                 type="password"
-                placeholder="Mode password to switch"
+                placeholder="Password to unlock mode switching"
                 value={modePassword}
                 onChange={(e) => setModePassword(e.target.value)}
                 className="flex-1 bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1.5 text-[10px] placeholder:text-muted-foreground/30 focus:outline-none focus:ring-1 focus:ring-primary/30"
               />
-              {modePassword && <span className="text-[9px] text-emerald-400/60">Unlocked</span>}
+              {modePassword && <span className="text-[9px] text-emerald-400/60">●</span>}
             </div>
             {modeMessage && (
-              <p className={`text-[10px] ${modeMessage.includes("switched") ? "text-emerald-400" : "text-red-400"}`}>
+              <p className={`text-[10px] font-semibold ${modeMessage.includes("switched") || modeMessage.includes("DEMO") ? "text-emerald-400" : modeMessage.includes("LIVE") ? "text-red-400" : "text-amber-400"}`}>
                 {modeMessage}
               </p>
             )}

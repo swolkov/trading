@@ -108,8 +108,16 @@ export function TopBar() {
   const hasAlpaca = !alpacaError && account;
   const hasFutures = futuresData?.connected && futuresData.account;
 
+  // Mode-aware visual styling — entire header shifts color when LIVE
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
+  const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
+
   return (
-    <header className="h-11 border-b border-border bg-sidebar flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto">
+    <header className={`h-11 border-b flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto transition-colors ${
+      isAnyLive
+        ? "border-red-500/20 bg-red-950/20"
+        : "border-border bg-sidebar"
+    }`}>
       {/* Spacer for mobile hamburger */}
       <div className="w-8 md:hidden shrink-0" />
 
