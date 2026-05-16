@@ -70,6 +70,10 @@ export function TopBar() {
     { refreshInterval: 15000 }
   );
   const marketClock = useMarketClock();
+  // Mode-aware visual styling — entire header shifts color when LIVE
+  // MUST be called before any early returns (rules of hooks)
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
+  const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
 
   const isLoading = alpacaLoading || futuresLoading;
 
@@ -107,10 +111,6 @@ export function TopBar() {
 
   const hasAlpaca = !alpacaError && account;
   const hasFutures = futuresData?.connected && futuresData.account;
-
-  // Mode-aware visual styling — entire header shifts color when LIVE
-  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
 
   return (
     <header className={`h-11 border-b flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto transition-colors ${
