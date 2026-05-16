@@ -14,28 +14,10 @@ import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, i
 // ── Config ──────────────────────────────────────────────
 
 const DEMO_API = "https://demo.tradovateapi.com/v1";
-const LIVE_API = "https://live.tradovateapi.com/v1";
-let ORDER_API = DEMO_API; // Updated dynamically from trading_mode_futures DB key
-let isLiveMode = false;
-let needsReauth = false; // Set true when mode changes — forces re-auth on next API call
+const ORDER_API = DEMO_API; // Railway engine ALWAYS trades on demo — it's the learning machine
+const isLiveMode = false; // Engine is never live — live execution handled by Vercel cron agent
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
-
-/** Read trading mode from DB and switch API endpoints accordingly */
-async function refreshTradingMode() {
-  try {
-    const config = await prisma.agentConfig.findUnique({ where: { key: "trading_mode_futures" } });
-    const mode = config?.value || "paper";
-    const wasLive = isLiveMode;
-    isLiveMode = mode === "live";
-    ORDER_API = isLiveMode ? LIVE_API : DEMO_API;
-    if (wasLive !== isLiveMode) {
-      log(`[MODE] Trading mode changed to ${isLiveMode ? "LIVE" : "DEMO"} (${ORDER_API})`);
-      // Force re-auth on next API call (token is for wrong environment)
-      needsReauth = true;
-    }
-  } catch { /* keep current mode */ }
-}
 
 // Subscribe to both full-size and micro — trade whichever fits account equity
 // Full-size: ES ($50/pt), NQ ($20/pt), GC ($100/pt) — need $25k+
@@ -92,7 +74,6 @@ let accountId = 0;
 let accountName = "";
 
 async function authenticate(): Promise<string> {
-  if (needsReauth) { accessToken = ""; tokenExpires = 0; needsReauth = false; }
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
   const res = await fetch(`${ORDER_API}/auth/accesstokenrequest`, {
@@ -523,37 +504,21 @@ function getMinutesSinceRTHOpen(): number {
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
-  // DEMO MODE: trade 24/7 aggressively — learn from every session
-  // Data from all sessions feeds the brain. What works gets promoted to live.
-  if (!isLiveMode) {
-    if (s === "halt") return 0; // market actually closed (5-6 PM daily break)
-    // Vary size by session quality (even in demo, size signals confidence to synthesis)
-    if (sym && METALS.has(sym)) {
-      const etH = getETHour();
-      if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
-      return 0.5; // Off-COMEX — still trade, smaller size for learning
-    }
-    if (s === "morning" || s === "afternoon") return 1.0;  // RTH prime
-    if (s === "midday") return 0.5;  // Lunch — demo tests if midday works
-    if (s === "open" || s === "close") return 0.5;  // Open/close — learning
-    return 0.3; // ETH — minimal size, maximum learning
-  }
+  // Engine always on DEMO — trade 24/7 aggressively for maximum learning
+  // Vary size by session quality (size signals confidence to synthesis agent)
+  if (s === "halt") return 0; // market actually closed (5-6 PM daily break)
 
-  // LIVE MODE: conservative, only proven profitable windows
-  // Overnight/off-hours blocked — protect real capital
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
-    if (etH >= 8.33 && etH < 10) return 1.0;   // COMEX open + London overlap = prime
-    if (etH >= 10 && etH < 12) return 0.8;       // Mid-COMEX
-    if (etH >= 12 && etH < 13.5) return 0.6;     // Late COMEX
-    if (etH >= 13.5 && etH < 16) return 0.4;     // Afternoon gold
-    return 0; // NO overnight gold on live — protect capital
+    if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
+    return 0.5; // Off-COMEX — still trade, smaller size for learning
   }
 
-  // Equities: RTH only on live
-  if (s === "morning") return 1.0;
-  if (s === "afternoon") return 0.8;
-  return 0; // NO ETH, midday, open/close on live
+  // Equities
+  if (s === "morning" || s === "afternoon") return 1.0;  // RTH prime
+  if (s === "midday") return 0.5;  // Lunch — test if midday works
+  if (s === "open" || s === "close") return 0.5;  // Open/close — learning
+  return 0.3; // ETH — minimal size, maximum learning
 }
 
 function checkSessionReset() {
@@ -1764,13 +1729,9 @@ async function evaluateAndTrade(
     return;
   }
 
-  // Check if execution is allowed (session, limits, tilt) or paper-only (learning mode)
-  // DEMO mode: higher limits (more data = more learning). LIVE: conservative.
-  const maxDailyTrades = isLiveMode ? 4 : 10;
-  const maxPositions = isLiveMode ? 2 : 3;
-  const dailyLossLimitPct = isLiveMode ? 0.15 : 0.25; // demo can lose more (it's fake money)
-  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < maxPositions
-    && dailyTradeCount < maxDailyTrades && dailyPnl >= -(startOfDayBalance || tradovateEquity) * dailyLossLimitPct
+  // Execution gates — engine is always demo, so use aggressive limits for maximum learning
+  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < 3
+    && dailyTradeCount < 10 && dailyPnl >= -(startOfDayBalance || tradovateEquity) * 0.25
     && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
 
   if (canExec) {
@@ -1779,7 +1740,7 @@ async function evaluateAndTrade(
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
   } else {
     // Hit daily limit or tilt — done for the day. Demo handles learning independently.
-    log(`  BLOCKED: ${direction.toUpperCase()} ${sym} (${dailyTradeCount >= maxDailyTrades ? "daily limit" : "tilt/position limit"}). Done.`);
+    log(`  BLOCKED: ${direction.toUpperCase()} ${sym} (${dailyTradeCount >= 10 ? "daily limit" : "tilt/position limit"}). Done.`);
   }
 }
 
@@ -1789,13 +1750,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const contract = contracts.get(sym);
   if (!contract) return;
 
-  // MODE: Both DEMO and LIVE execute trades — the difference is which Tradovate server
-  // DEMO → demo.tradovateapi.com (fake $50K account, real execution, validates system)
-  // LIVE → live.tradovateapi.com (real $1K account, real money)
-  // The ORDER_API variable already points to the correct server based on mode.
-  if (!isLiveMode) {
-    log(`[DEMO TRADE] Executing on demo account — not real money`);
-  }
+  // Engine always executes on DEMO account (the learning machine, 24/7)
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = tradovateEquity;
@@ -2722,9 +2677,9 @@ async function main() {
   await updateEarningsWeekFilter();
   await updateSectorRotation();
 
-  // Load trading mode from DB (demo vs live) — refreshed every 30s
-  await refreshTradingMode();
-  safeInterval(refreshTradingMode, 30_000, "refreshTradingMode");
+  // Engine always runs on DEMO — it's the 24/7 learning machine.
+  // Live execution is handled separately by the Vercel cron agent (futures-agent.ts)
+  // which reads trading_mode_futures from DB and connects to live.tradovateapi.com when enabled.
 
   // Start polling — all wrapped in safe intervals
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");

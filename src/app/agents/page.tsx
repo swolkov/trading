@@ -420,104 +420,79 @@ export default function AgentHubPage() {
           </div>
         </div>
 
-        {/* System Mode — Master Control */}
+        {/* System Mode — Demo always runs. Live is a separate activation. */}
         <div>
-          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">System Mode</p>
-          <div className={`rounded-xl border p-4 space-y-4 ${
-            Object.values(tradingModes?.modes || {}).some((m) => m === "live")
-              ? "border-red-500/20 bg-red-500/[0.03]"
-              : "border-emerald-500/20 bg-emerald-500/[0.03]"
-          }`}>
-            {/* Mode selector — 3 big buttons */}
-            <div className="flex gap-2">
-              {(["disabled", "paper", "live"] as const).map((m) => {
-                const currentMode = tradingModes?.modes?.futures || "paper";
-                const isActive = m === "live" ? currentMode === "live" : m === "disabled" ? currentMode === "disabled" : currentMode === "paper";
-                const colors = {
-                  disabled: { active: "bg-zinc-500/20 text-zinc-400 ring-1 ring-zinc-500/30", label: "OFF", desc: "All agents paused" },
-                  paper: { active: "bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30", label: "DEMO", desc: "Trade on demo account" },
-                  live: { active: "bg-red-500/20 text-red-400 ring-1 ring-red-500/30", label: "LIVE", desc: "Real money — $1K account" },
-                };
-                const cfg = colors[m];
-                return (
-                  <button
-                    key={m}
-                    disabled={isActive || (m === "live" && !modePassword)}
-                    onClick={async () => {
-                      if (m === "live" && !modePassword) return;
-                      setModeMessage("");
-                      // Switch systems — only attempt live on brokers that have credentials
-                      const targetMode = m === "disabled" ? "paper" : m;
-                      // Futures (Tradovate) — primary, always switch
-                      await fetch("/api/trading-mode", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ type: "futures", mode: targetMode, password: modePassword || "demo-switch" }),
-                      });
-                      // Stocks/Options (Alpaca) — only switch if keys exist, otherwise stay paper
-                      if (tradingModes?.hasLiveKeys?.options || targetMode === "paper") {
-                        for (const type of ["options", "stocks"]) {
-                          await fetch("/api/trading-mode", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ type, mode: targetMode, password: modePassword || "demo-switch" }),
-                          });
-                        }
-                      }
-                      if (m === "disabled") {
-                        // Also set enabled=false in config
-                        await fetch("/api/agent/config", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${modePassword}` },
-                          body: JSON.stringify({ enabled: "false" }),
-                        });
-                      } else {
-                        await fetch("/api/agent/config", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${modePassword || "demo-switch"}` },
-                          body: JSON.stringify({ enabled: "true" }),
-                        });
-                      }
-                      setModeMessage(`System switched to ${cfg.label}`);
-                      loadData();
-                    }}
-                    className={`flex-1 py-3 rounded-lg text-center transition-all ${
-                      isActive ? cfg.active : "bg-white/[0.04] text-muted-foreground/40 hover:bg-white/[0.08] disabled:opacity-30 disabled:cursor-not-allowed"
-                    }`}
-                  >
-                    <p className="text-sm font-black">{cfg.label}</p>
-                    <p className="text-[8px] mt-0.5 opacity-60">{cfg.desc}</p>
-                  </button>
-                );
-              })}
+          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">Trading Control</p>
+          <div className="space-y-3">
+            {/* Demo Engine Status */}
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.03] p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-400" />
+                  </span>
+                  <span className="text-sm font-black text-emerald-400">DEMO ENGINE</span>
+                </div>
+                <span className="text-[9px] text-emerald-400/60 font-medium">Always running · 24/7 · Learning</span>
+              </div>
+              <p className="text-[9px] text-muted-foreground/50">Trading on demo account ($50K). Brain evolves from every trade. This never turns off.</p>
             </div>
 
-            {/* Status line showing what's connected */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5">
-                  <span className={`w-2 h-2 rounded-full ${tradingModes?.hasLiveKeys?.futures ? "bg-blue-400" : "bg-zinc-600"}`} />
-                  <span className="text-[9px] font-semibold text-muted-foreground/60">Tradovate</span>
-                  <span className="text-[8px] text-muted-foreground/40">{tradingModes?.modes?.futures === "live" ? "LIVE" : "DEMO"}</span>
+            {/* Live Trading Activation */}
+            <div className={`rounded-xl border p-4 space-y-3 ${
+              tradingModes?.modes?.futures === "live"
+                ? "border-red-500/20 bg-red-500/[0.03]"
+                : "border-white/[0.06] bg-white/[0.02]"
+            }`}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-black">{tradingModes?.modes?.futures === "live" ? "🔴 LIVE TRADING ACTIVE" : "LIVE TRADING"}</p>
+                  <p className="text-[9px] text-muted-foreground/50 mt-0.5">
+                    {tradingModes?.modes?.futures === "live"
+                      ? "Real money at risk — Tradovate live account"
+                      : "Activate to trade your real $1K account (proven windows only)"}
+                  </p>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className={`w-2 h-2 rounded-full ${tradingModes?.hasLiveKeys?.options ? "bg-emerald-400" : "bg-zinc-600"}`} />
-                  <span className="text-[9px] font-semibold text-muted-foreground/60">Alpaca</span>
-                  <span className="text-[8px] text-muted-foreground/40">{tradingModes?.modes?.options === "live" ? "LIVE" : "PAPER"}</span>
+                <button
+                  disabled={!modePassword}
+                  onClick={async () => {
+                    if (!modePassword) return;
+                    setModeMessage("");
+                    const newMode = tradingModes?.modes?.futures === "live" ? "paper" : "live";
+                    const res = await fetch("/api/trading-mode", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ type: "futures", mode: newMode, password: modePassword }),
+                    });
+                    const data = await res.json();
+                    if (data.error) { setModeMessage(data.error); return; }
+                    setModeMessage(newMode === "live" ? "LIVE TRADING ACTIVATED" : "Live trading deactivated — demo continues");
+                    loadData();
+                  }}
+                  className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
+                    tradingModes?.modes?.futures === "live"
+                      ? "bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30"
+                      : "bg-white/[0.06] text-muted-foreground/60 ring-1 ring-white/[0.08] hover:bg-white/[0.1] hover:text-foreground disabled:opacity-30"
+                  }`}
+                >
+                  {tradingModes?.modes?.futures === "live" ? "DEACTIVATE" : "ACTIVATE"}
+                </button>
+              </div>
+
+              {tradingModes?.modes?.futures === "live" && (
+                <div className="flex items-center gap-2 text-[9px] text-red-400/70">
+                  <span className="animate-pulse">●</span>
+                  <span>Cron agent executing on live.tradovateapi.com during proven windows (9:45-11:30, 2:00-3:45 ET)</span>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                {Object.values(tradingModes?.modes || {}).some((m) => m === "live") && (
-                  <span className="text-[9px] text-red-400 font-bold animate-pulse">● LIVE</span>
-                )}
-              </div>
+              )}
             </div>
 
-            {/* Password input */}
+            {/* Password */}
             <div className="flex items-center gap-2">
               <input
                 type="password"
-                placeholder="Password to unlock mode switching"
+                placeholder="Password to control live trading"
                 value={modePassword}
                 onChange={(e) => setModePassword(e.target.value)}
                 className="flex-1 bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1.5 text-[10px] placeholder:text-muted-foreground/30 focus:outline-none focus:ring-1 focus:ring-primary/30"
@@ -525,7 +500,7 @@ export default function AgentHubPage() {
               {modePassword && <span className="text-[9px] text-emerald-400/60">●</span>}
             </div>
             {modeMessage && (
-              <p className={`text-[10px] font-semibold ${modeMessage.includes("switched") || modeMessage.includes("DEMO") ? "text-emerald-400" : modeMessage.includes("LIVE") ? "text-red-400" : "text-amber-400"}`}>
+              <p className={`text-[10px] font-semibold ${modeMessage.includes("ACTIVATED") || modeMessage.includes("LIVE") ? "text-red-400" : "text-emerald-400"}`}>
                 {modeMessage}
               </p>
             )}
