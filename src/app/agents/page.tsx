@@ -71,6 +71,22 @@ const CONFIG_GROUPS = [
     ],
   },
   {
+    label: "Futures",
+    icon: "F",
+    color: "from-amber-500 to-orange-500",
+    fields: [
+      { key: "futures_risk_per_trade_pct", label: "Risk Per Trade (%)", type: "number" as const },
+      { key: "futures_daily_loss_limit_pct", label: "Daily Loss Limit (%)", type: "number" as const },
+      { key: "futures_max_drawdown_pct", label: "Max Drawdown Kill (%)", type: "number" as const },
+      { key: "futures_max_contracts", label: "Max Contracts / Trade", type: "number" as const },
+      { key: "futures_max_total_contracts", label: "Max Total Contracts", type: "number" as const },
+      { key: "futures_max_trades_per_day", label: "Max Trades / Day", type: "number" as const },
+      { key: "futures_atr_stop_multiplier", label: "ATR Stop Multiplier", type: "number" as const },
+      { key: "futures_atr_target_multiplier", label: "ATR Target Multiplier", type: "number" as const },
+      { key: "futures_simulated_equity", label: "Simulated Equity ($)", type: "number" as const },
+    ],
+  },
+  {
     label: "Stocks",
     icon: "S",
     color: "from-blue-500 to-indigo-500",

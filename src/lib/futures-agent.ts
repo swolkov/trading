@@ -37,30 +37,60 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 // Aggressive sizing with ironclad daily/drawdown limits.
 // Scale-out advantage: 10 MES lets you sell 5 at 1R, trail 5 for runners.
 
-const FUTURES_RULES = {
-  // Risk per trade: 5% = $350 on $7K — reduced from 7% while fixing edge
-  // At 35% WR + 2.3 R:R target, this yields ~+$50-150/trade expected value
-  RISK_PER_TRADE_PCT: 0.05,         // 5% of equity per trade ($350 on $7K)
-  DAILY_LOSS_LIMIT_PCT: 0.10,       // 10% daily max ($700 on $7K — 2 full losses then STOP)
-  MAX_DRAWDOWN_PCT: 0.15,           // 15% drawdown kill switch ($1,050 on $7K)
-  MAX_CONTRACTS_PER_TRADE: 6,       // 6 MES max — enough for 3+3 scale-out, limits blowup
-  MAX_TOTAL_CONTRACTS: 10,          // Tighter total cap across all symbols
-  MAX_TRADES_PER_DAY: 3,            // Base limit — only A/A+ setups
-  MAX_TRADES_APLUS_OVERRIDE: 5,     // A+ setups can push past base limit up to this cap
-
-  // Technical
+// Default futures rules — can be overridden from Agent Hub config
+const FUTURES_RULES_DEFAULTS = {
+  RISK_PER_TRADE_PCT: 0.05,
+  DAILY_LOSS_LIMIT_PCT: 0.10,
+  MAX_DRAWDOWN_PCT: 0.15,
+  MAX_CONTRACTS_PER_TRADE: 6,
+  MAX_TOTAL_CONTRACTS: 10,
+  MAX_TRADES_PER_DAY: 3,
+  MAX_TRADES_APLUS_OVERRIDE: 5,
   ATR_STOP_MULTIPLIER: 1.5,
-  ATR_TARGET_MULTIPLIER: 3.5,       // 2.33 R:R minimum — need >2.0 to have edge at current WR
-
-  // Session times (ET hours — DST-aware via session-time.ts)
-  RTH_START_ET: 9.5,                // 9:30 AM ET
-  RTH_END_ET: 16,                   // 4:00 PM ET
-  AVOID_FIRST_MINUTES: 15,          // Avoid first 15 min (opening chaos)
-  AVOID_LAST_MINUTES: 15,           // Avoid last 15 min (closing chaos)
-
-  // Simulated live capital — agent uses this instead of actual demo equity
-  SIMULATED_EQUITY: 7_000,          // $7K live capital
+  ATR_TARGET_MULTIPLIER: 3.5,
+  RTH_START_ET: 9.5,
+  RTH_END_ET: 16,
+  AVOID_FIRST_MINUTES: 15,
+  AVOID_LAST_MINUTES: 15,
+  SIMULATED_EQUITY: 7_000,
 };
+
+// Mutable rules — populated from DB config at runtime, falls back to defaults
+let FUTURES_RULES = { ...FUTURES_RULES_DEFAULTS };
+
+/** Load futures config overrides from Agent Hub DB settings */
+async function loadFuturesConfig() {
+  try {
+    const keyMap: Record<string, keyof typeof FUTURES_RULES_DEFAULTS> = {
+      futures_risk_per_trade_pct: "RISK_PER_TRADE_PCT",
+      futures_daily_loss_limit_pct: "DAILY_LOSS_LIMIT_PCT",
+      futures_max_drawdown_pct: "MAX_DRAWDOWN_PCT",
+      futures_max_contracts: "MAX_CONTRACTS_PER_TRADE",
+      futures_max_total_contracts: "MAX_TOTAL_CONTRACTS",
+      futures_max_trades_per_day: "MAX_TRADES_PER_DAY",
+      futures_atr_stop_multiplier: "ATR_STOP_MULTIPLIER",
+      futures_atr_target_multiplier: "ATR_TARGET_MULTIPLIER",
+      futures_simulated_equity: "SIMULATED_EQUITY",
+    };
+    const configs = await prisma.agentConfig.findMany({
+      where: { key: { in: Object.keys(keyMap) } },
+    });
+    for (const c of configs) {
+      const ruleKey = keyMap[c.key];
+      if (ruleKey) {
+        const val = parseFloat(c.value);
+        if (!isNaN(val) && val > 0) {
+          // Percentage fields are stored as whole numbers in UI (e.g. 5 = 5%)
+          if (ruleKey.endsWith("_PCT")) {
+            (FUTURES_RULES as Record<string, number>)[ruleKey] = val / 100;
+          } else {
+            (FUTURES_RULES as Record<string, number>)[ruleKey] = val;
+          }
+        }
+      }
+    }
+  } catch { /* use defaults */ }
+}
 
 // ============ WHICH CONTRACTS TO TRADE ============
 // DEMO MODE: Force micros to mirror $5K live conditions.
@@ -554,6 +584,9 @@ export async function runFuturesAgent(): Promise<{
   const details: string[] = [];
   const trades: FuturesTradeResult[] = [];
   let managed = 0;
+
+  // Load config overrides from Agent Hub
+  await loadFuturesConfig();
 
   // Check Tradovate connection
   const auth = await checkTradovateAuth();

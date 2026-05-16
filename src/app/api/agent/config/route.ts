@@ -30,6 +30,16 @@ const DEFAULTS: Record<string, string> = {
   stocks_enabled: "paper", // disabled, paper, live — stock entry gate mode
   stock_min_score: "65", // Min analysis score for stock entries
   stock_min_confidence: "70", // Min confidence % for stock entries
+  // Futures agent rules (read by futures-agent.ts at runtime)
+  futures_risk_per_trade_pct: "5", // % of equity per trade
+  futures_daily_loss_limit_pct: "10", // % daily max loss
+  futures_max_drawdown_pct: "15", // % drawdown kill switch
+  futures_max_contracts: "6", // Max contracts per trade
+  futures_max_total_contracts: "10", // Max total contracts across all
+  futures_max_trades_per_day: "3", // Base limit per day
+  futures_atr_stop_multiplier: "1.5",
+  futures_atr_target_multiplier: "3.5",
+  futures_simulated_equity: "7000", // Simulated live capital ($)
 };
 
 export async function GET() {
