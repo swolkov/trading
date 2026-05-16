@@ -233,9 +233,12 @@ ${sectorInsights.map((s) => `- ${s}`).join("\n")}
       },
     });
 
+    await prisma.agentConfig.upsert({ where: { key: "premarket_last_run" }, update: { value: new Date().toISOString() }, create: { key: "premarket_last_run", value: new Date().toISOString() } }).catch(() => {});
+
     return Response.json({ status: "ok", briefing, details });
   } catch (error) {
     console.error("[premarket]", error);
+    try { await sendNotification(`🚨 PREMARKET CRON CRASH: ${error instanceof Error ? error.message : "Unknown"}`, "general"); } catch {}
     return Response.json({ error: String(error) }, { status: 500 });
   }
 }

@@ -484,7 +484,27 @@ export async function placeLimitBracketOrder(params: {
     }),
   }) as { orderId: number };
 
-  // Place stop loss (GTC — protects if limit fills)
+  // Wait for entry fill before placing bracket orders (prevent orphaned stops/targets)
+  // Poll for up to 30 seconds (limit orders may take time)
+  let filled = false;
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const orderStatus = await tvFetch(`/order/item?id=${entryData.orderId}`) as { ordStatus?: string };
+      if (orderStatus.ordStatus === "Filled") { filled = true; break; }
+      if (orderStatus.ordStatus === "Cancelled" || orderStatus.ordStatus === "Rejected") {
+        return { orderId: entryData.orderId, status: "entry_not_filled" };
+      }
+    } catch { /* continue polling */ }
+  }
+
+  if (!filled) {
+    // Entry didn't fill within 30s — return without placing brackets
+    // The agent's position monitor will manage if it fills later
+    return { orderId: entryData.orderId, status: "limit_pending", warnings: ["Entry not yet filled — brackets deferred to position monitor"] };
+  }
+
+  // Entry filled — now place protective bracket orders
   try {
     await tvFetch("/order/placeorder", {
       method: "POST",
@@ -502,7 +522,6 @@ export async function placeLimitBracketOrder(params: {
     });
   } catch { /* agent monitors positions as backup */ }
 
-  // Place take profit (GTC)
   try {
     await tvFetch("/order/placeorder", {
       method: "POST",
@@ -520,7 +539,7 @@ export async function placeLimitBracketOrder(params: {
     });
   } catch { /* agent monitors positions as backup */ }
 
-  return { orderId: entryData.orderId, status: "limit_submitted" };
+  return { orderId: entryData.orderId, status: "limit_filled" };
 }
 
 // Cancel an order (with single retry)

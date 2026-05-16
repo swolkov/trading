@@ -84,8 +84,8 @@ ${briefing.sectorAvoids?.map((s: string) => `- ${s}`).join("\n") || "None specif
       const currentVix = vixBars[vixBars.length - 1].c;
       const vixValues = vixBars.map((b) => b.c);
       const sortedVix = [...vixValues].sort((a, b) => a - b);
-      const percentileIdx = sortedVix.findIndex((v) => v >= currentVix);
-      const percentile = Math.round((percentileIdx / sortedVix.length) * 100);
+      const belowCount = sortedVix.filter((v) => v <= currentVix).length;
+      const percentile = Math.round((belowCount / sortedVix.length) * 100);
 
       const prevVix = vixBars.length > 1 ? vixBars[vixBars.length - 2].c : currentVix;
       const termStructure = currentVix < prevVix ? "Contango (normal)" : "Backwardation (fear)";

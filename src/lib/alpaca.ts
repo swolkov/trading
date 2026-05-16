@@ -59,10 +59,16 @@ async function alpacaFetch(url: string, options?: RequestInit) {
   const res = await fetch(resolvedUrl, {
     ...options,
     headers: { ...headers(), ...options?.headers },
+    signal: AbortSignal.timeout(15000), // 15s timeout to prevent hanging
   });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Alpaca API error ${res.status}: ${body}`);
+  }
+  const contentType = res.headers.get("content-type") || "";
+  if (options?.method === "DELETE") return; // DELETE returns no body
+  if (!contentType.includes("json")) {
+    throw new Error(`Alpaca returned non-JSON (${contentType}): ${(await res.text()).slice(0, 200)}`);
   }
   return res.json();
 }
@@ -167,9 +173,8 @@ export async function placeOrder(params: PlaceOrderParams): Promise<Order> {
 }
 
 export async function cancelOrder(orderId: string): Promise<void> {
-  await fetch(`${BASE_URL}/v2/orders/${orderId}`, {
+  await alpacaFetch(`${BASE_URL}/v2/orders/${orderId}`, {
     method: "DELETE",
-    headers: headers(),
   });
 }
 

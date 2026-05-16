@@ -38,15 +38,11 @@ export interface LearningInsights {
 }
 
 export async function generateLearningInsights(): Promise<LearningInsights> {
-  // Get all closed trades (sells with P&L)
+  // Get closed trades (last 500 for performance — avoids unbounded query growth)
   const allTrades = await prisma.autoTradeLog.findMany({
     where: { pnl: { not: null } },
     orderBy: { createdAt: "desc" },
-  });
-
-  const allBuys = await prisma.autoTradeLog.findMany({
-    where: { action: { in: ["buy", "buy_call", "buy_put"] } },
-    orderBy: { createdAt: "desc" },
+    take: 500,
   });
 
   const allReports = await prisma.researchReport.findMany({
@@ -153,14 +149,25 @@ export async function generateLearningInsights(): Promise<LearningInsights> {
     .sort((a, b) => b.trades - a.trades)
     .slice(0, 15);
 
-  // Market regime stats from agent runs
+  // Market regime stats — correlate trades with the regime at time of trade
   const regimeMap: Record<string, { trades: number; wins: number; totalPnl: number }> = {};
   for (const run of agentRuns) {
-    const regimeMatch = run.summary.match(/\[(BULL|BEAR|CHOPPY)\]/);
-    if (regimeMatch) {
+    const regimeMatch = run.summary?.match(/\[(BULL|BEAR|CHOPPY)\]/);
+    if (regimeMatch && run.tradesPlaced > 0) {
       const regime = regimeMatch[1];
       if (!regimeMap[regime]) regimeMap[regime] = { trades: 0, wins: 0, totalPnl: 0 };
       regimeMap[regime].trades += run.tradesPlaced;
+      // Find trades from this run's timeframe to compute actual win/loss
+      const runStart = new Date(run.createdAt);
+      const runEnd = new Date(runStart.getTime() + (run.durationMs || 300000));
+      const runTrades = allTrades.filter((t) => {
+        const tc = new Date(t.createdAt);
+        return tc >= runStart && tc <= runEnd;
+      });
+      for (const t of runTrades) {
+        if ((t.pnl || 0) > 0) regimeMap[regime].wins++;
+        regimeMap[regime].totalPnl += t.pnl || 0;
+      }
     }
   }
   const regimeStats = Object.entries(regimeMap)

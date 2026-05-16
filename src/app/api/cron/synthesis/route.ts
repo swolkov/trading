@@ -1,5 +1,6 @@
 import { runSynthesisAgent } from "@/lib/synthesis-agent";
 import { sendNotification } from "@/lib/notifications";
+import { prisma } from "@/lib/db";
 
 export const maxDuration = 120;
 
@@ -37,6 +38,8 @@ export async function GET(request: Request) {
       try { await sendNotification(summary, "futures"); } catch {}
     }
 
+    await prisma.agentConfig.upsert({ where: { key: "synthesis_last_run" }, update: { value: new Date().toISOString() }, create: { key: "synthesis_last_run", value: new Date().toISOString() } }).catch(() => {});
+
     return Response.json({
       status: "ok",
       ran: result.shouldRun,
@@ -50,6 +53,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error("[synthesis]", error);
+    try { await sendNotification(`🚨 SYNTHESIS CRON CRASH: ${error instanceof Error ? error.message : "Unknown"}`, "general"); } catch {}
     return Response.json({ error: String(error) }, { status: 500 });
   }
 }

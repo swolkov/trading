@@ -815,6 +815,24 @@ function checkPositions(sym: string, price: number) {
   const pos = positions.get(sym);
   if (!pos) return;
 
+  // AGGREGATE DRAWDOWN CHECK: close ALL positions if total drawdown exceeds 15% of equity
+  const MAX_DRAWDOWN_PCT = 0.15;
+  const aggregateUnrealized = [...positions.entries()].reduce((sum, [s, p]) => {
+    const m = CONTRACT_MULTIPLIERS[s] || 5;
+    const lastPrice = s === sym ? price : (barBuilders.get(s)?.currentBar?.c || p.entryPrice);
+    const d = p.direction === "long" ? lastPrice - p.entryPrice : p.entryPrice - lastPrice;
+    return sum + d * m * p.quantity;
+  }, 0);
+  const totalDrawdown = aggregateUnrealized + dailyPnl;
+  if (tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * MAX_DRAWDOWN_PCT)) {
+    log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${(MAX_DRAWDOWN_PCT * 100)}% of equity $${tradovateEquity.toFixed(0)} — CLOSING ALL`);
+    notify(`🚨 AGGREGATE DRAWDOWN KILL: $${totalDrawdown.toFixed(0)} loss. Closing all positions.`, "general");
+    for (const [s, p] of positions) {
+      closePosition(s, barBuilders.get(s)?.currentBar?.c || p.entryPrice, "emergency");
+    }
+    return;
+  }
+
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
@@ -926,9 +944,10 @@ function checkPositions(sym: string, price: number) {
     }
   }
 
-  // Emergency
-  if (diff * mult * pos.quantity < -750) {
-    log(`${sym}: EMERGENCY CLOSE $${(diff * mult * pos.quantity).toFixed(0)}`);
+  // Per-position emergency: cap single-position loss at 10% of equity or $750, whichever is lower
+  const perPositionLimit = Math.min(750, tradovateEquity * 0.10);
+  if (pnlDollars < -perPositionLimit) {
+    log(`${sym}: EMERGENCY CLOSE $${pnlDollars.toFixed(0)} exceeds per-position limit $${perPositionLimit.toFixed(0)}`);
     closePosition(sym, price, "emergency"); return;
   }
 }
@@ -1699,7 +1718,13 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const riskPct = 0.01;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  const qty = Math.max(1, Math.min(5, Math.floor(maxRisk / riskPer))); // Max 5 contracts per trade (matches futures-agent)
+  let qty = Math.max(1, Math.min(5, Math.floor(maxRisk / riskPer)));
+  // Hard ceiling: never risk more than 10% of equity on a single trade
+  const totalRisk = riskPer * qty;
+  if (totalRisk > equity * 0.10) {
+    qty = Math.max(1, Math.floor((equity * 0.10) / riskPer));
+    log(`${sym}: HARD CAP — risk $${totalRisk.toFixed(0)} exceeds 10% equity, capped to ${qty} contracts`);
+  }
   const rr = targetDist / stopDist;
   if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
 

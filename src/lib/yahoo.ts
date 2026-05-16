@@ -238,7 +238,7 @@ export async function getIncomeStatements(
       operatingExpenses: s.totalOperatingExpenses || 0,
       operatingIncome: s.operatingIncome || 0,
       netIncome: s.netIncome || 0,
-      eps: s.netIncome && s.totalRevenue ? Number(s.netIncome) / Number(s.totalRevenue) : 0,
+      eps: s.dilutedEPS || (s.netIncome && s.sharesOutstanding ? Number(s.netIncome) / Number(s.sharesOutstanding) : 0),
       ebitda: s.ebitda || 0,
     }));
   } catch {

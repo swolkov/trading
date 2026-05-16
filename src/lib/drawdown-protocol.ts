@@ -119,18 +119,29 @@ const MODE_CONFIGS: Record<DrawdownMode, {
 };
 
 export async function evaluateDrawdownState(): Promise<DrawdownState> {
-  // Try Tradovate first (futures account), fall back to Alpaca (stocks/options)
-  let currentEquity = 0;
+  // Evaluate BOTH accounts independently and use the worst drawdown
+  let tradovateEquity = 0;
+  let alpacaEquity = 0;
   try {
     const tradovate = await getTradovateAccountSummary();
-    currentEquity = tradovate.netLiq || tradovate.balance || 0;
-  } catch {
-    // Fallback to Alpaca if Tradovate unavailable
+    tradovateEquity = tradovate.netLiq || tradovate.balance || 0;
+  } catch { /* Tradovate unavailable */ }
+  try {
     const account = await getAccount();
-    currentEquity = parseFloat(account.equity);
+    alpacaEquity = parseFloat(account.equity) || 0;
+  } catch { /* Alpaca unavailable */ }
+
+  // Use total equity across both accounts (not one or the other)
+  const currentEquity = tradovateEquity + alpacaEquity;
+  if (currentEquity <= 0) {
+    // Both accounts unavailable — can't evaluate, return last known state
+    const lastState = await prisma.agentConfig.findUnique({ where: { key: "drawdown_state" } });
+    if (lastState?.value) {
+      try { return JSON.parse(lastState.value) as DrawdownState; } catch {}
+    }
   }
 
-  // Get peak equity from stored state
+  // Get peak equity from stored state (tracks combined peak, not per-account)
   const storedState = await prisma.agentConfig.findUnique({ where: { key: "drawdown_state" } });
   let peakEquity = currentEquity;
   let previousMode: DrawdownMode = "NORMAL";

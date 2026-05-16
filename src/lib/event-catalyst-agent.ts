@@ -280,10 +280,16 @@ export async function runEventCatalystCheck(): Promise<EventCalendarResult> {
     ? Math.min(...activeReductions.map((r) => r.multiplier))
     : 1.0;
 
+  // Store with TTL — expires at end of trading day (9 PM ET) so it doesn't persist if agent crashes
+  const ttlNow = new Date();
+  const expiresAt = new Date(ttlNow);
+  expiresAt.setUTCHours(21 + (ttlNow.getTimezoneOffset() === 240 ? 4 : 5), 0, 0, 0); // 9 PM ET
+  if (expiresAt < ttlNow) expiresAt.setDate(expiresAt.getDate() + 1);
+
   await prisma.agentConfig.upsert({
     where: { key: "event_size_override" },
-    update: { value: String(effectiveMultiplier) },
-    create: { key: "event_size_override", value: String(effectiveMultiplier) },
+    update: { value: JSON.stringify({ multiplier: effectiveMultiplier, expiresAt: expiresAt.toISOString(), updatedAt: ttlNow.toISOString() }) },
+    create: { key: "event_size_override", value: JSON.stringify({ multiplier: effectiveMultiplier, expiresAt: expiresAt.toISOString(), updatedAt: ttlNow.toISOString() }) },
   });
 
   // Store event calendar for dashboard

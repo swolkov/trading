@@ -72,8 +72,29 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // Auth check: require CRON_SECRET for config changes
+  const authHeader = request.headers.get("authorization");
+  if (
+    !process.env.CRON_SECRET ||
+    authHeader !== `Bearer ${process.env.CRON_SECRET}`
+  ) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const updates: Record<string, string> = await request.json();
+
+    // Validate numeric values to prevent dangerous configs
+    const numericKeys = ["max_positions", "max_per_sector", "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day", "daily_loss_limit", "daily_spend_cap", "max_options_exposure", "per_trade_max"];
+    for (const key of numericKeys) {
+      if (key in updates) {
+        const num = parseFloat(updates[key]);
+        if (isNaN(num) || num < 0) {
+          return Response.json({ error: `Invalid value for ${key}: must be a positive number` }, { status: 400 });
+        }
+      }
+    }
+
     for (const [key, value] of Object.entries(updates)) {
       if (key in DEFAULTS) {
         await prisma.agentConfig.upsert({

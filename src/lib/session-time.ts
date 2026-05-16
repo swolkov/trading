@@ -77,8 +77,29 @@ export function isHalt(): boolean {
   return hour >= 17 && hour < 18;
 }
 
-/** Is it Regular Trading Hours? (9:30 AM - 4:00 PM ET) */
+// US market holidays (fixed dates) — update annually
+// Early closes (1 PM ET) not included, but these are full closures
+const MARKET_HOLIDAYS_2026 = [
+  "2026-01-01", // New Year's Day
+  "2026-01-19", // MLK Day
+  "2026-02-16", // Presidents' Day
+  "2026-04-03", // Good Friday
+  "2026-05-25", // Memorial Day
+  "2026-06-19", // Juneteenth
+  "2026-07-03", // Independence Day observed
+  "2026-09-07", // Labor Day
+  "2026-11-26", // Thanksgiving
+  "2026-12-25", // Christmas
+];
+
+/** Is today a market holiday? */
+export function isMarketHoliday(): boolean {
+  return MARKET_HOLIDAYS_2026.includes(getETDateString());
+}
+
+/** Is it Regular Trading Hours? (9:30 AM - 4:00 PM ET, not holiday) */
 export function isRTH(): boolean {
+  if (isMarketHoliday()) return false;
   const hour = getETHour();
   return hour >= 9.5 && hour < 16;
 }

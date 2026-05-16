@@ -63,6 +63,12 @@ export async function GET(request: Request) {
         lastBeat = new Date(heartbeat.value).getTime();
       }
 
+      // Guard against NaN (corrupted heartbeat value) — treat as stale
+      if (isNaN(lastBeat)) {
+        console.log(`[cron/futures] Heartbeat value is corrupted (NaN). Treating as stale — taking over.`);
+        lastBeat = 0;
+      }
+
       const ageMinutes = (Date.now() - lastBeat) / 60000;
 
       if (ageMinutes < 5) {

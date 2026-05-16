@@ -93,8 +93,11 @@ function matchFillsToRoundTrips(fills: TradovateFill[], contractMap: Record<numb
         // Closing (partially or fully)
         const closeQty = Math.min(Math.abs(position), Math.abs(fillQty));
         const direction = position > 0 ? "long" : "short";
-        const entryFill = entryFills[0];
-        const entryPrice = entryFill.price;
+        // Use volume-weighted average entry price across all entry fills
+        const totalEntryQty = entryFills.reduce((s, f) => s + Math.abs(f.qty), 0);
+        const entryPrice = totalEntryQty > 0
+          ? entryFills.reduce((s, f) => s + f.price * Math.abs(f.qty), 0) / totalEntryQty
+          : entryFills[0]?.price || 0;
         const exitPrice = fill.price;
 
         const priceDiff = direction === "long"
@@ -105,21 +108,22 @@ function matchFillsToRoundTrips(fills: TradovateFill[], contractMap: Record<numb
         roundTrips.push({
           symbol: sym,
           direction,
-          entryFill,
+          entryFill: entryFills[0],
           exitFill: fill,
           entryPrice,
           exitPrice,
           qty: closeQty,
           pnl,
-          entryTime: entryFill.timestamp,
+          entryTime: entryFills[0]?.timestamp || fill.timestamp,
           exitTime: fill.timestamp,
         });
 
+        const oldPosition = position;
         position += fillQty;
         if (position === 0) {
           entryFills = [];
-        } else if (Math.sign(position) !== Math.sign(position - fillQty)) {
-          // Flipped direction — new entry
+        } else if (Math.sign(position) !== Math.sign(oldPosition)) {
+          // Flipped direction — new entry with remaining qty
           entryFills = [fill];
         }
       } else {

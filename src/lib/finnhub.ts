@@ -3,8 +3,12 @@ const API_KEY = () => process.env.FINNHUB_API_KEY || "";
 
 async function finnhubFetch(endpoint: string) {
   const url = `${FINNHUB_URL}${endpoint}${endpoint.includes("?") ? "&" : "?"}token=${API_KEY()}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Finnhub error ${res.status}`);
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000) }); // 10s timeout
+  if (res.status === 429) throw new Error("Finnhub rate limit hit (429)");
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Finnhub error ${res.status}: ${body.slice(0, 100)}`);
+  }
   return res.json();
 }
 
