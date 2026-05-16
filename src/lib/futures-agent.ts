@@ -687,7 +687,17 @@ export async function runFuturesAgent(): Promise<{
       prisma.agentConfig.findUnique({ where: { key: "event_size_override" } }),
     ]);
     const regimeOverride = regimeConfig?.value ? parseFloat(regimeConfig.value) || 1.0 : 1.0;
-    const eventOverride = eventConfig?.value ? parseFloat(eventConfig.value) || 1.0 : 1.0;
+    // Event override now stored as JSON with TTL — fall back to plain number for backward compat
+    let eventOverride = 1.0;
+    if (eventConfig?.value) {
+      try {
+        const parsed = JSON.parse(eventConfig.value);
+        const expired = parsed.expiresAt && new Date(parsed.expiresAt) < new Date();
+        eventOverride = expired ? 1.0 : (parsed.multiplier || 1.0);
+      } catch {
+        eventOverride = parseFloat(eventConfig.value) || 1.0;
+      }
+    }
     sizeOverride = regimeOverride * eventOverride;
     if (sizeOverride !== 1.0) {
       details.push(`OVERRIDES: regime ${regimeOverride}x × event ${eventOverride}x = ${sizeOverride.toFixed(2)}x sizing`);
@@ -712,9 +722,10 @@ export async function runFuturesAgent(): Promise<{
   const dailyLossLimit = equity * FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
   details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade${sizeOverride !== 1.0 ? ` (${sizeOverride.toFixed(2)}x adjusted)` : ""} | $${dailyLossLimit.toFixed(0)} daily limit`);
 
-  // Check daily P&L (ET-aware day boundary)
+  // Check daily P&L (ET-aware day boundary — force ET interpretation regardless of server timezone)
   const etDateStr = getETDateString();
-  const todayStart = new Date(`${etDateStr}T00:00:00`);
+  const isDST = new Date().toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }).includes("EDT");
+  const todayStart = new Date(`${etDateStr}T00:00:00${isDST ? "-04:00" : "-05:00"}`);
   const todayTrades = await prisma.autoTradeLog.findMany({
     where: { symbol: { startsWith: "FUT:" }, createdAt: { gte: todayStart } },
   });
@@ -769,6 +780,35 @@ export async function runFuturesAgent(): Promise<{
     openOrders = await getOpenOrders();
   } catch (err) {
     details.push(`WARNING: Failed to fetch open orders: ${err}. Bracket cancellation may fail.`);
+  }
+
+  // ── AGGREGATE DRAWDOWN CHECK (all positions combined) ──
+  const aggregateUnrealizedPnl = futuresPositions.reduce((sum, pos) => {
+    const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
+    const cached = sym ? posBarCache[sym] : null;
+    if (!cached || cached.price === 0) return sum;
+    const multiplier = sym ? FUTURES_CONTRACTS[sym].multiplier : 5;
+    const pnl = (cached.price - pos.netPrice) * Math.abs(pos.netPos) * multiplier * (pos.netPos > 0 ? 1 : -1);
+    return sum + pnl;
+  }, 0);
+  const aggregateDrawdown = aggregateUnrealizedPnl + todayPnl; // unrealized + realized today
+  if (aggregateDrawdown < -(equity * FUTURES_RULES.MAX_DRAWDOWN_PCT)) {
+    details.push(`AGGREGATE DRAWDOWN KILL SWITCH: Combined P&L $${aggregateDrawdown.toFixed(0)} exceeds ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% of equity — CLOSING ALL`);
+    for (const pos of futuresPositions) {
+      const absQty = Math.abs(pos.netPos);
+      try {
+        await placeMarketOrder({ contractId: pos.contractId, action: pos.netPos > 0 ? "Sell" : "Buy", quantity: absQty });
+        await prisma.autoTradeLog.create({ data: {
+          symbol: `FUT:${pos.contractName}`, action: "futures_emergency_close",
+          qty: absQty, price: posBarCache[Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s)) || ""]?.price || 0,
+          pnl: null, orderId: null,
+          reason: `AGGREGATE DRAWDOWN KILL: Combined P&L $${aggregateDrawdown.toFixed(0)} exceeded ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity limit. Closed all positions.`,
+        }});
+      } catch (err) { details.push(`  Emergency close ${pos.contractName} failed: ${err}`); }
+    }
+    try { for (const o of openOrders) { await cancelOrder(o.id); } } catch {}
+    try { await sendNotification(`🚨 AGGREGATE DRAWDOWN KILL: All futures closed. Combined P&L: $${aggregateDrawdown.toFixed(0)}`, "futures"); } catch {}
+    return { trades, managed, details };
   }
 
   for (const pos of futuresPositions) {
@@ -997,18 +1037,6 @@ export async function runFuturesAgent(): Promise<{
   // we still scan for setups and log them as "paper trades" with hypothetical entry/stop/target.
   // The post-market review tracks whether these would have won or lost.
   // This is how the brain learns 24/7 — studying setups even when it can't act.
-  // Paper mode for non-trade-count reasons (session, loss limit). Trade count is checked per-trade with A+ override.
-  const paperTradeBase = !canScanNewTrades || todayPnl < -dailyLossLimit || atHardTradeLimit;
-  if (paperTradeBase && !canScanNewTrades) {
-    details.push(`LEARNING MODE: Scanning for paper trades (${session} session) — no real entries`);
-  }
-
-  const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(p.netPos), 0);
-  if (totalContracts >= FUTURES_RULES.MAX_TOTAL_CONTRACTS) {
-    details.push("At contract limit — not scanning for new trades");
-    return { trades, managed, details };
-  }
-
   // ── TILT PROTECTION: No re-entry on recently stopped symbols ──
   // Query today's stops to build stopped-symbol set and consecutive-stop count
   const stoppedSymbols = new Set<string>();
@@ -1038,6 +1066,7 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Tilt pause: 2+ consecutive stops = paper mode only (still scans for learning)
+  const isTilted = consecutiveStops >= 2;
   if (consecutiveStops >= 3) {
     details.push(`TILT L2: ${consecutiveStops} consecutive stops today — real trades blocked, learning mode`);
   } else if (consecutiveStops >= 2) {
@@ -1046,6 +1075,18 @@ export async function runFuturesAgent(): Promise<{
 
   if (stoppedSymbols.size > 0) {
     details.push(`STOPPED SYMBOLS (no re-entry): ${[...stoppedSymbols].join(", ")}`);
+  }
+
+  // Paper mode for non-trade-count reasons (session, loss limit, tilt). Trade count is checked per-trade with A+ override.
+  const paperTradeBase = !canScanNewTrades || todayPnl < -dailyLossLimit || atHardTradeLimit || isTilted;
+  if (paperTradeBase && !canScanNewTrades) {
+    details.push(`LEARNING MODE: Scanning for paper trades (${session} session) — no real entries`);
+  }
+
+  const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(p.netPos), 0);
+  if (totalContracts >= FUTURES_RULES.MAX_TOTAL_CONTRACTS) {
+    details.push("At contract limit — not scanning for new trades");
+    return { trades, managed, details };
   }
 
   // Determine which symbols to trade based on equity + regime
@@ -1240,7 +1281,7 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
 
     // Size by risk budget: how many contracts fit within maxRiskPerTrade?
     const maxByRisk = Math.floor(maxRiskPerTrade / riskPerContract);
-    const contracts = Math.max(1, Math.min(
+    let contracts = Math.max(1, Math.min(
       FUTURES_RULES.MAX_CONTRACTS_PER_TRADE,
       maxByRisk,
     ));
@@ -1248,7 +1289,8 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     // Hard ceiling: never risk more than 10% on a single trade (absolute safety net)
     const totalRisk = riskPerContract * contracts;
     if (totalRisk > equity * 0.10) {
-      details.push(`  HARD CAP: Risk $${totalRisk.toFixed(0)} (${((totalRisk / equity) * 100).toFixed(1)}%) exceeds 10% ceiling — capping at 1 contract`);
+      contracts = Math.max(1, Math.floor((equity * 0.10) / riskPerContract));
+      details.push(`  HARD CAP: Risk $${totalRisk.toFixed(0)} (${((totalRisk / equity) * 100).toFixed(1)}%) exceeds 10% ceiling — capped to ${contracts} contract(s)`);
     }
 
     const side = setup.direction === "long" ? "BUY" as const : "SELL" as const;
@@ -1280,6 +1322,20 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       try {
         await logDecision("futures-agent", "PAPER", `FUT:${symbol}`, paperReason, setup.confidence);
         await logObservation("futures-agent", `PAPER TRADE: ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)} | Stop $${stopPrice.toFixed(2)} Target $${targetPrice.toFixed(2)} | Session: ${session} | Setup: ${setup.type} | Would check at EOD if target/stop hit`);
+        await logTradeToJournal({
+          tradeId: `PAPER-${Date.now().toString(36)}`,
+          timestamp: new Date().toISOString(),
+          instrument: `FUT:${symbol}`,
+          direction: setup.direction === "long" ? "LONG" : "SHORT",
+          strategy: "futures-scalping",
+          setupType: `paper_${setup.type}`,
+          contracts,
+          entryPrice: price,
+          stopPrice,
+          targetPrice,
+          conviction: setup.confidence,
+          lesson: "PAPER — not executed, tracking outcome at EOD",
+        }, "futures-agent");
       } catch {}
       continue; // Don't execute — just log and move to next symbol
     }
@@ -1307,16 +1363,21 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
         },
       });
 
+      if (order.status === "entry_not_filled") {
+        details.push(`  ORDER CANCELLED — entry did not fill within 2s`);
+        trades.push({
+          symbol, action: setup.direction, contracts, price,
+          stopLoss: stopPrice, target: targetPrice,
+          reasoning: setup.reasoning, orderId: String(order.orderId), success: false,
+        });
+        continue;
+      }
+
       trades.push({
         symbol, action: setup.direction, contracts, price,
         stopLoss: stopPrice, target: targetPrice,
         reasoning: setup.reasoning, orderId: String(order.orderId), success: true,
       });
-
-      if (order.status === "entry_not_filled") {
-        details.push(`  ORDER CANCELLED — entry did not fill within 2s`);
-        continue;
-      }
 
       // Alert if broker stop/target failed
       if (order.warnings?.length) {

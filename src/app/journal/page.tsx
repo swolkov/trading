@@ -49,9 +49,15 @@ interface JournalDay {
   alpacaTrades: AlpacaTrade[];
   futuresTrades: FuturesActivity[];
   totalPnl: number;
+  alpacaPnl: number;
+  futuresPnl: number;
   tradeCount: number;
   winCount: number;
   lossCount: number;
+  alpacaWinCount: number;
+  alpacaLossCount: number;
+  futuresWinCount: number;
+  futuresLossCount: number;
 }
 
 function formatET(iso: string) {
@@ -217,23 +223,28 @@ export default function JournalPage() {
   const journalDays = useMemo(() => {
     const dayMap: Record<string, JournalDay> = {};
 
+    function initDay(dateKey: string): JournalDay {
+      const d = new Date(dateKey + "T12:00:00Z");
+      return {
+        date: dateKey,
+        dateLabel: d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" }),
+        weekday: d.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" }),
+        alpacaTrades: [], futuresTrades: [], totalPnl: 0, alpacaPnl: 0, futuresPnl: 0,
+        tradeCount: 0, winCount: 0, lossCount: 0,
+        alpacaWinCount: 0, alpacaLossCount: 0, futuresWinCount: 0, futuresLossCount: 0,
+      };
+    }
+
     for (const t of (alpacaData?.trades || [])) {
       const dateKey = t.openDate.slice(0, 10);
-      if (!dayMap[dateKey]) {
-        const d = new Date(dateKey + "T12:00:00Z");
-        dayMap[dateKey] = {
-          date: dateKey,
-          dateLabel: d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" }),
-          weekday: d.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" }),
-          alpacaTrades: [], futuresTrades: [], totalPnl: 0, tradeCount: 0, winCount: 0, lossCount: 0,
-        };
-      }
+      if (!dayMap[dateKey]) dayMap[dateKey] = initDay(dateKey);
       dayMap[dateKey].alpacaTrades.push(t);
       dayMap[dateKey].tradeCount++;
       if (t.pnl != null) {
+        dayMap[dateKey].alpacaPnl += t.pnl;
         dayMap[dateKey].totalPnl += t.pnl;
-        if (t.pnl > 0) dayMap[dateKey].winCount++;
-        else if (t.pnl < 0) dayMap[dateKey].lossCount++;
+        if (t.pnl > 0) { dayMap[dateKey].winCount++; dayMap[dateKey].alpacaWinCount++; }
+        else if (t.pnl < 0) { dayMap[dateKey].lossCount++; dayMap[dateKey].alpacaLossCount++; }
       }
     }
 
@@ -242,21 +253,13 @@ export default function JournalPage() {
     // Tradovate account balance deltas are the only accurate P&L source.
     for (const t of (futuresData?.activity || [])) {
       const dateKey = new Date(t.time).toISOString().slice(0, 10);
-      if (!dayMap[dateKey]) {
-        const d = new Date(dateKey + "T12:00:00Z");
-        dayMap[dateKey] = {
-          date: dateKey,
-          dateLabel: d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" }),
-          weekday: d.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" }),
-          alpacaTrades: [], futuresTrades: [], totalPnl: 0, tradeCount: 0, winCount: 0, lossCount: 0,
-        };
-      }
+      if (!dayMap[dateKey]) dayMap[dateKey] = initDay(dateKey);
       dayMap[dateKey].futuresTrades.push(t);
       dayMap[dateKey].tradeCount++;
       if (t.pnl != null) {
         // Only count wins/losses for display, NOT for P&L total
-        if (t.pnl > 0) dayMap[dateKey].winCount++;
-        else if (t.pnl < 0) dayMap[dateKey].lossCount++;
+        if (t.pnl > 0) { dayMap[dateKey].winCount++; dayMap[dateKey].futuresWinCount++; }
+        else if (t.pnl < 0) { dayMap[dateKey].lossCount++; dayMap[dateKey].futuresLossCount++; }
       }
     }
 
@@ -266,7 +269,9 @@ export default function JournalPage() {
     for (const b of balHist) {
       balByDate[b.date] = { sod: b.startBalance ?? undefined, eod: b.endBalance ?? undefined };
     }
+    const todayKey = new Date().toISOString().slice(0, 10);
     const sortedBalDates = Object.keys(balByDate).sort();
+    const datesWithBalancePnl = new Set<string>();
     for (let i = 0; i < sortedBalDates.length; i++) {
       const date = sortedBalDates[i];
       const bal = balByDate[date];
@@ -278,24 +283,36 @@ export default function JournalPage() {
       } else if (nextBal?.sod != null && bal.sod != null) {
         balancePnl = nextBal.sod - bal.sod;
       }
-      if (balancePnl != null && dayMap[date]) {
+      if (balancePnl != null) {
+        if (!dayMap[date]) dayMap[date] = initDay(date);
+        dayMap[date].futuresPnl += balancePnl;
         dayMap[date].totalPnl += balancePnl;
+        datesWithBalancePnl.add(date);
       }
     }
-    // Today: use live balance delta
-    const todayKey = new Date().toISOString().slice(0, 10);
-    if (futuresData?.startOfDayBalance != null && futuresData?.account?.balance != null && dayMap[todayKey]) {
-      dayMap[todayKey].totalPnl += futuresData.account.balance - futuresData.startOfDayBalance;
+    // Today: use live balance delta only if balance history didn't already cover it
+    if (!datesWithBalancePnl.has(todayKey) && futuresData?.startOfDayBalance != null && futuresData?.account?.balance != null) {
+      const todayFutPnl = futuresData.account.balance - futuresData.startOfDayBalance;
+      if (!dayMap[todayKey]) dayMap[todayKey] = initDay(todayKey);
+      dayMap[todayKey].futuresPnl += todayFutPnl;
+      dayMap[todayKey].totalPnl += todayFutPnl;
     }
 
     return Object.values(dayMap).sort((a, b) => b.date.localeCompare(a.date));
   }, [alpacaData, futuresData]);
 
-  const filteredDays = useMemo(() => journalDays.filter((d) => {
-    if (viewMode === "stocks") return d.alpacaTrades.length > 0;
-    if (viewMode === "futures") return d.futuresTrades.length > 0;
-    return true;
-  }), [journalDays, viewMode]);
+  const filteredDays = useMemo(() => {
+    if (viewMode === "all") return journalDays;
+    return journalDays
+      .filter((d) => viewMode === "stocks" ? d.alpacaTrades.length > 0 : (d.futuresTrades.length > 0 || d.futuresPnl !== 0))
+      .map((d) => ({
+        ...d,
+        totalPnl: viewMode === "stocks" ? d.alpacaPnl : d.futuresPnl,
+        tradeCount: viewMode === "stocks" ? d.alpacaTrades.length : d.futuresTrades.length,
+        winCount: viewMode === "stocks" ? d.alpacaWinCount : d.futuresWinCount,
+        lossCount: viewMode === "stocks" ? d.alpacaLossCount : d.futuresLossCount,
+      }));
+  }, [journalDays, viewMode]);
 
   // Stats (safe for empty arrays)
   const totalDays = filteredDays.length;
@@ -427,6 +444,7 @@ export default function JournalPage() {
                   <span>{day.winCount}W {day.lossCount}L</span>
                   {day.alpacaTrades.length > 0 && <span className="px-1 py-px rounded bg-blue-500/10 text-blue-400 text-[9px]">ALP</span>}
                   {day.futuresTrades.length > 0 && <span className="px-1 py-px rounded bg-amber-500/10 text-amber-400 text-[9px]">FUT</span>}
+                  {day.futuresTrades.some(t => t.action.startsWith("paper_")) && <span className="px-1 py-px rounded bg-violet-500/10 text-violet-400 text-[9px]">PAPER</span>}
                 </div>
               </button>
             ))}
@@ -545,7 +563,8 @@ export default function JournalPage() {
                                 t.action.includes("take_profit") ? "bg-emerald-500/15 text-emerald-400" :
                                 t.action.includes("close") ? "bg-amber-500/15 text-amber-400" :
                                 "bg-white/10 text-muted-foreground"
-                              }`}>{t.action.replace("futures_", "").replace(/_/g, " ").toUpperCase()}</span>
+                              }`}>{t.action.replace("futures_", "").replace("paper_", "").replace(/_/g, " ").toUpperCase()}</span>
+                              {t.action.startsWith("paper_") && <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-bold bg-violet-500/15 text-violet-400">PAPER</span>}
                             </td>
                             <td className="px-2 py-2 text-right tabular-nums">{t.qty}</td>
                             <td className="px-2 py-2 text-right tabular-nums">

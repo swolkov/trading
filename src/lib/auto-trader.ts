@@ -72,16 +72,16 @@ async function loadRules() {
 
     if (configMap.max_positions) rules.MAX_POSITIONS = parseInt(configMap.max_positions);
     if (configMap.max_per_sector) rules.MAX_PER_SECTOR = parseInt(configMap.max_per_sector);
-    if (configMap.max_position_pct) rules.MAX_POSITION_PCT = parseInt(configMap.max_position_pct) / 100;
-    if (configMap.min_score) rules.MIN_SCORE_TO_BUY = parseInt(configMap.min_score);
-    if (configMap.min_confidence) rules.MIN_CONFIDENCE = parseInt(configMap.min_confidence);
+    if (configMap.max_position_pct) rules.MAX_POSITION_PCT = parseFloat(configMap.max_position_pct) / 100;
+    if (configMap.min_score) rules.MIN_SCORE_TO_BUY = parseFloat(configMap.min_score);
+    if (configMap.min_confidence) rules.MIN_CONFIDENCE = parseFloat(configMap.min_confidence);
     if (configMap.stop_loss_atr) rules.STOP_ATR_MULTIPLIER = parseFloat(configMap.stop_loss_atr);
-    if (configMap.take_profit_pct) rules.TAKE_PROFIT_PCT = parseInt(configMap.take_profit_pct) / 100;
-    if (configMap.cash_reserve_pct) rules.MIN_CASH_RESERVE_PCT = parseInt(configMap.cash_reserve_pct) / 100;
+    if (configMap.take_profit_pct) rules.TAKE_PROFIT_PCT = parseFloat(configMap.take_profit_pct) / 100;
+    if (configMap.cash_reserve_pct) rules.MIN_CASH_RESERVE_PCT = parseFloat(configMap.cash_reserve_pct) / 100;
     if (configMap.max_daily_trades) rules.MAX_DAILY_TRADES = parseInt(configMap.max_daily_trades);
     if (configMap.cooldown_hours) rules.COOLDOWN_HOURS = parseInt(configMap.cooldown_hours);
-    if (configMap.options_stop_loss_pct) rules.OPTIONS_STOP_LOSS = parseInt(configMap.options_stop_loss_pct) / 100;
-    if (configMap.options_profit_pct) rules.OPTIONS_PROFIT_TARGET = parseInt(configMap.options_profit_pct) / 100;
+    if (configMap.options_stop_loss_pct) rules.OPTIONS_STOP_LOSS = parseFloat(configMap.options_stop_loss_pct) / 100;
+    if (configMap.options_profit_pct) rules.OPTIONS_PROFIT_TARGET = parseFloat(configMap.options_profit_pct) / 100;
   } catch {
     // use defaults
   }
@@ -270,7 +270,16 @@ export async function runTradingAgent(): Promise<AgentResult> {
         prisma.agentConfig.findUnique({ where: { key: "event_size_override" } }),
       ]);
       if (regimeConfig?.value) regimeOverride = parseFloat(regimeConfig.value) || 1.0;
-      if (eventConfig?.value) eventOverride = parseFloat(eventConfig.value) || 1.0;
+      // Event override now stored as JSON with TTL
+      if (eventConfig?.value) {
+        try {
+          const parsed = JSON.parse(eventConfig.value);
+          const expired = parsed.expiresAt && new Date(parsed.expiresAt) < new Date();
+          eventOverride = expired ? 1.0 : (parsed.multiplier || 1.0);
+        } catch {
+          eventOverride = parseFloat(eventConfig.value) || 1.0;
+        }
+      }
       if (regimeOverride !== 1.0) details.push(`REGIME TRANSITION: size override ${regimeOverride}x`);
       if (eventOverride !== 1.0) details.push(`EVENT CATALYST: size override ${eventOverride}x`);
     } catch { /* use defaults */ }
@@ -326,11 +335,18 @@ export async function runTradingAgent(): Promise<AgentResult> {
       if (cm.drawdown_kill_pct) drawdownKillPct = parseFloat(cm.drawdown_kill_pct);
     } catch { /* use defaults */ }
 
-    // DRAWDOWN KILL SWITCH: if account dropped too much from peak, stop
+    // DRAWDOWN KILL SWITCH: if account dropped too much from persisted peak, stop
     const portfolioValue = parseFloat(account.portfolio_value || account.equity);
     const lastEquityVal = parseFloat(account.last_equity);
     const startingCapital = 100000; // paper trading start
-    const peakValue = Math.max(startingCapital, lastEquityVal, portfolioValue);
+    // Fetch persisted high-water mark from DB
+    const peakConfig = await prisma.agentConfig.findUnique({ where: { key: "peak_equity_alpaca" } });
+    const persistedPeak = peakConfig ? parseFloat(peakConfig.value) : startingCapital;
+    const peakValue = Math.max(persistedPeak, portfolioValue);
+    // Update peak if new high
+    if (portfolioValue > persistedPeak) {
+      await prisma.agentConfig.upsert({ where: { key: "peak_equity_alpaca" }, update: { value: String(portfolioValue) }, create: { key: "peak_equity_alpaca", value: String(portfolioValue) } });
+    }
     const drawdownPct = ((peakValue - portfolioValue) / peakValue) * 100;
     if (drawdownPct >= drawdownKillPct) {
       const summary = `KILL SWITCH: Account down ${drawdownPct.toFixed(1)}% from peak (limit: ${drawdownKillPct}%). Agent paused.`;
@@ -356,7 +372,11 @@ export async function runTradingAgent(): Promise<AgentResult> {
         action: { in: ["buy", "buy_call", "buy_put", "earnings_call", "earnings_put", "buy_straddle_call", "buy_straddle_put", "spread_buy_call", "spread_buy_put"] },
       },
     });
-    const todaySpent = todayBuys.reduce((sum, t) => sum + (t.price || 0) * (t.qty || 1) * 100, 0);
+    const todaySpent = todayBuys.reduce((sum, t) => {
+      const isOptions = t.action !== "buy"; // "buy" is stock; buy_call, buy_put, etc. are options
+      const multiplier = isOptions ? 100 : 1;
+      return sum + (t.price || 0) * (t.qty || 1) * multiplier;
+    }, 0);
     const remainingBudget = dailySpendCap - todaySpent;
 
     if (remainingBudget <= 0) {
@@ -645,7 +665,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
         const trailStopPrice = currentPrice - trailDistance;
         const trailFromHigh = (currentPrice - trailStopPrice) / currentPrice;
 
-        const highWaterMark = entryPrice * (1 + pnlPct);
+        // Use persisted high-water mark (highest price seen since entry)
+        const hwmKey = `hwm_${pos.symbol}`;
+        const hwmConfig = await prisma.agentConfig.findUnique({ where: { key: hwmKey } });
+        const prevHigh = hwmConfig ? parseFloat(hwmConfig.value) : currentPrice;
+        const highWaterMark = Math.max(prevHigh, currentPrice);
+        if (currentPrice > prevHigh) {
+          await prisma.agentConfig.upsert({ where: { key: hwmKey }, update: { value: String(currentPrice) }, create: { key: hwmKey, value: String(currentPrice) } });
+        }
         const pullbackFromHigh = 1 - (currentPrice / highWaterMark);
 
         if (pullbackFromHigh > trailFromHigh && pnlPct < RULES.TRAILING_ACTIVATION_PCT * 1.5) {
@@ -1353,6 +1380,22 @@ export async function runTradingAgent(): Promise<AgentResult> {
                   `[PAPER] [${reason}] Score: ${analysis.score}, Conf: ${analysis.confidence}%. Stop: $${stopPrice}. Target: $${(targetPrice as number).toFixed(2)}. R:R: ${riskReward.toFixed(1)}:1. ${analysis.summary.slice(0, 120)}`,
                   analysis.score, analysis.signal
                 );
+                try {
+                  await logTradeToJournal({
+                    tradeId: `PAPER-STK-${Date.now().toString(36)}`,
+                    timestamp: new Date().toISOString(),
+                    instrument: symbol,
+                    direction: "LONG",
+                    strategy: "stock-swing",
+                    setupType: "paper_stock",
+                    contracts: qty,
+                    entryPrice: price,
+                    stopPrice: parseFloat(stopPrice),
+                    targetPrice: targetPrice as number,
+                    conviction: analysis.score,
+                    lesson: "PAPER — not executed, tracking outcome at EOD",
+                  }, "auto-trader");
+                } catch {}
               } else {
                 // Live stock execution
                 details.push(`  BUY ${symbol}: ${qty} shares, ${execType} $${limitPrice} (score: ${analysis.score}, R:R ${riskReward.toFixed(1)}:1, ${reason})`);
@@ -1395,11 +1438,14 @@ export async function runTradingAgent(): Promise<AgentResult> {
                     Math.round(analysis.score / 20));
                 } catch { /* vault optional */ }
               }
+              continue; // Stock trade handled (paper or live) — don't also buy options
             } else if (optionsOnlyMode || isBearish) {
               details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
+            } else {
+              continue; // Neither bullish stock nor options path matched
             }
 
-            // === RISK AGENT REVIEW — final gatekeeper before any trade ===
+            // === RISK AGENT REVIEW — final gatekeeper before any options trade ===
             const riskCheck = reviewTrade(
               symbol,
               isBearish ? "bearish" : "bullish",

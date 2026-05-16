@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Position {
@@ -107,6 +107,7 @@ export default function PerformancePage() {
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [futures, setFutures] = useState<FuturesPerfData | null>(null);
+  const [activeTab, setActiveTab] = useState<"options" | "futures" | "paper">("options");
 
   useEffect(() => {
     fetch("/api/trades/analysis").then((r) => r.json()).then(setData).catch(console.error);
@@ -153,16 +154,41 @@ export default function PerformancePage() {
         <p className="text-[11px] text-muted-foreground/50">Options &amp; Futures — trade analytics by account</p>
       </div>
 
-      {/* ═══════════ OPTIONS SECTION ═══════════ */}
-      <div className="flex items-center gap-3 pt-2">
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-purple-500/[0.08] border border-purple-500/20">
-          <span className="w-2 h-2 rounded-full bg-purple-400" />
-          <span className="text-sm font-bold tracking-tight text-purple-400">Options</span>
-        </div>
-        <span className="text-[10px] text-muted-foreground/40">Alpaca account</span>
-        <div className="flex-1 border-t border-purple-500/10" />
+      {/* Account Tabs */}
+      <div className="flex gap-1.5">
+        <button
+          onClick={() => setActiveTab("options")}
+          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+            activeTab === "options"
+              ? "bg-purple-500/15 text-purple-400 ring-1 ring-purple-500/30"
+              : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
+          }`}
+        >
+          Options / Alpaca
+        </button>
+        <button
+          onClick={() => setActiveTab("futures")}
+          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+            activeTab === "futures"
+              ? "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30"
+              : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
+          }`}
+        >
+          Futures / Tradovate
+        </button>
+        <button
+          onClick={() => setActiveTab("paper")}
+          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+            activeTab === "paper"
+              ? "bg-violet-500/15 text-violet-400 ring-1 ring-violet-500/30"
+              : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
+          }`}
+        >
+          Paper Trades
+        </button>
       </div>
 
+      {activeTab === "options" && <>
       {/* Big P&L */}
       <Card className={`border-2 ${s.totalPnl >= 0 ? "border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.03] to-transparent" : "border-red-500/30 bg-gradient-to-br from-red-500/[0.03] to-transparent"}`}>
         <CardContent className="pt-6 pb-4 text-center">
@@ -464,17 +490,9 @@ export default function PerformancePage() {
         </CardContent>
       </Card>
 
-      {/* ═══════════ FUTURES SECTION ═══════════ */}
-      <div className="flex items-center gap-3 pt-4">
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
-          <span className="w-2 h-2 rounded-full bg-amber-400" />
-          <span className="text-sm font-bold tracking-tight text-amber-400">Futures</span>
-        </div>
-        <span className="text-[10px] text-muted-foreground/40">Tradovate account</span>
-        <div className="flex-1 border-t border-amber-500/10" />
-      </div>
+      </>}
 
-      {(() => {
+      {activeTab === "futures" && (() => {
         const fp = futures?.fillBasedPnl;
         const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null);
         const hasFillData = !!fp && fp.tradeCount > closedFromDb.length;
@@ -716,8 +734,131 @@ export default function PerformancePage() {
         );
       })()}
 
+      {/* ═══════════ PAPER TRADES TAB ═══════════ */}
+      {activeTab === "paper" && (() => {
+        // Paper trades from futures activity (action starts with paper_)
+        const allActivity = futures?.activity || [];
+        const paperTrades = allActivity.filter((t) => t.action.startsWith("paper_"));
+        const scoredPapers = paperTrades.filter((t) => t.pnl != null);
+        const unscoredPapers = paperTrades.filter((t) => t.pnl == null);
+        const paperWins = scoredPapers.filter((t) => (t.pnl || 0) > 0);
+        const paperLosses = scoredPapers.filter((t) => (t.pnl || 0) < 0);
+        const paperTotalPnl = scoredPapers.reduce((s, t) => s + (t.pnl || 0), 0);
+        const paperWinRate = scoredPapers.length > 0 ? (paperWins.length / scoredPapers.length * 100) : 0;
+        const paperAvgWin = paperWins.length > 0 ? paperWins.reduce((s, t) => s + (t.pnl || 0), 0) / paperWins.length : 0;
+        const paperAvgLoss = paperLosses.length > 0 ? paperLosses.reduce((s, t) => s + (t.pnl || 0), 0) / paperLosses.length : 0;
+
+        return (
+          <>
+            <Card className="border-2 border-violet-500/20 bg-gradient-to-br from-violet-500/[0.03] to-transparent">
+              <CardContent className="pt-6 pb-4 text-center">
+                <p className="text-sm text-muted-foreground mb-1">Hypothetical P&L — if these were real trades</p>
+                <p className={`text-5xl font-black tracking-tight ${pnl(paperTotalPnl)}`}>{fmt(Math.round(paperTotalPnl))}</p>
+                <p className="text-sm text-muted-foreground mt-2">
+                  {scoredPapers.length} scored ({paperWins.length}W / {paperLosses.length}L) · {unscoredPapers.length} awaiting EOD review
+                </p>
+              </CardContent>
+            </Card>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Paper Win Rate</p>
+                  <p className={`text-2xl font-bold mt-1 ${paperWinRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{paperWinRate.toFixed(0)}%</p>
+                  <p className="text-[10px] text-muted-foreground/50">{paperWins.length}W / {paperLosses.length}L</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Paper Win</p>
+                  <p className="text-2xl font-bold mt-1 text-emerald-400">{paperAvgWin > 0 ? `+$${paperAvgWin.toFixed(0)}` : "—"}</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Paper Loss</p>
+                  <p className="text-2xl font-bold mt-1 text-red-400">{paperAvgLoss < 0 ? `-$${Math.abs(paperAvgLoss).toFixed(0)}` : "—"}</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Total Paper Trades</p>
+                  <p className="text-2xl font-bold mt-1">{paperTrades.length}</p>
+                  <p className="text-[10px] text-muted-foreground/50">{scoredPapers.length} scored</p>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Paper trade log */}
+            {paperTrades.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Paper Trade Log</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-card z-10">
+                        <tr className="text-muted-foreground/60 border-b border-white/10">
+                          <th className="text-left py-2 font-medium">Time</th>
+                          <th className="text-left py-2 font-medium">Symbol</th>
+                          <th className="text-left py-2 font-medium">Direction</th>
+                          <th className="text-right py-2 font-medium">Qty</th>
+                          <th className="text-right py-2 font-medium">Entry</th>
+                          <th className="text-right py-2 font-medium">Hypothetical P&L</th>
+                          <th className="text-center py-2 font-medium">Result</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paperTrades.map((t) => {
+                          const result = t.pnl != null ? (t.pnl > 0 ? "WIN" : "LOSS") : "PENDING";
+                          return (
+                            <tr key={t.id} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                              <td className="py-2 text-muted-foreground/50 tabular-nums whitespace-nowrap">
+                                {new Date(t.time).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                              </td>
+                              <td className="py-2 font-bold">{t.symbol}</td>
+                              <td className="py-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+                                }`}>{t.action.replace("paper_", "").toUpperCase()}</span>
+                              </td>
+                              <td className="py-2 text-right tabular-nums">{t.qty}</td>
+                              <td className="py-2 text-right tabular-nums">{t.price ? `$${t.price.toFixed(2)}` : "—"}</td>
+                              <td className={`py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnl(t.pnl) : ""}`}>
+                                {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "—"}
+                              </td>
+                              <td className="py-2 text-center">
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  result === "WIN" ? "bg-emerald-500/15 text-emerald-400" :
+                                  result === "LOSS" ? "bg-red-500/15 text-red-400" :
+                                  "bg-violet-500/15 text-violet-400"
+                                }`}>{result}</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {paperTrades.length === 0 && (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <p className="text-sm text-muted-foreground/50">No paper trades yet</p>
+                  <p className="text-[11px] text-muted-foreground/30 mt-1">Set agents to "paper" mode in Agent Hub to start logging hypothetical trades</p>
+                </CardContent>
+              </Card>
+            )}
+          </>
+        );
+      })()}
+
       {/* Ready Checklist */}
-      <Card className="border-2 border-white/10">
+      {activeTab === "options" && <Card className="border-2 border-white/10">
         <CardHeader>
           <CardTitle className="text-sm">Safe to Use Real Money?</CardTitle>
           <p className="text-xs text-muted-foreground">All items must be green before switching to live trading</p>
@@ -743,7 +884,7 @@ export default function PerformancePage() {
             ))}
           </div>
         </CardContent>
-      </Card>
+      </Card>}
     </div>
   );
 }
