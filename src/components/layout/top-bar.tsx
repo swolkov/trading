@@ -2,7 +2,7 @@
 
 import { useAccount } from "@/hooks/use-account";
 import { formatCurrency, pnlColor } from "@/lib/utils";
-import { Clock } from "lucide-react";
+import { Clock, Shield, Zap } from "lucide-react";
 import useSWR from "swr";
 import { useEffect, useState } from "react";
 
@@ -163,7 +163,7 @@ export function TopBar() {
         </span>
       </div>
 
-      {/* Right side: market clock + status */}
+      {/* Right side: mode switch + market clock + status */}
       <div className="ml-auto flex items-center gap-3 shrink-0">
         {/* Market clock */}
         {marketClock.label && (
@@ -175,22 +175,129 @@ export function TopBar() {
           </div>
         )}
 
+        {/* Master Mode Switch */}
+        <ModeSwitch />
+
         {/* Connection indicators */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {hasAlpaca && (
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" title="Alpaca connected" />
           )}
           {hasFutures && (
             <span className="w-1.5 h-1.5 rounded-full bg-blue-400 live-dot" title="Tradovate connected" />
           )}
-          {!hasAlpaca && !hasFutures && (
-            <div className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-              <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider font-medium">Demo</span>
-            </div>
-          )}
         </div>
       </div>
     </header>
+  );
+}
+
+// ── Master Mode Switch ──────────────────────────────────
+function ModeSwitch() {
+  const { data, mutate } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
+  const [switching, setSwitching] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  // Derive global mode from individual modes
+  const modes = data?.modes || {};
+  const isAnyLive = Object.values(modes).some((m) => m === "live");
+  const globalMode: "demo" | "live" = isAnyLive ? "live" : "demo";
+
+  const handleSwitch = async () => {
+    if (globalMode === "demo") {
+      // Switching TO live — require confirmation
+      setShowConfirm(true);
+      setError("");
+      return;
+    }
+    // Switching to demo — no password needed, instant
+    setSwitching(true);
+    try {
+      // Switch ALL types to paper
+      for (const type of ["futures", "options", "stocks"]) {
+        await fetch("/api/trading-mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type, mode: "paper", password: "demo-switch" }),
+        });
+      }
+      mutate();
+    } catch {}
+    setSwitching(false);
+  };
+
+  const confirmLive = async () => {
+    if (!password) { setError("Password required"); return; }
+    setSwitching(true);
+    setError("");
+    try {
+      // Switch futures to live (primary — that's where the $1K is)
+      const res = await fetch("/api/trading-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "futures", mode: "live", password }),
+      });
+      const result = await res.json();
+      if (result.error) { setError(result.error); setSwitching(false); return; }
+      setShowConfirm(false);
+      setPassword("");
+      mutate();
+    } catch { setError("Failed"); }
+    setSwitching(false);
+  };
+
+  return (
+    <div className="relative">
+      <button
+        onClick={handleSwitch}
+        disabled={switching}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all ${
+          globalMode === "live"
+            ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/25"
+            : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30 hover:bg-emerald-500/25"
+        }`}
+      >
+        {globalMode === "live" ? (
+          <><Zap className="w-2.5 h-2.5" /> Live</>
+        ) : (
+          <><Shield className="w-2.5 h-2.5" /> Demo</>
+        )}
+      </button>
+
+      {/* Live confirmation popover */}
+      {showConfirm && (
+        <div className="absolute top-full right-0 mt-2 z-50 w-56 rounded-xl border border-red-500/20 bg-[#0a0a0f] shadow-2xl p-3 space-y-2">
+          <p className="text-[10px] text-red-400 font-bold uppercase tracking-wider">Switch to Live Trading</p>
+          <p className="text-[9px] text-muted-foreground/60">Real money. Real risk. Confirm with password.</p>
+          <input
+            type="password"
+            placeholder="Trading password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && confirmLive()}
+            autoFocus
+            className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-[10px] placeholder:text-muted-foreground/30 focus:outline-none focus:ring-1 focus:ring-red-500/30"
+          />
+          {error && <p className="text-[9px] text-red-400">{error}</p>}
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => { setShowConfirm(false); setPassword(""); setError(""); }}
+              className="flex-1 text-[9px] font-semibold py-1.5 rounded-lg bg-white/[0.04] text-muted-foreground/60 hover:bg-white/[0.08]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmLive}
+              disabled={switching}
+              className="flex-1 text-[9px] font-bold py-1.5 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 ring-1 ring-red-500/20"
+            >
+              {switching ? "..." : "GO LIVE"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

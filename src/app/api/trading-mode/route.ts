@@ -20,7 +20,7 @@ export async function GET() {
       // Never expose which are actually configured — just show what's active
       hasLiveKeys: {
         options: !!(process.env.ALPACA_LIVE_API_KEY && process.env.ALPACA_LIVE_API_SECRET),
-        futures: !!process.env.IBKR_LIVE_BASE_URL,
+        futures: !!process.env.TRADOVATE_USERNAME,
         stocks: !!(process.env.ALPACA_LIVE_API_KEY && process.env.ALPACA_LIVE_API_SECRET),
       },
     });
@@ -34,13 +34,15 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { type, mode, password } = body;
 
-    // Validate password
+    // Validate password (switching to DEMO/paper is always allowed — it's the safe direction)
     const correctPassword = process.env.TRADING_MODE_PASSWORD;
-    if (!correctPassword) {
-      return Response.json({ error: "TRADING_MODE_PASSWORD env var not set. Set it in Vercel to enable mode switching." }, { status: 403 });
-    }
-    if (password !== correctPassword) {
-      return Response.json({ error: "Incorrect password" }, { status: 403 });
+    if (mode === "live") {
+      if (!correctPassword) {
+        return Response.json({ error: "TRADING_MODE_PASSWORD env var not set. Set it in Vercel to enable live mode." }, { status: 403 });
+      }
+      if (password !== correctPassword) {
+        return Response.json({ error: "Incorrect password" }, { status: 403 });
+      }
     }
 
     // Validate type
@@ -58,8 +60,8 @@ export async function POST(request: Request) {
       if ((type === "options" || type === "stocks") && (!process.env.ALPACA_LIVE_API_KEY || !process.env.ALPACA_LIVE_API_SECRET)) {
         return Response.json({ error: "Cannot switch to live: ALPACA_LIVE_API_KEY and ALPACA_LIVE_API_SECRET env vars not set" }, { status: 400 });
       }
-      if (type === "futures" && !process.env.IBKR_LIVE_BASE_URL) {
-        return Response.json({ error: "Cannot switch to live: IBKR_LIVE_BASE_URL env var not set" }, { status: 400 });
+      if (type === "futures" && !process.env.TRADOVATE_USERNAME) {
+        return Response.json({ error: "Cannot switch to live: Tradovate credentials not configured" }, { status: 400 });
       }
     }
 
