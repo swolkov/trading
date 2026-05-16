@@ -78,15 +78,41 @@ function parseOptionSymbol(symbol: string) {
   return { underlying, type, strike, expiry: expiry.toLocaleDateString("en-US", { month: "short", day: "numeric" }), dte };
 }
 
+interface FuturesRoundTrip {
+  symbol: string;
+  direction: string;
+  qty: number;
+  entryPrice: number;
+  exitPrice: number;
+  pnl: number;
+  entryTime: string;
+  exitTime: string;
+}
+
+interface FuturesPerfData {
+  connected: boolean;
+  account: { balance: number; netLiq: number; realizedPnl: number } | null;
+  fillBasedPnl?: {
+    totalPnl: number;
+    tradeCount: number;
+    wins: number;
+    losses: number;
+    roundTrips: FuturesRoundTrip[];
+  };
+  activity: { id: string; symbol: string; action: string; qty: number; price: number | null; pnl: number | null; reason: string; time: string }[];
+}
+
 export default function PerformancePage() {
   const [data, setData] = useState<TradeAnalysis | null>(null);
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
+  const [futures, setFutures] = useState<FuturesPerfData | null>(null);
 
   useEffect(() => {
     fetch("/api/trades/analysis").then((r) => r.json()).then(setData).catch(console.error);
     fetch("/api/portfolio-history?period=1M&timeframe=1D").then((r) => r.json()).then((d) => { if (!d.error) setHistory(d); }).catch(() => {});
     fetch("/api/positions").then((r) => r.json()).then((p) => { if (Array.isArray(p)) setPositions(p); }).catch(() => {});
+    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
   }, []);
 
   if (!data) return (
@@ -124,7 +150,14 @@ export default function PerformancePage() {
     <div className="space-y-6 animate-fade-up">
       <div>
         <h1 className="text-xl font-bold tracking-tight">Performance</h1>
-        <p className="text-[11px] text-muted-foreground/50">Alpaca trade analysis — every trade, profit, and loss</p>
+        <p className="text-[11px] text-muted-foreground/50">Options &amp; Futures — trade analytics by account</p>
+      </div>
+
+      {/* ═══════════ OPTIONS SECTION ═══════════ */}
+      <div className="flex items-center gap-2 pt-2">
+        <span className="text-sm font-bold tracking-tight">Options</span>
+        <span className="text-[10px] text-muted-foreground/40">Alpaca account</span>
+        <div className="flex-1 border-t border-white/[0.06]" />
       </div>
 
       {/* Big P&L */}
@@ -427,6 +460,156 @@ export default function PerformancePage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ═══════════ FUTURES SECTION ═══════════ */}
+      <div className="flex items-center gap-2 pt-4">
+        <span className="text-sm font-bold tracking-tight">Futures</span>
+        <span className="text-[10px] text-muted-foreground/40">Tradovate account</span>
+        <div className="flex-1 border-t border-white/[0.06]" />
+      </div>
+
+      {(() => {
+        const fp = futures?.fillBasedPnl;
+        const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null);
+        const hasFillData = !!fp && fp.tradeCount > closedFromDb.length;
+        const tradeCount = hasFillData ? fp.tradeCount : closedFromDb.length;
+        const winCount = hasFillData ? fp.wins : closedFromDb.filter((t) => (t.pnl || 0) > 0).length;
+        const lossCount = hasFillData ? fp.losses : closedFromDb.filter((t) => (t.pnl || 0) < 0).length;
+        const STARTING_CAPITAL = 7_000;
+        const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL : null;
+        const totalPnl = accountPnl ?? (hasFillData ? fp.totalPnl : closedFromDb.reduce((s, t) => s + (t.pnl || 0), 0));
+        const winRate = tradeCount > 0 ? (winCount / tradeCount * 100) : 0;
+
+        const roundTrips = fp?.roundTrips || [];
+        const wins = roundTrips.filter((rt) => rt.pnl > 0);
+        const losses = roundTrips.filter((rt) => rt.pnl < 0);
+        const avgWin = wins.length > 0 ? wins.reduce((s, rt) => s + rt.pnl, 0) / wins.length : 0;
+        const avgLoss = losses.length > 0 ? losses.reduce((s, rt) => s + rt.pnl, 0) / losses.length : 0;
+
+        // Daily breakdown from round trips
+        const dayMap: Record<string, { trades: number; wins: number; losses: number; totalPnl: number; label: string }> = {};
+        for (const rt of roundTrips) {
+          const d = new Date(rt.exitTime);
+          const dateKey = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
+          if (!dayMap[dateKey]) dayMap[dateKey] = { trades: 0, wins: 0, losses: 0, totalPnl: 0, label };
+          dayMap[dateKey].trades++;
+          if (rt.pnl > 0) dayMap[dateKey].wins++;
+          else dayMap[dateKey].losses++;
+          dayMap[dateKey].totalPnl += rt.pnl;
+        }
+        const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
+
+        if (tradeCount === 0 && !futures?.connected) {
+          return (
+            <Card>
+              <CardContent className="py-8 text-center">
+                <p className="text-sm text-muted-foreground/50">Tradovate not connected — futures data unavailable</p>
+              </CardContent>
+            </Card>
+          );
+        }
+
+        return (
+          <>
+            {/* Futures Big P&L */}
+            <Card className={`border-2 ${totalPnl >= 0 ? "border-emerald-500/30" : "border-red-500/30"}`}>
+              <CardContent className="pt-6 pb-4 text-center">
+                <p className="text-sm text-muted-foreground mb-1">Futures Realized P&L</p>
+                <p className={`text-5xl font-bold ${pnl(totalPnl)}`}>{fmt(Math.round(totalPnl))}</p>
+                <p className="text-sm text-muted-foreground mt-2">
+                  {winCount} wins, {lossCount} losses from {tradeCount} completed trades
+                </p>
+              </CardContent>
+            </Card>
+
+            {/* Futures Key Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Win Rate</p>
+                  <p className={`text-2xl font-bold mt-1 ${winRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{winRate.toFixed(0)}%</p>
+                  <p className="text-[10px] text-muted-foreground/50">{winCount}W / {lossCount}L</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Win</p>
+                  <p className="text-2xl font-bold mt-1 text-emerald-400">{avgWin > 0 ? `+$${avgWin.toFixed(0)}` : "—"}</p>
+                  <p className="text-[10px] text-muted-foreground/50">Per winning trade</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Loss</p>
+                  <p className="text-2xl font-bold mt-1 text-red-400">{avgLoss < 0 ? `-$${Math.abs(avgLoss).toFixed(0)}` : "—"}</p>
+                  <p className="text-[10px] text-muted-foreground/50">Per losing trade</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Profit Factor</p>
+                  <p className={`text-2xl font-bold mt-1 ${wins.length > 0 && losses.length > 0 ? (wins.reduce((s, r) => s + r.pnl, 0) / Math.abs(losses.reduce((s, r) => s + r.pnl, 0)) >= 1 ? "text-emerald-400" : "text-red-400") : "text-muted-foreground"}`}>
+                    {wins.length > 0 && losses.length > 0
+                      ? (wins.reduce((s, r) => s + r.pnl, 0) / Math.abs(losses.reduce((s, r) => s + r.pnl, 0))).toFixed(2)
+                      : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/50">Gross profit / gross loss</p>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Futures Daily Breakdown */}
+            {days.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Daily Futures Performance</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-muted-foreground/60 border-b border-white/10">
+                          <th className="text-left py-2 font-medium">Date</th>
+                          <th className="text-center py-2 font-medium">Trades</th>
+                          <th className="text-center py-2 font-medium">Wins</th>
+                          <th className="text-center py-2 font-medium">Losses</th>
+                          <th className="text-center py-2 font-medium">Win Rate</th>
+                          <th className="text-right py-2 font-medium">Total P&L</th>
+                          <th className="text-right py-2 font-medium">Avg P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {days.map(([dateKey, d]) => {
+                          const wr = d.trades > 0 ? (d.wins / d.trades * 100) : 0;
+                          const avg = d.trades > 0 ? d.totalPnl / d.trades : 0;
+                          return (
+                            <tr key={dateKey} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                              <td className="py-2 font-medium">{d.label}</td>
+                              <td className="text-center py-2">{d.trades}</td>
+                              <td className="text-center py-2 text-emerald-400">{d.wins}</td>
+                              <td className="text-center py-2 text-red-400">{d.losses}</td>
+                              <td className="text-center py-2">
+                                <span className={wr >= 50 ? "text-emerald-400" : "text-red-400"}>{wr.toFixed(0)}%</span>
+                              </td>
+                              <td className={`text-right py-2 font-bold ${pnl(d.totalPnl)}`}>
+                                {d.totalPnl >= 0 ? "+" : "-"}${Math.abs(d.totalPnl).toFixed(0)}
+                              </td>
+                              <td className={`text-right py-2 ${pnl(avg)}`}>
+                                {avg >= 0 ? "+" : "-"}${Math.abs(avg).toFixed(0)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </>
+        );
+      })()}
 
       {/* Ready Checklist */}
       <Card className="border-2 border-white/10">
