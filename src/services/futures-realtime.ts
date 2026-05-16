@@ -1426,14 +1426,6 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier(sym);
-  // Daily loss limit: 15% of start-of-day equity (not current — prevents moving goalposts)
-  const sodEquity = startOfDayBalance || tradovateEquity;
-  const dailyLossLimit = sodEquity * 0.15;
-  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 4 || dailyPnl < -dailyLossLimit) return;
-  // Tilt protection: pause after 2 consecutive stops
-  if (Date.now() < tiltPauseUntil) return;
-  // No re-entry on stopped-out symbols
-  if (stoppedSymbols.has(sym)) return;
 
   // CORRELATION GATE: don't hold two equity index positions simultaneously
   // ES and NQ are 90%+ correlated — holding both is doubling the same bet
@@ -1759,9 +1751,28 @@ async function evaluateAndTrade(
     return;
   }
 
-  log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}%`);
-  await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
-    `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
+  // Check if execution is allowed (session, limits, tilt) or paper-only (learning mode)
+  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < 2
+    && dailyTradeCount < 4 && dailyPnl >= -(startOfDayBalance || tradovateEquity) * 0.15
+    && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
+
+  if (canExec) {
+    log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}%`);
+    await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
+      `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
+  } else {
+    // LEARNING MODE: log paper trade for brain evolution — system never stops learning
+    const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+    const qty = Math.max(1, Math.floor((tradovateEquity * 0.05 * sizeMult || 1) / (stopDist * mult)));
+    log(`  [PAPER] ${direction.toUpperCase()} ${qty}x ${sym} @ $${price.toFixed(2)} | ${session} | Score: ${finalScore}% (blocked: ${sizeMult === 0 ? "off-hours" : "limits/tilt"})`);
+    try {
+      await prisma.autoTradeLog.create({ data: {
+        symbol: `FUT:${sym}`, action: `paper_${direction}`, qty: qty || 1, price,
+        reason: `[PAPER ${session}] ${reasoning}. Confidence: ${finalScore}%. Blocked: ${sizeMult === 0 ? "off-hours" : "daily limit/tilt/position"}`,
+        aiScore: finalScore, aiSignal: direction,
+      }});
+    } catch {}
+  }
 }
 
 // ── Trade Execution ─────────────────────────────────────
