@@ -48,5 +48,11 @@
       "path": "/api/cron/synthesis",
       "schedule": "0 16,21,1 * * 1-5"
     }
-  ]
+  ],
+  "experimentalServices": {
+    "web": {
+      "routePrefix": "/",
+      "framework": "nextjs"
+    }
+  }
 }
