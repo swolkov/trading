@@ -38,21 +38,22 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 // Scale-out advantage: 10 MES lets you sell 5 at 1R, trail 5 for runners.
 
 // Default futures rules — can be overridden from Agent Hub config
+// Calibrated for aggressive small-account growth ($1K-$5K)
 const FUTURES_RULES_DEFAULTS = {
-  RISK_PER_TRADE_PCT: 0.05,
-  DAILY_LOSS_LIMIT_PCT: 0.10,
-  MAX_DRAWDOWN_PCT: 0.15,
-  MAX_CONTRACTS_PER_TRADE: 6,
-  MAX_TOTAL_CONTRACTS: 10,
-  MAX_TRADES_PER_DAY: 3,
-  MAX_TRADES_APLUS_OVERRIDE: 5,
+  RISK_PER_TRADE_PCT: 0.05,       // 5% per trade — $50 on $1K, aggressive but survivable
+  DAILY_LOSS_LIMIT_PCT: 0.15,     // 15% daily max loss — allows 3 full trades before stopping
+  MAX_DRAWDOWN_PCT: 0.25,         // 25% max drawdown before kill switch
+  MAX_CONTRACTS_PER_TRADE: 3,     // Initial entry cap (pyramid adds more)
+  MAX_TOTAL_CONTRACTS: 6,         // After pyramiding, max total open
+  MAX_TRADES_PER_DAY: 3,          // Quality over quantity
+  MAX_TRADES_APLUS_OVERRIDE: 4,   // A+ conviction gets one extra
   ATR_STOP_MULTIPLIER: 1.5,
-  ATR_TARGET_MULTIPLIER: 3.5,
+  ATR_TARGET_MULTIPLIER: 4.0,     // Need 4:1 R:R minimum — let winners run
   RTH_START_ET: 9.5,
   RTH_END_ET: 16,
   AVOID_FIRST_MINUTES: 15,
   AVOID_LAST_MINUTES: 15,
-  SIMULATED_EQUITY: 7_000,
+  SIMULATED_EQUITY: 1_000,        // Start with $1K live capital
 };
 
 // Mutable rules — populated from DB config at runtime, falls back to defaults
@@ -1286,11 +1287,11 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       maxByRisk,
     ));
 
-    // Hard ceiling: never risk more than 10% on a single trade (absolute safety net)
+    // Hard ceiling: never risk more than 15% on a single trade (aggressive small-account mode)
     const totalRisk = riskPerContract * contracts;
-    if (totalRisk > equity * 0.10) {
-      contracts = Math.max(1, Math.floor((equity * 0.10) / riskPerContract));
-      details.push(`  HARD CAP: Risk $${totalRisk.toFixed(0)} (${((totalRisk / equity) * 100).toFixed(1)}%) exceeds 10% ceiling — capped to ${contracts} contract(s)`);
+    if (totalRisk > equity * 0.15) {
+      contracts = Math.max(1, Math.floor((equity * 0.15) / riskPerContract));
+      details.push(`  HARD CAP: Risk $${totalRisk.toFixed(0)} (${((totalRisk / equity) * 100).toFixed(1)}%) exceeds 15% ceiling — capped to ${contracts} contract(s)`);
     }
 
     const side = setup.direction === "long" ? "BUY" as const : "SELL" as const;

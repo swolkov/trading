@@ -2,10 +2,16 @@
 
 ## Obsidian Trading Brain
 
-All trading agents have access to an Obsidian vault at `/Users/user/Desktop/Trading/Trading/` via the `obsidian-trading` MCP server. This vault is the persistent memory and learning system for all agents.
+All trading agents use the Obsidian vault at `/Users/user/Desktop/Trading/Trading/` as their persistent memory and learning system.
 
 ### Vault Path
 `/Users/user/Desktop/Trading/Trading/`
+
+### How to Access Vault Files
+- **Reading**: Use the built-in `Read` tool with the full path (e.g., `Read /Users/user/Desktop/Trading/Trading/Brain/market-regime.md`). This is instant. Do NOT use the `obsidian-trading` MCP server for reads — it is extremely slow and frequently times out.
+- **Writing/Editing**: Use the built-in `Write` or `Edit` tools with the full path.
+- **Searching**: Use `Grep` or `Glob` with path `/Users/user/Desktop/Trading/Trading/` for fast searches.
+- **MCP server**: Only use `obsidian-trading` MCP for tag operations (`add-tags`, `remove-tags`, `rename-tag`) that require Obsidian-specific functionality.
 
 ### Agent Protocols
 

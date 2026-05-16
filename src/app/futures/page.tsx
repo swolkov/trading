@@ -286,7 +286,7 @@ export default function FuturesPage() {
   const winCount = hasFillData ? fillPnl.wins : wins.length;
   const lossCount = hasFillData ? fillPnl.losses : losses.length;
   // Total P&L: use Tradovate account equity as source of truth (DB trade sums are unreliable due to reconciliation bugs)
-  const STARTING_CAPITAL = 7_000;
+  const STARTING_CAPITAL = 50_000;
   const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
   const totalPnl = accountPnl ?? (hasFillData ? fillPnl.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
   const avgWin = hasFillData

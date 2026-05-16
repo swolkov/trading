@@ -33,15 +33,15 @@ const DEFAULTS: Record<string, string> = {
   stock_min_confidence: "70", // Min confidence % for stock entries
   // Futures agent rules (read by futures-agent.ts at runtime)
   futures_mode: "demo", // disabled, demo, live — futures entry gate mode
-  futures_risk_per_trade_pct: "5", // % of equity per trade
-  futures_daily_loss_limit_pct: "10", // % daily max loss
-  futures_max_drawdown_pct: "15", // % drawdown kill switch
-  futures_max_contracts: "6", // Max contracts per trade
-  futures_max_total_contracts: "10", // Max total contracts across all
+  futures_risk_per_trade_pct: "5", // % of equity per trade (aggressive small-account)
+  futures_daily_loss_limit_pct: "15", // % daily max loss
+  futures_max_drawdown_pct: "25", // % drawdown kill switch
+  futures_max_contracts: "3", // Max contracts per initial entry (pyramid adds more)
+  futures_max_total_contracts: "6", // Max total contracts across all
   futures_max_trades_per_day: "3", // Base limit per day
   futures_atr_stop_multiplier: "1.5",
-  futures_atr_target_multiplier: "3.5",
-  futures_simulated_equity: "7000", // Simulated live capital ($)
+  futures_atr_target_multiplier: "4.0", // 4:1 R:R — need big winners at low WR
+  futures_simulated_equity: "1000", // Live capital ($) — grows with account
 };
 
 export async function GET() {

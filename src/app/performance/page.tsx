@@ -493,18 +493,31 @@ export default function PerformancePage() {
       </>}
 
       {activeTab === "futures" && (() => {
+        // Exclude May 13 2026 — Railway outage prevented trade closure (infrastructure failure, not strategy)
+        const EXCLUDED_DATES = ["2026-05-13"];
+        const isExcludedDate = (time: string) => EXCLUDED_DATES.some((d) => time.startsWith(d));
+
         const fp = futures?.fillBasedPnl;
-        const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null);
-        const hasFillData = !!fp && fp.tradeCount > closedFromDb.length;
-        const tradeCount = hasFillData ? fp.tradeCount : closedFromDb.length;
-        const winCount = hasFillData ? fp.wins : closedFromDb.filter((t) => (t.pnl || 0) > 0).length;
-        const lossCount = hasFillData ? fp.losses : closedFromDb.filter((t) => (t.pnl || 0) < 0).length;
-        const STARTING_CAPITAL = 7_000;
+        // Filter out excluded dates from fill-based round trips
+        const allRoundTrips = fp?.roundTrips || [];
+        const roundTrips = allRoundTrips.filter((rt) => !isExcludedDate(rt.exitTime));
+        const filteredFillPnl = {
+          totalPnl: roundTrips.reduce((s, rt) => s + rt.pnl, 0),
+          tradeCount: roundTrips.length,
+          wins: roundTrips.filter((rt) => rt.pnl > 0).length,
+          losses: roundTrips.filter((rt) => rt.pnl < 0).length,
+        };
+
+        const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null && !isExcludedDate(t.time));
+        const hasFillData = filteredFillPnl.tradeCount > closedFromDb.length;
+        const tradeCount = hasFillData ? filteredFillPnl.tradeCount : closedFromDb.length;
+        const winCount = hasFillData ? filteredFillPnl.wins : closedFromDb.filter((t) => (t.pnl || 0) > 0).length;
+        const lossCount = hasFillData ? filteredFillPnl.losses : closedFromDb.filter((t) => (t.pnl || 0) < 0).length;
+        const STARTING_CAPITAL = 50_000;
         const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL : null;
-        const totalPnl = accountPnl ?? (hasFillData ? fp.totalPnl : closedFromDb.reduce((s, t) => s + (t.pnl || 0), 0));
+        const totalPnl = accountPnl ?? (hasFillData ? filteredFillPnl.totalPnl : closedFromDb.reduce((s, t) => s + (t.pnl || 0), 0));
         const winRate = tradeCount > 0 ? (winCount / tradeCount * 100) : 0;
 
-        const roundTrips = fp?.roundTrips || [];
         const wins = roundTrips.filter((rt) => rt.pnl > 0);
         const losses = roundTrips.filter((rt) => rt.pnl < 0);
         const avgWin = wins.length > 0 ? wins.reduce((s, rt) => s + rt.pnl, 0) / wins.length : 0;

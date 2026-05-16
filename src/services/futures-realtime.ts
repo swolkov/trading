@@ -505,25 +505,22 @@ function getSizeMultiplier(sym?: string): number {
 
   // Gold has different prime hours: COMEX 8:20 AM - 1:30 PM ET
   // London overlap 8-12 ET is best for gold (DST-aware)
+  // OVERNIGHT KILLED — was costing $800+/day in losses on small accounts
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
     if (etH >= 8.33 && etH < 10) return 1.0;   // COMEX open + London overlap = prime
     if (etH >= 10 && etH < 12) return 0.8;       // Mid-COMEX
-    if (etH >= 12 && etH < 13.5) return 0.5;     // Late COMEX — reduced
-    if (etH >= 3 && etH < 8.33) return 0.4;      // London pre-COMEX — reduced
-    if (etH >= 13.5 && etH < 17) return 0.2;     // After COMEX — thin but gold can trend
-    return 0.15; // Overnight — minimal size, gold trends hard overnight
+    if (etH >= 12 && etH < 13.5) return 0.6;     // Late COMEX — still tradeable
+    if (etH >= 13.5 && etH < 16) return 0.4;     // Afternoon gold — can still trend
+    return 0; // NO overnight/ETH gold — kills small accounts
   }
 
-  // Equities session sizing — RTH only, ETH has no edge for equity indices
+  // Equities: RTH morning + afternoon only (proven profit windows)
   if (s === "morning") return 1.0;
-  if (s === "afternoon") return 0.6;
+  if (s === "afternoon") return 0.8;  // Raised from 0.6 — afternoon is your best WR (36%)
   if (s === "midday") return 0;  // lunch doldrums, lowest volume, most losses
-  if (s === "eth_europe") return 0;  // no edge — thin volume, unreliable signals
-  if (s === "eth_evening") return 0;  // post-close chop
-  if (s === "eth_asia") return 0;     // worst session
   if (s === "close" || s === "halt" || s === "open") return 0;
-  return 0;
+  return 0; // NO ETH for equities
 }
 
 function checkSessionReset() {
@@ -544,6 +541,7 @@ function checkSessionReset() {
       log(`Session reset ${sym} — PDH:${b.prevDayHigh.toFixed(2)} PDL:${b.prevDayLow.toFixed(2)}`);
     }
     dailyTradeCount = 0; dailyPnl = 0; stoppedSymbols.clear(); consecutiveStops = 0; tiltPauseUntil = 0;
+    startOfDayBalance = tradovateEquity; // Capture SOD equity for daily loss limit
     // Save start-of-day balance for calendar-day P&L calculation
     (async () => {
       try {
@@ -665,6 +663,7 @@ interface Position {
   scaledOut: boolean;
   originalQty: number;
   consecutiveStops: number;
+  pyramided: boolean;
 }
 
 const positions: Map<string, Position> = new Map();
@@ -797,6 +796,7 @@ async function loadPositions() {
         targetOrderId: null,
         entryTime: new Date(tp.timestamp).getTime(),
         scaledOut: false, originalQty: qty, consecutiveStops: 0,
+        pyramided: false,
       });
 
       log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
@@ -874,10 +874,45 @@ function checkPositions(sym: string, price: number) {
     }
   }
 
-  // 1.5R: Scale out 50% — lock in profit before it rides back to breakeven
-  if (diff >= stopDist * 1.5 && !pos.scaledOut && pos.quantity >= 2) {
+  // 1R+: PYRAMID — add to winners (original position now risk-free at breakeven)
+  // Only pyramid if: breakeven reached, haven't already pyramided, equity allows it
+  if (pos.reachedBreakeven && diff >= stopDist * 1.2 && diff < stopDist * 2 && !pos.pyramided) {
+    const addQty = Math.max(1, Math.floor(pos.quantity * 0.5)); // Add 50% of original size
+    const maxTotalContracts = Math.max(2, Math.floor(tradovateEquity / 500)); // Scale with account
+    if (pos.quantity + addQty <= maxTotalContracts) {
+      log(`${sym}: PYRAMID +${addQty}x @ $${price.toFixed(2)} (1.2R, original at breakeven). Total: ${pos.quantity + addQty}x`);
+      // Place add order — stop for NEW contracts at breakeven (same as original)
+      (async () => {
+        try {
+          const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+          const acct = accounts.find(a => a.id === accountId) || accounts[0];
+          const side = pos.direction === "long" ? "Buy" : "Sell";
+          await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+            accountSpec: acct.name, accountId, action: side, symbol: pos.contractId,
+            orderQty: addQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+          })});
+          pos.quantity += addQty;
+          pos.pyramided = true;
+          // Update broker stop to cover full new quantity at breakeven
+          if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+          const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+          const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+            accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+            orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.entryPrice, timeInForce: "GTC", isAutomated: true,
+          })}) as { orderId: number };
+          pos.stopOrderId = s.orderId;
+          log(`${sym}: Pyramid filled — now ${pos.quantity}x. Stop updated for full qty at breakeven $${pos.entryPrice.toFixed(2)}`);
+          notify(`PYRAMID ${sym}: +${addQty}x added at $${price.toFixed(2)}. Now ${pos.quantity}x total, stop at breakeven.`);
+          await savePositions();
+        } catch (err) { log(`${sym}: Pyramid order failed: ${err}`); }
+      })();
+    }
+  }
+
+  // 2R+: Scale out 50% of full (pyramided) position — lock profit
+  if (diff >= stopDist * 2 && !pos.scaledOut && pos.quantity >= 2) {
     const scaleQty = Math.max(1, Math.floor(pos.quantity / 2));
-    log(`${sym}: Reached 3R ($${pnlDollars.toFixed(0)}) — scaling out ${scaleQty} of ${pos.quantity} contracts`);
+    log(`${sym}: Reached 2R ($${pnlDollars.toFixed(0)}) — scaling out ${scaleQty} of ${pos.quantity} contracts`);
     scaleOutPosition(sym, price, scaleQty);
   }
 
@@ -1371,7 +1406,10 @@ function onBarClose(sym: string, bar: Bar) {
 
   const session = getSessionName();
   const sizeMult = getSizeMultiplier(sym);
-  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 6 || dailyPnl < -500) return;
+  // Daily loss limit: 15% of start-of-day equity (not current — prevents moving goalposts)
+  const sodEquity = startOfDayBalance || tradovateEquity;
+  const dailyLossLimit = sodEquity * 0.15;
+  if (sizeMult === 0 || positions.has(sym) || positions.size >= 2 || dailyTradeCount >= 4 || dailyPnl < -dailyLossLimit) return;
   // Tilt protection: pause after 2 consecutive stops
   if (Date.now() < tiltPauseUntil) return;
   // No re-entry on stopped-out symbols
@@ -1714,16 +1752,17 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = tradovateEquity;
-  // 1% risk per trade, consistent with futures-agent.ts FUTURES_RULES
-  const riskPct = 0.01;
+  // Aggressive small-account sizing: 5% risk per trade for $500+/day potential
+  // At $1K: 5% = $50 risk. At $5K: 5% = $250 risk. Scales with growth.
+  const riskPct = 0.05;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
   let qty = Math.max(1, Math.min(5, Math.floor(maxRisk / riskPer)));
-  // Hard ceiling: never risk more than 10% of equity on a single trade
+  // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
-  if (totalRisk > equity * 0.10) {
-    qty = Math.max(1, Math.floor((equity * 0.10) / riskPer));
-    log(`${sym}: HARD CAP — risk $${totalRisk.toFixed(0)} exceeds 10% equity, capped to ${qty} contracts`);
+  if (totalRisk > equity * 0.15) {
+    qty = Math.max(1, Math.floor((equity * 0.15) / riskPer));
+    log(`${sym}: HARD CAP — risk $${totalRisk.toFixed(0)} exceeds 15% equity, capped to ${qty} contracts`);
   }
   const rr = targetDist / stopDist;
   if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
@@ -1774,6 +1813,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       trailStop: null, reachedBreakeven: false,
       stopOrderId, targetOrderId, entryTime: Date.now(),
       scaledOut: false, originalQty: qty, consecutiveStops: 0,
+      pyramided: false,
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
@@ -2000,6 +2040,7 @@ async function syncPositions() {
         stopOrderId: null,
         targetOrderId: null,
         entryTime: Date.now(),
+        pyramided: false,
       });
 
       log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
@@ -2152,6 +2193,7 @@ async function preloadBars() {
 // ── VIX Check (adjust risk based on volatility) ──
 
 let tradovateEquity = 50000; // Will be fetched from Tradovate on startup
+let startOfDayBalance = 0; // Set at session reset, used for daily loss limit
 
 async function updateTradovateEquity() {
   try {
