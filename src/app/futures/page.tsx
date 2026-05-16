@@ -724,18 +724,18 @@ export default function FuturesPage() {
               let balancePnl: number | null = null;
               if (bal?.eod !== undefined && bal?.sod !== undefined) {
                 balancePnl = (bal.eod as number) - (bal.sod as number);
-              } else if (nextBal?.sod !== undefined && bal?.sod !== undefined) {
-                balancePnl = (nextBal.sod as number) - (bal.sod as number);
+              } else if (nextBal?.sod != null && bal?.sod !== undefined) {
+                balancePnl = (nextBal!.sod as number) - (bal.sod as number);
               }
               if (balancePnl != null && dayMap[date]) {
-                dayMap[date].pnl = balancePnl;
+                dayMap[date].pnl = balancePnl as number;
                 dayMap[date].fromBalance = true;
               }
             }
 
             // Today: always from live balance
             if (calendarDayPnl != null && dayMap[todayUTC]) {
-              dayMap[todayUTC].pnl = calendarDayPnl;
+              dayMap[todayUTC].pnl = calendarDayPnl as number;
               dayMap[todayUTC].fromBalance = true;
             }
 
@@ -752,7 +752,7 @@ export default function FuturesPage() {
               const balanceDays = Object.entries(dayMap).filter(([, d]) => d.fromBalance);
               const balanceTotal = balanceDays.reduce((s, [, d]) => s + d.pnl, 0);
               const dbTotal = dbDays.reduce((s, [, d]) => s + d.pnl, 0);
-              const remaining = knownPeriodPnl - balanceTotal;
+              const remaining = (knownPeriodPnl as number) - balanceTotal;
               // Scale DB-sourced days to fill the gap between known total and balance-sourced days
               if (dbDays.length > 0 && dbTotal !== 0) {
                 const scale = remaining / dbTotal;
@@ -1038,17 +1038,17 @@ export default function FuturesPage() {
                       const nextBal = nextDate ? balByDate2[nextDate] : null;
                       let balPnl: number | null = null;
                       if (bal2?.eod !== undefined && bal2?.sod !== undefined) balPnl = (bal2.eod as number) - (bal2.sod as number);
-                      else if (nextBal?.sod !== undefined && bal2?.sod !== undefined) balPnl = (nextBal.sod as number) - (bal2.sod as number);
+                      else if (nextBal?.sod != null && bal2?.sod !== undefined) balPnl = (nextBal!.sod as number) - (bal2.sod as number);
                       if (balPnl != null) {
                         const d = new Date(date + "T12:00:00Z");
                         const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
-                        if (reportDayMap[day]) reportDayMap[day].pnl = balPnl;
+                        if (reportDayMap[day]) reportDayMap[day].pnl = balPnl as number;
                       }
                     }
                     // Today: use live balance delta
                     if (calendarDayPnl != null) {
                       const todayLabel = new Date(todayUTC + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
-                      if (reportDayMap[todayLabel]) reportDayMap[todayLabel].pnl = calendarDayPnl;
+                      if (reportDayMap[todayLabel]) reportDayMap[todayLabel].pnl = calendarDayPnl as number;
                     }
                     const reportDays = Object.entries(reportDayMap);
                     return reportDays.length > 0 ? (
