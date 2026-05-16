@@ -60,7 +60,7 @@ const CONFIG_GROUPS = [
     icon: "O",
     color: "from-purple-500 to-pink-500",
     fields: [
-      { key: "trade_options", label: "Options Trading", type: "toggle" as const },
+      { key: "options_mode", label: "Options Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
       { key: "min_score", label: "Min AI Score", type: "number" as const },
       { key: "min_confidence", label: "Min Confidence (%)", type: "number" as const },
       { key: "max_options_exposure", label: "Max Exposure ($)", type: "number" as const },
@@ -75,6 +75,7 @@ const CONFIG_GROUPS = [
     icon: "F",
     color: "from-amber-500 to-orange-500",
     fields: [
+      { key: "futures_mode", label: "Futures Trading", type: "select" as const, options: ["disabled", "demo", "live"] },
       { key: "futures_risk_per_trade_pct", label: "Risk Per Trade (%)", type: "number" as const },
       { key: "futures_daily_loss_limit_pct", label: "Daily Loss Limit (%)", type: "number" as const },
       { key: "futures_max_drawdown_pct", label: "Max Drawdown Kill (%)", type: "number" as const },

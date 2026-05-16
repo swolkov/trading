@@ -12,7 +12,8 @@ const DEFAULTS: Record<string, string> = {
   take_profit_pct: "25",
   cash_reserve_pct: "20",
   max_daily_trades: "6",
-  trade_options: "true", // true = options-only mode, false = stocks only
+  trade_options: "true", // legacy — kept for backward compat
+  options_mode: "paper", // disabled, paper, live — options entry gate mode
   options_stop_loss_pct: "40",
   options_profit_pct: "50",
   focus_symbols: "", // comma-separated watchlist for agent to prioritize
@@ -31,6 +32,7 @@ const DEFAULTS: Record<string, string> = {
   stock_min_score: "65", // Min analysis score for stock entries
   stock_min_confidence: "70", // Min confidence % for stock entries
   // Futures agent rules (read by futures-agent.ts at runtime)
+  futures_mode: "demo", // disabled, demo, live — futures entry gate mode
   futures_risk_per_trade_pct: "5", // % of equity per trade
   futures_daily_loss_limit_pct: "10", // % daily max loss
   futures_max_drawdown_pct: "15", // % drawdown kill switch
@@ -48,6 +50,19 @@ export async function GET() {
     const result: Record<string, string> = { ...DEFAULTS };
     for (const c of configs) {
       result[c.key] = c.value;
+    }
+    // Derive mode selectors from trading_mode keys if not explicitly set
+    if (!result.options_mode || result.options_mode === DEFAULTS.options_mode) {
+      const tradeOpt = result.trade_options;
+      const tradingMode = result.trading_mode_options;
+      if (tradeOpt === "false") result.options_mode = "disabled";
+      else if (tradingMode === "live") result.options_mode = "live";
+      else result.options_mode = "paper";
+    }
+    if (!result.futures_mode || result.futures_mode === DEFAULTS.futures_mode) {
+      const tradingMode = result.trading_mode_futures;
+      if (tradingMode === "live") result.futures_mode = "live";
+      else result.futures_mode = "demo";
     }
     return Response.json(result);
   } catch (error) {
@@ -68,6 +83,22 @@ export async function POST(request: Request) {
         });
       }
     }
+    // Sync mode selectors to trading_mode keys used by the engines
+    if (updates.options_mode) {
+      const modeVal = updates.options_mode === "live" ? "live" : "paper";
+      const enabled = updates.options_mode !== "disabled";
+      await prisma.agentConfig.upsert({ where: { key: "trading_mode_options" }, update: { value: modeVal }, create: { key: "trading_mode_options", value: modeVal } });
+      await prisma.agentConfig.upsert({ where: { key: "trade_options" }, update: { value: String(enabled) }, create: { key: "trade_options", value: String(enabled) } });
+    }
+    if (updates.futures_mode) {
+      const modeVal = updates.futures_mode === "live" ? "live" : "paper";
+      await prisma.agentConfig.upsert({ where: { key: "trading_mode_futures" }, update: { value: modeVal }, create: { key: "trading_mode_futures", value: modeVal } });
+    }
+    if (updates.stocks_enabled) {
+      const modeVal = updates.stocks_enabled === "live" ? "live" : "paper";
+      await prisma.agentConfig.upsert({ where: { key: "trading_mode_stocks" }, update: { value: modeVal }, create: { key: "trading_mode_stocks", value: modeVal } });
+    }
+
     return Response.json({ success: true });
   } catch (error) {
     console.error("[/api/agent/config POST]", error);
