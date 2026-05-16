@@ -1778,17 +1778,8 @@ async function evaluateAndTrade(
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
   } else {
-    // LEARNING MODE: log paper trade for brain evolution — system never stops learning
-    const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-    const qty = Math.max(1, Math.floor((tradovateEquity * 0.05 * sizeMult || 1) / (stopDist * mult)));
-    log(`  [PAPER] ${direction.toUpperCase()} ${qty}x ${sym} @ $${price.toFixed(2)} | ${session} | Score: ${finalScore}% (blocked: ${sizeMult === 0 ? "off-hours" : "limits/tilt"})`);
-    try {
-      await prisma.autoTradeLog.create({ data: {
-        symbol: `FUT:${sym}`, action: `paper_${direction}`, qty: qty || 1, price,
-        reason: `[PAPER ${session}] ${reasoning}. Confidence: ${finalScore}%. Blocked: ${sizeMult === 0 ? "off-hours" : "daily limit/tilt/position"}`,
-        aiScore: finalScore, aiSignal: direction,
-      }});
-    } catch {}
+    // Hit daily limit or tilt — done for the day. Demo handles learning independently.
+    log(`  BLOCKED: ${direction.toUpperCase()} ${sym} (${dailyTradeCount >= maxDailyTrades ? "daily limit" : "tilt/position limit"}). Done.`);
   }
 }
 
