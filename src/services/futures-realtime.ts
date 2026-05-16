@@ -1186,6 +1186,31 @@ async function closePosition(sym: string, price: number, reason: string) {
     log(`CLOSED ${sym}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
     notify(`CLOSED ${sym}: ${reason} | ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)} | Daily: ${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(0)}`);
 
+    // Store in pattern memory — builds the database that predicts future outcomes
+    try {
+      const { storePattern } = await import("../lib/pattern-memory");
+      const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
+      await storePattern({
+        regime: "choppy" as "bull" | "bear" | "choppy",
+        session: getSessionName(),
+        instrument: sym,
+        setupType: reason,
+        direction: pos.direction,
+        rsi: 50, // TODO: capture at entry time
+        vixLevel: currentVIX,
+        vixTrend: currentVIX > 20 ? "rising" as const : "falling" as const,
+        atr: stopDist / pos.entryPrice * 1000,
+        priceVsVwap: 0, // TODO: capture at entry time
+        trend15m: "flat" as const, // TODO: capture at entry time
+        trendDaily: "flat" as const,
+        riskReward: stopDist > 0 ? Math.abs(pos.target - pos.entryPrice) / stopDist : 2,
+        dollarTrend: "flat" as const,
+        bondTrend: "flat" as const,
+        outcome: pnl > 0 ? "win" : "loss",
+        pnlR: stopDist > 0 ? diff / stopDist : 0,
+      });
+    } catch { /* pattern storage is optional */ }
+
     // Log close to database
     try {
       await prisma.autoTradeLog.create({ data: {
@@ -1735,6 +1760,24 @@ async function evaluateAndTrade(
     && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
 
   if (canExec) {
+    // SHADOW LOG: Record what confluence/pattern would have said (doesn't affect execution)
+    // This data trains the next-generation decision system
+    try {
+      const { predictOutcome } = await import("../lib/pattern-memory");
+      const patternPrediction = await predictOutcome({
+        regime: "choppy" as "bull" | "bear" | "choppy",
+        session, instrument: sym, setupType: reasoning.split("]")[0]?.replace("[", "") || "unknown",
+        direction: direction as "long" | "short",
+        rsi: rsiVal, vixLevel: currentVIX, vixTrend: currentVIX > 20 ? "rising" : "falling",
+        atr: atrVal / price * 1000, priceVsVwap: vwapVal > 0 ? (price - vwapVal) / vwapVal * 100 : 0,
+        trend15m: trend15 as "up" | "down" | "flat",
+        trendDaily: dayType.includes("trend") ? (direction === "long" ? "up" : "down") : "flat",
+        riskReward: targetDist / stopDist,
+        dollarTrend: "flat", bondTrend: "flat", // TODO: wire cross-asset
+      });
+      log(`  [SHADOW] Pattern memory: ${patternPrediction.matchCount} matches, ${(patternPrediction.winRate * 100).toFixed(0)}% historical WR, score ${patternPrediction.score}`);
+    } catch { /* shadow logging is optional */ }
+
     log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}%`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
