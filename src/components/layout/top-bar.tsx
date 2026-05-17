@@ -92,7 +92,7 @@ export function TopBar() {
   const hasFutures = futuresData?.connected && futuresData.account;
 
   return (
-    <header className={`h-11 border-b flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto transition-colors ${
+    <header className={`h-11 border-b flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto overflow-y-visible transition-colors ${
       isAnyLive
         ? "border-red-500/20 bg-red-950/20"
         : "border-border bg-sidebar"
