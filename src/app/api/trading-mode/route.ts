@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { invalidateViewCache } from "@/lib/trading-mode";
 
 // ============ VIEW MODE API ============
 // Controls which account data the dashboard DISPLAYS (demo vs live).
@@ -43,6 +44,9 @@ export async function POST(request: Request) {
       update: { value: mode },
       create: { key: `view_mode_${type}`, value: mode },
     });
+
+    // Invalidate server-side cache so next API call uses new mode immediately
+    invalidateViewCache(type);
 
     return Response.json({ success: true, type, mode, message: `${type} view switched to ${mode.toUpperCase()}` });
   } catch (error) {

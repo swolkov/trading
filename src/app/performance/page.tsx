@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
+import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { computeFuturesStats } from "./lib/compute-stats";
 
 interface Position {
   symbol: string;
@@ -102,19 +104,28 @@ interface FuturesPerfData {
   activity: { id: string; symbol: string; action: string; qty: number; price: number | null; pnl: number | null; reason: string; time: string }[];
 }
 
+const swrFetcher = (url: string) => fetch(url).then((r) => r.json());
+
 export default function PerformancePage() {
   const [data, setData] = useState<TradeAnalysis | null>(null);
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [futures, setFutures] = useState<FuturesPerfData | null>(null);
-  const [activeTab, setActiveTab] = useState<"options" | "futures" | "paper">("futures");
+  const [activeTab, setActiveTab] = useState<"options" | "futures">("futures");
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", swrFetcher, { refreshInterval: 10000 });
+  const futuresViewMode = modeData?.modes?.futures || "paper";
 
   useEffect(() => {
     fetch("/api/trades/analysis").then((r) => r.json()).then(setData).catch(console.error);
     fetch("/api/portfolio-history?period=1M&timeframe=1D").then((r) => r.json()).then((d) => { if (!d.error) setHistory(d); }).catch(() => {});
     fetch("/api/positions").then((r) => r.json()).then((p) => { if (Array.isArray(p)) setPositions(p); }).catch(() => {});
-    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
   }, []);
+
+  // Re-fetch futures data when view mode changes (LIVE ↔ DEMO)
+  useEffect(() => {
+    setFutures(null);
+    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
+  }, [futuresViewMode]);
 
   if (!data) return (
     <div className="space-y-5 animate-fade-up">
@@ -149,9 +160,18 @@ export default function PerformancePage() {
 
   return (
     <div className="space-y-6 animate-fade-up">
-      <div>
-        <h1 className="text-xl font-bold tracking-tight">Performance</h1>
-        <p className="text-[11px] text-muted-foreground/50">Futures trading analytics</p>
+      <div className="flex items-center gap-3">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">Performance</h1>
+          <p className="text-[11px] text-muted-foreground/50">Futures trading analytics</p>
+        </div>
+        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase ${
+          futuresViewMode === "live"
+            ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30"
+            : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30"
+        }`}>
+          {futuresViewMode === "live" ? "LIVE" : "DEMO"}
+        </span>
       </div>
 
       {/* Account Tabs */}
@@ -175,16 +195,6 @@ export default function PerformancePage() {
           }`}
         >
           Futures / Tradovate
-        </button>
-        <button
-          onClick={() => setActiveTab("paper")}
-          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-            activeTab === "paper"
-              ? "bg-violet-500/15 text-violet-400 ring-1 ring-violet-500/30"
-              : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
-          }`}
-        >
-          Paper Trades
         </button>
       </div>
 
@@ -498,47 +508,98 @@ export default function PerformancePage() {
         const isExcludedDate = (time: string) => EXCLUDED_DATES.some((d) => time.startsWith(d));
 
         const fp = futures?.fillBasedPnl;
-        // Filter out excluded dates from fill-based round trips
         const allRoundTrips = fp?.roundTrips || [];
         const roundTrips = allRoundTrips.filter((rt) => !isExcludedDate(rt.exitTime));
-        const filteredFillPnl = {
-          totalPnl: roundTrips.reduce((s, rt) => s + rt.pnl, 0),
-          tradeCount: roundTrips.length,
-          wins: roundTrips.filter((rt) => rt.pnl > 0).length,
-          losses: roundTrips.filter((rt) => rt.pnl < 0).length,
-        };
 
-        const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null && !isExcludedDate(t.time));
-        const hasFillData = filteredFillPnl.tradeCount > closedFromDb.length;
-        const tradeCount = hasFillData ? filteredFillPnl.tradeCount : closedFromDb.length;
-        const winCount = hasFillData ? filteredFillPnl.wins : closedFromDb.filter((t) => (t.pnl || 0) > 0).length;
-        const lossCount = hasFillData ? filteredFillPnl.losses : closedFromDb.filter((t) => (t.pnl || 0) < 0).length;
+        // Activity log fallback — when Tradovate fills aren't available, use DB trade logs
+        const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null && !isExcludedDate(t.time) && !t.action.startsWith("paper_"));
+        const useFills = roundTrips.length >= closedFromDb.length;
         const STARTING_CAPITAL = 50_000;
-        const EXCLUDED_INFRA_LOSSES = 3_200; // May 13 Railway outage — could not close trades
+        const EXCLUDED_INFRA_LOSSES = 3_200;
         const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL + EXCLUDED_INFRA_LOSSES : null;
-        const totalPnl = accountPnl ?? (hasFillData ? filteredFillPnl.totalPnl : closedFromDb.reduce((s, t) => s + (t.pnl || 0), 0));
-        const winRate = tradeCount > 0 ? (winCount / tradeCount * 100) : 0;
 
-        const wins = roundTrips.filter((rt) => rt.pnl > 0);
-        const losses = roundTrips.filter((rt) => rt.pnl < 0);
-        const avgWin = wins.length > 0 ? wins.reduce((s, rt) => s + rt.pnl, 0) / wins.length : 0;
-        const avgLoss = losses.length > 0 ? losses.reduce((s, rt) => s + rt.pnl, 0) / losses.length : 0;
+        // Build synthetic round-trips from activity logs when fills aren't available
+        // Note: activity close actions (stop_loss, take_profit, etc.) don't indicate direction,
+        // so we check the reason field or mark as unknown
+        const effectiveRoundTrips: FuturesRoundTrip[] = useFills ? roundTrips : closedFromDb.map((t) => {
+          const reasonLower = (t.reason || "").toLowerCase();
+          const actionLower = t.action.toLowerCase();
+          const isLong = actionLower.includes("long") || reasonLower.includes("long") || reasonLower.includes("buy");
+          const isShort = actionLower.includes("short") || reasonLower.includes("short") || reasonLower.includes("sell");
+          return {
+            symbol: t.symbol,
+            direction: isLong ? "Long" : isShort ? "Short" : "—",
+            qty: t.qty,
+            entryPrice: t.price || 0,
+            exitPrice: t.price || 0,
+            pnl: t.pnl || 0,
+            entryTime: t.time,
+            exitTime: t.time,
+          };
+        });
 
-        // Daily breakdown from round trips
+        // Daily breakdown
         const dayMap: Record<string, { trades: number; wins: number; losses: number; totalPnl: number; label: string }> = {};
-        for (const rt of roundTrips) {
+        for (const rt of effectiveRoundTrips) {
           const d = new Date(rt.exitTime);
           const dateKey = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
           const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
           if (!dayMap[dateKey]) dayMap[dateKey] = { trades: 0, wins: 0, losses: 0, totalPnl: 0, label };
           dayMap[dateKey].trades++;
           if (rt.pnl > 0) dayMap[dateKey].wins++;
-          else dayMap[dateKey].losses++;
+          else if (rt.pnl < 0) dayMap[dateKey].losses++;
           dayMap[dateKey].totalPnl += rt.pnl;
         }
         const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
 
-        if (tradeCount === 0 && !futures?.connected) {
+        // Weekly breakdown with trade counts
+        const weekMap: Record<string, { trades: number; wins: number; losses: number; pnl: number; label: string }> = {};
+        for (const rt of effectiveRoundTrips) {
+          const d = new Date(rt.exitTime);
+          const weekStart = new Date(d);
+          weekStart.setDate(d.getDate() - d.getDay());
+          const key = weekStart.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const label = `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}`;
+          if (!weekMap[key]) weekMap[key] = { trades: 0, wins: 0, losses: 0, pnl: 0, label };
+          weekMap[key].trades++;
+          if (rt.pnl > 0) weekMap[key].wins++;
+          else if (rt.pnl < 0) weekMap[key].losses++;
+          weekMap[key].pnl += rt.pnl;
+        }
+        const weeks = Object.entries(weekMap).sort(([a], [b]) => b.localeCompare(a));
+
+        // Monthly breakdown
+        const monthMap: Record<string, { pnl: number; label: string }> = {};
+        for (const rt of effectiveRoundTrips) {
+          const d = new Date(rt.exitTime);
+          const key = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 7);
+          const label = d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" });
+          if (!monthMap[key]) monthMap[key] = { pnl: 0, label };
+          monthMap[key].pnl += rt.pnl;
+        }
+        const months = Object.entries(monthMap).sort(([a], [b]) => b.localeCompare(a));
+
+        // Compute all stats
+        const stats = computeFuturesStats(effectiveRoundTrips, dayMap, weekMap, STARTING_CAPITAL);
+        const totalPnl = accountPnl ?? stats.totalPnl;
+
+        if (!futures) {
+          return (
+            <div className="space-y-4">
+              <div className="skeleton h-32 w-full rounded-xl" />
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+                    <div className="skeleton h-3 w-14 rounded mb-2" />
+                    <div className="skeleton h-6 w-20 rounded" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        }
+
+        if (stats.tradeCount === 0 && !futures.connected) {
           return (
             <Card>
               <CardContent className="py-8 text-center">
@@ -556,59 +617,103 @@ export default function PerformancePage() {
                 <p className="text-sm text-muted-foreground mb-1">Futures Realized P&L</p>
                 <p className={`text-5xl font-black tracking-tight ${pnl(totalPnl)}`}>{fmt(Math.round(totalPnl))}</p>
                 <p className="text-sm text-muted-foreground mt-2">
-                  {winCount} wins, {lossCount} losses from {tradeCount} completed trades
+                  {stats.winCount} wins, {stats.lossCount} losses from {stats.tradeCount} completed trades
                 </p>
               </CardContent>
             </Card>
 
-            {/* Futures Key Stats */}
+            {/* Row 1: Core Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Win Rate</p>
-                  <p className={`text-2xl font-bold mt-1 ${winRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{winRate.toFixed(0)}%</p>
-                  <p className="text-[10px] text-muted-foreground/50">{winCount}W / {lossCount}L</p>
+                  <p className={`text-2xl font-bold mt-1 ${stats.winRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{stats.winRate.toFixed(0)}%</p>
+                  <p className="text-[10px] text-muted-foreground/50">{stats.winCount}W / {stats.lossCount}L</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Win</p>
-                  <p className="text-2xl font-bold mt-1 text-emerald-400">{avgWin > 0 ? `+$${avgWin.toFixed(0)}` : "—"}</p>
+                  <p className="text-2xl font-bold mt-1 text-emerald-400">{stats.avgWin > 0 ? `+$${stats.avgWin.toFixed(0)}` : "—"}</p>
                   <p className="text-[10px] text-muted-foreground/50">Per winning trade</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Loss</p>
-                  <p className="text-2xl font-bold mt-1 text-red-400">{avgLoss < 0 ? `-$${Math.abs(avgLoss).toFixed(0)}` : "—"}</p>
+                  <p className="text-2xl font-bold mt-1 text-red-400">{stats.avgLoss < 0 ? `-$${Math.abs(stats.avgLoss).toFixed(0)}` : "—"}</p>
                   <p className="text-[10px] text-muted-foreground/50">Per losing trade</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Profit Factor</p>
-                  <p className={`text-2xl font-bold mt-1 ${wins.length > 0 && losses.length > 0 ? (wins.reduce((s, r) => s + r.pnl, 0) / Math.abs(losses.reduce((s, r) => s + r.pnl, 0)) >= 1 ? "text-emerald-400" : "text-red-400") : "text-muted-foreground"}`}>
-                    {wins.length > 0 && losses.length > 0
-                      ? (wins.reduce((s, r) => s + r.pnl, 0) / Math.abs(losses.reduce((s, r) => s + r.pnl, 0))).toFixed(2)
-                      : "—"}
+                  <p className={`text-2xl font-bold mt-1 ${stats.profitFactor >= 1 ? "text-emerald-400" : stats.profitFactor > 0 ? "text-red-400" : "text-muted-foreground"}`}>
+                    {stats.profitFactor === Infinity ? "∞" : stats.profitFactor > 0 ? stats.profitFactor.toFixed(2) : "—"}
                   </p>
                   <p className="text-[10px] text-muted-foreground/50">Gross profit / gross loss</p>
                 </CardContent>
               </Card>
             </div>
 
-            {/* Futures Account Value */}
+            {/* Row 2: Advanced Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Expectancy</p>
+                  <p className={`text-2xl font-bold mt-1 ${pnl(stats.expectancy)}`}>
+                    {stats.tradeCount > 0 ? fmt(Math.round(stats.expectancy)) : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/50">Per trade avg</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Max Drawdown</p>
+                  <p className="text-2xl font-bold mt-1 text-red-400">
+                    {stats.maxDrawdown > 0 ? `-$${stats.maxDrawdown.toFixed(0)}` : "$0"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/50">
+                    {stats.maxDrawdownPct > 0 ? `-${stats.maxDrawdownPct.toFixed(1)}% of capital` : "No drawdown"}
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Sharpe Ratio</p>
+                  <p className={`text-2xl font-bold mt-1 ${stats.sharpeRatio != null ? (stats.sharpeRatio >= 1 ? "text-emerald-400" : stats.sharpeRatio >= 0 ? "text-yellow-400" : "text-red-400") : "text-muted-foreground"}`}>
+                    {stats.sharpeRatio != null ? stats.sharpeRatio.toFixed(2) : "N/A"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/50">
+                    {stats.sharpeRatio == null ? "Need 5+ trading days" : "Annualized"}
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4 pb-3">
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Current Streak</p>
+                  <p className={`text-2xl font-bold mt-1 ${stats.currentStreak.type === "win" ? "text-emerald-400" : stats.currentStreak.type === "loss" ? "text-red-400" : "text-muted-foreground"}`}>
+                    {stats.currentStreak.count > 0 ? `${stats.currentStreak.count}${stats.currentStreak.type === "win" ? "W" : "L"}` : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/50">
+                    Best: {stats.longestWinStreak}W · Worst: {stats.longestLossStreak}L
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Account Summary */}
             {futures?.account && (
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <div className="grid grid-cols-3 gap-4">
                     <div>
                       <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Account Balance</p>
-                      <p className="text-xl font-bold mt-1">{fmt(Math.round(futures.account.balance))}</p>
+                      <p className="text-xl font-bold mt-1">${Math.round(futures.account.balance).toLocaleString()}</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Net Liquidation</p>
-                      <p className="text-xl font-bold mt-1">{fmt(Math.round(futures.account.netLiq))}</p>
+                      <p className="text-xl font-bold mt-1">${Math.round(futures.account.netLiq).toLocaleString()}</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Today Realized</p>
@@ -619,88 +724,184 @@ export default function PerformancePage() {
               </Card>
             )}
 
-            {/* Futures Daily / Weekly / Monthly P&L */}
-            {roundTrips.length > 0 && (() => {
-              // Weekly breakdown
-              const weekMap: Record<string, { pnl: number; label: string }> = {};
-              for (const rt of roundTrips) {
-                const d = new Date(rt.exitTime);
-                const weekStart = new Date(d);
-                weekStart.setDate(d.getDate() - d.getDay());
-                const key = weekStart.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-                const label = `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}`;
-                if (!weekMap[key]) weekMap[key] = { pnl: 0, label };
-                weekMap[key].pnl += rt.pnl;
-              }
-              const weeks = Object.entries(weekMap).sort(([a], [b]) => b.localeCompare(a));
+            {/* Highlights */}
+            {stats.tradeCount > 0 && (
+              <Card>
+                <CardHeader><CardTitle className="text-sm">Highlights</CardTitle></CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Best Trade</span>
+                      <span className={`font-bold ${stats.bestTrade ? pnl(stats.bestTrade.pnl) : ""}`}>
+                        {stats.bestTrade ? `${fmt(Math.round(stats.bestTrade.pnl))} (${stats.bestTrade.symbol})` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Worst Trade</span>
+                      <span className={`font-bold ${stats.worstTrade ? pnl(stats.worstTrade.pnl) : ""}`}>
+                        {stats.worstTrade ? `${fmt(Math.round(stats.worstTrade.pnl))} (${stats.worstTrade.symbol})` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Trading Days</span>
+                      <span className="font-bold">{stats.totalTradingDays}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Best Day</span>
+                      <span className={`font-bold ${stats.bestDay ? pnl(stats.bestDay.pnl) : ""}`}>
+                        {stats.bestDay ? `${fmt(Math.round(stats.bestDay.pnl))} (${stats.bestDay.date})` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Worst Day</span>
+                      <span className={`font-bold ${stats.worstDay ? pnl(stats.worstDay.pnl) : ""}`}>
+                        {stats.worstDay ? `${fmt(Math.round(stats.worstDay.pnl))} (${stats.worstDay.date})` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Green / Red Days</span>
+                      <span className="font-bold">
+                        <span className="text-emerald-400">{stats.greenDays}</span>
+                        <span className="text-muted-foreground/50"> / </span>
+                        <span className="text-red-400">{stats.redDays}</span>
+                        <span className="text-muted-foreground/50"> ({stats.totalTradingDays > 0 ? ((stats.greenDays / stats.totalTradingDays) * 100).toFixed(0) : 0}%)</span>
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Best Week</span>
+                      <span className={`font-bold ${stats.bestWeek ? pnl(stats.bestWeek.pnl) : ""}`}>
+                        {stats.bestWeek ? fmt(Math.round(stats.bestWeek.pnl)) : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Worst Week</span>
+                      <span className={`font-bold ${stats.worstWeek ? pnl(stats.worstWeek.pnl) : ""}`}>
+                        {stats.worstWeek ? fmt(Math.round(stats.worstWeek.pnl)) : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Avg Trades/Day</span>
+                      <span className="font-bold">{stats.avgTradesPerDay.toFixed(1)}</span>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
-              // Monthly breakdown
-              const monthMap: Record<string, { pnl: number; label: string }> = {};
-              for (const rt of roundTrips) {
-                const d = new Date(rt.exitTime);
-                const key = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 7);
-                const label = d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" });
-                if (!monthMap[key]) monthMap[key] = { pnl: 0, label };
-                monthMap[key].pnl += rt.pnl;
-              }
-              const months = Object.entries(monthMap).sort(([a], [b]) => b.localeCompare(a));
+            {/* Equity Curve */}
+            {stats.equityCurve.length > 1 && (() => {
+              const curve = stats.equityCurve;
+              const maxPnl = Math.max(...curve.map((p) => p.cumPnl));
+              const minPnl = Math.min(...curve.map((p) => p.cumPnl), 0);
+              const range = maxPnl - minPnl || 1;
+              const chartH = 180;
+              const chartW = 600;
+              const padTop = 10;
+              const padBot = 10;
+              const usableH = chartH - padTop - padBot;
+
+              const toY = (val: number) => padTop + usableH - ((val - minPnl) / range) * usableH;
+              const toX = (i: number) => (i / (curve.length - 1)) * chartW;
+
+              const linePts = curve.map((p, i) => `${toX(i)},${toY(p.cumPnl)}`).join(" ");
+              const zeroY = toY(0);
+              // Area fill — close path at zero line
+              const areaPath = `M${toX(0)},${zeroY} ` +
+                curve.map((p, i) => `L${toX(i)},${toY(p.cumPnl)}`).join(" ") +
+                ` L${toX(curve.length - 1)},${zeroY} Z`;
 
               return (
-                <div className="grid md:grid-cols-3 gap-4">
-                  <Card>
-                    <CardHeader><CardTitle className="text-sm">Daily P&L</CardTitle></CardHeader>
-                    <CardContent>
-                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
-                        {days.map(([dateKey, d]) => (
-                          <div key={dateKey} className="flex justify-between text-xs">
-                            <span className="text-muted-foreground">{d.label}</span>
-                            <span className={`font-medium ${pnl(d.totalPnl)}`}>
-                              {d.totalPnl >= 0 ? "+" : "-"}${Math.abs(d.totalPnl).toFixed(0)}
-                            </span>
-                          </div>
-                        ))}
+                <Card>
+                  <CardHeader><CardTitle className="text-sm">Equity Curve</CardTitle></CardHeader>
+                  <CardContent>
+                    <div className="relative">
+                      <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full h-48" preserveAspectRatio="none">
+                        {/* Zero line */}
+                        <line x1="0" y1={zeroY} x2={chartW} y2={zeroY} stroke="rgba(255,255,255,0.1)" strokeDasharray="4 4" />
+                        {/* Area fill */}
+                        <path d={areaPath} fill={curve[curve.length - 1].cumPnl >= 0 ? "rgba(52,211,153,0.08)" : "rgba(248,113,113,0.08)"} />
+                        {/* Line */}
+                        <polyline
+                          points={linePts}
+                          fill="none"
+                          stroke={curve[curve.length - 1].cumPnl >= 0 ? "rgb(52,211,153)" : "rgb(248,113,113)"}
+                          strokeWidth="2"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      </svg>
+                      {/* Y-axis labels */}
+                      <div className="absolute left-1 top-1 text-[9px] text-muted-foreground/40">
+                        {maxPnl >= 0 ? "+" : ""}${maxPnl.toFixed(0)}
                       </div>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader><CardTitle className="text-sm">Weekly P&L</CardTitle></CardHeader>
-                    <CardContent>
-                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
-                        {weeks.map(([key, w]) => (
-                          <div key={key} className="flex justify-between text-xs">
-                            <span className="text-muted-foreground">{w.label}</span>
-                            <span className={`font-medium ${pnl(w.pnl)}`}>
-                              {w.pnl >= 0 ? "+" : "-"}${Math.abs(w.pnl).toFixed(0)}
-                            </span>
-                          </div>
-                        ))}
+                      <div className="absolute left-1 bottom-1 text-[9px] text-muted-foreground/40">
+                        {minPnl >= 0 ? "+" : "-"}${Math.abs(minPnl).toFixed(0)}
                       </div>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader><CardTitle className="text-sm">Monthly P&L</CardTitle></CardHeader>
-                    <CardContent>
-                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
-                        {months.map(([key, m]) => (
-                          <div key={key} className="flex justify-between text-xs">
-                            <span className="text-muted-foreground">{m.label}</span>
-                            <span className={`font-medium ${pnl(m.pnl)}`}>
-                              {m.pnl >= 0 ? "+" : "-"}${Math.abs(m.pnl).toFixed(0)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
+                    </div>
+                    <div className="flex justify-between text-[9px] text-muted-foreground/40 mt-1">
+                      <span>{new Date(curve[0].date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                      <span>{new Date(curve[curve.length - 1].date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                    </div>
+                  </CardContent>
+                </Card>
               );
             })()}
 
-            {/* Futures Daily Breakdown Table */}
+            {/* Daily / Weekly / Monthly P&L */}
+            {effectiveRoundTrips.length > 0 && (
+              <div className="grid md:grid-cols-3 gap-4">
+                <Card>
+                  <CardHeader><CardTitle className="text-sm">Daily P&L</CardTitle></CardHeader>
+                  <CardContent>
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                      {days.map(([dateKey, d]) => (
+                        <div key={dateKey} className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">{d.label}</span>
+                          <span className={`font-medium ${pnl(d.totalPnl)}`}>
+                            {d.totalPnl >= 0 ? "+" : "-"}${Math.abs(d.totalPnl).toFixed(0)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader><CardTitle className="text-sm">Weekly P&L</CardTitle></CardHeader>
+                  <CardContent>
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                      {weeks.map(([key, w]) => (
+                        <div key={key} className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">{w.label}</span>
+                          <span className={`font-medium ${pnl(w.pnl)}`}>
+                            {w.pnl >= 0 ? "+" : "-"}${Math.abs(w.pnl).toFixed(0)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader><CardTitle className="text-sm">Monthly P&L</CardTitle></CardHeader>
+                  <CardContent>
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                      {months.map(([key, m]) => (
+                        <div key={key} className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">{m.label}</span>
+                          <span className={`font-medium ${pnl(m.pnl)}`}>
+                            {m.pnl >= 0 ? "+" : "-"}${Math.abs(m.pnl).toFixed(0)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {/* Daily Performance Table */}
             {days.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-sm">Daily Futures Performance</CardTitle>
+                  <CardTitle className="text-sm">Daily Performance</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="overflow-x-auto">
@@ -744,110 +945,45 @@ export default function PerformancePage() {
                 </CardContent>
               </Card>
             )}
-          </>
-        );
-      })()}
 
-      {/* ═══════════ PAPER TRADES TAB ═══════════ */}
-      {activeTab === "paper" && (() => {
-        // Paper trades from futures activity (action starts with paper_)
-        const allActivity = futures?.activity || [];
-        const paperTrades = allActivity.filter((t) => t.action.startsWith("paper_"));
-        const scoredPapers = paperTrades.filter((t) => t.pnl != null);
-        const unscoredPapers = paperTrades.filter((t) => t.pnl == null);
-        const paperWins = scoredPapers.filter((t) => (t.pnl || 0) > 0);
-        const paperLosses = scoredPapers.filter((t) => (t.pnl || 0) < 0);
-        const paperTotalPnl = scoredPapers.reduce((s, t) => s + (t.pnl || 0), 0);
-        const paperWinRate = scoredPapers.length > 0 ? (paperWins.length / scoredPapers.length * 100) : 0;
-        const paperAvgWin = paperWins.length > 0 ? paperWins.reduce((s, t) => s + (t.pnl || 0), 0) / paperWins.length : 0;
-        const paperAvgLoss = paperLosses.length > 0 ? paperLosses.reduce((s, t) => s + (t.pnl || 0), 0) / paperLosses.length : 0;
-
-        return (
-          <>
-            <Card className="border-2 border-violet-500/20 bg-gradient-to-br from-violet-500/[0.03] to-transparent">
-              <CardContent className="pt-6 pb-4 text-center">
-                <p className="text-sm text-muted-foreground mb-1">Hypothetical P&L — if these were real trades</p>
-                <p className={`text-5xl font-black tracking-tight ${pnl(paperTotalPnl)}`}>{fmt(Math.round(paperTotalPnl))}</p>
-                <p className="text-sm text-muted-foreground mt-2">
-                  {scoredPapers.length} scored ({paperWins.length}W / {paperLosses.length}L) · {unscoredPapers.length} awaiting EOD review
-                </p>
-              </CardContent>
-            </Card>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Paper Win Rate</p>
-                  <p className={`text-2xl font-bold mt-1 ${paperWinRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{paperWinRate.toFixed(0)}%</p>
-                  <p className="text-[10px] text-muted-foreground/50">{paperWins.length}W / {paperLosses.length}L</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Paper Win</p>
-                  <p className="text-2xl font-bold mt-1 text-emerald-400">{paperAvgWin > 0 ? `+$${paperAvgWin.toFixed(0)}` : "—"}</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Paper Loss</p>
-                  <p className="text-2xl font-bold mt-1 text-red-400">{paperAvgLoss < 0 ? `-$${Math.abs(paperAvgLoss).toFixed(0)}` : "—"}</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Total Paper Trades</p>
-                  <p className="text-2xl font-bold mt-1">{paperTrades.length}</p>
-                  <p className="text-[10px] text-muted-foreground/50">{scoredPapers.length} scored</p>
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Paper trade log */}
-            {paperTrades.length > 0 && (
+            {/* Weekly Performance Table */}
+            {weeks.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-sm">Paper Trade Log</CardTitle>
+                  <CardTitle className="text-sm">Weekly Performance</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+                  <div className="overflow-x-auto">
                     <table className="w-full text-xs">
-                      <thead className="sticky top-0 bg-card z-10">
+                      <thead>
                         <tr className="text-muted-foreground/60 border-b border-white/10">
-                          <th className="text-left py-2 font-medium">Time</th>
-                          <th className="text-left py-2 font-medium">Symbol</th>
-                          <th className="text-left py-2 font-medium">Direction</th>
-                          <th className="text-right py-2 font-medium">Qty</th>
-                          <th className="text-right py-2 font-medium">Entry</th>
-                          <th className="text-right py-2 font-medium">Hypothetical P&L</th>
-                          <th className="text-center py-2 font-medium">Result</th>
+                          <th className="text-left py-2 font-medium">Week</th>
+                          <th className="text-center py-2 font-medium">Trades</th>
+                          <th className="text-center py-2 font-medium">Wins</th>
+                          <th className="text-center py-2 font-medium">Losses</th>
+                          <th className="text-center py-2 font-medium">Win Rate</th>
+                          <th className="text-right py-2 font-medium">Total P&L</th>
+                          <th className="text-right py-2 font-medium">Avg P&L</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {paperTrades.map((t) => {
-                          const result = t.pnl != null ? (t.pnl > 0 ? "WIN" : "LOSS") : "PENDING";
+                        {weeks.map(([key, w]) => {
+                          const wr = w.trades > 0 ? (w.wins / w.trades * 100) : 0;
+                          const avg = w.trades > 0 ? w.pnl / w.trades : 0;
                           return (
-                            <tr key={t.id} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
-                              <td className="py-2 text-muted-foreground/50 tabular-nums whitespace-nowrap">
-                                {new Date(t.time).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                            <tr key={key} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                              <td className="py-2 font-medium">{w.label}</td>
+                              <td className="text-center py-2">{w.trades}</td>
+                              <td className="text-center py-2 text-emerald-400">{w.wins}</td>
+                              <td className="text-center py-2 text-red-400">{w.losses}</td>
+                              <td className="text-center py-2">
+                                <span className={wr >= 50 ? "text-emerald-400" : "text-red-400"}>{wr.toFixed(0)}%</span>
                               </td>
-                              <td className="py-2 font-bold">{t.symbol}</td>
-                              <td className="py-2">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                  t.action.includes("long") ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
-                                }`}>{t.action.replace("paper_", "").toUpperCase()}</span>
+                              <td className={`text-right py-2 font-bold ${pnl(w.pnl)}`}>
+                                {w.pnl >= 0 ? "+" : "-"}${Math.abs(w.pnl).toFixed(0)}
                               </td>
-                              <td className="py-2 text-right tabular-nums">{t.qty}</td>
-                              <td className="py-2 text-right tabular-nums">{t.price ? `$${t.price.toFixed(2)}` : "—"}</td>
-                              <td className={`py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnl(t.pnl) : ""}`}>
-                                {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(0)}` : "—"}
-                              </td>
-                              <td className="py-2 text-center">
-                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                  result === "WIN" ? "bg-emerald-500/15 text-emerald-400" :
-                                  result === "LOSS" ? "bg-red-500/15 text-red-400" :
-                                  "bg-violet-500/15 text-violet-400"
-                                }`}>{result}</span>
+                              <td className={`text-right py-2 ${pnl(avg)}`}>
+                                {avg >= 0 ? "+" : "-"}${Math.abs(avg).toFixed(0)}
                               </td>
                             </tr>
                           );
@@ -859,17 +995,59 @@ export default function PerformancePage() {
               </Card>
             )}
 
-            {paperTrades.length === 0 && (
+            {/* Full Round-Trip Trade Log */}
+            {effectiveRoundTrips.length > 0 && (
               <Card>
-                <CardContent className="py-12 text-center">
-                  <p className="text-sm text-muted-foreground/50">No paper trades yet</p>
-                  <p className="text-[11px] text-muted-foreground/30 mt-1">Set agents to "paper" mode in Agent Hub to start logging hypothetical trades</p>
+                <CardHeader>
+                  <CardTitle className="text-sm">All Trades ({effectiveRoundTrips.length})</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-card z-10">
+                        <tr className="text-muted-foreground/60 border-b border-white/10">
+                          <th className="text-left py-2 font-medium">Exit Time</th>
+                          <th className="text-left py-2 font-medium">Symbol</th>
+                          <th className="text-left py-2 font-medium">Dir</th>
+                          <th className="text-right py-2 font-medium">Qty</th>
+                          <th className="text-right py-2 font-medium">Entry</th>
+                          <th className="text-right py-2 font-medium">Exit</th>
+                          <th className="text-right py-2 font-medium">P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...effectiveRoundTrips].sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime()).map((rt, i) => (
+                          <tr key={i} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                            <td className="py-2 text-muted-foreground/50 tabular-nums whitespace-nowrap">
+                              {new Date(rt.exitTime).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{" "}
+                              {new Date(rt.exitTime).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
+                            </td>
+                            <td className="py-2 font-bold">{rt.symbol}</td>
+                            <td className="py-2">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                rt.direction === "Long" ? "bg-emerald-500/15 text-emerald-400" :
+                                rt.direction === "Short" ? "bg-red-500/15 text-red-400" :
+                                "bg-white/[0.06] text-muted-foreground"
+                              }`}>{rt.direction.toUpperCase()}</span>
+                            </td>
+                            <td className="py-2 text-right tabular-nums">{rt.qty}</td>
+                            <td className="py-2 text-right tabular-nums">${rt.entryPrice.toFixed(2)}</td>
+                            <td className="py-2 text-right tabular-nums">${rt.exitPrice.toFixed(2)}</td>
+                            <td className={`py-2 text-right font-bold tabular-nums ${pnl(rt.pnl)}`}>
+                              {rt.pnl >= 0 ? "+" : ""}${rt.pnl.toFixed(0)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </CardContent>
               </Card>
             )}
           </>
         );
       })()}
+
 
       {/* Ready Checklist */}
       {activeTab === "options" && <Card className="border-2 border-white/10">

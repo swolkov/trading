@@ -26,6 +26,10 @@ export async function getTradingMode(type: TradeType): Promise<TradingMode> {
 // Freely switchable, no password. Does NOT affect agent execution.
 let viewCache: Record<string, { mode: TradingMode; expires: number }> = {};
 
+export function invalidateViewCache(type?: TradeType) {
+  if (type) { delete viewCache[type]; } else { viewCache = {}; }
+}
+
 export async function getViewMode(type: TradeType): Promise<TradingMode> {
   const cached = viewCache[type];
   if (cached && Date.now() < cached.expires) return cached.mode;
