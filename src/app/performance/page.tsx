@@ -651,6 +651,51 @@ export default function PerformancePage() {
           );
         }
 
+        // ── Balance-based stats (accurate) ──
+        const daysWithPnl = days.filter(([, d]) => d.hasBalanceData);
+        const greenDays = daysWithPnl.filter(([, d]) => d.totalPnl > 0).length;
+        const redDays = daysWithPnl.filter(([, d]) => d.totalPnl < 0).length;
+        const tradingDays = daysWithPnl.length;
+
+        // Max drawdown from daily balance cumulative P&L
+        const sortedDayPnls = [...daysWithPnl].sort(([a], [b]) => a.localeCompare(b));
+        let ddPeak = 0, maxDD = 0, ddCum = 0;
+        for (const [, d] of sortedDayPnls) {
+          ddCum += d.totalPnl;
+          if (ddCum > ddPeak) ddPeak = ddCum;
+          const dd = ddPeak - ddCum;
+          if (dd > maxDD) maxDD = dd;
+        }
+        const maxDDPct = STARTING_CAPITAL > 0 ? (maxDD / STARTING_CAPITAL) * 100 : 0;
+
+        // Sharpe from daily balance P&L
+        let sharpe: number | null = null;
+        if (daysWithPnl.length >= 5) {
+          const pnls = daysWithPnl.map(([, d]) => d.totalPnl);
+          const mean = pnls.reduce((s, v) => s + v, 0) / pnls.length;
+          const stddev = Math.sqrt(pnls.reduce((s, v) => s + (v - mean) ** 2, 0) / pnls.length);
+          sharpe = stddev > 0 ? (mean / stddev) * Math.sqrt(252) : 0;
+        }
+
+        // Best/worst day
+        const bestDayEntry = daysWithPnl.length > 0 ? daysWithPnl.reduce(([bk, bv], [k, v]) => v.totalPnl > bv.totalPnl ? [k, v] : [bk, bv]) : null;
+        const worstDayEntry = daysWithPnl.length > 0 ? daysWithPnl.reduce(([wk, wv], [k, v]) => v.totalPnl < wv.totalPnl ? [k, v] : [wk, wv]) : null;
+
+        // Best/worst week (only weeks with P&L)
+        const weeksWithPnl = weeks.filter(([, w]) => w.pnl !== 0);
+        const bestWeekEntry = weeksWithPnl.length > 0 ? weeksWithPnl.reduce(([bk, bv], [k, v]) => v.pnl > bv.pnl ? [k, v] : [bk, bv]) : null;
+        const worstWeekEntry = weeksWithPnl.length > 0 ? weeksWithPnl.reduce(([wk, wv], [k, v]) => v.pnl < wv.pnl ? [k, v] : [wk, wv]) : null;
+
+        // Avg daily P&L
+        const avgDailyPnl = tradingDays > 0 ? totalPnl / tradingDays : 0;
+
+        // Equity curve from daily balance deltas (cumulative)
+        let balCum = 0;
+        const balanceCurve = sortedDayPnls.map(([dateKey, d]) => {
+          balCum += d.totalPnl;
+          return { date: dateKey, cumPnl: balCum };
+        });
+
         return (
           <>
             {/* Futures Big P&L */}
@@ -659,86 +704,50 @@ export default function PerformancePage() {
                 <p className="text-sm text-muted-foreground mb-1">Futures Realized P&L</p>
                 <p className={`text-5xl font-black tracking-tight ${pnl(totalPnl)}`}>{fmt(Math.round(totalPnl))}</p>
                 <p className="text-sm text-muted-foreground mt-2">
-                  {stats.winCount} wins, {stats.lossCount} losses from {stats.tradeCount} completed trades
+                  {tradingDays} trading day{tradingDays !== 1 ? "s" : ""} · {greenDays} green, {redDays} red
                 </p>
               </CardContent>
             </Card>
 
-            {/* Row 1: Core Stats */}
+            {/* Stats — all from balance data */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <Card>
                 <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Win Rate</p>
-                  <p className={`text-2xl font-bold mt-1 ${stats.winRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{stats.winRate.toFixed(0)}%</p>
-                  <p className="text-[10px] text-muted-foreground/50">{stats.winCount}W / {stats.lossCount}L</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Win</p>
-                  <p className="text-2xl font-bold mt-1 text-emerald-400">{stats.avgWin > 0 ? `+$${stats.avgWin.toFixed(0)}` : "—"}</p>
-                  <p className="text-[10px] text-muted-foreground/50">Per winning trade</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Loss</p>
-                  <p className="text-2xl font-bold mt-1 text-red-400">{stats.avgLoss < 0 ? `-$${Math.abs(stats.avgLoss).toFixed(0)}` : "—"}</p>
-                  <p className="text-[10px] text-muted-foreground/50">Per losing trade</p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Profit Factor</p>
-                  <p className={`text-2xl font-bold mt-1 ${stats.profitFactor >= 1 ? "text-emerald-400" : stats.profitFactor > 0 ? "text-red-400" : "text-muted-foreground"}`}>
-                    {stats.profitFactor === Infinity ? "∞" : stats.profitFactor > 0 ? stats.profitFactor.toFixed(2) : "—"}
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Green Days</p>
+                  <p className={`text-2xl font-bold mt-1 ${greenDays > redDays ? "text-emerald-400" : greenDays < redDays ? "text-red-400" : "text-muted-foreground"}`}>
+                    {tradingDays > 0 ? `${((greenDays / tradingDays) * 100).toFixed(0)}%` : "—"}
                   </p>
-                  <p className="text-[10px] text-muted-foreground/50">Gross profit / gross loss</p>
+                  <p className="text-[10px] text-muted-foreground/50">{greenDays}W / {redDays}L</p>
                 </CardContent>
               </Card>
-            </div>
-
-            {/* Row 2: Advanced Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <Card>
                 <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Expectancy</p>
-                  <p className={`text-2xl font-bold mt-1 ${pnl(stats.expectancy)}`}>
-                    {stats.tradeCount > 0 ? fmt(Math.round(stats.expectancy)) : "—"}
+                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Avg Daily P&L</p>
+                  <p className={`text-2xl font-bold mt-1 ${pnl(avgDailyPnl)}`}>
+                    {tradingDays > 0 ? fmt(Math.round(avgDailyPnl)) : "—"}
                   </p>
-                  <p className="text-[10px] text-muted-foreground/50">Per trade avg</p>
+                  <p className="text-[10px] text-muted-foreground/50">Per trading day</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Max Drawdown</p>
                   <p className="text-2xl font-bold mt-1 text-red-400">
-                    {stats.maxDrawdown > 0 ? `-$${stats.maxDrawdown.toFixed(0)}` : "$0"}
+                    {maxDD > 0 ? `-$${maxDD.toFixed(0)}` : "$0"}
                   </p>
                   <p className="text-[10px] text-muted-foreground/50">
-                    {stats.maxDrawdownPct > 0 ? `-${stats.maxDrawdownPct.toFixed(1)}% of capital` : "No drawdown"}
+                    {maxDDPct > 0 ? `-${maxDDPct.toFixed(1)}% of capital` : "No drawdown"}
                   </p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4 pb-3">
                   <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Sharpe Ratio</p>
-                  <p className={`text-2xl font-bold mt-1 ${stats.sharpeRatio != null ? (stats.sharpeRatio >= 1 ? "text-emerald-400" : stats.sharpeRatio >= 0 ? "text-yellow-400" : "text-red-400") : "text-muted-foreground"}`}>
-                    {stats.sharpeRatio != null ? stats.sharpeRatio.toFixed(2) : "N/A"}
+                  <p className={`text-2xl font-bold mt-1 ${sharpe != null ? (sharpe >= 1 ? "text-emerald-400" : sharpe >= 0 ? "text-yellow-400" : "text-red-400") : "text-muted-foreground"}`}>
+                    {sharpe != null ? sharpe.toFixed(2) : "N/A"}
                   </p>
                   <p className="text-[10px] text-muted-foreground/50">
-                    {stats.sharpeRatio == null ? "Need 5+ trading days" : "Annualized"}
-                  </p>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4 pb-3">
-                  <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Current Streak</p>
-                  <p className={`text-2xl font-bold mt-1 ${stats.currentStreak.type === "win" ? "text-emerald-400" : stats.currentStreak.type === "loss" ? "text-red-400" : "text-muted-foreground"}`}>
-                    {stats.currentStreak.count > 0 ? `${stats.currentStreak.count}${stats.currentStreak.type === "win" ? "W" : "L"}` : "—"}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground/50">
-                    Best: {stats.longestWinStreak}W · Worst: {stats.longestLossStreak}L
+                    {sharpe == null ? "Need 5+ trading days" : "Annualized"}
                   </p>
                 </CardContent>
               </Card>
@@ -766,75 +775,58 @@ export default function PerformancePage() {
               </Card>
             )}
 
-            {/* Highlights */}
-            {stats.tradeCount > 0 && (
+            {/* Highlights — balance-based only */}
+            {tradingDays > 0 && (
               <Card>
                 <CardHeader><CardTitle className="text-sm">Highlights</CardTitle></CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3 text-xs">
                     <div className="flex justify-between">
-                      <span className="text-muted-foreground">Best Trade</span>
-                      <span className={`font-bold ${stats.bestTrade ? pnl(stats.bestTrade.pnl) : ""}`}>
-                        {stats.bestTrade ? `${fmt(Math.round(stats.bestTrade.pnl))} (${stats.bestTrade.symbol})` : "—"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Worst Trade</span>
-                      <span className={`font-bold ${stats.worstTrade ? pnl(stats.worstTrade.pnl) : ""}`}>
-                        {stats.worstTrade ? `${fmt(Math.round(stats.worstTrade.pnl))} (${stats.worstTrade.symbol})` : "—"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Trading Days</span>
-                      <span className="font-bold">{stats.totalTradingDays}</span>
-                    </div>
-                    <div className="flex justify-between">
                       <span className="text-muted-foreground">Best Day</span>
-                      <span className={`font-bold ${stats.bestDay ? pnl(stats.bestDay.pnl) : ""}`}>
-                        {stats.bestDay ? `${fmt(Math.round(stats.bestDay.pnl))} (${stats.bestDay.date})` : "—"}
+                      <span className={`font-bold ${bestDayEntry ? pnl(bestDayEntry[1].totalPnl) : ""}`}>
+                        {bestDayEntry ? `${fmt(Math.round(bestDayEntry[1].totalPnl))} (${bestDayEntry[1].label})` : "—"}
                       </span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Worst Day</span>
-                      <span className={`font-bold ${stats.worstDay ? pnl(stats.worstDay.pnl) : ""}`}>
-                        {stats.worstDay ? `${fmt(Math.round(stats.worstDay.pnl))} (${stats.worstDay.date})` : "—"}
+                      <span className={`font-bold ${worstDayEntry ? pnl(worstDayEntry[1].totalPnl) : ""}`}>
+                        {worstDayEntry ? `${fmt(Math.round(worstDayEntry[1].totalPnl))} (${worstDayEntry[1].label})` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Trading Days</span>
+                      <span className="font-bold">{tradingDays}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Best Week</span>
+                      <span className={`font-bold ${bestWeekEntry ? pnl(bestWeekEntry[1].pnl) : ""}`}>
+                        {bestWeekEntry ? fmt(Math.round(bestWeekEntry[1].pnl)) : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Worst Week</span>
+                      <span className={`font-bold ${worstWeekEntry ? pnl(worstWeekEntry[1].pnl) : ""}`}>
+                        {worstWeekEntry ? fmt(Math.round(worstWeekEntry[1].pnl)) : "—"}
                       </span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Green / Red Days</span>
                       <span className="font-bold">
-                        <span className="text-emerald-400">{stats.greenDays}</span>
+                        <span className="text-emerald-400">{greenDays}</span>
                         <span className="text-muted-foreground/50"> / </span>
-                        <span className="text-red-400">{stats.redDays}</span>
-                        <span className="text-muted-foreground/50"> ({stats.totalTradingDays > 0 ? ((stats.greenDays / stats.totalTradingDays) * 100).toFixed(0) : 0}%)</span>
+                        <span className="text-red-400">{redDays}</span>
+                        <span className="text-muted-foreground/50"> ({tradingDays > 0 ? ((greenDays / tradingDays) * 100).toFixed(0) : 0}%)</span>
                       </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Best Week</span>
-                      <span className={`font-bold ${stats.bestWeek ? pnl(stats.bestWeek.pnl) : ""}`}>
-                        {stats.bestWeek ? fmt(Math.round(stats.bestWeek.pnl)) : "—"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Worst Week</span>
-                      <span className={`font-bold ${stats.worstWeek ? pnl(stats.worstWeek.pnl) : ""}`}>
-                        {stats.worstWeek ? fmt(Math.round(stats.worstWeek.pnl)) : "—"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Avg Trades/Day</span>
-                      <span className="font-bold">{stats.avgTradesPerDay.toFixed(1)}</span>
                     </div>
                   </div>
                 </CardContent>
               </Card>
             )}
 
-            {/* Equity Curve */}
-            {stats.equityCurve.length > 1 && (() => {
-              const curve = stats.equityCurve;
-              const maxPnl = Math.max(...curve.map((p) => p.cumPnl));
-              const minPnl = Math.min(...curve.map((p) => p.cumPnl), 0);
+            {/* Equity Curve — from daily balance deltas */}
+            {balanceCurve.length > 1 && (() => {
+              const maxPnl = Math.max(...balanceCurve.map((p) => p.cumPnl));
+              const minPnl = Math.min(...balanceCurve.map((p) => p.cumPnl), 0);
               const range = maxPnl - minPnl || 1;
               const chartH = 180;
               const chartW = 600;
@@ -843,14 +835,13 @@ export default function PerformancePage() {
               const usableH = chartH - padTop - padBot;
 
               const toY = (val: number) => padTop + usableH - ((val - minPnl) / range) * usableH;
-              const toX = (i: number) => (i / (curve.length - 1)) * chartW;
+              const toX = (i: number) => (i / (balanceCurve.length - 1)) * chartW;
 
-              const linePts = curve.map((p, i) => `${toX(i)},${toY(p.cumPnl)}`).join(" ");
+              const linePts = balanceCurve.map((p, i) => `${toX(i)},${toY(p.cumPnl)}`).join(" ");
               const zeroY = toY(0);
-              // Area fill — close path at zero line
               const areaPath = `M${toX(0)},${zeroY} ` +
-                curve.map((p, i) => `L${toX(i)},${toY(p.cumPnl)}`).join(" ") +
-                ` L${toX(curve.length - 1)},${zeroY} Z`;
+                balanceCurve.map((p, i) => `L${toX(i)},${toY(p.cumPnl)}`).join(" ") +
+                ` L${toX(balanceCurve.length - 1)},${zeroY} Z`;
 
               return (
                 <Card>
@@ -858,20 +849,16 @@ export default function PerformancePage() {
                   <CardContent>
                     <div className="relative">
                       <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full h-48" preserveAspectRatio="none">
-                        {/* Zero line */}
                         <line x1="0" y1={zeroY} x2={chartW} y2={zeroY} stroke="rgba(255,255,255,0.1)" strokeDasharray="4 4" />
-                        {/* Area fill */}
-                        <path d={areaPath} fill={curve[curve.length - 1].cumPnl >= 0 ? "rgba(52,211,153,0.08)" : "rgba(248,113,113,0.08)"} />
-                        {/* Line */}
+                        <path d={areaPath} fill={balanceCurve[balanceCurve.length - 1].cumPnl >= 0 ? "rgba(52,211,153,0.08)" : "rgba(248,113,113,0.08)"} />
                         <polyline
                           points={linePts}
                           fill="none"
-                          stroke={curve[curve.length - 1].cumPnl >= 0 ? "rgb(52,211,153)" : "rgb(248,113,113)"}
+                          stroke={balanceCurve[balanceCurve.length - 1].cumPnl >= 0 ? "rgb(52,211,153)" : "rgb(248,113,113)"}
                           strokeWidth="2"
                           vectorEffect="non-scaling-stroke"
                         />
                       </svg>
-                      {/* Y-axis labels */}
                       <div className="absolute left-1 top-1 text-[9px] text-muted-foreground/40">
                         {maxPnl >= 0 ? "+" : ""}${maxPnl.toFixed(0)}
                       </div>
@@ -880,8 +867,8 @@ export default function PerformancePage() {
                       </div>
                     </div>
                     <div className="flex justify-between text-[9px] text-muted-foreground/40 mt-1">
-                      <span>{new Date(curve[0].date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
-                      <span>{new Date(curve[curve.length - 1].date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                      <span>{new Date(balanceCurve[0].date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                      <span>{new Date(balanceCurve[balanceCurve.length - 1].date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -939,7 +926,7 @@ export default function PerformancePage() {
               </div>
             )}
 
-            {/* Daily Performance Table */}
+            {/* Daily Performance Table — P&L from balance, trades from fills */}
             {days.length > 0 && (
               <Card>
                 <CardHeader>
@@ -952,35 +939,19 @@ export default function PerformancePage() {
                         <tr className="text-muted-foreground/60 border-b border-white/10">
                           <th className="text-left py-2 font-medium">Date</th>
                           <th className="text-center py-2 font-medium">Trades</th>
-                          <th className="text-center py-2 font-medium">Wins</th>
-                          <th className="text-center py-2 font-medium">Losses</th>
-                          <th className="text-center py-2 font-medium">Win Rate</th>
-                          <th className="text-right py-2 font-medium">Total P&L</th>
-                          <th className="text-right py-2 font-medium">Avg P&L</th>
+                          <th className="text-right py-2 font-medium">P&L</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {days.map(([dateKey, d]) => {
-                          const wr = d.trades > 0 ? (d.wins / d.trades * 100) : 0;
-                          const avg = d.trades > 0 ? d.totalPnl / d.trades : 0;
-                          return (
-                            <tr key={dateKey} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
-                              <td className="py-2 font-medium">{d.label}</td>
-                              <td className="text-center py-2">{d.trades}</td>
-                              <td className="text-center py-2 text-emerald-400">{d.wins}</td>
-                              <td className="text-center py-2 text-red-400">{d.losses}</td>
-                              <td className="text-center py-2">
-                                <span className={wr >= 50 ? "text-emerald-400" : "text-red-400"}>{wr.toFixed(0)}%</span>
-                              </td>
-                              <td className={`text-right py-2 font-bold ${pnl(d.totalPnl)}`}>
-                                {d.totalPnl >= 0 ? "+" : "-"}${Math.abs(d.totalPnl).toFixed(0)}
-                              </td>
-                              <td className={`text-right py-2 ${pnl(avg)}`}>
-                                {avg >= 0 ? "+" : "-"}${Math.abs(avg).toFixed(0)}
-                              </td>
-                            </tr>
-                          );
-                        })}
+                        {days.map(([dateKey, d]) => (
+                          <tr key={dateKey} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                            <td className="py-2 font-medium">{d.label}</td>
+                            <td className="text-center py-2">{d.trades > 0 ? d.trades : "—"}</td>
+                            <td className={`text-right py-2 font-bold ${pnl(d.totalPnl)}`}>
+                              {fmt(d.totalPnl)}
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
@@ -989,7 +960,7 @@ export default function PerformancePage() {
             )}
 
             {/* Weekly Performance Table */}
-            {weeks.length > 0 && (
+            {weeks.filter(([, w]) => w.pnl !== 0).length > 0 && (
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">Weekly Performance</CardTitle>
@@ -1001,82 +972,16 @@ export default function PerformancePage() {
                         <tr className="text-muted-foreground/60 border-b border-white/10">
                           <th className="text-left py-2 font-medium">Week</th>
                           <th className="text-center py-2 font-medium">Trades</th>
-                          <th className="text-center py-2 font-medium">Wins</th>
-                          <th className="text-center py-2 font-medium">Losses</th>
-                          <th className="text-center py-2 font-medium">Win Rate</th>
-                          <th className="text-right py-2 font-medium">Total P&L</th>
-                          <th className="text-right py-2 font-medium">Avg P&L</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {weeks.map(([key, w]) => {
-                          const wr = w.trades > 0 ? (w.wins / w.trades * 100) : 0;
-                          const avg = w.trades > 0 ? w.pnl / w.trades : 0;
-                          return (
-                            <tr key={key} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
-                              <td className="py-2 font-medium">{w.label}</td>
-                              <td className="text-center py-2">{w.trades}</td>
-                              <td className="text-center py-2 text-emerald-400">{w.wins}</td>
-                              <td className="text-center py-2 text-red-400">{w.losses}</td>
-                              <td className="text-center py-2">
-                                <span className={wr >= 50 ? "text-emerald-400" : "text-red-400"}>{wr.toFixed(0)}%</span>
-                              </td>
-                              <td className={`text-right py-2 font-bold ${pnl(w.pnl)}`}>
-                                {w.pnl >= 0 ? "+" : "-"}${Math.abs(w.pnl).toFixed(0)}
-                              </td>
-                              <td className={`text-right py-2 ${pnl(avg)}`}>
-                                {avg >= 0 ? "+" : "-"}${Math.abs(avg).toFixed(0)}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Full Round-Trip Trade Log */}
-            {effectiveRoundTrips.length > 0 && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm">All Trades ({effectiveRoundTrips.length})</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="sticky top-0 bg-card z-10">
-                        <tr className="text-muted-foreground/60 border-b border-white/10">
-                          <th className="text-left py-2 font-medium">Exit Time</th>
-                          <th className="text-left py-2 font-medium">Symbol</th>
-                          <th className="text-left py-2 font-medium">Dir</th>
-                          <th className="text-right py-2 font-medium">Qty</th>
-                          <th className="text-right py-2 font-medium">Entry</th>
-                          <th className="text-right py-2 font-medium">Exit</th>
                           <th className="text-right py-2 font-medium">P&L</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {[...effectiveRoundTrips].sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime()).map((rt, i) => (
-                          <tr key={i} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
-                            <td className="py-2 text-muted-foreground/50 tabular-nums whitespace-nowrap">
-                              {new Date(rt.exitTime).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{" "}
-                              {new Date(rt.exitTime).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-                            </td>
-                            <td className="py-2 font-bold">{rt.symbol}</td>
-                            <td className="py-2">
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                rt.direction === "Long" ? "bg-emerald-500/15 text-emerald-400" :
-                                rt.direction === "Short" ? "bg-red-500/15 text-red-400" :
-                                "bg-white/[0.06] text-muted-foreground"
-                              }`}>{rt.direction.toUpperCase()}</span>
-                            </td>
-                            <td className="py-2 text-right tabular-nums">{rt.qty}</td>
-                            <td className="py-2 text-right tabular-nums">${rt.entryPrice.toFixed(2)}</td>
-                            <td className="py-2 text-right tabular-nums">${rt.exitPrice.toFixed(2)}</td>
-                            <td className={`py-2 text-right font-bold tabular-nums ${pnl(rt.pnl)}`}>
-                              {rt.pnl >= 0 ? "+" : ""}${rt.pnl.toFixed(0)}
+                        {weeks.filter(([, w]) => w.pnl !== 0).map(([key, w]) => (
+                          <tr key={key} className="border-b border-white/[0.04] hover:bg-white/[0.02]">
+                            <td className="py-2 font-medium">{w.label}</td>
+                            <td className="text-center py-2">{w.trades > 0 ? w.trades : "—"}</td>
+                            <td className={`text-right py-2 font-bold ${pnl(w.pnl)}`}>
+                              {fmt(w.pnl)}
                             </td>
                           </tr>
                         ))}
