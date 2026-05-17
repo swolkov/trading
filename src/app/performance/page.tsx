@@ -578,15 +578,19 @@ export default function PerformancePage() {
           else if (rt.pnl < 0) dayMap[dateKey].losses++;
         }
 
-        // Also add days that have balance data but no trades (e.g., position carry-over P&L)
+        // Also add days that have balance data with non-zero P&L but no trades (e.g., position carry-over)
+        // Skip $0 balance-only days (weekends, holidays with no activity)
         for (const [date, pnl] of Object.entries(balancePnlByDate)) {
-          if (!dayMap[date]) {
+          if (!dayMap[date] && pnl !== 0) {
             const d = new Date(date + "T12:00:00");
             const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
             dayMap[date] = { trades: 0, wins: 0, losses: 0, totalPnl: pnl, label, hasBalanceData: true };
           }
         }
-        const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
+        // Filter out days with no trades and no P&L (weekend balance snapshots)
+        const days = Object.entries(dayMap)
+          .filter(([, d]) => d.trades > 0 || d.totalPnl !== 0)
+          .sort(([a], [b]) => b.localeCompare(a));
 
         // Weekly breakdown — aggregate daily P&L by week (using string math to avoid timezone issues)
         const weekMap: Record<string, { trades: number; wins: number; losses: number; pnl: number; label: string }> = {};
