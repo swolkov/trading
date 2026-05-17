@@ -92,54 +92,57 @@ export function TopBar() {
   const hasFutures = futuresData?.connected && futuresData.account;
 
   return (
-    <header className={`h-11 border-b flex items-center px-3 md:px-5 gap-2 md:gap-5 overflow-x-auto overflow-y-visible transition-colors ${
+    <header className={`h-11 border-b flex items-center transition-colors relative ${
       isAnyLive
         ? "border-red-500/20 bg-red-950/20"
         : "border-border bg-sidebar"
     }`}>
-      {/* Spacer for mobile hamburger */}
-      <div className="w-8 md:hidden shrink-0" />
+      {/* Scrollable content area */}
+      <div className="flex items-center gap-2 md:gap-5 px-3 md:px-5 overflow-x-auto flex-1 h-full">
+        {/* Spacer for mobile hamburger */}
+        <div className="w-8 md:hidden shrink-0" />
 
-      {/* Desktop: Futures metrics */}
-      <div className="hidden md:flex items-center gap-5">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Equity</span>
-          <span className="text-[13px] font-bold tabular-nums">{formatCurrency(equity)}</span>
+        {/* Desktop: Futures metrics */}
+        <div className="hidden md:flex items-center gap-5">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Equity</span>
+            <span className="text-[13px] font-bold tabular-nums">{formatCurrency(equity)}</span>
+          </div>
+
+          <div className="w-px h-4 bg-border" />
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium">Day</span>
+            <span className={`text-[12px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+              {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
+            </span>
+            <span className={`text-[10px] font-medium tabular-nums opacity-60 ${pnlColor(dailyPnl)}`}>
+              ({dailyPct >= 0 ? "+" : ""}{(dailyPct * 100).toFixed(2)}%)
+            </span>
+          </div>
+
+          {hasFutures && (
+            <>
+              <div className="w-px h-4 bg-border" />
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                <span className="text-[10px] text-muted-foreground/50 font-medium">Tradovate</span>
+              </div>
+            </>
+          )}
         </div>
 
-        <div className="w-px h-4 bg-border" />
-
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium">Day</span>
-          <span className={`text-[12px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+        {/* Mobile: compact view */}
+        <div className="flex md:hidden items-center gap-2">
+          <span className="text-[12px] font-bold tabular-nums">{formatCurrency(equity)}</span>
+          <span className={`text-[11px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
             {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
           </span>
-          <span className={`text-[10px] font-medium tabular-nums opacity-60 ${pnlColor(dailyPnl)}`}>
-            ({dailyPct >= 0 ? "+" : ""}{(dailyPct * 100).toFixed(2)}%)
-          </span>
         </div>
-
-        {hasFutures && (
-          <>
-            <div className="w-px h-4 bg-border" />
-            <div className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
-              <span className="text-[10px] text-muted-foreground/50 font-medium">Tradovate</span>
-            </div>
-          </>
-        )}
       </div>
 
-      {/* Mobile: compact view */}
-      <div className="flex md:hidden items-center gap-2">
-        <span className="text-[12px] font-bold tabular-nums">{formatCurrency(equity)}</span>
-        <span className={`text-[11px] font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
-          {dailyPnl >= 0 ? "+" : ""}{formatCurrency(dailyPnl)}
-        </span>
-      </div>
-
-      {/* Right side: mode indicator + market clock */}
-      <div className="ml-auto flex items-center gap-3 shrink-0">
+      {/* Right side: mode indicator + market clock — OUTSIDE overflow container */}
+      <div className="flex items-center gap-3 shrink-0 pr-3 md:pr-5">
         {marketClock.label && (
           <div className="hidden md:flex items-center gap-1.5">
             <Clock className="w-3 h-3 text-muted-foreground/40" />
