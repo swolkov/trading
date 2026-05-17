@@ -1,6 +1,7 @@
 import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, getOpenOrders, getTradovateFills, TRADOVATE_CONTRACTS, resolveContractSymbol } from "@/lib/tradovate";
 import { getFuturesQuotes } from "@/lib/futures-data";
 import { prisma } from "@/lib/db";
+import { getViewMode } from "@/lib/trading-mode";
 
 const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "ES", "NQ", "YM", "RTY", "GC"];
 
@@ -13,9 +14,10 @@ function matchSymbol(contractName: string): string | null {
 
 export async function GET() {
   try {
-    // Dashboard shows data from whichever Tradovate server trading_mode_futures points to.
-    // Demo mode → demo data. Live activated → live data. Controlled from Agent Hub.
-    const auth = await checkTradovateAuth();
+    // Dashboard shows data from whichever account the VIEW mode points to.
+    // This is independent of the agent execution mode (trading_mode_futures).
+    const viewMode = await getViewMode("futures");
+    const auth = await checkTradovateAuth(viewMode);
 
     // Get recent trade logs from DB regardless of Tradovate connection
     const recentLogs = await prisma.autoTradeLog.findMany({
@@ -58,12 +60,12 @@ export async function GET() {
       });
     }
 
-    // Fetch positions, account, orders, and fills in parallel
+    // Fetch positions, account, orders, and fills in parallel — using view mode
     const [positions, accountSummary, openOrders, fills] = await Promise.all([
-      getTradovatePositions(),
-      getTradovateAccountSummary(),
-      getOpenOrders(),
-      getTradovateFills(),
+      getTradovatePositions(viewMode),
+      getTradovateAccountSummary(viewMode),
+      getOpenOrders(viewMode),
+      getTradovateFills(viewMode),
     ]);
 
     // Get live quotes for position symbols (Tradovate primary, Yahoo fallback)

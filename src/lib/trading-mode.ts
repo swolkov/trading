@@ -6,6 +6,8 @@ export type TradeType = "options" | "futures" | "stocks";
 // Cache mode for 60 seconds to avoid hitting DB on every API call
 let modeCache: Record<string, { mode: TradingMode; expires: number }> = {};
 
+// Trading mode — controls agent EXECUTION (which server agents trade on).
+// Gated by /agents page config. Do NOT use for display purposes.
 export async function getTradingMode(type: TradeType): Promise<TradingMode> {
   const cached = modeCache[type];
   if (cached && Date.now() < cached.expires) return cached.mode;
@@ -17,6 +19,24 @@ export async function getTradingMode(type: TradeType): Promise<TradingMode> {
     return mode;
   } catch {
     return "paper"; // always default to paper
+  }
+}
+
+// View mode — controls which account data the DASHBOARD displays.
+// Freely switchable, no password. Does NOT affect agent execution.
+let viewCache: Record<string, { mode: TradingMode; expires: number }> = {};
+
+export async function getViewMode(type: TradeType): Promise<TradingMode> {
+  const cached = viewCache[type];
+  if (cached && Date.now() < cached.expires) return cached.mode;
+
+  try {
+    const config = await prisma.agentConfig.findUnique({ where: { key: `view_mode_${type}` } });
+    const mode = (config?.value === "live" ? "live" : "paper") as TradingMode;
+    viewCache[type] = { mode, expires: Date.now() + 60000 };
+    return mode;
+  } catch {
+    return "paper";
   }
 }
 

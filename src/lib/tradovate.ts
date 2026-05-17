@@ -2,7 +2,7 @@
 // Fully automated futures trading — API keys, no gateway needed.
 // Paper: demo.tradovateapi.com | Live: live.tradovateapi.com
 
-import { getTradingMode } from "./trading-mode";
+import { getTradingMode, type TradingMode } from "./trading-mode";
 
 // Auth credentials from env vars
 const TRADOVATE_USERNAME = process.env.TRADOVATE_USERNAME || "";
@@ -15,23 +15,32 @@ const TRADOVATE_SEC = process.env.TRADOVATE_SEC || "";
 const DEMO_URL = "https://demo.tradovateapi.com/v1";
 const LIVE_URL = "https://live.tradovateapi.com/v1";
 
-// Token cache
-let _accessToken = "";
-let _tokenExpires = 0;
+// Per-mode token cache — prevents live token being used for demo requests (and vice versa)
+const _tokenCache: Record<string, { token: string; expires: number; accountId: number }> = {};
+
+// Legacy accountId — used by order placement functions (agent execution path).
+// These always use getTradingMode() (no view override) so this stays consistent.
 let _accountId = 0;
 
-async function getBaseUrl(): Promise<string> {
-  const mode = await getTradingMode("futures");
+async function getBaseUrl(modeOverride?: TradingMode): Promise<string> {
+  const mode = modeOverride ?? await getTradingMode("futures");
   return mode === "live" ? LIVE_URL : DEMO_URL;
+}
+
+async function resolveMode(modeOverride?: TradingMode): Promise<TradingMode> {
+  return modeOverride ?? await getTradingMode("futures");
 }
 
 // ============ AUTHENTICATION ============
 
-async function authenticate(): Promise<string> {
-  // Return cached token if still valid
-  if (_accessToken && Date.now() < _tokenExpires) return _accessToken;
+async function authenticate(modeOverride?: TradingMode): Promise<string> {
+  const mode = await resolveMode(modeOverride);
+  const cached = _tokenCache[mode];
 
-  const baseUrl = await getBaseUrl();
+  // Return cached token if still valid for this mode
+  if (cached && Date.now() < cached.expires) return cached.token;
+
+  const baseUrl = mode === "live" ? LIVE_URL : DEMO_URL;
 
   const res = await fetch(`${baseUrl}/auth/accesstokenrequest`, {
     method: "POST",
@@ -54,16 +63,20 @@ async function authenticate(): Promise<string> {
   }
 
   const data = await res.json();
-  _accessToken = data.accessToken;
-  // Token valid for ~24 hours, refresh at 23 hours
-  _tokenExpires = Date.now() + 23 * 60 * 60 * 1000;
+  _tokenCache[mode] = {
+    token: data.accessToken,
+    // Token valid for ~24 hours, refresh at 23 hours
+    expires: Date.now() + 23 * 60 * 60 * 1000,
+    accountId: 0,
+  };
 
-  return _accessToken;
+  return data.accessToken;
 }
 
-async function tvFetch(path: string, options?: RequestInit): Promise<unknown> {
-  const token = await authenticate();
-  const baseUrl = await getBaseUrl();
+async function tvFetch(path: string, options?: RequestInit, modeOverride?: TradingMode): Promise<unknown> {
+  const mode = await resolveMode(modeOverride);
+  const token = await authenticate(mode);
+  const baseUrl = await getBaseUrl(mode);
   const url = `${baseUrl}${path}`;
 
   const makeReq = (t: string) => fetch(url, {
@@ -91,10 +104,9 @@ async function tvFetch(path: string, options?: RequestInit): Promise<unknown> {
   }
 
   if (res.status === 401) {
-    // Token expired, re-auth and retry
-    _accessToken = "";
-    _tokenExpires = 0;
-    const newToken = await authenticate();
+    // Token expired, clear cache for this mode and re-auth
+    delete _tokenCache[mode];
+    const newToken = await authenticate(mode);
     const retryRes = await fetch(url, {
       ...options,
       headers: {
@@ -121,16 +133,18 @@ async function tvFetch(path: string, options?: RequestInit): Promise<unknown> {
 
 // ============ CONNECTION CHECK ============
 
-export async function checkTradovateAuth(): Promise<{ authenticated: boolean; accountId: number; accountName: string }> {
+export async function checkTradovateAuth(modeOverride?: TradingMode): Promise<{ authenticated: boolean; accountId: number; accountName: string }> {
   try {
     if (!TRADOVATE_USERNAME || !TRADOVATE_PASSWORD) {
       return { authenticated: false, accountId: 0, accountName: "" };
     }
-    await authenticate();
-    const accounts = await tvFetch("/account/list") as { id: number; name: string; active: boolean }[];
+    const mode = await resolveMode(modeOverride);
+    await authenticate(mode);
+    const accounts = await tvFetch("/account/list", undefined, mode) as { id: number; name: string; active: boolean }[];
     const active = accounts.find((a) => a.active) || accounts[0];
     if (active) {
-      _accountId = active.id;
+      if (_tokenCache[mode]) _tokenCache[mode].accountId = active.id;
+      _accountId = active.id; // backward compat for order placement functions
       return { authenticated: true, accountId: active.id, accountName: active.name };
     }
     return { authenticated: false, accountId: 0, accountName: "" };
@@ -141,15 +155,26 @@ export async function checkTradovateAuth(): Promise<{ authenticated: boolean; ac
 
 // ============ ACCOUNT ============
 
-export async function getTradovateAccountSummary(): Promise<{
+// Get accountId for a given mode (from token cache)
+async function getAccountIdForMode(modeOverride?: TradingMode): Promise<number> {
+  const mode = await resolveMode(modeOverride);
+  const cached = _tokenCache[mode];
+  if (cached?.accountId) return cached.accountId;
+  // Not cached — authenticate and populate
+  const auth = await checkTradovateAuth(mode);
+  return auth.accountId;
+}
+
+export async function getTradovateAccountSummary(modeOverride?: TradingMode): Promise<{
   balance: number;
   netLiq: number;
   realizedPnl: number;
   unrealizedPnl: number;
   marginUsed: number;
 }> {
-  if (!_accountId) await checkTradovateAuth();
-  const cashBalances = await tvFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${_accountId}`) as {
+  const accountId = await getAccountIdForMode(modeOverride);
+  const mode = await resolveMode(modeOverride);
+  const cashBalances = await tvFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${accountId}`, undefined, mode) as {
     totalCashValue: number;
     netLiq: number;
     realizedPnL: number;
@@ -177,9 +202,10 @@ export interface TradovatePosition {
   timestamp: string;
 }
 
-export async function getTradovatePositions(): Promise<TradovatePosition[]> {
-  if (!_accountId) await checkTradovateAuth();
-  const positions = await tvFetch("/position/list") as {
+export async function getTradovatePositions(modeOverride?: TradingMode): Promise<TradovatePosition[]> {
+  await getAccountIdForMode(modeOverride);
+  const mode = await resolveMode(modeOverride);
+  const positions = await tvFetch("/position/list", undefined, mode) as {
     id: number; accountId: number; contractId: number; netPos: number; netPrice: number; timestamp: string;
   }[];
 
@@ -188,7 +214,7 @@ export async function getTradovatePositions(): Promise<TradovatePosition[]> {
   for (const pos of positions.filter((p) => p.netPos !== 0)) {
     let contractName = `Contract#${pos.contractId}`;
     try {
-      const contract = await tvFetch(`/contract/item?id=${pos.contractId}`) as { name: string };
+      const contract = await tvFetch(`/contract/item?id=${pos.contractId}`, undefined, mode) as { name: string };
       contractName = contract.name;
     } catch { /* ignore */ }
     result.push({ ...pos, contractName });
@@ -240,8 +266,8 @@ export async function findContract(symbol: string): Promise<{ id: number; name: 
 const DEMO_MD_URL = "https://md-demo.tradovateapi.com/v1";
 const LIVE_MD_URL = "https://md.tradovateapi.com/v1";
 
-async function getMdBaseUrl(): Promise<string> {
-  const mode = await getTradingMode("futures");
+async function getMdBaseUrl(modeOverride?: TradingMode): Promise<string> {
+  const mode = modeOverride ?? await getTradingMode("futures");
   return mode === "live" ? LIVE_MD_URL : DEMO_MD_URL;
 }
 
@@ -593,8 +619,9 @@ export async function placeStopOrder(params: {
 }
 
 // Get open orders
-export async function getOpenOrders(): Promise<{ id: number; action: string; orderType: string; orderQty: number; orderStatus: string; contractId: number }[]> {
-  const orders = await tvFetch("/order/list") as { id: number; action: string; orderType: string; orderQty: number; ordStatus: string; contractId: number }[];
+export async function getOpenOrders(modeOverride?: TradingMode): Promise<{ id: number; action: string; orderType: string; orderQty: number; orderStatus: string; contractId: number }[]> {
+  const mode = await resolveMode(modeOverride);
+  const orders = await tvFetch("/order/list", undefined, mode) as { id: number; action: string; orderType: string; orderQty: number; ordStatus: string; contractId: number }[];
   return orders
     .filter((o) => o.ordStatus === "Working" || o.ordStatus === "Accepted")
     .map((o) => ({ ...o, orderStatus: o.ordStatus }));
@@ -613,9 +640,10 @@ export interface TradovateFill {
   active: boolean;
 }
 
-export async function getTradovateFills(): Promise<TradovateFill[]> {
+export async function getTradovateFills(modeOverride?: TradingMode): Promise<TradovateFill[]> {
   try {
-    const fills = await tvFetch("/fill/list") as TradovateFill[];
+    const mode = await resolveMode(modeOverride);
+    const fills = await tvFetch("/fill/list", undefined, mode) as TradovateFill[];
     return Array.isArray(fills) ? fills : [];
   } catch {
     return [];

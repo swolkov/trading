@@ -2,8 +2,8 @@
 
 import { formatCurrency, pnlColor } from "@/lib/utils";
 import { Clock } from "lucide-react";
-import useSWR from "swr";
-import { useEffect, useState } from "react";
+import useSWR, { mutate } from "swr";
+import { useEffect, useRef, useState } from "react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -156,23 +156,91 @@ export function TopBar() {
   );
 }
 
-// ── Mode Indicator ──────────────────────────────────────
-// Shows which mode the system is in. Not a button — just a status badge.
-// Live activation controlled from Agent Hub only.
+// ── View Mode Toggle ──────────────────────────────────────
+// Switches which account data you VIEW (demo vs live).
+// Trade execution is separately gated by agent config on /agents page.
 function ViewToggle() {
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const isLiveActive = modeData?.modes?.futures === "live";
 
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  // Close on click outside
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const switchMode = async (mode: "paper" | "live") => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/trading-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "futures", mode }),
+      });
+      if (res.ok) {
+        mutate("/api/trading-mode");
+        setOpen(false);
+      }
+    } catch {} finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider ${
-      isLiveActive
-        ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30"
-        : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30"
-    }`}>
-      {isLiveActive ? (
-        <><span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" /> Live</>
-      ) : (
-        <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Demo</>
+    <div className="relative" ref={popoverRef}>
+      <button
+        onClick={() => setOpen(!open)}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider cursor-pointer transition-opacity hover:opacity-80 ${
+          isLiveActive
+            ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30"
+            : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30"
+        }`}
+      >
+        {isLiveActive ? (
+          <><span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" /> Live</>
+        ) : (
+          <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Demo</>
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full mt-2 w-44 rounded-lg border border-border bg-zinc-900 shadow-xl z-50 p-2">
+          <div className="text-[10px] text-muted-foreground/50 uppercase tracking-wider px-2 py-1">
+            View Account
+          </div>
+          <button
+            onClick={() => switchMode("paper")}
+            disabled={loading || !isLiveActive}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+              !isLiveActive ? "bg-emerald-500/10 text-emerald-400" : "text-muted-foreground hover:bg-zinc-800"
+            } disabled:opacity-50`}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            Demo
+            {!isLiveActive && <span className="ml-auto text-[9px] opacity-60">active</span>}
+          </button>
+          <button
+            onClick={() => switchMode("live")}
+            disabled={loading || isLiveActive}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+              isLiveActive ? "bg-red-500/10 text-red-400" : "text-muted-foreground hover:bg-zinc-800"
+            } disabled:opacity-50`}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+            Live
+            {isLiveActive && <span className="ml-auto text-[9px] opacity-60">active</span>}
+          </button>
+        </div>
       )}
     </div>
   );
