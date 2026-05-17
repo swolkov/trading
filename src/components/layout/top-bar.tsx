@@ -188,7 +188,10 @@ function ViewToggle() {
         body: JSON.stringify({ type: "futures", mode }),
       });
       if (res.ok) {
-        mutate("/api/trading-mode");
+        // Revalidate mode, then revalidate ALL SWR-cached data so every page
+        // immediately reflects the new account (LIVE ↔ DEMO)
+        await mutate("/api/trading-mode");
+        mutate((key) => typeof key === "string" && key.startsWith("/api/"), undefined, { revalidate: true });
         setOpen(false);
       }
     } catch {} finally {
