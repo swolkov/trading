@@ -5,6 +5,7 @@ import { useAccount } from "@/hooks/use-account";
 import { usePositions } from "@/hooks/use-positions";
 import { formatCurrency, pnlColor } from "@/lib/utils";
 import { useEffect, useState, useMemo } from "react";
+import useSWR from "swr";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -97,29 +98,42 @@ export default function DashboardPage() {
   const [regime, setRegime] = useState<RegimeData | null>(null);
   const [futures, setFutures] = useState<FuturesData | null>(null);
   const [futuresQuotes, setFuturesQuotes] = useState<FuturesQuote[]>([]);
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 10000 });
+  const viewMode = modeData?.modes?.futures || "paper";
 
   useEffect(() => {
     fetch("/api/regime").then((r) => r.json()).then((d) => { if (!d.error) setRegime(d); }).catch(() => {});
-    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
     fetch("/api/futures/quotes").then((r) => r.json()).then((d) => { if (Array.isArray(d)) setFuturesQuotes(d); }).catch(() => {});
 
-    const futuresInterval = setInterval(() => {
-      fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
-    }, 10000);
     const quotesInterval = setInterval(() => {
       fetch("/api/futures/quotes").then((r) => r.json()).then((d) => { if (Array.isArray(d)) setFuturesQuotes(d); }).catch(() => {});
     }, 15000);
 
-    return () => { clearInterval(futuresInterval); clearInterval(quotesInterval); };
+    return () => { clearInterval(quotesInterval); };
   }, []);
+
+  // Re-fetch futures data when view mode changes (LIVE ↔ DEMO)
+  useEffect(() => {
+    setFutures(null);
+    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
+
+    const futuresInterval = setInterval(() => {
+      fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
+    }, 10000);
+
+    return () => { clearInterval(futuresInterval); };
+  }, [viewMode]);
 
   // ── Futures metrics (primary — Tradovate) ──
   const futuresEquity = futures?.account?.netLiq || 0;
   const futuresBalance = futures?.account?.balance || 0;
   const futuresSOD = futures?.startOfDayBalance;
+  // Daily P&L = balance - start-of-day balance (source of truth)
+  // If no SOD snapshot exists, show today's realizedPnl ONLY if it's reasonable
+  // (Tradovate sometimes returns cumulative values, not just today's)
   const futuresDailyPnl = (futuresSOD != null && futuresBalance)
     ? futuresBalance - futuresSOD
-    : (futures?.account?.realizedPnl || 0);
+    : 0;
   const futuresUnrealized = futures?.account?.unrealizedPnl || 0;
   const futuresMargin = futures?.account?.marginUsed || 0;
 
@@ -188,7 +202,7 @@ export default function DashboardPage() {
             <div className="rounded-xl border border-white/[0.10] bg-gradient-to-br from-white/[0.05] to-white/[0.02] p-4 shadow-sm">
               <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-bold">Total Equity</p>
               <p className="text-3xl font-black mt-1 tabular-nums tracking-tight">{formatCurrency(combinedEquity)}</p>
-              <p className="text-[11px] mt-0.5 text-muted-foreground/40">{totalPositions} positions across 2 accounts</p>
+              <p className="text-[11px] mt-0.5 text-muted-foreground/40">{totalPositions} position{totalPositions !== 1 ? "s" : ""}</p>
             </div>
             <div className={`rounded-xl border p-4 ${
               combinedDailyPnl >= 0
@@ -213,7 +227,7 @@ export default function DashboardPage() {
                 {combinedUnrealized >= 0 ? "+" : ""}{formatCurrency(combinedUnrealized)}
               </p>
               <p className="text-[11px] mt-0.5 text-muted-foreground/50">
-                {totalPositions} across 2 brokers
+                {totalPositions} open
               </p>
             </div>
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
