@@ -15,6 +15,7 @@ interface DayEntry {
   losses: number;
   totalPnl: number;
   label: string;
+  hasBalanceData?: boolean;
 }
 
 interface WeekEntry {
@@ -134,11 +135,12 @@ export function computeFuturesStats(
   currentType = streakType;
   currentCount = streakCount;
 
-  // Sharpe ratio from daily P&L
+  // Sharpe ratio from daily P&L — only use days with real balance data
   const dayEntries = Object.values(dayMap);
+  const balanceDays = dayEntries.filter((d) => d.hasBalanceData);
   let sharpeRatio: number | null = null;
-  if (dayEntries.length >= 5) {
-    const dailyPnls = dayEntries.map((d) => d.totalPnl);
+  if (balanceDays.length >= 5) {
+    const dailyPnls = balanceDays.map((d) => d.totalPnl);
     const mean = dailyPnls.reduce((s, v) => s + v, 0) / dailyPnls.length;
     const variance = dailyPnls.reduce((s, v) => s + (v - mean) ** 2, 0) / dailyPnls.length;
     const stddev = Math.sqrt(variance);
@@ -153,13 +155,13 @@ export function computeFuturesStats(
     ? sorted.reduce((worst, rt) => (rt.pnl < worst.pnl ? rt : worst), sorted[0])
     : null;
 
-  // Best/worst day
-  const dayKeys = Object.keys(dayMap).sort();
-  const bestDay = dayKeys.length > 0
-    ? dayKeys.reduce((best, k) => (dayMap[k].totalPnl > dayMap[best].totalPnl ? k : best), dayKeys[0])
+  // Best/worst day — only from days with real balance data
+  const dayKeysWithPnl = Object.keys(dayMap).filter((k) => dayMap[k].hasBalanceData).sort();
+  const bestDay = dayKeysWithPnl.length > 0
+    ? dayKeysWithPnl.reduce((best, k) => (dayMap[k].totalPnl > dayMap[best].totalPnl ? k : best), dayKeysWithPnl[0])
     : null;
-  const worstDay = dayKeys.length > 0
-    ? dayKeys.reduce((worst, k) => (dayMap[k].totalPnl < dayMap[worst].totalPnl ? k : worst), dayKeys[0])
+  const worstDay = dayKeysWithPnl.length > 0
+    ? dayKeysWithPnl.reduce((worst, k) => (dayMap[k].totalPnl < dayMap[worst].totalPnl ? k : worst), dayKeysWithPnl[0])
     : null;
 
   // Best/worst week
@@ -171,10 +173,11 @@ export function computeFuturesStats(
     ? weekKeys.reduce((worst, k) => (weekMap[k].pnl < weekMap[worst].pnl ? k : worst), weekKeys[0])
     : null;
 
-  // Day summaries
-  const greenDays = dayEntries.filter((d) => d.totalPnl > 0).length;
-  const redDays = dayEntries.filter((d) => d.totalPnl <= 0).length;
-  const avgTradesPerDay = dayEntries.length > 0 ? sorted.length / dayEntries.length : 0;
+  // Day summaries — only count days with real balance data for green/red
+  const daysWithPnl = dayEntries.filter((d) => d.hasBalanceData || d.trades > 0);
+  const greenDays = daysWithPnl.filter((d) => d.totalPnl > 0).length;
+  const redDays = daysWithPnl.filter((d) => d.totalPnl < 0).length;
+  const avgTradesPerDay = daysWithPnl.length > 0 ? sorted.length / daysWithPnl.length : 0;
 
   // Equity curve
   let runningPnl = 0;
@@ -210,7 +213,7 @@ export function computeFuturesStats(
     worstDay: worstDay ? { pnl: dayMap[worstDay].totalPnl, date: dayMap[worstDay].label } : null,
     bestWeek: bestWeek ? { pnl: weekMap[bestWeek].pnl, label: weekMap[bestWeek].label } : null,
     worstWeek: worstWeek ? { pnl: weekMap[worstWeek].pnl, label: weekMap[worstWeek].label } : null,
-    totalTradingDays: dayEntries.length,
+    totalTradingDays: daysWithPnl.length,
     greenDays,
     redDays,
     avgTradesPerDay,
