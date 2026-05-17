@@ -102,6 +102,7 @@ interface FuturesPerfData {
     roundTrips: FuturesRoundTrip[];
   };
   activity: { id: string; symbol: string; action: string; qty: number; price: number | null; pnl: number | null; reason: string; time: string }[];
+  balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
 }
 
 const swrFetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -541,44 +542,67 @@ export default function PerformancePage() {
           };
         });
 
-        // Daily breakdown
+        // ── Daily P&L from balance deltas (source of truth) ──
+        // Per risk-management.md: NEVER sum trade P&L. Use Tradovate balance deltas.
+        const balanceHistory = (futures?.balanceHistory || []).filter((b) => !EXCLUDED_DATES.includes(b.date));
         const dayMap: Record<string, { trades: number; wins: number; losses: number; totalPnl: number; label: string }> = {};
+
+        // First: seed daily P&L from balance history (accurate)
+        const sortedBal = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
+        for (let i = 0; i < sortedBal.length; i++) {
+          const b = sortedBal[i];
+          const d = new Date(b.date + "T12:00:00");
+          const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+          let dayPnl: number | null = null;
+          if (b.startBalance != null && b.endBalance != null) {
+            dayPnl = b.endBalance - b.startBalance;
+          } else if (b.startBalance != null && sortedBal[i + 1]?.startBalance != null) {
+            // Use next day's SOD as fallback EOD
+            dayPnl = sortedBal[i + 1].startBalance! - b.startBalance;
+          }
+          if (dayPnl != null) {
+            dayMap[b.date] = { trades: 0, wins: 0, losses: 0, totalPnl: Math.round(dayPnl), label };
+          }
+        }
+
+        // Second: add trade counts from round-trips (for win rate per day)
         for (const rt of effectiveRoundTrips) {
-          const d = new Date(rt.exitTime);
-          const dateKey = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-          const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
-          if (!dayMap[dateKey]) dayMap[dateKey] = { trades: 0, wins: 0, losses: 0, totalPnl: 0, label };
+          const dateKey = toEtDate(rt.exitTime);
+          if (!dayMap[dateKey]) {
+            const d = new Date(rt.exitTime);
+            const label = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" });
+            dayMap[dateKey] = { trades: 0, wins: 0, losses: 0, totalPnl: 0, label };
+          }
           dayMap[dateKey].trades++;
           if (rt.pnl > 0) dayMap[dateKey].wins++;
           else if (rt.pnl < 0) dayMap[dateKey].losses++;
-          dayMap[dateKey].totalPnl += rt.pnl;
         }
         const days = Object.entries(dayMap).sort(([a], [b]) => b.localeCompare(a));
 
-        // Weekly breakdown with trade counts
+        // Weekly breakdown — aggregate daily P&L by week
         const weekMap: Record<string, { trades: number; wins: number; losses: number; pnl: number; label: string }> = {};
-        for (const rt of effectiveRoundTrips) {
-          const d = new Date(rt.exitTime);
-          const weekStart = new Date(d);
-          weekStart.setDate(d.getDate() - d.getDay());
-          const key = weekStart.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-          const label = `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}`;
+        for (const [dateKey, d] of days) {
+          const dt = new Date(dateKey + "T12:00:00");
+          const weekStart = new Date(dt);
+          weekStart.setDate(dt.getDate() - dt.getDay());
+          const key = weekStart.toISOString().slice(0, 10);
+          const label = `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
           if (!weekMap[key]) weekMap[key] = { trades: 0, wins: 0, losses: 0, pnl: 0, label };
-          weekMap[key].trades++;
-          if (rt.pnl > 0) weekMap[key].wins++;
-          else if (rt.pnl < 0) weekMap[key].losses++;
-          weekMap[key].pnl += rt.pnl;
+          weekMap[key].trades += d.trades;
+          weekMap[key].wins += d.wins;
+          weekMap[key].losses += d.losses;
+          weekMap[key].pnl += d.totalPnl;
         }
         const weeks = Object.entries(weekMap).sort(([a], [b]) => b.localeCompare(a));
 
-        // Monthly breakdown
+        // Monthly breakdown — aggregate daily P&L by month
         const monthMap: Record<string, { pnl: number; label: string }> = {};
-        for (const rt of effectiveRoundTrips) {
-          const d = new Date(rt.exitTime);
-          const key = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 7);
-          const label = d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "America/New_York" });
+        for (const [dateKey, d] of days) {
+          const key = dateKey.slice(0, 7);
+          const dt = new Date(dateKey + "T12:00:00");
+          const label = dt.toLocaleDateString("en-US", { month: "long", year: "numeric" });
           if (!monthMap[key]) monthMap[key] = { pnl: 0, label };
-          monthMap[key].pnl += rt.pnl;
+          monthMap[key].pnl += d.totalPnl;
         }
         const months = Object.entries(monthMap).sort(([a], [b]) => b.localeCompare(a));
 
