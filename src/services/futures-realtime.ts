@@ -688,6 +688,79 @@ let tiltPauseUntil = 0; // timestamp when tilt pause ends
 let vaultLessonsCache: { lessons: string | null; antiPatterns: string | null } | null = null;
 let vaultLessonsCacheTime = 0;
 
+// ── Runtime Risk Config (loaded from DB — Agent Hub is the UI) ──────────
+// These are the LIVE values from AgentConfig table. Engine uses them at runtime.
+// Agent Hub page writes to these keys. Vault risk-management.md is documentation only.
+interface RiskConfig {
+  maxContractsPerTrade: number;
+  maxTotalContracts: number;
+  maxTradesPerDay: number;
+  riskPerTradePct: number;
+  dailyLossLimitPct: number;
+  maxDrawdownPct: number;
+  maxConcurrentPositions: number;
+  atrStopMultiplier: number;
+  atrTargetMultiplier: number;
+}
+
+// Defaults — used when DB values are missing
+const DEMO_DEFAULTS: RiskConfig = {
+  maxContractsPerTrade: 4,
+  maxTotalContracts: 8,
+  maxTradesPerDay: 10,
+  riskPerTradePct: 5,
+  dailyLossLimitPct: 25,
+  maxDrawdownPct: 25,
+  maxConcurrentPositions: 3,
+  atrStopMultiplier: 1.5,
+  atrTargetMultiplier: 4.0,
+};
+
+// Live defaults from Rules/risk-management.md ($1K account)
+const LIVE_DEFAULTS: RiskConfig = {
+  maxContractsPerTrade: 3,      // Up to 3 on A+ setups
+  maxTotalContracts: 6,
+  maxTradesPerDay: 6,
+  riskPerTradePct: 8,            // 8% of account per trade ($80 on $1K)
+  dailyLossLimitPct: 15,         // 15% daily loss → full stop ($150 on $1K)
+  maxDrawdownPct: 25,            // 25% drawdown → kill switch
+  maxConcurrentPositions: 4,
+  atrStopMultiplier: 1.5,
+  atrTargetMultiplier: 4.0,
+};
+
+let riskConfig: RiskConfig = DEMO_DEFAULTS;
+
+async function loadRiskConfig() {
+  const defaults = isLiveMode ? LIVE_DEFAULTS : DEMO_DEFAULTS;
+  try {
+    const keys = [
+      "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day",
+      "futures_risk_per_trade_pct", "futures_daily_loss_limit_pct", "futures_max_drawdown_pct",
+      "futures_atr_stop_multiplier", "futures_atr_target_multiplier", "max_positions",
+    ];
+    const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
+    const cfg: Record<string, string> = {};
+    for (const c of configs) cfg[c.key] = c.value;
+
+    riskConfig = {
+      maxContractsPerTrade: parseInt(cfg.futures_max_contracts) || defaults.maxContractsPerTrade,
+      maxTotalContracts: parseInt(cfg.futures_max_total_contracts) || defaults.maxTotalContracts,
+      maxTradesPerDay: parseInt(cfg.futures_max_trades_per_day) || defaults.maxTradesPerDay,
+      riskPerTradePct: parseFloat(cfg.futures_risk_per_trade_pct) || defaults.riskPerTradePct,
+      dailyLossLimitPct: parseFloat(cfg.futures_daily_loss_limit_pct) || defaults.dailyLossLimitPct,
+      maxDrawdownPct: parseFloat(cfg.futures_max_drawdown_pct) || defaults.maxDrawdownPct,
+      maxConcurrentPositions: parseInt(cfg.max_positions) || defaults.maxConcurrentPositions,
+      atrStopMultiplier: parseFloat(cfg.futures_atr_stop_multiplier) || defaults.atrStopMultiplier,
+      atrTargetMultiplier: parseFloat(cfg.futures_atr_target_multiplier) || defaults.atrTargetMultiplier,
+    };
+    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}`);
+  } catch (err) {
+    riskConfig = defaults;
+    log(`[CONFIG] Failed to load from DB, using defaults: ${err}`);
+  }
+}
+
 // ── Position Persistence (survive restarts) ──────────────
 
 async function savePositions() {
@@ -1765,9 +1838,9 @@ async function evaluateAndTrade(
     return;
   }
 
-  // Execution gates — engine is always demo, so use aggressive limits for maximum learning
-  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < 3
-    && dailyTradeCount < 10 && dailyPnl >= -(startOfDayBalance || tradovateEquity) * 0.25
+  // Execution gates — limits from DB config (Agent Hub manages these)
+  const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < riskConfig.maxConcurrentPositions
+    && dailyTradeCount < riskConfig.maxTradesPerDay && dailyPnl >= -(startOfDayBalance || tradovateEquity) * (riskConfig.dailyLossLimitPct / 100)
     && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
 
   if (canExec) {
@@ -1808,14 +1881,11 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = tradovateEquity;
-  // Aggressive small-account sizing: 5% risk per trade for $500+/day potential
-  // At $1K: 5% = $50 risk. At $5K: 5% = $250 risk. Scales with growth.
-  const riskPct = 0.05;
+  // Risk per trade from DB config (Agent Hub). Default: demo 5%, live 8%.
+  const riskPct = riskConfig.riskPerTradePct / 100;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  // Demo: up to 4 contracts for aggressive learning. Live: 2 max (risk-management.md).
-  const maxContracts = isLiveMode ? 2 : 4;
-  let qty = Math.max(1, Math.min(maxContracts, Math.floor(maxRisk / riskPer)));
+  let qty = Math.max(1, Math.min(riskConfig.maxContractsPerTrade, Math.floor(maxRisk / riskPer)));
   // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
   if (totalRisk > equity * 0.15) {
@@ -2683,6 +2753,7 @@ async function main() {
   startHealthServer();
 
   await authenticateWithRetry();
+  await loadRiskConfig(); // Load risk rules from DB (Agent Hub is the UI)
   await resolveContracts();
   // Init bar builders for ALL symbols (both full-size and micro) so we can switch dynamically
   for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) initBarBuilder(sym);
@@ -2744,6 +2815,7 @@ async function main() {
   safeInterval(writeHeartbeat, 60_000, "writeHeartbeat");
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
+  safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
   safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
   safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
   safeInterval(updateEarningsWeekFilter, 3600_000, "updateEarningsWeekFilter"); // hourly
@@ -2785,7 +2857,7 @@ async function main() {
       return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
     }).join(" ");
     const macroStatus = macroBlockReason || "clear";
-    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/6 | MD:${mdStatus} | Tilt:${tiltStatus} | ${prices}`);
+    log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size}/${riskConfig.maxConcurrentPositions} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/${riskConfig.maxTradesPerDay} | MD:${mdStatus} | Tilt:${tiltStatus} | ${prices}`);
   }, 120_000, "statusLog");
 
   log("Engine ready — scanning for setups on every 5-min bar close...");
