@@ -277,7 +277,7 @@ export async function GET() {
             const yesterday = new Date();
             yesterday.setDate(yesterday.getDate() - 1);
             const ydKey = yesterday.toISOString().slice(0, 10);
-            const ydRegex = new RegExp(`${ydKey}:\\s*\\n\\s*sod:\\s*\\S+\\s*\\n\\s*eod:\\s*(\\d+(?:\\.\\d+)?)`);
+            const ydRegex = new RegExp(`${ydKey}:\\s*\\n\\s*sod:\\s*\\S+[^\\n]*\\n\\s*eod:\\s*(\\d+(?:\\.\\d+)?)`);
             const ydMatch = vaultDoc.content.match(ydRegex);
             if (ydMatch) {
               const eodVal = parseFloat(ydMatch[1]);
@@ -310,7 +310,7 @@ export async function GET() {
           });
           if (vaultDoc?.content) {
             const vaultHistory: Record<string, { sod?: number; eod?: number }> = {};
-            const dayRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)\s*\n\s*eod:\s*(\d+(?:\.\d+)?|null)/g;
+            const dayRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)[^\n]*\n\s*eod:\s*(\d+(?:\.\d+)?|null)/g;
             let m;
             while ((m = dayRegex.exec(vaultDoc.content)) !== null) {
               vaultHistory[m[1]] = {

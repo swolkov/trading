@@ -317,13 +317,14 @@ async function parseDailyBalances(): Promise<{
   const startingCapital = capMatch ? parseInt(capMatch[1]) : 50000;
 
   const entries: DailyBalanceEntry[] = [];
-  const dailyRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+|null)\s*\n\s*eod:\s*(\d+|null)\s*\n\s*day_pnl:\s*([+\-]?\d+|null)/g;
+  // Allow inline comments (# ...) after values and decimal balances
+  const dailyRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)[^\n]*\n\s*eod:\s*(\d+(?:\.\d+)?|null)[^\n]*\n\s*day_pnl:\s*([+-]?\d+|null)/g;
   let match;
   while ((match = dailyRegex.exec(doc)) !== null) {
     entries.push({
       date: match[1],
-      sod: match[2] === "null" ? null : parseInt(match[2]),
-      eod: match[3] === "null" ? null : parseInt(match[3]),
+      sod: match[2] === "null" ? null : parseFloat(match[2]),
+      eod: match[3] === "null" ? null : parseFloat(match[3]),
       dayPnl: match[4] === "null" ? null : parseInt(match[4]),
     });
   }
