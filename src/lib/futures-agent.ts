@@ -677,7 +677,7 @@ export async function runFuturesAgent(): Promise<{
       actualEquity = 50_000;
       details.push(`WARNING: Equity anomaly — using $50k actual default`);
     }
-    // Use simulated equity for all risk calculations (mirrors $5K live)
+    // Use simulated equity for all risk calculations (mirrors $1K live)
     equity = FUTURES_RULES.SIMULATED_EQUITY || actualEquity;
     details.push(`ACCOUNT: Actual $${actualEquity.toLocaleString()} | Risk-sizing as $${equity.toLocaleString()} (Unrealized: $${summary.unrealizedPnl.toFixed(0)})`);
   } catch (err) {

@@ -23,7 +23,7 @@ const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
 // Subscribe to both full-size and micro — trade whichever fits account equity
 // Full-size: ES ($50/pt), NQ ($20/pt), GC ($100/pt) — need $25k+
-// Micro: MES ($5/pt), MNQ ($2/pt), MGC ($10/pt) — works with any account
+// Micro: MES ($5/pt), MNQ ($2/pt) — MGC removed ($10/pt too risky for $1K)
 const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC"];
 const MICRO_SYMBOLS = ["MES", "MNQ"]; // MGC removed: $10/pt too risky for $1K live mirror
 // Map full-size to micro equivalents
@@ -810,25 +810,27 @@ interface RiskConfig {
   maxConcurrentPositions: number;
   atrStopMultiplier: number;
   atrTargetMultiplier: number;
+  simulatedEquity: number;       // Size trades as if this is account equity (0 = use actual)
 }
 
-// Defaults — used when DB values are missing
+// Demo defaults — simulate $1K sizing so learning matches live conditions
 const DEMO_DEFAULTS: RiskConfig = {
-  maxContractsPerTrade: 4,
-  maxTotalContracts: 8,
-  maxTradesPerDay: 10,
-  riskPerTradePct: 5,
-  dailyLossLimitPct: 25,
+  maxContractsPerTrade: 3,       // Match live — learn with same sizing
+  maxTotalContracts: 4,          // Match live
+  maxTradesPerDay: 10,           // More than live — gather learning data faster
+  riskPerTradePct: 8,            // Match live — 8% of simulated $1K = $80
+  dailyLossLimitPct: 25,         // Looser than live — don't stop learning early
   maxDrawdownPct: 25,
-  maxConcurrentPositions: 3,
+  maxConcurrentPositions: 4,     // Match live
   atrStopMultiplier: 1.5,
   atrTargetMultiplier: 4.0,
+  simulatedEquity: 1_000,        // Size as $1K even though demo account has $50K
 };
 
 // Live defaults from Rules/risk-management.md ($1K account)
 const LIVE_DEFAULTS: RiskConfig = {
-  maxContractsPerTrade: 3,      // Up to 3 on A+ setups
-  maxTotalContracts: 4,         // Max 4 open positions on $1K
+  maxContractsPerTrade: 3,
+  maxTotalContracts: 4,
   maxTradesPerDay: 6,
   riskPerTradePct: 8,            // 8% of account per trade ($80 on $1K)
   dailyLossLimitPct: 15,         // 15% daily loss → full stop ($150 on $1K)
@@ -836,6 +838,7 @@ const LIVE_DEFAULTS: RiskConfig = {
   maxConcurrentPositions: 4,
   atrStopMultiplier: 1.5,
   atrTargetMultiplier: 4.0,
+  simulatedEquity: 0,            // Use actual live equity
 };
 
 let riskConfig: RiskConfig = DEMO_DEFAULTS;
@@ -847,6 +850,7 @@ async function loadRiskConfig() {
       "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day",
       "futures_risk_per_trade_pct", "futures_daily_loss_limit_pct", "futures_max_drawdown_pct",
       "futures_atr_stop_multiplier", "futures_atr_target_multiplier", "max_positions",
+      "futures_simulated_equity",
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -862,6 +866,7 @@ async function loadRiskConfig() {
       maxConcurrentPositions: parseInt(cfg.max_positions) || defaults.maxConcurrentPositions,
       atrStopMultiplier: parseFloat(cfg.futures_atr_stop_multiplier) || defaults.atrStopMultiplier,
       atrTargetMultiplier: parseFloat(cfg.futures_atr_target_multiplier) || defaults.atrTargetMultiplier,
+      simulatedEquity: parseFloat(cfg.futures_simulated_equity) || defaults.simulatedEquity,
     };
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}`);
   } catch (err) {
@@ -1285,26 +1290,43 @@ async function closePosition(sym: string, price: number, reason: string) {
   if (!pos) return;
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
 
-  // Retry up to 3 times — critical for EOD close and emergency exits
-  let closeOrderId: number | null = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      // Cancel bracket orders
-      if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
-      if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+  // CHECK: Is the position still open on Tradovate? Bracket stop/target may have already filled.
+  let positionAlreadyClosed = false;
+  try {
+    const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number }[];
+    const tvMatch = tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0);
+    if (!tvMatch) {
+      positionAlreadyClosed = true;
+      log(`${sym}: Position already closed on Tradovate (bracket filled). Using actual fill for P&L.`);
+    }
+  } catch { /* if check fails, proceed with close attempt */ }
 
-      const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-      const acct = accounts.find(a => a.id === accountId) || accounts[0];
-      const orderResult = await apiFetch("/order/placeorder", {
-        method: "POST",
-        body: JSON.stringify({
-          accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
-          symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
-        }),
-      }) as { orderId: number };
-      closeOrderId = orderResult.orderId;
-      // Success — break out of retry loop
-      break;
+  let closeOrderId: number | null = null;
+
+  if (positionAlreadyClosed) {
+    // Bracket already closed the position — cancel any remaining bracket orders
+    if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+    if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+  } else {
+    // Position still open — close it manually with retry
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        // Cancel bracket orders first
+        if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+        if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+
+        const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+        const acct = accounts.find(a => a.id === accountId) || accounts[0];
+        const orderResult = await apiFetch("/order/placeorder", {
+          method: "POST",
+          body: JSON.stringify({
+            accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
+            symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
+          }),
+        }) as { orderId: number };
+        closeOrderId = orderResult.orderId;
+        // Success — break out of retry loop
+        break;
     } catch (err) {
       log(`[CLOSE] Attempt ${attempt}/3 failed for ${sym}: ${err}`);
       if (attempt === 3) {
@@ -1331,26 +1353,37 @@ async function closePosition(sym: string, price: number, reason: string) {
       await new Promise(r => setTimeout(r, 2000 * attempt));
       continue;
     }
-  }
+  } // end retry loop
+  } // end else (position still open)
 
   try {
-    // Get ACTUAL fill price from Tradovate instead of using bar price estimate
+    // Get ACTUAL fill price from Tradovate — works for both bracket fills and engine-initiated closes
     let actualExitPrice = price;
-    if (closeOrderId) {
-      try {
+    try {
+      if (closeOrderId) {
         await new Promise(r => setTimeout(r, 1500)); // wait for fill
-        const fills = await apiFetch("/fill/list") as { orderId: number; price: number; qty: number; timestamp: string }[];
-        const myFills = fills.filter(f => f.orderId === closeOrderId);
-        if (myFills.length > 0) {
-          // Weighted average fill price if multiple fills
-          const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
-          actualExitPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
-          if (Math.abs(actualExitPrice - price) > 0.01) {
-            log(`${sym}: Actual fill $${actualExitPrice.toFixed(2)} (bar was $${price.toFixed(2)}, diff: ${(actualExitPrice - price).toFixed(2)})`);
-          }
+      }
+      // Query ALL recent fills for this contract to find the actual exit price
+      const fills = await apiFetch("/fill/list") as { orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
+      const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+      // Match by: our close order ID, OR recent fills on this contract in the close direction
+      const myFills = closeOrderId
+        ? fills.filter(f => f.orderId === closeOrderId)
+        : fills
+            .filter(f => f.contractId === pos.contractId && f.action === closeSide)
+            .filter(f => Date.now() - new Date(f.timestamp).getTime() < 120_000) // within 2 min
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, pos.quantity); // match qty
+      if (myFills.length > 0) {
+        const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
+        actualExitPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
+        if (Math.abs(actualExitPrice - price) > 0.01) {
+          log(`${sym}: Actual fill $${actualExitPrice.toFixed(2)} (engine price was $${price.toFixed(2)}, diff: ${(actualExitPrice - price).toFixed(2)})`);
         }
-      } catch { /* use bar price as fallback */ }
-    }
+      } else {
+        log(`${sym}: No fills found — using engine price $${price.toFixed(2)} for P&L`);
+      }
+    } catch { /* use bar price as fallback */ }
 
     // Calculate P&L from actual fill price
     const diff = pos.direction === "long" ? actualExitPrice - pos.entryPrice : pos.entryPrice - actualExitPrice;
@@ -1989,8 +2022,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // Demo always executes (24/7 learning). Live mirrors during RTH if enabled.
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  const equity = tradovateEquity;
-  // Risk per trade from DB config (Agent Hub). Default: demo 5%, live 8%.
+  // Use simulated equity for sizing (demo simulates $1K). Fall back to actual if not set.
+  const equity = riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity;
   const riskPct = riskConfig.riskPerTradePct / 100;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
