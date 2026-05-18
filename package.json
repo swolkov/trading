@@ -7,7 +7,10 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
-    "futures:realtime": "npx tsx src/services/futures-realtime.ts"
+    "futures:realtime": "npx tsx src/services/futures-realtime.ts",
+    "vault:sync": "npx tsx scripts/vault-sync.ts",
+    "vault:pull": "npx tsx scripts/vault-sync.ts pull",
+    "vault:push": "npx tsx scripts/vault-sync.ts push"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

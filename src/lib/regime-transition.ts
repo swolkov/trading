@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { getHistoricalBars } from "./yahoo";
 import { sendNotification } from "./notifications";
+import { logDecision } from "./vault";
 
 // ============ REGIME TRANSITION AGENT ============
 // Detects when markets are TRANSITIONING between regimes — the most profitable moments.
@@ -326,6 +327,17 @@ export async function runTransitionCheck(): Promise<TransitionSignal> {
       update: { value: JSON.stringify(signal.agentAdjustments.avoidStrategies) },
       create: { key: "regime_avoid_strategies", value: JSON.stringify(signal.agentAdjustments.avoidStrategies) },
     });
+
+    // Log to vault decisions so transitions are visible in session-prep and Obsidian
+    try {
+      await logDecision(
+        "regime-transition",
+        "ADJUSTMENT",
+        "MARKET",
+        `${signal.transition.replace(/_/g, " ").toUpperCase()} (${signal.confidence}% confidence): ${signal.description}. Action: ${signal.actionableAdvice}. Size: ${signal.agentAdjustments.positionSizeMultiplier}x`,
+        signal.confidence >= 70 ? 5 : 3,
+      );
+    } catch { /* vault write optional */ }
 
     // ALERT — this is important
     const urgencyEmoji = signal.agentAdjustments.urgency === "immediate" ? "🚨" : "⚡";
