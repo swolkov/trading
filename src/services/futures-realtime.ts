@@ -16,8 +16,8 @@ import { getTradingMode } from "../lib/trading-mode";
 
 const DEMO_API = "https://demo.tradovateapi.com/v1";
 const LIVE_API = "https://live.tradovateapi.com/v1";
-let ORDER_API = DEMO_API;   // Mutable — switches on mode change
-let isLiveMode = false;     // Loaded from DB every 5 min via loadTradingMode()
+const ORDER_API = DEMO_API; // Demo engine — ALWAYS on, 24/7 learning
+let isLiveMode = false;     // When true, ALSO executes on live during RTH windows
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
@@ -70,7 +70,84 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
 
-// ── Trading Mode (demo/live from DB) ─────────────────────
+// ── Trading Mode + Live Mirror ────────────────────────────
+// Demo engine ALWAYS runs 24/7. When isLiveMode=true, trades are ALSO
+// mirrored to the live account during RTH windows.
+
+let liveAccessToken = "";
+let liveTokenExpires = 0;
+let liveAccountId = 0;
+let liveAccountName = "";
+let liveEquity = 0;
+
+async function authenticateLive(): Promise<string> {
+  if (liveAccessToken && Date.now() < liveTokenExpires) return liveAccessToken;
+
+  const res = await fetch(`${LIVE_API}/auth/accesstokenrequest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: process.env.TRADOVATE_USERNAME || "",
+      password: process.env.TRADOVATE_PASSWORD || "",
+      appId: process.env.TRADOVATE_APP_ID || "",
+      appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
+      deviceId: "esbueno-live-agent",
+      cid: parseInt(process.env.TRADOVATE_CID || "0"),
+      sec: process.env.TRADOVATE_SEC || "",
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Live auth failed (${res.status}): ${await res.text().catch(() => "")}`);
+
+  const data = await res.json();
+  liveAccessToken = data.accessToken;
+  liveTokenExpires = Date.now() + 23 * 60 * 60 * 1000;
+
+  const accounts = await liveApiFetch("/account/list") as { id: number; name: string; active: boolean }[];
+  const active = accounts.find((a) => a.active) || accounts[0];
+  if (active) { liveAccountId = active.id; liveAccountName = active.name; }
+
+  // Fetch live equity
+  try {
+    const bal = await liveApiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${liveAccountId}`) as { totalCashValue?: number };
+    if (bal?.totalCashValue) liveEquity = bal.totalCashValue;
+  } catch { /* use last known */ }
+
+  log(`[LIVE] Authenticated — ${liveAccountName} (#${liveAccountId}) — equity $${liveEquity.toFixed(0)}`);
+  return liveAccessToken;
+}
+
+async function liveApiFetch(path: string, options?: RequestInit): Promise<unknown> {
+  const token = await authenticateLive();
+  const res = await fetch(`${LIVE_API}${path}`, {
+    ...options,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...options?.headers },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (res.status === 401) {
+    liveAccessToken = "";
+    liveTokenExpires = 0;
+    const newToken = await authenticateLive();
+    const retry = await fetch(`${LIVE_API}${path}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${newToken}`, ...options?.headers },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!retry.ok) throw new Error(`Live API ${retry.status}: ${await retry.text().catch(() => "")}`);
+    return retry.json();
+  }
+  if (!res.ok) throw new Error(`Live API ${res.status}: ${await res.text().catch(() => "")}`);
+  return res.json();
+}
+
+function isLiveRTHWindow(): boolean {
+  if (!isLiveMode) return false;
+  const s = getSessionName();
+  if (s === "morning") return getMinutesSinceRTHOpen() >= 15; // After first 15 min
+  if (s === "afternoon") return true;
+  if (s === "close") return true;
+  return false; // Block: midday, ETH, open, halt
+}
 
 async function loadTradingMode() {
   try {
@@ -79,68 +156,25 @@ async function loadTradingMode() {
 
     if (newIsLive === isLiveMode) return; // No change
 
-    const oldMode = isLiveMode ? "LIVE" : "DEMO";
-    const newMode = newIsLive ? "LIVE" : "DEMO";
     log(`\n${"!".repeat(60)}`);
-    log(`MODE SWITCH: ${oldMode} → ${newMode}`);
+    log(`LIVE MODE: ${newIsLive ? "ENABLED — trades will mirror to live during RTH" : "DISABLED — demo only"}`);
     log(`${"!".repeat(60)}\n`);
-    notify(`MODE SWITCH: ${oldMode} → ${newMode}`, "general");
+    notify(`LIVE MODE ${newIsLive ? "ENABLED" : "DISABLED"} — demo continues 24/7`, "general");
 
-    // Update state
     isLiveMode = newIsLive;
-    ORDER_API = newIsLive ? LIVE_API : DEMO_API;
 
-    // Force re-authentication against new API endpoint
-    accessToken = "";
-    tokenExpires = 0;
-
-    try {
-      await authenticate();
-      log(`[MODE] Authenticated on ${newMode} — account ${accountName} (#${accountId})`);
-    } catch (err) {
-      log(`[MODE] FAILED to authenticate on ${newMode}: ${err}`);
-      if (newIsLive) {
-        // SAFETY: revert to demo if live auth fails
-        log(`[MODE] REVERTING to DEMO — live auth failed`);
+    if (newIsLive) {
+      // Authenticate against live account (demo stays untouched)
+      try {
+        await authenticateLive();
+      } catch (err) {
+        log(`[LIVE] Auth FAILED: ${err} — disabling live mode`);
         isLiveMode = false;
-        ORDER_API = DEMO_API;
-        accessToken = "";
-        tokenExpires = 0;
-        await authenticate();
-        notify(`LIVE AUTH FAILED — reverted to DEMO: ${err}`, "general");
-        return;
+        notify(`LIVE AUTH FAILED — live disabled: ${err}`, "general");
       }
-      throw err; // Demo auth fail is fatal
     }
-
-    // Clear tracked positions (old account's positions stay on old account)
-    positions.clear();
-    await savePositions();
-
-    // Reset daily counters for clean slate on new account
-    dailyTradeCount = 0;
-    dailyPnl = 0;
-    stoppedSymbols.clear();
-    consecutiveStops = 0;
-    tiltPauseUntil = 0;
-
-    // Reload risk config with new defaults (DEMO_DEFAULTS vs LIVE_DEFAULTS)
-    await loadRiskConfig();
-
-    // Re-resolve contracts (contract IDs may differ between demo/live)
-    await resolveContracts();
-
-    // Fetch equity from new account
-    await updateTradovateEquity();
-    startOfDayBalance = tradovateEquity;
-
-    // Load any existing positions on the new account
-    await loadPositions();
-
-    log(`[MODE] Switch complete — ${positions.size} positions on ${newMode}, equity $${tradovateEquity.toFixed(0)}`);
   } catch (err) {
     log(`[MODE] Failed to check trading mode: ${err}`);
-    // On error, keep current mode — do not change anything
   }
 }
 
