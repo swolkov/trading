@@ -625,27 +625,9 @@ function getMinutesSinceRTHOpen(): number {
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
+  // Demo engine trades 24/7 — live mirroring handled separately by isLiveRTHWindow()
   if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
-  if (isLiveMode) {
-    // LIVE MODE: RTH prime windows only — protect real money
-    if (sym && METALS.has(sym)) {
-      const etH = getETHour();
-      if (etH >= 8.5 && etH < 13.5) return 1.0; // COMEX prime only
-      return 0; // No metals outside COMEX prime when live
-    }
-    // Equities — two-window approach (matches cron agent)
-    if (s === "morning") {
-      const mins = getMinutesSinceRTHOpen();
-      if (mins < 15) return 0; // Skip first 15 min
-      return 1.0; // Morning prime: 9:45-11:30 AM
-    }
-    if (s === "afternoon") return 0.8;  // Afternoon: 2:00-3:45 PM
-    if (s === "close") return 0.5;      // Close: reduced size
-    return 0; // Block: midday, ETH, open
-  }
-
-  // DEMO MODE: Trade 24/7 aggressively for maximum learning
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
     if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
@@ -2004,7 +1986,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const contract = contracts.get(sym);
   if (!contract) return;
 
-  // Engine always executes on DEMO account (the learning machine, 24/7)
+  // Demo always executes (24/7 learning). Live mirrors during RTH if enabled.
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const equity = tradovateEquity;
@@ -2089,6 +2071,73 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       }});
     } catch {}
   } catch (err) { log(`TRADE FAILED: ${err}`); }
+
+  // ── LIVE MIRROR: Also execute on live account if enabled + RTH window ──
+  if (isLiveRTHWindow()) {
+    try {
+      const liveContract = contract; // Same symbol, Tradovate uses same contract IDs for demo/live
+      const liveMult = CONTRACT_MULTIPLIERS[sym] || 5;
+      const liveRiskPct = LIVE_DEFAULTS.riskPerTradePct / 100; // Always use live defaults for live sizing
+      const liveMaxRisk = liveEquity * liveRiskPct;
+      const liveRiskPer = stopDist * liveMult;
+      let liveQty = Math.max(1, Math.min(LIVE_DEFAULTS.maxContractsPerTrade, Math.floor(liveMaxRisk / liveRiskPer)));
+      // Hard cap: never risk more than 15% of live equity
+      if (liveRiskPer * liveQty > liveEquity * 0.15) {
+        liveQty = Math.max(1, Math.floor((liveEquity * 0.15) / liveRiskPer));
+      }
+
+      const liveAccounts = await liveApiFetch("/account/list") as { id: number; name: string }[];
+      const liveAcct = liveAccounts.find(a => a.id === liveAccountId) || liveAccounts[0];
+
+      log(`[LIVE MIRROR] ${side} ${liveQty}x ${sym} @ ~$${price.toFixed(2)} | Risk: $${(liveRiskPer * liveQty).toFixed(0)} | Equity: $${liveEquity.toFixed(0)}`);
+
+      const liveEntry = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        accountSpec: liveAcct.name, accountId: liveAccountId, action: side, symbol: liveContract.id,
+        orderQty: liveQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+      })}) as { orderId: number };
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Place stop on live
+      try {
+        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: liveContract.id,
+          orderQty: liveQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
+        })});
+      } catch (stopErr) {
+        log(`[LIVE] Stop order FAILED: ${stopErr}`);
+        notify(`LIVE STOP FAILED for ${sym} — position UNPROTECTED!`, "general");
+      }
+
+      // Place target on live
+      try {
+        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: liveContract.id,
+          orderQty: liveQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
+        })});
+      } catch {}
+
+      log(`[LIVE MIRROR] Order #${liveEntry.orderId} placed on live account`);
+      notify(`LIVE: ${side} ${liveQty}x ${sym} @ $${price.toFixed(2)} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)}`, "general");
+
+      // Log live trade to DB
+      try {
+        await prisma.autoTradeLog.create({ data: {
+          symbol: `FUT:${sym}`,
+          action: `live_${direction}`,
+          qty: liveQty,
+          price,
+          reason: `[LIVE ${sym}] Mirrored from demo. ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(liveRiskPer * liveQty).toFixed(0)}`,
+          aiScore: confidenceScore,
+          aiSignal: direction,
+          orderId: String(liveEntry.orderId),
+        }});
+      } catch {}
+    } catch (err) {
+      log(`[LIVE MIRROR] FAILED: ${err}`);
+      notify(`LIVE TRADE FAILED for ${sym}: ${err}`, "general");
+    }
+  }
 }
 
 // ── Heartbeat (tells dashboard the engine is alive) ─────
