@@ -25,7 +25,7 @@ const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 // Full-size: ES ($50/pt), NQ ($20/pt), GC ($100/pt) — need $25k+
 // Micro: MES ($5/pt), MNQ ($2/pt), MGC ($10/pt) — works with any account
 const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC"];
-const MICRO_SYMBOLS = ["MES", "MNQ", "MGC"];
+const MICRO_SYMBOLS = ["MES", "MNQ"]; // MGC removed: $10/pt too risky for $1K live mirror
 // Map full-size to micro equivalents
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC" };
