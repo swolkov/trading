@@ -230,18 +230,23 @@ function OrdersTableInner({
   }, [unified, assetFilter]);
 
   // Compute summary for parent
+  // Today's P&L uses Tradovate balance delta (source of truth), NOT DB trade sums
   useMemo(() => {
     if (!onSummary) return;
     const today = new Date().toISOString().slice(0, 10);
     const todayItems = filtered.filter((o) => o.time.slice(0, 10) === today);
+    // Balance-based daily P&L (correct) — falls back to DB sum only if no balance data
+    const balancePnl = (futuresData?.startOfDayBalance != null && futuresData?.account?.balance != null)
+      ? futuresData.account.balance - futuresData.startOfDayBalance
+      : null;
     onSummary({
       totalShown: filtered.length,
       openCount: filtered.filter((o) => !["filled", "canceled", "cancelled", "expired", "rejected"].includes(o.status.toLowerCase())).length,
       filledCount: filtered.filter((o) => o.status.toLowerCase() === "filled").length,
-      todayPnl: todayItems.reduce((s, o) => s + (o.pnl || 0), 0),
+      todayPnl: balancePnl ?? todayItems.reduce((s, o) => s + (o.pnl || 0), 0),
       todayFills: todayItems.filter((o) => o.status.toLowerCase() === "filled").length,
     });
-  }, [filtered, onSummary]);
+  }, [filtered, onSummary, futuresData]);
 
   if (isLoading) {
     return (
