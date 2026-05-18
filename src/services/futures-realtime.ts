@@ -1813,8 +1813,9 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const riskPct = 0.05;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  // Hard limit: max 2 contracts per trade (from Rules/risk-management.md)
-  let qty = Math.max(1, Math.min(2, Math.floor(maxRisk / riskPer)));
+  // Demo: up to 4 contracts for aggressive learning. Live: 2 max (risk-management.md).
+  const maxContracts = isLiveMode ? 2 : 4;
+  let qty = Math.max(1, Math.min(maxContracts, Math.floor(maxRisk / riskPer)));
   // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
   if (totalRisk > equity * 0.15) {
