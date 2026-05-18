@@ -1528,17 +1528,30 @@ async function closePosition(sym: string, price: number, reason: string) {
 
   let closeOrderId: number | null = null;
 
+  // Helper: cancel ALL working orders for this contract (catches orphans after restarts)
+  const cancelAllOrdersForContract = async () => {
+    try {
+      if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+      if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+      // Also scan for ANY working orders on this contract (catches orphans with unknown IDs)
+      const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
+      const orphans = allOrders.filter(o => o.contractId === pos.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
+      for (const o of orphans) {
+        try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {}
+      }
+      if (orphans.length > 0) log(`${sym}: Cancelled ${orphans.length} orphaned orders for contract`);
+    } catch {}
+  };
+
   if (positionAlreadyClosed) {
     // Bracket already closed the position — cancel any remaining bracket orders
-    if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
-    if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+    await cancelAllOrdersForContract();
   } else {
     // Position still open — close it manually with retry
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        // Cancel bracket orders first
-        if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
-        if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+        // Cancel ALL bracket/working orders for this contract
+        await cancelAllOrdersForContract();
 
         const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
         const acct = accounts.find(a => a.id === accountId) || accounts[0];
@@ -2465,6 +2478,14 @@ async function syncPositions() {
     for (const [sym, pos] of [...positions]) {
       if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
         const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+
+        // Cancel any orphaned working orders for this contract
+        try {
+          const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
+          const orphans = allOrders.filter(o => o.contractId === pos.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
+          for (const o of orphans) { try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {} }
+          if (orphans.length > 0) log(`SYNC: Cancelled ${orphans.length} orphaned orders for ${sym}`);
+        } catch {}
 
         // Check if this close was already logged (manual close from UI, or bracket order fill)
         // to avoid double-logging P&L
