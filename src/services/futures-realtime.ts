@@ -2106,11 +2106,27 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   } catch (err) { log(`TRADE FAILED: ${err}`); }
 
   // ── LIVE MIRROR: Also execute on live account if enabled + RTH window ──
+  // Check daily loss limit on live account before mirroring
   if (isLiveRTHWindow()) {
+    // Query today's live P&L from DB to enforce daily loss limit
+    let liveDailyPnl = 0;
     try {
-      const liveContract = contract; // Same symbol, Tradovate uses same contract IDs for demo/live
+      const todayET = getETDateString();
+      const isDST = new Date().toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }).includes("EDT");
+      const todayStart = new Date(`${todayET}T00:00:00${isDST ? "-04:00" : "-05:00"}`);
+      const liveTrades = await prisma.autoTradeLog.findMany({
+        where: { action: { startsWith: "live_" }, pnl: { not: null }, createdAt: { gte: todayStart } },
+      });
+      liveDailyPnl = liveTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+    } catch {}
+    const liveDailyLimit = liveEquity * (LIVE_DEFAULTS.dailyLossLimitPct / 100); // 15% of $1K = $150
+    if (liveDailyPnl < -liveDailyLimit) {
+      log(`[LIVE MIRROR] BLOCKED — live daily P&L $${liveDailyPnl.toFixed(0)} exceeds limit -$${liveDailyLimit.toFixed(0)}`);
+    } else {
+    try {
+      const liveContract = contract;
       const liveMult = CONTRACT_MULTIPLIERS[sym] || 5;
-      const liveRiskPct = LIVE_DEFAULTS.riskPerTradePct / 100; // Always use live defaults for live sizing
+      const liveRiskPct = LIVE_DEFAULTS.riskPerTradePct / 100;
       const liveMaxRisk = liveEquity * liveRiskPct;
       const liveRiskPer = stopDist * liveMult;
       let liveQty = Math.max(1, Math.min(LIVE_DEFAULTS.maxContractsPerTrade, Math.floor(liveMaxRisk / liveRiskPer)));
@@ -2170,6 +2186,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       log(`[LIVE MIRROR] FAILED: ${err}`);
       notify(`LIVE TRADE FAILED for ${sym}: ${err}`, "general");
     }
+    } // end else (not past daily loss limit)
   }
 }
 
