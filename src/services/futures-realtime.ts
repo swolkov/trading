@@ -210,6 +210,7 @@ function validateEnvironment() {
 
 let mdConsecutiveFailures = 0;
 let mdCircuitOpen = false;
+let mdDebugCount = 0; // Log first 3 MD failures to diagnose
 let mdCircuitResetAt = 0;
 const MD_MAX_FAILURES = 5;
 const MD_CIRCUIT_BASE_MS = 30_000;
@@ -373,8 +374,16 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
         const bar = bars[bars.length - 1];
         return { price: bar.close, volume: (bar.upVolume || 0) + (bar.downVolume || 0) };
       }
+    } else if (mdDebugCount < 3) {
+      mdDebugCount++;
+      log(`[MD-DEBUG] ${sym} MD server ${res.status}: ${await res.text().catch(() => "no body")}`);
     }
-  } catch { /* MD server unavailable, try main API */ }
+  } catch (err) {
+    if (mdDebugCount < 3) {
+      mdDebugCount++;
+      log(`[MD-DEBUG] ${sym} MD server error: ${err instanceof Error ? err.message : err}`);
+    }
+  }
 
   // Fallback: main API server
   try {
