@@ -32,28 +32,28 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 // Multi-timeframe analysis, key levels, VWAP bands, session awareness,
 // bracket orders (stop + target placed with entry), equity-based sizing.
 
-// ============ RULES — $7K ACCOUNT, ES-EQUIVALENT VIA MICROS ============
-// Trade 6-10 MES per trade to match ES-level P&L ($50/pt at 10 MES).
-// Aggressive sizing with ironclad daily/drawdown limits.
-// Scale-out advantage: 10 MES lets you sell 5 at 1R, trail 5 for runners.
+// ============ RULES — $1K LIVE ACCOUNT, MICROS ONLY ============
+// Trade 1-3 MES per trade. Conviction is the primary gate.
+// Aggressive sizing with daily loss limit as the only hard stop.
+// Scale-out at 2R: close half, trail rest. 1-contract positions: trail everything.
 
 // Default futures rules — can be overridden from Agent Hub config
-// Calibrated for aggressive small-account growth ($1K-$5K)
+// Calibrated for aggressive $1K live account — conviction is primary gate
 const FUTURES_RULES_DEFAULTS = {
-  RISK_PER_TRADE_PCT: 0.05,       // 5% per trade — $50 on $1K, aggressive but survivable
-  DAILY_LOSS_LIMIT_PCT: 0.15,     // 15% daily max loss — allows 3 full trades before stopping
-  MAX_DRAWDOWN_PCT: 0.25,         // 25% max drawdown before kill switch
-  MAX_CONTRACTS_PER_TRADE: 3,     // Initial entry cap (pyramid adds more)
-  MAX_TOTAL_CONTRACTS: 6,         // After pyramiding, max total open
-  MAX_TRADES_PER_DAY: 3,          // Quality over quantity
-  MAX_TRADES_APLUS_OVERRIDE: 4,   // A+ conviction gets one extra
+  RISK_PER_TRADE_PCT: 0.08,       // 8% per trade — $80 on $1K, aggressive
+  DAILY_LOSS_LIMIT_PCT: 0.15,     // 15% daily max loss ($150) — the ONLY hard stop
+  MAX_DRAWDOWN_PCT: 0.25,         // 25% max drawdown kill switch ($250)
+  MAX_CONTRACTS_PER_TRADE: 3,     // Up to 3 MES on A+ setups
+  MAX_TOTAL_CONTRACTS: 4,         // Max total open positions
+  MAX_TRADES_PER_DAY: 6,          // Conviction is primary gate, not trade count
+  MAX_TRADES_APLUS_OVERRIDE: 20,  // A+ effectively uncapped — daily loss limit ($150) is the real cap
   ATR_STOP_MULTIPLIER: 1.5,
-  ATR_TARGET_MULTIPLIER: 4.0,     // Need 4:1 R:R minimum — let winners run
+  ATR_TARGET_MULTIPLIER: 4.0,     // Let winners run to 4R
   RTH_START_ET: 9.5,
   RTH_END_ET: 16,
   AVOID_FIRST_MINUTES: 15,
   AVOID_LAST_MINUTES: 15,
-  SIMULATED_EQUITY: 1_000,        // Start with $1K live capital
+  SIMULATED_EQUITY: 1_000,        // $1K live account
 };
 
 // Mutable rules — populated from DB config at runtime, falls back to defaults
@@ -106,7 +106,7 @@ const FULL_SIZE_PRIORITY: { symbol: string; when: string }[] = [
 const MICRO_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "MES", when: "always" },    // $5/pt — S&P micro
   { symbol: "MNQ", when: "trending" },  // $2/pt — Nasdaq micro
-  { symbol: "MGC", when: "always" },    // $10/pt — Gold micro
+  // MGC removed: $10/pt × 15pt stop = $150 = 15% of $1K in one trade. Add back when account > $5K.
 ];
 
 function getTradePriority(equity: number): { symbol: string; when: string }[] {
@@ -310,7 +310,7 @@ function getTimeQuality(session: Session, minutesSinceOpen: number): { quality: 
   // Lunch: the account killer. Volume drops 40-60%, everything mean-reverts.
   if (session === "midday") return { quality: "avoid", sizeMultiplier: 0 };
 
-  // All ETH sessions: not worth the risk on a $7K account.
+  // All ETH sessions: not worth the risk on a $1K account.
   // The agent still manages positions (trailing stops, scale-outs) during ETH,
   // but will not open new trades.
   if (session === "eth_europe") return { quality: "avoid", sizeMultiplier: 0 };
@@ -738,7 +738,7 @@ export async function runFuturesAgent(): Promise<{
   if (todayPnl < -dailyLossLimit) {
     details.push(`DAILY LOSS LIMIT: Down $${Math.abs(todayPnl).toFixed(0)} (limit: $${dailyLossLimit.toFixed(0)}). Real trades blocked — learning mode active.`);
   }
-  // Trade count limit: base cap of 3, but A+ setups can push to 5
+  // Trade count limit: base cap of 6, A+ effectively uncapped (daily loss limit is real stop)
   const atBaseTradeLimit = todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY;
   const atHardTradeLimit = todayTradeCount >= FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
   if (atHardTradeLimit) {
@@ -951,19 +951,18 @@ export async function runFuturesAgent(): Promise<{
       }
     }
 
-    // ── SCALE OUT at 1.5R (close half, or full close if only 1 contract) ──
-    // Moved from 1R → 1.5R: at sub-35% WR, we need winners to run bigger.
-    // Breakeven stop protects the remaining contracts.
-    // If 2+ contracts: close half, breakeven stop on rest (classic scale-out)
-    // If 1 contract: close entire position at 1.5R (can't split 1 contract)
-    if (priceDiff >= stopDistance * 1.5 && priceDiff < stopDistance * 2) {
-      const scaleQty = absQty === 1 ? 1 : Math.floor(absQty / 2);
+    // ── SCALE OUT at 2R (close half of multi-contract positions) ──
+    // Let winners run further before taking partial profit.
+    // 1 contract: NEVER scale out — trail the whole position for max P&L.
+    // 2+ contracts: close half at 2R, breakeven stop on rest, trail for runners.
+    if (priceDiff >= stopDistance * 2 && priceDiff < stopDistance * 3) {
+      const scaleQty = absQty >= 2 ? Math.floor(absQty / 2) : 0; // Don't scale 1-contract — let it run
       if (scaleQty >= 1) {
         const alreadyScaled = await prisma.autoTradeLog.findFirst({
           where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out", createdAt: { gte: todayStart } },
         });
         if (!alreadyScaled) {
-          details.push(`    SCALE OUT: Taking profit on ${scaleQty}/${absQty} at 1R`);
+          details.push(`    SCALE OUT: Taking profit on ${scaleQty}/${absQty} at 2R`);
           try {
             // Close partial FIRST, then cancel old brackets, then place new stop for remaining
             await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: scaleQty });
@@ -985,11 +984,11 @@ export async function runFuturesAgent(): Promise<{
             await prisma.autoTradeLog.create({ data: {
               symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out",
               qty: scaleQty, price: currentPrice, pnl: priceDiff * multiplier * scaleQty, orderId: null,
-              reason: `Scale out: Closed ${scaleQty}/${absQty} at 1R ($${currentPrice.toFixed(2)}). Remaining ${remainingQty} protected with breakeven stop.`,
+              reason: `Scale out: Closed ${scaleQty}/${absQty} at 2R ($${currentPrice.toFixed(2)}). Remaining ${remainingQty} protected with breakeven stop.`,
             }});
             try {
-              await logTradeToJournal({ tradeId: `SO-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${symbolMatch || pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "scale_out", contracts: scaleQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: priceDiff * multiplier * scaleQty, conviction: 0, exitReason: `Scale out ${scaleQty}/${absQty} at 1R` }, "futures-agent");
-              await logObservation("futures-agent", `SCALE OUT ${scaleQty}/${absQty} ${pos.contractName} at 1R | P&L: $${(priceDiff * multiplier * scaleQty).toFixed(0)} | Remaining ${absQty - scaleQty}x protected at breakeven`);
+              await logTradeToJournal({ tradeId: `SO-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${symbolMatch || pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "scale_out", contracts: scaleQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: priceDiff * multiplier * scaleQty, conviction: 0, exitReason: `Scale out ${scaleQty}/${absQty} at 2R` }, "futures-agent");
+              await logObservation("futures-agent", `SCALE OUT ${scaleQty}/${absQty} ${pos.contractName} at 2R | P&L: $${(priceDiff * multiplier * scaleQty).toFixed(0)} | Remaining ${absQty - scaleQty}x protected at breakeven`);
             } catch {}
           } catch (err) { details.push(`    Scale out failed: ${err}`); }
         }
@@ -1069,17 +1068,18 @@ export async function runFuturesAgent(): Promise<{
   // Tilt pause: 2+ consecutive stops = paper mode only (still scans for learning)
   const isTilted = consecutiveStops >= 2;
   if (consecutiveStops >= 3) {
-    details.push(`TILT L2: ${consecutiveStops} consecutive stops today — real trades blocked, learning mode`);
+    details.push(`TILT L2: ${consecutiveStops} consecutive stops today — only A+ trades allowed`);
   } else if (consecutiveStops >= 2) {
-    details.push(`TILT L1: ${consecutiveStops} consecutive stops — real trades blocked, learning mode`);
+    details.push(`TILT L1: ${consecutiveStops} consecutive stops — only A+ trades allowed`);
   }
 
   if (stoppedSymbols.size > 0) {
     details.push(`STOPPED SYMBOLS (no re-entry): ${[...stoppedSymbols].join(", ")}`);
   }
 
-  // Paper mode for non-trade-count reasons (session, loss limit, tilt). Trade count is checked per-trade with A+ override.
-  const paperTradeBase = !canScanNewTrades || todayPnl < -dailyLossLimit || atHardTradeLimit || isTilted;
+  // Paper mode for hard reasons only: session, daily loss limit, hard trade cap.
+  // Tilt is checked per-trade — A+ conviction overrides tilt.
+  const paperTradeBase = !canScanNewTrades || todayPnl < -dailyLossLimit || atHardTradeLimit;
   if (paperTradeBase && !canScanNewTrades) {
     details.push(`LEARNING MODE: Scanning for paper trades (${session} session) — no real entries`);
   }
@@ -1196,9 +1196,9 @@ export async function runFuturesAgent(): Promise<{
     // AI confirmation — Opus with extended thinking for decisive, opinionated calls
     let aiConviction = "";
     try {
-      const aiPrompt = `You are an elite futures scalper trading a $7K account with up to 6 MES contracts per trade. Every trade risks ~$350. Base limit: 3 trades/day, but A+ setups can override up to 5. Only A+ and A execute — B and C are killed.
+      const aiPrompt = `You are an elite futures scalper trading a $${equity.toLocaleString()} account with up to ${FUTURES_RULES.MAX_CONTRACTS_PER_TRADE} MES contracts per trade. Each contract risks ~$75. Daily loss limit: $${dailyLossLimit.toFixed(0)}. Goal: catch big moves on high-conviction setups to make $500-$2000+ on winning days.
 
-CRITICAL CONTEXT: Current win rate is ~30%. We MUST be selective. Only approve trades with clear edge, strong R:R (2:1+), and alignment across timeframes. The math: at 30% WR we need 2.3+ R:R to make money. Kill anything marginal — a skipped trade costs $0, a bad trade costs $350.
+CRITICAL: Only A+ and A setups execute. B and C are KILLED immediately. We need explosive R:R (3:1+) with technical confluence across timeframes. A skipped trade costs $0, a bad trade costs $75-$225. Be ruthlessly selective — but when the setup is textbook, say YES with full conviction. On $${equity.toLocaleString()}, every trade matters.
 
 ${symbol} setup:
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}
@@ -1236,7 +1236,7 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
         setup.confidence -= 15;
         details.push(`  AI MARGINAL (B): ${ai.reasoning} — killing, only A/A+ setups trade`);
       } else {
-        // Only A+ and A pass — these are the setups that justify $350 risk
+        // Only A+ and A pass — these are the setups that justify $75-$225 risk
         aiConviction = ai.conviction || "A";
         const convictionBoost = aiConviction === "A+" ? 30 : 20; // A+ or A only
         setup.confidence += convictionBoost;
@@ -1246,15 +1246,15 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       details.push(`  AI unavailable — proceeding on technicals alone`);
     }
 
-    if (setup.confidence < 72) {
-      details.push(`  Final confidence ${setup.confidence}% — below 72% threshold, skipping`);
-      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 72% threshold. ${setup.reasoning}`, 1); } catch {}
+    if (setup.confidence < 80) {
+      details.push(`  Final confidence ${setup.confidence}% — below 80% threshold, skipping`);
+      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 80% threshold. ${setup.reasoning}`, 1); } catch {}
       continue;
     }
 
     // ============ TRADE COUNT CHECK (A+ override) ============
-    // Base limit: 3 trades/day for A/A+ setups
-    // A+ override: if past base limit, only A+ can trade (up to hard cap of 5)
+    // Base limit: 6 trades/day — conviction is primary gate
+    // A+ override: if past base limit, A+ can still trade (daily loss limit is real cap)
     if (atBaseTradeLimit && aiConviction !== "A+") {
       details.push(`  BASE LIMIT HIT (${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY}) — need A+ to override, got ${aiConviction || "no AI grade"}. Paper mode.`);
       // Fall through to paper trade logging below
@@ -1299,8 +1299,8 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     const targetPrice = setup.direction === "long" ? price + targetDistance : price - targetDistance;
     const riskReward = targetDistance / stopDistance;
 
-    // Per-trade paper mode: base reasons OR hit base limit without A+ override
-    const paperTradeMode = paperTradeBase || (atBaseTradeLimit && aiConviction !== "A+");
+    // Per-trade paper mode: base reasons, trade count without A+ override, OR tilt without A+ override
+    const paperTradeMode = paperTradeBase || (atBaseTradeLimit && aiConviction !== "A+") || (isTilted && aiConviction !== "A+");
 
     details.push(`  ${paperTradeMode ? "PAPER " : ""}TRADE: ${side} ${contracts}x ${symbol} @ $${price.toFixed(2)}`);
     details.push(`  Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${riskReward.toFixed(1)} | Risk: $${(riskPerContract * contracts).toFixed(0)}`);
