@@ -10,12 +10,14 @@
 import { prisma } from "../lib/db";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
+import { getTradingMode } from "../lib/trading-mode";
 
 // ── Config ──────────────────────────────────────────────
 
 const DEMO_API = "https://demo.tradovateapi.com/v1";
-const ORDER_API = DEMO_API; // Railway engine ALWAYS trades on demo — it's the learning machine
-const isLiveMode = false; // Engine is never live — live execution handled by Vercel cron agent
+const LIVE_API = "https://live.tradovateapi.com/v1";
+let ORDER_API = DEMO_API;   // Mutable — switches on mode change
+let isLiveMode = false;     // Loaded from DB every 5 min via loadTradingMode()
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
@@ -68,6 +70,80 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
 
+// ── Trading Mode (demo/live from DB) ─────────────────────
+
+async function loadTradingMode() {
+  try {
+    const mode = await getTradingMode("futures");
+    const newIsLive = mode === "live";
+
+    if (newIsLive === isLiveMode) return; // No change
+
+    const oldMode = isLiveMode ? "LIVE" : "DEMO";
+    const newMode = newIsLive ? "LIVE" : "DEMO";
+    log(`\n${"!".repeat(60)}`);
+    log(`MODE SWITCH: ${oldMode} → ${newMode}`);
+    log(`${"!".repeat(60)}\n`);
+    notify(`MODE SWITCH: ${oldMode} → ${newMode}`, "general");
+
+    // Update state
+    isLiveMode = newIsLive;
+    ORDER_API = newIsLive ? LIVE_API : DEMO_API;
+
+    // Force re-authentication against new API endpoint
+    accessToken = "";
+    tokenExpires = 0;
+
+    try {
+      await authenticate();
+      log(`[MODE] Authenticated on ${newMode} — account ${accountName} (#${accountId})`);
+    } catch (err) {
+      log(`[MODE] FAILED to authenticate on ${newMode}: ${err}`);
+      if (newIsLive) {
+        // SAFETY: revert to demo if live auth fails
+        log(`[MODE] REVERTING to DEMO — live auth failed`);
+        isLiveMode = false;
+        ORDER_API = DEMO_API;
+        accessToken = "";
+        tokenExpires = 0;
+        await authenticate();
+        notify(`LIVE AUTH FAILED — reverted to DEMO: ${err}`, "general");
+        return;
+      }
+      throw err; // Demo auth fail is fatal
+    }
+
+    // Clear tracked positions (old account's positions stay on old account)
+    positions.clear();
+    await savePositions();
+
+    // Reset daily counters for clean slate on new account
+    dailyTradeCount = 0;
+    dailyPnl = 0;
+    stoppedSymbols.clear();
+    consecutiveStops = 0;
+    tiltPauseUntil = 0;
+
+    // Reload risk config with new defaults (DEMO_DEFAULTS vs LIVE_DEFAULTS)
+    await loadRiskConfig();
+
+    // Re-resolve contracts (contract IDs may differ between demo/live)
+    await resolveContracts();
+
+    // Fetch equity from new account
+    await updateTradovateEquity();
+    startOfDayBalance = tradovateEquity;
+
+    // Load any existing positions on the new account
+    await loadPositions();
+
+    log(`[MODE] Switch complete — ${positions.size} positions on ${newMode}, equity $${tradovateEquity.toFixed(0)}`);
+  } catch (err) {
+    log(`[MODE] Failed to check trading mode: ${err}`);
+    // On error, keep current mode — do not change anything
+  }
+}
+
 // ── Tradovate Auth (for order execution only) ───────────
 
 let accessToken = "";
@@ -102,7 +178,7 @@ async function authenticate(): Promise<string> {
   const active = accounts.find((a) => a.active) || accounts[0];
   if (active) { accountId = active.id; accountName = active.name; }
 
-  log(`Authenticated — ${accountName} (#${accountId}) — DEMO`);
+  log(`Authenticated — ${accountName} (#${accountId}) — ${isLiveMode ? "LIVE" : "DEMO"}`);
   return accessToken;
 }
 
@@ -515,10 +591,27 @@ function getMinutesSinceRTHOpen(): number {
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
-  // Engine always on DEMO — trade 24/7 aggressively for maximum learning
-  // Vary size by session quality (size signals confidence to synthesis agent)
-  if (s === "halt") return 0; // market actually closed (5-6 PM daily break)
+  if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
+  if (isLiveMode) {
+    // LIVE MODE: RTH prime windows only — protect real money
+    if (sym && METALS.has(sym)) {
+      const etH = getETHour();
+      if (etH >= 8.5 && etH < 13.5) return 1.0; // COMEX prime only
+      return 0; // No metals outside COMEX prime when live
+    }
+    // Equities — two-window approach (matches cron agent)
+    if (s === "morning") {
+      const mins = getMinutesSinceRTHOpen();
+      if (mins < 15) return 0; // Skip first 15 min
+      return 1.0; // Morning prime: 9:45-11:30 AM
+    }
+    if (s === "afternoon") return 0.8;  // Afternoon: 2:00-3:45 PM
+    if (s === "close") return 0.5;      // Close: reduced size
+    return 0; // Block: midday, ETH, open
+  }
+
+  // DEMO MODE: Trade 24/7 aggressively for maximum learning
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
     if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
@@ -719,7 +812,7 @@ const DEMO_DEFAULTS: RiskConfig = {
 // Live defaults from Rules/risk-management.md ($1K account)
 const LIVE_DEFAULTS: RiskConfig = {
   maxContractsPerTrade: 3,      // Up to 3 on A+ setups
-  maxTotalContracts: 6,
+  maxTotalContracts: 4,         // Max 4 open positions on $1K
   maxTradesPerDay: 6,
   riskPerTradePct: 8,            // 8% of account per trade ($80 on $1K)
   dailyLossLimitPct: 15,         // 15% daily loss → full stop ($150 on $1K)
@@ -2744,7 +2837,7 @@ async function main() {
   log("╔══════════════════════════════════════════════╗");
   log("║  ESBUENO FUTURES — REAL-TIME TRADING ENGINE  ║");
   log("╚══════════════════════════════════════════════╝");
-  log("Mode: DEMO | Data: Yahoo Finance (5s poll) | Orders: Tradovate");
+  log("Mode: DB-driven (demo/live) | Data: Tradovate MD + Yahoo fallback | Orders: Tradovate");
 
   // Validate all required env vars BEFORE doing anything else
   validateEnvironment();
@@ -2754,6 +2847,7 @@ async function main() {
 
   await authenticateWithRetry();
   await loadRiskConfig(); // Load risk rules from DB (Agent Hub is the UI)
+  await loadTradingMode(); // Check if live mode is enabled (may switch API endpoint)
   await resolveContracts();
   // Init bar builders for ALL symbols (both full-size and micro) so we can switch dynamically
   for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) initBarBuilder(sym);
@@ -2804,9 +2898,9 @@ async function main() {
   await updateEarningsWeekFilter();
   await updateSectorRotation();
 
-  // Engine always runs on DEMO — it's the 24/7 learning machine.
-  // Live execution is handled separately by the Vercel cron agent (futures-agent.ts)
-  // which reads trading_mode_futures from DB and connects to live.tradovateapi.com when enabled.
+  // Engine mode is DB-driven: demo (24/7 learning) or live (RTH-only, real money).
+  // Mode is checked every 5 min via loadTradingMode(). On switch, engine re-auths
+  // against the correct Tradovate API and adjusts session blocking.
 
   // Start polling — all wrapped in safe intervals
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
@@ -2816,6 +2910,7 @@ async function main() {
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
+  safeInterval(loadTradingMode, 300_000, "loadTradingMode"); // check demo/live mode every 5min
   safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
   safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
   safeInterval(updateEarningsWeekFilter, 3600_000, "updateEarningsWeekFilter"); // hourly

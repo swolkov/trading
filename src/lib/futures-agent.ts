@@ -614,15 +614,20 @@ export async function runFuturesAgent(): Promise<{
 
   // Determine if we should scan for NEW trades (vs just managing positions)
   // Position management ALWAYS runs regardless of session.
-  // New entries ONLY during the two prime windows (morning + afternoon).
+  // DEMO: Trade all sessions except halt (24/7 learning).
+  // LIVE: New entries ONLY during RTH prime windows (morning + afternoon).
   const totalRTHMinutes = (FUTURES_RULES.RTH_END_ET - FUTURES_RULES.RTH_START_ET) * 60; // 390 min
   const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (totalRTHMinutes - FUTURES_RULES.AVOID_LAST_MINUTES));
   const timeQuality = getTimeQuality(session, minutesSinceOpen);
-  const canScanNewTrades = timeQuality.sizeMultiplier > 0 && !isFirstLast15;
+  const canScanNewTrades = tradingMode === "paper"
+    ? true  // Demo: all sessions (halt already returned above)
+    : (timeQuality.sizeMultiplier > 0 && !isFirstLast15);  // Live: RTH prime only
   if (!canScanNewTrades) {
-    const reason = timeQuality.sizeMultiplier === 0
-      ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
-      : "first/last 15 min RTH";
+    const reason = tradingMode === "paper"
+      ? "market halted"
+      : (timeQuality.sizeMultiplier === 0
+        ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
+        : "first/last 15 min RTH");
     details.push(`New trade scanning BLOCKED (${reason}) — position management still active`);
   }
 
