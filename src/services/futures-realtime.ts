@@ -37,8 +37,8 @@ let SYMBOLS = MICRO_SYMBOLS; // default to micros, upgraded on startup after equ
 
 function updateTradingSymbols() {
   const prev = SYMBOLS;
-  // Demo engine always trades micros — full-size MD may not be subscribed on demo,
-  // and the purpose is learning, not sizing up. Full-size only relevant for live.
+  // Demo always trades micros (full-size MD not subscribed on demo).
+  // Live only upgrades to full-size when equity exceeds $25K.
   SYMBOLS = isLiveMode && tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS;
   if (prev !== SYMBOLS) {
     log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ")} (${SYMBOLS === FULL_SIZE_SYMBOLS ? "full-size" : "micros"})`);
@@ -212,7 +212,7 @@ async function authenticate(): Promise<string> {
   const active = accounts.find((a) => a.active) || accounts[0];
   if (active) { accountId = active.id; accountName = active.name; }
 
-  log(`Authenticated — ${accountName} (#${accountId}) — ${isLiveMode ? "LIVE" : "DEMO"}`);
+  log(`Authenticated — ${accountName} (#${accountId}) — DEMO`);
   return accessToken;
 }
 
@@ -2920,7 +2920,7 @@ async function main() {
   log("╔══════════════════════════════════════════════╗");
   log("║  ESBUENO FUTURES — REAL-TIME TRADING ENGINE  ║");
   log("╚══════════════════════════════════════════════╝");
-  log("Mode: DB-driven (demo/live) | Data: Tradovate MD + Yahoo fallback | Orders: Tradovate");
+  log("Mode: DEMO 24/7 + LIVE mirror (RTH) | Data: Tradovate MD + Yahoo fallback | Orders: Tradovate");
 
   // Validate all required env vars BEFORE doing anything else
   validateEnvironment();
@@ -2981,9 +2981,8 @@ async function main() {
   await updateEarningsWeekFilter();
   await updateSectorRotation();
 
-  // Engine mode is DB-driven: demo (24/7 learning) or live (RTH-only, real money).
-  // Mode is checked every 5 min via loadTradingMode(). On switch, engine re-auths
-  // against the correct Tradovate API and adjusts session blocking.
+  // Demo engine runs 24/7. When live mode enabled in DB, trades are ALSO mirrored
+  // to the live account during RTH windows. Mode checked every 5 min.
 
   // Start polling — all wrapped in safe intervals
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
