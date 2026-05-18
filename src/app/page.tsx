@@ -181,8 +181,10 @@ export default function DashboardPage() {
             </span>
           )}
           <div className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 live-dot" />
-            <span className="text-[10px] text-muted-foreground/40">Live</span>
+            <span className={`w-1.5 h-1.5 rounded-full ${viewMode === "live" ? "bg-red-400 animate-pulse" : "bg-emerald-400"} live-dot`} />
+            <span className={`text-[10px] ${viewMode === "live" ? "text-red-400/60" : "text-muted-foreground/40"}`}>
+              {viewMode === "live" ? "Live Account" : "Demo Account"}
+            </span>
           </div>
         </div>
       </div>

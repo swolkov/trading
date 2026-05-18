@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
+import useSWR from "swr";
 import {
   LayoutDashboard,
   BarChart3,
@@ -14,6 +15,8 @@ import {
   TrendingUp,
   Bot,
 } from "lucide-react";
+
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 const sections = [
   {
@@ -48,6 +51,8 @@ const sections = [
 export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
+  const isLiveView = modeData?.modes?.futures === "live";
 
   useEffect(() => {
     setMobileOpen(false);
@@ -70,10 +75,12 @@ export function Sidebar() {
             <h1 className="text-[13px] font-bold tracking-tight leading-none bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">Esbueno Trades</h1>
             <div className="flex items-center gap-1.5 mt-1">
               <span className="relative flex h-1.5 w-1.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isLiveView ? "bg-red-400" : "bg-emerald-400"}`} />
+                <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isLiveView ? "bg-red-400" : "bg-emerald-400"}`} />
               </span>
-              <span className="text-[9px] text-emerald-400/80 font-semibold tracking-[0.15em] uppercase">Demo</span>
+              <span className={`text-[9px] font-semibold tracking-[0.15em] uppercase ${isLiveView ? "text-red-400/80" : "text-emerald-400/80"}`}>
+                {isLiveView ? "Live" : "Demo"}
+              </span>
             </div>
           </div>
         </Link>

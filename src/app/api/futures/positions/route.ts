@@ -238,6 +238,7 @@ export async function GET() {
 
     return Response.json({
       connected: true,
+      viewMode,
       account: {
         balance: accountSummary.balance,
         netLiq: accountSummary.netLiq,
@@ -259,6 +260,15 @@ export async function GET() {
       activity,
       engineStatus,
       startOfDayBalance: await (async () => {
+        // Vault/DB snapshots are from the demo account only.
+        // When viewing live, skip them and use broker-derived fallback.
+        if (viewMode === "live") {
+          if (accountSummary?.balance != null && accountSummary?.realizedPnl != null && accountSummary.realizedPnl !== 0) {
+            return accountSummary.balance - accountSummary.realizedPnl;
+          }
+          return null;
+        }
+
         const todayKey = new Date().toISOString().slice(0, 10);
         // 1. Best source: vault daily-balances.md (Railway engine writes SOD before trading)
         try {
@@ -301,8 +311,11 @@ export async function GET() {
         }
         return null;
       })(),
-      // Historical daily balance snapshots — vault is source of truth
+      // Historical daily balance snapshots — vault is source of truth (demo only)
       balanceHistory: await (async () => {
+        // Vault/DB balance history is from the demo account only
+        if (viewMode === "live") return [];
+
         try {
           // Primary: parse from vault daily-balances.md
           const vaultDoc = await prisma.vaultDocument.findUnique({
