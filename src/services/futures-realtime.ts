@@ -723,6 +723,17 @@ function checkSessionReset() {
     }
     // Cancel ALL working orders to prevent orphaned fills overnight
     cancelAllOrders().catch(err => log(`[EOD] Failed to cancel orders: ${err}`));
+    // Also cancel all live working orders
+    if (isLiveMode) {
+      (async () => {
+        try {
+          const orders = await liveApiFetch("/order/list") as { id: number; ordStatus: string }[];
+          const working = orders.filter(o => o.ordStatus === "Working" || o.ordStatus === "Accepted");
+          for (const o of working) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {}
+          if (working.length > 0) log(`[EOD LIVE] Cancelled ${working.length} live orders`);
+        } catch (err) { log(`[EOD LIVE] Order cleanup failed: ${err}`); }
+      })();
+    }
     // Save end-of-day balance snapshot for historical daily P&L
     (async () => {
       try {
@@ -787,6 +798,17 @@ interface Position {
 const positions: Map<string, Position> = new Map();
 // Per-symbol lock to prevent concurrent async stop modifications
 const stopMoveLocks = new Map<string, boolean>();
+
+// ── Live Position Tracking (mirrors demo management to live account) ──
+interface LivePosition {
+  symbol: string; contractId: number; direction: "long" | "short";
+  quantity: number; entryPrice: number; stopLoss: number; target: number;
+  trailStop: number | null; reachedBreakeven: boolean;
+  stopOrderId: number | null; targetOrderId: number | null;
+  entryTime: number; scaledOut: boolean; originalQty: number; pyramided: boolean;
+}
+const livePositions: Map<string, LivePosition> = new Map();
+const liveStopMoveLocks = new Map<string, boolean>();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
 const stoppedSymbols: Set<string> = new Set(); // symbols stopped out today — no re-entry
@@ -888,6 +910,85 @@ async function savePositions() {
       create: { key: "futures_positions", value: JSON.stringify(data) },
     });
   } catch (err) { log(`[PERSIST] Failed to save positions: ${err}`); }
+}
+
+async function saveLivePositions() {
+  if (livePositions.size === 0) return;
+  try {
+    const data = Object.fromEntries([...livePositions].map(([k, v]) => [k, { ...v }]));
+    await prisma.agentConfig.upsert({
+      where: { key: "live_futures_positions" },
+      update: { value: JSON.stringify(data) },
+      create: { key: "live_futures_positions", value: JSON.stringify(data) },
+    });
+  } catch (err) { log(`[LIVE PERSIST] Failed to save: ${err}`); }
+}
+
+async function loadLivePositions() {
+  if (!isLiveMode) return;
+  try {
+    const saved = await prisma.agentConfig.findUnique({ where: { key: "live_futures_positions" } });
+    if (saved?.value) {
+      const data = JSON.parse(saved.value) as Record<string, LivePosition>;
+      for (const [sym, pos] of Object.entries(data)) livePositions.set(sym, pos);
+      if (livePositions.size > 0) {
+        log(`[LIVE PERSIST] Restored ${livePositions.size} live positions`);
+        await syncLivePositions();
+      }
+    }
+  } catch (err) { log(`[LIVE PERSIST] Failed to load: ${err}`); }
+}
+
+async function syncLivePositions() {
+  if (!isLiveMode) return;
+  try {
+    const tvPos = await liveApiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number }[];
+
+    // Remove closed live positions
+    for (const [sym, pos] of [...livePositions]) {
+      if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
+        log(`[LIVE SYNC] ${sym} closed on live broker — removing`);
+        livePositions.delete(sym);
+      }
+    }
+
+    // Adopt untracked live positions (copy flags from demo if available)
+    for (const tp of tvPos) {
+      if (tp.netPos === 0) continue;
+      let sym: string | null = null;
+      for (const [s, c] of contracts) { if (c.id === tp.contractId) { sym = s; break; } }
+      if (!sym || livePositions.has(sym)) continue;
+
+      const demoPos = positions.get(sym);
+      if (demoPos) {
+        livePositions.set(sym, {
+          symbol: sym, contractId: tp.contractId,
+          direction: tp.netPos > 0 ? "long" : "short",
+          quantity: Math.abs(tp.netPos), entryPrice: demoPos.entryPrice,
+          stopLoss: demoPos.stopLoss, target: demoPos.target,
+          trailStop: demoPos.trailStop, reachedBreakeven: demoPos.reachedBreakeven,
+          stopOrderId: null, targetOrderId: null, entryTime: Date.now(),
+          scaledOut: demoPos.scaledOut, originalQty: Math.abs(tp.netPos), pyramided: demoPos.pyramided,
+        });
+        log(`[LIVE SYNC] Adopted ${sym} from live broker, synced from demo`);
+      }
+    }
+
+    // Correct qty/direction drift
+    for (const [sym, pos] of livePositions) {
+      const tv = tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0);
+      if (!tv) continue;
+      const tvQty = Math.abs(tv.netPos);
+      const tvDir: "long" | "short" = tv.netPos > 0 ? "long" : "short";
+      if (tvDir !== pos.direction || tvQty !== pos.quantity) {
+        log(`[LIVE SYNC] ${sym} drift: engine=${pos.direction} ${pos.quantity}x, live=${tvDir} ${tvQty}x — correcting`);
+        pos.direction = tvDir;
+        pos.quantity = tvQty;
+      }
+    }
+
+    await saveLivePositions();
+  } catch (err) { log(`[LIVE SYNC] Failed: ${err}`); }
 }
 
 async function loadPositions() {
@@ -1007,6 +1108,126 @@ async function loadPositions() {
   }
 }
 
+// ── Live Mirror: route management actions to live account ──
+type LiveAction = "breakeven" | "trail" | "pyramid" | "scale_out" | "close";
+
+async function mirrorToLive(action: LiveAction, sym: string, params: {
+  stopPrice?: number; qty?: number; addQty?: number; reason?: string;
+}) {
+  if (!isLiveMode) return;
+  const livePos = livePositions.get(sym);
+  if (!livePos) return;
+
+  try {
+    const liveAccounts = await liveApiFetch("/account/list") as { id: number; name: string }[];
+    const liveAcct = liveAccounts.find(a => a.id === liveAccountId) || liveAccounts[0];
+    const closeSide = livePos.direction === "long" ? "Sell" : "Buy";
+
+    switch (action) {
+      case "breakeven": {
+        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
+        const s = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
+          orderQty: livePos.quantity, orderType: "Stop", stopPrice: livePos.entryPrice, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        livePos.stopOrderId = s.orderId;
+        livePos.stopLoss = livePos.entryPrice;
+        livePos.reachedBreakeven = true;
+        log(`[LIVE MIRROR] ${sym}: Breakeven stop at $${livePos.entryPrice.toFixed(2)}`);
+        break;
+      }
+      case "trail": {
+        if (!params.stopPrice || liveStopMoveLocks.get(sym)) break;
+        liveStopMoveLocks.set(sym, true);
+        try {
+          if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
+          const s = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+            accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
+            orderQty: livePos.quantity, orderType: "Stop", stopPrice: params.stopPrice, timeInForce: "GTC", isAutomated: true,
+          })}) as { orderId: number };
+          livePos.stopOrderId = s.orderId;
+          livePos.trailStop = params.stopPrice;
+          log(`[LIVE MIRROR] ${sym}: Trail stop at $${params.stopPrice.toFixed(2)}`);
+        } finally { liveStopMoveLocks.set(sym, false); }
+        break;
+      }
+      case "pyramid": {
+        if (!params.addQty) break;
+        const side = livePos.direction === "long" ? "Buy" : "Sell";
+        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: side, symbol: livePos.contractId,
+          orderQty: params.addQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+        })});
+        livePos.quantity += params.addQty;
+        livePos.pyramided = true;
+        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
+        const s = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
+          orderQty: livePos.quantity, orderType: "Stop", stopPrice: livePos.entryPrice, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        livePos.stopOrderId = s.orderId;
+        log(`[LIVE MIRROR] ${sym}: Pyramid +${params.addQty}x, now ${livePos.quantity}x`);
+        notify(`LIVE PYRAMID ${sym}: +${params.addQty}x, now ${livePos.quantity}x`, "general");
+        break;
+      }
+      case "scale_out": {
+        if (!params.qty) break;
+        if (livePos.targetOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.targetOrderId }) }); } catch {}
+        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
+          orderQty: params.qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+        })});
+        livePos.quantity -= params.qty;
+        livePos.scaledOut = true;
+        livePos.targetOrderId = null;
+        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
+        const so = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
+          orderQty: livePos.quantity, orderType: "Stop", stopPrice: livePos.stopLoss, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        livePos.stopOrderId = so.orderId;
+        log(`[LIVE MIRROR] ${sym}: Scaled out ${params.qty}x, ${livePos.quantity}x remaining`);
+        notify(`LIVE SCALE ${sym}: ${params.qty}x closed, ${livePos.quantity}x left`, "general");
+        break;
+      }
+      case "close": {
+        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
+        if (livePos.targetOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.targetOrderId }) }); } catch {}
+        // Check if still open before placing close order
+        try {
+          const tvPos = await liveApiFetch("/position/list") as { contractId: number; netPos: number }[];
+          if (!tvPos.find(p => p.contractId === livePos.contractId && p.netPos !== 0)) {
+            log(`[LIVE MIRROR] ${sym}: Already closed on broker`);
+            livePositions.delete(sym);
+            await saveLivePositions();
+            break;
+          }
+        } catch {}
+        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
+          orderQty: livePos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
+        })});
+        log(`[LIVE MIRROR] ${sym}: CLOSED — ${params.reason}`);
+        notify(`LIVE CLOSED ${sym}: ${params.reason}`, "general");
+        try {
+          await prisma.autoTradeLog.create({ data: {
+            symbol: `FUT:${sym}`, action: `live_${params.reason || "close"}`,
+            qty: livePos.quantity, price: 0, pnl: 0,
+            reason: `[LIVE ${sym}] ${params.reason}: Closed ${livePos.quantity}x. Entry: $${livePos.entryPrice.toFixed(2)}`,
+            orderId: null,
+          }});
+        } catch {}
+        livePositions.delete(sym);
+        break;
+      }
+    }
+    await saveLivePositions();
+  } catch (err) {
+    log(`[LIVE MIRROR] ${action} FAILED for ${sym}: ${err}`);
+    notify(`LIVE MIRROR ${action} FAILED ${sym}: ${err}`, "general");
+  }
+}
+
 function checkPositions(sym: string, price: number) {
   const pos = positions.get(sym);
   if (!pos) return;
@@ -1061,6 +1282,7 @@ function checkPositions(sym: string, price: number) {
           pos.stopOrderId = s.orderId;
           pos.stopLoss = breakevenPrice;
           log(`${sym}: Broker stop moved to breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
+          mirrorToLive("breakeven", sym, {}).catch(() => {});
         } catch (err) {
           log(`${sym}: WARNING — failed to move broker stop to breakeven: ${err}`);
         } finally {
@@ -1099,6 +1321,7 @@ function checkPositions(sym: string, price: number) {
           pos.stopOrderId = s.orderId;
           log(`${sym}: Pyramid filled — now ${pos.quantity}x. Stop updated for full qty at breakeven $${pos.entryPrice.toFixed(2)}`);
           notify(`PYRAMID ${sym}: +${addQty}x added at $${price.toFixed(2)}. Now ${pos.quantity}x total, stop at breakeven.`);
+          mirrorToLive("pyramid", sym, { addQty }).catch(() => {});
           await savePositions();
         } catch (err) { log(`${sym}: Pyramid order failed: ${err}`); }
       })();
@@ -1140,6 +1363,7 @@ function checkPositions(sym: string, price: number) {
               })}) as { orderId: number };
               pos.stopOrderId = s.orderId;
               if (isNew) log(`${sym}: Broker trail stop at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
+              mirrorToLive("trail", sym, { stopPrice: trail }).catch(() => {});
             } catch (err) {
               log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
             } finally {
@@ -1231,6 +1455,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     dailyPnl += actualPnl;
     log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`);
     notify(`SCALE OUT ${sym}: +$${actualPnl.toFixed(0)} locked (${scaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
+    mirrorToLive("scale_out", sym, { qty: scaleQty }).catch(() => {});
 
     // Log to database
     try {
@@ -1483,6 +1708,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     } catch { /* vault optional */ }
 
     positions.delete(sym);
+    mirrorToLive("close", sym, { reason }).catch(() => {});
     await savePositions();
 
     // Save balance snapshot after every close — ensures accurate daily P&L even with overnight trades or engine restarts
@@ -2147,26 +2373,40 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
       await new Promise(r => setTimeout(r, 1500));
 
-      // Place stop on live
+      // Place stop on live — capture order ID for management
+      let liveStopOrderId: number | null = null;
       try {
-        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        const ls = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
           accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: liveContract.id,
           orderQty: liveQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
-        })});
+        })}) as { orderId: number };
+        liveStopOrderId = ls.orderId;
       } catch (stopErr) {
         log(`[LIVE] Stop order FAILED: ${stopErr}`);
         notify(`LIVE STOP FAILED for ${sym} — position UNPROTECTED!`, "general");
       }
 
-      // Place target on live
+      // Place target on live — capture order ID
+      let liveTargetOrderId: number | null = null;
       try {
-        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        const lt = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
           accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: liveContract.id,
           orderQty: liveQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
-        })});
+        })}) as { orderId: number };
+        liveTargetOrderId = lt.orderId;
       } catch {}
 
-      log(`[LIVE MIRROR] Order #${liveEntry.orderId} placed on live account`);
+      // Track live position for management mirroring
+      livePositions.set(sym, {
+        symbol: sym, contractId: contract.id, direction, quantity: liveQty,
+        entryPrice: price, stopLoss: stopPrice, target: targetPrice,
+        trailStop: null, reachedBreakeven: false,
+        stopOrderId: liveStopOrderId, targetOrderId: liveTargetOrderId,
+        entryTime: Date.now(), scaledOut: false, originalQty: liveQty, pyramided: false,
+      });
+      await saveLivePositions();
+
+      log(`[LIVE MIRROR] ${sym}: ${direction} ${liveQty}x tracked | stop #${liveStopOrderId} | target #${liveTargetOrderId}`);
       notify(`LIVE: ${side} ${liveQty}x ${sym} @ $${price.toFixed(2)} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)}`, "general");
 
       // Log live trade to DB
@@ -2198,6 +2438,7 @@ async function writeHeartbeat() {
       timestamp: new Date().toISOString(),
       tickCount,
       positions: positions.size,
+      livePositions: livePositions.size,
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
@@ -2210,6 +2451,7 @@ async function writeHeartbeat() {
     });
     // Also persist position state (trailing stops, breakeven flags) every heartbeat
     if (positions.size > 0) await savePositions();
+    if (livePositions.size > 0) await saveLivePositions();
   } catch { /* best-effort */ }
 }
 
@@ -2987,6 +3229,7 @@ async function main() {
 
   // Restore positions from database (survive restarts)
   await loadPositions();
+  await loadLivePositions();
 
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
@@ -3038,6 +3281,7 @@ async function main() {
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
   safeInterval(checkSessionReset, 60_000, "checkSessionReset");
   safeInterval(syncPositions, 30_000, "syncPositions");
+  safeInterval(syncLivePositions, 30_000, "syncLivePositions");
   safeInterval(writeHeartbeat, 60_000, "writeHeartbeat");
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
