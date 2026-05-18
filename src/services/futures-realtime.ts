@@ -35,9 +35,11 @@ let SYMBOLS = MICRO_SYMBOLS; // default to micros, upgraded on startup after equ
 
 function updateTradingSymbols() {
   const prev = SYMBOLS;
-  SYMBOLS = tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS;
+  // Demo engine always trades micros — full-size MD may not be subscribed on demo,
+  // and the purpose is learning, not sizing up. Full-size only relevant for live.
+  SYMBOLS = isLiveMode && tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS;
   if (prev !== SYMBOLS) {
-    log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ")} (${tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? "full-size" : "micros"})`);
+    log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ")} (${SYMBOLS === FULL_SIZE_SYMBOLS ? "full-size" : "micros"})`);
   }
 }
 
@@ -1802,7 +1804,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const riskPct = 0.05;
   const maxRisk = equity * riskPct * sizeMult;
   const riskPer = stopDist * mult;
-  let qty = Math.max(1, Math.min(5, Math.floor(maxRisk / riskPer)));
+  // Hard limit: max 2 contracts per trade (from Rules/risk-management.md)
+  let qty = Math.max(1, Math.min(2, Math.floor(maxRisk / riskPer)));
   // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
   if (totalRisk > equity * 0.15) {
