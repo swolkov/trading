@@ -3228,10 +3228,15 @@ async function authenticateWithRetry(maxRetries = 5): Promise<string> {
     try {
       return await authenticate();
     } catch (err) {
+      const errStr = String(err);
       log(`[AUTH] Attempt ${attempt}/${maxRetries} failed: ${err}`);
       if (attempt === maxRetries) throw err;
-      const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60_000);
-      log(`[AUTH] Retrying in ${Math.round(delay / 1000)}s...`);
+      // Rate limit (429): wait much longer to let it clear
+      const isRateLimit = errStr.includes("429");
+      const delay = isRateLimit
+        ? 120_000  // 2 minutes for rate limit
+        : Math.min(5000 * Math.pow(2, attempt - 1), 60_000);
+      log(`[AUTH] ${isRateLimit ? "Rate limited — " : ""}Retrying in ${Math.round(delay / 1000)}s...`);
       await new Promise(r => setTimeout(r, delay));
     }
   }
