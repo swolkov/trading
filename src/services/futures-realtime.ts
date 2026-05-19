@@ -1510,9 +1510,18 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
   } catch (err) { log(`Scale out failed ${sym}: ${err}`); }
 }
 
+// Lock to prevent concurrent close attempts on the same symbol
+const closingLocks = new Map<string, boolean>();
+
 async function closePosition(sym: string, price: number, reason: string) {
+  // Prevent double-close: if another close is already in progress, skip
+  if (closingLocks.get(sym)) {
+    log(`${sym}: Close already in progress (${reason}) — skipping duplicate`);
+    return;
+  }
   const pos = positions.get(sym);
   if (!pos) return;
+  closingLocks.set(sym, true);
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
 
   // CHECK: Is the position still open on Tradovate? Bracket stop/target may have already filled.
@@ -1735,6 +1744,7 @@ async function closePosition(sym: string, price: number, reason: string) {
       });
     } catch {}
   } catch (err) { log(`Close failed ${sym}: ${err}`); }
+  finally { closingLocks.delete(sym); }
 }
 
 // ── Multi-Timeframe (build 15-min bars from 5-min) ──────
@@ -2477,6 +2487,11 @@ async function syncPositions() {
     // Step 1: Remove engine positions that no longer exist on Tradovate
     for (const [sym, pos] of [...positions]) {
       if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
+        // Skip if closePosition is already handling this symbol
+        if (closingLocks.get(sym)) {
+          log(`SYNC: ${sym} — close already in progress, skipping`);
+          continue;
+        }
         const mult = CONTRACT_MULTIPLIERS[sym] || 5;
 
         // Cancel any orphaned working orders for this contract
