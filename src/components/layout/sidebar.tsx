@@ -9,11 +9,12 @@ import {
   LayoutDashboard,
   BarChart3,
   LineChart,
-  Layers,
+  Bitcoin,
   ClipboardList,
   BookOpen,
   TrendingUp,
   Bot,
+  Link2,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -28,14 +29,14 @@ const sections = [
   {
     label: "MARKETS",
     links: [
-      { href: "/futures", label: "Futures", icon: BarChart3 },
-      { href: "/stocks", label: "Stocks", icon: LineChart, active: false, phase: "Long-term" },
+      { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
     ],
   },
   {
     label: "CONTROL",
     links: [
       { href: "/agents", label: "Agent Hub", icon: Bot },
+      { href: "/connect", label: "Connect", icon: Link2 },
     ],
   },
   {
@@ -52,7 +53,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  const isLiveView = modeData?.modes?.futures === "live";
+  const modes = modeData?.modes || {};
+  const isLiveView = Object.values(modes).some(m => m === "live");
 
   useEffect(() => {
     setMobileOpen(false);
@@ -97,7 +99,6 @@ export function Sidebar() {
               {section.links.map((link) => {
                 const Icon = link.icon;
                 const active = isActive(link.href);
-                const dimmed = "active" in link && !link.active;
                 return (
                   <Link
                     key={link.href}
@@ -106,16 +107,17 @@ export function Sidebar() {
                       "flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-[12.5px] font-medium transition-all duration-100",
                       active
                         ? "bg-primary/10 text-primary"
-                        : dimmed
-                          ? "text-muted-foreground/30 hover:text-muted-foreground/50 hover:bg-accent/50"
-                          : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent"
                     )}
                   >
-                    <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : dimmed ? "text-muted-foreground/20" : "text-muted-foreground/50")} />
+                    <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : "text-muted-foreground/50")} />
                     <span className="flex-1">{link.label}</span>
-                    {"phase" in link && link.phase && (
-                      <span className="text-[7px] font-bold uppercase tracking-wider text-muted-foreground/25 bg-white/[0.03] px-1.5 py-0.5 rounded">
-                        {link.phase}
+                    {"broker" in link && link.broker && (
+                      <span className={cn(
+                        "text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
+                        link.broker === "Tradovate" ? "text-amber-400/40 bg-amber-500/[0.06]" : "text-blue-400/40 bg-blue-500/[0.06]"
+                      )}>
+                        {link.broker}
                       </span>
                     )}
                   </Link>

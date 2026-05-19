@@ -176,28 +176,11 @@ export default function PerformancePage() {
         </span>
       </div>
 
-      {/* Account Tabs */}
+      {/* Futures Only */}
       <div className="flex gap-1.5">
-        <button
-          onClick={() => setActiveTab("options")}
-          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-            activeTab === "options"
-              ? "bg-purple-500/15 text-purple-400 ring-1 ring-purple-500/30"
-              : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
-          }`}
-        >
-          Stocks (Long-term)
-        </button>
-        <button
-          onClick={() => setActiveTab("futures")}
-          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-            activeTab === "futures"
-              ? "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30"
-              : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
-          }`}
-        >
+        <span className="px-3 py-1.5 rounded-full text-xs font-medium bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30">
           Futures / Tradovate
-        </button>
+        </span>
       </div>
 
       {activeTab === "options" && <>

@@ -162,15 +162,22 @@ export function TopBar() {
 // ── View Mode Toggle ──────────────────────────────────────
 // Switches which account data you VIEW (demo vs live).
 // Trade execution is separately gated by agent config on /agents page.
+const VIEW_TYPES = [
+  { key: "futures", label: "Futures", broker: "Tradovate" },
+] as const;
+
 function ViewToggle() {
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  const isLiveActive = modeData?.modes?.futures === "live";
+  const modes = modeData?.modes || {};
+  const liveCount = VIEW_TYPES.filter(t => modes[t.key] === "live").length;
+  const allLive = liveCount === VIEW_TYPES.length;
+  const anyLive = liveCount > 0;
+  const mixed = anyLive && !allLive;
 
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState<string | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
-  // Close on click outside
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
@@ -182,70 +189,76 @@ function ViewToggle() {
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const switchMode = async (mode: "paper" | "live") => {
-    setLoading(true);
+  const switchMode = async (type: string, mode: "paper" | "live") => {
+    setLoading(type);
     try {
       const res = await fetch("/api/trading-mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "futures", mode }),
+        body: JSON.stringify({ type, mode }),
       });
       if (res.ok) {
-        // Revalidate mode, then revalidate ALL SWR-cached data so every page
-        // immediately reflects the new account (LIVE ↔ DEMO)
         await mutate("/api/trading-mode");
         mutate((key) => typeof key === "string" && key.startsWith("/api/"), undefined, { revalidate: true });
-        setOpen(false);
       }
     } catch {} finally {
-      setLoading(false);
+      setLoading(null);
     }
   };
+
+  const pillColor = mixed
+    ? "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30"
+    : anyLive
+      ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30"
+      : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30";
+
+  const pillLabel = mixed ? "Mixed" : anyLive ? "Live" : "Demo";
+  const dotColor = mixed ? "bg-amber-400" : anyLive ? "bg-red-400" : "bg-emerald-400";
 
   return (
     <div className="relative" ref={popoverRef}>
       <button
         onClick={() => setOpen(!open)}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider cursor-pointer transition-opacity hover:opacity-80 ${
-          isLiveActive
-            ? "bg-red-500/15 text-red-400 ring-1 ring-red-500/30"
-            : "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30"
-        }`}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider cursor-pointer transition-opacity hover:opacity-80 ${pillColor}`}
       >
-        {isLiveActive ? (
-          <><span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" /> Live</>
-        ) : (
-          <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Demo</>
-        )}
+        <span className={`w-1.5 h-1.5 rounded-full ${dotColor} ${anyLive ? "animate-pulse" : ""}`} />
+        {pillLabel}
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-2 w-44 rounded-lg border border-border bg-zinc-900 shadow-xl z-50 p-2">
-          <div className="text-[10px] text-muted-foreground/50 uppercase tracking-wider px-2 py-1">
+        <div className="absolute right-0 top-full mt-2 w-56 rounded-lg border border-border bg-zinc-900 shadow-xl z-50 p-2">
+          <div className="text-[10px] text-muted-foreground/50 uppercase tracking-wider px-2 py-1 mb-1">
             View Account
           </div>
-          <button
-            onClick={() => switchMode("paper")}
-            disabled={loading || !isLiveActive}
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
-              !isLiveActive ? "bg-emerald-500/10 text-emerald-400" : "text-muted-foreground hover:bg-zinc-800"
-            } disabled:opacity-50`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            Demo
-            {!isLiveActive && <span className="ml-auto text-[9px] opacity-60">active</span>}
-          </button>
-          <button
-            onClick={() => switchMode("live")}
-            disabled={loading || isLiveActive}
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
-              isLiveActive ? "bg-red-500/10 text-red-400" : "text-muted-foreground hover:bg-zinc-800"
-            } disabled:opacity-50`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
-            Live
-            {isLiveActive && <span className="ml-auto text-[9px] opacity-60">active</span>}
-          </button>
+          {VIEW_TYPES.map(({ key, label, broker }) => {
+            const isLive = modes[key] === "live";
+            return (
+              <div key={key} className="flex items-center gap-2 px-2 py-1.5">
+                <span className="text-[11px] font-medium text-muted-foreground flex-1">{label}</span>
+                <span className="text-[8px] text-muted-foreground/30 uppercase tracking-wider mr-1">{broker}</span>
+                <div className="flex rounded-md overflow-hidden ring-1 ring-border">
+                  <button
+                    onClick={() => switchMode(key, "paper")}
+                    disabled={loading === key || !isLive}
+                    className={`px-2 py-0.5 text-[9px] font-semibold transition-colors ${
+                      !isLive ? "bg-emerald-500/15 text-emerald-400" : "text-muted-foreground/50 hover:bg-zinc-800"
+                    } disabled:opacity-50`}
+                  >
+                    Demo
+                  </button>
+                  <button
+                    onClick={() => switchMode(key, "live")}
+                    disabled={loading === key || isLive}
+                    className={`px-2 py-0.5 text-[9px] font-semibold transition-colors ${
+                      isLive ? "bg-red-500/15 text-red-400" : "text-muted-foreground/50 hover:bg-zinc-800"
+                    } disabled:opacity-50`}
+                  >
+                    Live
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
