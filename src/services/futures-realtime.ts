@@ -3265,8 +3265,10 @@ async function authenticateWithRetry(): Promise<string> {
       const isRateLimit = errStr.includes("429");
       if (isRateLimit) {
         // Rate limited: wait 5 min and retry FOREVER — never crash, never let Railway restart
-        log(`[AUTH] Rate limited (attempt ${attempt}) — waiting 5 min before retry...`);
-        await new Promise(r => setTimeout(r, 300_000));
+        // Exponential backoff: 5min, 10min, 15min, 15min...
+        const rateLimitDelay = Math.min(900_000, 300_000 * Math.ceil(attempt / 2));
+        log(`[AUTH] Rate limited (attempt ${attempt}) — waiting ${Math.round(rateLimitDelay / 60000)} min before retry...`);
+        await new Promise(r => setTimeout(r, rateLimitDelay));
       } else {
         // Other auth error: exponential backoff, give up after 10 attempts
         log(`[AUTH] Attempt ${attempt} failed: ${err}`);
