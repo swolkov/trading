@@ -38,27 +38,12 @@ function pnlColor(val: number) {
   return val > 0 ? "text-emerald-500" : val < 0 ? "text-red-500" : "text-muted-foreground";
 }
 
-// Config groups organized by asset class for clarity
+// Config groups — futures only (stocks/crypto/options disabled)
 const CONFIG_GROUPS = [
   {
-    label: "General",
-    icon: "G",
-    color: "from-slate-500 to-zinc-500",
-    fields: [
-      { key: "strategy", label: "Strategy Mode", type: "select" as const, options: ["conservative", "balanced", "aggressive"] },
-      { key: "enabled", label: "Trading Agent", type: "toggle" as const },
-      { key: "daily_loss_limit", label: "Daily Loss Limit ($)", type: "number" as const },
-      { key: "drawdown_kill_pct", label: "Drawdown Kill (%)", type: "number" as const },
-      { key: "max_positions", label: "Max Open Positions", type: "number" as const },
-      { key: "max_daily_trades", label: "Max Trades / Day", type: "number" as const },
-      { key: "cooldown_hours", label: "Cooldown Between Trades (hrs)", type: "number" as const },
-      { key: "cash_reserve_pct", label: "Cash Reserve (%)", type: "number" as const },
-    ],
-  },
-  {
-    label: "Futures",
-    icon: "F",
-    color: "from-amber-500 to-orange-500",
+    label: "Futures (Demo — 24/7 Learning)",
+    icon: "D",
+    color: "from-emerald-500 to-teal-500",
     fields: [
       { key: "futures_mode", label: "Futures Trading", type: "select" as const, options: ["disabled", "demo", "live"] },
       { key: "futures_risk_per_trade_pct", label: "Risk Per Trade (%)", type: "number" as const },
@@ -73,19 +58,12 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Stocks",
-    icon: "S",
-    color: "from-blue-500 to-indigo-500",
+    label: "Live Mirror (RTH Only)",
+    icon: "L",
+    color: "from-red-500 to-rose-500",
     fields: [
-      { key: "stocks_enabled", label: "Stocks Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
-      { key: "stock_min_score", label: "Min AI Score", type: "number" as const },
-      { key: "stock_min_confidence", label: "Min Confidence (%)", type: "number" as const },
-      { key: "max_per_sector", label: "Max Per Sector", type: "number" as const },
-      { key: "max_position_pct", label: "Max Position Size (%)", type: "number" as const },
-      { key: "stop_loss_atr", label: "Stop Loss (ATR multiplier)", type: "number" as const },
-      { key: "take_profit_pct", label: "Take Profit (%)", type: "number" as const },
-      { key: "focus_symbols", label: "Focus Watchlist", type: "text" as const, placeholder: "AAPL,TSLA,NVDA" },
-      { key: "blacklist", label: "Blacklisted Symbols", type: "text" as const, placeholder: "GME,AMC" },
+      { key: "max_positions", label: "Max Open Positions", type: "number" as const },
+      { key: "drawdown_kill_pct", label: "Drawdown Kill (%)", type: "number" as const },
     ],
   },
 ];
@@ -184,7 +162,7 @@ export default function AgentHubPage() {
     {
       id: "futures",
       name: "Futures Engine",
-      desc: "24/7 demo learning — MES, MNQ, MGC on Tradovate",
+      desc: "24/7 demo learning — MES, MNQ on Tradovate",
       schedule: futuresStatus?.connected ? "Real-time 5s (Railway)" : "Waiting",
       endpoint: "/api/futures",
       canRun: futuresStatus?.connected || false,
