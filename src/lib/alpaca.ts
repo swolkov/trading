@@ -1,46 +1,38 @@
-import { getAlpacaConfig } from "./trading-mode";
+import { getAlpacaConfig, type TradeType, type TradingMode } from "./trading-mode";
 
 const DATA_URL = process.env.ALPACA_DATA_URL || "https://data.alpaca.markets";
 
 // Dynamic base URL — switches between paper/live based on DB mode.
 // DEFAULT IS ALWAYS PAPER. Live requires: password + env vars + explicit DB switch.
-let _cachedConfig: { baseUrl: string; apiKey: string; apiSecret: string; isLive: boolean } | null = null;
-let _configExpires = 0;
+// Cache is keyed per mode key so view and trading modes resolve independently.
+type AlpacaConfigResult = { baseUrl: string; apiKey: string; apiSecret: string; isLive: boolean };
+const _configCache: Record<string, { config: AlpacaConfigResult; expires: number }> = {};
 
-async function getConfig() {
-  if (_cachedConfig && Date.now() < _configExpires) return _cachedConfig;
+// Resolve Alpaca config. modeOverride lets API routes pass view mode
+// (mirrors Tradovate's modeOverride pattern for dashboard display).
+async function getConfig(modeOverride?: TradingMode) {
+  const cacheKey = modeOverride || "trading";
+  const cached = _configCache[cacheKey];
+  if (cached && Date.now() < cached.expires) return cached.config;
   try {
-    _cachedConfig = await getAlpacaConfig();
+    const config = await getAlpacaConfig("stocks", modeOverride);
+    _configCache[cacheKey] = { config, expires: Date.now() + 60000 };
+    return config;
   } catch {
     // If DB is unavailable, ALWAYS fall back to paper
-    _cachedConfig = {
+    const config: AlpacaConfigResult = {
       baseUrl: process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets",
       apiKey: process.env.ALPACA_API_KEY || "",
       apiSecret: process.env.ALPACA_API_SECRET || "",
       isLive: false,
     };
+    _configCache[cacheKey] = { config, expires: Date.now() + 60000 };
+    return config;
   }
-  _configExpires = Date.now() + 60000;
-  return _cachedConfig;
 }
 
-// BASE_URL — reads from cached config, defaults to paper.
-// The cache is populated on first alpacaFetch call.
-function get_BASE_URL(): string {
-  return _cachedConfig?.baseUrl || process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
-}
 // All existing code references BASE_URL in template literals — this stays in sync with the mode.
 let BASE_URL = process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
-
-function headers() {
-  // Sync headers using current cache or env vars
-  // The actual mode-aware headers are applied in alpacaFetch
-  return {
-    "APCA-API-KEY-ID": _cachedConfig?.apiKey || process.env.ALPACA_API_KEY || "",
-    "APCA-API-SECRET-KEY": _cachedConfig?.apiSecret || process.env.ALPACA_API_SECRET || "",
-    "Content-Type": "application/json",
-  };
-}
 
 // Check if currently in live mode (for display purposes)
 export async function isLiveMode(): Promise<boolean> {
@@ -48,17 +40,24 @@ export async function isLiveMode(): Promise<boolean> {
   return config.isLive;
 }
 
-async function alpacaFetch(url: string, options?: RequestInit) {
-  // Load mode-aware config (paper vs live) and sync BASE_URL + headers
-  const config = await getConfig();
+// Core fetch wrapper. modeOverride routes to paper/live Alpaca account
+// (API routes pass getViewMode("stocks") for dashboard display).
+async function alpacaFetch(url: string, options?: RequestInit, modeOverride?: TradingMode) {
+  const config = await getConfig(modeOverride);
   BASE_URL = config.baseUrl;
 
   // Replace any stale BASE_URL in the URL if it was constructed before config loaded
   const resolvedUrl = url.replace(/https:\/\/(paper-api|api)\.alpaca\.markets/, config.baseUrl);
 
+  const hdrs = {
+    "APCA-API-KEY-ID": config.apiKey,
+    "APCA-API-SECRET-KEY": config.apiSecret,
+    "Content-Type": "application/json",
+  };
+
   const res = await fetch(resolvedUrl, {
     ...options,
-    headers: { ...headers(), ...options?.headers },
+    headers: { ...hdrs, ...options?.headers },
     signal: AbortSignal.timeout(15000), // 15s timeout to prevent hanging
   });
   if (!res.ok) {
@@ -95,8 +94,8 @@ export interface Account {
   options_buying_power: string;
 }
 
-export async function getAccount(): Promise<Account> {
-  return alpacaFetch(`${BASE_URL}/v2/account`);
+export async function getAccount(modeOverride?: TradingMode): Promise<Account> {
+  return alpacaFetch(`${BASE_URL}/v2/account`, undefined, modeOverride);
 }
 
 // ---------- Positions ----------
@@ -118,8 +117,8 @@ export interface Position {
   change_today: string;
 }
 
-export async function getPositions(): Promise<Position[]> {
-  return alpacaFetch(`${BASE_URL}/v2/positions`);
+export async function getPositions(modeOverride?: TradingMode): Promise<Position[]> {
+  return alpacaFetch(`${BASE_URL}/v2/positions`, undefined, modeOverride);
 }
 
 // ---------- Orders ----------
@@ -147,10 +146,13 @@ export interface Order {
 }
 
 export async function getOrders(
-  status: "open" | "closed" | "all" = "all"
+  status: "open" | "closed" | "all" = "all",
+  modeOverride?: TradingMode
 ): Promise<Order[]> {
   return alpacaFetch(
-    `${BASE_URL}/v2/orders?status=${status}&limit=100&direction=desc`
+    `${BASE_URL}/v2/orders?status=${status}&limit=100&direction=desc`,
+    undefined,
+    modeOverride
   );
 }
 
@@ -165,11 +167,11 @@ export interface PlaceOrderParams {
   stop_price?: string;
 }
 
-export async function placeOrder(params: PlaceOrderParams): Promise<Order> {
+export async function placeOrder(params: PlaceOrderParams, modeOverride?: TradingMode): Promise<Order> {
   return alpacaFetch(`${BASE_URL}/v2/orders`, {
     method: "POST",
     body: JSON.stringify(params),
-  });
+  }, modeOverride);
 }
 
 export async function cancelOrder(orderId: string): Promise<void> {
@@ -487,4 +489,99 @@ export async function getOptionsExpirations(
     ...new Set(contracts.map((c) => c.expiration_date)),
   ].sort();
   return expirations;
+}
+
+// ---------- Crypto ----------
+
+export const DEFAULT_CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "LINK/USD"];
+
+export interface CryptoBar {
+  t: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  vw: number;
+  n: number;
+}
+
+export interface CryptoQuote {
+  symbol: string;
+  bp: number;
+  bs: number;
+  ap: number;
+  as: number;
+  t: string;
+}
+
+export interface CryptoSnapshot {
+  latestTrade: { p: number; s: number; t: string; tks: string };
+  latestQuote: { bp: number; bs: number; ap: number; as: number; t: string };
+  minuteBar: CryptoBar;
+  dailyBar: CryptoBar;
+  prevDailyBar: CryptoBar;
+}
+
+export async function getCryptoQuote(symbol: string): Promise<CryptoQuote> {
+  const encoded = encodeURIComponent(symbol);
+  const data = await alpacaFetch(
+    `${DATA_URL}/v1beta3/crypto/us/latest/quotes?symbols=${encoded}`
+  );
+  return { symbol, ...data.quotes?.[symbol] };
+}
+
+export async function getCryptoBars(
+  symbol: string,
+  timeframe: string = "1Day",
+  start?: string,
+  end?: string
+): Promise<CryptoBar[]> {
+  const encoded = encodeURIComponent(symbol);
+  const params = new URLSearchParams({ timeframe, limit: "500" });
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  const data = await alpacaFetch(
+    `${DATA_URL}/v1beta3/crypto/us/bars?symbols=${encoded}&${params}`
+  );
+  return data.bars?.[symbol] || [];
+}
+
+export async function getCryptoSnapshot(symbol: string): Promise<CryptoSnapshot> {
+  const encoded = encodeURIComponent(symbol);
+  const data = await alpacaFetch(
+    `${DATA_URL}/v1beta3/crypto/us/snapshots?symbols=${encoded}`
+  );
+  return data.snapshots?.[symbol];
+}
+
+export async function getCryptoSnapshots(
+  symbols: string[]
+): Promise<Record<string, CryptoSnapshot>> {
+  const encoded = symbols.map(s => encodeURIComponent(s)).join(",");
+  const data = await alpacaFetch(
+    `${DATA_URL}/v1beta3/crypto/us/snapshots?symbols=${encoded}`
+  );
+  return data.snapshots || {};
+}
+
+export async function placeCryptoOrder(params: {
+  symbol: string;
+  qty?: string;
+  notional?: string;
+  side: "buy" | "sell";
+  type: "market" | "limit" | "stop" | "stop_limit";
+  limit_price?: string;
+  stop_price?: string;
+}, modeOverride?: TradingMode): Promise<Order> {
+  return placeOrder({
+    ...params,
+    qty: params.qty || "0",
+    time_in_force: "gtc", // crypto is 24/7
+  }, modeOverride);
+}
+
+export async function getCryptoPositions(modeOverride?: TradingMode): Promise<Position[]> {
+  const all = await getPositions(modeOverride);
+  return all.filter(p => p.asset_class === "crypto");
 }

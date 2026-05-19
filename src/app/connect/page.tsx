@@ -46,8 +46,8 @@ export default function ConnectPage() {
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-8">
       <div>
-        <h1 className="text-2xl font-black">Connect Broker</h1>
-        <p className="text-sm text-muted-foreground mt-1">Link your trading accounts to enable automated execution.</p>
+        <h1 className="text-2xl font-black">Broker Connections</h1>
+        <p className="text-sm text-muted-foreground mt-1">Manage your Tradovate and Alpaca trading accounts.</p>
       </div>
 
       {/* Existing connections */}
@@ -131,8 +131,41 @@ export default function ConnectPage() {
         </button>
       </div>
 
+      {/* Alpaca Status */}
+      <div className="rounded-xl border border-blue-500/15 bg-gradient-to-br from-blue-500/[0.04] to-transparent p-6 space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center">
+            <span className="text-lg font-black text-blue-400">A</span>
+          </div>
+          <div className="flex-1">
+            <h2 className="text-sm font-bold">Alpaca</h2>
+            <p className="text-xs text-muted-foreground">Stocks & crypto — 24/7 crypto, US equities</p>
+          </div>
+          <span className="px-2 py-1 rounded-full text-[9px] font-bold bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30">
+            Connected via API Keys
+          </span>
+        </div>
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <div>
+            <p className="text-[10px] text-muted-foreground/40">Mode</p>
+            <p className="font-bold text-emerald-400">Paper</p>
+          </div>
+          <div>
+            <p className="text-[10px] text-muted-foreground/40">Assets</p>
+            <p className="font-bold">Stocks, Crypto</p>
+          </div>
+          <div>
+            <p className="text-[10px] text-muted-foreground/40">Crypto</p>
+            <p className="font-bold">24/7 Trading</p>
+          </div>
+        </div>
+        <p className="text-[10px] text-muted-foreground/40">
+          Alpaca is connected via environment API keys. To switch between paper and live, update your API keys in the deployment environment or use the Agent Hub config.
+        </p>
+      </div>
+
       <p className="text-[10px] text-muted-foreground/40 text-center">
-        Credentials are encrypted and stored securely. You can disconnect at any time.
+        Credentials are encrypted with AES-256. Connections can be revoked at any time.
       </p>
     </div>
   );

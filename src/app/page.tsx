@@ -146,9 +146,9 @@ export default function DashboardPage() {
   const combinedUnrealized = futuresUnrealized;
   const totalPositions = futures?.positions?.length || 0;
 
-  // ── Alpaca (dormant — for future stock holds) ──
+  // ── Alpaca (stocks & crypto) ──
   const alpacaEquity = account ? parseFloat(account.equity) : 0;
-  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol)) || [], [positions]);
+  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol) && p.asset_class !== "crypto") || [], [positions]);
   const optionPositions = useMemo(() => positions?.filter((p) => !!parseOptionSymbol(p.symbol)) || [], [positions]);
 
   // ── Risk / Allocation ──
@@ -167,7 +167,7 @@ export default function DashboardPage() {
         <div>
           <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
           <p className="text-[11px] text-muted-foreground/50">
-            Futures portfolio — Tradovate
+            Multi-asset portfolio — Tradovate & Alpaca
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -241,14 +241,15 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* ── Tradovate Account ── */}
-      <div className="grid grid-cols-1 gap-3">
+      {/* ── Broker Accounts ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Tradovate */}
         <div className="rounded-xl border border-amber-500/15 bg-gradient-to-br from-amber-500/[0.04] to-transparent p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-amber-400" />
               <span className="text-xs font-bold">Tradovate</span>
-              <span className="text-[10px] text-muted-foreground/40">Micro Futures</span>
+              <span className="text-[10px] text-muted-foreground/40">Futures</span>
               {futures?.engineStatus?.alive && (
                 <span className="relative flex h-1.5 w-1.5 ml-1">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
@@ -274,6 +275,35 @@ export default function DashboardPage() {
               <p className={`text-sm font-bold tabular-nums ${marginUtilization > 50 ? "text-red-400" : marginUtilization > 25 ? "text-amber-400" : ""}`}>
                 {marginUtilization.toFixed(0)}% used
               </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Alpaca */}
+        <div className="rounded-xl border border-blue-500/15 bg-gradient-to-br from-blue-500/[0.04] to-transparent p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-400" />
+              <span className="text-xs font-bold">Alpaca</span>
+              <span className="text-[10px] text-muted-foreground/40">Stocks & Crypto</span>
+            </div>
+            <div className="flex gap-2">
+              <Link href="/stocks" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
+              <Link href="/crypto" className="text-[10px] text-purple-400 hover:underline">Crypto</Link>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <p className="text-[10px] text-muted-foreground/40">Equity</p>
+              <p className="text-sm font-bold tabular-nums">{formatCurrency(alpacaEquity)}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-muted-foreground/40">Positions</p>
+              <p className="text-sm font-bold tabular-nums">{stockPositions.length + optionPositions.length}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-muted-foreground/40">Buying Power</p>
+              <p className="text-sm font-bold tabular-nums">{account ? formatCurrency(parseFloat(account.buying_power)) : "—"}</p>
             </div>
           </div>
         </div>
@@ -347,9 +377,9 @@ export default function DashboardPage() {
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/[0.06] text-muted-foreground/60 tabular-nums">{totalPositions}</span>
             </div>
             <div className="flex gap-3">
-              <Link href="/stocks" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
-              <Link href="/options" className="text-[10px] text-purple-400 hover:underline">Options</Link>
               <Link href="/futures" className="text-[10px] text-amber-400 hover:underline">Futures</Link>
+              <Link href="/stocks" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
+              <Link href="/crypto" className="text-[10px] text-purple-400 hover:underline">Crypto</Link>
             </div>
           </div>
 
@@ -478,7 +508,7 @@ export default function DashboardPage() {
           ) : (
             <div className="px-4 py-10 text-center">
               <p className="text-sm text-muted-foreground/40">No open positions</p>
-              <p className="text-[11px] text-muted-foreground/25 mt-1">Futures positions from Tradovate will appear here</p>
+              <p className="text-[11px] text-muted-foreground/25 mt-1">Positions from Tradovate and Alpaca will appear here when active</p>
             </div>
           )}
         </div>

@@ -30,6 +30,8 @@ const sections = [
     label: "MARKETS",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
+      { href: "/stocks", label: "Stocks", icon: LineChart, broker: "Alpaca" },
+      { href: "/crypto", label: "Crypto", icon: Bitcoin, broker: "Alpaca" },
     ],
   },
   {
@@ -131,7 +133,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
         <p className="text-[9px] text-muted-foreground/30 tracking-wider uppercase text-center">
-          Tradovate · Claude AI
+          Tradovate · Alpaca · Claude AI
         </p>
       </div>
     </>

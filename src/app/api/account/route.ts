@@ -1,8 +1,11 @@
 import { getAccount } from "@/lib/alpaca";
+import { getViewMode } from "@/lib/trading-mode";
 
 export async function GET() {
   try {
-    const account = await getAccount();
+    // Use view mode so dashboard shows paper/live based on toggle (mirrors futures pattern)
+    const viewMode = await getViewMode("stocks");
+    const account = await getAccount(viewMode);
     return Response.json(account);
   } catch (error) {
     console.error("[/api/account]", error);

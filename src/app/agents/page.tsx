@@ -38,7 +38,6 @@ function pnlColor(val: number) {
   return val > 0 ? "text-emerald-500" : val < 0 ? "text-red-500" : "text-muted-foreground";
 }
 
-// Config groups — futures only (stocks/crypto/options disabled)
 const CONFIG_GROUPS = [
   {
     label: "Futures (Demo — 24/7 Learning)",
@@ -58,6 +57,36 @@ const CONFIG_GROUPS = [
     ],
   },
   {
+    label: "Crypto (Demo — 24/7)",
+    icon: "C",
+    color: "from-purple-500 to-violet-500",
+    fields: [
+      { key: "crypto_enabled", label: "Crypto Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
+      { key: "crypto_risk_per_trade_pct", label: "Risk Per Trade (%)", type: "number" as const },
+      { key: "crypto_daily_loss_limit_pct", label: "Daily Loss Limit (%)", type: "number" as const },
+      { key: "crypto_max_positions", label: "Max Positions", type: "number" as const },
+      { key: "crypto_max_trades_per_day", label: "Max Trades / Day", type: "number" as const },
+      { key: "crypto_confidence_threshold", label: "Confidence Threshold", type: "number" as const },
+      { key: "crypto_simulated_equity", label: "Simulated Equity ($)", type: "number" as const },
+      { key: "crypto_focus_symbols", label: "Focus Symbols", type: "text" as const, placeholder: "BTC/USD,ETH/USD,SOL/USD" },
+    ],
+  },
+  {
+    label: "Stocks (Demo — RTH Swing)",
+    icon: "S",
+    color: "from-blue-500 to-indigo-500",
+    fields: [
+      { key: "stocks_enabled", label: "Stocks Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
+      { key: "stocks_risk_per_trade_pct", label: "Risk Per Trade (%)", type: "number" as const },
+      { key: "stocks_daily_loss_limit_pct", label: "Daily Loss Limit (%)", type: "number" as const },
+      { key: "stocks_max_positions", label: "Max Positions", type: "number" as const },
+      { key: "stocks_max_trades_per_day", label: "Max Trades / Day", type: "number" as const },
+      { key: "stocks_confidence_threshold", label: "Confidence Threshold", type: "number" as const },
+      { key: "stocks_simulated_equity", label: "Simulated Equity ($)", type: "number" as const },
+      { key: "stocks_focus_symbols", label: "Focus Watchlist", type: "text" as const, placeholder: "NVDA,AAPL,TSLA,META,AMZN" },
+    ],
+  },
+  {
     label: "Live Mirror (RTH Only)",
     icon: "L",
     color: "from-red-500 to-rose-500",
@@ -66,7 +95,7 @@ const CONFIG_GROUPS = [
       { key: "drawdown_kill_pct", label: "Drawdown Kill (%)", type: "number" as const },
     ],
   },
-];
+] as { label: string; icon: string; color: string; fields: { key: string; label: string; type: "number" | "select" | "text" | "toggle"; options?: string[]; placeholder?: string }[] }[];
 
 export default function AgentHubPage() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
@@ -175,6 +204,24 @@ export default function AgentHubPage() {
       schedule: "Every 10m (market hrs)",
       endpoint: "/api/cron/futures",
       canRun: true,
+    },
+    {
+      id: "crypto",
+      name: "Crypto Agent",
+      desc: "24/7 crypto — BTC, ETH, SOL on Alpaca paper",
+      schedule: "Every 15m (24/7)",
+      endpoint: "/api/cron/crypto",
+      canRun: true,
+      status: "active",
+    },
+    {
+      id: "stocks",
+      name: "Stocks Agent",
+      desc: "Swing trades — NVDA, AAPL, TSLA on Alpaca paper",
+      schedule: "Every 30m (RTH)",
+      endpoint: "/api/cron/stocks",
+      canRun: true,
+      status: "active",
     },
     {
       id: "premarket",

@@ -83,13 +83,14 @@ export function TopBar() {
     );
   }
 
-  // Tradovate data only — futures focused
-  const equity = futuresData?.account?.netLiq || futuresData?.account?.balance || 0;
+  // Futures equity (primary display in top bar)
+  const futuresEquity = futuresData?.account?.netLiq || futuresData?.account?.balance || 0;
   const balance = futuresData?.account?.balance || 0;
   const sod = futuresData?.startOfDayBalance;
   const dailyPnl = (sod != null && balance) ? balance - sod : (futuresData?.account?.realizedPnl || 0);
   const dailyPct = sod && sod > 0 ? dailyPnl / sod : 0;
   const hasFutures = futuresData?.connected && futuresData.account;
+  const equity = futuresEquity;
 
   return (
     <header className={`h-11 border-b flex items-center transition-colors relative ${
@@ -164,6 +165,7 @@ export function TopBar() {
 // Trade execution is separately gated by agent config on /agents page.
 const VIEW_TYPES = [
   { key: "futures", label: "Futures", broker: "Tradovate" },
+  { key: "stocks", label: "Stocks & Crypto", broker: "Alpaca" },
 ] as const;
 
 function ViewToggle() {

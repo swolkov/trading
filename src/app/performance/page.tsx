@@ -165,7 +165,7 @@ export default function PerformancePage() {
       <div className="flex items-center gap-3">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Performance</h1>
-          <p className="text-[11px] text-muted-foreground/50">Futures trading analytics</p>
+          <p className="text-[11px] text-muted-foreground/50">Trading analytics — all asset classes</p>
         </div>
         <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase ${
           futuresViewMode === "live"

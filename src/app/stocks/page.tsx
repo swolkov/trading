@@ -53,19 +53,25 @@ export default function StocksPage() {
 
   const isLoading = accountLoading || positionsLoading;
 
-  // Filter to stock-only positions (not options)
-  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol)) || [], [positions]);
+  // Filter to stock-only positions (not options, not crypto)
+  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol) && p.asset_class !== "crypto") || [], [positions]);
 
   // Account metrics
   const equity = account ? parseFloat(account.equity) : 0;
   const cash = account ? parseFloat(account.cash) : 0;
   const buyingPower = account ? parseFloat(account.buying_power) : 0;
-  const lastEquity = account ? parseFloat(account.last_equity) : 0;
-  const dailyPnl = equity - lastEquity;
-  const dailyPnlPct = lastEquity > 0 ? (dailyPnl / lastEquity) * 100 : 0;
 
   const totalMarketValue = stockPositions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value)), 0);
   const totalUnrealized = stockPositions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0);
+  // Stock-only daily P&L from position-level data (not account-level which mixes crypto)
+  const dailyPnl = stockPositions.reduce((s, p) => {
+    const qty = parseFloat(p.qty);
+    const current = parseFloat(p.current_price);
+    const lastday = parseFloat(p.lastday_price);
+    return s + (current - lastday) * qty;
+  }, 0);
+  const costBasis = stockPositions.reduce((s, p) => s + Math.abs(parseFloat(p.cost_basis)), 0);
+  const dailyPnlPct = costBasis > 0 ? (dailyPnl / costBasis) * 100 : 0;
   const stockExposurePct = equity > 0 ? (totalMarketValue / equity) * 100 : 0;
 
   // Stock-only trades from analysis
@@ -90,8 +96,8 @@ export default function StocksPage() {
           <Link href="/trade" className="text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors border border-emerald-500/20 font-medium">
             Trade
           </Link>
-          <Link href="/options" className="text-xs px-3 py-1.5 rounded-lg bg-white/[0.04] text-foreground hover:bg-white/[0.08] transition-colors border border-white/[0.06] font-medium">
-            Options
+          <Link href="/crypto" className="text-xs px-3 py-1.5 rounded-lg bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 transition-colors border border-purple-500/20 font-medium">
+            Crypto
           </Link>
         </div>
       </div>

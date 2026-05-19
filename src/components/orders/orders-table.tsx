@@ -16,7 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-type AssetFilter = "all" | "options" | "stocks" | "futures";
+type AssetFilter = "all" | "options" | "stocks" | "futures" | "crypto";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -45,7 +45,7 @@ function statusBadge(status: string) {
   return <Badge variant="outline" className="text-[10px]">{status}</Badge>;
 }
 
-function assetBadge(type: "options" | "stocks" | "futures") {
+function assetBadge(type: "options" | "stocks" | "futures" | "crypto") {
   switch (type) {
     case "options":
       return <span className="px-1.5 py-0.5 rounded text-[9px] bg-purple-500/15 text-purple-400 font-bold">OPT</span>;
@@ -53,6 +53,8 @@ function assetBadge(type: "options" | "stocks" | "futures") {
       return <span className="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/15 text-amber-400 font-bold">FUT</span>;
     case "stocks":
       return <span className="px-1.5 py-0.5 rounded text-[9px] bg-blue-500/15 text-blue-400 font-bold">STK</span>;
+    case "crypto":
+      return <span className="px-1.5 py-0.5 rounded text-[9px] bg-purple-500/15 text-purple-400 font-bold">CRY</span>;
   }
 }
 
@@ -83,7 +85,7 @@ export interface UnifiedOrder {
   reason: string | null;
   status: string;
   time: string;
-  assetType: "options" | "stocks" | "futures";
+  assetType: "options" | "stocks" | "futures" | "crypto";
   source: "alpaca" | "tradovate";
   cancelable: boolean;
 }
@@ -134,6 +136,7 @@ function OrdersTableInner({
     if (alpacaOrders) {
       for (const o of alpacaOrders) {
         const isOpt = isOptionSymbol(o.symbol);
+        const isCrypto = o.symbol.includes("/");
         items.push({
           id: o.id,
           symbol: o.symbol,
@@ -153,7 +156,7 @@ function OrdersTableInner({
           reason: null,
           status: o.status,
           time: o.filled_at || o.submitted_at,
-          assetType: isOpt ? "options" : "stocks",
+          assetType: isCrypto ? "crypto" : isOpt ? "options" : "stocks",
           source: "alpaca",
           cancelable: ["new", "accepted", "partially_filled"].includes(o.status),
         });
@@ -417,7 +420,7 @@ export function OrdersTable() {
 
       {/* Asset type filter */}
       <div className="flex gap-1.5">
-        {(["all", "options", "stocks", "futures"] as const).map((f) => (
+        {(["all", "futures", "stocks", "crypto", "options"] as const).map((f) => (
           <button
             key={f}
             onClick={() => setAssetFilter(f)}
@@ -427,7 +430,7 @@ export function OrdersTable() {
                 : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
             }`}
           >
-            {f === "all" ? "All" : f === "options" ? "Options" : f === "stocks" ? "Stocks" : "Futures"}
+            {f === "all" ? "All" : f === "futures" ? "Futures" : f === "stocks" ? "Stocks" : f === "crypto" ? "Crypto" : "Options"}
           </button>
         ))}
       </div>

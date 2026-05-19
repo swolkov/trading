@@ -1,7 +1,7 @@
 import { prisma } from "./db";
 
 export type TradingMode = "paper" | "live";
-export type TradeType = "options" | "futures" | "stocks";
+export type TradeType = "options" | "futures" | "stocks" | "crypto";
 
 // Cache mode for 60 seconds to avoid hitting DB on every API call
 let modeCache: Record<string, { mode: TradingMode; expires: number }> = {};
@@ -44,14 +44,16 @@ export async function getViewMode(type: TradeType): Promise<TradingMode> {
   }
 }
 
-// Get Alpaca credentials based on current mode
-export async function getAlpacaConfig(): Promise<{
+// Get Alpaca credentials based on mode.
+// modeOverride: pass getViewMode("stocks") result for dashboard display,
+// or leave undefined for agent execution (reads trading_mode from DB).
+export async function getAlpacaConfig(type: TradeType = "stocks", modeOverride?: TradingMode): Promise<{
   baseUrl: string;
   apiKey: string;
   apiSecret: string;
   isLive: boolean;
 }> {
-  const mode = await getTradingMode("options");
+  const mode = modeOverride ?? await getTradingMode(type);
 
   if (mode === "live" && process.env.ALPACA_LIVE_API_KEY && process.env.ALPACA_LIVE_API_SECRET) {
     return {

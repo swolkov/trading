@@ -206,14 +206,14 @@ function CumulativePnl({ days }: { days: JournalDay[] }) {
 // ── Main Page ──────────────────────────────────────────
 
 export default function JournalPage() {
-  const [alpacaData] = useState<{ trades: AlpacaTrade[] } | null>(null); // Alpaca dormant — no fetch
+  const [alpacaData] = useState<{ trades: AlpacaTrade[] } | null>(null); // Crypto/stock trades logged via vault journal, not Alpaca orders
   const [futuresData, setFuturesData] = useState<FuturesData | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"all" | "stocks" | "futures">("futures");
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Only fetch futures data — Alpaca is dormant (long-term holds only, no journal tracking)
+    // Fetch futures data — crypto/stock trades are logged to vault journal by their agents
     fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (d && !d.error) setFuturesData(d); }).catch(() => {}).finally(() => setIsLoading(false));
   }, []);
 

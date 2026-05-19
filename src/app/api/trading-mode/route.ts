@@ -7,7 +7,7 @@ import { invalidateViewCache } from "@/lib/trading-mode";
 // Agent execution mode is controlled separately via /agents config page
 // which writes to trading_mode_* keys.
 
-const VALID_TYPES = ["options", "futures", "stocks"] as const;
+const VALID_TYPES = ["options", "futures", "stocks", "crypto"] as const;
 
 export async function GET() {
   try {
@@ -23,10 +23,12 @@ export async function GET() {
   }
 }
 
+const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD || "golive";
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { type, mode } = body;
+    const { type, mode, password } = body;
 
     // Validate type
     if (!VALID_TYPES.includes(type)) {
@@ -38,7 +40,27 @@ export async function POST(request: Request) {
       return Response.json({ error: "Mode must be 'paper' or 'live'" }, { status: 400 });
     }
 
-    // Update the view mode only — agent execution reads trading_mode_* separately
+    // If activating live trading, require password and set BOTH view + trading mode
+    if (mode === "live" && password) {
+      if (password !== LIVE_PASSWORD) {
+        return Response.json({ error: "Incorrect password" }, { status: 403 });
+      }
+      // Set trading mode (engine reads this for live execution)
+      await prisma.agentConfig.upsert({
+        where: { key: `trading_mode_${type}` },
+        update: { value: "live" },
+        create: { key: `trading_mode_${type}`, value: "live" },
+      });
+    } else if (mode === "paper" && password) {
+      // Deactivating live — set trading mode back to paper
+      await prisma.agentConfig.upsert({
+        where: { key: `trading_mode_${type}` },
+        update: { value: "paper" },
+        create: { key: `trading_mode_${type}`, value: "paper" },
+      });
+    }
+
+    // Always update view mode
     await prisma.agentConfig.upsert({
       where: { key: `view_mode_${type}` },
       update: { value: mode },
@@ -48,7 +70,12 @@ export async function POST(request: Request) {
     // Invalidate server-side cache so next API call uses new mode immediately
     invalidateViewCache(type);
 
-    return Response.json({ success: true, type, mode, message: `${type} view switched to ${mode.toUpperCase()}` });
+    const isLiveActivation = mode === "live" && password;
+    const message = isLiveActivation
+      ? `LIVE TRADING ACTIVATED for ${type} — engine will mirror trades within 5 minutes`
+      : `${type} ${mode === "live" ? "view" : "mode"} switched to ${mode.toUpperCase()}`;
+
+    return Response.json({ success: true, type, mode, message });
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 500 });
   }
