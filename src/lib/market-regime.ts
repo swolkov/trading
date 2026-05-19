@@ -77,27 +77,27 @@ export async function detectMarketRegime(): Promise<RegimeAnalysis> {
 
   if (goldenCross && spyAbove50sma && spy1mReturn > 0) {
     regime = "bull";
-    recommendation = "BULL MARKET: Be aggressive. Buy dips. Full position sizes. Favor calls over puts. Reduce cash reserve.";
+    recommendation = "BULL MARKET: Strong trend. Full size on trend continuation longs. Let runners go. Best regime for big wins.";
     positionSizeMultiplier = 1.3;
     cashReservePct = 15;
   } else if (deathCross && !spyAbove50sma && spy1mReturn < -0.03) {
     regime = "bear";
-    recommendation = "BEAR MARKET: Be defensive. Raise cash. Smaller positions. Consider puts for hedging. Tighter stop losses.";
+    recommendation = "BEAR MARKET: Trend continuation shorts. Tighter stops. Reduce size. High conviction only.";
     positionSizeMultiplier = 0.5;
     cashReservePct = 40;
   } else if (deathCross || (!spyAbove200sma && spy3mReturn < -0.05)) {
     regime = "bear";
-    recommendation = "BEAR TREND: Market below key averages. Reduce exposure. Favor cash and hedges.";
+    recommendation = "BEAR TREND: Below key averages. Short bias. Smaller size. Tight stops on any longs.";
     positionSizeMultiplier = 0.6;
     cashReservePct = 35;
   } else if (goldenCross && spyAbove200sma) {
     regime = "bull";
-    recommendation = "BULL TREND: Market above key averages. Buy quality on pullbacks. Normal to slightly larger positions.";
+    recommendation = "BULL TREND: Above key averages. Buy pullbacks to VWAP/EMA. Normal size. Trend continuation setups.";
     positionSizeMultiplier = 1.1;
     cashReservePct = 18;
   } else {
     regime = "choppy";
-    recommendation = "CHOPPY MARKET: No clear trend. Trade less. Tighter ranges. Sell premium (covered calls). Wait for breakout or breakdown.";
+    recommendation = "CHOPPY MARKET: No clear trend. A+ setups only. 1 contract max. Wider stops. Wait for breakout or breakdown.";
     positionSizeMultiplier = 0.7;
     cashReservePct = 30;
   }
