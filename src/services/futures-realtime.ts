@@ -3223,24 +3223,29 @@ function startHealthServer() {
 
 // ── Reliability: Auth with retries ───────────────────────
 
-async function authenticateWithRetry(maxRetries = 5): Promise<string> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+async function authenticateWithRetry(): Promise<string> {
+  let attempt = 0;
+  while (true) {
+    attempt++;
     try {
       return await authenticate();
     } catch (err) {
       const errStr = String(err);
-      log(`[AUTH] Attempt ${attempt}/${maxRetries} failed: ${err}`);
-      if (attempt === maxRetries) throw err;
-      // Rate limit (429): wait much longer to let it clear
       const isRateLimit = errStr.includes("429");
-      const delay = isRateLimit
-        ? 300_000  // 5 minutes for rate limit — must survive Railway restart cycle
-        : Math.min(5000 * Math.pow(2, attempt - 1), 60_000);
-      log(`[AUTH] ${isRateLimit ? "Rate limited — " : ""}Retrying in ${Math.round(delay / 1000)}s...`);
-      await new Promise(r => setTimeout(r, delay));
+      if (isRateLimit) {
+        // Rate limited: wait 5 min and retry FOREVER — never crash, never let Railway restart
+        log(`[AUTH] Rate limited (attempt ${attempt}) — waiting 5 min before retry...`);
+        await new Promise(r => setTimeout(r, 300_000));
+      } else {
+        // Other auth error: exponential backoff, give up after 10 attempts
+        log(`[AUTH] Attempt ${attempt} failed: ${err}`);
+        if (attempt >= 10) throw err;
+        const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60_000);
+        log(`[AUTH] Retrying in ${Math.round(delay / 1000)}s...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
   }
-  throw new Error("Auth retry exhausted"); // unreachable, satisfies TS
 }
 
 // ── Reliability: Session bars cap ────────────────────────
