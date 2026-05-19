@@ -171,10 +171,10 @@ const VIEW_TYPES = [
 function ViewToggle() {
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const modes = modeData?.modes || {};
-  const liveCount = VIEW_TYPES.filter(t => modes[t.key] === "live").length;
-  const allLive = liveCount === VIEW_TYPES.length;
-  const anyLive = liveCount > 0;
-  const mixed = anyLive && !allLive;
+  // Futures-only: just check futures mode for the pill badge
+  const futuresLive = modes["futures"] === "live";
+  const anyLive = futuresLive;
+  const mixed = false; // No mixed state — futures only
 
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState<string | null>(null);
@@ -228,32 +228,32 @@ function ViewToggle() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-2 w-56 rounded-lg border border-border bg-zinc-900 shadow-xl z-50 p-2">
-          <div className="text-[10px] text-muted-foreground/50 uppercase tracking-wider px-2 py-1 mb-1">
+        <div className="absolute right-0 top-full mt-2 w-60 rounded-xl border border-border bg-background shadow-2xl z-50 p-3">
+          <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2 font-bold">
             View Account
           </div>
           {VIEW_TYPES.map(({ key, label, broker }) => {
             const isLive = modes[key] === "live";
             return (
-              <div key={key} className="flex items-center gap-2 px-2 py-1.5">
-                <span className="text-[11px] font-medium text-muted-foreground flex-1">{label}</span>
-                <span className="text-[8px] text-muted-foreground/30 uppercase tracking-wider mr-1">{broker}</span>
-                <div className="flex rounded-md overflow-hidden ring-1 ring-border">
+              <div key={key} className="flex items-center gap-2 px-1 py-2 border-b border-border/50 last:border-0">
+                <span className="text-[12px] font-bold text-foreground flex-1">{label}</span>
+                <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider mr-2">{broker}</span>
+                <div className="flex rounded-lg overflow-hidden ring-1 ring-border">
                   <button
                     onClick={() => switchMode(key, "paper")}
                     disabled={loading === key || !isLive}
-                    className={`px-2 py-0.5 text-[9px] font-semibold transition-colors ${
-                      !isLive ? "bg-emerald-500/15 text-emerald-400" : "text-muted-foreground/50 hover:bg-zinc-800"
-                    } disabled:opacity-50`}
+                    className={`px-3 py-1 text-[10px] font-bold transition-colors ${
+                      !isLive ? "bg-emerald-500/20 text-emerald-500" : "text-muted-foreground hover:bg-muted"
+                    } disabled:opacity-40`}
                   >
                     Demo
                   </button>
                   <button
                     onClick={() => switchMode(key, "live")}
                     disabled={loading === key || isLive}
-                    className={`px-2 py-0.5 text-[9px] font-semibold transition-colors ${
-                      isLive ? "bg-red-500/15 text-red-400" : "text-muted-foreground/50 hover:bg-zinc-800"
-                    } disabled:opacity-50`}
+                    className={`px-3 py-1 text-[10px] font-bold transition-colors ${
+                      isLive ? "bg-red-500/20 text-red-500" : "text-muted-foreground hover:bg-muted"
+                    } disabled:opacity-40`}
                   >
                     Live
                   </button>
