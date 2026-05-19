@@ -103,6 +103,7 @@ interface FuturesPerfData {
   };
   activity: { id: string; symbol: string; action: string; qty: number; price: number | null; pnl: number | null; reason: string; time: string }[];
   balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
+  startingCapital?: number;
 }
 
 const swrFetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -505,7 +506,7 @@ export default function PerformancePage() {
 
       {activeTab === "futures" && (() => {
         // Exclude May 13 2026 — Railway outage prevented trade closure (infrastructure failure, not strategy)
-        const EXCLUDED_DATES = ["2026-05-13"];
+        const EXCLUDED_DATES: string[] = []; // Clean account, no exclusions
         const toEtDate = (time: string) => new Date(time).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
         const isExcludedDate = (time: string) => EXCLUDED_DATES.includes(toEtDate(time));
 
@@ -518,9 +519,8 @@ export default function PerformancePage() {
         // Tradovate fills are the source of truth for per-trade P&L.
         const closedFromDb = (futures?.activity || []).filter((t) => t.pnl != null && !isExcludedDate(t.time) && !t.action.startsWith("paper_"));
         const useFills = roundTrips.length > 0;
-        const STARTING_CAPITAL = 50_000;
-        const EXCLUDED_INFRA_LOSSES = 3_200;
-        const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL + EXCLUDED_INFRA_LOSSES : null;
+        const STARTING_CAPITAL = futures?.startingCapital ?? 50_000;
+        const accountPnl = futures?.account?.balance ? futures.account.balance - STARTING_CAPITAL : null;
 
         // Build synthetic round-trips from activity logs when fills aren't available
         // Note: activity close actions (stop_loss, take_profit, etc.) don't indicate direction,

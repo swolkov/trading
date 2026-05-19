@@ -249,8 +249,7 @@ export default function JournalPage() {
     // Futures activity: use trades for counts, but P&L from balance history (source of truth)
     // DB trade P&L values are unreliable (double-logging inflates them).
     // Tradovate account balance deltas are the only accurate P&L source.
-    // Exclude May 13 2026 — Railway outage prevented trade closure (infrastructure failure)
-    const EXCLUDED_DATES = new Set(["2026-05-13"]);
+    const EXCLUDED_DATES = new Set<string>(); // Clean account, no exclusions
     for (const t of (futuresData?.activity || [])) {
       const dateKey = new Date(t.time).toISOString().slice(0, 10);
       if (EXCLUDED_DATES.has(dateKey)) continue;

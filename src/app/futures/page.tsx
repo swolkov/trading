@@ -357,7 +357,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate micro futures — MES, MNQ, MGC, MYM, M2K
+            Tradovate micro futures — MES, MNQ
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
