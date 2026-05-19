@@ -83,6 +83,30 @@ let liveEquity = 0;
 async function authenticateLive(): Promise<string> {
   if (liveAccessToken && Date.now() < liveTokenExpires) return liveAccessToken;
 
+  // Check for bootstrap token (injected when rate limited)
+  try {
+    const bootstrap = await prisma.agentConfig.findUnique({ where: { key: "tradovate_live_bootstrap_token" } });
+    if (bootstrap?.value) {
+      const { token, expires } = JSON.parse(bootstrap.value);
+      const expMs = new Date(expires).getTime();
+      if (token && expMs > Date.now()) {
+        log("[LIVE AUTH] Using bootstrap token from DB");
+        liveAccessToken = token;
+        liveTokenExpires = expMs;
+        await prisma.agentConfig.delete({ where: { key: "tradovate_live_bootstrap_token" } }).catch(() => {});
+        const accounts = await liveApiFetch("/account/list") as { id: number; name: string; active: boolean }[];
+        const active = accounts.find((a) => a.active) || accounts[0];
+        if (active) { liveAccountId = active.id; liveAccountName = active.name; }
+        try {
+          const bal = await liveApiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${liveAccountId}`) as { totalCashValue?: number };
+          if (bal?.totalCashValue) liveEquity = bal.totalCashValue;
+        } catch {}
+        log(`[LIVE AUTH] Authenticated — ${liveAccountName} (#${liveAccountId}) — equity $${liveEquity.toFixed(0)} (bootstrap)`);
+        return liveAccessToken;
+      }
+    }
+  } catch {}
+
   const res = await fetch(`${LIVE_API}/auth/accesstokenrequest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
