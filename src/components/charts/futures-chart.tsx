@@ -92,9 +92,16 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
   const priceLinesRef = useRef<any[]>([]);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const barsRef = useRef<CandlestickData<Time>[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const vwapRef = useRef<ISeriesApi<any> | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const vwapUpperRef = useRef<ISeriesApi<any> | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const vwapLowerRef = useRef<ISeriesApi<any> | null>(null);
   const [activeIdx, setActiveIdx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [showEMA, setShowEMA] = useState(true);
+  const [showVWAP, setShowVWAP] = useState(true);
   const [isLive, setIsLive] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<string>("");
   const [crosshairData, setCrosshairData] = useState<{
@@ -169,6 +176,23 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       priceScaleId: "volume",
     });
 
+    // VWAP + bands
+    const vwap = chart.addSeries(LineSeries, {
+      color: "#6366f1", lineWidth: 2, lineStyle: 2, // indigo dashed
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    const vwapUpper = chart.addSeries(LineSeries, {
+      color: "rgba(99,102,241,0.25)", lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    const vwapLower = chart.addSeries(LineSeries, {
+      color: "rgba(99,102,241,0.25)", lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    vwapRef.current = vwap;
+    vwapUpperRef.current = vwapUpper;
+    vwapLowerRef.current = vwapLower;
+
     chart.priceScale("volume").applyOptions({
       scaleMargins: { top: 0.8, bottom: 0 },
     });
@@ -227,10 +251,14 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         fetch("/api/futures/positions"),
       ]);
 
-      const bars: Bar[] = await barsRes.json();
+      const barsJson = await barsRes.json();
       const posData = await posRes.json().catch(() => null);
 
-      if (!Array.isArray(bars) || bars.length === 0) return;
+      // API now returns { bars, overlays } for intraday, or { bars } for daily
+      const bars: Bar[] = Array.isArray(barsJson) ? barsJson : (barsJson.bars || []);
+      const overlays = Array.isArray(barsJson) ? null : barsJson.overlays;
+
+      if (bars.length === 0) return;
 
       const candleData: CandlestickData<Time>[] = bars.map((bar) => {
         const time = tf.intraday
@@ -259,6 +287,55 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       } else {
         ema9Ref.current!.setData([]);
         ema21Ref.current!.setData([]);
+      }
+
+      // VWAP + Key Levels
+      if (showVWAP && overlays?.vwapSeries && vwapRef.current && vwapUpperRef.current && vwapLowerRef.current) {
+        const vwapData = overlays.vwapSeries.map((v: { t: number; vwap: number; upper: number; lower: number }) => ({
+          time: (typeof v.t === "number" ? v.t : Math.floor(new Date(v.t).getTime() / 1000)) as Time,
+          value: v.vwap,
+        }));
+        const upperData = overlays.vwapSeries.map((v: { t: number; upper: number }) => ({
+          time: (typeof v.t === "number" ? v.t : Math.floor(new Date(v.t).getTime() / 1000)) as Time,
+          value: v.upper,
+        }));
+        const lowerData = overlays.vwapSeries.map((v: { t: number; lower: number }) => ({
+          time: (typeof v.t === "number" ? v.t : Math.floor(new Date(v.t).getTime() / 1000)) as Time,
+          value: v.lower,
+        }));
+        vwapRef.current.setData(vwapData);
+        vwapUpperRef.current.setData(upperData);
+        vwapLowerRef.current.setData(lowerData);
+      } else if (vwapRef.current) {
+        vwapRef.current.setData([]);
+        vwapUpperRef.current?.setData([]);
+        vwapLowerRef.current?.setData([]);
+      }
+
+      // Key levels as price lines on the candle series
+      priceLinesRef.current.forEach((pl) => { try { candleRef.current?.removePriceLine(pl); } catch {} });
+      priceLinesRef.current = [];
+      if (overlays && tf.intraday) {
+        if (overlays.prevDayHigh > 0) {
+          priceLinesRef.current.push(candleRef.current!.createPriceLine({
+            price: overlays.prevDayHigh, color: "#f59e0b", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "PDH",
+          }));
+        }
+        if (overlays.prevDayLow > 0) {
+          priceLinesRef.current.push(candleRef.current!.createPriceLine({
+            price: overlays.prevDayLow, color: "#f59e0b", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "PDL",
+          }));
+        }
+        if (overlays.openingRangeHigh > 0) {
+          priceLinesRef.current.push(candleRef.current!.createPriceLine({
+            price: overlays.openingRangeHigh, color: "#6b7280", lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: "OR-H",
+          }));
+        }
+        if (overlays.openingRangeLow > 0) {
+          priceLinesRef.current.push(candleRef.current!.createPriceLine({
+            price: overlays.openingRangeLow, color: "#6b7280", lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: "OR-L",
+          }));
+        }
       }
 
       // ── TRADE MARKERS ──
@@ -380,7 +457,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
     } finally {
       if (!isRefresh) setLoading(false);
     }
-  }, [symbol, activeIdx, showEMA]);
+  }, [symbol, activeIdx, showEMA, showVWAP]);
 
   // Initial load
   useEffect(() => {
@@ -423,6 +500,16 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
             }`}
           >
             EMA 9/21
+          </button>
+          <button
+            onClick={() => setShowVWAP(!showVWAP)}
+            className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+              showVWAP
+                ? "bg-indigo-500/15 text-indigo-400 border border-indigo-500/30"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            VWAP
           </button>
           <button
             onClick={() => setIsLive(!isLive)}
