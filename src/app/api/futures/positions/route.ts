@@ -246,6 +246,28 @@ export async function GET() {
         unrealizedPnl: accountSummary.unrealizedPnl,
         marginUsed: accountSummary.marginUsed,
       },
+      // Risk metrics for dashboard gauge
+      riskMetrics: await (async () => {
+        try {
+          const keys = ["futures_daily_loss_limit_pct", "futures_max_trades_per_day", "futures_risk_per_trade_pct", "futures_simulated_equity"];
+          const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
+          const cfg: Record<string, string> = {};
+          for (const c of configs) cfg[c.key] = c.value;
+          const simEquity = parseFloat(cfg.futures_simulated_equity) || 1000;
+          const dailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || 15;
+          const maxTrades = parseInt(cfg.futures_max_trades_per_day) || 6;
+          const riskPct = parseFloat(cfg.futures_risk_per_trade_pct) || 8;
+          const dailyLossLimit = simEquity * (dailyLossPct / 100);
+          const riskPerTrade = simEquity * (riskPct / 100);
+          // Count today's closed trades
+          const todayET = new Date().toISOString().slice(0, 10);
+          const todayStart = new Date(todayET + "T00:00:00-04:00");
+          const todayTrades = await prisma.autoTradeLog.count({
+            where: { symbol: { startsWith: "FUT:" }, pnl: { not: null }, createdAt: { gte: todayStart } },
+          });
+          return { dailyLossLimit, maxTradesPerDay: maxTrades, riskPerTrade, simEquity, todayTradeCount: todayTrades };
+        } catch { return null; }
+      })(),
       positions: enrichedPositions,
       orders: openOrders.map((o) => ({
         id: o.id,
@@ -259,12 +281,19 @@ export async function GET() {
       fillBasedPnl,
       activity,
       engineStatus,
-      startOfDayBalance: await (async () => {
-        // Use engine's persisted SOD balance for BOTH demo and live.
-        // The engine saves this on session reset (9:29 AM ET) from actual Tradovate balance.
-        // This is more reliable than computing from broker realizedPnl (which may be cumulative).
+      // Starting capital for P&L calculations (mode-aware)
+      startingCapital: await (async () => {
+        const key = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
         try {
-          const sodConfig = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+          const cfg = await prisma.agentConfig.findUnique({ where: { key } });
+          return cfg?.value ? parseFloat(cfg.value) : (viewMode === "live" ? 1025 : 50000);
+        } catch { return viewMode === "live" ? 1025 : 50000; }
+      })(),
+      startOfDayBalance: await (async () => {
+        // Mode-aware SOD: demo uses start_of_day_balance, live uses live_start_of_day_balance
+        const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
+        try {
+          const sodConfig = await prisma.agentConfig.findUnique({ where: { key: sodKey } });
           if (sodConfig?.value) {
             const sodVal = parseFloat(sodConfig.value);
             if (!isNaN(sodVal) && sodVal > 0) return sodVal;

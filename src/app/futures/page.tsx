@@ -117,7 +117,10 @@ interface PositionsData {
   activity: ActivityLog[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
   startOfDayBalance?: number | null;
+  startingCapital?: number;
+  viewMode?: string;
   balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
+  riskMetrics?: { dailyLossLimit: number; maxTradesPerDay: number; riskPerTrade: number; simEquity: number; todayTradeCount: number } | null;
 }
 
 interface BacktestSetup {
@@ -158,7 +161,7 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-const CONTRACTS = ["MES", "MNQ", "MGC", "MYM", "M2K"];
+const CONTRACTS = ["MES", "MNQ"]; // Only trade MES/MNQ — MGC removed (too risky for $1K)
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
@@ -274,35 +277,28 @@ export default function FuturesPage() {
   const allTrades = posData?.activity || [];
   const fillPnl = posData?.fillBasedPnl;
 
-  // Exclude May 13 2026 — Railway outage prevented trade closure (infrastructure failure)
-  const EXCLUDED_DATES = ["2026-05-13"];
-  const isExcludedDate = (time: string) => EXCLUDED_DATES.some((d) => time.startsWith(d));
-
-  // DB trades (reconciliation keeps these accurate) — exclude infrastructure failure days
-  const closedTrades = allTrades.filter((t) => t.pnl != null && !isExcludedDate(t.time));
+  // DB trades — clean slate, no exclusions on new account
+  const closedTrades = allTrades.filter((t) => t.pnl != null);
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
 
-  // Filter fill-based round trips to exclude infrastructure failure days
-  const filteredRoundTrips = (fillPnl?.roundTrips || []).filter((rt) => !isExcludedDate(rt.exitTime));
+  // Fill-based round trips from Tradovate (source of truth for per-trade stats)
   const filteredFills = {
-    tradeCount: filteredRoundTrips.length,
-    wins: filteredRoundTrips.filter((rt) => rt.pnl > 0).length,
-    losses: filteredRoundTrips.filter((rt) => rt.pnl < 0).length,
-    totalPnl: filteredRoundTrips.reduce((s, rt) => s + rt.pnl, 0),
-    roundTrips: filteredRoundTrips,
+    tradeCount: (fillPnl?.roundTrips || []).length,
+    wins: (fillPnl?.roundTrips || []).filter((rt) => rt.pnl > 0).length,
+    losses: (fillPnl?.roundTrips || []).filter((rt) => rt.pnl < 0).length,
+    totalPnl: (fillPnl?.roundTrips || []).reduce((s, rt) => s + rt.pnl, 0),
+    roundTrips: fillPnl?.roundTrips || [],
   };
 
-  // Use fill-based data ONLY when it has more trades than DB (catches gaps between reconciliation runs)
+  // Use fill-based data ONLY when it has more trades than DB
   const hasFillData = filteredFills.tradeCount > closedTrades.length;
   const tradeCount = hasFillData ? filteredFills.tradeCount : closedTrades.length;
   const winCount = hasFillData ? filteredFills.wins : wins.length;
   const lossCount = hasFillData ? filteredFills.losses : losses.length;
-  // Total P&L: use Tradovate account equity as source of truth (DB trade sums are unreliable due to reconciliation bugs)
-  // Excluded infrastructure losses: Railway outage May 13 (-$3,200) — not a strategy failure
-  const STARTING_CAPITAL = 50_000;
-  const EXCLUDED_INFRA_LOSSES = 3_200; // May 13 Railway outage — could not close trades
-  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL + EXCLUDED_INFRA_LOSSES : null;
+  // Total P&L: balance - starting capital (mode-aware, no exclusions on new account)
+  const STARTING_CAPITAL = posData?.startingCapital ?? 50_000;
+  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
   const totalPnl = accountPnl ?? (hasFillData ? filteredFills.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
   const avgWin = hasFillData
     ? (filteredFills.wins > 0 ? filteredFills.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / filteredFills.wins : 0)
@@ -340,28 +336,16 @@ export default function FuturesPage() {
 
   // Balance history for period P&L
   const balanceHistory = posData?.balanceHistory || [];
-  // Excluded dates fall within a period → add back the infra loss so period P&L reflects strategy only
-  const EXCLUDED_DATE_RANGES = [{ start: "2026-05-13", end: "2026-05-13", loss: 3_200 }];
+  // Period P&L from balance history — clean account, no exclusions
   const computePeriodPnlFromBalance = (periodStartDate: Date): number | null => {
     if (currentBalance == null) return null;
     const periodKey = `${periodStartDate.getUTCFullYear()}-${String(periodStartDate.getUTCMonth() + 1).padStart(2, "0")}-${String(periodStartDate.getUTCDate()).padStart(2, "0")}`;
     const sorted = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
     const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null);
-    let pnl: number | null = null;
     if (startSnapshot?.startBalance != null) {
-      pnl = currentBalance - startSnapshot.startBalance;
-    } else {
-      pnl = accountPnl;
+      return currentBalance - startSnapshot.startBalance;
     }
-    // If excluded infra loss dates fall within this period, add them back (they aren't strategy losses)
-    if (pnl != null) {
-      for (const ex of EXCLUDED_DATE_RANGES) {
-        if (ex.start >= periodKey && ex.start <= todayUTC) {
-          pnl += ex.loss;
-        }
-      }
-    }
-    return pnl;
+    return accountPnl;
   };
   const adjustedWeeklyPnl = computePeriodPnlFromBalance(weekStart) ?? (accountPnl ?? 0);
   const adjustedMonthlyPnl = computePeriodPnlFromBalance(monthStart) ?? (accountPnl ?? 0);
@@ -1336,6 +1320,45 @@ export default function FuturesPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* ── RISK GAUGE ── */}
+          {posData?.riskMetrics && (() => {
+            const rm = posData.riskMetrics;
+            const todayPnl = dailyPnl;
+            const lossUsed = todayPnl < 0 ? Math.abs(todayPnl) : 0;
+            const budgetPct = rm.dailyLossLimit > 0 ? Math.min(100, (lossUsed / rm.dailyLossLimit) * 100) : 0;
+            const tradePct = rm.maxTradesPerDay > 0 ? (rm.todayTradeCount / rm.maxTradesPerDay) * 100 : 0;
+            const budgetColor = budgetPct > 80 ? "bg-red-500" : budgetPct > 50 ? "bg-amber-500" : "bg-emerald-500";
+            return (
+              <Card className="border-white/[0.06]">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Daily Risk</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div>
+                    <div className="flex justify-between text-[10px] text-muted-foreground/50 mb-1">
+                      <span>Loss Budget</span>
+                      <span>${lossUsed.toFixed(0)} / ${rm.dailyLossLimit.toFixed(0)}</span>
+                    </div>
+                    <div className="h-2 bg-white/[0.06] rounded-full overflow-hidden">
+                      <div className={`h-full ${budgetColor} rounded-full transition-all`} style={{ width: `${budgetPct}%` }} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Trades Today</p>
+                      <p className="text-sm font-bold tabular-nums">{rm.todayTradeCount} / {rm.maxTradesPerDay}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Risk / Trade</p>
+                      <p className="text-sm font-bold tabular-nums">${rm.riskPerTrade.toFixed(0)}</p>
+                      <p className="text-[9px] text-muted-foreground/30">{((rm.riskPerTrade / rm.simEquity) * 100).toFixed(1)}% of ${rm.simEquity >= 1000 ? `$${(rm.simEquity/1000).toFixed(0)}K` : `$${rm.simEquity}`}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })()}
 
           {/* ── PERFORMANCE STATS ── */}
           <Card className="border-white/[0.06]">

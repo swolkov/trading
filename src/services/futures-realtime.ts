@@ -683,6 +683,23 @@ function checkSessionReset() {
           create: { key: `eod_balance_${yesterday}`, value: String(tradovateEquity) },
         });
         log(`[RESET] Saved start-of-day balance: $${tradovateEquity.toFixed(2)} (${today}), EOD yesterday (${yesterday})`);
+        // Also save live SOD if live mode is active
+        if (isLiveMode) {
+          try {
+            await authenticateLive();
+            await prisma.agentConfig.upsert({
+              where: { key: "live_start_of_day_balance" },
+              update: { value: String(liveEquity) },
+              create: { key: "live_start_of_day_balance", value: String(liveEquity) },
+            });
+            await prisma.agentConfig.upsert({
+              where: { key: `live_daily_balance_${today}` },
+              update: { value: String(liveEquity) },
+              create: { key: `live_daily_balance_${today}`, value: String(liveEquity) },
+            });
+            log(`[RESET] Live SOD: $${liveEquity.toFixed(2)}`);
+          } catch {}
+        }
 
         // Write to Obsidian vault — persistent brain for agents
         try {
