@@ -49,7 +49,7 @@ export async function GET(request: Request) {
 
     // Tradovate (futures)
     try {
-      const tvAccount = await getTradovateAccountSummary();
+      const tvAccount = await getTradovateAccountSummary("paper"); // Demo account (where engine trades)
       const tvPositions = await getTradovatePositions();
       const tvEquity = tvAccount.netLiq || tvAccount.balance;
 
@@ -223,7 +223,7 @@ export async function GET(request: Request) {
     // 4b. Daily P&L Reconciliation — compare DB trade sum vs Tradovate balance delta
     let reconciliationResult = "";
     try {
-      const account = await getTradovateAccountSummary();
+      const account = await getTradovateAccountSummary("paper"); // Always reconcile against demo (where trades execute)
       const sodConfig = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
       const sodBalance = sodConfig?.value ? parseFloat(sodConfig.value) : null;
       if (sodBalance && account?.balance) {
