@@ -246,17 +246,21 @@ export async function GET() {
         unrealizedPnl: accountSummary.unrealizedPnl,
         marginUsed: accountSummary.marginUsed,
       },
-      // Risk metrics for dashboard gauge
+      // Risk metrics for dashboard gauge (mode-aware)
       riskMetrics: await (async () => {
         try {
           const keys = ["futures_daily_loss_limit_pct", "futures_max_trades_per_day", "futures_risk_per_trade_pct", "futures_simulated_equity"];
           const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
           const cfg: Record<string, string> = {};
           for (const c of configs) cfg[c.key] = c.value;
-          const simEquity = parseFloat(cfg.futures_simulated_equity) || 1000;
-          const dailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || 15;
-          const maxTrades = parseInt(cfg.futures_max_trades_per_day) || 6;
-          const riskPct = parseFloat(cfg.futures_risk_per_trade_pct) || 8;
+          // Demo uses actual account equity; live uses simulated equity config
+          const isDemo = viewMode === "paper";
+          const simEquity = isDemo
+            ? (accountSummary.netLiq || 50000)
+            : (parseFloat(cfg.futures_simulated_equity) || 1000);
+          const dailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || (isDemo ? 5 : 15);
+          const maxTrades = parseInt(cfg.futures_max_trades_per_day) || (isDemo ? 10 : 6);
+          const riskPct = parseFloat(cfg.futures_risk_per_trade_pct) || (isDemo ? 2 : 8);
           const dailyLossLimit = simEquity * (dailyLossPct / 100);
           const riskPerTrade = simEquity * (riskPct / 100);
           // Count today's closed trades

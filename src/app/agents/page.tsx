@@ -40,7 +40,9 @@ function pnlColor(val: number) {
 
 const CONFIG_GROUPS = [
   {
-    label: "Futures (Demo — 24/7 Learning)",
+    label: "Futures",
+    modeKey: "futures_mode",
+    modeLabelMap: { disabled: "Disabled", demo: "Demo — 24/7 Learning", live: "Live — RTH Mirror" } as Record<string, string>,
     icon: "D",
     color: "from-emerald-500 to-teal-500",
     fields: [
@@ -57,7 +59,9 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Crypto (Demo — 24/7)",
+    label: "Crypto",
+    modeKey: "crypto_enabled",
+    modeLabelMap: { disabled: "Disabled", paper: "Paper — 24/7", live: "Live — 24/7" } as Record<string, string>,
     icon: "C",
     color: "from-purple-500 to-violet-500",
     fields: [
@@ -72,7 +76,9 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Stocks (Demo — RTH Swing)",
+    label: "Stocks",
+    modeKey: "stocks_enabled",
+    modeLabelMap: { disabled: "Disabled", paper: "Paper — RTH Swing", live: "Live — RTH Swing" } as Record<string, string>,
     icon: "S",
     color: "from-blue-500 to-indigo-500",
     fields: [
@@ -95,7 +101,7 @@ const CONFIG_GROUPS = [
       { key: "drawdown_kill_pct", label: "Drawdown Kill (%)", type: "number" as const },
     ],
   },
-] as { label: string; icon: string; color: string; fields: { key: string; label: string; type: "number" | "select" | "text" | "toggle"; options?: string[]; placeholder?: string }[] }[];
+] as { label: string; modeKey?: string; modeLabelMap?: Record<string, string>; icon: string; color: string; fields: { key: string; label: string; type: "number" | "select" | "text" | "toggle"; options?: string[]; placeholder?: string }[] }[];
 
 export default function AgentHubPage() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
@@ -505,7 +511,14 @@ export default function AgentHubPage() {
                 <div className={`w-5 h-5 rounded-md bg-gradient-to-br ${group.color} flex items-center justify-center`}>
                   <span className="text-[9px] text-white font-black">{group.icon}</span>
                 </div>
-                <span className="text-xs font-bold">{group.label}</span>
+                <span className="text-xs font-bold">
+                  {group.label}
+                  {group.modeKey && config?.[group.modeKey] && (
+                    <span className="text-[9px] text-muted-foreground/50 font-normal ml-1">
+                      ({group.modeLabelMap?.[config[group.modeKey]] ?? config[group.modeKey]})
+                    </span>
+                  )}
+                </span>
               </div>
               <div className="space-y-2">
                 {group.fields.map((field) => {

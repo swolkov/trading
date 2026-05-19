@@ -943,12 +943,16 @@ async function loadRiskConfig() {
     const cfg: Record<string, string> = {};
     for (const c of configs) cfg[c.key] = c.value;
 
+    const dbTradesPerDay = parseInt(cfg.futures_max_trades_per_day) || defaults.maxTradesPerDay;
+    const dbDailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || defaults.dailyLossLimitPct;
+
     riskConfig = {
       maxContractsPerTrade: parseInt(cfg.futures_max_contracts) || defaults.maxContractsPerTrade,
       maxTotalContracts: parseInt(cfg.futures_max_total_contracts) || defaults.maxTotalContracts,
-      maxTradesPerDay: parseInt(cfg.futures_max_trades_per_day) || defaults.maxTradesPerDay,
+      // Demo mode: never tighter than demo defaults — learn faster, don't stop early
+      maxTradesPerDay: !isLiveMode ? Math.max(dbTradesPerDay, DEMO_DEFAULTS.maxTradesPerDay) : dbTradesPerDay,
       riskPerTradePct: parseFloat(cfg.futures_risk_per_trade_pct) || defaults.riskPerTradePct,
-      dailyLossLimitPct: parseFloat(cfg.futures_daily_loss_limit_pct) || defaults.dailyLossLimitPct,
+      dailyLossLimitPct: !isLiveMode ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
       maxDrawdownPct: parseFloat(cfg.futures_max_drawdown_pct) || defaults.maxDrawdownPct,
       maxConcurrentPositions: parseInt(cfg.max_positions) || defaults.maxConcurrentPositions,
       atrStopMultiplier: parseFloat(cfg.futures_atr_stop_multiplier) || defaults.atrStopMultiplier,
