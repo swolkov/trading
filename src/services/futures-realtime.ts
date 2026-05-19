@@ -3234,7 +3234,7 @@ async function authenticateWithRetry(maxRetries = 5): Promise<string> {
       // Rate limit (429): wait much longer to let it clear
       const isRateLimit = errStr.includes("429");
       const delay = isRateLimit
-        ? 120_000  // 2 minutes for rate limit
+        ? 300_000  // 5 minutes for rate limit — must survive Railway restart cycle
         : Math.min(5000 * Math.pow(2, attempt - 1), 60_000);
       log(`[AUTH] ${isRateLimit ? "Rate limited — " : ""}Retrying in ${Math.round(delay / 1000)}s...`);
       await new Promise(r => setTimeout(r, delay));
