@@ -188,6 +188,30 @@ let accountName = "";
 async function authenticate(): Promise<string> {
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
+  // Check for bootstrap token in DB (injected when rate limited to bypass auth endpoint)
+  if (!accessToken) {
+    try {
+      const bootstrap = await prisma.agentConfig.findUnique({ where: { key: "tradovate_bootstrap_token" } });
+      if (bootstrap?.value) {
+        const { token, expires } = JSON.parse(bootstrap.value);
+        const expMs = new Date(expires).getTime();
+        if (token && expMs > Date.now()) {
+          log("[AUTH] Using bootstrap token from DB (bypassing rate-limited endpoint)");
+          accessToken = token;
+          tokenExpires = expMs;
+          // Clean up bootstrap token so it's one-time use
+          await prisma.agentConfig.delete({ where: { key: "tradovate_bootstrap_token" } }).catch(() => {});
+          // Still need to fetch account info
+          const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
+          const active = accounts.find((a) => a.active) || accounts[0];
+          if (active) { accountId = active.id; accountName = active.name; }
+          log(`Authenticated — ${accountName} (#${accountId}) — DEMO (bootstrap)`);
+          return accessToken;
+        }
+      }
+    } catch { /* bootstrap optional */ }
+  }
+
   const res = await fetch(`${ORDER_API}/auth/accesstokenrequest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
