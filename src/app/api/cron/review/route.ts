@@ -220,6 +220,31 @@ export async function GET(request: Request) {
       }
     } catch { /* ignore */ }
 
+    // 4b. Daily P&L Reconciliation — compare DB trade sum vs Tradovate balance delta
+    let reconciliationResult = "";
+    try {
+      const account = await getTradovateAccountSummary();
+      const sodConfig = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+      const sodBalance = sodConfig?.value ? parseFloat(sodConfig.value) : null;
+      if (sodBalance && account?.balance) {
+        const balanceDelta = account.balance - sodBalance;
+        const futuresTrades = todayTrades.filter((t) => t.symbol.startsWith("FUT:") && t.pnl != null);
+        const dbPnlSum = futuresTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+        const discrepancy = Math.abs(dbPnlSum - balanceDelta);
+        reconciliationResult = `Balance delta: $${balanceDelta.toFixed(2)} | DB sum: $${dbPnlSum.toFixed(2)} | Discrepancy: $${discrepancy.toFixed(2)}`;
+        if (discrepancy > 10) {
+          await logObservation("review-agent", `P&L DISCREPANCY: Balance says $${balanceDelta.toFixed(2)} but DB trades sum to $${dbPnlSum.toFixed(2)} (gap: $${discrepancy.toFixed(2)}). Balance is truth.`);
+        }
+        // Save EOD balance snapshot
+        const todayKey = new Date().toISOString().slice(0, 10);
+        await prisma.agentConfig.upsert({
+          where: { key: `eod_balance_${todayKey}` },
+          update: { value: String(account.balance) },
+          create: { key: `eod_balance_${todayKey}`, value: String(account.balance) },
+        });
+      }
+    } catch { /* reconciliation optional */ }
+
     // 5. Run full synthesis agent — updates Performance, Lessons, Anti-Patterns in Obsidian brain
     // Forces run since this is the post-market review (always synthesize at EOD)
     let synthesisUpdate = "";
@@ -249,6 +274,7 @@ export async function GET(request: Request) {
       "",
       paperTradeResults ? `Paper Trades (Learning):\n  ${paperTradeResults}` : "",
       learningUpdate ? `Learning Engine:\n  ${learningUpdate}` : "",
+      reconciliationResult ? `Reconciliation:\n  ${reconciliationResult}` : "",
       synthesisUpdate ? `Vault Brain:\n  ${synthesisUpdate}` : "",
     ].filter(Boolean).join("\n");
 
