@@ -38,7 +38,6 @@ const sections = [
     label: "CONTROL",
     links: [
       { href: "/agents", label: "Agent Hub", icon: Bot },
-      { href: "/connect", label: "Connect", icon: Link2 },
     ],
   },
   {
