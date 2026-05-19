@@ -260,14 +260,16 @@ export async function GET() {
       activity,
       engineStatus,
       startOfDayBalance: await (async () => {
-        // Vault/DB snapshots are from the demo account only.
-        // When viewing live, skip them and use broker-derived fallback.
-        if (viewMode === "live") {
-          if (accountSummary?.balance != null && accountSummary?.realizedPnl != null && accountSummary.realizedPnl !== 0) {
-            return accountSummary.balance - accountSummary.realizedPnl;
+        // Use engine's persisted SOD balance for BOTH demo and live.
+        // The engine saves this on session reset (9:29 AM ET) from actual Tradovate balance.
+        // This is more reliable than computing from broker realizedPnl (which may be cumulative).
+        try {
+          const sodConfig = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+          if (sodConfig?.value) {
+            const sodVal = parseFloat(sodConfig.value);
+            if (!isNaN(sodVal) && sodVal > 0) return sodVal;
           }
-          return null;
-        }
+        } catch {}
 
         const todayKey = new Date().toISOString().slice(0, 10);
         // 1. Best source: vault daily-balances.md (Railway engine writes SOD before trading)

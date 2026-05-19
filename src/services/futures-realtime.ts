@@ -2450,6 +2450,20 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       notify(`LIVE TRADE FAILED for ${sym}: ${err}`, "general");
     }
     } // end else (not past daily loss limit)
+  } else if (isLiveMode) {
+    // Live mode active but outside RTH or daily loss hit — log paper trade for learning
+    const paperReason = getSessionName() === "halt" ? "market halted"
+      : !isLiveRTHWindow() ? `outside RTH (${getSessionName()})`
+      : "daily loss limit hit";
+    try {
+      await prisma.autoTradeLog.create({ data: {
+        symbol: `FUT:${sym}`, action: `paper_live_${direction}`,
+        qty: 1, price,
+        reason: `[PAPER LIVE] Would have ${direction} ${sym} @ $${price.toFixed(2)}. Blocked: ${paperReason}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}`,
+        aiScore: confidenceScore, aiSignal: direction,
+      }});
+      log(`[PAPER LIVE] ${direction} ${sym} @ $${price.toFixed(2)} — blocked (${paperReason})`);
+    } catch {}
   }
 }
 
