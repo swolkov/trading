@@ -255,22 +255,23 @@ let mdDebugCount = 0; // Log first 3 MD failures to diagnose
 let mdCircuitResetAt = 0;
 const MD_MAX_FAILURES = 5;
 const MD_CIRCUIT_BASE_MS = 30_000;
-// Tradovate MD base URLs — ALWAYS use demo MD for market data (free, same prices)
-// Live Tradovate may not have paid MD subscription, so demo is the safe default.
+// Tradovate MD base URLs
 const DEMO_MD_URL = "https://md-demo.tradovateapi.com/v1";
+const LIVE_MD_URL = "https://md.tradovateapi.com/v1";
 function getMdUrl(): string {
-  return DEMO_MD_URL; // Both engines use demo MD — prices are identical
+  // Each engine uses its own MD server (contract IDs match the auth environment)
+  return IS_LIVE ? LIVE_MD_URL : DEMO_MD_URL;
 }
 
-// ── Demo Auth for Market Data (live engine needs separate demo token for MD) ──
+// ── Demo Auth + Contracts for MD fallback (live engine only) ──
+// Live MD may fail — fall back to demo MD with demo contract IDs (same prices)
 let demoMdToken = "";
 let demoMdTokenExpires = 0;
+const demoContracts: Map<string, ContractInfo> = new Map(); // demo contract IDs for MD fallback
 
 async function authenticateDemoMd(): Promise<string> {
-  // Demo engine: reuse main auth (already demo)
-  if (IS_DEMO) return authenticate();
+  if (IS_DEMO) return authenticate(); // demo engine: main token IS demo
 
-  // Live engine: separate demo auth just for market data
   if (demoMdToken && Date.now() < demoMdTokenExpires) return demoMdToken;
 
   try {
@@ -282,23 +283,43 @@ async function authenticateDemoMd(): Promise<string> {
         password: process.env.TRADOVATE_PASSWORD || "",
         appId: process.env.TRADOVATE_APP_ID || "",
         appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
-        deviceId: "esbueno-live-md", // separate device ID for MD
+        deviceId: "esbueno-live-md",
         cid: parseInt(process.env.TRADOVATE_CID || "0"),
         sec: process.env.TRADOVATE_SEC || "",
       }),
     });
     if (!res.ok) {
-      log(`[MD AUTH] Demo auth for MD failed (${res.status}) — will use order token`);
-      return authenticate(); // fall back to live token
+      log(`[MD AUTH] Demo auth for MD failed (${res.status})`);
+      return "";
     }
     const data = await res.json();
     demoMdToken = data.accessToken;
     demoMdTokenExpires = Date.now() + 23 * 60 * 60 * 1000;
-    log(`[MD AUTH] Authenticated demo token for market data`);
+    log(`[MD AUTH] Authenticated demo token for market data fallback`);
     return demoMdToken;
   } catch (err) {
-    log(`[MD AUTH] Failed: ${err} — using order token`);
-    return authenticate(); // fallback
+    log(`[MD AUTH] Failed: ${err}`);
+    return "";
+  }
+}
+
+async function resolveDemoContracts(): Promise<void> {
+  if (IS_DEMO) return; // demo engine doesn't need separate demo contracts
+  const token = await authenticateDemoMd();
+  if (!token) return;
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
+    try {
+      const res = await fetch(`${DEMO_API}/contract/suggest?t=${sym}&l=5`, {
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) continue;
+      const results = await res.json() as { id: number; name: string; tickSize: number; providerTickSize: number }[];
+      if (results.length > 0) {
+        demoContracts.set(sym, { id: results[0].id, name: results[0].name, tickSize: results[0].providerTickSize || results[0].tickSize, symbol: sym });
+        log(`[MD] Demo contract ${sym} → ${results[0].name} (ID: ${results[0].id})`);
+      }
+    } catch { /* non-critical */ }
   }
 }
 
@@ -318,6 +339,8 @@ async function resolveContracts() {
       }
     } catch (err) { log(`Failed to resolve ${sym}: ${err}`); }
   }
+  // Live engine: also resolve demo contracts for MD fallback
+  await resolveDemoContracts();
 }
 
 // ── Technical Indicators ────────────────────────────────
@@ -438,22 +461,28 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
     underlyingType: "MinuteBar", elementSize: 1, elementSizeUnit: "UnderlyingUnits",
   }));
   const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: 1 }));
-  const mdUrl = getMdUrl();
-  const mdToken = await authenticateDemoMd(); // Always demo token for MD (free, reliable)
 
-  // Try dedicated MD server first
+  // Helper to parse MD response
+  const parseMdResponse = (data: { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] }): { price: number; volume: number } | null => {
+    const bars = data?.charts?.[0]?.bars;
+    if (bars && bars.length > 0) {
+      const bar = bars[bars.length - 1];
+      return { price: bar.close, volume: (bar.upVolume || 0) + (bar.downVolume || 0) };
+    }
+    return null;
+  };
+
+  // PRIMARY: Mode's own MD server + token + contract IDs
+  const mdUrl = getMdUrl();
+  const token = await authenticate();
   try {
     const res = await fetch(
       `${mdUrl}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
-      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${mdToken}` }, signal: AbortSignal.timeout(8000) },
+      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) },
     );
     if (res.ok) {
-      const data = await res.json() as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
-      const bars = data?.charts?.[0]?.bars;
-      if (bars && bars.length > 0) {
-        const bar = bars[bars.length - 1];
-        return { price: bar.close, volume: (bar.upVolume || 0) + (bar.downVolume || 0) };
-      }
+      const result = parseMdResponse(await res.json());
+      if (result) return result;
     } else if (mdDebugCount < 3) {
       mdDebugCount++;
       log(`[MD-DEBUG] ${sym} MD server ${res.status}: ${await res.text().catch(() => "no body")}`);
@@ -465,21 +494,32 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
     }
   }
 
-  // Fallback: DEMO API server for MD (live engine can't rely on LIVE_API for free MD)
+  // FALLBACK 1: Mode's main API /md/getChart
   try {
-    const fallbackToken = await authenticateDemoMd();
-    const fallbackRes = await fetch(
-      `${DEMO_API}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
-      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${fallbackToken}` }, signal: AbortSignal.timeout(8000) },
-    );
-    if (!fallbackRes.ok) throw new Error(`MD fallback ${fallbackRes.status}`);
-    const data = await fallbackRes.json() as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
-    const bars = data?.charts?.[0]?.bars;
-    if (bars && bars.length > 0) {
-      const bar = bars[bars.length - 1];
-      return { price: bar.close, volume: (bar.upVolume || 0) + (bar.downVolume || 0) };
-    }
+    const data = await apiFetch(
+      `/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`
+    ) as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
+    const result = parseMdResponse(data);
+    if (result) return result;
   } catch { /* fall through */ }
+
+  // FALLBACK 2 (live only): Demo MD server with demo contract IDs (same prices, free)
+  if (IS_LIVE) {
+    const demoToken = await authenticateDemoMd();
+    const demoContract = demoContracts.get(sym) || demoContracts.get(FULL_EQUIVALENT[sym] || "");
+    if (demoToken && demoContract) {
+      try {
+        const res = await fetch(
+          `${DEMO_MD_URL}/md/getChart?contractId=${demoContract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${demoToken}` }, signal: AbortSignal.timeout(8000) },
+        );
+        if (res.ok) {
+          const result = parseMdResponse(await res.json());
+          if (result) return result;
+        }
+      } catch { /* fall through to Yahoo */ }
+    }
+  }
 
   return null;
 }
@@ -2428,30 +2468,42 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
         underlyingType: "MinuteBar", elementSize: 5, elementSizeUnit: "UnderlyingUnits",
       }));
       const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: 200 }));
-      const mdToken = await authenticateDemoMd(); // Always demo for MD
+      const token = await authenticate();
       const mdUrl = getMdUrl();
 
       let data: { charts?: { bars: { timestamp: string; open: number; high: number; low: number; close: number; upVolume: number; downVolume: number }[] }[] } | null = null;
 
-      // Try dedicated MD server (demo — free, reliable)
+      // PRIMARY: Mode's own MD server + token
       try {
         const res = await fetch(
           `${mdUrl}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
-          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${mdToken}` }, signal: AbortSignal.timeout(15000) },
+          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) },
         );
         if (res.ok) data = await res.json();
       } catch { /* try fallback */ }
 
-      // Fallback: DEMO main API for MD
+      // FALLBACK 1: Mode's main API
       if (!data?.charts) {
         try {
-          const fallbackToken = await authenticateDemoMd();
-          const fallbackRes = await fetch(
-            `${DEMO_API}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
-            { headers: { "Content-Type": "application/json", Authorization: `Bearer ${fallbackToken}` }, signal: AbortSignal.timeout(15000) },
-          );
-          if (fallbackRes.ok) data = await fallbackRes.json();
-        } catch { /* fall through to Yahoo */ }
+          data = await apiFetch(
+            `/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`
+          ) as typeof data;
+        } catch { /* try demo fallback */ }
+      }
+
+      // FALLBACK 2 (live only): Demo MD with demo contract IDs
+      if (!data?.charts && IS_LIVE) {
+        const demoToken = await authenticateDemoMd();
+        const demoContract = demoContracts.get(sym) || demoContracts.get(FULL_EQUIVALENT[sym] || "");
+        if (demoToken && demoContract) {
+          try {
+            const res = await fetch(
+              `${DEMO_MD_URL}/md/getChart?contractId=${demoContract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+              { headers: { "Content-Type": "application/json", Authorization: `Bearer ${demoToken}` }, signal: AbortSignal.timeout(15000) },
+            );
+            if (res.ok) data = await res.json();
+          } catch { /* fall through to Yahoo */ }
+        }
       }
 
       if (data?.charts?.[0]?.bars) {
