@@ -21,25 +21,26 @@ let isLiveMode = false;     // When true, ALSO executes on live during RTH windo
 const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
-// Subscribe to both full-size and micro — trade whichever fits account equity
-// Full-size: ES ($50/pt), NQ ($20/pt), GC ($100/pt) — need $25k+
-// Micro: MES ($5/pt), MNQ ($2/pt) — MGC removed ($10/pt too risky for $1K)
+// DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
+// LIVE ($1K): Micros only MES, MNQ until equity scales
 const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC"];
-const MICRO_SYMBOLS = ["MES", "MNQ"]; // MGC removed: $10/pt too risky for $1K live mirror
-// Map full-size to micro equivalents
+const MICRO_SYMBOLS = ["MES", "MNQ"];
+// Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC" };
-// $25k threshold: below this, trade micros. Above, trade full-size.
+// $25k threshold for live: below this, trade micros. Above, trade full-size.
 const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
 
 // Active trading symbols — recalculated when equity updates
-let SYMBOLS = MICRO_SYMBOLS; // default to micros, upgraded on startup after equity fetch
+let SYMBOLS = FULL_SIZE_SYMBOLS; // default to full-size (demo), downgraded to micros for small live accounts
 
 function updateTradingSymbols() {
   const prev = SYMBOLS;
-  // Demo always trades micros (full-size MD not subscribed on demo).
-  // Live only upgrades to full-size when equity exceeds $25K.
-  SYMBOLS = isLiveMode && tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS;
+  // DEMO: Always trade full-size (ES, NQ, GC) — $50K demo account, max learning
+  // LIVE: Micros until equity >= $25K, then full-size
+  SYMBOLS = isLiveMode
+    ? (tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
+    : FULL_SIZE_SYMBOLS;
   if (prev !== SYMBOLS) {
     log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ")} (${SYMBOLS === FULL_SIZE_SYMBOLS ? "full-size" : "micros"})`);
   }
@@ -607,10 +608,29 @@ async function pollPrices() {
       }
     }
 
-    // Fallback: Yahoo for any symbols Tradovate couldn't serve
+    // Fallback 1: Try micro equivalent via Tradovate (same price, demo has micro data subs)
+    const stillNeedYahoo: string[] = [];
     if (needYahoo.length > 0) {
-      const yahooQuotes = await fetchYahooQuotes();
       for (const sym of needYahoo) {
+        const microSym = MICRO_EQUIVALENT[sym];
+        if (microSym) {
+          try {
+            const microQuote = await fetchTradovateQuote(microSym);
+            if (microQuote) {
+              onPrice(sym, microQuote.price, microQuote.volume); // Map micro price to full-size symbol
+              received++;
+              continue;
+            }
+          } catch { /* fall through to Yahoo */ }
+        }
+        stillNeedYahoo.push(sym);
+      }
+    }
+
+    // Fallback 2: Yahoo for anything still missing
+    if (stillNeedYahoo.length > 0) {
+      const yahooQuotes = await fetchYahooQuotes();
+      for (const sym of stillNeedYahoo) {
         const yq = yahooQuotes.get(sym);
         if (yq) {
           onPrice(sym, yq.price, yq.volume);
@@ -618,7 +638,7 @@ async function pollPrices() {
         }
       }
       if (yahooQuotes.size > 0) {
-        log(`[MD] Tradovate missed ${needYahoo.join(",")}, Yahoo fallback served ${yahooQuotes.size}`);
+        log(`[MD] Tradovate missed ${stillNeedYahoo.join(",")}, Yahoo fallback served ${yahooQuotes.size}`);
       }
     }
 
@@ -900,18 +920,18 @@ interface RiskConfig {
   simulatedEquity: number;       // Size trades as if this is account equity (0 = use actual)
 }
 
-// Demo defaults — simulate $1K sizing so learning matches live conditions
+// Demo defaults — use actual $50K equity, trade aggressively for max learning
 const DEMO_DEFAULTS: RiskConfig = {
-  maxContractsPerTrade: 3,       // Match live — learn with same sizing
-  maxTotalContracts: 4,          // Match live
-  maxTradesPerDay: 10,           // More than live — gather learning data faster
-  riskPerTradePct: 8,            // Match live — 8% of simulated $1K = $80
-  dailyLossLimitPct: 25,         // Looser than live — don't stop learning early
+  maxContractsPerTrade: 10,      // Aggressive — more contracts, more learning
+  maxTotalContracts: 8,          // Up to 8 open positions across ES/NQ/GC
+  maxTradesPerDay: 20,           // High volume — brain learns from every trade
+  riskPerTradePct: 8,            // 8% of $50K = $4,000 per trade
+  dailyLossLimitPct: 15,         // 15% of $50K = $7,500 daily limit
   maxDrawdownPct: 25,
-  maxConcurrentPositions: 4,     // Match live
+  maxConcurrentPositions: 8,     // Match maxTotalContracts
   atrStopMultiplier: 1.5,
   atrTargetMultiplier: 4.0,
-  simulatedEquity: 1_000,        // Size as $1K even though demo account has $50K
+  simulatedEquity: 0,            // Use actual $50K demo equity (not simulated)
 };
 
 // Live defaults from Rules/risk-management.md ($1K account)
