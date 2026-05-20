@@ -827,6 +827,12 @@ interface Position {
   originalQty: number;
   consecutiveStops: number;
   pyramided: boolean;
+  // Setup context captured at entry — used for pattern memory learning
+  entryRsi: number;
+  entryVwap: number;
+  entryTrend15m: string;
+  entryDayType: string;
+  entrySession: string;
 }
 
 const positions: Map<string, Position> = new Map();
@@ -1053,6 +1059,7 @@ async function loadPositions() {
         entryTime: new Date(tp.timestamp).getTime(),
         scaledOut: false, originalQty: qty, consecutiveStops: 0,
         pyramided: false,
+        entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
       });
 
       log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
@@ -1519,17 +1526,17 @@ async function closePosition(sym: string, price: number, reason: string) {
       const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
       await storePattern({
         regime: "choppy" as "bull" | "bear" | "choppy",
-        session: getSessionName(),
+        session: pos.entrySession || getSessionName(),
         instrument: sym,
         setupType: reason,
         direction: pos.direction,
-        rsi: 50, // TODO: capture at entry time
+        rsi: pos.entryRsi || 50,
         vixLevel: currentVIX,
         vixTrend: currentVIX > 20 ? "rising" as const : "falling" as const,
         atr: stopDist / pos.entryPrice * 1000,
-        priceVsVwap: 0, // TODO: capture at entry time
-        trend15m: "flat" as const, // TODO: capture at entry time
-        trendDaily: "flat" as const,
+        priceVsVwap: pos.entryVwap > 0 ? (pos.entryPrice - pos.entryVwap) / pos.entryVwap * 100 : 0,
+        trend15m: (pos.entryTrend15m || "flat") as "up" | "down" | "flat",
+        trendDaily: (pos.entryDayType || "").includes("trend") ? (pos.direction === "long" ? "up" as const : "down" as const) : "flat" as const,
         riskReward: stopDist > 0 ? Math.abs(pos.target - pos.entryPrice) / stopDist : 2,
         dollarTrend: "flat" as const,
         bondTrend: "flat" as const,
@@ -2120,7 +2127,8 @@ async function evaluateAndTrade(
 
     log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}% | ${MODE_TAG}`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
-      `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
+      `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`,
+      { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session });
   } else {
     // Hit daily limit or tilt — done for the day. Demo handles learning independently.
     log(`  BLOCKED: ${direction.toUpperCase()} ${sym} (${dailyTradeCount >= 10 ? "daily limit" : "tilt/position limit"}). Done.`);
@@ -2129,7 +2137,7 @@ async function evaluateAndTrade(
 
 // ── Trade Execution ─────────────────────────────────────
 
-async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string) {
+async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string, setupContext?: { rsi: number; vwap: number; trend15m: string; dayType: string; session: string }) {
   const contract = contracts.get(sym);
   if (!contract) return;
 
@@ -2198,6 +2206,11 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       stopOrderId, targetOrderId, entryTime: Date.now(),
       scaledOut: false, originalQty: qty, consecutiveStops: 0,
       pyramided: false,
+      entryRsi: setupContext?.rsi ?? 50,
+      entryVwap: setupContext?.vwap ?? 0,
+      entryTrend15m: setupContext?.trend15m ?? "flat",
+      entryDayType: setupContext?.dayType ?? "unknown",
+      entrySession: setupContext?.session ?? getSessionName(),
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
@@ -2440,6 +2453,7 @@ async function syncPositions() {
         targetOrderId: null,
         entryTime: Date.now(),
         pyramided: false,
+        entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
       });
 
       log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
