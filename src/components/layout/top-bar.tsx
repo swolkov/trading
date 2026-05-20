@@ -194,16 +194,29 @@ function ViewToggle() {
   const switchMode = async (type: string, mode: "paper" | "live") => {
     setLoading(type);
     try {
+      // Optimistic update — instantly show new mode before server responds
+      await mutate("/api/trading-mode", { modes: { ...modes, [type]: mode } }, false);
+
       const res = await fetch("/api/trading-mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, mode }),
       });
       if (res.ok) {
+        // Revalidate mode from server (confirms optimistic update)
         await mutate("/api/trading-mode");
-        mutate((key) => typeof key === "string" && key.startsWith("/api/"), undefined, { revalidate: true });
+        // Revalidate page data with a small delay so server-side cache clears
+        setTimeout(() => {
+          mutate((key) => typeof key === "string" && key.startsWith("/api/") && key !== "/api/trading-mode", undefined, { revalidate: true });
+        }, 300);
+      } else {
+        // Revert optimistic update on failure
+        await mutate("/api/trading-mode");
       }
-    } catch {} finally {
+    } catch {
+      // Revert on error
+      await mutate("/api/trading-mode");
+    } finally {
       setLoading(null);
     }
   };
