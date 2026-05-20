@@ -40,6 +40,35 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
   // Return cached token if still valid for this mode
   if (cached && Date.now() < cached.expires) return cached.token;
 
+  // Check for shared token from Railway engine (saves a Tradovate auth call)
+  // The engine saves its token to DB after authenticating — Vercel crons/API reuse it
+  try {
+    const { prisma } = await import("./db");
+    const shareKey = mode === "live" ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+    const shared = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+    if (shared?.value) {
+      const { token, expires, accountId: savedAcctId } = JSON.parse(shared.value);
+      const expMs = new Date(expires).getTime();
+      if (token && expMs > Date.now() + 300_000) { // At least 5 min remaining
+        _tokenCache[mode] = { token, expires: expMs, accountId: savedAcctId || 0 };
+        if (savedAcctId) _accountId = savedAcctId;
+        return token;
+      }
+    }
+    // Also check bootstrap token
+    const bootstrapKey = mode === "live" ? "tradovate_live_bootstrap_token" : "tradovate_bootstrap_token";
+    const bootstrap = await prisma.agentConfig.findUnique({ where: { key: bootstrapKey } });
+    if (bootstrap?.value) {
+      const { token, expires } = JSON.parse(bootstrap.value);
+      const expMs = new Date(expires).getTime();
+      if (token && expMs > Date.now()) {
+        _tokenCache[mode] = { token, expires: expMs, accountId: 0 };
+        await prisma.agentConfig.delete({ where: { key: bootstrapKey } }).catch(() => {});
+        return token;
+      }
+    }
+  } catch { /* DB lookup optional — fall through to direct auth */ }
+
   const baseUrl = mode === "live" ? LIVE_URL : DEMO_URL;
 
   const res = await fetch(`${baseUrl}/auth/accesstokenrequest`, {
@@ -51,7 +80,7 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
       password: TRADOVATE_PASSWORD,
       appId: TRADOVATE_APP_ID,
       appVersion: TRADOVATE_APP_VERSION,
-      deviceId: "esbueno-trading-agent",
+      deviceId: "esbueno-vercel-agent",
       cid: parseInt(TRADOVATE_CID) || 0,
       sec: TRADOVATE_SEC,
     }),
