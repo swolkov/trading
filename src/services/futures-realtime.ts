@@ -1148,9 +1148,13 @@ function checkPositions(sym: string, price: number) {
             accountSpec: acct.name, accountId, action: side, symbol: pos.contractId,
             orderQty: addQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
           })});
+          // Update average entry price: weighted average of existing + new contracts
+          const oldQty = pos.quantity;
+          const oldEntry = pos.entryPrice;
           pos.quantity += addQty;
+          pos.entryPrice = (oldEntry * oldQty + price * addQty) / pos.quantity;
           pos.pyramided = true;
-          // Update broker stop to cover full new quantity at breakeven
+          // Update broker stop to cover full new quantity at breakeven (use NEW average entry)
           if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
           const closeSide = pos.direction === "long" ? "Sell" : "Buy";
           const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
@@ -1158,8 +1162,19 @@ function checkPositions(sym: string, price: number) {
             orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.entryPrice, timeInForce: "GTC", isAutomated: true,
           })}) as { orderId: number };
           pos.stopOrderId = s.orderId;
-          log(`${sym}: Pyramid filled — now ${pos.quantity}x. Stop updated for full qty at breakeven $${pos.entryPrice.toFixed(2)}`);
-          notify(`PYRAMID ${sym}: +${addQty}x added at $${price.toFixed(2)}. Now ${pos.quantity}x total, stop at breakeven.`);
+          log(`${sym}: Pyramid filled — ${oldQty}x@$${oldEntry.toFixed(2)} + ${addQty}x@$${price.toFixed(2)} = ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}`);
+          notify(`PYRAMID ${sym}: +${addQty}x @ $${price.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}.`);
+
+          // Log pyramid entry to DB so orders page shows it
+          try {
+            await prisma.autoTradeLog.create({ data: {
+              symbol: `FUT:${sym}`,
+              action: `${TRADE_ACTION_PREFIX}_pyramid`,
+              qty: addQty,
+              price,
+              reason: `[${MODE_TAG} ${sym}] Pyramid +${addQty}x @ $${price.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}. Original: ${oldQty}x @ $${oldEntry.toFixed(2)}`,
+            }});
+          } catch {}
 
           await savePositions();
         } catch (err) { log(`${sym}: Pyramid order failed: ${err}`); }
