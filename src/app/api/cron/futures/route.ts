@@ -2,12 +2,84 @@ import { runFuturesAgent } from "@/lib/futures-agent";
 import { checkTradovateAuth } from "@/lib/tradovate";
 import { reconcileFills } from "@/lib/fill-reconciliation";
 import { prisma } from "@/lib/db";
+import { getETHour, isWeekend as isWeekendET } from "@/lib/session-time";
 
 export const maxDuration = 300;
 
-// Futures agent cron — SAFETY NET for the Railway real-time engine.
-// If the real-time engine is alive (heartbeat < 5 min old), this cron defers trading.
-// Fill reconciliation ALWAYS runs to ensure DB matches Tradovate.
+// Futures agent cron — SAFETY NET for TWO Railway engines (demo + live).
+// Checks both heartbeats independently. Fill reconciliation ALWAYS runs for both.
+
+// Helper: check if a heartbeat is stale or stalled
+async function checkEngine(mode: "demo" | "live"): Promise<{
+  alive: boolean;
+  reason: string;
+  tickCount: number | null;
+  mdHealth: string | null;
+}> {
+  const heartbeatKey = `futures_engine_heartbeat_${mode}`;
+  const tickCountKey = `futures_cron_last_tick_count_${mode}`;
+
+  const heartbeat = await prisma.agentConfig.findUnique({ where: { key: heartbeatKey } });
+
+  if (!heartbeat?.value) {
+    return { alive: false, reason: `No heartbeat found for ${mode} engine`, tickCount: null, mdHealth: null };
+  }
+
+  let lastBeat: number;
+  let currentTickCount: number | null = null;
+  let mdHealth: string | null = null;
+
+  try {
+    const parsed = JSON.parse(heartbeat.value);
+    lastBeat = new Date(parsed.timestamp).getTime();
+    currentTickCount = parsed.tickCount ?? null;
+    mdHealth = parsed.mdHealth ?? null;
+  } catch {
+    lastBeat = new Date(heartbeat.value).getTime();
+  }
+
+  if (isNaN(lastBeat)) {
+    return { alive: false, reason: `${mode} heartbeat corrupted (NaN)`, tickCount: currentTickCount, mdHealth };
+  }
+
+  const ageMinutes = (Date.now() - lastBeat) / 60000;
+
+  if (ageMinutes >= 5) {
+    console.log(`[cron/futures] ${mode} engine heartbeat stale (${ageMinutes.toFixed(0)} min). Taking over.`);
+    return { alive: false, reason: `Heartbeat stale (${ageMinutes.toFixed(0)} min)`, tickCount: currentTickCount, mdHealth };
+  }
+
+  // Fresh heartbeat — check for stall (tick count unchanged)
+  if (currentTickCount !== null) {
+    const prevTickRecord = await prisma.agentConfig.findUnique({ where: { key: tickCountKey } });
+
+    if (prevTickRecord?.value) {
+      const prevTickCount = parseInt(prevTickRecord.value, 10);
+      if (currentTickCount <= prevTickCount) {
+        console.log(`[cron/futures] ${mode} engine STALLED: tickCount ${currentTickCount} unchanged. Taking over.`);
+        await prisma.agentConfig.upsert({
+          where: { key: tickCountKey },
+          update: { value: String(currentTickCount) },
+          create: { key: tickCountKey, value: String(currentTickCount) },
+        });
+        return { alive: false, reason: `Stalled (tickCount ${currentTickCount} unchanged)`, tickCount: currentTickCount, mdHealth };
+      }
+    }
+
+    await prisma.agentConfig.upsert({
+      where: { key: tickCountKey },
+      update: { value: String(currentTickCount) },
+      create: { key: tickCountKey, value: String(currentTickCount) },
+    });
+  }
+
+  return {
+    alive: true,
+    reason: `Alive (heartbeat ${ageMinutes.toFixed(1)} min ago, ticks: ${currentTickCount ?? "?"}, md: ${mdHealth ?? "?"})`,
+    tickCount: currentTickCount,
+    mdHealth,
+  };
+}
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -30,87 +102,78 @@ export async function GET(request: Request) {
       return Response.json({ status: "skipped", reason: "Tradovate not connected" });
     }
 
-    // ALWAYS run fill reconciliation — catches missed trades regardless of engine status
-    let reconciliation;
+    // ALWAYS run fill reconciliation for both demo and live
+    let demoReconciliation, liveReconciliation;
     try {
-      reconciliation = await reconcileFills();
-      if (reconciliation.backfilled > 0 || reconciliation.pnlCorrections > 0) {
-        console.log(`[cron/futures] Reconciliation: ${reconciliation.backfilled} backfilled, ${reconciliation.pnlCorrections} P&L corrected`);
+      demoReconciliation = await reconcileFills();
+      if (demoReconciliation.backfilled > 0 || demoReconciliation.pnlCorrections > 0) {
+        console.log(`[cron/futures] Demo reconciliation: ${demoReconciliation.backfilled} backfilled, ${demoReconciliation.pnlCorrections} P&L corrected`);
       }
     } catch (err) {
-      console.error("[cron/futures] Reconciliation error:", err);
-      reconciliation = { error: String(err) };
+      console.error("[cron/futures] Demo reconciliation error:", err);
+      demoReconciliation = { error: String(err) };
     }
 
-    // Check if the real-time engine is alive AND actually processing
-    const heartbeat = await prisma.agentConfig.findUnique({
-      where: { key: "futures_engine_heartbeat" },
-    });
+    try {
+      liveReconciliation = await reconcileFills("live");
+      if (typeof liveReconciliation === "object" && "backfilled" in liveReconciliation && (liveReconciliation.backfilled > 0 || liveReconciliation.pnlCorrections > 0)) {
+        console.log(`[cron/futures] Live reconciliation: ${liveReconciliation.backfilled} backfilled, ${liveReconciliation.pnlCorrections} P&L corrected`);
+      }
+    } catch (err) {
+      console.error("[cron/futures] Live reconciliation error:", err);
+      liveReconciliation = { error: String(err) };
+    }
 
-    if (heartbeat?.value) {
-      let lastBeat: number;
-      let currentTickCount: number | null = null;
-      let mdHealth: string | null = null;
+    // Check both engine heartbeats
+    const demoStatus = await checkEngine("demo");
+    const liveStatus = await checkEngine("live");
 
+    // Determine if we should run the fallback agent
+    // Live fallback only during RTH (no point running outside market hours)
+    const etH = getETHour();
+    const isRTH = !isWeekendET() && etH >= 9.5 && etH < 16;
+
+    let fallbackResult = null;
+
+    if (!demoStatus.alive) {
+      console.log(`[cron/futures] Demo engine down — running fallback agent`);
       try {
-        // Enhanced heartbeat: JSON with tickCount, positions, market data health, etc.
-        const parsed = JSON.parse(heartbeat.value);
-        lastBeat = new Date(parsed.timestamp).getTime();
-        currentTickCount = parsed.tickCount ?? null;
-        mdHealth = parsed.mdHealth ?? parsed.yahooHealth ?? null;
-      } catch {
-        // Legacy format: plain ISO string
-        lastBeat = new Date(heartbeat.value).getTime();
-      }
-
-      // Guard against NaN (corrupted heartbeat value) — treat as stale
-      if (isNaN(lastBeat)) {
-        console.log(`[cron/futures] Heartbeat value is corrupted (NaN). Treating as stale — taking over.`);
-        lastBeat = 0;
-      }
-
-      const ageMinutes = (Date.now() - lastBeat) / 60000;
-
-      if (ageMinutes < 5) {
-        // Heartbeat is fresh — but verify engine is actually processing ticks
-        let engineStalled = false;
-
-        if (currentTickCount !== null) {
-          const prevTickRecord = await prisma.agentConfig.findUnique({
-            where: { key: "futures_cron_last_tick_count" },
-          });
-
-          if (prevTickRecord?.value) {
-            const prevTickCount = parseInt(prevTickRecord.value, 10);
-            // Tick count unchanged across 2+ cron checks = engine stuck
-            if (currentTickCount <= prevTickCount) {
-              engineStalled = true;
-              console.log(`[cron/futures] Engine heartbeat fresh but STALLED: tickCount ${currentTickCount} unchanged. Taking over.`);
-            }
-          }
-
-          // Save tick count for next comparison
-          await prisma.agentConfig.upsert({
-            where: { key: "futures_cron_last_tick_count" },
-            update: { value: String(currentTickCount) },
-            create: { key: "futures_cron_last_tick_count", value: String(currentTickCount) },
-          });
-        }
-
-        if (!engineStalled) {
-          return Response.json({
-            status: "deferred",
-            reason: `Real-time engine alive (heartbeat ${ageMinutes.toFixed(1)} min ago, ticks: ${currentTickCount ?? "?"}, md: ${mdHealth ?? "?"}).`,
-            reconciliation,
-          });
-        }
-      } else {
-        console.log(`[cron/futures] Real-time engine heartbeat stale (${ageMinutes.toFixed(0)} min). Taking over.`);
+        fallbackResult = await runFuturesAgent();
+      } catch (err) {
+        console.error("[cron/futures] Fallback agent error:", err);
+        fallbackResult = { error: String(err) };
       }
     }
 
-    const result = await runFuturesAgent();
-    return Response.json({ ...result, reconciliation });
+    if (!liveStatus.alive && isRTH) {
+      console.log(`[cron/futures] Live engine down during RTH — running fallback agent`);
+      // The futures-agent reads trading mode from DB and adapts to demo/live
+      if (!fallbackResult) {
+        try {
+          fallbackResult = await runFuturesAgent();
+        } catch (err) {
+          console.error("[cron/futures] Live fallback agent error:", err);
+        }
+      }
+    }
+
+    // Both engines alive — defer
+    if (demoStatus.alive && (liveStatus.alive || !isRTH)) {
+      return Response.json({
+        status: "deferred",
+        demo: demoStatus.reason,
+        live: liveStatus.reason,
+        reconciliation: { demo: demoReconciliation, live: liveReconciliation },
+      });
+    }
+
+    return Response.json({
+      status: fallbackResult ? "fallback_ran" : "deferred",
+      demo: demoStatus.reason,
+      live: liveStatus.reason,
+      fallback: fallbackResult,
+      reconciliation: { demo: demoReconciliation, live: liveReconciliation },
+    });
   } catch (error) {
     console.error("[/api/cron/futures]", error);
     try {

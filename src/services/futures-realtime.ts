@@ -10,16 +10,29 @@
 import { prisma } from "../lib/db";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
-import { getTradingMode } from "../lib/trading-mode";
+
 
 // ── Config ──────────────────────────────────────────────
 
 const DEMO_API = "https://demo.tradovateapi.com/v1";
 const LIVE_API = "https://live.tradovateapi.com/v1";
-const ORDER_API = DEMO_API; // Demo engine — ALWAYS on, 24/7 learning
-let isLiveMode = false;     // When true, ALSO executes on live during RTH windows
-const POLL_INTERVAL_MS = 5000; // Poll Yahoo every 5 seconds
+
+// ENGINE_MODE: "demo" or "live" — set per Railway service via env var
+// Demo engine: 24/7 learning, full-size, DEMO_API, 5s polling
+// Live engine: RTH prime only, micros, LIVE_API, 1s polling
+const ENGINE_MODE = (process.env.ENGINE_MODE || "demo") as "demo" | "live";
+const IS_DEMO = ENGINE_MODE === "demo";
+const IS_LIVE = ENGINE_MODE === "live";
+const ORDER_API = IS_LIVE ? LIVE_API : DEMO_API;
+const POLL_INTERVAL_MS = IS_LIVE ? 1000 : 5000; // Live: 1s for fast position mgmt
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
+
+// Mode-keyed DB keys (both engines share DB, don't collide)
+const HEARTBEAT_KEY = `futures_engine_heartbeat_${ENGINE_MODE}`;
+const POSITIONS_KEY = `futures_positions_${ENGINE_MODE}`;
+const TRADE_ACTION_PREFIX = IS_LIVE ? "live" : "futures";
+const MODE_TAG = IS_LIVE ? "LIVE" : "DEMO";
+const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ until equity scales
@@ -38,7 +51,7 @@ function updateTradingSymbols() {
   const prev = SYMBOLS;
   // DEMO: Always trade full-size (ES, NQ, GC) — $50K demo account, max learning
   // LIVE: Micros until equity >= $25K, then full-size
-  SYMBOLS = isLiveMode
+  SYMBOLS = IS_LIVE
     ? (tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
     : FULL_SIZE_SYMBOLS;
   if (prev !== SYMBOLS) {
@@ -71,139 +84,7 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
 
-// ── Trading Mode + Live Mirror ────────────────────────────
-// Demo engine ALWAYS runs 24/7. When isLiveMode=true, trades are ALSO
-// mirrored to the live account during RTH windows.
-
-let liveAccessToken = "";
-let liveTokenExpires = 0;
-let liveAccountId = 0;
-let liveAccountName = "";
-let liveEquity = 0;
-
-async function authenticateLive(): Promise<string> {
-  if (liveAccessToken && Date.now() < liveTokenExpires) return liveAccessToken;
-
-  // Check for bootstrap token (injected when rate limited)
-  try {
-    const bootstrap = await prisma.agentConfig.findUnique({ where: { key: "tradovate_live_bootstrap_token" } });
-    if (bootstrap?.value) {
-      const { token, expires } = JSON.parse(bootstrap.value);
-      const expMs = new Date(expires).getTime();
-      if (token && expMs > Date.now()) {
-        log("[LIVE AUTH] Using bootstrap token from DB");
-        liveAccessToken = token;
-        liveTokenExpires = expMs;
-        await prisma.agentConfig.delete({ where: { key: "tradovate_live_bootstrap_token" } }).catch(() => {});
-        const accounts = await liveApiFetch("/account/list") as { id: number; name: string; active: boolean }[];
-        const active = accounts.find((a) => a.active) || accounts[0];
-        if (active) { liveAccountId = active.id; liveAccountName = active.name; }
-        try {
-          const bal = await liveApiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${liveAccountId}`) as { totalCashValue?: number };
-          if (bal?.totalCashValue) liveEquity = bal.totalCashValue;
-        } catch {}
-        log(`[LIVE AUTH] Authenticated — ${liveAccountName} (#${liveAccountId}) — equity $${liveEquity.toFixed(0)} (bootstrap)`);
-        return liveAccessToken;
-      }
-    }
-  } catch {}
-
-  const res = await fetch(`${LIVE_API}/auth/accesstokenrequest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: process.env.TRADOVATE_USERNAME || "",
-      password: process.env.TRADOVATE_PASSWORD || "",
-      appId: process.env.TRADOVATE_APP_ID || "",
-      appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
-      deviceId: "esbueno-live-agent",
-      cid: parseInt(process.env.TRADOVATE_CID || "0"),
-      sec: process.env.TRADOVATE_SEC || "",
-    }),
-  });
-
-  if (!res.ok) throw new Error(`Live auth failed (${res.status}): ${await res.text().catch(() => "")}`);
-
-  const data = await res.json();
-  liveAccessToken = data.accessToken;
-  liveTokenExpires = Date.now() + 23 * 60 * 60 * 1000;
-
-  const accounts = await liveApiFetch("/account/list") as { id: number; name: string; active: boolean }[];
-  const active = accounts.find((a) => a.active) || accounts[0];
-  if (active) { liveAccountId = active.id; liveAccountName = active.name; }
-
-  // Fetch live equity
-  try {
-    const bal = await liveApiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${liveAccountId}`) as { totalCashValue?: number };
-    if (bal?.totalCashValue) liveEquity = bal.totalCashValue;
-  } catch { /* use last known */ }
-
-  log(`[LIVE] Authenticated — ${liveAccountName} (#${liveAccountId}) — equity $${liveEquity.toFixed(0)}`);
-  return liveAccessToken;
-}
-
-async function liveApiFetch(path: string, options?: RequestInit): Promise<unknown> {
-  const token = await authenticateLive();
-  const res = await fetch(`${LIVE_API}${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...options?.headers },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (res.status === 401) {
-    liveAccessToken = "";
-    liveTokenExpires = 0;
-    const newToken = await authenticateLive();
-    const retry = await fetch(`${LIVE_API}${path}`, {
-      ...options,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${newToken}`, ...options?.headers },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!retry.ok) throw new Error(`Live API ${retry.status}: ${await retry.text().catch(() => "")}`);
-    return retry.json();
-  }
-  if (!res.ok) throw new Error(`Live API ${res.status}: ${await res.text().catch(() => "")}`);
-  return res.json();
-}
-
-function isLiveRTHWindow(): boolean {
-  if (!isLiveMode) return false;
-  const s = getSessionName();
-  if (s === "morning") return getMinutesSinceRTHOpen() >= 15; // After first 15 min
-  if (s === "afternoon") return true;
-  if (s === "close") return true;
-  return false; // Block: midday, ETH, open, halt
-}
-
-async function loadTradingMode() {
-  try {
-    const mode = await getTradingMode("futures");
-    const newIsLive = mode === "live";
-
-    if (newIsLive === isLiveMode) return; // No change
-
-    log(`\n${"!".repeat(60)}`);
-    log(`LIVE MODE: ${newIsLive ? "ENABLED — trades will mirror to live during RTH" : "DISABLED — demo only"}`);
-    log(`${"!".repeat(60)}\n`);
-    notify(`LIVE MODE ${newIsLive ? "ENABLED" : "DISABLED"} — demo continues 24/7`, "general");
-
-    isLiveMode = newIsLive;
-
-    if (newIsLive) {
-      // Authenticate against live account (demo stays untouched)
-      try {
-        await authenticateLive();
-      } catch (err) {
-        log(`[LIVE] Auth FAILED: ${err} — disabling live mode`);
-        isLiveMode = false;
-        notify(`LIVE AUTH FAILED — live disabled: ${err}`, "general");
-      }
-    }
-  } catch (err) {
-    log(`[MODE] Failed to check trading mode: ${err}`);
-  }
-}
-
-// ── Tradovate Auth (for order execution only) ───────────
+// ── Tradovate Auth (for order execution) ────────────────
 
 let accessToken = "";
 let tokenExpires = 0;
@@ -216,7 +97,8 @@ async function authenticate(): Promise<string> {
   // Check for bootstrap token in DB (injected when rate limited to bypass auth endpoint)
   if (!accessToken) {
     try {
-      const bootstrap = await prisma.agentConfig.findUnique({ where: { key: "tradovate_bootstrap_token" } });
+      const bootstrapKey = IS_LIVE ? "tradovate_live_bootstrap_token" : "tradovate_bootstrap_token";
+      const bootstrap = await prisma.agentConfig.findUnique({ where: { key: bootstrapKey } });
       if (bootstrap?.value) {
         const { token, expires } = JSON.parse(bootstrap.value);
         const expMs = new Date(expires).getTime();
@@ -225,12 +107,12 @@ async function authenticate(): Promise<string> {
           accessToken = token;
           tokenExpires = expMs;
           // Clean up bootstrap token so it's one-time use
-          await prisma.agentConfig.delete({ where: { key: "tradovate_bootstrap_token" } }).catch(() => {});
+          await prisma.agentConfig.delete({ where: { key: bootstrapKey } }).catch(() => {});
           // Still need to fetch account info
           const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
           const active = accounts.find((a) => a.active) || accounts[0];
           if (active) { accountId = active.id; accountName = active.name; }
-          log(`Authenticated — ${accountName} (#${accountId}) — DEMO (bootstrap)`);
+          log(`Authenticated — ${accountName} (#${accountId}) — ${MODE_TAG} (bootstrap)`);
           return accessToken;
         }
       }
@@ -245,7 +127,7 @@ async function authenticate(): Promise<string> {
       password: process.env.TRADOVATE_PASSWORD || "",
       appId: process.env.TRADOVATE_APP_ID || "",
       appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
-      deviceId: "esbueno-realtime-agent",
+      deviceId: IS_LIVE ? "esbueno-live-engine" : "esbueno-demo-engine",
       cid: parseInt(process.env.TRADOVATE_CID || "0"),
       sec: process.env.TRADOVATE_SEC || "",
     }),
@@ -261,7 +143,7 @@ async function authenticate(): Promise<string> {
   const active = accounts.find((a) => a.active) || accounts[0];
   if (active) { accountId = active.id; accountName = active.name; }
 
-  log(`Authenticated — ${accountName} (#${accountId}) — DEMO`);
+  log(`Authenticated — ${accountName} (#${accountId}) — ${MODE_TAG}`);
   return accessToken;
 }
 
@@ -333,7 +215,7 @@ async function notify(msg: string, channel: "futures" | "general" = "futures") {
     await fetch(config.value, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: `[FUTURES] ${msg}` }),
+      body: JSON.stringify({ text: `[FUTURES-${MODE_TAG}] ${msg}` }),
       signal: AbortSignal.timeout(5000),
     });
   } catch {}
@@ -373,12 +255,51 @@ let mdDebugCount = 0; // Log first 3 MD failures to diagnose
 let mdCircuitResetAt = 0;
 const MD_MAX_FAILURES = 5;
 const MD_CIRCUIT_BASE_MS = 30_000;
-// Tradovate MD base URLs (try dedicated MD server, fall back to main API)
+// Tradovate MD base URLs — ALWAYS use demo MD for market data (free, same prices)
+// Live Tradovate may not have paid MD subscription, so demo is the safe default.
 const DEMO_MD_URL = "https://md-demo.tradovateapi.com/v1";
-const LIVE_MD_URL = "https://md.tradovateapi.com/v1";
 function getMdUrl(): string {
-  // Default to demo; override when live mode is detected
-  return ORDER_API.includes("live") ? LIVE_MD_URL : DEMO_MD_URL;
+  return DEMO_MD_URL; // Both engines use demo MD — prices are identical
+}
+
+// ── Demo Auth for Market Data (live engine needs separate demo token for MD) ──
+let demoMdToken = "";
+let demoMdTokenExpires = 0;
+
+async function authenticateDemoMd(): Promise<string> {
+  // Demo engine: reuse main auth (already demo)
+  if (IS_DEMO) return authenticate();
+
+  // Live engine: separate demo auth just for market data
+  if (demoMdToken && Date.now() < demoMdTokenExpires) return demoMdToken;
+
+  try {
+    const res = await fetch(`${DEMO_API}/auth/accesstokenrequest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: process.env.TRADOVATE_USERNAME || "",
+        password: process.env.TRADOVATE_PASSWORD || "",
+        appId: process.env.TRADOVATE_APP_ID || "",
+        appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
+        deviceId: "esbueno-live-md", // separate device ID for MD
+        cid: parseInt(process.env.TRADOVATE_CID || "0"),
+        sec: process.env.TRADOVATE_SEC || "",
+      }),
+    });
+    if (!res.ok) {
+      log(`[MD AUTH] Demo auth for MD failed (${res.status}) — will use order token`);
+      return authenticate(); // fall back to live token
+    }
+    const data = await res.json();
+    demoMdToken = data.accessToken;
+    demoMdTokenExpires = Date.now() + 23 * 60 * 60 * 1000;
+    log(`[MD AUTH] Authenticated demo token for market data`);
+    return demoMdToken;
+  } catch (err) {
+    log(`[MD AUTH] Failed: ${err} — using order token`);
+    return authenticate(); // fallback
+  }
 }
 
 // ── Contract Resolution ─────────────────────────────────
@@ -518,13 +439,13 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
   }));
   const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: 1 }));
   const mdUrl = getMdUrl();
-  const token = await authenticate();
+  const mdToken = await authenticateDemoMd(); // Always demo token for MD (free, reliable)
 
   // Try dedicated MD server first
   try {
     const res = await fetch(
       `${mdUrl}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
-      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) },
+      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${mdToken}` }, signal: AbortSignal.timeout(8000) },
     );
     if (res.ok) {
       const data = await res.json() as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
@@ -544,11 +465,15 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
     }
   }
 
-  // Fallback: main API server
+  // Fallback: DEMO API server for MD (live engine can't rely on LIVE_API for free MD)
   try {
-    const data = await apiFetch(
-      `/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`
-    ) as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
+    const fallbackToken = await authenticateDemoMd();
+    const fallbackRes = await fetch(
+      `${DEMO_API}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${fallbackToken}` }, signal: AbortSignal.timeout(8000) },
+    );
+    if (!fallbackRes.ok) throw new Error(`MD fallback ${fallbackRes.status}`);
+    const data = await fallbackRes.json() as { charts?: { bars: { close: number; upVolume: number; downVolume: number }[] }[] };
     const bars = data?.charts?.[0]?.bars;
     if (bars && bars.length > 0) {
       const bar = bars[bars.length - 1];
@@ -693,9 +618,16 @@ function getMinutesSinceRTHOpen(): number {
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
-  // Demo engine trades 24/7 — live mirroring handled separately by isLiveRTHWindow()
   if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
+  // LIVE ENGINE: RTH prime only — morning (after 15min) + afternoon. No ETH, no midday, no open/close.
+  if (IS_LIVE) {
+    if (s === "morning") return getMinutesSinceRTHOpen() >= 15 ? 1.0 : 0;
+    if (s === "afternoon") return 1.0;
+    return 0; // Block: open, midday, close, all ETH sessions
+  }
+
+  // DEMO ENGINE: trades 24/7 for maximum learning
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
     if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
@@ -732,42 +664,28 @@ function checkSessionReset() {
     (async () => {
       try {
         const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-        // Save today's start-of-day balance (keyed by date for history)
+        // Save today's start-of-day balance — mode-keyed so demo/live don't collide
+        const sodKey = IS_LIVE ? "live_start_of_day_balance" : "start_of_day_balance";
+        const dailyBalKey = IS_LIVE ? `live_daily_balance_${today}` : `daily_balance_${today}`;
         await prisma.agentConfig.upsert({
-          where: { key: "start_of_day_balance" },
+          where: { key: sodKey },
           update: { value: String(tradovateEquity) },
-          create: { key: "start_of_day_balance", value: String(tradovateEquity) },
+          create: { key: sodKey, value: String(tradovateEquity) },
         });
         await prisma.agentConfig.upsert({
-          where: { key: `daily_balance_${today}` },
+          where: { key: dailyBalKey },
           update: { value: String(tradovateEquity) },
-          create: { key: `daily_balance_${today}`, value: String(tradovateEquity) },
+          create: { key: dailyBalKey, value: String(tradovateEquity) },
         });
         // Also save yesterday's end-of-day balance (session reset = end of previous day)
         const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+        const eodKey = IS_LIVE ? `live_eod_balance_${yesterday}` : `eod_balance_${yesterday}`;
         await prisma.agentConfig.upsert({
-          where: { key: `eod_balance_${yesterday}` },
+          where: { key: eodKey },
           update: { value: String(tradovateEquity) },
-          create: { key: `eod_balance_${yesterday}`, value: String(tradovateEquity) },
+          create: { key: eodKey, value: String(tradovateEquity) },
         });
-        log(`[RESET] Saved start-of-day balance: $${tradovateEquity.toFixed(2)} (${today}), EOD yesterday (${yesterday})`);
-        // Also save live SOD if live mode is active
-        if (isLiveMode) {
-          try {
-            await authenticateLive();
-            await prisma.agentConfig.upsert({
-              where: { key: "live_start_of_day_balance" },
-              update: { value: String(liveEquity) },
-              create: { key: "live_start_of_day_balance", value: String(liveEquity) },
-            });
-            await prisma.agentConfig.upsert({
-              where: { key: `live_daily_balance_${today}` },
-              update: { value: String(liveEquity) },
-              create: { key: `live_daily_balance_${today}`, value: String(liveEquity) },
-            });
-            log(`[RESET] Live SOD: $${liveEquity.toFixed(2)}`);
-          } catch {}
-        }
+        log(`[RESET] Saved ${MODE_TAG} start-of-day balance: $${tradovateEquity.toFixed(2)} (${today}), EOD yesterday (${yesterday})`);
 
         // Write to Obsidian vault — persistent brain for agents
         try {
@@ -782,7 +700,7 @@ function checkSessionReset() {
                 sodEntry + "\n```\n\n## Cumulative"
               );
               if (updatedDoc !== balancesDoc) {
-                await vaultWrite("Performance/daily-balances.md", updatedDoc, "futures-realtime");
+                await vaultWrite("Performance/daily-balances.md", updatedDoc, AGENT_NAME);
               }
             }
           }
@@ -808,33 +726,24 @@ function checkSessionReset() {
     }
     // Cancel ALL working orders to prevent orphaned fills overnight
     cancelAllOrders().catch(err => log(`[EOD] Failed to cancel orders: ${err}`));
-    // Also cancel all live working orders
-    if (isLiveMode) {
-      (async () => {
-        try {
-          const orders = await liveApiFetch("/order/list") as { id: number; ordStatus: string }[];
-          const working = orders.filter(o => o.ordStatus === "Working" || o.ordStatus === "Accepted");
-          for (const o of working) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {}
-          if (working.length > 0) log(`[EOD LIVE] Cancelled ${working.length} live orders`);
-        } catch (err) { log(`[EOD LIVE] Order cleanup failed: ${err}`); }
-      })();
-    }
     // Save end-of-day balance snapshot for historical daily P&L
     (async () => {
       try {
         await new Promise(r => setTimeout(r, 3000)); // wait for close fills to settle
         await updateTradovateEquity();
         const today = now.toISOString().slice(0, 10);
+        const eodBalKey = IS_LIVE ? `live_eod_balance_${today}` : `eod_balance_${today}`;
         await prisma.agentConfig.upsert({
-          where: { key: `eod_balance_${today}` },
+          where: { key: eodBalKey },
           update: { value: String(tradovateEquity) },
-          create: { key: `eod_balance_${today}`, value: String(tradovateEquity) },
+          create: { key: eodBalKey, value: String(tradovateEquity) },
         });
-        log(`[EOD] Saved end-of-day balance: $${tradovateEquity.toFixed(2)} (${today})`);
+        log(`[EOD] Saved ${MODE_TAG} end-of-day balance: $${tradovateEquity.toFixed(2)} (${today})`);
 
         // Write EOD to vault + reconciliation check
         try {
-          const sodKey = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
+          const dailyBalKeyForReconcile = IS_LIVE ? `live_daily_balance_${today}` : `daily_balance_${today}`;
+          const sodKey = await prisma.agentConfig.findUnique({ where: { key: dailyBalKeyForReconcile } });
           const sodBalance = sodKey ? parseFloat(sodKey.value) : null;
           const eodBalance = tradovateEquity;
           const balanceDelta = sodBalance != null ? eodBalance - sodBalance : null;
@@ -856,7 +765,7 @@ function checkSessionReset() {
               .replace(new RegExp(`(${today}:[\\s\\S]*?eod:)\\s*null`), `$1 ${Math.round(eodBalance)}`)
               .replace(new RegExp(`(${today}:[\\s\\S]*?day_pnl:)\\s*null`), `$1 ${dayPnl >= 0 ? "+" : ""}${dayPnl}`);
             if (updatedDoc !== balancesDoc) {
-              await vaultWrite("Performance/daily-balances.md", updatedDoc, "futures-realtime");
+              await vaultWrite("Performance/daily-balances.md", updatedDoc, AGENT_NAME);
               log(`[EOD] Updated vault: ${today} SOD=$${sodBalance.toFixed(0)} EOD=$${Math.round(eodBalance)} P&L=${dayPnl >= 0 ? "+" : ""}$${dayPnl}`);
             }
           }
@@ -884,16 +793,6 @@ const positions: Map<string, Position> = new Map();
 // Per-symbol lock to prevent concurrent async stop modifications
 const stopMoveLocks = new Map<string, boolean>();
 
-// ── Live Position Tracking (mirrors demo management to live account) ──
-interface LivePosition {
-  symbol: string; contractId: number; direction: "long" | "short";
-  quantity: number; entryPrice: number; stopLoss: number; target: number;
-  trailStop: number | null; reachedBreakeven: boolean;
-  stopOrderId: number | null; targetOrderId: number | null;
-  entryTime: number; scaledOut: boolean; originalQty: number; pyramided: boolean;
-}
-const livePositions: Map<string, LivePosition> = new Map();
-const liveStopMoveLocks = new Map<string, boolean>();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
 const stoppedSymbols: Set<string> = new Set(); // symbols stopped out today — no re-entry
@@ -948,36 +847,38 @@ const LIVE_DEFAULTS: RiskConfig = {
   simulatedEquity: 0,            // Use actual live equity
 };
 
-let riskConfig: RiskConfig = DEMO_DEFAULTS;
+let riskConfig: RiskConfig = IS_LIVE ? LIVE_DEFAULTS : DEMO_DEFAULTS;
 
 async function loadRiskConfig() {
-  const defaults = isLiveMode ? LIVE_DEFAULTS : DEMO_DEFAULTS;
+  const defaults = IS_LIVE ? LIVE_DEFAULTS : DEMO_DEFAULTS;
+  // Live reads from live_futures_* keys, demo reads from futures_* keys
+  const kp = IS_LIVE ? "live_futures" : "futures";
   try {
     const keys = [
-      "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day",
-      "futures_risk_per_trade_pct", "futures_daily_loss_limit_pct", "futures_max_drawdown_pct",
-      "futures_atr_stop_multiplier", "futures_atr_target_multiplier", "max_positions",
-      "futures_simulated_equity",
+      `${kp}_max_contracts`, `${kp}_max_total_contracts`, `${kp}_max_trades_per_day`,
+      `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
+      `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, "max_positions",
+      `${kp}_simulated_equity`,
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
     for (const c of configs) cfg[c.key] = c.value;
 
-    const dbTradesPerDay = parseInt(cfg.futures_max_trades_per_day) || defaults.maxTradesPerDay;
-    const dbDailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || defaults.dailyLossLimitPct;
+    const dbTradesPerDay = parseInt(cfg[`${kp}_max_trades_per_day`]) || defaults.maxTradesPerDay;
+    const dbDailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || defaults.dailyLossLimitPct;
 
     riskConfig = {
-      maxContractsPerTrade: parseInt(cfg.futures_max_contracts) || defaults.maxContractsPerTrade,
-      maxTotalContracts: parseInt(cfg.futures_max_total_contracts) || defaults.maxTotalContracts,
+      maxContractsPerTrade: parseInt(cfg[`${kp}_max_contracts`]) || defaults.maxContractsPerTrade,
+      maxTotalContracts: parseInt(cfg[`${kp}_max_total_contracts`]) || defaults.maxTotalContracts,
       // Demo mode: never tighter than demo defaults — learn faster, don't stop early
-      maxTradesPerDay: !isLiveMode ? Math.max(dbTradesPerDay, DEMO_DEFAULTS.maxTradesPerDay) : dbTradesPerDay,
-      riskPerTradePct: parseFloat(cfg.futures_risk_per_trade_pct) || defaults.riskPerTradePct,
-      dailyLossLimitPct: !isLiveMode ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
-      maxDrawdownPct: parseFloat(cfg.futures_max_drawdown_pct) || defaults.maxDrawdownPct,
+      maxTradesPerDay: IS_DEMO ? Math.max(dbTradesPerDay, DEMO_DEFAULTS.maxTradesPerDay) : dbTradesPerDay,
+      riskPerTradePct: parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || defaults.riskPerTradePct,
+      dailyLossLimitPct: IS_DEMO ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
+      maxDrawdownPct: parseFloat(cfg[`${kp}_max_drawdown_pct`]) || defaults.maxDrawdownPct,
       maxConcurrentPositions: parseInt(cfg.max_positions) || defaults.maxConcurrentPositions,
-      atrStopMultiplier: parseFloat(cfg.futures_atr_stop_multiplier) || defaults.atrStopMultiplier,
-      atrTargetMultiplier: parseFloat(cfg.futures_atr_target_multiplier) || defaults.atrTargetMultiplier,
-      simulatedEquity: parseFloat(cfg.futures_simulated_equity) || defaults.simulatedEquity,
+      atrStopMultiplier: parseFloat(cfg[`${kp}_atr_stop_multiplier`]) || defaults.atrStopMultiplier,
+      atrTargetMultiplier: parseFloat(cfg[`${kp}_atr_target_multiplier`]) || defaults.atrTargetMultiplier,
+      simulatedEquity: parseFloat(cfg[`${kp}_simulated_equity`]) || defaults.simulatedEquity,
     };
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}`);
   } catch (err) {
@@ -994,98 +895,27 @@ async function savePositions() {
       [...positions].map(([k, v]) => [k, { ...v }])
     );
     await prisma.agentConfig.upsert({
-      where: { key: "futures_positions" },
+      where: { key: POSITIONS_KEY },
       update: { value: JSON.stringify(data) },
-      create: { key: "futures_positions", value: JSON.stringify(data) },
+      create: { key: POSITIONS_KEY, value: JSON.stringify(data) },
     });
   } catch (err) { log(`[PERSIST] Failed to save positions: ${err}`); }
 }
 
-async function saveLivePositions() {
-  if (livePositions.size === 0) return;
-  try {
-    const data = Object.fromEntries([...livePositions].map(([k, v]) => [k, { ...v }]));
-    await prisma.agentConfig.upsert({
-      where: { key: "live_futures_positions" },
-      update: { value: JSON.stringify(data) },
-      create: { key: "live_futures_positions", value: JSON.stringify(data) },
-    });
-  } catch (err) { log(`[LIVE PERSIST] Failed to save: ${err}`); }
-}
-
-async function loadLivePositions() {
-  if (!isLiveMode) return;
-  try {
-    const saved = await prisma.agentConfig.findUnique({ where: { key: "live_futures_positions" } });
-    if (saved?.value) {
-      const data = JSON.parse(saved.value) as Record<string, LivePosition>;
-      for (const [sym, pos] of Object.entries(data)) livePositions.set(sym, pos);
-      if (livePositions.size > 0) {
-        log(`[LIVE PERSIST] Restored ${livePositions.size} live positions`);
-        await syncLivePositions();
-      }
-    }
-  } catch (err) { log(`[LIVE PERSIST] Failed to load: ${err}`); }
-}
-
-async function syncLivePositions() {
-  if (!isLiveMode) return;
-  try {
-    const tvPos = await liveApiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number }[];
-
-    // Remove closed live positions
-    for (const [sym, pos] of [...livePositions]) {
-      if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
-        log(`[LIVE SYNC] ${sym} closed on live broker — removing`);
-        livePositions.delete(sym);
-      }
-    }
-
-    // Adopt untracked live positions (copy flags from demo if available)
-    for (const tp of tvPos) {
-      if (tp.netPos === 0) continue;
-      let sym: string | null = null;
-      for (const [s, c] of contracts) { if (c.id === tp.contractId) { sym = s; break; } }
-      if (!sym || livePositions.has(sym)) continue;
-
-      const demoPos = positions.get(sym);
-      if (demoPos) {
-        livePositions.set(sym, {
-          symbol: sym, contractId: tp.contractId,
-          direction: tp.netPos > 0 ? "long" : "short",
-          quantity: Math.abs(tp.netPos), entryPrice: demoPos.entryPrice,
-          stopLoss: demoPos.stopLoss, target: demoPos.target,
-          trailStop: demoPos.trailStop, reachedBreakeven: demoPos.reachedBreakeven,
-          stopOrderId: null, targetOrderId: null, entryTime: Date.now(),
-          scaledOut: demoPos.scaledOut, originalQty: Math.abs(tp.netPos), pyramided: demoPos.pyramided,
-        });
-        log(`[LIVE SYNC] Adopted ${sym} from live broker, synced from demo`);
-      }
-    }
-
-    // Correct qty/direction drift
-    for (const [sym, pos] of livePositions) {
-      const tv = tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0);
-      if (!tv) continue;
-      const tvQty = Math.abs(tv.netPos);
-      const tvDir: "long" | "short" = tv.netPos > 0 ? "long" : "short";
-      if (tvDir !== pos.direction || tvQty !== pos.quantity) {
-        log(`[LIVE SYNC] ${sym} drift: engine=${pos.direction} ${pos.quantity}x, live=${tvDir} ${tvQty}x — correcting`);
-        pos.direction = tvDir;
-        pos.quantity = tvQty;
-      }
-    }
-
-    await saveLivePositions();
-  } catch (err) { log(`[LIVE SYNC] Failed: ${err}`); }
-}
-
 async function loadPositions() {
   try {
-    // Try loading from database first
-    const saved = await prisma.agentConfig.findUnique({
-      where: { key: "futures_positions" },
+    // Try loading from database first (mode-keyed, with fallback to old key for migration)
+    let saved = await prisma.agentConfig.findUnique({
+      where: { key: POSITIONS_KEY },
     });
+    // Migration: if new key empty, check old key (one-time after deploy)
+    if (!saved?.value && IS_DEMO) {
+      const legacy = await prisma.agentConfig.findUnique({ where: { key: "futures_positions" } });
+      if (legacy?.value && legacy.value !== "{}") {
+        log(`[PERSIST] Migrating positions from legacy key to ${POSITIONS_KEY}`);
+        saved = legacy;
+      }
+    }
 
     if (saved?.value) {
       const data = JSON.parse(saved.value) as Record<string, Position>;
@@ -1197,126 +1027,6 @@ async function loadPositions() {
   }
 }
 
-// ── Live Mirror: route management actions to live account ──
-type LiveAction = "breakeven" | "trail" | "pyramid" | "scale_out" | "close";
-
-async function mirrorToLive(action: LiveAction, sym: string, params: {
-  stopPrice?: number; qty?: number; addQty?: number; reason?: string;
-}) {
-  if (!isLiveMode) return;
-  const livePos = livePositions.get(sym);
-  if (!livePos) return;
-
-  try {
-    const liveAccounts = await liveApiFetch("/account/list") as { id: number; name: string }[];
-    const liveAcct = liveAccounts.find(a => a.id === liveAccountId) || liveAccounts[0];
-    const closeSide = livePos.direction === "long" ? "Sell" : "Buy";
-
-    switch (action) {
-      case "breakeven": {
-        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
-        const s = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
-          orderQty: livePos.quantity, orderType: "Stop", stopPrice: livePos.entryPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        livePos.stopOrderId = s.orderId;
-        livePos.stopLoss = livePos.entryPrice;
-        livePos.reachedBreakeven = true;
-        log(`[LIVE MIRROR] ${sym}: Breakeven stop at $${livePos.entryPrice.toFixed(2)}`);
-        break;
-      }
-      case "trail": {
-        if (!params.stopPrice || liveStopMoveLocks.get(sym)) break;
-        liveStopMoveLocks.set(sym, true);
-        try {
-          if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
-          const s = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-            accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
-            orderQty: livePos.quantity, orderType: "Stop", stopPrice: params.stopPrice, timeInForce: "GTC", isAutomated: true,
-          })}) as { orderId: number };
-          livePos.stopOrderId = s.orderId;
-          livePos.trailStop = params.stopPrice;
-          log(`[LIVE MIRROR] ${sym}: Trail stop at $${params.stopPrice.toFixed(2)}`);
-        } finally { liveStopMoveLocks.set(sym, false); }
-        break;
-      }
-      case "pyramid": {
-        if (!params.addQty) break;
-        const side = livePos.direction === "long" ? "Buy" : "Sell";
-        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: side, symbol: livePos.contractId,
-          orderQty: params.addQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-        })});
-        livePos.quantity += params.addQty;
-        livePos.pyramided = true;
-        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
-        const s = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
-          orderQty: livePos.quantity, orderType: "Stop", stopPrice: livePos.entryPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        livePos.stopOrderId = s.orderId;
-        log(`[LIVE MIRROR] ${sym}: Pyramid +${params.addQty}x, now ${livePos.quantity}x`);
-        notify(`LIVE PYRAMID ${sym}: +${params.addQty}x, now ${livePos.quantity}x`, "general");
-        break;
-      }
-      case "scale_out": {
-        if (!params.qty) break;
-        if (livePos.targetOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.targetOrderId }) }); } catch {}
-        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
-          orderQty: params.qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-        })});
-        livePos.quantity -= params.qty;
-        livePos.scaledOut = true;
-        livePos.targetOrderId = null;
-        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
-        const so = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
-          orderQty: livePos.quantity, orderType: "Stop", stopPrice: livePos.stopLoss, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        livePos.stopOrderId = so.orderId;
-        log(`[LIVE MIRROR] ${sym}: Scaled out ${params.qty}x, ${livePos.quantity}x remaining`);
-        notify(`LIVE SCALE ${sym}: ${params.qty}x closed, ${livePos.quantity}x left`, "general");
-        break;
-      }
-      case "close": {
-        if (livePos.stopOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.stopOrderId }) }); } catch {}
-        if (livePos.targetOrderId) try { await liveApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: livePos.targetOrderId }) }); } catch {}
-        // Check if still open before placing close order
-        try {
-          const tvPos = await liveApiFetch("/position/list") as { contractId: number; netPos: number }[];
-          if (!tvPos.find(p => p.contractId === livePos.contractId && p.netPos !== 0)) {
-            log(`[LIVE MIRROR] ${sym}: Already closed on broker`);
-            livePositions.delete(sym);
-            await saveLivePositions();
-            break;
-          }
-        } catch {}
-        await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: livePos.contractId,
-          orderQty: livePos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
-        })});
-        log(`[LIVE MIRROR] ${sym}: CLOSED — ${params.reason}`);
-        notify(`LIVE CLOSED ${sym}: ${params.reason}`, "general");
-        try {
-          await prisma.autoTradeLog.create({ data: {
-            symbol: `FUT:${sym}`, action: `live_${params.reason || "close"}`,
-            qty: livePos.quantity, price: 0, pnl: 0,
-            reason: `[LIVE ${sym}] ${params.reason}: Closed ${livePos.quantity}x. Entry: $${livePos.entryPrice.toFixed(2)}`,
-            orderId: null,
-          }});
-        } catch {}
-        livePositions.delete(sym);
-        break;
-      }
-    }
-    await saveLivePositions();
-  } catch (err) {
-    log(`[LIVE MIRROR] ${action} FAILED for ${sym}: ${err}`);
-    notify(`LIVE MIRROR ${action} FAILED ${sym}: ${err}`, "general");
-  }
-}
-
 function checkPositions(sym: string, price: number) {
   const pos = positions.get(sym);
   if (!pos) return;
@@ -1371,7 +1081,7 @@ function checkPositions(sym: string, price: number) {
           pos.stopOrderId = s.orderId;
           pos.stopLoss = breakevenPrice;
           log(`${sym}: Broker stop moved to breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
-          mirrorToLive("breakeven", sym, {}).catch(() => {});
+
         } catch (err) {
           log(`${sym}: WARNING — failed to move broker stop to breakeven: ${err}`);
         } finally {
@@ -1410,7 +1120,7 @@ function checkPositions(sym: string, price: number) {
           pos.stopOrderId = s.orderId;
           log(`${sym}: Pyramid filled — now ${pos.quantity}x. Stop updated for full qty at breakeven $${pos.entryPrice.toFixed(2)}`);
           notify(`PYRAMID ${sym}: +${addQty}x added at $${price.toFixed(2)}. Now ${pos.quantity}x total, stop at breakeven.`);
-          mirrorToLive("pyramid", sym, { addQty }).catch(() => {});
+
           await savePositions();
         } catch (err) { log(`${sym}: Pyramid order failed: ${err}`); }
       })();
@@ -1452,7 +1162,7 @@ function checkPositions(sym: string, price: number) {
               })}) as { orderId: number };
               pos.stopOrderId = s.orderId;
               if (isNew) log(`${sym}: Broker trail stop at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
-              mirrorToLive("trail", sym, { stopPrice: trail }).catch(() => {});
+
             } catch (err) {
               log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
             } finally {
@@ -1544,13 +1254,13 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     dailyPnl += actualPnl;
     log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`);
     notify(`SCALE OUT ${sym}: +$${actualPnl.toFixed(0)} locked (${scaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
-    mirrorToLive("scale_out", sym, { qty: scaleQty }).catch(() => {});
+
 
     // Log to database
     try {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
-        action: "futures_scale_out",
+        action: `${TRADE_ACTION_PREFIX}_scale_out`,
         qty: scaleQty,
         price,
         pnl: actualPnl,
@@ -1576,7 +1286,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     // Log scale-out to Obsidian vault (learning loop)
     try {
       await logTradeToJournal({
-        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${sym}-SCALE`,
+        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${MODE_TAG}-${sym}-SCALE`,
         timestamp: new Date().toISOString(),
         instrument: `FUT:${sym}`,
         direction: pos.direction === "long" ? "LONG" : "SHORT",
@@ -1591,8 +1301,8 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         rMultiple: pos.stopLoss ? (price - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
         conviction: 3,
         exitReason: "scale_out",
-      }, "futures-realtime");
-      await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `Scale out ${scaleQty}x @ $${price.toFixed(2)}: P&L $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`, actualPnl > 0 ? 4 : 2);
+      }, AGENT_NAME);
+      await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `Scale out ${scaleQty}x @ $${price.toFixed(2)}: P&L $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`, actualPnl > 0 ? 4 : 2);
     } catch { /* vault optional */ }
 
     await savePositions();
@@ -1671,7 +1381,7 @@ async function closePosition(sym: string, price: number, reason: string) {
         try {
           await prisma.autoTradeLog.create({ data: {
             symbol: `FUT:${sym}`,
-            action: "futures_close_failed",
+            action: `${TRADE_ACTION_PREFIX}_close_failed`,
             qty: pos.quantity,
             price,
             pnl: 0,
@@ -1777,7 +1487,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     try {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
-        action: `futures_${reason}`,
+        action: `${TRADE_ACTION_PREFIX}_${reason}`,
         qty: pos.quantity,
         price,
         pnl,
@@ -1789,7 +1499,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     // Log exit to Obsidian vault
     try {
       await logTradeToJournal({
-        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${sym}`,
+        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${MODE_TAG}-${sym}`,
         timestamp: new Date().toISOString(),
         instrument: `FUT:${sym}`,
         direction: pos.direction === "long" ? "LONG" : "SHORT",
@@ -1805,21 +1515,21 @@ async function closePosition(sym: string, price: number, reason: string) {
         conviction: 3,
         exitReason: reason,
         followedPlan: true,
-      }, "futures-realtime");
-      await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `${reason}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
+      }, AGENT_NAME);
+      await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `${reason}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
       // Log observations for notable trades (big wins, big losses, emergencies)
       const rMult = pos.stopLoss ? Math.abs((price - pos.entryPrice) / (pos.entryPrice - pos.stopLoss)) * (pnl > 0 ? 1 : -1) : null;
       if (rMult != null && rMult >= 2) {
-        await logObservation("futures-realtime", `BIG WIN: ${sym} ${pos.direction} +$${pnl.toFixed(0)} (${rMult.toFixed(1)}R) — ${reason}`);
+        await logObservation(AGENT_NAME, `BIG WIN: ${sym} ${pos.direction} +$${pnl.toFixed(0)} (${rMult.toFixed(1)}R) — ${reason}`);
       } else if (pnl < -200) {
-        await logObservation("futures-realtime", `BIG LOSS: ${sym} ${pos.direction} -$${Math.abs(pnl).toFixed(0)} — ${reason}`);
+        await logObservation(AGENT_NAME, `BIG LOSS: ${sym} ${pos.direction} -$${Math.abs(pnl).toFixed(0)} — ${reason}`);
       } else if (reason.includes("emergency") || reason.includes("kill")) {
-        await logObservation("futures-realtime", `EMERGENCY: ${sym} ${pos.direction} $${pnl.toFixed(0)} — ${reason}`);
+        await logObservation(AGENT_NAME, `EMERGENCY: ${sym} ${pos.direction} $${pnl.toFixed(0)} — ${reason}`);
       }
     } catch { /* vault optional */ }
 
     positions.delete(sym);
-    mirrorToLive("close", sym, { reason }).catch(() => {});
+
     await savePositions();
 
     // Save balance snapshot after every close — ensures accurate daily P&L even with overnight trades or engine restarts
@@ -1827,9 +1537,9 @@ async function closePosition(sym: string, price: number, reason: string) {
       await updateTradovateEquity();
       const today = new Date().toISOString().slice(0, 10);
       await prisma.agentConfig.upsert({
-        where: { key: `eod_balance_${today}` },
+        where: { key: IS_LIVE ? `live_eod_balance_${today}` : `eod_balance_${today}` },
         update: { value: String(tradovateEquity) },
-        create: { key: `eod_balance_${today}`, value: String(tradovateEquity) },
+        create: { key: IS_LIVE ? `live_eod_balance_${today}` : `eod_balance_${today}`, value: String(tradovateEquity) },
       });
     } catch {}
   } catch (err) { log(`Close failed ${sym}: ${err}`); }
@@ -1890,8 +1600,12 @@ GOLD-SPECIFIC RULES:
 - Gold trends for HOURS — let winners run, wide stops needed
 - COMEX open (8:20 AM ET) is the most important session for gold` : "";
 
-    const prompt = `You are an elite futures day trader. You only take A+ setups with clear edge.
+    const liveContext = IS_LIVE
+      ? `\nTHIS IS REAL MONEY ($${tradovateEquity.toFixed(0)} account). Be EXTREMELY selective. Only confirm genuine A+ setups with clear, unambiguous edge. Reject anything borderline or uncertain. A missed trade costs nothing — a bad trade costs real capital.\n`
+      : "";
 
+    const prompt = `You are an elite futures day trader. You only take A+ setups with clear edge.
+${liveContext}
 ${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()} | ${isMetal ? "MICRO GOLD" : "EQUITY INDEX"}
 Setup: ${setup.reasoning}
 RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
@@ -2312,9 +2026,10 @@ async function evaluateAndTrade(
     log(`  AI: ${ai.reasoning}`);
   }
 
-  // Final gate: need 65%+ after AI adjustment
-  if (finalScore < 65) {
-    log(`  SKIPPED: Final confidence ${finalScore}% below 65% threshold`);
+  // Final gate: live needs 75%+ (A+ only), demo needs 65%+
+  const MIN_CONFIDENCE = IS_LIVE ? 75 : 65;
+  if (finalScore < MIN_CONFIDENCE) {
+    log(`  SKIPPED: Final confidence ${finalScore}% below ${MIN_CONFIDENCE}% threshold (${MODE_TAG})`);
     return;
   }
 
@@ -2339,10 +2054,16 @@ async function evaluateAndTrade(
         riskReward: targetDist / stopDist,
         dollarTrend: "flat", bondTrend: "flat", // TODO: wire cross-asset
       });
-      log(`  [SHADOW] Pattern memory: ${patternPrediction.matchCount} matches, ${(patternPrediction.winRate * 100).toFixed(0)}% historical WR, score ${patternPrediction.score}`);
-    } catch { /* shadow logging is optional */ }
+      log(`  [PATTERN] ${patternPrediction.matchCount} matches, ${(patternPrediction.winRate * 100).toFixed(0)}% historical WR, score ${patternPrediction.score}`);
 
-    log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}%`);
+      // LIVE: Active gate — block setups with proven low win rate
+      if (IS_LIVE && patternPrediction.matchCount >= 10 && patternPrediction.winRate < 0.45) {
+        log(`  BLOCKED by pattern memory: ${(patternPrediction.winRate * 100).toFixed(0)}% WR < 45% on ${patternPrediction.matchCount} matches — skipping for live`);
+        return;
+      }
+    } catch { /* pattern memory is optional */ }
+
+    log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}% | ${MODE_TAG}`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`);
   } else {
@@ -2432,7 +2153,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     try {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
-        action: `futures_${direction}`,
+        action: `${TRADE_ACTION_PREFIX}_${direction}`,
         qty,
         price,
         reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x`,
@@ -2443,117 +2164,6 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     } catch {}
   } catch (err) { log(`TRADE FAILED: ${err}`); }
 
-  // ── LIVE MIRROR: Also execute on live account if enabled + RTH window ──
-  // Check daily loss limit on live account before mirroring
-  if (isLiveRTHWindow()) {
-    // Query today's live P&L from DB to enforce daily loss limit
-    let liveDailyPnl = 0;
-    try {
-      const todayET = getETDateString();
-      const isDST = new Date().toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }).includes("EDT");
-      const todayStart = new Date(`${todayET}T00:00:00${isDST ? "-04:00" : "-05:00"}`);
-      const liveTrades = await prisma.autoTradeLog.findMany({
-        where: { action: { startsWith: "live_" }, pnl: { not: null }, createdAt: { gte: todayStart } },
-      });
-      liveDailyPnl = liveTrades.reduce((s, t) => s + (t.pnl || 0), 0);
-    } catch {}
-    const liveDailyLimit = liveEquity * (LIVE_DEFAULTS.dailyLossLimitPct / 100); // 15% of $1K = $150
-    if (liveDailyPnl < -liveDailyLimit) {
-      log(`[LIVE MIRROR] BLOCKED — live daily P&L $${liveDailyPnl.toFixed(0)} exceeds limit -$${liveDailyLimit.toFixed(0)}`);
-    } else {
-    try {
-      const liveContract = contract;
-      const liveMult = CONTRACT_MULTIPLIERS[sym] || 5;
-      const liveRiskPct = LIVE_DEFAULTS.riskPerTradePct / 100;
-      const liveMaxRisk = liveEquity * liveRiskPct;
-      const liveRiskPer = stopDist * liveMult;
-      let liveQty = Math.max(1, Math.min(LIVE_DEFAULTS.maxContractsPerTrade, Math.floor(liveMaxRisk / liveRiskPer)));
-      // Hard cap: never risk more than 15% of live equity
-      if (liveRiskPer * liveQty > liveEquity * 0.15) {
-        liveQty = Math.max(1, Math.floor((liveEquity * 0.15) / liveRiskPer));
-      }
-
-      const liveAccounts = await liveApiFetch("/account/list") as { id: number; name: string }[];
-      const liveAcct = liveAccounts.find(a => a.id === liveAccountId) || liveAccounts[0];
-
-      log(`[LIVE MIRROR] ${side} ${liveQty}x ${sym} @ ~$${price.toFixed(2)} | Risk: $${(liveRiskPer * liveQty).toFixed(0)} | Equity: $${liveEquity.toFixed(0)}`);
-
-      const liveEntry = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-        accountSpec: liveAcct.name, accountId: liveAccountId, action: side, symbol: liveContract.id,
-        orderQty: liveQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-      })}) as { orderId: number };
-
-      await new Promise(r => setTimeout(r, 1500));
-
-      // Place stop on live — capture order ID for management
-      let liveStopOrderId: number | null = null;
-      try {
-        const ls = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: liveContract.id,
-          orderQty: liveQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        liveStopOrderId = ls.orderId;
-      } catch (stopErr) {
-        log(`[LIVE] Stop order FAILED: ${stopErr}`);
-        notify(`LIVE STOP FAILED for ${sym} — position UNPROTECTED!`, "general");
-      }
-
-      // Place target on live — capture order ID
-      let liveTargetOrderId: number | null = null;
-      try {
-        const lt = await liveApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: liveAcct.name, accountId: liveAccountId, action: closeSide, symbol: liveContract.id,
-          orderQty: liveQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        liveTargetOrderId = lt.orderId;
-      } catch {}
-
-      // Track live position for management mirroring
-      livePositions.set(sym, {
-        symbol: sym, contractId: contract.id, direction, quantity: liveQty,
-        entryPrice: price, stopLoss: stopPrice, target: targetPrice,
-        trailStop: null, reachedBreakeven: false,
-        stopOrderId: liveStopOrderId, targetOrderId: liveTargetOrderId,
-        entryTime: Date.now(), scaledOut: false, originalQty: liveQty, pyramided: false,
-      });
-      await saveLivePositions();
-
-      log(`[LIVE MIRROR] ${sym}: ${direction} ${liveQty}x tracked | stop #${liveStopOrderId} | target #${liveTargetOrderId}`);
-      notify(`LIVE: ${side} ${liveQty}x ${sym} @ $${price.toFixed(2)} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)}`, "general");
-
-      // Log live trade to DB
-      try {
-        await prisma.autoTradeLog.create({ data: {
-          symbol: `FUT:${sym}`,
-          action: `live_${direction}`,
-          qty: liveQty,
-          price,
-          reason: `[LIVE ${sym}] Mirrored from demo. ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(liveRiskPer * liveQty).toFixed(0)}`,
-          aiScore: confidenceScore,
-          aiSignal: direction,
-          orderId: String(liveEntry.orderId),
-        }});
-      } catch {}
-    } catch (err) {
-      log(`[LIVE MIRROR] FAILED: ${err}`);
-      notify(`LIVE TRADE FAILED for ${sym}: ${err}`, "general");
-    }
-    } // end else (not past daily loss limit)
-  } else if (isLiveMode) {
-    // Live mode active but outside RTH or daily loss hit — log paper trade for learning
-    const paperReason = getSessionName() === "halt" ? "market halted"
-      : !isLiveRTHWindow() ? `outside RTH (${getSessionName()})`
-      : "daily loss limit hit";
-    try {
-      await prisma.autoTradeLog.create({ data: {
-        symbol: `FUT:${sym}`, action: `paper_live_${direction}`,
-        qty: 1, price,
-        reason: `[PAPER LIVE] Would have ${direction} ${sym} @ $${price.toFixed(2)}. Blocked: ${paperReason}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}`,
-        aiScore: confidenceScore, aiSignal: direction,
-      }});
-      log(`[PAPER LIVE] ${direction} ${sym} @ $${price.toFixed(2)} — blocked (${paperReason})`);
-    } catch {}
-  }
 }
 
 // ── Heartbeat (tells dashboard the engine is alive) ─────
@@ -2563,21 +2173,20 @@ async function writeHeartbeat() {
     const payload = JSON.stringify({
       timestamp: new Date().toISOString(),
       tickCount,
+      mode: ENGINE_MODE,
       positions: positions.size,
-      livePositions: livePositions.size,
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
       mdHealth: mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok",
     });
     await prisma.agentConfig.upsert({
-      where: { key: "futures_engine_heartbeat" },
+      where: { key: HEARTBEAT_KEY },
       update: { value: payload },
-      create: { key: "futures_engine_heartbeat", value: payload },
+      create: { key: HEARTBEAT_KEY, value: payload },
     });
     // Also persist position state (trailing stops, breakeven flags) every heartbeat
     if (positions.size > 0) await savePositions();
-    if (livePositions.size > 0) await saveLivePositions();
   } catch { /* best-effort */ }
 }
 
@@ -2612,7 +2221,7 @@ async function syncPositions() {
           const recentClose = await prisma.autoTradeLog.findFirst({
             where: {
               symbol: `FUT:${sym}`,
-              action: { in: ["futures_manual_close", "futures_take_profit", "futures_stop_loss", "futures_trail_stop", "futures_breakeven", "futures_emergency", "futures_bracket_close"] },
+              action: { in: [`${TRADE_ACTION_PREFIX}_manual_close`, `${TRADE_ACTION_PREFIX}_take_profit`, `${TRADE_ACTION_PREFIX}_stop_loss`, `${TRADE_ACTION_PREFIX}_trail_stop`, `${TRADE_ACTION_PREFIX}_breakeven`, `${TRADE_ACTION_PREFIX}_emergency`, `${TRADE_ACTION_PREFIX}_bracket_close`] },
               createdAt: { gte: new Date(Date.now() - 120_000) }, // within last 2 minutes
             },
             orderBy: { createdAt: "desc" },
@@ -2667,7 +2276,7 @@ async function syncPositions() {
           try {
             await prisma.autoTradeLog.create({ data: {
               symbol: `FUT:${sym}`,
-              action: `futures_${closeType}`,
+              action: `${TRADE_ACTION_PREFIX}_${closeType}`,
               qty: pos.quantity,
               price: closePrice,
               pnl,
@@ -2679,7 +2288,7 @@ async function syncPositions() {
           // Log synced close to Obsidian vault (learning loop)
           try {
             await logTradeToJournal({
-              tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${sym}`,
+              tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${MODE_TAG}-${sym}`,
               timestamp: new Date().toISOString(),
               instrument: `FUT:${sym}`,
               direction: pos.direction === "long" ? "LONG" : "SHORT",
@@ -2694,8 +2303,8 @@ async function syncPositions() {
               rMultiple: pos.stopLoss ? (closePrice - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
               conviction: 3,
               exitReason: closeType,
-            }, "futures-realtime");
-            await logDecision("futures-realtime", "EXIT", `FUT:${sym}`, `${closeType}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
+            }, AGENT_NAME);
+            await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `${closeType}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
           } catch { /* vault optional */ }
         }
 
@@ -2819,26 +2428,29 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
         underlyingType: "MinuteBar", elementSize: 5, elementSizeUnit: "UnderlyingUnits",
       }));
       const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: 200 }));
-      const token = await authenticate();
+      const mdToken = await authenticateDemoMd(); // Always demo for MD
       const mdUrl = getMdUrl();
 
       let data: { charts?: { bars: { timestamp: string; open: number; high: number; low: number; close: number; upVolume: number; downVolume: number }[] }[] } | null = null;
 
-      // Try dedicated MD server
+      // Try dedicated MD server (demo — free, reliable)
       try {
         const res = await fetch(
           `${mdUrl}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
-          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) },
+          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${mdToken}` }, signal: AbortSignal.timeout(15000) },
         );
         if (res.ok) data = await res.json();
-      } catch { /* try main API */ }
+      } catch { /* try fallback */ }
 
-      // Fallback: main API
+      // Fallback: DEMO main API for MD
       if (!data?.charts) {
         try {
-          data = await apiFetch(
-            `/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`
-          ) as typeof data;
+          const fallbackToken = await authenticateDemoMd();
+          const fallbackRes = await fetch(
+            `${DEMO_API}/md/getChart?contractId=${contract.id}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+            { headers: { "Content-Type": "application/json", Authorization: `Bearer ${fallbackToken}` }, signal: AbortSignal.timeout(15000) },
+          );
+          if (fallbackRes.ok) data = await fallbackRes.json();
         } catch { /* fall through to Yahoo */ }
       }
 
@@ -3294,6 +2906,7 @@ function startHealthServer() {
     const healthy = tickCount > 0 && (now - lastTickCheckTime) < 120_000;
 
     const status = {
+      mode: ENGINE_MODE,
       status: healthy ? "healthy" : "degraded",
       uptime: uptimeSeconds,
       tickCount,
@@ -3361,9 +2974,9 @@ const MAX_SESSION_BARS = 500; // ~41 hours of 5-min bars, more than a full sessi
 
 async function main() {
   log("╔══════════════════════════════════════════════╗");
-  log("║  ESBUENO FUTURES — REAL-TIME TRADING ENGINE  ║");
+  log(`║  ESBUENO FUTURES — ${MODE_TAG} ENGINE ${"".padEnd(16 - MODE_TAG.length)}║`);
   log("╚══════════════════════════════════════════════╝");
-  log("Mode: DEMO 24/7 + LIVE mirror (RTH) | Data: Tradovate MD + Yahoo fallback | Orders: Tradovate");
+  log(`Mode: ${IS_LIVE ? "LIVE — real money, 1s polling, RTH prime only" : "DEMO 24/7 learning, 5s polling"} | Data: Tradovate MD + Yahoo fallback | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
 
   // Validate all required env vars BEFORE doing anything else
   validateEnvironment();
@@ -3373,48 +2986,49 @@ async function main() {
 
   await authenticateWithRetry();
   await loadRiskConfig(); // Load risk rules from DB (Agent Hub is the UI)
-  await loadTradingMode(); // Check if live mode is enabled (may switch API endpoint)
+  // Mode is set by ENGINE_MODE env var — no DB check needed
   await resolveContracts();
   // Init bar builders for ALL symbols (both full-size and micro) so we can switch dynamically
   for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) initBarBuilder(sym);
 
   // Restore positions from database (survive restarts)
   await loadPositions();
-  await loadLivePositions();
+  // Each engine loads its own positions from POSITIONS_KEY
 
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
 
   // Get account equity + VIX + macro intelligence — this also sets SYMBOLS based on equity
   await updateTradovateEquity();
-  // Save balance snapshot on startup — ensures we always have today's reference point
+  // Save balance snapshot on startup — mode-keyed so demo/live don't collide
   try {
     const today = new Date().toISOString().slice(0, 10);
+    const startupDailyKey = IS_LIVE ? `live_daily_balance_${today}` : `daily_balance_${today}`;
+    const startupSodKey = IS_LIVE ? "live_start_of_day_balance" : "start_of_day_balance";
     // If no SOD snapshot for today, save one now (catches deploys/restarts after 9:29 AM)
-    const existing = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${today}` } });
+    const existing = await prisma.agentConfig.findUnique({ where: { key: startupDailyKey } });
     if (!existing) {
       await prisma.agentConfig.upsert({
-        where: { key: `daily_balance_${today}` },
+        where: { key: startupDailyKey },
         update: { value: String(tradovateEquity) },
-        create: { key: `daily_balance_${today}`, value: String(tradovateEquity) },
+        create: { key: startupDailyKey, value: String(tradovateEquity) },
       });
-      // Also update the global start_of_day_balance (may be stale from yesterday after a deploy)
       await prisma.agentConfig.upsert({
-        where: { key: "start_of_day_balance" },
+        where: { key: startupSodKey },
         update: { value: String(tradovateEquity) },
-        create: { key: "start_of_day_balance", value: String(tradovateEquity) },
+        create: { key: startupSodKey, value: String(tradovateEquity) },
       });
-      log(`[STARTUP] Saved SOD balance snapshot: $${tradovateEquity.toFixed(2)} (${today})`);
+      log(`[STARTUP] Saved ${MODE_TAG} SOD balance snapshot: $${tradovateEquity.toFixed(2)} (${today})`);
     } else {
-      // SOD snapshot exists for today — make sure start_of_day_balance matches it (not stale from prior day)
-      const sodGlobal = await prisma.agentConfig.findUnique({ where: { key: "start_of_day_balance" } });
+      // SOD snapshot exists for today — make sure it matches
+      const sodGlobal = await prisma.agentConfig.findUnique({ where: { key: startupSodKey } });
       if (!sodGlobal || sodGlobal.value !== existing.value) {
         await prisma.agentConfig.upsert({
-          where: { key: "start_of_day_balance" },
+          where: { key: startupSodKey },
           update: { value: existing.value },
-          create: { key: "start_of_day_balance", value: existing.value },
+          create: { key: startupSodKey, value: existing.value },
         });
-        log(`[STARTUP] Synced start_of_day_balance to today's snapshot: $${existing.value}`);
+        log(`[STARTUP] Synced ${MODE_TAG} SOD balance to today's snapshot: $${existing.value}`);
       }
     }
   } catch {}
@@ -3425,19 +3039,18 @@ async function main() {
   await updateEarningsWeekFilter();
   await updateSectorRotation();
 
-  // Demo engine runs 24/7. When live mode enabled in DB, trades are ALSO mirrored
-  // to the live account during RTH windows. Mode checked every 5 min.
+  // Engine mode set by ENGINE_MODE env var. Demo: 24/7 learning. Live: RTH prime only.
 
   // Start polling — all wrapped in safe intervals
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
   safeInterval(checkSessionReset, 60_000, "checkSessionReset");
   safeInterval(syncPositions, 30_000, "syncPositions");
-  safeInterval(syncLivePositions, 30_000, "syncLivePositions");
+  // No live position sync needed — each engine manages its own positions
   safeInterval(writeHeartbeat, 60_000, "writeHeartbeat");
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
-  safeInterval(loadTradingMode, 300_000, "loadTradingMode"); // check demo/live mode every 5min
+  // Mode is fixed by ENGINE_MODE env var — no polling needed
   safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
   safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
   safeInterval(updateEarningsWeekFilter, 3600_000, "updateEarningsWeekFilter"); // hourly

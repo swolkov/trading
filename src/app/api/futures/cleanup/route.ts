@@ -19,11 +19,16 @@ export async function POST() {
       },
     });
 
-    // Clear saved positions (start fresh tomorrow)
+    // Clear saved positions for both demo and live engines
     await prisma.agentConfig.upsert({
-      where: { key: "futures_positions" },
+      where: { key: "futures_positions_demo" },
       update: { value: "{}" },
-      create: { key: "futures_positions", value: "{}" },
+      create: { key: "futures_positions_demo", value: "{}" },
+    });
+    await prisma.agentConfig.upsert({
+      where: { key: "futures_positions_live" },
+      update: { value: "{}" },
+      create: { key: "futures_positions_live", value: "{}" },
     });
 
     return Response.json({

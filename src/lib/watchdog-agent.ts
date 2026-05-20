@@ -31,7 +31,8 @@ const CRON_EXPECTATIONS: Record<string, { maxStaleMinutes: number; description: 
   premarket_last_run: { maxStaleMinutes: 1500, description: "Pre-market research (once daily at 9AM ET)" },
   review_last_run: { maxStaleMinutes: 1500, description: "Post-market review (once daily at 4:30PM ET)" },
   // Futures runs 24/5
-  futures_engine_heartbeat: { maxStaleMinutes: 15, description: "Futures real-time engine (every 5s on Railway)" },
+  futures_engine_heartbeat_demo: { maxStaleMinutes: 15, description: "Futures demo engine (Railway)" },
+  futures_engine_heartbeat_live: { maxStaleMinutes: 15, description: "Futures live engine (Railway)" },
   futures_cron_last_run: { maxStaleMinutes: 20, description: "Futures cron fallback (every 10min)" },
 };
 

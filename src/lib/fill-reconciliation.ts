@@ -149,7 +149,7 @@ export interface ReconciliationResult {
   details: string[];
 }
 
-export async function reconcileFills(): Promise<ReconciliationResult> {
+export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<ReconciliationResult> {
   const details: string[] = [];
   const result: ReconciliationResult = {
     totalFills: 0,
@@ -172,7 +172,7 @@ export async function reconcileFills(): Promise<ReconciliationResult> {
     }
 
     // 2. Fetch all fills from Tradovate
-    const fills = await getTradovateFills();
+    const fills = await getTradovateFills(modeOverride);
     result.totalFills = fills.length;
     details.push(`Fetched ${fills.length} fills from Tradovate`);
 

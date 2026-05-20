@@ -42,14 +42,36 @@ export async function GET() {
       time: log.createdAt.toISOString(),
     }));
 
-    // Check Railway engine heartbeat
-    let engineStatus: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number } = { alive: false, lastHeartbeat: null, ageMinutes: 999 };
+    // Check Railway engine heartbeats (demo + live)
+    let engineStatus: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number; demo?: { alive: boolean; ageMinutes: number }; live?: { alive: boolean; ageMinutes: number } } = { alive: false, lastHeartbeat: null, ageMinutes: 999 };
     try {
-      const heartbeat = await prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat" } });
-      if (heartbeat?.value) {
-        const age = (Date.now() - new Date(heartbeat.value).getTime()) / 60000;
-        engineStatus = { alive: age < 5, lastHeartbeat: heartbeat.value, ageMinutes: Math.round(age) };
-      }
+      const [demoHB, liveHB] = await Promise.all([
+        prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_demo" } }),
+        prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } }),
+      ]);
+      const parseAge = (hb: typeof demoHB) => {
+        if (!hb?.value) return { alive: false, ageMinutes: 999 };
+        try {
+          const parsed = JSON.parse(hb.value);
+          const age = (Date.now() - new Date(parsed.timestamp).getTime()) / 60000;
+          return { alive: age < 5, ageMinutes: Math.round(age) };
+        } catch {
+          const age = (Date.now() - new Date(hb.value).getTime()) / 60000;
+          return { alive: age < 5, ageMinutes: Math.round(age) };
+        }
+      };
+      const demo = parseAge(demoHB);
+      const live = parseAge(liveHB);
+      // Overall status: alive if the relevant engine for current view mode is alive
+      const relevantHB = viewMode === "live" ? liveHB : demoHB;
+      const relevantAge = viewMode === "live" ? live : demo;
+      engineStatus = {
+        alive: relevantAge.alive,
+        lastHeartbeat: relevantHB?.value || null,
+        ageMinutes: relevantAge.ageMinutes,
+        demo,
+        live,
+      };
     } catch {}
 
     if (!auth.authenticated) {

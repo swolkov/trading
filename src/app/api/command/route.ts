@@ -58,7 +58,8 @@ export async function GET() {
       // Agent heartbeats
       heartbeats: {
         watchdog: configMap.watchdog_last_run || null,
-        futuresEngine: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat || "{}").timestamp || null; } catch { return null; } })(),
+        futuresEngineDemo: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat_demo || "{}").timestamp || null; } catch { return null; } })(),
+        futuresEngineLive: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat_live || "{}").timestamp || null; } catch { return null; } })(),
         futuresCron: configMap.futures_cron_last_run || null,
         tradeCron: configMap.trade_last_run || null,
         monitorCron: configMap.monitor_last_run || null,
