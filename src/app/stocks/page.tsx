@@ -5,6 +5,7 @@ import { useAccount } from "@/hooks/use-account";
 import { usePositions } from "@/hooks/use-positions";
 import { formatCurrency, pnlColor } from "@/lib/utils";
 import { useEffect, useState, useMemo } from "react";
+import useSWR from "swr";
 
 interface TradeAnalysis {
   stats: {
@@ -42,6 +43,8 @@ function parseOptionSymbol(symbol: string) {
 export default function StocksPage() {
   const { data: account, isLoading: accountLoading } = useAccount();
   const { data: positions, isLoading: positionsLoading } = usePositions();
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 10000 });
+  const viewMode = modeData?.modes?.stocks || "paper";
   const [analysis, setAnalysis] = useState<TradeAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(true);
 
@@ -90,7 +93,13 @@ export default function StocksPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Stocks</h1>
-          <p className="text-[11px] text-muted-foreground/50">Alpaca account — equity positions</p>
+          <p className="text-[11px] text-muted-foreground/50">
+            Alpaca {viewMode === "live" ? "live" : "paper"} — equity positions
+            <span className={`ml-2 inline-flex items-center gap-1 ${viewMode === "live" ? "text-red-400" : "text-emerald-400"}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${viewMode === "live" ? "bg-red-400 animate-pulse" : "bg-emerald-400"}`} />
+              {viewMode === "live" ? "Live" : "Demo"}
+            </span>
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Link href="/trade" className="text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors border border-emerald-500/20 font-medium">

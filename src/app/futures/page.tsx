@@ -161,7 +161,8 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-const CONTRACTS = ["MES", "MNQ"]; // Only trade MES/MNQ — MGC removed (too risky for $1K)
+const DEMO_CONTRACTS = ["ES", "NQ", "GC"]; // Demo: 3 uncorrelated markets for learning
+const LIVE_CONTRACTS = ["MES", "MNQ"]; // Live: micros only on $1K
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
@@ -171,16 +172,28 @@ const STRATEGIES = [
   { name: "Extreme RSI Bounce", priority: 5, confidence: "70%", when: "RSI <25 or >75", desc: "Exhaustion reversal on declining volume. Any session, any day type." },
 ];
 
-const RISK_RULES = [
-  "7% risk/trade ($490) — 6-10 MES per trade",
+const DEMO_RISK_RULES = [
+  "8% risk/trade ($4,000) — ES, NQ, GC",
+  "Up to 10 contracts/trade, 8 total open",
+  "ALL SESSIONS: 24/5 learning (Sun 6PM–Fri 5PM ET)",
+  "$7,500 daily loss limit (15% of $50K)",
+  "20 trades/day base, 40 with A+ override",
+  "AI hard gate — only A/A+ setups (60%+ conf)",
+  "Tilt: pause after 2 stops, A+ overrides",
+  "Brain learns from every trade — vault syncs",
+  "25% drawdown kill ($12,500) → lockdown",
+  "No re-entry on stopped symbols",
+];
+const LIVE_RISK_RULES = [
+  "8% risk/trade ($80) — MES, MNQ only",
   "Scale out 50% at 1R, trail rest for runners",
   "TWO WINDOWS: 9:45-11:30 AM + 2:00-3:30 PM",
-  "$980 daily loss limit (2 full losses → stop)",
-  "Max 10 MES/trade, 4 trades/day",
-  "AI hard gate — only A/A+ setups (60%+ conf)",
+  "$150 daily loss limit (15% of $1K)",
+  "Max 3 MES/trade, 6 trades/day",
+  "AI hard gate — only A/A+ setups (80%+ conf)",
   "Tilt: pause after 2 stops, halt after 3",
   "Paper trades outside windows (learning mode)",
-  "20% drawdown kill ($1,400) → lockdown",
+  "25% drawdown kill ($250) → lockdown",
   "No re-entry on stopped symbols",
 ];
 
@@ -215,7 +228,10 @@ export default function FuturesPage() {
   const [posData, setPosData] = useState<PositionsData | null>(null);
   const [result, setResult] = useState<FuturesResult | null>(null);
   const [running, setRunning] = useState(false);
-  const [selectedContract, setSelectedContract] = useState("MES");
+  const isLiveView = posData?.viewMode === "live";
+  const CONTRACTS = isLiveView ? LIVE_CONTRACTS : DEMO_CONTRACTS;
+  const RISK_RULES = isLiveView ? LIVE_RISK_RULES : DEMO_RISK_RULES;
+  const [selectedContract, setSelectedContract] = useState("ES");
   const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
@@ -246,6 +262,11 @@ export default function FuturesPage() {
       setStatus(statusRes);
     } catch { /* ignore */ }
   }, []);
+
+  // Reset selected contract when view mode changes (ES for demo, MES for live)
+  useEffect(() => {
+    setSelectedContract(CONTRACTS[0]);
+  }, [isLiveView]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     loadQuotes();
@@ -357,7 +378,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate micro futures — MES, MNQ
+            Tradovate {isLiveView ? "micro futures — MES, MNQ" : "futures — ES, NQ, GC"}
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
@@ -383,7 +404,7 @@ export default function FuturesPage() {
       </div>
 
       {/* ── Live Price Tiles ── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+      <div className={`grid ${CONTRACTS.length <= 2 ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
         {CONTRACTS.map((sym) => {
           const q = quotes.find((x) => x.symbol === sym);
           const isSelected = sym === selectedContract;

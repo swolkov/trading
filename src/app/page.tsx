@@ -336,11 +336,11 @@ export default function DashboardPage() {
       {/* ── Micro Futures Ticker Strip ── */}
       <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.06]">
-          <p className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-wider">Micro Futures</p>
+          <p className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-wider">Futures</p>
           <Link href="/futures" className="text-[10px] text-emerald-400 hover:underline">Open</Link>
         </div>
-        <div className="grid grid-cols-5 divide-x divide-white/[0.04]">
-          {["MES", "MNQ", "MGC", "MYM", "M2K"].map((sym) => {
+        <div className={`grid ${viewMode === "live" ? "grid-cols-2" : "grid-cols-3"} divide-x divide-white/[0.04]`}>
+          {(viewMode === "live" ? ["MES", "MNQ"] : ["ES", "NQ", "GC"]).map((sym) => {
             const q = futuresQuotes.find((x) => x.symbol === sym);
             if (!q) return (
               <div key={sym} className="px-3 py-2.5 text-center">

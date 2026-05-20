@@ -1,10 +1,11 @@
 import { getDashboardQuotes } from "@/lib/futures-data";
 
-const MICRO_SYMBOLS = ["MES", "MNQ", "MGC", "MYM", "M2K"];
+// All contracts needed across demo (ES, NQ, GC) and live (MES, MNQ) views
+const ALL_SYMBOLS = ["ES", "NQ", "GC", "MES", "MNQ", "MGC", "MYM", "M2K"];
 
 export async function GET() {
   try {
-    const results = await getDashboardQuotes(MICRO_SYMBOLS);
+    const results = await getDashboardQuotes(ALL_SYMBOLS);
     return Response.json(results);
   } catch (error) {
     console.error("[/api/futures/quotes]", error);

@@ -166,7 +166,24 @@ export async function runCryptoAgent(): Promise<{
     return { trades, managed: 0, details: ["Crypto agent disabled"] };
   }
 
-  details.push(`[crypto-agent] Starting scan. Mode: ${config.mode.toUpperCase()}, Equity: $${config.simulatedEquity}, Symbols: ${config.focusSymbols.join(", ")}`);
+  // DEMO: Use Alpaca paper account's actual equity for aggressive learning
+  // LIVE: Stay conservative with simulated $1K equity
+  if (config.mode === "paper") {
+    try {
+      const { getAccount } = await import("./alpaca");
+      const account = await getAccount(config.mode);
+      const actualEquity = parseFloat(account.equity);
+      if (actualEquity > 0) {
+        config.simulatedEquity = actualEquity;
+        config.maxPositions = 6;
+        config.maxTradesPerDay = 15;
+        config.riskPerTradePct = 5;
+        config.confidenceThreshold = 65;
+      }
+    } catch { /* fall back to defaults */ }
+  }
+
+  details.push(`[crypto-agent] Starting scan. Mode: ${config.mode.toUpperCase()}, Equity: $${config.simulatedEquity.toLocaleString()}, Symbols: ${config.focusSymbols.join(", ")}`);
 
   // ── 1. Load vault context ──
   const context = await loadAgentContext("crypto-agent", "crypto-day-trading.md");

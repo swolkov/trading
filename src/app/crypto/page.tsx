@@ -28,6 +28,8 @@ function formatCryptoPrice(price: number): string {
 export default function CryptoPage() {
   const { data: account, isLoading: accountLoading } = useAccount();
   const { data: positions, isLoading: positionsLoading } = usePositions();
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 10000 });
+  const viewMode = modeData?.modes?.crypto || "paper";
   const { data: snapshotData, isLoading: snapshotsLoading } = useSWR<{ snapshots: Record<string, CryptoSnapshotData> }>(
     "/api/crypto/snapshots",
     fetcher,
@@ -59,7 +61,13 @@ export default function CryptoPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Crypto</h1>
-          <p className="text-[11px] text-muted-foreground/50">Alpaca account — 24/7 crypto trading · No PDT rule</p>
+          <p className="text-[11px] text-muted-foreground/50">
+            Alpaca {viewMode === "live" ? "live" : "paper"} — 24/7 crypto · No PDT
+            <span className={`ml-2 inline-flex items-center gap-1 ${viewMode === "live" ? "text-red-400" : "text-emerald-400"}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${viewMode === "live" ? "bg-red-400 animate-pulse" : "bg-emerald-400"}`} />
+              {viewMode === "live" ? "Live" : "Demo"}
+            </span>
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="relative flex h-2 w-2">

@@ -19,9 +19,12 @@ export async function GET() {
     const viewMode = await getViewMode("futures");
     const auth = await checkTradovateAuth(viewMode);
 
-    // Get recent trade logs from DB regardless of Tradovate connection
+    // Get recent trade logs — filtered by mode's symbols to avoid demo/live mixing
+    const viewModeSymbols = viewMode === "live"
+      ? ["FUT:MES", "FUT:MNQ"]
+      : ["FUT:ES", "FUT:NQ", "FUT:GC"];
     const recentLogs = await prisma.autoTradeLog.findMany({
-      where: { symbol: { startsWith: "FUT:" } },
+      where: { symbol: { in: viewModeSymbols } },
       orderBy: { createdAt: "desc" },
     });
 
@@ -246,25 +249,35 @@ export async function GET() {
         unrealizedPnl: accountSummary.unrealizedPnl,
         marginUsed: accountSummary.marginUsed,
       },
-      // Risk metrics for dashboard gauge (mode-aware)
+      // Risk metrics for dashboard gauge — mode-aware (demo $50K vs live $1K)
       riskMetrics: await (async () => {
         try {
           const keys = ["futures_daily_loss_limit_pct", "futures_max_trades_per_day", "futures_risk_per_trade_pct", "futures_simulated_equity"];
           const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
           const cfg: Record<string, string> = {};
           for (const c of configs) cfg[c.key] = c.value;
-          // Both demo and live use simulated equity for risk gauge (engine sizes as $1K on both)
-          const simEquity = parseFloat(cfg.futures_simulated_equity) || 1000;
+
           const dailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || 15;
-          const maxTrades = parseInt(cfg.futures_max_trades_per_day) || 6;
           const riskPct = parseFloat(cfg.futures_risk_per_trade_pct) || 8;
+
+          // DEMO: Use actual account equity + expanded limits
+          // LIVE: Use simulated equity ($1K) + conservative limits
+          const isDemoView = viewMode !== "live";
+          const simEquity = isDemoView
+            ? (accountSummary.netLiq || accountSummary.balance || 50000)
+            : (parseFloat(cfg.futures_simulated_equity) || 1000);
+          const maxTrades = isDemoView ? 20 : (parseInt(cfg.futures_max_trades_per_day) || 6);
+
           const dailyLossLimit = simEquity * (dailyLossPct / 100);
           const riskPerTrade = simEquity * (riskPct / 100);
-          // Count today's closed trades
+          // Count today's closed trades — filtered by mode's symbols to avoid cross-contamination
+          const modeSymbols = isDemoView
+            ? ["FUT:ES", "FUT:NQ", "FUT:GC"]
+            : ["FUT:MES", "FUT:MNQ"];
           const todayET = new Date().toISOString().slice(0, 10);
           const todayStart = new Date(todayET + "T00:00:00-04:00");
           const todayTrades = await prisma.autoTradeLog.count({
-            where: { symbol: { startsWith: "FUT:" }, pnl: { not: null }, createdAt: { gte: todayStart } },
+            where: { symbol: { in: modeSymbols }, pnl: { not: null }, createdAt: { gte: todayStart } },
           });
           return { dailyLossLimit, maxTradesPerDay: maxTrades, riskPerTrade, simEquity, todayTradeCount: todayTrades };
         } catch { return null; }

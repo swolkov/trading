@@ -328,7 +328,23 @@ export async function runStocksAgent(): Promise<{
     return { trades, managed: 0, details: ["Stocks agent disabled"] };
   }
 
-  details.push(`[stocks-agent] Starting. Mode: ${config.mode.toUpperCase()}, Equity: $${config.simulatedEquity}, Watchlist: ${config.focusSymbols.length} symbols`);
+  // DEMO: Use Alpaca paper account's actual equity for aggressive learning
+  // LIVE: Stay conservative with simulated $1K equity
+  if (config.mode === "paper") {
+    try {
+      const account = await getAccount(config.mode);
+      const actualEquity = parseFloat(account.equity);
+      if (actualEquity > 0) {
+        config.simulatedEquity = actualEquity;
+        config.maxPositions = 10;
+        config.maxTradesPerDay = 8;
+        config.riskPerTradePct = 5;
+        config.confidenceThreshold = 65;
+      }
+    } catch { /* fall back to defaults */ }
+  }
+
+  details.push(`[stocks-agent] Starting. Mode: ${config.mode.toUpperCase()}, Equity: $${config.simulatedEquity.toLocaleString()}, Watchlist: ${config.focusSymbols.length} symbols`);
 
   // ── 1. Check market hours ──
   try {

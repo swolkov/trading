@@ -94,10 +94,15 @@ async function loadFuturesConfig() {
 }
 
 // ============ WHICH CONTRACTS TO TRADE ============
-// DEMO MODE: Force micros to mirror $5K live conditions.
-// When live and scaled to $25k+, switch to full-size.
+// DEMO ($50K): Trade everything — ES, NQ, GC, MGC. Max learning across all instruments.
+// LIVE ($1K): Micros only (MES, MNQ). Scale up as equity grows.
 const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
 
+const DEMO_PRIORITY: { symbol: string; when: string }[] = [
+  { symbol: "ES", when: "always" },     // $50/pt — S&P 500, full-size execution learning
+  { symbol: "NQ", when: "always" },     // $20/pt — Nasdaq 100, learn trend character
+  { symbol: "GC", when: "always" },     // $100/pt — Gold, uncorrelated, Asia/London sessions
+];
 const FULL_SIZE_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "ES", when: "always" },     // $50/pt — primary money maker
   { symbol: "NQ", when: "trending" },   // $20/pt — best in trends, volatile
@@ -109,8 +114,10 @@ const MICRO_PRIORITY: { symbol: string; when: string }[] = [
   // MGC removed: $10/pt × 15pt stop = $150 = 15% of $1K in one trade. Add back when account > $5K.
 ];
 
-function getTradePriority(equity: number): { symbol: string; when: string }[] {
-  // Force micros when simulating small account (demo or live under threshold)
+function getTradePriority(equity: number, mode: string = "paper"): { symbol: string; when: string }[] {
+  // DEMO: Always use full instrument set for maximum learning
+  if (mode === "paper") return DEMO_PRIORITY;
+  // LIVE: Equity-based selection — micros until $25K, then full-size
   const effectiveEquity = FUTURES_RULES.SIMULATED_EQUITY || equity;
   return effectiveEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_PRIORITY : MICRO_PRIORITY;
 }
@@ -677,8 +684,8 @@ export async function runFuturesAgent(): Promise<{
       actualEquity = 50_000;
       details.push(`WARNING: Equity anomaly — using $50k actual default`);
     }
-    // Use simulated equity for all risk calculations (mirrors $1K live)
-    equity = FUTURES_RULES.SIMULATED_EQUITY || actualEquity;
+    // DEMO: Use actual equity ($50K) for full-size learning. LIVE: Use simulated equity for risk control.
+    equity = tradingMode === "paper" ? actualEquity : (FUTURES_RULES.SIMULATED_EQUITY || actualEquity);
     details.push(`ACCOUNT: Actual $${actualEquity.toLocaleString()} | Risk-sizing as $${equity.toLocaleString()} (Unrealized: $${summary.unrealizedPnl.toFixed(0)})`);
   } catch (err) {
     details.push(`Account error: ${err}`);
@@ -723,6 +730,12 @@ export async function runFuturesAgent(): Promise<{
     }
   } catch { /* use defaults */ }
 
+  // DEMO: Override limits for aggressive learning (more contracts, more trades)
+  const demoMaxContracts = tradingMode === "paper" ? 8 : FUTURES_RULES.MAX_TOTAL_CONTRACTS;
+  const demoMaxContractsPerTrade = tradingMode === "paper" ? 10 : FUTURES_RULES.MAX_CONTRACTS_PER_TRADE;
+  const demoMaxTrades = tradingMode === "paper" ? 20 : FUTURES_RULES.MAX_TRADES_PER_DAY;
+  const demoMaxTradesAplus = tradingMode === "paper" ? 40 : FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
+
   // Calculate risk limits based on equity (adjusted by overrides)
   const maxRiskPerTrade = equity * FUTURES_RULES.RISK_PER_TRADE_PCT * sizeOverride;
   const dailyLossLimit = equity * FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
@@ -732,8 +745,10 @@ export async function runFuturesAgent(): Promise<{
   const etDateStr = getETDateString();
   const isDST = new Date().toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }).includes("EDT");
   const todayStart = new Date(`${etDateStr}T00:00:00${isDST ? "-04:00" : "-05:00"}`);
+  // Filter trades by THIS mode's symbols to avoid demo/live cross-contamination
+  const modeSymbols = getTradePriority(equity, tradingMode).map((s) => `FUT:${s.symbol}`);
   const todayTrades = await prisma.autoTradeLog.findMany({
-    where: { symbol: { startsWith: "FUT:" }, createdAt: { gte: todayStart } },
+    where: { symbol: { in: modeSymbols }, createdAt: { gte: todayStart } },
   });
   const todayPnl = todayTrades.filter((t) => t.pnl != null).reduce((s, t) => s + (t.pnl || 0), 0);
   const todayTradeCount = todayTrades.filter((t) => t.action.startsWith("futures_")).length;
@@ -744,12 +759,12 @@ export async function runFuturesAgent(): Promise<{
     details.push(`DAILY LOSS LIMIT: Down $${Math.abs(todayPnl).toFixed(0)} (limit: $${dailyLossLimit.toFixed(0)}). Real trades blocked — learning mode active.`);
   }
   // Trade count limit: base cap of 6, A+ effectively uncapped (daily loss limit is real stop)
-  const atBaseTradeLimit = todayTradeCount >= FUTURES_RULES.MAX_TRADES_PER_DAY;
-  const atHardTradeLimit = todayTradeCount >= FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
+  const atBaseTradeLimit = todayTradeCount >= demoMaxTrades;
+  const atHardTradeLimit = todayTradeCount >= demoMaxTradesAplus;
   if (atHardTradeLimit) {
-    details.push(`HARD TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE} trades today (including A+ overrides). All trades blocked.`);
+    details.push(`HARD TRADE LIMIT: ${todayTradeCount}/${demoMaxTradesAplus} trades today (including A+ overrides). All trades blocked.`);
   } else if (atBaseTradeLimit) {
-    details.push(`BASE TRADE LIMIT: ${todayTradeCount}/${FUTURES_RULES.MAX_TRADES_PER_DAY} trades today. Only A+ setups can still execute (up to ${FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE} total).`);
+    details.push(`BASE TRADE LIMIT: ${todayTradeCount}/${demoMaxTrades} trades today. Only A+ setups can still execute (up to ${demoMaxTradesAplus} total).`);
   }
 
   // Get existing futures positions
@@ -1090,14 +1105,14 @@ export async function runFuturesAgent(): Promise<{
   }
 
   const totalContracts = futuresPositions.reduce((s, p) => s + Math.abs(p.netPos), 0);
-  if (totalContracts >= FUTURES_RULES.MAX_TOTAL_CONTRACTS) {
-    details.push("At contract limit — not scanning for new trades");
+  if (totalContracts >= demoMaxContracts) {
+    details.push(`At contract limit (${totalContracts}/${demoMaxContracts}) — not scanning for new trades`);
     return { trades, managed, details };
   }
 
   // Determine which symbols to trade based on equity + regime
-  const tradePriority = getTradePriority(equity);
-  details.push(`CONTRACTS: ${equity >= FULL_SIZE_EQUITY_THRESHOLD ? "FULL-SIZE" : "MICROS"} (equity $${equity.toLocaleString()})`);
+  const tradePriority = getTradePriority(equity, tradingMode);
+  details.push(`CONTRACTS: ${tradingMode === "paper" ? "DEMO ALL" : equity >= FULL_SIZE_EQUITY_THRESHOLD ? "FULL-SIZE" : "MICROS"} — ${tradePriority.map(s => s.symbol).join(", ")} (equity $${equity.toLocaleString()})`);
   const symbolsToTrade = tradePriority
     .filter((s) => s.when === "always" || (s.when === "trending" && (regime === "bull" || regime === "bear")))
     .map((s) => s.symbol);
@@ -1201,9 +1216,9 @@ export async function runFuturesAgent(): Promise<{
     // AI confirmation — Opus with extended thinking for decisive, opinionated calls
     let aiConviction = "";
     try {
-      const aiPrompt = `You are an elite futures scalper trading a $${equity.toLocaleString()} account with up to ${FUTURES_RULES.MAX_CONTRACTS_PER_TRADE} MES contracts per trade. Each contract risks ~$75. Daily loss limit: $${dailyLossLimit.toFixed(0)}. Goal: catch big moves on high-conviction setups to make $500-$2000+ on winning days.
+      const aiPrompt = `You are an elite futures scalper trading a $${equity.toLocaleString()} ${tradingMode === "paper" ? "DEMO" : "LIVE"} account with up to ${demoMaxContractsPerTrade} ${symbol} contracts per trade. Risk per trade: $${maxRiskPerTrade.toFixed(0)}. Daily loss limit: $${dailyLossLimit.toFixed(0)}.${tradingMode === "paper" ? " DEMO MODE: Trade aggressively for maximum learning — every trade teaches the brain." : " Goal: catch big moves on high-conviction setups."}
 
-CRITICAL: Only A+ and A setups execute. B and C are KILLED immediately. We need explosive R:R (3:1+) with technical confluence across timeframes. A skipped trade costs $0, a bad trade costs $75-$225. Be ruthlessly selective — but when the setup is textbook, say YES with full conviction. On $${equity.toLocaleString()}, every trade matters.
+CRITICAL: Only A+ and A setups execute. B and C are KILLED immediately. We need explosive R:R (3:1+) with technical confluence across timeframes. A skipped trade costs $0, a bad trade costs real risk. Be ruthlessly selective — but when the setup is textbook, say YES with full conviction.
 
 ${symbol} setup:
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}
@@ -1288,7 +1303,7 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     // Size by risk budget: how many contracts fit within maxRiskPerTrade?
     const maxByRisk = Math.floor(maxRiskPerTrade / riskPerContract);
     let contracts = Math.max(1, Math.min(
-      FUTURES_RULES.MAX_CONTRACTS_PER_TRADE,
+      demoMaxContractsPerTrade,
       maxByRisk,
     ));
 
