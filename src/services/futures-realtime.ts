@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 // ============ REAL-TIME FUTURES TRADING ENGINE ============
-// Persistent process — polls Tradovate md/getChart every 5s for prices,
-// builds bars, detects setups on bar close, executes via Tradovate.
-// Deploy on Railway.
-//
-// DATA SOURCE: Tradovate md/getChart REST (same broker = most reliable).
-// Falls back to Yahoo Finance if Tradovate MD is unavailable.
+// Persistent process — streams real-time prices via Tradovate WebSocket,
+// falls back to Yahoo Finance polling if WebSocket unavailable.
+// Builds bars, detects setups on bar close, executes via Tradovate.
+// Deploy on Railway — two instances: ENGINE_MODE=demo and ENGINE_MODE=live.
 
 import { prisma } from "../lib/db";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
+import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 
 
 // ── Config ──────────────────────────────────────────────
@@ -19,12 +18,16 @@ const LIVE_API = "https://live.tradovateapi.com/v1";
 
 // ENGINE_MODE: "demo" or "live" — set per Railway service via env var
 // Demo engine: 24/7 learning, full-size, DEMO_API, 5s polling
-// Live engine: RTH prime only, micros, LIVE_API, 1s polling
+// Live engine: RTH prime only, micros, LIVE_API
 const ENGINE_MODE = (process.env.ENGINE_MODE || "demo") as "demo" | "live";
 const IS_DEMO = ENGINE_MODE === "demo";
 const IS_LIVE = ENGINE_MODE === "live";
 const ORDER_API = IS_LIVE ? LIVE_API : DEMO_API;
-const POLL_INTERVAL_MS = IS_LIVE ? 1000 : 5000; // Live: 1s for fast position mgmt
+const POLL_INTERVAL_MS = 5000; // Yahoo fallback polls every 5s (Yahoo updates every ~15s)
+
+// WebSocket state — when connected, polling pauses
+let wsConnected = false;
+let tradovateWS: TradovateWebSocket | null = null;
 const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 
 // Mode-keyed DB keys (both engines share DB, don't collide)
@@ -94,21 +97,34 @@ let accountName = "";
 async function authenticate(): Promise<string> {
   if (accessToken && Date.now() < tokenExpires) return accessToken;
 
-  // Check for bootstrap token in DB (injected when rate limited to bypass auth endpoint)
+  // Check for shared or bootstrap token in DB (avoids hitting rate-limited auth endpoint)
   if (!accessToken) {
     try {
+      // Try shared token first (saved by a previous engine run)
+      const shareKey = IS_LIVE ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+      const shared = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+      if (shared?.value) {
+        const { token, expires, accountId: savedAcctId, accountName: savedAcctName } = JSON.parse(shared.value);
+        const expMs = new Date(expires).getTime();
+        if (token && expMs > Date.now() + 300_000) { // At least 5 min remaining
+          log("[AUTH] Using shared token from DB (no auth call needed)");
+          accessToken = token;
+          tokenExpires = expMs;
+          if (savedAcctId) { accountId = savedAcctId; accountName = savedAcctName; }
+          return accessToken;
+        }
+      }
+      // Try bootstrap token (manually injected)
       const bootstrapKey = IS_LIVE ? "tradovate_live_bootstrap_token" : "tradovate_bootstrap_token";
       const bootstrap = await prisma.agentConfig.findUnique({ where: { key: bootstrapKey } });
       if (bootstrap?.value) {
         const { token, expires } = JSON.parse(bootstrap.value);
         const expMs = new Date(expires).getTime();
         if (token && expMs > Date.now()) {
-          log("[AUTH] Using bootstrap token from DB (bypassing rate-limited endpoint)");
+          log("[AUTH] Using bootstrap token from DB");
           accessToken = token;
           tokenExpires = expMs;
-          // Clean up bootstrap token so it's one-time use
           await prisma.agentConfig.delete({ where: { key: bootstrapKey } }).catch(() => {});
-          // Still need to fetch account info
           const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
           const active = accounts.find((a) => a.active) || accounts[0];
           if (active) { accountId = active.id; accountName = active.name; }
@@ -116,7 +132,7 @@ async function authenticate(): Promise<string> {
           return accessToken;
         }
       }
-    } catch { /* bootstrap optional */ }
+    } catch { /* token reuse optional */ }
   }
 
   const res = await fetch(`${ORDER_API}/auth/accesstokenrequest`, {
@@ -142,6 +158,17 @@ async function authenticate(): Promise<string> {
   const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
   const active = accounts.find((a) => a.active) || accounts[0];
   if (active) { accountId = active.id; accountName = active.name; }
+
+  // Share token via DB so other services (crons, Vercel) can reuse it instead of re-authenticating
+  // This prevents the Tradovate auth rate limit that burned us today
+  try {
+    const shareKey = IS_LIVE ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+    await prisma.agentConfig.upsert({
+      where: { key: shareKey },
+      update: { value: JSON.stringify({ token: accessToken, expires: new Date(tokenExpires).toISOString(), accountId, accountName }) },
+      create: { key: shareKey, value: JSON.stringify({ token: accessToken, expires: new Date(tokenExpires).toISOString(), accountId, accountName }) },
+    });
+  } catch { /* sharing is best-effort */ }
 
   log(`Authenticated — ${accountName} (#${accountId}) — ${MODE_TAG}`);
   return accessToken;
@@ -544,6 +571,9 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
 }
 
 async function pollPrices() {
+  // Skip polling when WebSocket is streaming real-time data
+  if (wsConnected) return;
+
   // Circuit breaker: skip polls while circuit is open
   if (mdCircuitOpen) {
     if (Date.now() < mdCircuitResetAt) return;
@@ -1100,6 +1130,16 @@ function checkPositions(sym: string, price: number) {
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
   const pnlDollars = diff * mult * pos.quantity;
+
+  // TIME-BASED EXIT: Close stale trades that haven't moved 1R in 30 minutes
+  // Saves $40-80 per dead trade instead of waiting for full stop loss
+  const STALE_TRADE_MINUTES = 30;
+  const minutesInTrade = (Date.now() - pos.entryTime) / 60_000;
+  if (minutesInTrade >= STALE_TRADE_MINUTES && diff < stopDist && !pos.reachedBreakeven && !pos.scaledOut) {
+    log(`${sym}: TIME EXIT — ${minutesInTrade.toFixed(0)} min, hasn't reached 1R ($${pnlDollars.toFixed(0)}). Closing to preserve capital.`);
+    closePosition(sym, price, "time_exit");
+    return;
+  }
 
   // 1R: Move stop to breakeven ON THE BROKER — protect capital, NO scale out yet
   if (diff >= stopDist && !pos.reachedBreakeven) {
@@ -2044,6 +2084,64 @@ function onBarClose(sym: string, bar: Bar) {
 
   // SETUP 3: VWAP Mean Reversion — DISABLED (backtest: 49 trades, 24% win rate, -99 pts)
 
+  // SETUP 4: VWAP Bounce — price pulls back to VWAP on trending day, rejection candle
+  // Unlike mean reversion (fading at extremes), this enters WITH the trend at VWAP support
+  if (dayType === "trend" && vwapData.vwap > 0 && b.sessionBars.length >= 12) {
+    const distToVwap = Math.abs(price - vwapData.vwap);
+    const vwapTolerance = currentATR * 0.3; // Within 0.3 ATR of VWAP
+    const touchingVwap = distToVwap <= vwapTolerance;
+
+    if (touchingVwap) {
+      // Determine direction from trend: if price has been above VWAP most of session → bullish bounce
+      const barsAboveVwap = b.sessionBars.filter(sb => sb.c > vwapData.vwap).length;
+      const bullishSession = barsAboveVwap / b.sessionBars.length > 0.6;
+      const bearishSession = barsAboveVwap / b.sessionBars.length < 0.4;
+
+      // Rejection candle: wick touches VWAP, body closes away from it
+      const isLongRejection = bullishSession && bar.l <= vwapData.vwap + vwapTolerance && bar.c > vwapData.vwap && bar.c > bar.o; // bullish candle bouncing off VWAP
+      const isShortRejection = bearishSession && bar.h >= vwapData.vwap - vwapTolerance && bar.c < vwapData.vwap && bar.c < bar.o; // bearish candle rejected at VWAP
+
+      if (isLongRejection && tf15.trend === "up" && currentRSI < 70) {
+        const dir = "long";
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 72,
+          volTrend, volRatio,
+          trend15Aligns: true,
+          rsiExtreme: false,
+          priceAboveVWAP: true,
+          dayTypeMatch: true,
+          sessionQuality: session === "morning" || session === "afternoon" ? "prime" : "neutral",
+        });
+        log(`  → VWAP BOUNCE LONG | VWAP:$${vwapData.vwap.toFixed(2)} | Dist:${distToVwap.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+        if (score >= 70) {
+          evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, adjustedATR * 3.0, effectiveSizeMult, score,
+            `VWAP bounce ${dir} at $${vwapData.vwap.toFixed(2)}, rejection candle, 15m ${tf15.trend}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        }
+        return;
+      }
+      if (isShortRejection && tf15.trend === "down" && currentRSI > 30) {
+        const dir = "short";
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 72,
+          volTrend, volRatio,
+          trend15Aligns: true,
+          rsiExtreme: false,
+          priceAboveVWAP: false,
+          dayTypeMatch: true,
+          sessionQuality: session === "morning" || session === "afternoon" ? "prime" : "neutral",
+        });
+        log(`  → VWAP BOUNCE SHORT | VWAP:$${vwapData.vwap.toFixed(2)} | Dist:${distToVwap.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+        if (score >= 70) {
+          evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, adjustedATR * 3.0, effectiveSizeMult, score,
+            `VWAP bounce ${dir} at $${vwapData.vwap.toFixed(2)}, rejection candle, 15m ${tf15.trend}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        }
+        return;
+      }
+    }
+  }
+
   // Log near-miss or why no setup triggered
   if (bestNearMiss) {
     log(`  ✗ Near miss: ${bestNearMiss}`);
@@ -2246,7 +2344,7 @@ async function writeHeartbeat() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
-      mdHealth: mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok",
+      mdHealth: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "yahoo",
     });
     await prisma.agentConfig.upsert({
       where: { key: HEARTBEAT_KEY },
@@ -2996,7 +3094,7 @@ function startHealthServer() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
-      md: mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok",
+      md: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "yahoo",
       tilt: tiltPauseUntil === Infinity ? "session_done" : Date.now() < tiltPauseUntil ? `paused(${consecutiveStops})` : "ok",
       consecutiveStops,
       symbols: SYMBOLS.map(s => {
@@ -3057,7 +3155,7 @@ async function main() {
   log("╔══════════════════════════════════════════════╗");
   log(`║  ESBUENO FUTURES — ${MODE_TAG} ENGINE ${"".padEnd(16 - MODE_TAG.length)}║`);
   log("╚══════════════════════════════════════════════╝");
-  log(`Mode: ${IS_LIVE ? "LIVE — real money, 1s polling, RTH prime only" : "DEMO 24/7 learning, 5s polling"} | Data: Tradovate MD + Yahoo fallback | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
+  log(`Mode: ${IS_LIVE ? "LIVE — real money, RTH prime only" : "DEMO 24/7 learning"} | Data: Tradovate WS → Yahoo fallback (5s) | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
 
   // Validate all required env vars BEFORE doing anything else
   validateEnvironment();
@@ -3122,7 +3220,47 @@ async function main() {
 
   // Engine mode set by ENGINE_MODE env var. Demo: 24/7 learning. Live: RTH prime only.
 
-  // Start polling — all wrapped in safe intervals
+  // Start Tradovate WebSocket for real-time MD (requires CME data subscription)
+  // Falls back to Yahoo polling if WebSocket fails — zero risk
+  try {
+    const wsSymbols = [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]
+      .map(sym => contracts.get(sym)?.name)
+      .filter((n): n is string => !!n);
+    if (wsSymbols.length > 0) {
+      tradovateWS = new TradovateWebSocket({
+        accessToken: await authenticate(),
+        symbols: wsSymbols,
+        useLive: IS_LIVE,
+        logger: log,
+        onQuote: (quote: QuoteUpdate) => {
+          onPrice(quote.symbol, quote.price, quote.volume);
+          tickCount++;
+          lastTickCheckTime = Date.now();
+        },
+        onConnect: () => {
+          wsConnected = true;
+          log("[WS-MD] Real-time streaming active — Yahoo polling paused");
+        },
+        onDisconnect: () => {
+          wsConnected = false;
+          log("[WS-MD] Disconnected — Yahoo polling resumed");
+        },
+        onError: (err) => {
+          if (err.includes("UnknownSymbol") || err.includes("inaccessible")) {
+            log("[WS-MD] CME market data not subscribed — using Yahoo fallback. Enable CME MD in Tradovate settings.");
+            tradovateWS?.destroy();
+            tradovateWS = null;
+          }
+        },
+      });
+      tradovateWS.connect();
+      log("[WS-MD] WebSocket connecting... (Yahoo polling active as fallback)");
+    }
+  } catch (err) {
+    log(`[WS-MD] Failed to start WebSocket: ${err} — Yahoo polling active`);
+  }
+
+  // Start Yahoo polling as fallback (pauses automatically when WebSocket is active)
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
   safeInterval(checkSessionReset, 60_000, "checkSessionReset");
   safeInterval(syncPositions, 30_000, "syncPositions");

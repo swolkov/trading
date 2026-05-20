@@ -75,6 +75,19 @@ export async function GET() {
     } catch {}
 
     if (!auth.authenticated) {
+      // Still return viewMode and balance data even when Tradovate auth fails
+      // This prevents the dashboard from flickering to demo view during rate limits
+      const startingCapital = await (async () => {
+        try {
+          const key = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
+          const cfg = await prisma.agentConfig.findUnique({ where: { key } });
+          return cfg?.value ? parseFloat(cfg.value) : (viewMode === "live" ? 1025 : 50000);
+        } catch { return viewMode === "live" ? 1025 : 50000; }
+      })();
+      const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
+      const sodCfg = await prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null);
+      const startOfDayBalance = sodCfg?.value ? parseFloat(sodCfg.value) : null;
+
       return Response.json({
         connected: false,
         account: null,
@@ -82,6 +95,9 @@ export async function GET() {
         orders: [],
         activity,
         engineStatus,
+        viewMode,
+        startingCapital,
+        startOfDayBalance,
       });
     }
 
