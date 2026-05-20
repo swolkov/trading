@@ -312,8 +312,9 @@ export default function FuturesPage() {
     roundTrips: fillPnl?.roundTrips || [],
   };
 
-  // Use fill-based data ONLY when it has more trades than DB
-  const hasFillData = filteredFills.tradeCount > closedTrades.length;
+  // Prefer fill-based round trips (Tradovate fills = source of truth for per-trade stats)
+  // Fall back to DB trades only when no fill data is available
+  const hasFillData = filteredFills.tradeCount > 0;
   const tradeCount = hasFillData ? filteredFills.tradeCount : closedTrades.length;
   const winCount = hasFillData ? filteredFills.wins : wins.length;
   const lossCount = hasFillData ? filteredFills.losses : losses.length;
@@ -327,8 +328,19 @@ export default function FuturesPage() {
   const avgLoss = hasFillData
     ? (filteredFills.losses > 0 ? filteredFills.roundTrips.filter((rt) => rt.pnl < 0).reduce((s, rt) => s + rt.pnl, 0) / filteredFills.losses : 0)
     : (losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0);
-  const bestTrade = closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
-  const worstTrade = closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
+  // Best/worst from fill-based round trips (accurate) with DB fallback
+  const bestRoundTrip = filteredFills.roundTrips.length > 0
+    ? filteredFills.roundTrips.reduce((best, rt) => rt.pnl > best.pnl ? rt : best, filteredFills.roundTrips[0])
+    : null;
+  const worstRoundTrip = filteredFills.roundTrips.length > 0
+    ? filteredFills.roundTrips.reduce((worst, rt) => rt.pnl < worst.pnl ? rt : worst, filteredFills.roundTrips[0])
+    : null;
+  const bestTrade = bestRoundTrip
+    ? { pnl: bestRoundTrip.pnl, symbol: `FUT:${bestRoundTrip.symbol}` }
+    : closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
+  const worstTrade = worstRoundTrip
+    ? { pnl: worstRoundTrip.pnl, symbol: `FUT:${worstRoundTrip.symbol}` }
+    : closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
 
   // ── P&L Calculations — ALL from Tradovate balance, NEVER from DB trade sums ──
   // DB trade P&L values are unreliable (logged $4,575 losses vs actual $2,210).
@@ -1438,7 +1450,9 @@ export default function FuturesPage() {
                   {worstTrade && (
                     <div>
                       <p className="text-[10px] text-muted-foreground/40">Worst Trade</p>
-                      <p className="text-[11px] font-bold text-red-400 tabular-nums">-${Math.abs(worstTrade.pnl || 0).toFixed(0)}</p>
+                      <p className={`text-[11px] font-bold tabular-nums ${(worstTrade.pnl || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {(worstTrade.pnl || 0) >= 0 ? "+" : "-"}${Math.abs(worstTrade.pnl || 0).toFixed(0)}
+                      </p>
                       <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol}</p>
                     </div>
                   )}
