@@ -312,22 +312,18 @@ export default function FuturesPage() {
     roundTrips: fillPnl?.roundTrips || [],
   };
 
-  // Prefer fill-based round trips (Tradovate fills = source of truth for per-trade stats)
-  // Fall back to DB trades only when no fill data is available
-  const hasFillData = filteredFills.tradeCount > 0;
-  const tradeCount = hasFillData ? filteredFills.tradeCount : closedTrades.length;
-  const winCount = hasFillData ? filteredFills.wins : wins.length;
-  const lossCount = hasFillData ? filteredFills.losses : losses.length;
+  // DB trades have full history (all sessions). Fill-based round trips only cover the current
+  // Tradovate session, so using them alone would drop older trades and inflate win rate.
+  // Use DB trades for trade count / win rate; fill round trips for per-trade detail only.
+  const tradeCount = closedTrades.length || filteredFills.tradeCount;
+  const winCount = closedTrades.length > 0 ? wins.length : filteredFills.wins;
+  const lossCount = closedTrades.length > 0 ? losses.length : filteredFills.losses;
   // Total P&L: balance - starting capital (mode-aware, no exclusions on new account)
   const STARTING_CAPITAL = posData?.startingCapital ?? 50_000;
   const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
-  const totalPnl = accountPnl ?? (hasFillData ? filteredFills.totalPnl : closedTrades.reduce((s, t) => s + (t.pnl || 0), 0));
-  const avgWin = hasFillData
-    ? (filteredFills.wins > 0 ? filteredFills.roundTrips.filter((rt) => rt.pnl > 0).reduce((s, rt) => s + rt.pnl, 0) / filteredFills.wins : 0)
-    : (wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0);
-  const avgLoss = hasFillData
-    ? (filteredFills.losses > 0 ? filteredFills.roundTrips.filter((rt) => rt.pnl < 0).reduce((s, rt) => s + rt.pnl, 0) / filteredFills.losses : 0)
-    : (losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0);
+  const totalPnl = accountPnl ?? (closedTrades.length > 0 ? closedTrades.reduce((s, t) => s + (t.pnl || 0), 0) : filteredFills.totalPnl);
+  const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0;
+  const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0;
   // Best/worst from fill-based round trips (accurate) with DB fallback
   const bestRoundTrip = filteredFills.roundTrips.length > 0
     ? filteredFills.roundTrips.reduce((best, rt) => rt.pnl > best.pnl ? rt : best, filteredFills.roundTrips[0])
@@ -1159,7 +1155,7 @@ export default function FuturesPage() {
                       <p className={`text-xl font-bold ${tradeCount > 0 && totalPnl / tradeCount >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {tradeCount > 0 ? `${totalPnl / tradeCount >= 0 ? "+" : ""}$${(totalPnl / tradeCount).toFixed(0)}` : "—"}
                       </p>
-                      <p className="text-[9px] text-muted-foreground/30">per trade{hasFillData ? " (fills)" : ""}</p>
+                      <p className="text-[9px] text-muted-foreground/30">per trade</p>
                     </div>
                     <div className="bg-white/[0.03] rounded-lg p-3">
                       <p className="text-[9px] text-muted-foreground/40 uppercase">Max Drawdown</p>
@@ -1414,7 +1410,7 @@ export default function FuturesPage() {
                   <p className="text-lg font-bold">
                     {tradeCount > 0 ? `${((winCount / tradeCount) * 100).toFixed(0)}%` : "—"}
                   </p>
-                  <p className="text-[9px] text-muted-foreground/30">{winCount}W / {lossCount}L{hasFillData ? " (fills)" : ""}</p>
+                  <p className="text-[9px] text-muted-foreground/30">{winCount}W / {lossCount}L</p>
                 </div>
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Fills</p>

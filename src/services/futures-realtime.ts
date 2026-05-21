@@ -3118,18 +3118,88 @@ function startHealthServer() {
 
 // ── Reliability: Auth with retries ───────────────────────
 
+// Poll DB for shared/bootstrap token without hitting the auth endpoint
+async function tryDBTokenOnly(): Promise<string | null> {
+  try {
+    const shareKey = IS_LIVE ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+    const shared = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+    if (shared?.value) {
+      const { token, expires, accountId: savedAcctId, accountName: savedAcctName } = JSON.parse(shared.value);
+      const expMs = new Date(expires).getTime();
+      if (token && expMs > Date.now() + 300_000) {
+        log("[AUTH] Found shared token in DB — using it (no auth call)");
+        accessToken = token;
+        tokenExpires = expMs;
+        if (savedAcctId) { accountId = savedAcctId; accountName = savedAcctName; }
+        return accessToken;
+      }
+    }
+    const bootstrapKey = IS_LIVE ? "tradovate_live_bootstrap_token" : "tradovate_bootstrap_token";
+    const bootstrap = await prisma.agentConfig.findUnique({ where: { key: bootstrapKey } });
+    if (bootstrap?.value) {
+      const { token, expires } = JSON.parse(bootstrap.value);
+      const expMs = new Date(expires).getTime();
+      if (token && expMs > Date.now()) {
+        log("[AUTH] Found bootstrap token in DB — using it");
+        accessToken = token;
+        tokenExpires = expMs;
+        await prisma.agentConfig.delete({ where: { key: bootstrapKey } }).catch(() => {});
+        const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
+        const active = accounts.find((a) => a.active) || accounts[0];
+        if (active) { accountId = active.id; accountName = active.name; }
+        log(`Authenticated — ${accountName} (#${accountId}) — ${MODE_TAG} (bootstrap)`);
+        return accessToken;
+      }
+    }
+  } catch { /* DB lookup failed */ }
+  return null;
+}
+
 async function authenticateWithRetry(): Promise<string> {
   let attempt = 0;
+  let rateLimitHits = 0;
+  let lastAuthCallTime = 0;
+  const COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours — let Tradovate fully cool down
+  const MAX_DIRECT_ATTEMPTS = 5; // After 5 429s, stop hammering the endpoint
+
   while (true) {
     attempt++;
     try {
+      // If we've been rate-limited too many times, stop calling the auth endpoint
+      // and only poll DB for shared/bootstrap tokens. This lets the rate limit cool down.
+      if (rateLimitHits >= MAX_DIRECT_ATTEMPTS) {
+        const dbToken = await tryDBTokenOnly();
+        if (dbToken) {
+          rateLimitHits = 0; // Reset — we're back in business
+          return dbToken;
+        }
+
+        // Every 2 hours, try one direct auth call to see if rate limit cleared
+        const timeSinceLastCall = Date.now() - lastAuthCallTime;
+        if (timeSinceLastCall >= COOLDOWN_MS) {
+          log(`[AUTH] Cooldown elapsed (${Math.round(timeSinceLastCall / 60000)}min) — trying one direct auth call...`);
+          lastAuthCallTime = Date.now();
+          return await authenticate(); // If this 429s, we catch it below
+        }
+
+        const waitMin = Math.round((COOLDOWN_MS - timeSinceLastCall) / 60000);
+        log(`[AUTH] Rate-limited (${rateLimitHits}x) — DB-only mode, checking every 2 min. Next direct auth in ${waitMin}min. Inject bootstrap token to skip wait.`);
+        await new Promise(r => setTimeout(r, 120_000)); // Poll DB every 2 min
+        continue;
+      }
+
+      lastAuthCallTime = Date.now();
       return await authenticate();
     } catch (err) {
       const errStr = String(err);
       const isRateLimit = errStr.includes("429");
       if (isRateLimit) {
-        // Rate limited: wait 5 min and retry FOREVER — never crash, never let Railway restart
-        // Exponential backoff: 5min, 10min, 15min, 15min...
+        rateLimitHits++;
+        if (rateLimitHits >= MAX_DIRECT_ATTEMPTS) {
+          log(`[AUTH] Hit 429 ${rateLimitHits} times — switching to DB-only mode. Stopping auth calls to let rate limit cool down.`);
+          log(`[AUTH] Will retry direct auth in 2 hours, or inject a bootstrap token to resume immediately.`);
+          continue; // Go back to top of loop — will enter DB-only mode
+        }
         const rateLimitDelay = Math.min(900_000, 300_000 * Math.ceil(attempt / 2));
         log(`[AUTH] Rate limited (attempt ${attempt}) — waiting ${Math.round(rateLimitDelay / 60000)} min before retry...`);
         await new Promise(r => setTimeout(r, rateLimitDelay));
