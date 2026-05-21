@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { checkTradovateAuth, getTradovatePositions, getCashBalanceLogs, getTradovateAccountSummary } from "@/lib/tradovate";
+import { getViewMode } from "@/lib/trading-mode";
 
 const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
@@ -14,59 +15,65 @@ export async function PUT(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const results: string[] = [];
+    // Use view mode so backfill targets the account the user is viewing
+    const mode = body.mode || await getViewMode("futures");
+    const isLive = mode === "live";
+    // Mode-prefixed keys prevent demo/live balance data from colliding
+    const balKeyPrefix = isLive ? "live_daily_balance_" : "daily_balance_";
+    const eodKeyPrefix = isLive ? "live_eod_balance_" : "eod_balance_";
+    const modeTag = isLive ? "LIVE" : "DEMO";
 
     // 1. If manual balances provided, seed them
     const manualBalances: { date: string; balance: number }[] = body.balances || [];
     for (const { date, balance } of manualBalances) {
       if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) continue;
       await prisma.agentConfig.upsert({
-        where: { key: `daily_balance_${date}` },
+        where: { key: `${balKeyPrefix}${date}` },
         update: { value: String(balance) },
-        create: { key: `daily_balance_${date}`, value: String(balance) },
+        create: { key: `${balKeyPrefix}${date}`, value: String(balance) },
       });
-      results.push(`manual: ${date} = $${balance.toLocaleString()}`);
+      results.push(`manual [${modeTag}]: ${date} = $${balance.toLocaleString()}`);
     }
 
     // 2. Auto-pull from Tradovate cash balance logs
-    const auth = await checkTradovateAuth();
+    const auth = await checkTradovateAuth(mode);
     if (!auth.authenticated) {
       return Response.json({ seeded: results.length, details: results, error: "Tradovate not connected — only manual balances seeded" });
     }
 
     // Get current balance as today's snapshot
-    const account = await getTradovateAccountSummary();
+    const account = await getTradovateAccountSummary(mode);
     const today = new Date().toISOString().slice(0, 10);
     await prisma.agentConfig.upsert({
-      where: { key: `daily_balance_${today}` },
+      where: { key: `${balKeyPrefix}${today}` },
       update: { value: String(account.balance) },
-      create: { key: `daily_balance_${today}`, value: String(account.balance) },
+      create: { key: `${balKeyPrefix}${today}`, value: String(account.balance) },
     });
-    results.push(`today: ${today} = $${account.balance.toLocaleString()} (live)`);
+    results.push(`today [${modeTag}]: ${today} = $${account.balance.toLocaleString()}`);
 
     // Try cash balance logs for historical daily settlement data
-    const cashLogs = await getCashBalanceLogs();
+    const cashLogs = await getCashBalanceLogs(mode);
     if (cashLogs.length > 0) {
       for (const log of cashLogs) {
         const date = `${log.tradeDate.year}-${String(log.tradeDate.month).padStart(2, "0")}-${String(log.tradeDate.day).padStart(2, "0")}`;
-        // amount = account balance at that settlement
         await prisma.agentConfig.upsert({
-          where: { key: `daily_balance_${date}` },
+          where: { key: `${balKeyPrefix}${date}` },
           update: { value: String(log.amount) },
-          create: { key: `daily_balance_${date}`, value: String(log.amount) },
+          create: { key: `${balKeyPrefix}${date}`, value: String(log.amount) },
         });
-        // Also save as EOD balance
         await prisma.agentConfig.upsert({
-          where: { key: `eod_balance_${date}` },
+          where: { key: `${eodKeyPrefix}${date}` },
           update: { value: String(log.amount) },
-          create: { key: `eod_balance_${date}`, value: String(log.amount) },
+          create: { key: `${eodKeyPrefix}${date}`, value: String(log.amount) },
         });
-        results.push(`tradovate: ${date} = $${log.amount.toLocaleString()} (settlement, realized: $${log.realizedPnL})`);
+        results.push(`tradovate [${modeTag}]: ${date} = $${log.amount.toLocaleString()} (settlement, realized: $${log.realizedPnL})`);
       }
     } else {
       // Fallback: reconstruct from fills + current balance (work backwards)
-      // Get all futures trade logs with P&L and reconstruct daily balances
+      // Filter trade logs by mode symbols to avoid cross-contamination
+      const modeSymbols = isLive ? ["FUT:MES", "FUT:MNQ"] : ["FUT:ES", "FUT:NQ", "FUT:GC"];
       const tradeLogs = await prisma.autoTradeLog.findMany({
-        where: { symbol: { startsWith: "FUT:" }, pnl: { not: null } },
+        where: { symbol: { in: modeSymbols }, pnl: { not: null } },
         orderBy: { createdAt: "desc" },
       });
 
@@ -79,13 +86,12 @@ export async function PUT(req: NextRequest) {
       }
 
       // Work backwards from current balance to reconstruct historical
-      // NEVER overwrite existing balance entries — they may have been manually verified
       const existingKeys = new Set(
-        (await prisma.agentConfig.findMany({ where: { key: { startsWith: "daily_balance_" } }, select: { key: true } }))
+        (await prisma.agentConfig.findMany({ where: { key: { startsWith: balKeyPrefix } }, select: { key: true } }))
           .map((r) => r.key)
       );
       const existingEodKeys = new Set(
-        (await prisma.agentConfig.findMany({ where: { key: { startsWith: "eod_balance_" } }, select: { key: true } }))
+        (await prisma.agentConfig.findMany({ where: { key: { startsWith: eodKeyPrefix } }, select: { key: true } }))
           .map((r) => r.key)
       );
       const dates = Object.keys(dailyPnls).sort().reverse();
@@ -94,27 +100,25 @@ export async function PUT(req: NextRequest) {
         if (date === today) continue;
         const eodBalance = runningBalance;
         const sodBalance = eodBalance - dailyPnls[date];
-        // Skip if already has a manually-seeded value
-        if (existingKeys.has(`daily_balance_${date}`)) {
-          results.push(`skipped: ${date} (already has balance)`);
-          // Use the existing SOD as the running balance for the next iteration
-          const existing = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${date}` } });
+        if (existingKeys.has(`${balKeyPrefix}${date}`)) {
+          results.push(`skipped [${modeTag}]: ${date} (already has balance)`);
+          const existing = await prisma.agentConfig.findUnique({ where: { key: `${balKeyPrefix}${date}` } });
           if (existing) runningBalance = parseFloat(existing.value);
           continue;
         }
         await prisma.agentConfig.upsert({
-          where: { key: `daily_balance_${date}` },
+          where: { key: `${balKeyPrefix}${date}` },
           update: { value: String(sodBalance) },
-          create: { key: `daily_balance_${date}`, value: String(sodBalance) },
+          create: { key: `${balKeyPrefix}${date}`, value: String(sodBalance) },
         });
-        if (!existingEodKeys.has(`eod_balance_${date}`)) {
+        if (!existingEodKeys.has(`${eodKeyPrefix}${date}`)) {
           await prisma.agentConfig.upsert({
-            where: { key: `eod_balance_${date}` },
+            where: { key: `${eodKeyPrefix}${date}` },
             update: { value: String(eodBalance) },
-            create: { key: `eod_balance_${date}`, value: String(eodBalance) },
+            create: { key: `${eodKeyPrefix}${date}`, value: String(eodBalance) },
           });
         }
-        results.push(`reconstructed: ${date} SOD=$${sodBalance.toFixed(0)} EOD=$${eodBalance.toFixed(0)} (day P&L: $${dailyPnls[date].toFixed(0)})`);
+        results.push(`reconstructed [${modeTag}]: ${date} SOD=$${sodBalance.toFixed(0)} EOD=$${eodBalance.toFixed(0)} (day P&L: $${dailyPnls[date].toFixed(0)})`);
         runningBalance = sodBalance;
       }
     }
@@ -127,20 +131,25 @@ export async function PUT(req: NextRequest) {
 
 export async function POST() {
   try {
-    // 1. Get all futures trade logs
+    const mode = await getViewMode("futures");
+    const isLive = mode === "live";
+    const modeSymbols = isLive ? ["FUT:MES", "FUT:MNQ"] : ["FUT:ES", "FUT:NQ", "FUT:GC"];
+    const knownSymbols = isLive ? ["MES", "MNQ", "MYM", "M2K", "MGC"] : ["ES", "NQ", "GC", "YM", "RTY"];
+
+    // 1. Get futures trade logs for current mode
     const allLogs = await prisma.autoTradeLog.findMany({
-      where: { symbol: { startsWith: "FUT:" } },
+      where: { symbol: { in: modeSymbols } },
       orderBy: { createdAt: "asc" },
     });
 
     // 2. Get currently open positions from Tradovate
-    const auth = await checkTradovateAuth();
+    const auth = await checkTradovateAuth(mode);
     let openSymbols: Set<string> = new Set();
     if (auth.authenticated) {
-      const positions = await getTradovatePositions();
+      const positions = await getTradovatePositions(mode);
       for (const pos of positions) {
         if (pos.netPos !== 0) {
-          for (const sym of ["MES", "MNQ", "MYM", "M2K"]) {
+          for (const sym of knownSymbols) {
             if (pos.contractName.startsWith(sym)) openSymbols.add(sym);
           }
         }

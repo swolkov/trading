@@ -50,7 +50,7 @@ export async function GET(request: Request) {
     // Tradovate (futures)
     try {
       const tvAccount = await getTradovateAccountSummary("paper"); // Demo account (where engine trades)
-      const tvPositions = await getTradovatePositions();
+      const tvPositions = await getTradovatePositions("paper");
       const tvEquity = tvAccount.netLiq || tvAccount.balance;
 
       const today = new Date().toISOString().slice(0, 10);

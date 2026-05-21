@@ -6,6 +6,7 @@
 // Contract resolution is cached to avoid repeated Tradovate API calls.
 
 import { findContract, getBars as tradovateBars, getQuote as tradovateQuote, type BarData, TRADOVATE_CONTRACTS } from "./tradovate";
+import type { TradingMode } from "./trading-mode";
 
 // Lazy-load Yahoo only when needed (keeps Tradovate-only deploys clean)
 let _yahoo: typeof import("./yahoo") | null = null;
@@ -37,10 +38,10 @@ const YAHOO_MAP: Record<string, string> = {
 
 const contractCache = new Map<string, { id: number; name: string; tickSize: number }>();
 
-export async function resolveContract(symbol: string): Promise<{ id: number; name: string; tickSize: number } | null> {
+export async function resolveContract(symbol: string, modeOverride?: TradingMode): Promise<{ id: number; name: string; tickSize: number } | null> {
   const cached = contractCache.get(symbol);
   if (cached) return cached;
-  const contract = await findContract(symbol);
+  const contract = await findContract(symbol, modeOverride);
   if (contract) contractCache.set(symbol, contract);
   return contract;
 }
@@ -56,6 +57,7 @@ export async function getFuturesIntradayBars(
   symbol: string,
   interval: "5m" | "15m" | "1h" = "5m",
   range: "1d" | "5d" = "1d",
+  modeOverride?: TradingMode,
 ): Promise<BarData[]> {
   // Map interval + range to Tradovate bar params
   const barSize = interval === "5m" ? "5min" : interval === "15m" ? "15min" : "1h";
@@ -65,9 +67,9 @@ export async function getFuturesIntradayBars(
 
   // Try Tradovate first
   try {
-    const contract = await resolveContract(symbol);
+    const contract = await resolveContract(symbol, modeOverride);
     if (contract) {
-      const bars = await tradovateBars(contract.id, count, barSize);
+      const bars = await tradovateBars(contract.id, count, barSize, modeOverride);
       if (bars.length > 0) return bars;
     }
   } catch (err) {
@@ -91,12 +93,13 @@ export async function getFuturesIntradayBars(
 export async function getFuturesDailyBars(
   symbol: string,
   days: number = 60,
+  modeOverride?: TradingMode,
 ): Promise<{ t: string; o: number; h: number; l: number; c: number; v: number }[]> {
   // Try Tradovate first
   try {
-    const contract = await resolveContract(symbol);
+    const contract = await resolveContract(symbol, modeOverride);
     if (contract) {
-      const bars = await tradovateBars(contract.id, days, "1d");
+      const bars = await tradovateBars(contract.id, days, "1d", modeOverride);
       if (bars.length > 0) {
         // Convert unix seconds back to ISO string for daily bar format
         return bars.map((b) => ({
@@ -132,12 +135,12 @@ export interface FuturesQuote {
   source: "tradovate" | "yahoo" | "none";
 }
 
-export async function getFuturesQuote(symbol: string): Promise<FuturesQuote> {
+export async function getFuturesQuote(symbol: string, modeOverride?: TradingMode): Promise<FuturesQuote> {
   // Try Tradovate
   try {
-    const contract = await resolveContract(symbol);
+    const contract = await resolveContract(symbol, modeOverride);
     if (contract) {
-      const q = await tradovateQuote(contract.id);
+      const q = await tradovateQuote(contract.id, modeOverride);
       if (q.last > 0) return { symbol, price: q.last, volume: q.volume, bid: q.bid, ask: q.ask, source: "tradovate" };
     }
   } catch { /* fall through */ }
@@ -165,15 +168,15 @@ export async function getFuturesQuote(symbol: string): Promise<FuturesQuote> {
 
 // ── Batch Quotes (multiple symbols) ─────────────────────
 
-export async function getFuturesQuotes(symbols: string[]): Promise<Record<string, FuturesQuote>> {
+export async function getFuturesQuotes(symbols: string[], modeOverride?: TradingMode): Promise<Record<string, FuturesQuote>> {
   const results: Record<string, FuturesQuote> = {};
 
   // Try Tradovate in parallel
   const tradovateResults = await Promise.allSettled(
     symbols.map(async (sym) => {
-      const contract = await resolveContract(sym);
+      const contract = await resolveContract(sym, modeOverride);
       if (!contract) return null;
-      const q = await tradovateQuote(contract.id);
+      const q = await tradovateQuote(contract.id, modeOverride);
       if (q.last > 0) return { sym, quote: { symbol: sym, price: q.last, volume: q.volume, bid: q.bid, ask: q.ask, source: "tradovate" as const } };
       return null;
     })

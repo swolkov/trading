@@ -1,4 +1,5 @@
 import { getFuturesIntradayBars, getFuturesDailyBars } from "@/lib/futures-data";
+import { getViewMode } from "@/lib/trading-mode";
 
 // VWAP calculation (running, per-bar values for chart overlay)
 function calcVwapSeries(bars: { t: number; h: number; l: number; c: number; v: number }[]): { t: number; vwap: number; upper: number; lower: number }[] {
@@ -22,6 +23,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const symbol = (searchParams.get("symbol") || "MES").toUpperCase();
     const interval = searchParams.get("interval") || "5m";
+    const viewMode = await getViewMode("futures");
 
     // Intraday intervals — include VWAP + key levels
     if (interval === "5m" || interval === "15m" || interval === "1h") {
@@ -29,7 +31,8 @@ export async function GET(request: Request) {
       const bars = await getFuturesIntradayBars(
         symbol,
         interval as "5m" | "15m" | "1h",
-        range as "1d" | "5d"
+        range as "1d" | "5d",
+        viewMode,
       );
 
       // Compute VWAP series (running values per bar)
@@ -38,7 +41,7 @@ export async function GET(request: Request) {
       // Key levels from yesterday's bars
       let prevDayHigh = 0, prevDayLow = 0;
       try {
-        const dailyBars = await getFuturesDailyBars(symbol, 5);
+        const dailyBars = await getFuturesDailyBars(symbol, 5, viewMode);
         if (dailyBars.length >= 2) {
           const prevDay = dailyBars[dailyBars.length - 2];
           prevDayHigh = prevDay.h;
@@ -68,7 +71,7 @@ export async function GET(request: Request) {
 
     // Daily bars — no overlays
     const days = interval === "1W" ? 7 : interval === "1M" ? 30 : interval === "3M" ? 90 : interval === "1Y" ? 365 : 30;
-    const bars = await getFuturesDailyBars(symbol, days);
+    const bars = await getFuturesDailyBars(symbol, days, viewMode);
     return Response.json({ bars, overlays: null });
   } catch (error) {
     console.error("[/api/futures/bars]", error);

@@ -119,7 +119,7 @@ export async function GET() {
     let quotes: Record<string, number> = {};
     if (symbolsNeeded.length > 0) {
       try {
-        const futuresQuotes = await getFuturesQuotes(symbolsNeeded);
+        const futuresQuotes = await getFuturesQuotes(symbolsNeeded, viewMode);
         for (const [sym, q] of Object.entries(futuresQuotes)) {
           if (q.price > 0) quotes[sym] = q.price;
         }
@@ -199,7 +199,7 @@ export async function GET() {
     // Resolve any fill contractIds not in current positions
     const unmappedIds = [...new Set(fills.map((f) => f.contractId))].filter((id) => !contractMap[id]);
     for (const cid of unmappedIds) {
-      const resolved = await resolveContractSymbol(cid);
+      const resolved = await resolveContractSymbol(cid, viewMode);
       if (resolved) contractMap[cid] = resolved;
     }
 

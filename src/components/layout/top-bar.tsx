@@ -11,6 +11,7 @@ interface FuturesAccount {
   balance: number;
   netLiq: number;
   realizedPnl: number;
+  unrealizedPnl: number;
   marginUsed: number;
 }
 
@@ -18,6 +19,7 @@ interface FuturesData {
   connected: boolean;
   account: FuturesAccount | null;
   startOfDayBalance?: number | null;
+  todayTradesPnl?: number | null;
 }
 
 interface MarketClock {
@@ -88,8 +90,15 @@ export function TopBar() {
   const futuresEquity = futuresData?.account?.netLiq || futuresData?.account?.balance || futuresData?.startOfDayBalance || 0;
   const balance = futuresData?.account?.balance || futuresData?.startOfDayBalance || 0;
   const sod = futuresData?.startOfDayBalance;
-  const dailyPnl = (sod != null && balance) ? balance - sod : (futuresData?.account?.realizedPnl || 0);
-  const dailyPct = sod && sod > 0 ? dailyPnl / sod : 0;
+  // Primary: sum of today's actual trade P&Ls + any unrealized P&L (most reliable)
+  // Fallback: balance - SOD (can be wrong if SOD is stale from engine restart)
+  const tradePnl = futuresData?.todayTradesPnl;
+  const unrealizedPnl = futuresData?.account?.unrealizedPnl || 0;
+  const balanceDelta = (sod != null && balance) ? balance - sod : null;
+  const dailyPnl = tradePnl != null
+    ? tradePnl + unrealizedPnl
+    : (balanceDelta != null ? balanceDelta : (futuresData?.account?.realizedPnl || 0));
+  const dailyPct = sod && sod > 0 ? dailyPnl / sod : (balance > 0 ? dailyPnl / balance : 0);
   const hasFutures = futuresData?.connected && futuresData.account;
   const equity = futuresEquity;
 

@@ -730,14 +730,17 @@ export async function runFuturesAgent(): Promise<{
     }
   } catch { /* use defaults */ }
 
-  // DEMO: Override limits for aggressive learning (more contracts, more trades)
-  const demoMaxContracts = tradingMode === "paper" ? 8 : FUTURES_RULES.MAX_TOTAL_CONTRACTS;
-  const demoMaxContractsPerTrade = tradingMode === "paper" ? 10 : FUTURES_RULES.MAX_CONTRACTS_PER_TRADE;
-  const demoMaxTrades = tradingMode === "paper" ? 20 : FUTURES_RULES.MAX_TRADES_PER_DAY;
-  const demoMaxTradesAplus = tradingMode === "paper" ? 40 : FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
+  // DEMO: Ultra-aggressive mode — target thousands/day on $50K account
+  // Full-size ES/NQ/GC with massive position sizing and high trade volume
+  const demoMaxContracts = tradingMode === "paper" ? 25 : FUTURES_RULES.MAX_TOTAL_CONTRACTS;
+  const demoMaxContractsPerTrade = tradingMode === "paper" ? 20 : FUTURES_RULES.MAX_CONTRACTS_PER_TRADE;
+  const demoMaxTrades = tradingMode === "paper" ? 50 : FUTURES_RULES.MAX_TRADES_PER_DAY;
+  const demoMaxTradesAplus = tradingMode === "paper" ? 100 : FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
 
   // Calculate risk limits based on equity (adjusted by overrides)
-  const maxRiskPerTrade = equity * FUTURES_RULES.RISK_PER_TRADE_PCT * sizeOverride;
+  // DEMO: 15% risk per trade ($7,500 on $50K) for aggressive sizing
+  const demoRiskPct = tradingMode === "paper" ? 0.15 : FUTURES_RULES.RISK_PER_TRADE_PCT;
+  const maxRiskPerTrade = equity * demoRiskPct * sizeOverride;
   const dailyLossLimit = equity * FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
   details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade${sizeOverride !== 1.0 ? ` (${sizeOverride.toFixed(2)}x adjusted)` : ""} | $${dailyLossLimit.toFixed(0)} daily limit`);
 
@@ -1205,7 +1208,9 @@ export async function runFuturesAgent(): Promise<{
       details.push(`  Counter-trend warning: 15m trend is ${trend15}, setup is ${setup.direction}`);
     }
 
-    if (setup.confidence < 60) {
+    // DEMO: Lower pre-AI threshold to let more setups through for aggressive trading
+    const preAiThreshold = tradingMode === "paper" ? 40 : 60;
+    if (setup.confidence < preAiThreshold) {
       details.push(`  Setup found (${setup.type}) but pre-AI confidence too low: ${setup.confidence}% — not worth AI call`);
       continue;
     }
@@ -1218,7 +1223,7 @@ export async function runFuturesAgent(): Promise<{
     try {
       const aiPrompt = `You are an elite futures scalper trading a $${equity.toLocaleString()} ${tradingMode === "paper" ? "DEMO" : "LIVE"} account with up to ${demoMaxContractsPerTrade} ${symbol} contracts per trade. Risk per trade: $${maxRiskPerTrade.toFixed(0)}. Daily loss limit: $${dailyLossLimit.toFixed(0)}.${tradingMode === "paper" ? " DEMO MODE: Trade aggressively for maximum learning — every trade teaches the brain." : " Goal: catch big moves on high-conviction setups."}
 
-CRITICAL: Only A+ and A setups execute. B and C are KILLED immediately. We need explosive R:R (3:1+) with technical confluence across timeframes. A skipped trade costs $0, a bad trade costs real risk. Be ruthlessly selective — but when the setup is textbook, say YES with full conviction.
+${tradingMode === "paper" ? "DEMO AGGRESSIVE MODE: A+, A, AND B setups ALL execute. Only C is killed. We want VOLUME — take every trade with reasonable edge (2:1+ R:R). The goal is maximum profit and learning. Be AGGRESSIVE — if there's any edge at all, grade it B or higher. We're here to make thousands per day on full-size contracts." : "CRITICAL: Only A+ and A setups execute. B and C are KILLED immediately. We need explosive R:R (3:1+) with technical confluence across timeframes. A skipped trade costs $0, a bad trade costs real risk. Be ruthlessly selective — but when the setup is textbook, say YES with full conviction."}
 
 ${symbol} setup:
 Price: $${price.toFixed(2)} | VWAP: $${vwapData.vwap.toFixed(2)} | RSI: ${currentRSI?.toFixed(0)} | ATR: ${currentATR.toFixed(2)}

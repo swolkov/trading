@@ -294,17 +294,17 @@ export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: strin
   M2K: { name: "Micro E-mini Russell 2000", exchange: "CME", multiplier: 5, tickSize: 0.1 },
 };
 
-export async function findContract(symbol: string): Promise<{ id: number; name: string; tickSize: number } | null> {
+export async function findContract(symbol: string, modeOverride?: TradingMode): Promise<{ id: number; name: string; tickSize: number } | null> {
   try {
     // Tradovate contract names include month code: MESM5, MNQM5, etc.
     // Find the front-month contract
-    const contracts = await tvFetch(`/contract/suggest?t=${symbol}&l=5`) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
+    const contracts = await tvFetch(`/contract/suggest?t=${symbol}&l=5`, undefined, modeOverride) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
     if (contracts.length > 0) {
       return { id: contracts[0].id, name: contracts[0].name, tickSize: contracts[0].providerTickSize || contracts[0].tickSize };
     }
 
     // Fallback: search by name
-    const search = await tvFetch(`/contract/find?name=${symbol}`) as { id: number; name: string; tickSize: number; providerTickSize: number };
+    const search = await tvFetch(`/contract/find?name=${symbol}`, undefined, modeOverride) as { id: number; name: string; tickSize: number; providerTickSize: number };
     if (search?.id) {
       return { id: search.id, name: search.name, tickSize: search.providerTickSize || search.tickSize };
     }
@@ -327,9 +327,9 @@ async function getMdBaseUrl(modeOverride?: TradingMode): Promise<string> {
 }
 
 // Fetch from the dedicated MD server (falls back to main API server)
-async function mdFetch(path: string): Promise<unknown> {
-  const token = await authenticate();
-  const mdUrl = await getMdBaseUrl();
+async function mdFetch(path: string, modeOverride?: TradingMode): Promise<unknown> {
+  const token = await authenticate(modeOverride);
+  const mdUrl = await getMdBaseUrl(modeOverride);
 
   // Try dedicated MD server first
   try {
@@ -341,12 +341,12 @@ async function mdFetch(path: string): Promise<unknown> {
   } catch { /* MD server unavailable, fall through */ }
 
   // Fall back to main API server (works on some Tradovate plans)
-  return tvFetch(path);
+  return tvFetch(path, undefined, modeOverride);
 }
 
 export type BarData = { t: number; o: number; h: number; l: number; c: number; v: number };
 
-export async function getBars(contractId: number, count: number = 100, barSize: string = "5min"): Promise<BarData[]> {
+export async function getBars(contractId: number, count: number = 100, barSize: string = "5min", modeOverride?: TradingMode): Promise<BarData[]> {
   const elementSize = barSize === "5min" ? 5 : barSize === "15min" ? 15 : barSize === "1h" ? 60 : barSize === "1d" ? 1 : 5;
   const underlyingType = barSize === "1d" ? "DailyBar" : "MinuteBar";
 
@@ -358,7 +358,8 @@ export async function getBars(contractId: number, count: number = 100, barSize: 
   const timeRange = encodeURIComponent(JSON.stringify({ asMuchAsElements: count }));
 
   const data = await mdFetch(
-    `/md/getChart?contractId=${contractId}&chartDescription=${chartDesc}&timeRange=${timeRange}`
+    `/md/getChart?contractId=${contractId}&chartDescription=${chartDesc}&timeRange=${timeRange}`,
+    modeOverride,
   ) as { charts?: { id: number; td: number; bars: { timestamp: string; open: number; high: number; low: number; close: number; upVolume: number; downVolume: number }[] }[] };
 
   if (!data?.charts || data.charts.length === 0 || !data.charts[0]?.bars) return [];
@@ -375,10 +376,10 @@ export async function getBars(contractId: number, count: number = 100, barSize: 
     }));
 }
 
-export async function getQuote(contractId: number): Promise<{ last: number; bid: number; ask: number; volume: number }> {
+export async function getQuote(contractId: number, modeOverride?: TradingMode): Promise<{ last: number; bid: number; ask: number; volume: number }> {
   // Get the latest 1-minute bar for a near-real-time price snapshot
   try {
-    const bars = await getBars(contractId, 1, "5min");
+    const bars = await getBars(contractId, 1, "5min", modeOverride);
     if (bars.length > 0) {
       const bar = bars[bars.length - 1];
       return { last: bar.c, bid: 0, ask: 0, volume: bar.v };
@@ -387,7 +388,7 @@ export async function getQuote(contractId: number): Promise<{ last: number; bid:
 
   // Fallback: contract item (may have stale lastPrice)
   try {
-    const q = await tvFetch(`/contract/item?id=${contractId}`) as { lastPrice?: number };
+    const q = await tvFetch(`/contract/item?id=${contractId}`, undefined, modeOverride) as { lastPrice?: number };
     return { last: q.lastPrice || 0, bid: 0, ask: 0, volume: 0 };
   } catch {
     return { last: 0, bid: 0, ask: 0, volume: 0 };
@@ -718,18 +719,19 @@ export async function getTradovateFills(modeOverride?: TradingMode): Promise<Tra
 
 // Resolve a Tradovate contractId to a symbol (MES, MNQ, etc.)
 // Get historical cash balance logs (daily settlement records)
-export async function getCashBalanceLogs(): Promise<{ id: number; accountId: number; timestamp: string; tradeDate: { year: number; month: number; day: number }; currencyId: number; amount: number; realizedPnL: number; weekRealizedPnL: number }[]> {
+export async function getCashBalanceLogs(modeOverride?: TradingMode): Promise<{ id: number; accountId: number; timestamp: string; tradeDate: { year: number; month: number; day: number }; currencyId: number; amount: number; realizedPnL: number; weekRealizedPnL: number }[]> {
   try {
-    const logs = await tvFetch(`/cashBalanceLog/ldeps?masterid=${_accountId}`) as unknown[];
+    const accountId = await getAccountIdForMode(modeOverride);
+    const logs = await tvFetch(`/cashBalanceLog/ldeps?masterid=${accountId}`, undefined, modeOverride) as unknown[];
     return (Array.isArray(logs) ? logs : []) as { id: number; accountId: number; timestamp: string; tradeDate: { year: number; month: number; day: number }; currencyId: number; amount: number; realizedPnL: number; weekRealizedPnL: number }[];
   } catch {
     return [];
   }
 }
 
-export async function resolveContractSymbol(contractId: number): Promise<string | null> {
+export async function resolveContractSymbol(contractId: number, modeOverride?: TradingMode): Promise<string | null> {
   try {
-    const contract = await tvFetch(`/contract/item?id=${contractId}`) as { name: string };
+    const contract = await tvFetch(`/contract/item?id=${contractId}`, undefined, modeOverride) as { name: string };
     if (contract?.name) {
       for (const sym of Object.keys(TRADOVATE_CONTRACTS)) {
         if (contract.name.startsWith(sym)) return sym;

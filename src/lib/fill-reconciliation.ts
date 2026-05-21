@@ -165,7 +165,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
 
   try {
     // 1. Check auth
-    const auth = await checkTradovateAuth();
+    const auth = await checkTradovateAuth(modeOverride);
     if (!auth.authenticated) {
       details.push("Tradovate not connected — skipping reconciliation");
       return result;
@@ -208,7 +208,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     // Resolve unmapped contracts via Tradovate API
     for (const cid of uniqueContractIds) {
       if (!contractMap[cid]) {
-        const resolved = await resolveContractSymbol(cid);
+        const resolved = await resolveContractSymbol(cid, modeOverride);
         contractMap[cid] = resolved || "UNKNOWN";
       }
     }

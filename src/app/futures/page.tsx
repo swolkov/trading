@@ -117,6 +117,7 @@ interface PositionsData {
   activity: ActivityLog[];
   engineStatus?: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number };
   startOfDayBalance?: number | null;
+  todayTradesPnl?: number | null;
   startingCapital?: number;
   viewMode?: string;
   balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
@@ -355,13 +356,17 @@ export default function FuturesPage() {
   const weeklyTrades = closedTrades.filter((t) => t.time >= weekStart.toISOString()).length;
   const monthlyTrades = closedTrades.filter((t) => t.time >= monthStart.toISOString()).length;
 
-  // Balance-based P&L (source of truth)
+  // Daily P&L: prefer actual trade fill sums (reliable), fallback to balance delta
   const currentBalance = posData?.account?.balance;
   const startOfDayBalance = posData?.startOfDayBalance;
+  const tradePnl = posData?.todayTradesPnl;
+  const unrealizedPnl = posData?.account?.unrealizedPnl || 0;
   const calendarDayPnl = (startOfDayBalance != null && currentBalance != null)
     ? currentBalance - startOfDayBalance
     : null;
-  const dailyPnl = calendarDayPnl ?? (posData?.account?.realizedPnl || 0);
+  const dailyPnl = tradePnl != null
+    ? tradePnl + unrealizedPnl
+    : (calendarDayPnl ?? (posData?.account?.realizedPnl || 0));
 
   // Balance history for period P&L
   const balanceHistory = posData?.balanceHistory || [];
@@ -1266,7 +1271,7 @@ export default function FuturesPage() {
                                   const res = await fetch("/api/futures/close", {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ symbol: pos.symbol }),
+                                    body: JSON.stringify({ symbol: pos.symbol, mode: isLiveView ? "live" : "paper" }),
                                   });
                                   const data = await res.json();
                                   if (data.closed?.length) alert(`Closed: ${data.closed.join(", ")}`);

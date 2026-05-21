@@ -1,11 +1,13 @@
 import { runFuturesAgent } from "@/lib/futures-agent";
 import { checkTradovateAuth } from "@/lib/tradovate";
+import { getViewMode } from "@/lib/trading-mode";
 
 export const maxDuration = 300;
 
 export async function GET() {
   try {
-    const auth = await checkTradovateAuth();
+    const viewMode = await getViewMode("futures");
+    const auth = await checkTradovateAuth(viewMode);
     return Response.json({
       connected: auth.authenticated,
       accountId: auth.accountId,

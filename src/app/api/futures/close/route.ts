@@ -1,29 +1,38 @@
 import { checkTradovateAuth, getTradovatePositions, placeMarketOrder, getOpenOrders, cancelOrder, getTradovateFills } from "@/lib/tradovate";
 import { prisma } from "@/lib/db";
 import { logTradeToJournal, logDecision } from "@/lib/vault";
+import { getViewMode } from "@/lib/trading-mode";
 
-const MULTIPLIERS: Record<string, number> = { MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5 };
+// Multipliers for both micro (live) and full-size (demo) contracts
+const MULTIPLIERS: Record<string, number> = {
+  MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
+  ES: 50, NQ: 20, GC: 100, YM: 5, RTY: 50,
+};
+const KNOWN_SYMBOLS = ["MES", "MNQ", "MGC", "MYM", "M2K", "ES", "NQ", "GC", "YM", "RTY"];
 
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const targetSymbol = body.symbol || "all"; // "MNQ", "MES", or "all"
+    const targetSymbol = body.symbol || "all";
 
-    const auth = await checkTradovateAuth();
+    // Use view mode so the Close button acts on the account the user is viewing
+    const mode = body.mode || await getViewMode("futures");
+
+    const auth = await checkTradovateAuth(mode);
     if (!auth.authenticated) {
       return Response.json({ error: "Tradovate not connected" }, { status: 400 });
     }
 
-    // Get positions via centralized client (with timeout, rate limit, token refresh)
-    const positions = await getTradovatePositions();
+    // Get positions via centralized client — use view mode to close the right account
+    const positions = await getTradovatePositions(mode);
     const openPos = positions.filter(p => p.netPos !== 0);
 
     const closed: string[] = [];
 
     for (const pos of openPos) {
-      // Match symbol
+      // Match symbol (both micro and full-size)
       let sym = "";
-      for (const s of ["MES", "MNQ", "MGC", "MYM", "M2K"]) {
+      for (const s of KNOWN_SYMBOLS) {
         if (pos.contractName.startsWith(s)) { sym = s; break; }
       }
       if (!sym) continue;
@@ -37,7 +46,7 @@ export async function POST(request: Request) {
       let closePrice = pos.netPrice;
       try {
         const { getFuturesQuote } = await import("@/lib/futures-data");
-        const q = await getFuturesQuote(sym);
+        const q = await getFuturesQuote(sym, mode);
         if (q.price > 0) closePrice = q.price;
       } catch {}
 
@@ -59,7 +68,7 @@ export async function POST(request: Request) {
       if (orderId) {
         try {
           await new Promise(r => setTimeout(r, 1500));
-          const fills = await getTradovateFills();
+          const fills = await getTradovateFills(mode);
           const myFills = fills.filter(f => f.orderId === orderId);
           if (myFills.length > 0) {
             const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
@@ -114,11 +123,11 @@ export async function POST(request: Request) {
 
     // Cancel working orders for closed symbols via centralized client
     try {
-      const orders = await getOpenOrders();
+      const orders = await getOpenOrders(mode);
       const closedContractIds = new Set(openPos
         .filter(p => {
           let sym = "";
-          for (const s of ["MES", "MNQ", "MGC", "MYM", "M2K"]) {
+          for (const s of KNOWN_SYMBOLS) {
             if (p.contractName.startsWith(s)) { sym = s; break; }
           }
           return targetSymbol === "all" || sym === targetSymbol.toUpperCase();

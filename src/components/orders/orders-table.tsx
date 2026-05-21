@@ -233,20 +233,26 @@ function OrdersTableInner({
   }, [unified, assetFilter]);
 
   // Compute summary for parent
-  // Today's P&L uses Tradovate balance delta (source of truth), NOT DB trade sums
+  // Today's P&L: prefer actual trade fill sums (reliable), fallback to balance delta
   useMemo(() => {
     if (!onSummary) return;
     const today = new Date().toISOString().slice(0, 10);
     const todayItems = filtered.filter((o) => o.time.slice(0, 10) === today);
-    // Balance-based daily P&L (correct) — falls back to DB sum only if no balance data
+    // Primary: sum of today's actual fills P&L from the engine (most accurate)
+    const tradePnl = futuresData?.todayTradesPnl;
+    const unrealizedPnl = futuresData?.account?.unrealizedPnl || 0;
+    // Fallback: balance delta (can be wrong if SOD is stale)
     const balancePnl = (futuresData?.startOfDayBalance != null && futuresData?.account?.balance != null)
       ? futuresData.account.balance - futuresData.startOfDayBalance
       : null;
+    const dailyPnl = tradePnl != null
+      ? tradePnl + unrealizedPnl
+      : (balancePnl ?? todayItems.reduce((s, o) => s + (o.pnl || 0), 0));
     onSummary({
       totalShown: filtered.length,
       openCount: filtered.filter((o) => !["filled", "canceled", "cancelled", "expired", "rejected"].includes(o.status.toLowerCase())).length,
       filledCount: filtered.filter((o) => o.status.toLowerCase() === "filled").length,
-      todayPnl: balancePnl ?? todayItems.reduce((s, o) => s + (o.pnl || 0), 0),
+      todayPnl: dailyPnl,
       todayFills: todayItems.filter((o) => o.status.toLowerCase() === "filled").length,
     });
   }, [filtered, onSummary, futuresData]);
