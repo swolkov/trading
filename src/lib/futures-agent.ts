@@ -381,7 +381,12 @@ type SetupType =
   | "vwap_mean_reversion"
   | "trend_continuation"
   | "key_level_bounce"
+  | "key_level_breakout"
   | "ema_crossover"
+  | "ema_momentum"
+  | "rsi_extreme"
+  | "vwap_crossover"
+  | "range_scalp"
   | "none";
 
 interface Setup {
@@ -470,15 +475,23 @@ function detectSetup(
   // ── SETUP 2: TREND CONTINUATION ──
   // ONLY on trend days or in trending regime. Pullback to EMA zone (within 0.3%, not exact touch).
   // Requires: volume declining on pullback (healthy), RSI not extreme.
-  if ((dayType === "trend" || regime === "bull" || regime === "bear") &&
-      (session === "morning" || session === "afternoon")) {
+  // DEMO: All sessions allowed, not just morning/afternoon
+  const trendSessions = tradingMode === "paper"
+    ? true
+    : (session === "morning" || session === "afternoon");
+  if ((dayType === "trend" || regime === "bull" || regime === "bear") && trendSessions) {
     const isTrendUp = fastEMA > slowEMA;
     const isTrendDown = fastEMA < slowEMA;
-    const nearEMA9 = Math.abs(price - fastEMA) / price < 0.003; // within 0.3%
+    // DEMO: Wider EMA zone (0.6%) to catch more pullbacks
+    const emaZone = tradingMode === "paper" ? 0.006 : 0.003;
+    const nearEMA9 = Math.abs(price - fastEMA) / price < emaZone;
     const aboveEMA21 = price > slowEMA;
     const belowEMA21 = price < slowEMA;
 
-    if (isTrendUp && nearEMA9 && aboveEMA21 && currentRSI > 35 && currentRSI < 65) {
+    // DEMO: Wider RSI range (25-75) to catch more setups
+    const rsiLow = tradingMode === "paper" ? 25 : 35;
+    const rsiHigh = tradingMode === "paper" ? 75 : 65;
+    if (isTrendUp && nearEMA9 && aboveEMA21 && currentRSI > rsiLow && currentRSI < rsiHigh) {
       let conf = 75;
       // Boost: volume declining on pullback (healthy pullback, not selling pressure)
       if (volume.trend === "declining" || volume.trend === "dry") conf += 8;
@@ -498,7 +511,7 @@ function detectSetup(
         targetDistance: currentATR * 2.5,
       };
     }
-    if (isTrendDown && nearEMA9 && belowEMA21 && currentRSI > 35 && currentRSI < 65) {
+    if (isTrendDown && nearEMA9 && belowEMA21 && currentRSI > rsiLow && currentRSI < rsiHigh) {
       let conf = 75;
       if (volume.trend === "declining" || volume.trend === "dry") conf += 8;
       if (price < vwapData.vwap) conf += 5;
@@ -517,9 +530,14 @@ function detectSetup(
 
   // ── SETUP 3: VWAP MEAN REVERSION ──
   // ONLY on range days or choppy regime. Requires: declining volume at extreme + RSI confirmation.
-  // This is the highest-probability setup when conditions are right.
-  if ((dayType === "range" || regime === "choppy" || regime === "neutral") &&
-      (session === "morning" || session === "midday" || session === "afternoon")) {
+  // DEMO: Allow on any day type — VWAP extremes can revert even on trend days
+  const vwapDayFilter = tradingMode === "paper"
+    ? true
+    : (dayType === "range" || regime === "choppy" || regime === "neutral");
+  const vwapSessionFilter = tradingMode === "paper"
+    ? true
+    : (session === "morning" || session === "midday" || session === "afternoon");
+  if (vwapDayFilter && vwapSessionFilter) {
     // Short from VWAP upper band
     if (price > vwapData.upperBand && currentRSI > 65) {
       let conf = 68;
@@ -565,11 +583,146 @@ function detectSetup(
     }
   }
 
-  // ── NO SETUP ──
-  // Key Level Bounce: KILLED — prev day H/L are magnets, not reliable bounces
-  // EMA Crossover: KILLED — lagging signal, move is often exhausted by the time it triggers
+  // ── DEMO-ONLY SETUPS: More aggressive patterns for maximum learning ──
+  if (tradingMode === "paper") {
 
-  return { type: "none", direction: "long", confidence: 0, reasoning: "No valid setup", stopDistance: 0, targetDistance: 0 };
+    // ── SETUP 4: EMA MOMENTUM ──
+    // Trade with the trend when EMAs are aligned and price is moving. No pullback needed.
+    if (fastEMA > slowEMA && price > fastEMA && currentRSI > 50 && currentRSI < 80) {
+      let conf = 55;
+      if (volume.ratio > 1.2) conf += 8;
+      if (price > vwapData.vwap) conf += 5;
+      if ((fastEMA - slowEMA) / price > 0.001) conf += 5; // EMAs spreading = strong trend
+      if (price > levels.prevDayHigh && levels.prevDayHigh > 0) conf += 5;
+      return {
+        type: "ema_momentum", direction: "long", confidence: conf,
+        reasoning: `EMA momentum long: price $${price.toFixed(2)} > EMA9 $${fastEMA.toFixed(2)} > EMA21 $${slowEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`,
+        stopDistance: currentATR * 1.5,
+        targetDistance: currentATR * 3.0,
+      };
+    }
+    if (fastEMA < slowEMA && price < fastEMA && currentRSI > 20 && currentRSI < 50) {
+      let conf = 55;
+      if (volume.ratio > 1.2) conf += 8;
+      if (price < vwapData.vwap) conf += 5;
+      if ((slowEMA - fastEMA) / price > 0.001) conf += 5;
+      if (price < levels.prevDayLow && levels.prevDayLow > 0) conf += 5;
+      return {
+        type: "ema_momentum", direction: "short", confidence: conf,
+        reasoning: `EMA momentum short: price $${price.toFixed(2)} < EMA9 $${fastEMA.toFixed(2)} < EMA21 $${slowEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}`,
+        stopDistance: currentATR * 1.5,
+        targetDistance: currentATR * 3.0,
+      };
+    }
+
+    // ── SETUP 5: KEY LEVEL BREAKOUT ──
+    // Price breaking above prev day high or below prev day low with conviction
+    if (levels.prevDayHigh > 0 && price > levels.prevDayHigh) {
+      const breakDist = price - levels.prevDayHigh;
+      if (breakDist < currentATR * 1.5) { // not too extended
+        let conf = 58;
+        if (volume.ratio > 1.3) conf += 10;
+        if (fastEMA > slowEMA) conf += 5; // trend aligned
+        if (currentRSI > 55 && currentRSI < 80) conf += 3;
+        return {
+          type: "key_level_breakout", direction: "long", confidence: conf,
+          reasoning: `PDH breakout long: price $${price.toFixed(2)} > PDH $${levels.prevDayHigh.toFixed(2)} by ${breakDist.toFixed(2)}pts, vol ${volume.ratio.toFixed(1)}x`,
+          stopDistance: Math.max(currentATR * 1.2, breakDist + currentATR * 0.5),
+          targetDistance: currentATR * 3.0,
+        };
+      }
+    }
+    if (levels.prevDayLow > 0 && price < levels.prevDayLow) {
+      const breakDist = levels.prevDayLow - price;
+      if (breakDist < currentATR * 1.5) {
+        let conf = 58;
+        if (volume.ratio > 1.3) conf += 10;
+        if (fastEMA < slowEMA) conf += 5;
+        if (currentRSI > 20 && currentRSI < 45) conf += 3;
+        return {
+          type: "key_level_breakout", direction: "short", confidence: conf,
+          reasoning: `PDL breakout short: price $${price.toFixed(2)} < PDL $${levels.prevDayLow.toFixed(2)} by ${breakDist.toFixed(2)}pts, vol ${volume.ratio.toFixed(1)}x`,
+          stopDistance: Math.max(currentATR * 1.2, breakDist + currentATR * 0.5),
+          targetDistance: currentATR * 3.0,
+        };
+      }
+    }
+
+    // ── SETUP 6: RSI EXTREME REVERSAL ──
+    // Oversold/overbought bounce — mean reversion on RSI extremes
+    if (currentRSI < 25) {
+      let conf = 55;
+      if (volume.trend === "declining" || volume.trend === "dry") conf += 10; // exhaustion
+      if (price < vwapData.lowerBand) conf += 5;
+      if (price > levels.prevDayLow || levels.prevDayLow === 0) conf += 3; // not in freefall
+      return {
+        type: "rsi_extreme", direction: "long", confidence: conf,
+        reasoning: `RSI extreme long: RSI ${currentRSI.toFixed(0)} oversold, vol ${volume.trend}, price $${price.toFixed(2)}`,
+        stopDistance: currentATR * 1.5,
+        targetDistance: currentATR * 2.5,
+      };
+    }
+    if (currentRSI > 75) {
+      let conf = 55;
+      if (volume.trend === "declining" || volume.trend === "dry") conf += 10;
+      if (price > vwapData.upperBand) conf += 5;
+      if (price < levels.prevDayHigh || levels.prevDayHigh === 0) conf += 3;
+      return {
+        type: "rsi_extreme", direction: "short", confidence: conf,
+        reasoning: `RSI extreme short: RSI ${currentRSI.toFixed(0)} overbought, vol ${volume.trend}, price $${price.toFixed(2)}`,
+        stopDistance: currentATR * 1.5,
+        targetDistance: currentATR * 2.5,
+      };
+    }
+
+    // ── SETUP 7: VWAP CROSSOVER ──
+    // Price crossing VWAP with EMA alignment — momentum trade
+    const prevClose = closes[closes.length - 2];
+    if (prevClose < vwapData.vwap && price > vwapData.vwap && fastEMA > slowEMA) {
+      let conf = 52;
+      if (volume.ratio > 1.0) conf += 8;
+      if (currentRSI > 45 && currentRSI < 65) conf += 5; // not overextended
+      return {
+        type: "vwap_crossover", direction: "long", confidence: conf,
+        reasoning: `VWAP cross long: price crossed above VWAP $${vwapData.vwap.toFixed(2)}, EMA aligned up, RSI ${currentRSI.toFixed(0)}`,
+        stopDistance: currentATR * 1.2,
+        targetDistance: currentATR * 2.5,
+      };
+    }
+    if (prevClose > vwapData.vwap && price < vwapData.vwap && fastEMA < slowEMA) {
+      let conf = 52;
+      if (volume.ratio > 1.0) conf += 8;
+      if (currentRSI > 35 && currentRSI < 55) conf += 5;
+      return {
+        type: "vwap_crossover", direction: "short", confidence: conf,
+        reasoning: `VWAP cross short: price crossed below VWAP $${vwapData.vwap.toFixed(2)}, EMA aligned down, RSI ${currentRSI.toFixed(0)}`,
+        stopDistance: currentATR * 1.2,
+        targetDistance: currentATR * 2.5,
+      };
+    }
+
+    // ── SETUP 8: RANGE SCALP ──
+    // When nothing else triggers — any EMA alignment with reasonable RSI. Lowest conviction.
+    if (fastEMA > slowEMA && currentRSI > 40 && currentRSI < 70) {
+      return {
+        type: "range_scalp", direction: "long", confidence: 45,
+        reasoning: `Range scalp long: EMA9 > EMA21, RSI ${currentRSI.toFixed(0)}, price $${price.toFixed(2)}`,
+        stopDistance: currentATR * 1.0,
+        targetDistance: currentATR * 2.0,
+      };
+    }
+    if (fastEMA < slowEMA && currentRSI > 30 && currentRSI < 60) {
+      return {
+        type: "range_scalp", direction: "short", confidence: 45,
+        reasoning: `Range scalp short: EMA9 < EMA21, RSI ${currentRSI.toFixed(0)}, price $${price.toFixed(2)}`,
+        stopDistance: currentATR * 1.0,
+        targetDistance: currentATR * 2.0,
+      };
+    }
+  }
+
+  // ── NO SETUP ──
+  return { type: "none", direction: "long", confidence: 0, reasoning: `No valid setup: RSI ${currentRSI.toFixed(0)} not extreme | ${session !== "morning" ? "not morning (no OR breakout)" : "no OR break"} | ${dayType === "trend" ? "trend day (VWAP reversion needs range)" : "no trend pullback"}`, stopDistance: 0, targetDistance: 0 };
 }
 
 // ============ MAIN FUTURES AGENT ============
