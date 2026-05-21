@@ -44,6 +44,11 @@ interface Position {
   entryPrice: number;
   stopLoss: number | null;
   target: number | null;
+  unrealizedPnl?: number;
+  quantity?: number;
+  multiplier?: number;
+  aiScore?: number | null;
+  setup?: string | null;
 }
 
 const TIMEFRAMES = [
@@ -407,42 +412,53 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         );
 
         if (pos) {
-          // Entry line
+          // Calculate R:R and risk info for labels
+          const stopDist = pos.stopLoss ? Math.abs(pos.entryPrice - pos.stopLoss) : 0;
+          const targetDist = pos.target ? Math.abs(pos.target - pos.entryPrice) : 0;
+          const rr = stopDist > 0 && targetDist > 0 ? (targetDist / stopDist).toFixed(1) : "?";
+          const pnlStr = pos.unrealizedPnl != null ? `${pos.unrealizedPnl >= 0 ? "+" : ""}$${pos.unrealizedPnl.toFixed(0)}` : "";
+          const qtyStr = pos.quantity ? `${pos.quantity}x ` : "";
+          const aiStr = pos.aiScore ? ` AI:${pos.aiScore}%` : "";
+
+          // Entry line — shows direction, qty, price, R:R, and current P&L
           priceLinesRef.current.push(
             candleRef.current!.createPriceLine({
               price: pos.entryPrice,
               color: "#3b82f6",
               lineWidth: 2,
-              lineStyle: 0, // solid
+              lineStyle: 0,
               axisLabelVisible: true,
-              title: `${pos.direction.toUpperCase()} @ ${pos.entryPrice.toFixed(2)}`,
+              title: `${qtyStr}${pos.direction.toUpperCase()} @ ${pos.entryPrice.toFixed(2)}  R:R ${rr}  ${pnlStr}${aiStr}`,
             })
           );
 
-          // Stop loss line
+          // Stop loss line — shows price and dollar risk
+          const mult = pos.multiplier || 5;
           if (pos.stopLoss) {
+            const riskDollars = stopDist * (pos.quantity || 1) * mult;
             priceLinesRef.current.push(
               candleRef.current!.createPriceLine({
                 price: pos.stopLoss,
                 color: "#ef4444",
                 lineWidth: 1,
-                lineStyle: 2, // dashed
+                lineStyle: 2,
                 axisLabelVisible: true,
-                title: `STOP ${pos.stopLoss.toFixed(2)}`,
+                title: `STOP ${pos.stopLoss.toFixed(2)}  (-$${riskDollars.toFixed(0)})`,
               })
             );
           }
 
-          // Target line
+          // Target line — shows price and potential profit
           if (pos.target) {
+            const rewardDollars = targetDist * (pos.quantity || 1) * mult;
             priceLinesRef.current.push(
               candleRef.current!.createPriceLine({
                 price: pos.target,
                 color: "#10b981",
                 lineWidth: 1,
-                lineStyle: 2, // dashed
+                lineStyle: 2,
                 axisLabelVisible: true,
-                title: `TARGET ${pos.target.toFixed(2)}`,
+                title: `TARGET ${pos.target.toFixed(2)}  (+$${rewardDollars.toFixed(0)})`,
               })
             );
           }
