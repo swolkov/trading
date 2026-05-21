@@ -45,6 +45,7 @@ export class TradovateWebSocket {
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private lastHeartbeat = 0;
   private symbolSubscriptions: Map<string, number> = new Map(); // symbol → requestId
+  private failedSubscriptions = 0;
   private destroyed = false;
 
   constructor(options: TradovateWSOptions) {
@@ -157,6 +158,13 @@ export class TradovateWebSocket {
       this.log(`${sym}: ${errText} (${errCode})`);
       if (errCode === "UnknownSymbol") {
         this.log(`${sym}: CME market data subscription may not be enabled on your Tradovate account`);
+        this.failedSubscriptions++;
+        // If ALL symbols failed, WebSocket is useless — disconnect and fall back to Yahoo
+        if (this.failedSubscriptions >= this.symbolSubscriptions.size) {
+          this.log("ALL symbols inaccessible — disconnecting WebSocket, Yahoo fallback active");
+          this.options.onError?.("All symbols inaccessible — CME market data not enabled for API");
+          this.destroy();
+        }
       }
       return;
     }

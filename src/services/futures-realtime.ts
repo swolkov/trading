@@ -3233,24 +3233,31 @@ async function main() {
         useLive: IS_LIVE,
         logger: log,
         onQuote: (quote: QuoteUpdate) => {
+          if (!wsConnected) {
+            wsConnected = true;
+            log("[WS-MD] First quote received — real-time streaming confirmed, Yahoo polling paused");
+          }
           onPrice(quote.symbol, quote.price, quote.volume);
           tickCount++;
           lastTickCheckTime = Date.now();
         },
         onConnect: () => {
-          wsConnected = true;
-          log("[WS-MD] Real-time streaming active — Yahoo polling paused");
+          // Don't set wsConnected here — wait for actual quote data
+          log("[WS-MD] WebSocket authorized — waiting for first quote...");
         },
         onDisconnect: () => {
           wsConnected = false;
           log("[WS-MD] Disconnected — Yahoo polling resumed");
         },
         onError: (err) => {
-          if (err.includes("UnknownSymbol") || err.includes("inaccessible")) {
-            log("[WS-MD] CME market data not subscribed — using Yahoo fallback. Enable CME MD in Tradovate settings.");
-            tradovateWS?.destroy();
-            tradovateWS = null;
+          wsConnected = false;
+          if (err.includes("inaccessible") || err.includes("UnknownSymbol")) {
+            log("[WS-MD] CME market data not accessible via API — using Yahoo fallback. Contact Tradovate support.");
+          } else {
+            log("[WS-MD] Error: " + err);
           }
+          tradovateWS?.destroy();
+          tradovateWS = null;
         },
       });
       tradovateWS.connect();
