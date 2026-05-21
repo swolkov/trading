@@ -1358,7 +1358,8 @@ export default function FuturesPage() {
           {/* ── RISK GAUGE ── */}
           {posData?.riskMetrics && (() => {
             const rm = posData.riskMetrics;
-            const todayPnl = dailyPnl;
+            // Use balance delta for risk gauge — DB trade P&L sums are double-logged and inflated
+            const todayPnl = calendarDayPnl ?? dailyPnl;
             const lossUsed = todayPnl < 0 ? Math.abs(todayPnl) : 0;
             const budgetPct = rm.dailyLossLimit > 0 ? Math.min(100, (lossUsed / rm.dailyLossLimit) * 100) : 0;
             const tradePct = rm.maxTradesPerDay > 0 ? (rm.todayTradeCount / rm.maxTradesPerDay) * 100 : 0;

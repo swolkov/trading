@@ -753,7 +753,7 @@ export async function runFuturesAgent(): Promise<{
   const dailyLossLimit = equity * demoDailyLossPct;
   details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade${sizeOverride !== 1.0 ? ` (${sizeOverride.toFixed(2)}x adjusted)` : ""} | $${dailyLossLimit.toFixed(0)} daily limit`);
 
-  // Check daily P&L (ET-aware day boundary — force ET interpretation regardless of server timezone)
+  // Check daily P&L — use BALANCE DELTA (not DB trade sums which are double-logged and inflated)
   const etDateStr = getETDateString();
   const isDST = new Date().toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }).includes("EDT");
   const todayStart = new Date(`${etDateStr}T00:00:00${isDST ? "-04:00" : "-05:00"}`);
@@ -762,8 +762,12 @@ export async function runFuturesAgent(): Promise<{
   const todayTrades = await prisma.autoTradeLog.findMany({
     where: { symbol: { in: modeSymbols }, createdAt: { gte: todayStart } },
   });
-  const todayPnl = todayTrades.filter((t) => t.pnl != null).reduce((s, t) => s + (t.pnl || 0), 0);
-  const todayTradeCount = todayTrades.filter((t) => t.action.startsWith("futures_")).length;
+  const todayTradeCount = todayTrades.filter((t) => t.action.startsWith("futures_") || t.action.startsWith("live_")).length;
+  // Daily P&L from balance delta (accurate), NOT DB trade P&L sums (inflated by double-logging)
+  const sodKey = tradingMode === "paper" ? "start_of_day_balance" : "live_start_of_day_balance";
+  const sodCfg = await prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null);
+  const startOfDayBalance = sodCfg?.value ? parseFloat(sodCfg.value) : null;
+  const todayPnl = startOfDayBalance != null ? equity - startOfDayBalance : 0;
 
   // These limits block REAL trades but the agent keeps scanning in paper/learning mode
   // Daily loss limit is absolute — no override

@@ -334,21 +334,8 @@ export async function GET() {
       fillBasedPnl,
       activity,
       engineStatus,
-      // Today's realized P&L from actual trade fills (more reliable than SOD balance delta)
-      todayTradesPnl: await (async () => {
-        try {
-          const modeSymbols = viewMode === "live"
-            ? ["FUT:MES", "FUT:MNQ"]
-            : ["FUT:ES", "FUT:NQ", "FUT:GC"];
-          const todayET = new Date().toISOString().slice(0, 10);
-          const todayStart = new Date(todayET + "T00:00:00-04:00");
-          const todayLogs = await prisma.autoTradeLog.findMany({
-            where: { symbol: { in: modeSymbols }, pnl: { not: null }, createdAt: { gte: todayStart } },
-            select: { pnl: true },
-          });
-          return todayLogs.reduce((sum, log) => sum + (log.pnl || 0), 0);
-        } catch { return null; }
-      })(),
+      // Today's P&L from balance delta — DB trade P&L sums are double-logged and inflated
+      todayTradesPnl: null, // Force fallback to calendarDayPnl (balance delta) on the frontend
       // Starting capital for P&L calculations (mode-aware)
       startingCapital: await (async () => {
         const key = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
