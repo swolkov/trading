@@ -1448,6 +1448,7 @@ interface CloseMeta {
   closeOrderId: number | null;
   reason: string;
   mult: number;
+  estimatedPnl: number;
   entrySession: string;
   entryRsi: number;
   entryVwap: number;
@@ -1487,7 +1488,14 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
     const stopDist = Math.abs(meta.entryPrice - meta.stopLoss);
     const pnlR = stopDist > 0 ? diff / stopDist : 0;
 
-    log(`[DEFERRED] ${meta.sym}: Fill price $${fillPrice.toFixed(2)} | Real P&L: $${realPnl.toFixed(2)} | R: ${pnlR.toFixed(1)}`);
+    log(`[DEFERRED] ${meta.sym}: Fill price $${fillPrice.toFixed(2)} | Real P&L: $${realPnl.toFixed(2)} | R: ${pnlR.toFixed(1)} (was est $${meta.estimatedPnl.toFixed(0)})`);
+
+    // Correct dailyPnl: remove Yahoo estimate, add real fill P&L
+    const pnlDelta = realPnl - meta.estimatedPnl;
+    if (Math.abs(pnlDelta) > 0.01) {
+      dailyPnl += pnlDelta;
+      log(`[DEFERRED] ${meta.sym}: Daily P&L corrected by $${pnlDelta.toFixed(0)} → $${dailyPnl.toFixed(0)}`);
+    }
 
     // UPDATE the DB entry with real P&L
     if (meta.dbLogId) {
@@ -1717,6 +1725,7 @@ async function closePosition(sym: string, price: number, reason: string) {
       closeOrderId,
       reason,
       mult,
+      estimatedPnl,
       entrySession: pos.entrySession || getSessionName(),
       entryRsi: pos.entryRsi || 50,
       entryVwap: pos.entryVwap,
