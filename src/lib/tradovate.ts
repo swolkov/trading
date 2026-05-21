@@ -50,9 +50,25 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
       const { token, expires, accountId: savedAcctId } = JSON.parse(shared.value);
       const expMs = new Date(expires).getTime();
       if (token && expMs > Date.now() + 300_000) { // At least 5 min remaining
-        _tokenCache[mode] = { token, expires: expMs, accountId: savedAcctId || 0 };
-        if (savedAcctId) _accountId = savedAcctId;
-        return token;
+        // Verify the token is still valid with a lightweight call
+        try {
+          const testRes = await fetch(`${mode === "live" ? LIVE_URL : DEMO_URL}/me`, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (testRes.ok) {
+            _tokenCache[mode] = { token, expires: expMs, accountId: savedAcctId || 0 };
+            if (savedAcctId) _accountId = savedAcctId;
+            return token;
+          }
+          // Token rejected — clear stale shared token
+          await prisma.agentConfig.delete({ where: { key: shareKey } }).catch(() => {});
+        } catch {
+          // Network error — try using the token anyway
+          _tokenCache[mode] = { token, expires: expMs, accountId: savedAcctId || 0 };
+          if (savedAcctId) _accountId = savedAcctId;
+          return token;
+        }
       }
     }
     // Also check bootstrap token
