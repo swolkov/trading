@@ -221,9 +221,13 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     result.tradovatePnl = roundTrips.reduce((s, rt) => s + rt.pnl, 0);
     details.push(`Matched ${roundTrips.length} round-trip trades, total P&L: $${result.tradovatePnl.toFixed(2)}`);
 
-    // 5. Get existing DB trades with P&L for comparison
-    const existingExits = dbLogs.filter((l) => l.pnl != null);
-    result.dbPnl = existingExits.reduce((s, l) => s + (l.pnl || 0), 0);
+    // 5. Get existing DB exit trades for comparison (including pnl: null from deferred logging)
+    const exitActions = ["futures_stop_loss", "futures_take_profit", "futures_trail_stop", "futures_breakeven",
+      "futures_emergency", "futures_bracket_close", "futures_manual_close", "futures_scale_out",
+      "live_stop_loss", "live_take_profit", "live_trail_stop", "live_breakeven",
+      "live_emergency", "live_bracket_close", "live_manual_close", "live_scale_out"];
+    const existingExits = dbLogs.filter((l) => exitActions.includes(l.action) || l.pnl != null);
+    result.dbPnl = existingExits.filter(l => l.pnl != null).reduce((s, l) => s + (l.pnl || 0), 0);
     result.pnlGap = result.tradovatePnl - result.dbPnl;
     details.push(`DB logged P&L: $${result.dbPnl.toFixed(2)}, gap: $${result.pnlGap.toFixed(2)}`);
 
@@ -233,23 +237,69 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
       const exitTime = new Date(rt.exitTime);
       const timeWindow = 5 * 60 * 1000; // 5 minute window
 
+      // Match by orderId (exact) first, then by time window + symbol (fuzzy)
       const matchingExit = existingExits.find((log) => {
+        // Exact match: same orderId from Tradovate fill
+        if (log.orderId && log.orderId === String(rt.exitFill.orderId)) return true;
+        // Fuzzy match: symbol + time window
         const logTime = log.createdAt.getTime();
         const sym = log.symbol.replace("FUT:", "");
         return (
           sym === rt.symbol &&
-          Math.abs(logTime - exitTime.getTime()) < timeWindow &&
-          log.pnl != null
+          Math.abs(logTime - exitTime.getTime()) < timeWindow
         );
       });
 
       if (matchingExit) {
         result.alreadyLogged++;
 
-        // P&L correction DISABLED — the FIFO matching here doesn't handle scale-outs
-        // and partial fills correctly, producing wrong values that overwrite correct ones.
-        // Total P&L now uses account equity (source of truth) instead of DB trade sums.
-        // Only backfill MISSING trades, never overwrite existing P&L values.
+        // Skip if already reconciled with fill data
+        if (matchingExit.reconciledAt) continue;
+
+        // CORRECT P&L if: null (deferred), or materially wrong (>$5 AND >10%)
+        const dbPnl = matchingExit.pnl;
+        const fillPnl = rt.pnl;
+        const needsCorrection = dbPnl == null || (() => {
+          const diff = Math.abs((dbPnl || 0) - fillPnl);
+          const magnitude = Math.max(Math.abs(fillPnl), Math.abs(dbPnl || 0), 1);
+          return diff > 5 && diff / magnitude > 0.10;
+        })();
+
+        if (needsCorrection) {
+          try {
+            await prisma.autoTradeLog.update({
+              where: { id: matchingExit.id },
+              data: {
+                pnl: fillPnl,
+                price: rt.exitPrice,
+                fillPrice: rt.exitPrice,
+                reconciledAt: new Date(),
+                originalPnl: dbPnl ?? matchingExit.originalPnl, // preserve first estimate
+                reason: matchingExit.reason + ` [CORRECTED: ${dbPnl != null ? `was $${dbPnl.toFixed(0)}` : "was pending"}, actual $${fillPnl.toFixed(0)} from fill #${rt.exitFill.id}]`,
+              },
+            });
+            result.pnlCorrections++;
+            details.push(
+              `CORRECTED: ${rt.symbol} #${matchingExit.id} P&L ${dbPnl != null ? `$${dbPnl.toFixed(0)}` : "null"} → $${fillPnl.toFixed(0)} (fill #${rt.exitFill.id})`
+            );
+
+            // Correct pattern memory if win/loss classification changed
+            const oldOutcome = dbPnl != null ? (dbPnl > 0 ? "win" : "loss") : null;
+            const newOutcome: "win" | "loss" = fillPnl > 0 ? "win" : "loss";
+            if (oldOutcome && oldOutcome !== newOutcome) {
+              try {
+                const { correctPattern } = await import("./pattern-memory");
+                const sym = matchingExit.symbol.replace("FUT:", "");
+                const direction = matchingExit.action.includes("long") || matchingExit.action.includes("buy") ? "long" : "short";
+                const stopDist = rt.entryPrice > 0 ? Math.abs(rt.exitPrice - rt.entryPrice) : 1;
+                await correctPattern(sym, direction as "long" | "short", oldOutcome as "win" | "loss", newOutcome, fillPnl / (stopDist * (TRADOVATE_CONTRACTS[sym]?.multiplier || 5)));
+                details.push(`  → Pattern corrected: ${oldOutcome} → ${newOutcome}`);
+              } catch { /* pattern correction optional */ }
+            }
+          } catch (err) {
+            details.push(`CORRECTION FAILED: ${rt.symbol} #${matchingExit.id}: ${err}`);
+          }
+        }
       } else {
         // Missing exit — backfill it
         const exitAction = rt.pnl >= 0 ? "take_profit" : "stop_loss";

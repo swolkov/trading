@@ -1432,6 +1432,141 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
   } catch (err) { log(`Scale out failed ${sym}: ${err}`); }
 }
 
+// ── Deferred P&L: Get REAL fill price from Tradovate, update DB + patterns ──
+// Runs 15s after close (fills need time to appear). Retries once at 60s.
+// This is the ONLY place that writes real P&L to the database.
+
+interface CloseMeta {
+  dbLogId: number | null;
+  sym: string;
+  direction: "long" | "short";
+  entryPrice: number;
+  stopLoss: number;
+  target: number;
+  quantity: number;
+  contractId: number;
+  closeOrderId: number | null;
+  reason: string;
+  mult: number;
+  entrySession: string;
+  entryRsi: number;
+  entryVwap: number;
+  entryTrend15m: string;
+  entryDayType: string;
+}
+
+async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
+  try {
+    const closeSide = meta.direction === "long" ? "Sell" : "Buy";
+    const fills = await apiFetch("/fill/list") as { id: number; orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
+
+    // Match fills: by orderId (exact) or by contractId + side + recency (fuzzy)
+    const myFills = meta.closeOrderId
+      ? fills.filter(f => f.orderId === meta.closeOrderId)
+      : fills
+          .filter(f => f.contractId === meta.contractId && f.action === closeSide)
+          .filter(f => Date.now() - new Date(f.timestamp).getTime() < 300_000) // within 5 min
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, meta.quantity);
+
+    if (myFills.length === 0) {
+      if (attempt < 2) {
+        log(`[DEFERRED] ${meta.sym}: No fills yet (attempt ${attempt}). Retrying in 60s...`);
+        setTimeout(() => deferredPnlCheck(meta, attempt + 1), 60_000);
+      } else {
+        log(`[DEFERRED] ${meta.sym}: No fills after ${attempt} attempts. Reconciliation cron will catch this.`);
+      }
+      return;
+    }
+
+    // Calculate real P&L from actual fill price
+    const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
+    const fillPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
+    const diff = meta.direction === "long" ? fillPrice - meta.entryPrice : meta.entryPrice - fillPrice;
+    const realPnl = diff * meta.mult * meta.quantity;
+    const stopDist = Math.abs(meta.entryPrice - meta.stopLoss);
+    const pnlR = stopDist > 0 ? diff / stopDist : 0;
+
+    log(`[DEFERRED] ${meta.sym}: Fill price $${fillPrice.toFixed(2)} | Real P&L: $${realPnl.toFixed(2)} | R: ${pnlR.toFixed(1)}`);
+
+    // UPDATE the DB entry with real P&L
+    if (meta.dbLogId) {
+      try {
+        await prisma.autoTradeLog.update({
+          where: { id: meta.dbLogId },
+          data: {
+            pnl: realPnl,
+            fillPrice,
+            reconciledAt: new Date(),
+            reason: `[FUTURES ${meta.sym}] ${meta.reason}: Closed ${meta.quantity}x @ $${fillPrice.toFixed(2)} (fill). Entry: $${meta.entryPrice.toFixed(2)}. P&L: $${realPnl.toFixed(2)}`,
+          },
+        });
+        log(`[DEFERRED] ${meta.sym}: DB log #${meta.dbLogId} updated with fill P&L $${realPnl.toFixed(2)}`);
+      } catch (err) { log(`[DEFERRED] DB update failed: ${err}`); }
+    }
+
+    // Correct dailyPnl estimate with real value
+    const estimatedPnl = (meta.direction === "long" ? -1 : 1) * 0; // we already added estimate, adjust delta
+    // Note: dailyPnl was set from Yahoo estimate. We can't perfectly fix it here since
+    // other trades may have happened. The reconciliation cron handles aggregate accuracy.
+
+    // Store pattern memory with REAL P&L (not Yahoo estimate)
+    try {
+      const { storePattern } = await import("../lib/pattern-memory");
+      await storePattern({
+        regime: "choppy" as "bull" | "bear" | "choppy",
+        session: meta.entrySession,
+        instrument: meta.sym,
+        setupType: meta.reason,
+        direction: meta.direction,
+        rsi: meta.entryRsi,
+        vixLevel: currentVIX,
+        vixTrend: currentVIX > 20 ? "rising" as const : "falling" as const,
+        atr: stopDist / meta.entryPrice * 1000,
+        priceVsVwap: meta.entryVwap > 0 ? (meta.entryPrice - meta.entryVwap) / meta.entryVwap * 100 : 0,
+        trend15m: (meta.entryTrend15m || "flat") as "up" | "down" | "flat",
+        trendDaily: (meta.entryDayType || "").includes("trend") ? (meta.direction === "long" ? "up" as const : "down" as const) : "flat" as const,
+        riskReward: stopDist > 0 ? Math.abs(meta.target - meta.entryPrice) / stopDist : 2,
+        dollarTrend: "flat" as const,
+        bondTrend: "flat" as const,
+        outcome: realPnl > 0 ? "win" : "loss",
+        pnlR,
+      });
+      log(`[DEFERRED] ${meta.sym}: Pattern stored — ${realPnl > 0 ? "WIN" : "LOSS"} ${pnlR.toFixed(1)}R`);
+    } catch { /* pattern storage optional */ }
+
+    // Log to vault journal with real fill price
+    try {
+      await logTradeToJournal({
+        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${MODE_TAG}-${meta.sym}`,
+        timestamp: new Date().toISOString(),
+        instrument: `FUT:${meta.sym}`,
+        direction: meta.direction === "long" ? "LONG" : "SHORT",
+        strategy: "futures-scalping",
+        setupType: "realtime",
+        contracts: meta.quantity,
+        entryPrice: meta.entryPrice,
+        stopPrice: meta.stopLoss,
+        targetPrice: meta.target,
+        exitPrice: fillPrice,
+        pnlDollars: realPnl,
+        rMultiple: pnlR,
+        conviction: 3,
+        exitReason: meta.reason,
+      }, AGENT_NAME);
+      await logDecision(AGENT_NAME, "EXIT", `FUT:${meta.sym}`,
+        `${meta.reason}: P&L $${realPnl.toFixed(2)} (${pnlR.toFixed(1)}R) @ $${fillPrice.toFixed(2)} (fill)`,
+        realPnl > 0 ? 4 : 2);
+    } catch { /* vault optional */ }
+
+  } catch (err) {
+    log(`[DEFERRED] ${meta.sym}: Error: ${err}`);
+    if (attempt < 2) {
+      setTimeout(() => deferredPnlCheck(meta, attempt + 1), 60_000);
+    }
+  }
+}
+
 // Lock to prevent concurrent close attempts on the same symbol
 const closingLocks = new Map<string, boolean>();
 
@@ -1526,139 +1661,74 @@ async function closePosition(sym: string, price: number, reason: string) {
   } // end else (position still open)
 
   try {
-    // Get ACTUAL fill price from Tradovate — retry multiple times since fills take time to appear
-    let actualExitPrice = price;
-    try {
-      const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-      // Retry 3 times with increasing waits — fills don't appear instantly
-      for (let fillAttempt = 0; fillAttempt < 3; fillAttempt++) {
-        const waitMs = closeOrderId ? [2000, 3000, 5000][fillAttempt] : [500, 1500, 3000][fillAttempt];
-        await new Promise(r => setTimeout(r, waitMs));
+    // Estimate P&L from Yahoo price for immediate logging (tilt, notifications)
+    // REAL P&L comes from Tradovate fills via deferredPnlCheck() — never trust Yahoo for DB/patterns
+    const estimatedDiff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
+    const estimatedPnl = estimatedDiff * mult * pos.quantity;
 
-        const fills = await apiFetch("/fill/list") as { orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
-        const myFills = closeOrderId
-          ? fills.filter(f => f.orderId === closeOrderId)
-          : fills
-              .filter(f => f.contractId === pos.contractId && f.action === closeSide)
-              .filter(f => Date.now() - new Date(f.timestamp).getTime() < 120_000)
-              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-              .slice(0, pos.quantity);
-
-        if (myFills.length > 0) {
-          const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
-          actualExitPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
-          if (Math.abs(actualExitPrice - price) > 0.01) {
-            log(`${sym}: Actual fill $${actualExitPrice.toFixed(2)} vs Yahoo $${price.toFixed(2)} (diff: ${(actualExitPrice - price).toFixed(2)}) [attempt ${fillAttempt + 1}]`);
-          }
-          break; // Got fills — done
-        }
-        if (fillAttempt < 2) {
-          log(`${sym}: No fills yet (attempt ${fillAttempt + 1}/3) — retrying...`);
-        }
-      }
-      if (Math.abs(actualExitPrice - price) < 0.01) {
-        log(`${sym}: No Tradovate fills found after 3 attempts — using Yahoo price $${price.toFixed(2)} (may be inaccurate)`);
-      }
-    } catch (err) {
-      log(`${sym}: Fill lookup failed: ${err} — using Yahoo price $${price.toFixed(2)}`);
-    }
-
-    // Calculate P&L from actual fill price
-    const diff = pos.direction === "long" ? actualExitPrice - pos.entryPrice : pos.entryPrice - actualExitPrice;
-    const pnl = diff * mult * pos.quantity;
-    price = actualExitPrice; // update for logging
-
-    dailyPnl += pnl;
+    // Tilt tracking uses estimates (needs to be immediate for risk management)
+    dailyPnl += estimatedPnl;
     if (reason === "stop_loss" || reason === "emergency") {
       stoppedSymbols.add(sym);
       consecutiveStops++;
 
-      // Escalating tilt protection: progressive pause durations
-      // 2 stops → 30min, 3 → 60min, 4 → 2hr, 5+ → rest of session
-      const pauseSchedule = [0, 0, 30, 60, 120]; // minutes per consecutive stop count
+      const pauseSchedule = [0, 0, 30, 60, 120];
       const pauseMin = consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0);
 
       if (pauseMin > 0) {
         tiltPauseUntil = pauseMin === Infinity ? Infinity : Date.now() + pauseMin * 60_000;
         const label = pauseMin === Infinity ? "rest of session" : `${pauseMin} min`;
         log(`[TILT] Level ${consecutiveStops - 1}: ${consecutiveStops} consecutive stops — pausing ${label}`);
-        notify(`TILT L${consecutiveStops - 1}: ${consecutiveStops} stops → pausing ${label}. Daily P&L: $${dailyPnl.toFixed(0)}`, "general");
+        notify(`TILT L${consecutiveStops - 1}: ${consecutiveStops} stops → pausing ${label}. Daily P&L: $${dailyPnl.toFixed(0)} (est)`, "general");
       }
     } else {
-      consecutiveStops = 0; // reset on profitable exit
+      consecutiveStops = 0;
     }
-    log(`CLOSED ${sym}: ${reason} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
-    notify(`CLOSED ${sym}: ${reason} | ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(0)} | Daily: ${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(0)}`);
+    log(`CLOSED ${sym}: ${reason} | Est P&L: $${estimatedPnl.toFixed(0)} (Yahoo) | Daily: $${dailyPnl.toFixed(0)} | Fill P&L pending...`);
+    notify(`CLOSED ${sym}: ${reason} | ~$${estimatedPnl >= 0 ? "+" : ""}${estimatedPnl.toFixed(0)} (fill pending) | Daily: ${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(0)}`);
 
-    // Store in pattern memory — builds the database that predicts future outcomes
+    // Log close to database with pnl: null — real P&L set by deferredPnlCheck()
+    // NEVER use Yahoo price for DB P&L. The deferred check gets the actual Tradovate fill.
+    let dbLogId: number | null = null;
     try {
-      const { storePattern } = await import("../lib/pattern-memory");
-      const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
-      await storePattern({
-        regime: "choppy" as "bull" | "bear" | "choppy",
-        session: pos.entrySession || getSessionName(),
-        instrument: sym,
-        setupType: reason,
-        direction: pos.direction,
-        rsi: pos.entryRsi || 50,
-        vixLevel: currentVIX,
-        vixTrend: currentVIX > 20 ? "rising" as const : "falling" as const,
-        atr: stopDist / pos.entryPrice * 1000,
-        priceVsVwap: pos.entryVwap > 0 ? (pos.entryPrice - pos.entryVwap) / pos.entryVwap * 100 : 0,
-        trend15m: (pos.entryTrend15m || "flat") as "up" | "down" | "flat",
-        trendDaily: (pos.entryDayType || "").includes("trend") ? (pos.direction === "long" ? "up" as const : "down" as const) : "flat" as const,
-        riskReward: stopDist > 0 ? Math.abs(pos.target - pos.entryPrice) / stopDist : 2,
-        dollarTrend: "flat" as const,
-        bondTrend: "flat" as const,
-        outcome: pnl > 0 ? "win" : "loss",
-        pnlR: stopDist > 0 ? diff / stopDist : 0,
-      });
-    } catch { /* pattern storage is optional */ }
-
-    // Log close to database
-    try {
-      await prisma.autoTradeLog.create({ data: {
+      const dbLog = await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
         action: `${TRADE_ACTION_PREFIX}_${reason}`,
         qty: pos.quantity,
-        price,
-        pnl,
-        reason: `[FUTURES ${sym}] ${reason}: Closed ${pos.quantity}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Daily: $${dailyPnl.toFixed(0)}`,
-        orderId: null,
+        price, // Yahoo price as reference (fillPrice will have the real one)
+        pnl: null, // DEFERRED — filled by deferredPnlCheck() from actual Tradovate fill
+        originalPnl: estimatedPnl, // Save Yahoo estimate for audit/comparison
+        reason: `[FUTURES ${sym}] ${reason}: Closed ${pos.quantity}x. Entry: $${pos.entryPrice.toFixed(2)}. Est: $${estimatedPnl.toFixed(0)} (fill pending)`,
+        orderId: closeOrderId ? String(closeOrderId) : null,
       }});
+      dbLogId = dbLog.id;
     } catch {}
 
-    // Log exit to Obsidian vault
-    try {
-      await logTradeToJournal({
-        tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${MODE_TAG}-${sym}`,
-        timestamp: new Date().toISOString(),
-        instrument: `FUT:${sym}`,
-        direction: pos.direction === "long" ? "LONG" : "SHORT",
-        strategy: "futures-scalping",
-        setupType: "realtime",
-        contracts: pos.quantity,
-        entryPrice: pos.entryPrice,
-        stopPrice: pos.stopLoss,
-        targetPrice: pos.target,
-        exitPrice: price,
-        pnlDollars: pnl,
-        rMultiple: pos.stopLoss ? (price - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
-        conviction: 3,
-        exitReason: reason,
-        followedPlan: true,
-      }, AGENT_NAME);
-      await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `${reason}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
-      // Log observations for notable trades (big wins, big losses, emergencies)
-      const rMult = pos.stopLoss ? Math.abs((price - pos.entryPrice) / (pos.entryPrice - pos.stopLoss)) * (pnl > 0 ? 1 : -1) : null;
-      if (rMult != null && rMult >= 2) {
-        await logObservation(AGENT_NAME, `BIG WIN: ${sym} ${pos.direction} +$${pnl.toFixed(0)} (${rMult.toFixed(1)}R) — ${reason}`);
-      } else if (pnl < -200) {
-        await logObservation(AGENT_NAME, `BIG LOSS: ${sym} ${pos.direction} -$${Math.abs(pnl).toFixed(0)} — ${reason}`);
-      } else if (reason.includes("emergency") || reason.includes("kill")) {
-        await logObservation(AGENT_NAME, `EMERGENCY: ${sym} ${pos.direction} $${pnl.toFixed(0)} — ${reason}`);
-      }
-    } catch { /* vault optional */ }
+    // Schedule deferred P&L check — gets REAL fill price from Tradovate and updates DB + pattern memory
+    const closeMeta = {
+      dbLogId,
+      sym,
+      direction: pos.direction,
+      entryPrice: pos.entryPrice,
+      stopLoss: pos.stopLoss,
+      target: pos.target,
+      quantity: pos.quantity,
+      contractId: pos.contractId,
+      closeOrderId,
+      reason,
+      mult,
+      entrySession: pos.entrySession || getSessionName(),
+      entryRsi: pos.entryRsi || 50,
+      entryVwap: pos.entryVwap,
+      entryTrend15m: pos.entryTrend15m || "flat",
+      entryDayType: pos.entryDayType || "unknown",
+    };
+    // First check after 15s, retry at 60s if no fill yet
+    setTimeout(() => deferredPnlCheck(closeMeta, 1), 15_000);
+
+    // Pattern memory is NOT stored here — deferredPnlCheck() stores it with real P&L
+
+    // Vault journal + pattern memory logged by deferredPnlCheck() with REAL fill P&L
 
     positions.delete(sym);
 

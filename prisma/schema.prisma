@@ -69,17 +69,21 @@ model ChatMessage {
 }
 
 model AutoTradeLog {
-  id          Int      @id @default(autoincrement())
-  symbol      String
-  action      String   // buy, sell, skip, stop_loss, take_profit
-  qty         Int      @default(0)
-  price       Float?
-  reason      String   @default("")
-  aiScore     Int?
-  aiSignal    String?
-  orderId     String?  // Alpaca order ID
-  pnl         Float?   // realized P&L for sells
-  createdAt   DateTime @default(now())
+  id           Int       @id @default(autoincrement())
+  symbol       String
+  action       String    // buy, sell, skip, stop_loss, take_profit
+  qty          Int       @default(0)
+  price        Float?
+  reason       String    @default("")
+  aiScore      Int?
+  aiSignal     String?
+  orderId      String?   // Broker order ID (Tradovate/Alpaca)
+  pnl          Float?    // realized P&L — null until verified from fills
+  createdAt    DateTime  @default(now())
+  // Fill reconciliation: corrects P&L from actual Tradovate fills
+  reconciledAt DateTime? // when P&L was verified/corrected from fills
+  originalPnl  Float?    // pre-correction P&L (audit trail)
+  fillPrice    Float?    // actual Tradovate fill price
 
   @@index([symbol])
   @@index([createdAt])

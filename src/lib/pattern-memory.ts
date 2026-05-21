@@ -52,6 +52,47 @@ export async function storePattern(vector: SetupVector): Promise<void> {
   } catch {}
 }
 
+// Correct a stored pattern's outcome when fill reconciliation finds the real P&L
+// Matches on instrument + direction + old outcome (most recent match wins)
+export async function correctPattern(
+  instrument: string,
+  direction: "long" | "short",
+  oldOutcome: "win" | "loss",
+  newOutcome: "win" | "loss",
+  newPnlR: number,
+): Promise<boolean> {
+  try {
+    const existing = await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } });
+    if (!existing?.value) return false;
+
+    const patterns: SetupVector[] = JSON.parse(existing.value);
+
+    // Find the most recent matching pattern (search from end)
+    let matchIdx = -1;
+    for (let i = patterns.length - 1; i >= 0; i--) {
+      const p = patterns[i];
+      if (p.instrument === instrument && p.direction === direction && p.outcome === oldOutcome) {
+        matchIdx = i;
+        break;
+      }
+    }
+
+    if (matchIdx === -1) return false;
+
+    patterns[matchIdx].outcome = newOutcome;
+    patterns[matchIdx].pnlR = newPnlR;
+
+    await prisma.agentConfig.upsert({
+      where: { key: "pattern_memory" },
+      update: { value: JSON.stringify(patterns) },
+      create: { key: "pattern_memory", value: JSON.stringify(patterns) },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Find similar historical setups and return their win rate
 export async function predictOutcome(current: Omit<SetupVector, "outcome" | "pnlR">): Promise<{
   matchCount: number;
