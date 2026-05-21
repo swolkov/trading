@@ -84,8 +84,9 @@ export function TopBar() {
   }
 
   // Futures equity (primary display in top bar)
-  const futuresEquity = futuresData?.account?.netLiq || futuresData?.account?.balance || 0;
-  const balance = futuresData?.account?.balance || 0;
+  // Fall back to startOfDayBalance when Tradovate is disconnected (avoids showing $0)
+  const futuresEquity = futuresData?.account?.netLiq || futuresData?.account?.balance || futuresData?.startOfDayBalance || 0;
+  const balance = futuresData?.account?.balance || futuresData?.startOfDayBalance || 0;
   const sod = futuresData?.startOfDayBalance;
   const dailyPnl = (sod != null && balance) ? balance - sod : (futuresData?.account?.realizedPnl || 0);
   const dailyPct = sod && sod > 0 ? dailyPnl / sod : 0;

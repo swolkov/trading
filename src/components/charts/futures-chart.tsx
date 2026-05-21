@@ -138,6 +138,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       rightPriceScale: {
         borderColor: "rgba(255,255,255,0.06)",
         scaleMargins: { top: 0.1, bottom: 0.25 },
+        autoScale: true,
       },
       crosshair: {
         mode: 0,
@@ -291,15 +292,16 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
 
       // VWAP + Key Levels
       if (showVWAP && overlays?.vwapSeries && vwapRef.current && vwapUpperRef.current && vwapLowerRef.current) {
-        const vwapData = overlays.vwapSeries.map((v: { t: number; vwap: number; upper: number; lower: number }) => ({
+        const validVwap = overlays.vwapSeries.filter((v: { vwap: number; upper: number; lower: number }) => v.vwap > 0 && v.upper > 0 && v.lower > 0);
+        const vwapData = validVwap.map((v: { t: number; vwap: number }) => ({
           time: (typeof v.t === "number" ? v.t : Math.floor(new Date(v.t).getTime() / 1000)) as Time,
           value: v.vwap,
         }));
-        const upperData = overlays.vwapSeries.map((v: { t: number; upper: number }) => ({
+        const upperData = validVwap.map((v: { t: number; upper: number }) => ({
           time: (typeof v.t === "number" ? v.t : Math.floor(new Date(v.t).getTime() / 1000)) as Time,
           value: v.upper,
         }));
-        const lowerData = overlays.vwapSeries.map((v: { t: number; lower: number }) => ({
+        const lowerData = validVwap.map((v: { t: number; lower: number }) => ({
           time: (typeof v.t === "number" ? v.t : Math.floor(new Date(v.t).getTime() / 1000)) as Time,
           value: v.lower,
         }));
