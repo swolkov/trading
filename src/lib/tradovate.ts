@@ -169,11 +169,21 @@ export async function checkTradovateAuth(modeOverride?: TradingMode): Promise<{ 
     }
     const mode = await resolveMode(modeOverride);
     await authenticate(mode);
+
+    // If we got the token from DB shared cache, trust it — don't hit /account/list
+    // (avoids rate limiting when Tradovate API is throttled)
+    const cached = _tokenCache[mode];
+    if (cached?.accountId && cached.accountId > 0) {
+      _accountId = cached.accountId;
+      return { authenticated: true, accountId: cached.accountId, accountName: String(cached.accountId) };
+    }
+
+    // Otherwise verify with Tradovate
     const accounts = await tvFetch("/account/list", undefined, mode) as { id: number; name: string; active: boolean }[];
     const active = accounts.find((a) => a.active) || accounts[0];
     if (active) {
       if (_tokenCache[mode]) _tokenCache[mode].accountId = active.id;
-      _accountId = active.id; // backward compat for order placement functions
+      _accountId = active.id;
       return { authenticated: true, accountId: active.id, accountName: active.name };
     }
     return { authenticated: false, accountId: 0, accountName: "" };
