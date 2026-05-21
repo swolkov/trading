@@ -698,6 +698,17 @@ export interface TradovateFill {
 export async function getTradovateFills(modeOverride?: TradingMode): Promise<TradovateFill[]> {
   try {
     const mode = await resolveMode(modeOverride);
+
+    // Use /fill/ldeps (historical fills by account) instead of /fill/list (current session only).
+    // /fill/list loses fills when the CME session rolls (~5 PM CT), so losses from previous
+    // sessions would vanish — causing phantom 100% win rates.
+    const auth = await checkTradovateAuth(mode);
+    if (auth.accountId) {
+      const fills = await tvFetch(`/fill/ldeps?masterid=${auth.accountId}`, undefined, mode) as TradovateFill[];
+      return Array.isArray(fills) ? fills : [];
+    }
+
+    // Fallback to /fill/list if no accountId
     const fills = await tvFetch("/fill/list", undefined, mode) as TradovateFill[];
     return Array.isArray(fills) ? fills : [];
   } catch {
