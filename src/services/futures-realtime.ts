@@ -863,6 +863,9 @@ interface Position {
   entryTrend15m: string;
   entryDayType: string;
   entrySession: string;
+  // Emergency confirmation — require 2 consecutive ticks past limit before closing
+  // Prevents stale Yahoo prices from triggering phantom emergency closes
+  emergencyWarningTick: number;
 }
 
 const positions: Map<string, Position> = new Map();
@@ -1090,6 +1093,7 @@ async function loadPositions() {
         scaledOut: false, originalQty: qty, consecutiveStops: 0,
         pyramided: false,
         entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
+        emergencyWarningTick: 0,
       });
 
       log(`[PERSIST] Bootstrapped ${sym}: ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
@@ -1301,10 +1305,27 @@ function checkPositions(sym: string, price: number) {
   }
 
   // Per-position emergency: cap single-position loss at 10% of equity or $750, whichever is lower
+  // IMPORTANT: Require 2 consecutive ticks (10s) past the limit before closing.
+  // Yahoo prices lag 15-60s and can show phantom losses that don't exist on the exchange.
+  // The broker bracket stop order handles the REAL stop — this is a last-resort safety net.
   const perPositionLimit = Math.min(750, tradovateEquity * 0.10);
   if (pnlDollars < -perPositionLimit) {
-    log(`${sym}: EMERGENCY CLOSE $${pnlDollars.toFixed(0)} exceeds per-position limit $${perPositionLimit.toFixed(0)}`);
+    if (!pos.emergencyWarningTick) {
+      pos.emergencyWarningTick = Date.now();
+      log(`${sym}: WARNING — Yahoo shows $${pnlDollars.toFixed(0)} past limit $${perPositionLimit.toFixed(0)}. Confirming on next tick (Yahoo can lag)...`);
+      return; // Wait for confirmation on next tick
+    }
+    // Confirmed: still past limit after at least one more tick
+    const confirmAge = Date.now() - pos.emergencyWarningTick;
+    if (confirmAge < 8_000) return; // Need at least 8s of confirmation (Yahoo updates every ~15s so this ensures a fresh quote)
+    log(`${sym}: EMERGENCY CLOSE CONFIRMED — $${pnlDollars.toFixed(0)} past limit $${perPositionLimit.toFixed(0)} for ${(confirmAge / 1000).toFixed(0)}s`);
     closePosition(sym, price, "emergency"); return;
+  } else {
+    // Price recovered — clear warning
+    if (pos.emergencyWarningTick) {
+      log(`${sym}: Emergency warning cleared — Yahoo P&L $${pnlDollars.toFixed(0)} back within limit`);
+      pos.emergencyWarningTick = 0;
+    }
   }
 }
 
@@ -1505,33 +1526,42 @@ async function closePosition(sym: string, price: number, reason: string) {
   } // end else (position still open)
 
   try {
-    // Get ACTUAL fill price from Tradovate — works for both bracket fills and engine-initiated closes
+    // Get ACTUAL fill price from Tradovate — retry multiple times since fills take time to appear
     let actualExitPrice = price;
     try {
-      if (closeOrderId) {
-        await new Promise(r => setTimeout(r, 1500)); // wait for fill
-      }
-      // Query ALL recent fills for this contract to find the actual exit price
-      const fills = await apiFetch("/fill/list") as { orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
       const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-      // Match by: our close order ID, OR recent fills on this contract in the close direction
-      const myFills = closeOrderId
-        ? fills.filter(f => f.orderId === closeOrderId)
-        : fills
-            .filter(f => f.contractId === pos.contractId && f.action === closeSide)
-            .filter(f => Date.now() - new Date(f.timestamp).getTime() < 120_000) // within 2 min
-            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-            .slice(0, pos.quantity); // match qty
-      if (myFills.length > 0) {
-        const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
-        actualExitPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
-        if (Math.abs(actualExitPrice - price) > 0.01) {
-          log(`${sym}: Actual fill $${actualExitPrice.toFixed(2)} (engine price was $${price.toFixed(2)}, diff: ${(actualExitPrice - price).toFixed(2)})`);
+      // Retry 3 times with increasing waits — fills don't appear instantly
+      for (let fillAttempt = 0; fillAttempt < 3; fillAttempt++) {
+        const waitMs = closeOrderId ? [2000, 3000, 5000][fillAttempt] : [500, 1500, 3000][fillAttempt];
+        await new Promise(r => setTimeout(r, waitMs));
+
+        const fills = await apiFetch("/fill/list") as { orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
+        const myFills = closeOrderId
+          ? fills.filter(f => f.orderId === closeOrderId)
+          : fills
+              .filter(f => f.contractId === pos.contractId && f.action === closeSide)
+              .filter(f => Date.now() - new Date(f.timestamp).getTime() < 120_000)
+              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+              .slice(0, pos.quantity);
+
+        if (myFills.length > 0) {
+          const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
+          actualExitPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
+          if (Math.abs(actualExitPrice - price) > 0.01) {
+            log(`${sym}: Actual fill $${actualExitPrice.toFixed(2)} vs Yahoo $${price.toFixed(2)} (diff: ${(actualExitPrice - price).toFixed(2)}) [attempt ${fillAttempt + 1}]`);
+          }
+          break; // Got fills — done
         }
-      } else {
-        log(`${sym}: No fills found — using engine price $${price.toFixed(2)} for P&L`);
+        if (fillAttempt < 2) {
+          log(`${sym}: No fills yet (attempt ${fillAttempt + 1}/3) — retrying...`);
+        }
       }
-    } catch { /* use bar price as fallback */ }
+      if (Math.abs(actualExitPrice - price) < 0.01) {
+        log(`${sym}: No Tradovate fills found after 3 attempts — using Yahoo price $${price.toFixed(2)} (may be inaccurate)`);
+      }
+    } catch (err) {
+      log(`${sym}: Fill lookup failed: ${err} — using Yahoo price $${price.toFixed(2)}`);
+    }
 
     // Calculate P&L from actual fill price
     const diff = pos.direction === "long" ? actualExitPrice - pos.entryPrice : pos.entryPrice - actualExitPrice;
@@ -2246,8 +2276,17 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const equity = riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity;
   const riskPct = riskConfig.riskPerTradePct / 100;
   const maxRisk = equity * riskPct * sizeMult;
-  const riskPer = stopDist * mult;
-  let qty = Math.max(1, Math.min(riskConfig.maxContractsPerTrade, Math.floor(maxRisk / riskPer)));
+  const riskPer = stopDist * mult; // Dollar risk per 1 contract
+
+  // REJECT if even 1 contract exceeds the risk-per-trade cap
+  // This prevents the old bug: Math.max(1,...) forced 1 contract even when risk was 2x the cap
+  if (riskPer > maxRisk) {
+    log(`${sym}: SKIP — 1 contract risk $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)} (${(riskPct * 100)}% of $${equity.toFixed(0)}). Stop too wide.`);
+    return;
+  }
+
+  let qty = Math.min(riskConfig.maxContractsPerTrade, Math.floor(maxRisk / riskPer));
+  if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
   // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
   if (totalRisk > equity * 0.15) {
@@ -2309,6 +2348,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       entryTrend15m: setupContext?.trend15m ?? "flat",
       entryDayType: setupContext?.dayType ?? "unknown",
       entrySession: setupContext?.session ?? getSessionName(),
+      emergencyWarningTick: 0,
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
@@ -2552,6 +2592,7 @@ async function syncPositions() {
         entryTime: Date.now(),
         pyramided: false,
         entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
+        emergencyWarningTick: 0,
       });
 
       log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
