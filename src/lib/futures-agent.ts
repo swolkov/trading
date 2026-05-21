@@ -403,6 +403,7 @@ function detectSetup(
   regime: string,
   dayType: DayType = "unknown",
   minutesSinceOpen: number = 60,
+  tradingMode: string = "live",
 ): Setup {
   if (closes.length < 25) return { type: "none", direction: "long", confidence: 0, reasoning: "Insufficient data", stopDistance: 0, targetDistance: 0 };
 
@@ -419,7 +420,8 @@ function detectSetup(
   const timeQ = getTimeQuality(session, minutesSinceOpen);
 
   // ── DON'T TRADE during lunch chop unless perfect setup ──
-  if (timeQ.quality === "avoid") {
+  // DEMO: Trade ALL sessions — no time quality filter. 24/7 aggressive.
+  if (timeQ.quality === "avoid" && tradingMode !== "paper") {
     return { type: "none", direction: "long", confidence: 0, reasoning: `Avoiding ${session} session (low quality)`, stopDistance: 0, targetDistance: 0 };
   }
 
@@ -694,33 +696,38 @@ export async function runFuturesAgent(): Promise<{
 
   // Load regime transition + event catalyst overrides
   let sizeOverride = 1.0;
-  try {
-    const [regimeConfig, eventConfig] = await Promise.all([
-      prisma.agentConfig.findUnique({ where: { key: "regime_size_override" } }),
-      prisma.agentConfig.findUnique({ where: { key: "event_size_override" } }),
-    ]);
-    const regimeOverride = regimeConfig?.value ? parseFloat(regimeConfig.value) || 1.0 : 1.0;
-    // Event override now stored as JSON with TTL — fall back to plain number for backward compat
-    let eventOverride = 1.0;
-    if (eventConfig?.value) {
-      try {
-        const parsed = JSON.parse(eventConfig.value);
-        const expired = parsed.expiresAt && new Date(parsed.expiresAt) < new Date();
-        eventOverride = expired ? 1.0 : (parsed.multiplier || 1.0);
-      } catch {
-        eventOverride = parseFloat(eventConfig.value) || 1.0;
+  // DEMO: No regime/event/drawdown size reductions — always full size
+  if (tradingMode !== "paper") {
+    try {
+      const [regimeConfig, eventConfig] = await Promise.all([
+        prisma.agentConfig.findUnique({ where: { key: "regime_size_override" } }),
+        prisma.agentConfig.findUnique({ where: { key: "event_size_override" } }),
+      ]);
+      const regimeOverride = regimeConfig?.value ? parseFloat(regimeConfig.value) || 1.0 : 1.0;
+      // Event override now stored as JSON with TTL — fall back to plain number for backward compat
+      let eventOverride = 1.0;
+      if (eventConfig?.value) {
+        try {
+          const parsed = JSON.parse(eventConfig.value);
+          const expired = parsed.expiresAt && new Date(parsed.expiresAt) < new Date();
+          eventOverride = expired ? 1.0 : (parsed.multiplier || 1.0);
+        } catch {
+          eventOverride = parseFloat(eventConfig.value) || 1.0;
+        }
       }
-    }
-    sizeOverride = regimeOverride * eventOverride;
-    if (sizeOverride !== 1.0) {
-      details.push(`OVERRIDES: regime ${regimeOverride}x × event ${eventOverride}x = ${sizeOverride.toFixed(2)}x sizing`);
-    }
-  } catch { /* use defaults */ }
+      sizeOverride = regimeOverride * eventOverride;
+      if (sizeOverride !== 1.0) {
+        details.push(`OVERRIDES: regime ${regimeOverride}x × event ${eventOverride}x = ${sizeOverride.toFixed(2)}x sizing`);
+      }
+    } catch { /* use defaults */ }
+  } else {
+    details.push(`DEMO: Full size always — no regime/event/drawdown reductions`);
+  }
 
   // Evaluate drawdown protocol
   try {
     const ddState = await evaluateDrawdownState();
-    if (ddState.mode !== "NORMAL") {
+    if (ddState.mode !== "NORMAL" && tradingMode !== "paper") {
       sizeOverride *= ddState.overrides.sizeMultiplier;
       details.push(`DRAWDOWN: ${ddState.mode} — sizing ${(ddState.overrides.sizeMultiplier * 100).toFixed(0)}%`);
       if (ddState.mode === "LOCKDOWN") {
@@ -741,7 +748,9 @@ export async function runFuturesAgent(): Promise<{
   // DEMO: 15% risk per trade ($7,500 on $50K) for aggressive sizing
   const demoRiskPct = tradingMode === "paper" ? 0.15 : FUTURES_RULES.RISK_PER_TRADE_PCT;
   const maxRiskPerTrade = equity * demoRiskPct * sizeOverride;
-  const dailyLossLimit = equity * FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
+  // DEMO: 30% daily loss limit ($15K on $50K) — much more room to recover and keep trading
+  const demoDailyLossPct = tradingMode === "paper" ? 0.30 : FUTURES_RULES.DAILY_LOSS_LIMIT_PCT;
+  const dailyLossLimit = equity * demoDailyLossPct;
   details.push(`RISK: $${maxRiskPerTrade.toFixed(0)} per trade${sizeOverride !== 1.0 ? ` (${sizeOverride.toFixed(2)}x adjusted)` : ""} | $${dailyLossLimit.toFixed(0)} daily limit`);
 
   // Check daily P&L (ET-aware day boundary — force ET interpretation regardless of server timezone)
@@ -1089,11 +1098,16 @@ export async function runFuturesAgent(): Promise<{
   }
 
   // Tilt pause: 2+ consecutive stops = paper mode only (still scans for learning)
-  const isTilted = consecutiveStops >= 2;
-  if (consecutiveStops >= 3) {
-    details.push(`TILT L2: ${consecutiveStops} consecutive stops today — only A+ trades allowed`);
+  // DEMO: No tilt pause — keep trading aggressively regardless of consecutive stops
+  const isTilted = tradingMode === "paper" ? false : consecutiveStops >= 2;
+  if (tradingMode !== "paper") {
+    if (consecutiveStops >= 3) {
+      details.push(`TILT L2: ${consecutiveStops} consecutive stops today — only A+ trades allowed`);
+    } else if (consecutiveStops >= 2) {
+      details.push(`TILT L1: ${consecutiveStops} consecutive stops — only A+ trades allowed`);
+    }
   } else if (consecutiveStops >= 2) {
-    details.push(`TILT L1: ${consecutiveStops} consecutive stops — only A+ trades allowed`);
+    details.push(`DEMO: ${consecutiveStops} consecutive stops — NO tilt pause, keep trading`);
   }
 
   if (stoppedSymbols.size > 0) {
@@ -1127,10 +1141,12 @@ export async function runFuturesAgent(): Promise<{
       continue;
     }
 
-    // Skip if stopped out of this symbol today
-    if (stoppedSymbols.has(symbol)) {
+    // Skip if stopped out of this symbol today (DEMO: allow re-entry — keep learning)
+    if (stoppedSymbols.has(symbol) && tradingMode !== "paper") {
       details.push(`${symbol}: Stopped out today — no re-entry`);
       continue;
+    } else if (stoppedSymbols.has(symbol)) {
+      details.push(`${symbol}: Stopped out today — DEMO: re-entry allowed`);
     }
 
     const contractInfo = FUTURES_CONTRACTS[symbol];
@@ -1194,7 +1210,7 @@ export async function runFuturesAgent(): Promise<{
     details.push(`  Levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} | PDL $${keyLevels.prevDayLow.toFixed(2)} | OR ${keyLevels.openingRangeLow.toFixed(2)}-${keyLevels.openingRangeHigh.toFixed(2)}`);
 
     // Detect setup
-    const setup = detectSetup(price, closes5, bars5min, keyLevels, vwapData, session, regime, dayType, minutesSinceOpen);
+    const setup = detectSetup(price, closes5, bars5min, keyLevels, vwapData, session, regime, dayType, minutesSinceOpen, tradingMode);
 
     if (setup.type === "none") {
       details.push(`  No setup — holding`);
@@ -1203,9 +1219,10 @@ export async function runFuturesAgent(): Promise<{
 
     // 15-min trend confirmation: don't go against the higher timeframe
     if ((setup.direction === "long" && trend15 === "down") || (setup.direction === "short" && trend15 === "up")) {
-      // Reduce confidence for counter-trend trades
-      setup.confidence -= 20;
-      details.push(`  Counter-trend warning: 15m trend is ${trend15}, setup is ${setup.direction}`);
+      // DEMO: Smaller penalty — counter-trend trades can still work with volume
+      const counterTrendPenalty = tradingMode === "paper" ? 8 : 20;
+      setup.confidence -= counterTrendPenalty;
+      details.push(`  Counter-trend warning: 15m trend is ${trend15}, setup is ${setup.direction} [-${counterTrendPenalty}]`);
     }
 
     // DEMO: Lower pre-AI threshold to let more setups through for aggressive trading
@@ -1233,7 +1250,7 @@ Key levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} PDL $${keyLevels.prevDayLow
 Stop distance: ${setup.stopDistance.toFixed(2)} pts ($${(setup.stopDistance * contractInfo.multiplier).toFixed(0)}/contract) | Target: ${setup.targetDistance.toFixed(2)} pts | R:R: ${(setup.targetDistance / setup.stopDistance).toFixed(1)}
 ${vaultContext}
 
-A+ = textbook, high conviction. A = solid edge, clear R:R. B = marginal, will be KILLED. C = no edge, will be KILLED.
+${tradingMode === "paper" ? 'A+ = textbook, high conviction. A = solid edge, clear R:R. B = marginal but tradeable. C = no edge, will be KILLED.\nDEMO: Be generous with grades. If there\'s any technical edge, grade B or higher. We want VOLUME.' : 'A+ = textbook, high conviction. A = solid edge, clear R:R. B = marginal, will be KILLED. C = no edge, will be KILLED.'}
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
@@ -1257,9 +1274,16 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
         setup.confidence -= 25;
         details.push(`  AI WEAK CONFIRM (C): ${ai.reasoning} — killing, not worth the risk`);
       } else if (ai.conviction === "B") {
-        // B-grade = marginal. At sub-35% WR, only A/A+ setups have edge. Kill B.
-        setup.confidence -= 15;
-        details.push(`  AI MARGINAL (B): ${ai.reasoning} — killing, only A/A+ setups trade`);
+        if (tradingMode === "paper") {
+          // DEMO: B-grade trades execute — we want volume and learning
+          aiConviction = "B";
+          setup.confidence += 10;
+          details.push(`  AI MARGINAL (B): ${ai.reasoning} — DEMO: executing for volume [+10]`);
+        } else {
+          // LIVE: B-grade = marginal. At sub-35% WR, only A/A+ setups have edge. Kill B.
+          setup.confidence -= 15;
+          details.push(`  AI MARGINAL (B): ${ai.reasoning} — killing, only A/A+ setups trade`);
+        }
       } else {
         // Only A+ and A pass — these are the setups that justify $75-$225 risk
         aiConviction = ai.conviction || "A";
@@ -1271,9 +1295,11 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       details.push(`  AI unavailable — proceeding on technicals alone`);
     }
 
-    if (setup.confidence < 80) {
-      details.push(`  Final confidence ${setup.confidence}% — below 80% threshold, skipping`);
-      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < 80% threshold. ${setup.reasoning}`, 1); } catch {}
+    // DEMO: Lower execution threshold to 55% — we want aggressive volume
+    const execThreshold = tradingMode === "paper" ? 55 : 80;
+    if (setup.confidence < execThreshold) {
+      details.push(`  Final confidence ${setup.confidence}% — below ${execThreshold}% threshold, skipping`);
+      try { await logDecision("futures-agent", "SKIP", `FUT:${symbol}`, `${setup.type}: Confidence ${setup.confidence}% < ${execThreshold}% threshold. ${setup.reasoning}`, 1); } catch {}
       continue;
     }
 
