@@ -137,6 +137,44 @@ export async function GET(request: Request) {
 
     if (!demoStatus.alive) {
       console.log(`[cron/futures] Demo engine down — running fallback agent`);
+
+      // If demo engine is stale AND no shared token exists, create one so Railway can recover
+      try {
+        const demoToken = await prisma.agentConfig.findUnique({ where: { key: "tradovate_demo_shared_token" } });
+        if (!demoToken?.value && process.env.TRADOVATE_USERNAME && process.env.TRADOVATE_PASSWORD) {
+          console.log("[cron/futures] No demo shared token — refreshing for Railway recovery");
+          const res = await fetch("https://demo.tradovateapi.com/v1/auth/accesstokenrequest", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: process.env.TRADOVATE_USERNAME,
+              password: process.env.TRADOVATE_PASSWORD,
+              appId: process.env.TRADOVATE_APP_ID || "esbueno",
+              appVersion: process.env.TRADOVATE_APP_VERSION || "1.0",
+              deviceId: "esbueno-vercel-cron-recovery",
+              cid: parseInt(process.env.TRADOVATE_CID || "0"),
+              sec: process.env.TRADOVATE_SEC || "",
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json() as { accessToken: string };
+            const acctRes = await fetch("https://demo.tradovateapi.com/v1/account/list", {
+              headers: { Authorization: `Bearer ${data.accessToken}` },
+            });
+            const accounts = await acctRes.json() as { id: number; name: string; active: boolean }[];
+            const active = accounts.find(a => a.active) || accounts[0];
+            await prisma.agentConfig.upsert({
+              where: { key: "tradovate_demo_shared_token" },
+              update: { value: JSON.stringify({ token: data.accessToken, expires: new Date(Date.now() + 23 * 3600000).toISOString(), accountId: active?.id || 0, accountName: active?.name || "" }) },
+              create: { key: "tradovate_demo_shared_token", value: JSON.stringify({ token: data.accessToken, expires: new Date(Date.now() + 23 * 3600000).toISOString(), accountId: active?.id || 0, accountName: active?.name || "" }) },
+            });
+            console.log(`[cron/futures] Demo token created for ${active?.name} — Railway will recover on next poll`);
+          }
+        }
+      } catch (err) {
+        console.error("[cron/futures] Demo token recovery failed:", err);
+      }
+
       try {
         fallbackResult = await runFuturesAgent();
       } catch (err) {
