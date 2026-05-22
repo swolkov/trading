@@ -121,6 +121,38 @@ model VaultDocument {
   @@index([updatedAt])
 }
 
+// ─── Event Bus & Orchestration ────────────────────────────────────────────────
+
+model AgentEvent {
+  id          Int      @id @default(autoincrement())
+  type        String   // e.g. "trade.entry", "trade.exit", "regime.changed", "risk.breach"
+  source      String   // agent that emitted: "futures-agent", "research-agent", etc.
+  payload     String   @default("{}") // JSON context (instrument, pnl, details)
+  processed   Boolean  @default(false) // orchestrator marks true after handling
+  processedAt DateTime?
+  processedBy String?  // which workflow handled it
+  createdAt   DateTime @default(now())
+
+  @@index([type])
+  @@index([processed, createdAt])
+  @@index([createdAt])
+  @@index([source])
+}
+
+model SessionContext {
+  id        Int      @id @default(autoincrement())
+  sessionId String   // date string "2026-05-22" — one per trading day
+  key       String   // e.g. "btc_flash_crash", "regime_shift_pending", "consecutive_stops"
+  value     String   // JSON payload
+  expiresAt DateTime // auto-cleanup: midnight ET or custom TTL
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sessionId, key])
+  @@index([sessionId])
+  @@index([expiresAt])
+}
+
 // ─── Fund Infrastructure ─────────────────────────────────────────────────────
 
 model User {

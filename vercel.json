@@ -45,6 +45,10 @@
       "schedule": "0 16,21,1 * * 1-5"
     },
     {
+      "path": "/api/cron/orchestrator",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/token-refresh",
       "schedule": "0 4,16 * * *"
     }

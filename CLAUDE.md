@@ -47,10 +47,33 @@ All trading agents use the Obsidian vault at `/Users/user/Desktop/Trading/Tradin
 3. Identify anti-patterns → update `Rules/anti-patterns.md`
 4. Adjust strategy parameters in `Strategies/` if statistically supported (>20 trade sample)
 
+### Event Bus & Orchestrator
+
+The orchestrator is the **nervous system** — it routes events between agents in real-time (every 1 min via cron). Agents emit events, the orchestrator processes them and updates ephemeral session state.
+
+**Event emission** is automatic via `logTradeToJournal()`, `logDecision()`, `updateMarketRegime()`, and `runSynthesis()`. No manual event emission needed.
+
+**Before placing trades**, agents SHOULD check:
+```typescript
+import { areEntriesPaused } from "@/lib/orchestrator";
+const { paused, reason } = await areEntriesPaused("live");
+if (paused) return; // orchestrator has paused entries
+```
+
+**Key files**:
+- `src/lib/event-bus.ts` — `emitEvent()`, `emitEventSafe()`, typed events
+- `src/lib/session-context.ts` — `getSessionValue()`, `setSessionValue()`, ephemeral day state
+- `src/lib/orchestrator.ts` — `runOrchestrator()`, `areEntriesPaused()`, `getSessionTradingSummary()`
+- `src/app/api/cron/orchestrator/route.ts` — runs every 1 min
+
+**Vault brain files**:
+- `Brain/orchestrator.md` — Event bus architecture & status
+- `Agent-Config/orchestrator-agent.md` — Orchestrator config & workflows
+
 ### Key Directories
 | Dir | Purpose |
 |-----|---------|
-| `Brain/` | Live market intelligence (regime, vol, macro) |
+| `Brain/` | Live market intelligence (regime, vol, macro, orchestrator) |
 | `Strategies/` | Evolving playbooks with parameters |
 | `Journal/` | Every trade with full YAML context |
 | `Lessons/` | Synthesized patterns from trade history |

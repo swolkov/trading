@@ -1,4 +1,5 @@
 import { prisma } from "./db";
+import { emitEventSafe, type EventPayload } from "./event-bus";
 
 // ============ OBSIDIAN VAULT INTERFACE ============
 // DB-backed vault that syncs with local Obsidian at ~/Desktop/Trading/Trading/
@@ -165,6 +166,36 @@ agent: "${agentName}"
 `;
     await vaultWrite(journalPath, header + tradeYaml, agentName);
   }
+
+  // Emit trade event to event bus
+  const isEntry = trade.exitPrice == null;
+  const isStopLoss = trade.exitReason === "stop_loss";
+  const isTarget = trade.exitReason === "target" || trade.exitReason === "target_hit";
+  const mode = agentName.includes("live") ? "live" as const : "demo" as const;
+
+  const eventPayload: EventPayload = {
+    instrument: trade.instrument,
+    direction: trade.direction,
+    contracts: trade.contracts,
+    price: isEntry ? trade.entryPrice : trade.exitPrice,
+    pnl: trade.pnlDollars,
+    rMultiple: trade.rMultiple,
+    conviction: trade.conviction,
+    setupType: trade.setupType,
+    mode,
+    tradeId: trade.tradeId,
+    relatedFile: journalPath,
+  };
+
+  if (isEntry) {
+    emitEventSafe("trade.entry", agentName, eventPayload);
+  } else if (isStopLoss) {
+    emitEventSafe("trade.stop_loss", agentName, eventPayload);
+  } else if (isTarget) {
+    emitEventSafe("trade.target_hit", agentName, eventPayload);
+  } else {
+    emitEventSafe("trade.exit", agentName, eventPayload);
+  }
 }
 
 // ============ DECISION LOGGING ============
@@ -206,6 +237,16 @@ agent: "${agentName}"
 
 `;
     await vaultWrite(path, header + entry, agentName);
+  }
+
+  // Emit skip events to event bus (entries/exits already emitted from logTradeToJournal)
+  if (type === "SKIP") {
+    emitEventSafe("trade.skip", agentName, {
+      instrument,
+      confidence,
+      reason: rationale,
+      mode: agentName.includes("live") ? "live" : "demo",
+    });
   }
 }
 
@@ -313,6 +354,13 @@ ${details.implications || "Follow standard strategy parameters for current regim
 `;
 
   await vaultWrite("Brain/market-regime.md", content, "research-agent");
+
+  // Emit regime change event
+  emitEventSafe("regime.changed", "research-agent", {
+    toRegime: regime.toUpperCase(),
+    confidence: 70,
+    message: `Regime updated: ${regime.toUpperCase()} | Trend: ${details.trend || "unknown"}`,
+  });
 }
 
 export async function updateVolatilityEnvironment(
@@ -800,6 +848,15 @@ ${antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}
     }
   } catch { /* strategy update optional */ }
 
+  // Emit synthesis completed event
+  emitEventSafe("synthesis.completed", "synthesis-agent", {
+    totalTrades,
+    winRate,
+    lessonsExtracted,
+    antiPatternsFound,
+    message: `Synthesis: ${totalTrades} trades, ${(winRate * 100).toFixed(0)}% WR, PF ${profitFactor.toFixed(2)}`,
+  });
+
   return { totalTrades, winRate, profitFactor, lessonsExtracted, antiPatternsFound };
 }
 
@@ -998,6 +1055,7 @@ export async function updateJARVIS(triggeredBy: string): Promise<void> {
     { name: "Regime Scan", hbKey: "regime_transition_last_run", mode: "auto" },
     { name: "Premarket", hbKey: "premarket_last_run", mode: "auto" },
     { name: "Synthesis", hbKey: "synthesis_last_run", mode: "auto" },
+    { name: "Orchestrator", hbKey: "orchestrator_last_run", mode: "auto" },
     { name: "Events", hbKey: "event_catalyst_last_run", mode: "auto" },
     { name: "Review", hbKey: "review_last_run", mode: "auto" },
   ];
@@ -1089,12 +1147,14 @@ ${apLines.map((ap) => `> - ${ap}`).join("\n")}` : "*No active anti-patterns*"}
 - [[futures-scalping|Futures Strategy]] · [[crypto-day-trading|Crypto Strategy]]
 - [[risk-management|Risk Rules]] · [[active-lessons|All Lessons]] · [[anti-patterns|Anti-Patterns]]
 - [[statistics|Performance]] · [[daily-balances|Equity Curve]]
+- [[orchestrator|Event Bus]] · [[orchestrator-agent|Orchestrator Config]]
 
 ## System Architecture
 \`\`\`mermaid
 graph TD
     J[🧠 JARVIS] --> B[Brain]
     J --> AF[Agent Fleet]
+    J --> ORC[⚡ Orchestrator]
     B --> MR[Market Regime]
     B --> VE[Volatility]
     B --> MO[Macro Outlook]
@@ -1103,6 +1163,12 @@ graph TD
     AF --> CR[Crypto 24/7]
     AF --> RE[Research]
     AF --> SY[Synthesis]
+    FD --> EB[Event Bus]
+    FL --> EB
+    CR --> EB
+    EB --> ORC
+    ORC --> SC[Session Context]
+    SC --> AF
     FD --> JN[Journal]
     FL --> JN
     CR --> JN

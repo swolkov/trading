@@ -2,6 +2,7 @@ import { prisma } from "./db";
 import { getHistoricalBars } from "./yahoo";
 import { sendNotification } from "./notifications";
 import { logDecision } from "./vault";
+import { emitEventSafe } from "./event-bus";
 
 // ============ REGIME TRANSITION AGENT ============
 // Detects when markets are TRANSITIONING between regimes — the most profitable moments.
@@ -349,6 +350,20 @@ export async function runTransitionCheck(): Promise<TransitionSignal> {
       `Size: ${signal.agentAdjustments.positionSizeMultiplier}x | Prefer: ${signal.agentAdjustments.preferredStrategies.join(", ")} | Avoid: ${signal.agentAdjustments.avoidStrategies.join(", ")}`,
       "general"
     );
+
+    // Emit to event bus for orchestrator
+    const eventType = signal.transition === "vix_spike" ? "regime.vix_spike"
+      : signal.transition === "vix_crush" ? "regime.vol_crush"
+      : signal.transition === "breadth_collapse" ? "regime.breadth_collapse"
+      : signal.transition === "breadth_thrust" ? "regime.breadth_thrust"
+      : "regime.changed";
+    emitEventSafe(eventType as Parameters<typeof emitEventSafe>[0], "regime-transition", {
+      fromRegime: prevTransition,
+      toRegime: signal.transition,
+      confidence: signal.confidence,
+      sizeMultiplier: signal.agentAdjustments.positionSizeMultiplier,
+      message: signal.description,
+    });
   }
 
   const summary = signal.transition !== "none"

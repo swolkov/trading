@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { getAccount, getPositions, getMarketClock } from "./alpaca";
 import { sendNotification } from "./notifications";
+import { emitEventSafe } from "./event-bus";
 
 // ============ SYSTEM HEALTH WATCHDOG ============
 // Monitors infrastructure health so we never lose money to failures.
@@ -271,6 +272,13 @@ export async function runWatchdog(): Promise<WatchdogResult> {
       `🚨 WATCHDOG CRITICAL (${criticals} issue${criticals > 1 ? "s" : ""}):\n${criticalChecks.map((c) => `• ${c.name}: ${c.message}`).join("\n")}`,
       "general"
     );
+    // Emit agent error/offline events for orchestrator
+    for (const check of criticalChecks) {
+      emitEventSafe("agent.error", "watchdog", {
+        agentName: check.name.toLowerCase().replace(/\s+/g, "-"),
+        error: check.message,
+      });
+    }
   } else if (warnings > 2) {
     const warnChecks = checks.filter((c) => c.status === "warning");
     await sendNotification(
