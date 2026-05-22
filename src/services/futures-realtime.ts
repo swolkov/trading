@@ -218,6 +218,50 @@ async function authenticate(): Promise<string> {
   return accessToken;
 }
 
+// Proactive token refresh — check every 10min, refresh from DB 1h before expiry
+async function proactiveTokenRefresh() {
+  if (!accessToken || !tokenExpires) return;
+  const timeLeft = tokenExpires - Date.now();
+  const hoursLeft = timeLeft / 3_600_000;
+
+  // More than 2 hours left — no action needed
+  if (hoursLeft > 2) return;
+
+  // Between 1-2 hours left — check DB for a fresh token from the cron
+  if (hoursLeft > 0) {
+    try {
+      const shareKey = IS_LIVE ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+      const shared = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+      if (shared?.value) {
+        const { token, expires, accountId: aid, accountName: aname } = JSON.parse(shared.value);
+        const expMs = new Date(expires).getTime();
+        // Only use if it's newer than our current token (at least 2h more life)
+        if (token && expMs > tokenExpires + 3_600_000) {
+          log(`[AUTH] Proactive refresh: found fresher token in DB (${((expMs - Date.now()) / 3_600_000).toFixed(1)}h remaining)`);
+          accessToken = token;
+          tokenExpires = expMs;
+          if (aid) { accountId = aid; accountName = aname; }
+          return;
+        }
+      }
+      // Also check bootstrap token
+      const bootstrapKey = IS_LIVE ? "tradovate_live_bootstrap_token" : "tradovate_bootstrap_token";
+      const bootstrap = await prisma.agentConfig.findUnique({ where: { key: bootstrapKey } });
+      if (bootstrap?.value) {
+        const { token, expires } = JSON.parse(bootstrap.value);
+        if (token && new Date(expires).getTime() > Date.now() + 3_600_000) {
+          log("[AUTH] Proactive refresh: using bootstrap token");
+          accessToken = token;
+          tokenExpires = new Date(expires).getTime();
+          await prisma.agentConfig.delete({ where: { key: bootstrapKey } }).catch(() => {});
+          return;
+        }
+      }
+    } catch {}
+    log(`[AUTH] Token expires in ${hoursLeft.toFixed(1)}h — no fresh token in DB yet. Cron should refresh soon.`);
+  }
+}
+
 async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
   const token = await authenticate();
   const makeRequest = (t: string) => fetch(`${ORDER_API}${path}`, {
@@ -3510,6 +3554,7 @@ async function main() {
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
+  safeInterval(proactiveTokenRefresh, 600_000, "tokenRefresh"); // check token expiry every 10min
   // Mode is fixed by ENGINE_MODE env var — no polling needed
   safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
   safeInterval(updateCrossAssetSignals, 300_000, "updateCrossAssetSignals"); // every 5min
