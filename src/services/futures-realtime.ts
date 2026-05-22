@@ -6,7 +6,7 @@
 // Deploy on Railway — two instances: ENGINE_MODE=demo and ENGINE_MODE=live.
 
 import { prisma } from "../lib/db";
-import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateJARVIS } from "../lib/vault";
+import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateJARVIS, appendLiveFeed } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 
@@ -94,6 +94,17 @@ async function throttledJARVIS(trigger: string) {
   if (Date.now() - lastJARVISUpdate < JARVIS_THROTTLE_MS) return;
   lastJARVISUpdate = Date.now();
   try { await updateJARVIS(trigger); } catch { /* jarvis optional */ }
+}
+
+// Live feed logging (throttled for scans, immediate for trades)
+let lastFeedScan = 0;
+async function feedLog(type: "scan" | "setup" | "trade" | "exit" | "skip" | "cooldown" | "alert", msg: string) {
+  // Scans: max once per 5 min. Everything else: immediate.
+  if (type === "scan") {
+    if (Date.now() - lastFeedScan < 300_000) return;
+    lastFeedScan = Date.now();
+  }
+  try { await appendLiveFeed(AGENT_NAME, type, msg); } catch { /* feed optional */ }
 }
 
 // ── Tradovate Auth (for order execution) ────────────────
@@ -1821,6 +1832,7 @@ async function closePosition(sym: string, price: number, reason: string) {
       consecutiveStops = 0;
     }
     log(`CLOSED ${sym}: ${reason} | Est P&L: $${estimatedPnl.toFixed(0)} (Yahoo) | Daily: $${dailyPnl.toFixed(0)} | Fill P&L pending...`);
+    feedLog("exit", `**${MODE_TAG} CLOSED ${sym}** ${reason} | ~${estimatedPnl >= 0 ? "+" : ""}$${estimatedPnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
     notify(`CLOSED ${sym}: ${reason} | ~$${estimatedPnl >= 0 ? "+" : ""}${estimatedPnl.toFixed(0)} (fill pending) | Daily: ${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(0)}`);
 
     // Log close to database with pnl: null — real P&L set by deferredPnlCheck()
@@ -2147,6 +2159,7 @@ function onBarClose(sym: string, bar: Bar) {
   const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.5 ? "good" : "avoid";
 
   log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
+  feedLog("scan", `**${sym}** $${price.toFixed(2)} | RSI ${currentRSI.toFixed(0)} | ${tf15.trend} | ${dayType} | ${session}`);
 
   // ── EVALUATE ALL SETUPS WITH CONFIDENCE SCORING ──
 
@@ -2487,6 +2500,7 @@ async function evaluateAndTrade(
   if (cooldownExpiry && Date.now() < cooldownExpiry) {
     const remainMin = ((cooldownExpiry - Date.now()) / 60_000).toFixed(0);
     log(`  COOLDOWN: ${cooldownKey} blocked for ${remainMin}min after recent stop-out — skipping`);
+    feedLog("cooldown", `${sym} ${direction} blocked — ${remainMin}min cooldown after stop-out`);
     return;
   }
   // Clear expired cooldowns
@@ -2530,6 +2544,7 @@ async function evaluateAndTrade(
     } catch { /* pattern memory is optional */ }
 
     log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}% | ${MODE_TAG}`);
+    feedLog("trade", `**${MODE_TAG} ${direction.toUpperCase()} ${sym}** @ $${price.toFixed(2)} | ${finalScore}% confidence`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`,
       { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session });

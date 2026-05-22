@@ -217,6 +217,60 @@ export async function logObservation(agentName: string, observation: string): Pr
   await vaultAppend("Lessons/raw-observations.md", entry, agentName);
 }
 
+// ============ JARVIS LIVE FEED ============
+// Real-time engine activity log in Obsidian — appends entries, trims to last 50
+
+const LIVE_FEED_PATH = "Brain/JARVIS-live-feed.md";
+const MAX_FEED_ENTRIES = 50;
+
+export async function appendLiveFeed(
+  agentName: string,
+  type: "scan" | "setup" | "trade" | "exit" | "skip" | "cooldown" | "alert",
+  message: string,
+): Promise<void> {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZone: "America/New_York" });
+  const icons: Record<string, string> = {
+    scan: "~",
+    setup: ">>",
+    trade: "$$",
+    exit: "<<",
+    skip: "--",
+    cooldown: "!!",
+    alert: "**",
+  };
+  const icon = icons[type] || "--";
+  const entry = `- \`${timeStr}\` \`${icon}\` ${message}`;
+
+  const existing = await vaultRead(LIVE_FEED_PATH);
+  if (existing) {
+    // Split into header and entries
+    const lines = existing.split("\n");
+    const headerEndIdx = lines.findIndex((l, i) => i > 0 && l.startsWith("- `"));
+    const header = headerEndIdx > 0 ? lines.slice(0, headerEndIdx).join("\n") : "";
+    const entries = lines.filter((l) => l.startsWith("- `"));
+
+    // Prepend new entry, trim to max
+    const updated = [entry, ...entries].slice(0, MAX_FEED_ENTRIES);
+    const content = `${header}\n${updated.join("\n")}\n`;
+    await vaultWrite(LIVE_FEED_PATH, content, agentName);
+  } else {
+    // Create fresh feed
+    const header = `---
+aliases: [Live Feed, Engine Log]
+tags: [jarvis, live-feed]
+---
+
+# JARVIS Live Feed
+
+> [!live] REAL-TIME ENGINE ACTIVITY
+> Auto-updated by trading engines. Most recent first.
+
+`;
+    await vaultWrite(LIVE_FEED_PATH, header + entry + "\n", agentName);
+  }
+}
+
 // ============ MARKET BRAIN UPDATES ============
 
 export async function updateMarketRegime(
@@ -988,21 +1042,24 @@ last_updated: "${isoNow}"
 updated_by: "jarvis-system"
 triggered_by: "${triggeredBy}"
 tags: [jarvis, dashboard, system]
+cssclasses: [jarvis]
 ---
 
 # J.A.R.V.I.S.
-> *Just A Rather Very Intelligent System*
+> *Just A Rather Very Intelligent System — Trading Intelligence v2*
 
 ---
 
-> [!${regimeCallout}] REGIME: ${regime} — ${volRegime} Vol
+> [!regime] ${regime} REGIME — ${volRegime} Volatility
 > **Trend** ${trend} · **VIX** ${vix} · **Crypto** ${cryptoRegime}
 > *Updated ${jTimeAgo(regimeUpdated !== "Unknown" ? regimeUpdated : undefined)} by research-agent*
 
-> [!${livePnl >= 0 ? "tip" : "danger"}] LIVE: ${livePnl >= 0 ? "+" : ""}$${livePnl.toFixed(0)} — ${liveTotal} trades (${liveWins}W/${liveLosses}L)${liveTotal > 0 ? ` · ${jProgressBar(liveWinRate)} ${(liveWinRate * 100).toFixed(0)}%` : ""}
-> ${liveBalance ? `Balance: $${liveBalance.toFixed(0)}` : "No trades today"}${drawdownMode !== "NORMAL" ? ` · ⚠️ ${drawdownMode}` : ""}
+> [!trade] LIVE P&L: ${livePnl >= 0 ? "+" : ""}$${livePnl.toFixed(0)}
+> ${liveTotal > 0 ? `${jProgressBar(liveWinRate)} **${(liveWinRate * 100).toFixed(0)}%** Win Rate · ${liveWins}W/${liveLosses}L` : "No trades today — waiting for setups"}
+> ${liveBalance ? `Balance: **$${liveBalance.toFixed(0)}**` : ""}${drawdownMode !== "NORMAL" ? ` · **${drawdownMode}**` : ""}
 
-> [!${demoPnl >= 0 ? "success" : "warning"}] DEMO: ${demoPnl >= 0 ? "+" : ""}$${demoPnl.toFixed(0)} — ${demoTotal} trades (${demoWins}W/${demoLosses}L)${demoTotal > 0 ? ` · ${jProgressBar(demoWinRate)} ${(demoWinRate * 100).toFixed(0)}%` : ""}
+> [!${demoPnl >= 0 ? "success" : "warning"}] DEMO P&L: ${demoPnl >= 0 ? "+" : ""}$${demoPnl.toFixed(0)}
+> ${demoTotal > 0 ? `${jProgressBar(demoWinRate)} **${(demoWinRate * 100).toFixed(0)}%** Win Rate · ${demoWins}W/${demoLosses}L` : "No trades today"}
 
 ## Agent Fleet (${aliveCount}/${enabledCount} online)
 | Agent | Status | Last Active | Mode | Detail |
@@ -1054,6 +1111,9 @@ graph TD
     SY --> ST[Statistics]
     LS --> AF
 \`\`\`
+
+## Live Engine Feed
+![[JARVIS-live-feed#REAL-TIME ENGINE ACTIVITY]]
 
 ---
 *Auto-updated by JARVIS · Triggered by: ${triggeredBy} · ${now.toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" })}*
