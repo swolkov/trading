@@ -1,7 +1,7 @@
 import { prisma } from "./db";
-import { getAccount } from "./alpaca";
 import { getTradovateAccountSummary } from "./tradovate";
 import { sendNotification } from "./notifications";
+import { getTradingMode } from "./trading-mode";
 
 // ============ DRAWDOWN RECOVERY PROTOCOL ============
 // When the account draws down, don't just trade smaller — trade DIFFERENTLY.
@@ -9,6 +9,10 @@ import { sendNotification } from "./notifications";
 // Each mode changes: min score, stops, strategies, correlation, sizing.
 // The simple "loss multiplier" approach loses money differently but still loses.
 // This protocol changes the ENTIRE trading approach.
+//
+// MODE ISOLATION: Drawdown state is tracked PER MODE (demo vs live).
+// Demo drawdown NEVER affects live trading and vice versa.
+// Peak equity is tracked per-mode so switching modes resets cleanly.
 
 export type DrawdownMode = "NORMAL" | "CAUTION" | "RECOVERY" | "LOCKDOWN";
 
@@ -119,30 +123,42 @@ const MODE_CONFIGS: Record<DrawdownMode, {
 };
 
 export async function evaluateDrawdownState(): Promise<DrawdownState> {
-  // Evaluate BOTH accounts independently and use the worst drawdown
-  let tradovateEquity = 0;
-  let alpacaEquity = 0;
-  try {
-    const tradovate = await getTradovateAccountSummary();
-    tradovateEquity = tradovate.netLiq || tradovate.balance || 0;
-  } catch { /* Tradovate unavailable */ }
-  try {
-    const account = await getAccount();
-    alpacaEquity = parseFloat(account.equity) || 0;
-  } catch { /* Alpaca unavailable */ }
+  // MODE-AWARE: Track drawdown separately per trading mode.
+  // Demo losses never trigger LOCKDOWN on live. Live losses never affect demo.
+  const futuresMode = await getTradingMode("futures");
+  const stateKey = futuresMode === "live" ? "drawdown_state_live" : "drawdown_state_demo";
 
-  // Use total equity across both accounts (not one or the other)
-  const currentEquity = tradovateEquity + alpacaEquity;
+  // Get equity for the ACTIVE mode only — no cross-mode contamination
+  let currentEquity = 0;
+  try {
+    const tradovate = await getTradovateAccountSummary(futuresMode);
+    currentEquity = tradovate.netLiq || tradovate.balance || 0;
+  } catch { /* Tradovate unavailable */ }
+
   if (currentEquity <= 0) {
-    // Both accounts unavailable — can't evaluate, return last known state
-    const lastState = await prisma.agentConfig.findUnique({ where: { key: "drawdown_state" } });
+    // Account unavailable — return last known state for this mode
+    const lastState = await prisma.agentConfig.findUnique({ where: { key: stateKey } });
     if (lastState?.value) {
       try { return JSON.parse(lastState.value) as DrawdownState; } catch {}
     }
+    // Fresh start — no state for this mode yet
+    const freshState: DrawdownState = {
+      mode: "NORMAL",
+      currentDrawdownPct: 0,
+      peakEquity: 0,
+      currentEquity: 0,
+      daysSinceNewHigh: 0,
+      consecutiveLosses: 0,
+      recentWinRate: 50,
+      overrides: MODE_CONFIGS.NORMAL.overrides,
+      modeChangedAt: new Date().toISOString(),
+      reason: "No account data available.",
+    };
+    return freshState;
   }
 
-  // Get peak equity from stored state (tracks combined peak, not per-account)
-  const storedState = await prisma.agentConfig.findUnique({ where: { key: "drawdown_state" } });
+  // Get peak equity from mode-specific stored state
+  const storedState = await prisma.agentConfig.findUnique({ where: { key: stateKey } });
   let peakEquity = currentEquity;
   let previousMode: DrawdownMode = "NORMAL";
 
@@ -163,11 +179,14 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
     ? ((peakEquity - currentEquity) / peakEquity) * 100
     : 0;
 
-  // Calculate consecutive losses and recent win rate
+  // Calculate consecutive losses and recent win rate — mode-filtered
+  // Live trades use "live_" prefix in action, demo trades don't
   const recentTrades = await prisma.autoTradeLog.findMany({
     where: {
       pnl: { not: null },
-      action: { notIn: ["skip", "risk_veto", "liquidity_veto"] },
+      action: futuresMode === "live"
+        ? { startsWith: "live_" }
+        : { notIn: ["skip", "risk_veto", "liquidity_veto"], not: { startsWith: "live_" } },
     },
     orderBy: { createdAt: "desc" },
     take: 20,
@@ -205,7 +224,6 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
 
   // Check for mode upgrade (consecutive wins during recovery)
   if (previousMode !== "NORMAL" && newMode === previousMode) {
-    // Check if we've earned an upgrade via consecutive wins
     let consecutiveWins = 0;
     for (const trade of recentTrades) {
       if ((trade.pnl || 0) > 0) consecutiveWins++;
@@ -214,7 +232,6 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
 
     const winsNeeded = MODE_CONFIGS[previousMode].overrides.winsToRecover;
     if (consecutiveWins >= winsNeeded) {
-      // Step up one level
       if (previousMode === "LOCKDOWN") newMode = "RECOVERY";
       else if (previousMode === "RECOVERY") newMode = "CAUTION";
       else if (previousMode === "CAUTION") newMode = "NORMAL";
@@ -228,7 +245,7 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
     if (newMode === "NORMAL" && previousMode !== "NORMAL") {
       reason = `Upgraded from ${previousMode} — consecutive wins met threshold. Resuming normal operations.`;
     } else if (newMode !== "NORMAL") {
-      reason = `Drawdown ${currentDrawdownPct.toFixed(1)}%, ${consecutiveLosses} consecutive losses, ${recentWinRate.toFixed(0)}% win rate. ${config.description}`;
+      reason = `[${futuresMode.toUpperCase()}] Drawdown ${currentDrawdownPct.toFixed(1)}%, ${consecutiveLosses} consecutive losses, ${recentWinRate.toFixed(0)}% win rate. ${config.description}`;
     }
   }
 
@@ -245,14 +262,20 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
     reason,
   };
 
-  // Store state
+  // Store mode-specific state (isolated per mode)
+  await prisma.agentConfig.upsert({
+    where: { key: stateKey },
+    update: { value: JSON.stringify(state) },
+    create: { key: stateKey, value: JSON.stringify(state) },
+  });
+
+  // Store global keys that agents read — always reflects the ACTIVE mode
   await prisma.agentConfig.upsert({
     where: { key: "drawdown_state" },
     update: { value: JSON.stringify(state) },
     create: { key: "drawdown_state", value: JSON.stringify(state) },
   });
 
-  // Store overrides for agents to read
   await prisma.agentConfig.upsert({
     where: { key: "drawdown_mode" },
     update: { value: newMode },
@@ -267,9 +290,9 @@ export async function evaluateDrawdownState(): Promise<DrawdownState> {
 
   // Notify on mode changes
   if (newMode !== previousMode) {
-    const emoji = newMode === "LOCKDOWN" ? "🔴" : newMode === "RECOVERY" ? "🟠" : newMode === "CAUTION" ? "🟡" : "🟢";
+    const emoji = newMode === "LOCKDOWN" ? "\u{1F534}" : newMode === "RECOVERY" ? "\u{1F7E0}" : newMode === "CAUTION" ? "\u{1F7E1}" : "\u{1F7E2}";
     await sendNotification(
-      `${emoji} DRAWDOWN MODE: ${previousMode} → ${newMode}\n` +
+      `${emoji} DRAWDOWN [${futuresMode.toUpperCase()}]: ${previousMode} \u2192 ${newMode}\n` +
       `Drawdown: ${currentDrawdownPct.toFixed(1)}% | Peak: $${peakEquity.toFixed(0)} | Current: $${currentEquity.toFixed(0)}\n` +
       `Consecutive losses: ${consecutiveLosses} | Win rate: ${recentWinRate.toFixed(0)}%\n` +
       `${reason}\n` +
