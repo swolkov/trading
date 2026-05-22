@@ -6,7 +6,7 @@
 // Deploy on Railway — two instances: ENGINE_MODE=demo and ENGINE_MODE=live.
 
 import { prisma } from "../lib/db";
-import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite } from "../lib/vault";
+import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateJARVIS } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 
@@ -86,6 +86,15 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 };
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
+
+// ── JARVIS Dashboard Update (throttled) ──────────────────
+let lastJARVISUpdate = 0;
+const JARVIS_THROTTLE_MS = 30_000; // 30s min between updates
+async function throttledJARVIS(trigger: string) {
+  if (Date.now() - lastJARVISUpdate < JARVIS_THROTTLE_MS) return;
+  lastJARVISUpdate = Date.now();
+  try { await updateJARVIS(trigger); } catch { /* jarvis optional */ }
+}
 
 // ── Tradovate Auth (for order execution) ────────────────
 
@@ -778,11 +787,12 @@ function getSizeMultiplier(sym?: string): number {
 
   if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
-  // LIVE ENGINE: RTH prime only — morning (after 15min) + afternoon. No ETH, no midday, no open/close.
+  // LIVE ENGINE: RTH prime + midday at half size. No ETH, no open/close.
   if (IS_LIVE) {
     if (s === "morning") return getMinutesSinceRTHOpen() >= 15 ? 1.0 : 0;
     if (s === "afternoon") return 1.0;
-    return 0; // Block: open, midday, close, all ETH sessions
+    if (s === "midday") return 0.5; // Half size 12-2 PM — reduced but not blocked
+    return 0; // Block: open, close, all ETH sessions
   }
 
   // DEMO ENGINE: trades 24/7 for maximum learning
@@ -969,6 +979,29 @@ let tiltPauseUntil = 0; // timestamp when tilt pause ends
 // Vault lessons cache — refreshed hourly, read before each trade
 let vaultLessonsCache: { lessons: string | null; antiPatterns: string | null } | null = null;
 let vaultLessonsCacheTime = 0;
+
+// Regime cache — refreshed hourly from vault Brain/market-regime.md
+let cachedRegime: "bull" | "bear" | "choppy" = "choppy";
+let regimeCacheTime = 0;
+async function getCurrentRegime(): Promise<"bull" | "bear" | "choppy"> {
+  if (Date.now() - regimeCacheTime < 3600_000 && regimeCacheTime > 0) return cachedRegime;
+  try {
+    const doc = await vaultRead("Brain/market-regime.md");
+    if (doc) {
+      const m = doc.match(/\*\*Current\*\*:\s*`?(\w+)`?/);
+      if (m) {
+        const r = m[1].toUpperCase();
+        cachedRegime = r.includes("BULL") || r.includes("TREND") ? "bull"
+          : r.includes("BEAR") ? "bear" : "choppy";
+      }
+    }
+    regimeCacheTime = Date.now();
+  } catch { /* use cached */ }
+  return cachedRegime;
+}
+
+// Re-entry cooldown — after stop-out, block same symbol+direction for 3 bars (15 min)
+const reEntryCooldowns = new Map<string, number>(); // "SYM:long" → timestamp when cooldown expires
 
 // ── Runtime Risk Config (loaded from DB — Agent Hub is the UI) ──────────
 // These are the LIVE values from AgentConfig table. Engine uses them at runtime.
@@ -1610,7 +1643,7 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
     try {
       const { storePattern } = await import("../lib/pattern-memory");
       await storePattern({
-        regime: "choppy" as "bull" | "bear" | "choppy",
+        regime: cachedRegime,
         session: meta.entrySession,
         instrument: meta.sym,
         setupType: meta.reason,
@@ -1654,6 +1687,9 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         `${meta.reason}: P&L $${realPnl.toFixed(2)} (${pnlR.toFixed(1)}R) @ $${fillPrice.toFixed(2)} (fill)`,
         realPnl > 0 ? 4 : 2);
     } catch { /* vault optional */ }
+
+    // JARVIS: update dashboard after trade close (throttled)
+    throttledJARVIS(`trade-exit-${meta.sym}`);
 
   } catch (err) {
     log(`[DEFERRED] ${meta.sym}: Error: ${err}`);
@@ -1767,6 +1803,10 @@ async function closePosition(sym: string, price: number, reason: string) {
     if (reason === "stop_loss" || reason === "emergency") {
       stoppedSymbols.add(sym);
       consecutiveStops++;
+      // Re-entry cooldown: block same symbol+direction for 15 min (3 bars)
+      const cooldownKey = `${sym}:${pos.direction}`;
+      reEntryCooldowns.set(cooldownKey, Date.now() + 15 * 60_000);
+      log(`[COOLDOWN] ${cooldownKey} blocked for 15min (re-entry cooldown after stop)`);
 
       const pauseSchedule = [0, 0, 30, 60, 120];
       const pauseMin = consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0);
@@ -2103,8 +2143,7 @@ function onBarClose(sym: string, bar: Bar) {
   if (!METALS.has(sym) && earningsWeekNQPenalty < 1.0) {
     effectiveSizeMult *= earningsWeekNQPenalty;
   }
-  const dayOfWeek = new Date().getUTCDay();
-  if (dayOfWeek === 1 || dayOfWeek === 5) effectiveSizeMult *= 0.5; // half size Mon/Fri
+  // Mon/Fri penalty removed — let regime/VIX/event data handle sizing dynamically
   const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.5 ? "good" : "avoid";
 
   log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
@@ -2339,6 +2378,65 @@ function onBarClose(sym: string, bar: Bar) {
     }
   }
 
+  // SETUP 5: Range Bounce — mean reversion at prev day high/low or session extremes
+  // Works in CHOPPY/RANGE markets where price oscillates between levels
+  if (dayType === "range" && b.barCount >= 12 && b.prevDayHigh > 0 && b.prevDayLow > 0) {
+    const distToPDH = Math.abs(price - b.prevDayHigh);
+    const distToPDL = Math.abs(price - b.prevDayLow);
+    const levelTolerance = currentATR * 0.5;
+
+    // Near previous day high → short (mean revert down)
+    const nearPDH = distToPDH <= levelTolerance && price >= b.prevDayHigh - levelTolerance;
+    // Near previous day low → long (mean revert up)
+    const nearPDL = distToPDL <= levelTolerance && price <= b.prevDayLow + levelTolerance;
+
+    // Also check session high/low as secondary levels
+    const sessionHigh = Math.max(...b.sessionBars.map(sb => sb.h));
+    const sessionLow = Math.min(...b.sessionBars.map(sb => sb.l));
+    const sessionRange = sessionHigh - sessionLow;
+    const nearSessionHigh = sessionRange > currentATR * 1.5 && price > sessionHigh - levelTolerance * 0.5 && !nearPDH;
+    const nearSessionLow = sessionRange > currentATR * 1.5 && price < sessionLow + levelTolerance * 0.5 && !nearPDL;
+
+    if (nearPDH || nearPDL || nearSessionHigh || nearSessionLow) {
+      const dir = (nearPDH || nearSessionHigh) ? "short" : "long";
+      const levelName = nearPDH ? "PDH" : nearPDL ? "PDL" : nearSessionHigh ? "Session High" : "Session Low";
+      const levelPrice = nearPDH ? b.prevDayHigh : nearPDL ? b.prevDayLow : nearSessionHigh ? sessionHigh : sessionLow;
+
+      // Require rejection candle: wick tests level, body closes away
+      const isRejection = dir === "short"
+        ? (bar.h >= levelPrice - levelTolerance * 0.3 && bar.c < bar.o) // bearish candle near high
+        : (bar.l <= levelPrice + levelTolerance * 0.3 && bar.c > bar.o); // bullish candle near low
+
+      if (isRejection) {
+        const rangeTarget = dir === "short"
+          ? Math.abs(price - (vwapData.vwap > 0 ? vwapData.vwap : (b.prevDayHigh + b.prevDayLow) / 2))
+          : Math.abs((vwapData.vwap > 0 ? vwapData.vwap : (b.prevDayHigh + b.prevDayLow) / 2) - price);
+        const rangeStop = adjustedATR * 1.3;
+
+        if (rangeTarget / rangeStop >= 1.5) {
+          const { score, reasons } = scoreSetup({
+            baseConfidence: 70,
+            volTrend, volRatio,
+            trend15Aligns: dir === "short" ? tf15.trend !== "up" : tf15.trend !== "down",
+            rsiExtreme: dir === "short" ? currentRSI > 60 : currentRSI < 40,
+            priceAboveVWAP: dir === "short",
+            dayTypeMatch: true,
+            sessionQuality,
+          });
+
+          log(`  → RANGE BOUNCE ${dir.toUpperCase()} | ${levelName} $${levelPrice.toFixed(2)} | Rejection candle | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+          if (score >= 72) {
+            evaluateAndTrade(sym, dir, price, rangeStop, rangeTarget, effectiveSizeMult, score,
+              `Range bounce ${dir} at ${levelName} $${levelPrice.toFixed(2)}, rejection candle, RSI ${currentRSI.toFixed(0)}, targeting VWAP/mid, conf ${score}%`,
+              currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+          }
+          return;
+        }
+      }
+    }
+  }
+
   // Log near-miss or why no setup triggered
   if (bestNearMiss) {
     log(`  ✗ Near miss: ${bestNearMiss}`);
@@ -2348,7 +2446,7 @@ function onBarClose(sym: string, bar: Bar) {
     if (currentRSI > 25 && currentRSI < 75) reasons.push(`RSI ${currentRSI.toFixed(0)} not extreme`);
     if (session !== "morning") reasons.push("not morning (no OR breakout)");
     if (Math.abs(price - fastEMA) / price >= 0.003) reasons.push(`price ${((Math.abs(price - fastEMA) / price) * 100).toFixed(2)}% from EMA9 (need <0.3%)`);
-    if (dayType !== "range") reasons.push(`${dayType} day (VWAP reversion needs range)`);
+    if (dayType !== "range") reasons.push(`${dayType} day (range bounce needs range)`);
     if (reasons.length > 0) log(`  ✗ No setup: ${reasons.join(" | ")}`);
   }
 }
@@ -2383,6 +2481,17 @@ async function evaluateAndTrade(
     log(`  AI: ${ai.reasoning}`);
   }
 
+  // Re-entry cooldown check: was this symbol+direction recently stopped out?
+  const cooldownKey = `${sym}:${direction}`;
+  const cooldownExpiry = reEntryCooldowns.get(cooldownKey);
+  if (cooldownExpiry && Date.now() < cooldownExpiry) {
+    const remainMin = ((cooldownExpiry - Date.now()) / 60_000).toFixed(0);
+    log(`  COOLDOWN: ${cooldownKey} blocked for ${remainMin}min after recent stop-out — skipping`);
+    return;
+  }
+  // Clear expired cooldowns
+  if (cooldownExpiry && Date.now() >= cooldownExpiry) reEntryCooldowns.delete(cooldownKey);
+
   // Final gate: live needs 75%+ (A+ only), demo needs 65%+
   const MIN_CONFIDENCE = IS_LIVE ? 75 : 65;
   if (finalScore < MIN_CONFIDENCE) {
@@ -2401,7 +2510,7 @@ async function evaluateAndTrade(
     try {
       const { predictOutcome } = await import("../lib/pattern-memory");
       const patternPrediction = await predictOutcome({
-        regime: "choppy" as "bull" | "bear" | "choppy",
+        regime: cachedRegime,
         session, instrument: sym, setupType: reasoning.split("]")[0]?.replace("[", "") || "unknown",
         direction: direction as "long" | "short",
         rsi: rsiVal, vixLevel: currentVIX, vixTrend: currentVIX > 20 ? "rising" : "falling",
@@ -2535,6 +2644,9 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
         orderId: String(entry.orderId),
       }});
     } catch {}
+
+    // JARVIS: update dashboard after trade entry (throttled)
+    throttledJARVIS(`trade-entry-${sym}`);
   } catch (err) { log(`TRADE FAILED: ${err}`); }
 
 }
@@ -2679,6 +2791,7 @@ async function syncPositions() {
             }, AGENT_NAME);
             await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `${closeType}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
           } catch { /* vault optional */ }
+          throttledJARVIS(`synced-close-${sym}`);
         }
 
         positions.delete(sym);
@@ -3571,6 +3684,8 @@ async function main() {
     vaultLessonsCacheTime = Date.now();
     if (lessons || antiPatterns) log("[VAULT] Loaded lessons + anti-patterns from brain");
   } catch { /* vault read optional */ }
+  // Load regime on startup
+  try { await getCurrentRegime(); log(`[VAULT] Regime: ${cachedRegime}`); } catch {}
   safeInterval(async () => {
     try {
       const [lessons, antiPatterns] = await Promise.all([
@@ -3581,6 +3696,8 @@ async function main() {
       vaultLessonsCacheTime = Date.now();
       if (lessons || antiPatterns) log("[VAULT] Loaded lessons + anti-patterns from brain");
     } catch { /* vault read optional */ }
+    // Refresh regime cache alongside lessons
+    try { await getCurrentRegime(); } catch {}
   }, 3600_000, "loadVaultLessons");
 
   // Watchdog: monitors tickCount and restarts poll if stalled

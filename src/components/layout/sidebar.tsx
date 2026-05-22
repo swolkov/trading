@@ -15,7 +15,6 @@ import {
   TrendingUp,
   Bot,
   Link2,
-  Brain,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -38,7 +37,6 @@ const sections = [
   {
     label: "CONTROL",
     links: [
-      { href: "/brain", label: "J.A.R.V.I.S.", icon: Brain },
       { href: "/agents", label: "Agent Hub", icon: Bot },
     ],
   },

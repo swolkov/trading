@@ -749,6 +749,458 @@ ${antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}
   return { totalTrades, winRate, profitFactor, lessonsExtracted, antiPatternsFound };
 }
 
+// ============ J.A.R.V.I.S. — OBSIDIAN INTELLIGENCE SYSTEM ============
+// Generates Brain/JARVIS.md (dashboard) and Brain/JARVIS-daily-brief.md (pre-session)
+// Called by agents after key events: trade entry/exit, premarket, synthesis, regime change
+
+interface JARVISState {
+  // Vault docs
+  regime: string | null;
+  volatility: string | null;
+  macro: string | null;
+  cryptoRegime: string | null;
+  activeLessons: string | null;
+  antiPatterns: string | null;
+  riskRules: string | null;
+  futuresStrategy: string | null;
+  statistics: string | null;
+  dailyBalances: string | null;
+  // DB state
+  agentHeartbeats: Record<string, string>;
+  todayTrades: { action: string; symbol: string; qty: number; pnl: number | null; reason: string | null; createdAt: Date }[];
+  recentJournals: string[];
+}
+
+async function gatherJARVISState(): Promise<JARVISState> {
+  const [vaultDocs, configs, todayTrades, journals] = await Promise.all([
+    vaultReadMultiple([
+      "Brain/market-regime.md",
+      "Brain/volatility-environment.md",
+      "Brain/macro-outlook.md",
+      "Brain/crypto-regime.md",
+      "Lessons/active-lessons.md",
+      "Rules/anti-patterns.md",
+      "Rules/risk-management.md",
+      "Strategies/futures-scalping.md",
+      "Performance/statistics.md",
+      "Performance/daily-balances.md",
+    ]),
+    prisma.agentConfig.findMany(),
+    prisma.autoTradeLog.findMany({
+      where: { createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+    prisma.vaultDocument.findMany({
+      where: { path: { startsWith: "Journal/" }, NOT: { path: { contains: "_template" } } },
+      orderBy: { updatedAt: "desc" },
+      take: 3,
+    }),
+  ]);
+
+  const configMap: Record<string, string> = {};
+  for (const c of configs) configMap[c.key] = c.value;
+
+  return {
+    regime: vaultDocs["Brain/market-regime.md"] ?? null,
+    volatility: vaultDocs["Brain/volatility-environment.md"] ?? null,
+    macro: vaultDocs["Brain/macro-outlook.md"] ?? null,
+    cryptoRegime: vaultDocs["Brain/crypto-regime.md"] ?? null,
+    activeLessons: vaultDocs["Lessons/active-lessons.md"] ?? null,
+    antiPatterns: vaultDocs["Rules/anti-patterns.md"] ?? null,
+    riskRules: vaultDocs["Rules/risk-management.md"] ?? null,
+    futuresStrategy: vaultDocs["Strategies/futures-scalping.md"] ?? null,
+    statistics: vaultDocs["Performance/statistics.md"] ?? null,
+    dailyBalances: vaultDocs["Performance/daily-balances.md"] ?? null,
+    agentHeartbeats: configMap,
+    todayTrades: todayTrades.map((t) => ({
+      action: t.action,
+      symbol: t.symbol,
+      qty: t.qty || 0,
+      pnl: t.pnl,
+      reason: t.reason,
+      createdAt: t.createdAt,
+    })),
+    recentJournals: journals.map((j) => j.content),
+  };
+}
+
+// Helper: extract field from vault markdown
+function jExtract(content: string | null, pattern: RegExp): string {
+  if (!content) return "Unknown";
+  const m = content.match(pattern);
+  return m ? m[1].trim() : "Unknown";
+}
+
+// Helper: time ago from ISO string or JSON heartbeat
+function jTimeAgo(raw: string | undefined): string {
+  if (!raw) return "Never";
+  let ts: number;
+  try {
+    const parsed = JSON.parse(raw);
+    ts = new Date(parsed.timestamp).getTime();
+  } catch {
+    ts = new Date(raw).getTime();
+  }
+  if (isNaN(ts)) return "Unknown";
+  const mins = (Date.now() - ts) / 60000;
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${Math.floor(mins)}m ago`;
+  if (mins < 1440) return `${(mins / 60).toFixed(0)}h ago`;
+  return `${Math.floor(mins / 1440)}d ago`;
+}
+
+function jAgentHealth(raw: string | undefined, mode: string): { icon: string; status: string } {
+  if (mode === "disabled" || mode === "placeholder") return { icon: "🔴", status: "OFF" };
+  if (!raw) return { icon: "🔴", status: "OFFLINE" };
+  let ts: number;
+  try {
+    const parsed = JSON.parse(raw);
+    ts = new Date(parsed.timestamp).getTime();
+  } catch {
+    ts = new Date(raw).getTime();
+  }
+  if (isNaN(ts)) return { icon: "🔴", status: "OFFLINE" };
+  const mins = (Date.now() - ts) / 60000;
+  if (mins < 15) return { icon: "🟢", status: "ONLINE" };
+  if (mins < 60) return { icon: "🟡", status: "STALE" };
+  return { icon: "🔴", status: "OFFLINE" };
+}
+
+function jProgressBar(pct: number, width = 10): string {
+  const filled = Math.round(Math.max(0, Math.min(1, pct)) * width);
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+// Helper: extract heartbeat detail from JSON
+function jHeartbeatDetail(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const p = JSON.parse(raw);
+    const parts: string[] = [];
+    if (p.tickCount != null) parts.push(`${p.tickCount} ticks`);
+    if (p.positions != null) parts.push(`${p.positions} pos`);
+    if (p.dailyTrades != null) parts.push(`${p.dailyTrades} trades`);
+    return parts.join(", ");
+  } catch {
+    return "";
+  }
+}
+
+export async function updateJARVIS(triggeredBy: string): Promise<void> {
+  const s = await gatherJARVISState();
+  const now = new Date();
+  const isoNow = now.toISOString();
+
+  // Parse regime
+  const regime = jExtract(s.regime, /\*\*Current\*\*:\s*`?(\w+)`?/);
+  const trend = jExtract(s.regime, /\*\*Trend\*\*:\s*(.+)/);
+  const vix = jExtract(s.regime, /VIX\*\*:\s*([\d.]+)/);
+  const volRegime = jExtract(s.volatility, /\*\*Current\*\*:\s*`?(\w+)`?/);
+  const cryptoRegime = jExtract(s.cryptoRegime, /\*\*Current\*\*:\s*`?(\w+)`?/);
+  const regimeUpdated = jExtract(s.regime, /last_updated:\s*"?([^"\n]+)"?/);
+
+  // Regime callout type
+  const regimeCallout = regime === "BULL" || regime.includes("TREND") ? "success"
+    : regime === "BEAR" ? "danger"
+    : regime === "CHOPPY" ? "warning"
+    : "info";
+
+  // Today's P&L from trades — separated by mode (action prefix is the reliable tag)
+  const closedTrades = s.todayTrades.filter((t) => t.pnl != null && !t.action.includes("skip"));
+  const liveTrades = closedTrades.filter((t) => t.action.startsWith("live_"));
+  const demoTrades = closedTrades.filter((t) => !t.action.startsWith("live_"));
+  const livePnl = liveTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+  const demoPnl = demoTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+  const liveWins = liveTrades.filter((t) => (t.pnl || 0) > 0).length;
+  const liveLosses = liveTrades.filter((t) => (t.pnl || 0) <= 0).length;
+  const demoWins = demoTrades.filter((t) => (t.pnl || 0) > 0).length;
+  const demoLosses = demoTrades.filter((t) => (t.pnl || 0) <= 0).length;
+  const todayTotal = closedTrades.length;
+  const liveTotal = liveWins + liveLosses;
+  const demoTotal = demoWins + demoLosses;
+  const liveWinRate = liveTotal > 0 ? liveWins / liveTotal : 0;
+  const demoWinRate = demoTotal > 0 ? demoWins / demoTotal : 0;
+
+  // Equity from daily balances
+  const balanceMatch = s.dailyBalances?.match(/last_known_balance:\s*([\d.]+)/);
+  const liveBalance = balanceMatch ? parseFloat(balanceMatch[1]) : null;
+
+  // Drawdown state
+  const drawdownRaw = s.agentHeartbeats.drawdown_state || s.agentHeartbeats.drawdown_state_live;
+  let drawdownMode = "NORMAL";
+  try {
+    if (drawdownRaw) drawdownMode = JSON.parse(drawdownRaw).mode || "NORMAL";
+  } catch {}
+
+  // Agent fleet
+  const hb = s.agentHeartbeats;
+  const agents = [
+    { name: "Futures (Live)", hbKey: "futures_engine_heartbeat_live", mode: "live" },
+    { name: "Futures (Demo)", hbKey: "futures_engine_heartbeat_demo", mode: "demo" },
+    { name: "Crypto", hbKey: "crypto_last_run", mode: hb.crypto_enabled || "disabled" },
+    { name: "Stocks", hbKey: "stocks_last_run", mode: hb.stocks_enabled || "placeholder" },
+    { name: "Watchdog", hbKey: "watchdog_last_run", mode: "auto" },
+    { name: "Regime Scan", hbKey: "regime_transition_last_run", mode: "auto" },
+    { name: "Premarket", hbKey: "premarket_last_run", mode: "auto" },
+    { name: "Synthesis", hbKey: "synthesis_last_run", mode: "auto" },
+    { name: "Events", hbKey: "event_catalyst_last_run", mode: "auto" },
+    { name: "Review", hbKey: "review_last_run", mode: "auto" },
+  ];
+
+  const fleetRows = agents.map((a) => {
+    const { icon, status } = jAgentHealth(hb[a.hbKey], a.mode);
+    const detail = jHeartbeatDetail(hb[a.hbKey]);
+    return `| ${icon} ${a.name} | ${status} | ${jTimeAgo(hb[a.hbKey])} | ${a.mode} | ${detail} |`;
+  });
+  const aliveCount = agents.filter((a) => jAgentHealth(hb[a.hbKey], a.mode).status === "ONLINE").length;
+  const enabledCount = agents.filter((a) => a.mode !== "disabled" && a.mode !== "placeholder").length;
+
+  // Alerts
+  const alerts: string[] = [];
+  const regimeAge = regimeUpdated !== "Unknown" ? (Date.now() - new Date(regimeUpdated).getTime()) / 3600000 : 999;
+  if (regimeAge > 12) alerts.push(`🟡 Regime data ${regimeAge > 24 ? Math.floor(regimeAge / 24) + "d" : Math.floor(regimeAge) + "h"} stale — update needed`);
+  if (regime === "CHOPPY") alerts.push("🟡 Choppy market — A+ setups only for live");
+  if (drawdownMode !== "NORMAL") alerts.push(`🔴 Drawdown protocol: ${drawdownMode}`);
+  const staleAgents = agents.filter((a) => a.mode !== "disabled" && a.mode !== "placeholder" && jAgentHealth(hb[a.hbKey], a.mode).status !== "ONLINE");
+  if (staleAgents.length > 0) alerts.push(`🟡 ${staleAgents.length} agent(s) stale/offline: ${staleAgents.map((a) => a.name).join(", ")}`);
+
+  // Lessons (top 5)
+  const lessonLines = s.activeLessons
+    ?.split("\n")
+    .filter((l) => l.match(/^\d+\.\s|^-\s\*\*L\d|^###\s*L\d/))
+    .slice(0, 5)
+    .map((l) => l.replace(/^[-\d.]+\s*/, "").replace(/^###\s*/, "").trim()) || [];
+
+  // Anti-patterns
+  const apLines = s.antiPatterns
+    ?.split("\n")
+    .filter((l) => l.match(/^\*\*AP\d|^###\s*AP\d|^-\s\*\*AP/))
+    .slice(0, 5)
+    .map((l) => l.replace(/^###\s*/, "").replace(/^-\s*/, "").trim()) || [];
+
+  // Active positions from today's trades (entries without matching exits)
+  const openEntries = s.todayTrades.filter((t) => t.pnl == null && !t.action.includes("skip"));
+
+  const content = `---
+aliases: [JARVIS, Command Center, Dashboard]
+last_updated: "${isoNow}"
+updated_by: "jarvis-system"
+triggered_by: "${triggeredBy}"
+tags: [jarvis, dashboard, system]
+---
+
+# J.A.R.V.I.S.
+> *Just A Rather Very Intelligent System*
+
+---
+
+> [!${regimeCallout}] REGIME: ${regime} — ${volRegime} Vol
+> **Trend** ${trend} · **VIX** ${vix} · **Crypto** ${cryptoRegime}
+> *Updated ${jTimeAgo(regimeUpdated !== "Unknown" ? regimeUpdated : undefined)} by research-agent*
+
+> [!${livePnl >= 0 ? "tip" : "danger"}] LIVE: ${livePnl >= 0 ? "+" : ""}$${livePnl.toFixed(0)} — ${liveTotal} trades (${liveWins}W/${liveLosses}L)${liveTotal > 0 ? ` · ${jProgressBar(liveWinRate)} ${(liveWinRate * 100).toFixed(0)}%` : ""}
+> ${liveBalance ? `Balance: $${liveBalance.toFixed(0)}` : "No trades today"}${drawdownMode !== "NORMAL" ? ` · ⚠️ ${drawdownMode}` : ""}
+
+> [!${demoPnl >= 0 ? "success" : "warning"}] DEMO: ${demoPnl >= 0 ? "+" : ""}$${demoPnl.toFixed(0)} — ${demoTotal} trades (${demoWins}W/${demoLosses}L)${demoTotal > 0 ? ` · ${jProgressBar(demoWinRate)} ${(demoWinRate * 100).toFixed(0)}%` : ""}
+
+## Agent Fleet (${aliveCount}/${enabledCount} online)
+| Agent | Status | Last Active | Mode | Detail |
+|-------|--------|-------------|------|--------|
+${fleetRows.join("\n")}
+
+${alerts.length > 0 ? `> [!warning] ALERTS (${alerts.length})
+${alerts.map((a) => `> - ${a}`).join("\n")}` : "> [!success] ALL CLEAR\n> No active alerts"}
+
+## Active Positions
+${openEntries.length > 0
+    ? openEntries.map((t) => {
+        const mode = t.action.startsWith("live_") ? "LIVE" : "DEMO";
+        return `- \`${mode}\` **${t.symbol.replace("FUT:", "")}** ${t.action.includes("long") ? "LONG" : "SHORT"} x${t.qty} — ${(t.reason || "").slice(0, 60)}`;
+      }).join("\n")
+    : "*No open positions*"}
+
+## Top Lessons
+${lessonLines.length > 0 ? lessonLines.map((l, i) => `${i + 1}. ${l}`).join("\n") : "*No active lessons*"}
+
+## Anti-Patterns Active
+${apLines.length > 0 ? `> [!danger] AVOID
+${apLines.map((ap) => `> - ${ap}`).join("\n")}` : "*No active anti-patterns*"}
+
+## Quick Links
+- [[market-regime|Regime]] · [[volatility-environment|Vol]] · [[macro-outlook|Macro]] · [[crypto-regime|Crypto]]
+- [[futures-scalping|Futures Strategy]] · [[crypto-day-trading|Crypto Strategy]]
+- [[risk-management|Risk Rules]] · [[active-lessons|All Lessons]] · [[anti-patterns|Anti-Patterns]]
+- [[statistics|Performance]] · [[daily-balances|Equity Curve]]
+
+## System Architecture
+\`\`\`mermaid
+graph TD
+    J[🧠 JARVIS] --> B[Brain]
+    J --> AF[Agent Fleet]
+    B --> MR[Market Regime]
+    B --> VE[Volatility]
+    B --> MO[Macro Outlook]
+    AF --> FD[Futures Demo 24/7]
+    AF --> FL[Futures Live RTH]
+    AF --> CR[Crypto 24/7]
+    AF --> RE[Research]
+    AF --> SY[Synthesis]
+    FD --> JN[Journal]
+    FL --> JN
+    CR --> JN
+    JN --> SY
+    SY --> LS[Lessons]
+    SY --> ST[Statistics]
+    LS --> AF
+\`\`\`
+
+---
+*Auto-updated by JARVIS · Triggered by: ${triggeredBy} · ${now.toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" })}*
+`;
+
+  await vaultWrite("Brain/JARVIS.md", content, "jarvis-system");
+}
+
+export async function generateDailyBrief(): Promise<void> {
+  const s = await gatherJARVISState();
+  const now = new Date();
+  const isoNow = now.toISOString();
+  const dateStr = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" });
+
+  // Parse all the vault fields
+  const regime = jExtract(s.regime, /\*\*Current\*\*:\s*`?(\w+)`?/);
+  const vix = jExtract(s.regime, /VIX\*\*:\s*([\d.]+)/);
+  const volRegime = jExtract(s.volatility, /\*\*Current\*\*:\s*`?(\w+)`?/);
+  const cryptoRegime = jExtract(s.cryptoRegime, /\*\*Current\*\*:\s*`?(\w+)`?/);
+  const macroSummary = jExtract(s.macro, /## Summary\n([\s\S]*?)(?=\n##|$)/);
+  const macroBias = jExtract(s.macro, /## Bias:\s*(\w+)/);
+  const tradingRules = s.macro?.match(/^- .+$/gm)?.slice(0, 5) || [];
+
+  // Regime-specific playbook for futures
+  const regimePlaybooks: Record<string, { setups: string; sizing: string; note: string }> = {
+    BULL: { setups: "Trend continuation + breakout preferred", sizing: "Full size, 2-3 contracts", note: "Trade with the trend. Buy pullbacks." },
+    BEAR: { setups: "Short breakdowns + mean reversion longs at extremes", sizing: "Reduced size, 1-2 contracts", note: "Short the rallies. Tighter stops." },
+    CHOPPY: { setups: "A+ setups only or sit out", sizing: "1 contract max, wider stops", note: "Wait for breakout/breakdown to shift regime" },
+    TRENDING: { setups: "Trend continuation + breakout", sizing: "Full size", note: "Follow the trend direction" },
+  };
+  const playbook = regimePlaybooks[regime] || regimePlaybooks.CHOPPY!;
+
+  // Risk rules extract
+  const maxRisk = jExtract(s.riskRules, /max_risk_per_trade_pct:\s*([\d.]+)/);
+  const dailyLoss = jExtract(s.riskRules, /max_daily_loss_pct:\s*([\d.]+)/);
+  const confThreshold = jExtract(s.riskRules, /confidence_threshold:\s*(\d+)/);
+  const convictionGate = jExtract(s.riskRules, /conviction_gate:\s*"?([^"\n]+)"?/);
+  const instruments = jExtract(s.riskRules, /instruments:\s*\[([^\]]+)\]/);
+  const maxContracts = jExtract(s.riskRules, /max_contracts_per_trade:\s*(\d+)/);
+
+  // Equity
+  const balanceMatch = s.dailyBalances?.match(/last_known_balance:\s*([\d.]+)/);
+  const liveBalance = balanceMatch ? parseFloat(balanceMatch[1]) : 1000;
+  const riskDollar = (parseFloat(maxRisk) / 100 * liveBalance) || 80;
+  const dailyLossDollar = (parseFloat(dailyLoss) / 100 * liveBalance) || 150;
+
+  // Lessons
+  const lessonLines = s.activeLessons
+    ?.split("\n")
+    .filter((l) => l.match(/^\d+\.\s|^-\s\*\*L\d|^###\s*L\d|^\*\*LESSON/))
+    .slice(0, 6)
+    .map((l) => l.replace(/^[-\d.]+\s*/, "").replace(/^###\s*/, "").replace(/^\*\*LESSON\*\*:\s*/, "").trim()) || [];
+
+  // Anti-patterns
+  const apEntries: string[] = [];
+  if (s.antiPatterns) {
+    const blocks = s.antiPatterns.split(/###\s*AP\d+/).filter((b) => b.trim());
+    for (const block of blocks.slice(0, 5)) {
+      const nameMatch = block.match(/—\s*(.+)/);
+      const patternMatch = block.match(/\*\*(?:PATTERN|Pattern)\*\*:\s*(.+)/);
+      const label = nameMatch?.[1] || patternMatch?.[1] || block.split("\n")[0]?.trim();
+      if (label) apEntries.push(label.slice(0, 80));
+    }
+  }
+
+  // Yesterday's review from most recent journal
+  let yesterdayReview = "*No recent journal entries*";
+  if (s.recentJournals.length > 0) {
+    const journal = s.recentJournals[0];
+    const tradeCount = (journal.match(/### Trade/g) || []).length;
+    const pnlMatches = journal.match(/pnl_dollars:\s*([+-]?\d+(?:\.\d+)?)/g) || [];
+    const totalPnl = pnlMatches.reduce((sum, m) => sum + parseFloat(m.replace("pnl_dollars: ", "")), 0);
+    const dateMatch = journal.match(/date:\s*"?(\d{4}-\d{2}-\d{2})"?/);
+    const wins = pnlMatches.filter((m) => parseFloat(m.replace("pnl_dollars: ", "")) > 0).length;
+    const losses = pnlMatches.filter((m) => parseFloat(m.replace("pnl_dollars: ", "")) <= 0).length;
+    yesterdayReview = `${dateMatch?.[1] || "Recent"}: ${tradeCount} trades, ${wins}W/${losses}L, net ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(0)} (DB approx)`;
+  }
+
+  // Crypto playbook
+  const cryptoPlaybooks: Record<string, string> = {
+    CRYPTO_BULL: "100% size, momentum + trend continuation",
+    CRYPTO_BEAR: "50% size, mean reversion only, tight stops",
+    CRYPTO_CHOPPY: "75% size, mean reversion + range plays",
+    CRYPTO_EUPHORIA: "50% size, fade extremes, tight stops",
+    CRYPTO_FEAR: "75% size, mean reversion + DCA, wide stops",
+  };
+  const cryptoPlay = cryptoPlaybooks[cryptoRegime] || cryptoPlaybooks.CRYPTO_CHOPPY || "Standard parameters";
+
+  const content = `---
+date: "${now.toISOString().slice(0, 10)}"
+generated_by: "jarvis-premarket"
+generated_at: "${isoNow}"
+tags: [jarvis, daily-brief]
+---
+
+# JARVIS Daily Brief — ${dateStr}
+
+> [!info] MARKET ENVIRONMENT
+> **Regime:** ${regime} · **VIX:** ${vix} (${volRegime}) · **Crypto:** ${cryptoRegime}
+> ${macroSummary !== "Unknown" ? macroSummary.slice(0, 150) : "No macro summary available"}
+
+## Risk Rules Snapshot
+> [!danger] HARD LIMITS
+> - Max risk/trade: ${maxRisk !== "Unknown" ? (parseFloat(maxRisk) * 100).toFixed(0) : "8"}% ($${riskDollar.toFixed(0)}) · Daily loss limit: ${dailyLoss !== "Unknown" ? (parseFloat(dailyLoss) * 100).toFixed(0) : "15"}% ($${dailyLossDollar.toFixed(0)})
+> - Live instruments: ${instruments !== "Unknown" ? instruments : "MES, MNQ"} ONLY · Max contracts: ${maxContracts}
+> - Confidence: ≥${confThreshold !== "Unknown" ? confThreshold : "80"}% · Conviction: ${convictionGate !== "Unknown" ? convictionGate : "A+/A only"}
+
+## Today's Playbook
+
+### Futures (Live $${liveBalance.toFixed(0)})
+> [!${regime === "BULL" ? "success" : regime === "CHOPPY" ? "warning" : "danger"}] ${regime} REGIME → ${regime === "CHOPPY" ? "Conservative" : regime === "BULL" ? "Aggressive" : "Defensive"} Mode
+> - **Preferred setups:** ${playbook.setups}
+> - **Sizing:** ${playbook.sizing}
+> - **Session focus:** 9:45-11:30 + 2:00-3:30 ET
+> - **Note:** ${playbook.note}
+
+### Futures (Demo $50K)
+> [!tip] Ultra-Aggressive Learning Mode
+> - All setup types active, 55% confidence gate
+> - 20 contracts max, 50 trades/day (100 with A+)
+> - ES/NQ/GC — full instrument coverage
+
+### Crypto (Alpaca)
+> - **Regime:** ${cryptoRegime} → ${cryptoPlay}
+> - Max 3 concurrent, 6 trades/day
+
+## Lessons to Apply Today
+${lessonLines.length > 0 ? lessonLines.map((l, i) => `${i + 1}. ${l}`).join("\n") : "*No active lessons — check Lessons/active-lessons.md*"}
+
+## Anti-Patterns — DO NOT
+${apEntries.length > 0 ? apEntries.map((ap) => `- ❌ ${ap}`).join("\n") : "*No active anti-patterns*"}
+
+## Macro Context
+${macroSummary !== "Unknown" ? `> ${macroSummary.slice(0, 300)}` : "> No macro data available"}
+${macroBias !== "Unknown" ? `> **Bias:** ${macroBias}` : ""}
+${tradingRules.length > 0 ? `\n**Trading Rules:**\n${tradingRules.join("\n")}` : ""}
+
+## Yesterday's Review
+> ${yesterdayReview}
+
+---
+*Generated by JARVIS premarket synthesis · Valid for ${now.toISOString().slice(0, 10)} session*
+`;
+
+  await vaultWrite("Brain/JARVIS-daily-brief.md", content, "jarvis-premarket");
+}
+
 // ============ BUILD VAULT CONTEXT STRING FOR AI PROMPTS ============
 // Returns a condensed context string agents can inject into their AI analysis prompts
 

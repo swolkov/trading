@@ -19,12 +19,12 @@ export async function GET() {
     const viewMode = await getViewMode("futures");
     const auth = await checkTradovateAuth(viewMode);
 
-    // Get recent trade logs — filtered by mode's symbols to avoid demo/live mixing
-    const viewModeSymbols = viewMode === "live"
-      ? ["FUT:MES", "FUT:MNQ"]
-      : ["FUT:ES", "FUT:NQ", "FUT:GC"];
+    // Get recent trade logs — filtered by ACTION PREFIX (reliable mode tag)
+    // Demo engine uses "futures_*" prefix, live engine uses "live_*" prefix.
+    // Symbol-only filtering is unreliable: demo can trade MES/MNQ with simulated equity.
+    const actionPrefix = viewMode === "live" ? "live_" : "futures_";
     const recentLogs = await prisma.autoTradeLog.findMany({
-      where: { symbol: { in: viewModeSymbols } },
+      where: { symbol: { startsWith: "FUT:" }, action: { startsWith: actionPrefix } },
       orderBy: { createdAt: "desc" },
     });
 
@@ -309,14 +309,12 @@ export async function GET() {
 
           const dailyLossLimit = simEquity * (dailyLossPct / 100);
           const riskPerTrade = simEquity * (riskPct / 100);
-          // Count today's closed trades — filtered by mode's symbols to avoid cross-contamination
-          const modeSymbols = isDemoView
-            ? ["FUT:ES", "FUT:NQ", "FUT:GC"]
-            : ["FUT:MES", "FUT:MNQ"];
+          // Count today's closed trades — filtered by action prefix (reliable mode tag)
+          const modeActionPrefix = isDemoView ? "futures_" : "live_";
           const todayET = new Date().toISOString().slice(0, 10);
           const todayStart = new Date(todayET + "T00:00:00-04:00");
           const todayTrades = await prisma.autoTradeLog.count({
-            where: { symbol: { in: modeSymbols }, pnl: { not: null }, createdAt: { gte: todayStart } },
+            where: { symbol: { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
           });
           return { dailyLossLimit, maxTradesPerDay: maxTrades, riskPerTrade, simEquity, todayTradeCount: todayTrades };
         } catch { return null; }

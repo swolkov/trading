@@ -129,7 +129,26 @@ export async function runWatchdog(): Promise<WatchdogResult> {
       continue;
     }
 
-    const ageMinutes = (Date.now() - new Date(lastRun).getTime()) / 60000;
+    // Engine heartbeats are JSON with a timestamp field; cron heartbeats are ISO strings
+    let lastRunDate: number;
+    try {
+      const parsed = JSON.parse(lastRun);
+      lastRunDate = new Date(parsed.timestamp).getTime();
+    } catch {
+      lastRunDate = new Date(lastRun).getTime();
+    }
+    const ageMinutes = (Date.now() - lastRunDate) / 60000;
+
+    if (isNaN(ageMinutes)) {
+      warnings++;
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "warning",
+        message: `Heartbeat value unparseable (key: ${key})`,
+        lastSeen: lastRun.slice(0, 80),
+      });
+      continue;
+    }
 
     if (ageMinutes > expectation.maxStaleMinutes * 2) {
       criticals++;
