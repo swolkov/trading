@@ -149,6 +149,50 @@ async function authenticate(): Promise<string> {
     }),
   });
 
+  if (res.status === 429) {
+    // Rate limited — don't hammer, wait for bootstrap token injection from local machine
+    log("[AUTH] Rate limited (429) — entering DB-only poll mode. Inject bootstrap token to resume.");
+    // Poll DB every 30s for a bootstrap token instead of retrying auth
+    for (let i = 0; i < 240; i++) { // Up to 2 hours
+      await new Promise(r => setTimeout(r, 30_000));
+      try {
+        const bootstrapKey = IS_LIVE ? "tradovate_live_bootstrap_token" : "tradovate_bootstrap_token";
+        const bootstrap = await prisma.agentConfig.findUnique({ where: { key: bootstrapKey } });
+        if (bootstrap?.value) {
+          const { token, expires } = JSON.parse(bootstrap.value);
+          if (token && new Date(expires).getTime() > Date.now()) {
+            log("[AUTH] Found bootstrap token in DB — resuming");
+            accessToken = token;
+            tokenExpires = new Date(expires).getTime();
+            await prisma.agentConfig.delete({ where: { key: bootstrapKey } }).catch(() => {});
+            try {
+              const accounts = await apiFetch("/account/list") as { id: number; name: string; active: boolean }[];
+              const active = accounts.find((a) => a.active) || accounts[0];
+              if (active) { accountId = active.id; accountName = active.name; }
+            } catch {}
+            log(`Authenticated — ${accountName} (#${accountId}) — ${MODE_TAG} (bootstrap after 429)`);
+            return accessToken;
+          }
+        }
+        // Also check shared token (another engine may have refreshed it)
+        const shareKey = IS_LIVE ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+        const shared = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+        if (shared?.value) {
+          const { token, expires, accountId: aid, accountName: aname } = JSON.parse(shared.value);
+          if (token && new Date(expires).getTime() > Date.now() + 300_000) {
+            log("[AUTH] Found fresh shared token in DB — resuming");
+            accessToken = token;
+            tokenExpires = new Date(expires).getTime();
+            if (aid) { accountId = aid; accountName = aname; }
+            return accessToken;
+          }
+        }
+      } catch {}
+      if (i % 4 === 0) log(`[AUTH] Still waiting for bootstrap token... (${i * 30}s elapsed)`);
+    }
+    throw new Error("Auth failed: rate limited for 2 hours, no bootstrap token found");
+  }
+
   if (!res.ok) throw new Error(`Auth failed (${res.status}): ${await res.text().catch(() => "")}`);
 
   const data = await res.json();
