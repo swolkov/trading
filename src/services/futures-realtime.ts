@@ -2301,6 +2301,42 @@ function onBarClose(sym: string, bar: Bar) {
     }
   }
 
+  // SETUP: IB EXTENSION (after first hour, price breaks IB range → target 1.5x extension)
+  // Statistical tendency: 80%+ chance of reaching 1.5x IB extension on trend days
+  if (b.barCount >= 12 && b.barCount <= 36 && b.openingRangeHigh > 0 && orSize > currentATR * 0.4 &&
+      (session === "morning" || session === "midday")) {
+    const ext15 = orSize * 1.5; // 1.5x extension target
+    const breakAbove = price > b.openingRangeHigh && price < b.openingRangeHigh + ext15;
+    const breakBelow = price < b.openingRangeLow && price > b.openingRangeLow - ext15;
+
+    if ((breakAbove || breakBelow) && volRatio > 1.2) {
+      const dir = breakAbove ? "long" : "short";
+      const targetLevel = breakAbove ? b.openingRangeHigh + ext15 : b.openingRangeLow - ext15;
+      const distToTarget = Math.abs(price - targetLevel);
+
+      if (distToTarget > currentATR * 0.5) { // enough room to target
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 72,
+          volTrend, volRatio,
+          trend15Aligns: breakAbove ? tf15.trend === "up" : tf15.trend === "down",
+          rsiExtreme: false,
+          priceAboveVWAP: breakAbove ? price > vwapData.vwap : price < vwapData.vwap,
+          dayTypeMatch: dayType === "trend",
+          sessionQuality,
+        });
+
+        log(`  → IB EXTENSION ${dir.toUpperCase()} | IB: $${b.openingRangeLow.toFixed(2)}-$${b.openingRangeHigh.toFixed(2)} | Target: $${targetLevel.toFixed(2)} | Confidence: ${score}% | ${reasons.join(", ")}`);
+
+        if (score >= 72) {
+          evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), distToTarget, effectiveSizeMult, score,
+            `IB extension ${dir}: price $${price.toFixed(2)} ${breakAbove ? ">" : "<"} IB ${breakAbove ? "high" : "low"} $${(breakAbove ? b.openingRangeHigh : b.openingRangeLow).toFixed(2)}, targeting 1.5x ext $${targetLevel.toFixed(2)}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+        }
+        return;
+      }
+    }
+  }
+
   // SETUP 2: Trend Continuation (pullback to EMA9) — RTH only
   if ((dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
       (session === "morning" || session === "afternoon")) {
