@@ -2517,6 +2517,37 @@ async function checkEntriesPaused(): Promise<{ paused: boolean; reason: string }
   return { paused: true, reason: v.reason || "orchestrator pause" };
 }
 
+// Verify an entry order actually filled before we commit a tracked position and rest
+// protective stop/target orders. SAFETY-BIASED: only reports "rejected" when positively
+// confirmed (order in a terminal non-filled state AND no fill exists). Any uncertainty
+// (still working, API error, timeout) returns "unknown" so the caller falls back to current
+// behavior — we never abandon a real fill or leave a naked position. Polls ~4s (market
+// orders fill in <1s during open hours).
+async function verifyOrderFill(orderId: number): Promise<
+  | { status: "filled"; price: number }
+  | { status: "rejected"; reason: string }
+  | { status: "unknown" }
+> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 700 : 900));
+    try {
+      const fills = (await apiFetch("/fill/list")) as { orderId: number; price: number; qty: number }[];
+      const mine = Array.isArray(fills) ? fills.filter((f) => f.orderId === orderId) : [];
+      if (mine.length > 0) {
+        const q = mine.reduce((s, f) => s + (f.qty || 0), 0);
+        const vwap = q > 0 ? mine.reduce((s, f) => s + f.price * f.qty, 0) / q : mine[0].price;
+        return { status: "filled", price: vwap };
+      }
+      const ord = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
+      if (ord?.ordStatus === "Rejected" || ord?.ordStatus === "Canceled" || ord?.ordStatus === "Expired") {
+        return { status: "rejected", reason: ord.ordStatus };
+      }
+      // Working / Pending / Suspended → keep polling
+    } catch { /* transient API error — keep polling, resolve as unknown */ }
+  }
+  return { status: "unknown" };
+}
+
 async function evaluateAndTrade(
   sym: string, direction: string, price: number,
   stopDist: number, targetDist: number, sizeMult: number, technicalScore: number,
@@ -2668,7 +2699,18 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
     })}) as { orderId: number };
 
-    await new Promise(r => setTimeout(r, 1500));
+    // Confirm the entry filled BEFORE resting protective orders or tracking a position.
+    // Only skip on a positively-confirmed rejection (no fill); unknown → fall back to
+    // current behavior (track at estimated price) so we never abandon a real fill.
+    const fillResult = await verifyOrderFill(entry.orderId);
+    if (fillResult.status === "rejected") {
+      log(`  ORDER REJECTED (${fillResult.reason}) — no fill, NOT opening ${sym} position (no orphan orders)`);
+      notify(`⚠️ ${MODE_TAG} ${sym} entry REJECTED (${fillResult.reason}) — no position opened`);
+      feedLog("skip", `${sym} ${direction} entry rejected (${fillResult.reason}) — no position`);
+      return;
+    }
+    const fillConfirmed = fillResult.status === "filled";
+    const entryPrice = fillConfirmed ? fillResult.price : price; // real fill price when known
 
     let stopOrderId: number | null = null;
     try {
@@ -2690,7 +2732,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
     positions.set(sym, {
       symbol: sym, contractId: contract.id, direction, quantity: qty,
-      entryPrice: price, stopLoss: stopPrice, target: targetPrice,
+      entryPrice, stopLoss: stopPrice, target: targetPrice,
       trailStop: null, reachedBreakeven: false,
       stopOrderId, targetOrderId, entryTime: Date.now(),
       scaledOut: false, originalQty: qty, consecutiveStops: 0,
@@ -2703,8 +2745,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       emergencyWarningTick: 0,
     });
     dailyTradeCount++;
-    log(`Order #${entry.orderId} filled | Stop #${stopOrderId} | Target #${targetOrderId}`);
-    notify(`${side} ${qty}x ${sym} @ $${price.toFixed(2)} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
+    log(`Order #${entry.orderId} ${fillConfirmed ? `FILLED @ $${entryPrice.toFixed(2)}` : "placed (fill unconfirmed — tracking at est)"} | Stop #${stopOrderId} | Target #${targetOrderId}`);
+    notify(`${side} ${qty}x ${sym} @ $${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (est)"} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
     await savePositions();
 
     // Log to database so Vercel dashboard shows it
@@ -2713,8 +2755,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
         symbol: `FUT:${sym}`,
         action: `${TRADE_ACTION_PREFIX}_${direction}`,
         qty,
-        price,
-        reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x`,
+        price: entryPrice,
+        reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x. Fill: ${fillConfirmed ? "confirmed" : "unconfirmed(est)"}`,
         aiScore: confidenceScore,
         aiSignal: direction,
         orderId: String(entry.orderId),
