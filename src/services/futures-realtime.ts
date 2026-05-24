@@ -2502,6 +2502,21 @@ function onBarClose(sym: string, bar: Bar) {
 
 // ── AI Evaluation + Execute ─────────────────────────────
 
+// Orchestrator pause gate. Reads the ephemeral `entries_paused` session flag set by the
+// VIX-spike / consecutive-stop workflows. Self-contained prisma read so the engine doesn't
+// pull in the orchestrator's heavy deps; callers treat any error as "not paused" (fail-open).
+async function checkEntriesPaused(): Promise<{ paused: boolean; reason: string }> {
+  const sessionId = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const row = await prisma.sessionContext.findUnique({
+    where: { sessionId_key: { sessionId, key: "entries_paused" } },
+  });
+  if (!row || row.expiresAt < new Date()) return { paused: false, reason: "" };
+  const v = JSON.parse(row.value) as { paused?: boolean; reason?: string; mode?: string };
+  if (!v.paused) return { paused: false, reason: "" };
+  if (v.mode && v.mode !== ENGINE_MODE) return { paused: false, reason: "" }; // mode-scoped pause
+  return { paused: true, reason: v.reason || "orchestrator pause" };
+}
+
 async function evaluateAndTrade(
   sym: string, direction: string, price: number,
   stopDist: number, targetDist: number, sizeMult: number, technicalScore: number,
@@ -2548,6 +2563,16 @@ async function evaluateAndTrade(
     log(`  SKIPPED: Final confidence ${finalScore}% below ${MIN_CONFIDENCE}% threshold (${MODE_TAG})`);
     return;
   }
+
+  // Orchestrator pause gate (fail-open) — respect VIX-spike / consecutive-stop pauses
+  try {
+    const pause = await checkEntriesPaused();
+    if (pause.paused) {
+      log(`  PAUSED by orchestrator: ${pause.reason} — skipping ${sym} ${direction}`);
+      feedLog("cooldown", `Entries paused — ${pause.reason}`);
+      return;
+    }
+  } catch { /* fail-open: proceed normally if the pause check fails */ }
 
   // Execution gates — limits from DB config (Agent Hub manages these)
   const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < riskConfig.maxConcurrentPositions
