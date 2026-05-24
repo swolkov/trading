@@ -207,6 +207,20 @@ export interface Bar {
   v: number; // volume
 }
 
+// Alpaca's bars API returns ONLY the current day's bars when no `start` is given.
+// That starves every indicator/scanner (RSI/EMA/ATR need 15-55+ bars), so all
+// setups silently fail. Default a sensible lookback per timeframe so callers that
+// omit `start` still get enough history ending at the current bar (single page).
+function defaultBarsStart(timeframe: string): string {
+  const tf = timeframe.toLowerCase();
+  let days: number;
+  if (tf.includes("week")) days = 730;
+  else if (tf.includes("day") || tf === "1d") days = 250;   // ~170 trading bars
+  else if (tf.includes("hour") || /\dh$/.test(tf)) days = 10; // ~240 hourly bars
+  else days = 3;                                              // minute frames
+  return new Date(Date.now() - days * 86_400_000).toISOString();
+}
+
 export async function getBars(
   symbol: string,
   timeframe: string = "1Day",
@@ -214,7 +228,7 @@ export async function getBars(
   end?: string
 ): Promise<Bar[]> {
   const params = new URLSearchParams({ timeframe, feed: "iex", limit: "500" });
-  if (start) params.set("start", start);
+  params.set("start", start || defaultBarsStart(timeframe));
   if (end) params.set("end", end);
   const data = await alpacaFetch(
     `${DATA_URL}/v2/stocks/${symbol}/bars?${params}`
@@ -539,7 +553,7 @@ export async function getCryptoBars(
 ): Promise<CryptoBar[]> {
   const encoded = encodeURIComponent(symbol);
   const params = new URLSearchParams({ timeframe, limit: "500" });
-  if (start) params.set("start", start);
+  params.set("start", start || defaultBarsStart(timeframe));
   if (end) params.set("end", end);
   const data = await alpacaFetch(
     `${DATA_URL}/v1beta3/crypto/us/bars?symbols=${encoded}&${params}`
