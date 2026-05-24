@@ -42,6 +42,18 @@ const DEFAULTS: Record<string, string> = {
   futures_atr_stop_multiplier: "1.5",
   futures_atr_target_multiplier: "4.0", // 4:1 R:R — let winners run
   futures_simulated_equity: "1000", // $1K live capital — grows with account
+  // Live futures engine ($1K REAL money) — SEPARATE, conservative config the LIVE engine reads.
+  // (Matches LIVE_DEFAULTS in futures-realtime.ts. The demo engine reads the futures_* keys above.)
+  live_futures_risk_per_trade_pct: "5",
+  live_futures_daily_loss_limit_pct: "8",
+  live_futures_max_drawdown_pct: "15",
+  live_futures_max_contracts: "3",
+  live_futures_max_total_contracts: "4",
+  live_futures_max_trades_per_day: "6",
+  live_futures_max_positions: "2",
+  live_futures_atr_stop_multiplier: "1.5",
+  live_futures_atr_target_multiplier: "4.0",
+  live_futures_simulated_equity: "0",
 };
 
 export async function GET() {
@@ -85,7 +97,8 @@ export async function POST(request: Request) {
     const updates: Record<string, string> = await request.json();
 
     // Validate numeric values to prevent dangerous configs
-    const numericKeys = ["max_positions", "max_per_sector", "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day", "daily_loss_limit", "daily_spend_cap", "max_options_exposure", "per_trade_max"];
+    const numericKeys = ["max_positions", "max_per_sector", "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day", "daily_loss_limit", "daily_spend_cap", "max_options_exposure", "per_trade_max",
+      "live_futures_risk_per_trade_pct", "live_futures_daily_loss_limit_pct", "live_futures_max_drawdown_pct", "live_futures_max_contracts", "live_futures_max_total_contracts", "live_futures_max_trades_per_day", "live_futures_max_positions", "live_futures_atr_stop_multiplier", "live_futures_atr_target_multiplier"];
     for (const key of numericKeys) {
       if (key in updates) {
         const num = parseFloat(updates[key]);
