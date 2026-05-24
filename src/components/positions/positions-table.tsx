@@ -144,13 +144,14 @@ export function PositionsTable() {
     if (positions && positions.length > 0) loadContexts();
   }, [positions]);
 
-  async function closePosition(symbol: string, qty: string) {
+  async function closePosition(symbol: string, qty: string, side: string) {
     setClosing(symbol);
+    const closeSide = side === "short" ? "buy" : "sell"; // close a short by buying, a long by selling
     try {
       await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, qty, side: "sell", type: "market", time_in_force: "day" }),
+        body: JSON.stringify({ symbol, qty, side: closeSide, type: "market", time_in_force: "day" }),
       });
       setTimeout(() => mutate(), 2000);
     } catch { /* ignore */ }
@@ -165,7 +166,7 @@ export function PositionsTable() {
         await fetch("/api/orders", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }),
+          body: JSON.stringify({ symbol: pos.symbol, qty: pos.qty, side: pos.side === "short" ? "buy" : "sell", type: "market", time_in_force: "day" }),
         });
       } catch { /* ignore */ }
     }
@@ -241,7 +242,7 @@ export function PositionsTable() {
                     variant="outline"
                     size="sm"
                     className="text-red-500 border-red-500/30 hover:bg-red-500/10"
-                    onClick={() => closePosition(pos.symbol, pos.qty)}
+                    onClick={() => closePosition(pos.symbol, pos.qty, pos.side)}
                     disabled={closing === pos.symbol}
                   >
                     {closing === pos.symbol ? "Closing..." : "Close"}

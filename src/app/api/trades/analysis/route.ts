@@ -119,32 +119,10 @@ export async function GET() {
       }
     }
 
-    // Add historical wins from agent database (trades that span across the fresh start cutoff)
-    // Exclude futures trades (FUT: prefix) — those are tracked separately via Tradovate
-    const historicalWins = await prisma.autoTradeLog.findMany({
-      where: {
-        pnl: { gt: 0 },
-        orderId: "historical",
-        NOT: { symbol: { startsWith: "FUT:" } },
-      },
-    });
-    for (const hw of historicalWins) {
-      roundTrips.push({
-        symbol: hw.symbol,
-        underlying: hw.symbol.replace(/\d.*$/, ""),
-        type: hw.symbol.includes("C0") ? "CALL" : "PUT",
-        openSide: "sell",
-        openDate: new Date(hw.createdAt).toISOString(),
-        openPrice: 15.25, // original entry
-        openQty: hw.qty,
-        closeDate: new Date(hw.createdAt).toISOString(),
-        closePrice: hw.price || 3.65,
-        pnl: hw.pnl,
-        pnlPct: 75.1,
-        holdDays: 3,
-        status: "winner",
-      });
-    }
+    // (Removed 2026-05-24) Synthetic "historical wins" injection. It fabricated
+    // openPrice/closePrice/pnlPct(75.1)/holdDays(3) for orderId:"historical" rows, inflating the
+    // win-rate and the "Safe to Use Real Money?" checklist with fake numbers. Realized P&L now
+    // reflects only real round-trips — no fabricated track record feeding the go-live decision.
 
     // Sort by date descending
     roundTrips.sort((a, b) => new Date(b.openDate).getTime() - new Date(a.openDate).getTime());
