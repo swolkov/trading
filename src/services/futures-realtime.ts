@@ -1044,15 +1044,16 @@ const DEMO_DEFAULTS: RiskConfig = {
   simulatedEquity: 0,            // Use actual $50K demo equity (not simulated)
 };
 
-// Live defaults from Rules/risk-management.md ($1K account)
+// Live defaults — conservative for a $1K REAL-money account (audit-hardened 2026-05-24).
+// 8%/trade + 15% daily was too hot for real money; tightened. Tunable later via live_futures_* DB keys.
 const LIVE_DEFAULTS: RiskConfig = {
   maxContractsPerTrade: 3,
   maxTotalContracts: 4,
   maxTradesPerDay: 6,
-  riskPerTradePct: 8,            // 8% of account per trade ($80 on $1K)
-  dailyLossLimitPct: 15,         // 15% daily loss → full stop ($150 on $1K)
-  maxDrawdownPct: 25,            // 25% drawdown → kill switch
-  maxConcurrentPositions: 4,
+  riskPerTradePct: 5,            // 5% per trade (~$50 on $1K) — was 8%
+  dailyLossLimitPct: 8,          // 8% daily loss → full stop (~$80 on $1K) — was 15%
+  maxDrawdownPct: 15,            // 15% drawdown → kill switch — was 25%
+  maxConcurrentPositions: 2,     // tight on a small real account — was 4
   atrStopMultiplier: 1.5,
   atrTargetMultiplier: 4.0,
   simulatedEquity: 0,            // Use actual live equity
@@ -1068,7 +1069,7 @@ async function loadRiskConfig() {
     const keys = [
       `${kp}_max_contracts`, `${kp}_max_total_contracts`, `${kp}_max_trades_per_day`,
       `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
-      `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, "max_positions",
+      `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
       `${kp}_simulated_equity`,
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
@@ -1086,7 +1087,9 @@ async function loadRiskConfig() {
       riskPerTradePct: parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || defaults.riskPerTradePct,
       dailyLossLimitPct: IS_DEMO ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
       maxDrawdownPct: parseFloat(cfg[`${kp}_max_drawdown_pct`]) || defaults.maxDrawdownPct,
-      maxConcurrentPositions: parseInt(cfg.max_positions) || defaults.maxConcurrentPositions,
+      // Live is ISOLATED to its mode-keyed limit (no leak from the shared max_positions / stocks setting);
+      // demo keeps the legacy shared key for backward-compat.
+      maxConcurrentPositions: parseInt(cfg[`${kp}_max_positions`]) || (IS_DEMO ? parseInt(cfg.max_positions) : 0) || defaults.maxConcurrentPositions,
       atrStopMultiplier: parseFloat(cfg[`${kp}_atr_stop_multiplier`]) || defaults.atrStopMultiplier,
       atrTargetMultiplier: parseFloat(cfg[`${kp}_atr_target_multiplier`]) || defaults.atrTargetMultiplier,
       simulatedEquity: parseFloat(cfg[`${kp}_simulated_equity`]) || defaults.simulatedEquity,
@@ -2523,11 +2526,13 @@ async function checkEntriesPaused(): Promise<{ paused: boolean; reason: string }
 // (still working, API error, timeout) returns "unknown" so the caller falls back to current
 // behavior — we never abandon a real fill or leave a naked position. Polls ~4s (market
 // orders fill in <1s during open hours).
-async function verifyOrderFill(orderId: number): Promise<
-  | { status: "filled"; price: number }
+async function verifyOrderFill(orderId: number, requestedQty: number): Promise<
+  | { status: "filled"; price: number; qty: number }
   | { status: "rejected"; reason: string }
   | { status: "unknown" }
 > {
+  let lastFilledQty = 0;
+  let lastVwap = 0;
   for (let attempt = 0; attempt < 5; attempt++) {
     await new Promise((r) => setTimeout(r, attempt === 0 ? 700 : 900));
     try {
@@ -2535,16 +2540,21 @@ async function verifyOrderFill(orderId: number): Promise<
       const mine = Array.isArray(fills) ? fills.filter((f) => f.orderId === orderId) : [];
       if (mine.length > 0) {
         const q = mine.reduce((s, f) => s + (f.qty || 0), 0);
-        const vwap = q > 0 ? mine.reduce((s, f) => s + f.price * f.qty, 0) / q : mine[0].price;
-        return { status: "filled", price: vwap };
+        lastVwap = q > 0 ? mine.reduce((s, f) => s + f.price * f.qty, 0) / q : mine[0].price;
+        lastFilledQty = q;
+        if (q >= requestedQty) return { status: "filled", price: lastVwap, qty: q }; // fully filled
+        // partial — keep polling briefly to let the remainder fill
+      } else {
+        const ord = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
+        if (ord?.ordStatus === "Rejected" || ord?.ordStatus === "Canceled" || ord?.ordStatus === "Expired") {
+          return { status: "rejected", reason: ord.ordStatus };
+        }
       }
-      const ord = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
-      if (ord?.ordStatus === "Rejected" || ord?.ordStatus === "Canceled" || ord?.ordStatus === "Expired") {
-        return { status: "rejected", reason: ord.ordStatus };
-      }
-      // Working / Pending / Suspended → keep polling
     } catch { /* transient API error — keep polling, resolve as unknown */ }
   }
+  // Polling ended: if ANY fill was seen, treat as filled at the ACTUAL (possibly partial) qty so
+  // protective orders are sized to what we really hold — never larger (oversize → reversal risk).
+  if (lastFilledQty > 0) return { status: "filled", price: lastVwap, qty: lastFilledQty };
   return { status: "unknown" };
 }
 
@@ -2702,7 +2712,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // Confirm the entry filled BEFORE resting protective orders or tracking a position.
     // Only skip on a positively-confirmed rejection (no fill); unknown → fall back to
     // current behavior (track at estimated price) so we never abandon a real fill.
-    const fillResult = await verifyOrderFill(entry.orderId);
+    const fillResult = await verifyOrderFill(entry.orderId, qty);
     if (fillResult.status === "rejected") {
       log(`  ORDER REJECTED (${fillResult.reason}) — no fill, NOT opening ${sym} position (no orphan orders)`);
       notify(`⚠️ ${MODE_TAG} ${sym} entry REJECTED (${fillResult.reason}) — no position opened`);
@@ -2711,31 +2721,59 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     }
     const fillConfirmed = fillResult.status === "filled";
     const entryPrice = fillConfirmed ? fillResult.price : price; // real fill price when known
+    const fillQty = fillConfirmed ? fillResult.qty : qty;        // size protective orders to ACTUAL fill, never larger
 
+    // Protective STOP — retry once; for a real position this is non-negotiable.
     let stopOrderId: number | null = null;
-    try {
-      const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-        accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
-        orderQty: qty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
-      })}) as { orderId: number };
-      stopOrderId = s.orderId;
-    } catch {}
+    for (let a = 0; a < 2 && stopOrderId === null; a++) {
+      try {
+        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
+          orderQty: fillQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        stopOrderId = s.orderId;
+      } catch { if (a === 0) await new Promise(r => setTimeout(r, 800)); }
+    }
+
+    // SAFETY: never hold a CONFIRMED position without a protective stop. If the stop couldn't be
+    // placed, flatten the just-filled entry immediately rather than run naked.
+    if (stopOrderId === null && fillConfirmed) {
+      log(`  🚨 STOP PLACEMENT FAILED for ${sym} — flattening ${fillQty}x entry to avoid a naked position`);
+      notify(`🚨 ${MODE_TAG} ${sym}: stop order FAILED — flattening entry (no naked position)`);
+      try {
+        await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
+          orderQty: fillQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+        })});
+        feedLog("skip", `${sym} flattened — stop placement failed`);
+      } catch (e) {
+        log(`  🚨🚨 FLATTEN ALSO FAILED for ${sym}: ${e} — MANUAL INTERVENTION NEEDED`);
+        notify(`🚨🚨 ${MODE_TAG} ${sym}: entry filled, stop FAILED, flatten FAILED — CHECK ACCOUNT NOW`);
+      }
+      return; // never track a stopless position; never place a target on a flattened entry
+    }
+    if (stopOrderId === null) {
+      // Fill UNCONFIRMED + stop failed: can't safely flatten (may hold nothing). Track so the
+      // software hard-stop manages it, but alert loudly.
+      log(`  ⚠️ ${sym}: stop placement failed, fill unconfirmed — tracking with SOFTWARE stop only`);
+      notify(`⚠️ ${MODE_TAG} ${sym}: no broker stop (fill unconfirmed) — software stop active, watch it`);
+    }
 
     let targetOrderId: number | null = null;
     try {
       const t = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
         accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
-        orderQty: qty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
+        orderQty: fillQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
       })}) as { orderId: number };
       targetOrderId = t.orderId;
     } catch {}
 
     positions.set(sym, {
-      symbol: sym, contractId: contract.id, direction, quantity: qty,
+      symbol: sym, contractId: contract.id, direction, quantity: fillQty,
       entryPrice, stopLoss: stopPrice, target: targetPrice,
       trailStop: null, reachedBreakeven: false,
       stopOrderId, targetOrderId, entryTime: Date.now(),
-      scaledOut: false, originalQty: qty, consecutiveStops: 0,
+      scaledOut: false, originalQty: fillQty, consecutiveStops: 0,
       pyramided: false,
       entryRsi: setupContext?.rsi ?? 50,
       entryVwap: setupContext?.vwap ?? 0,
@@ -2746,7 +2784,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     });
     dailyTradeCount++;
     log(`Order #${entry.orderId} ${fillConfirmed ? `FILLED @ $${entryPrice.toFixed(2)}` : "placed (fill unconfirmed — tracking at est)"} | Stop #${stopOrderId} | Target #${targetOrderId}`);
-    notify(`${side} ${qty}x ${sym} @ $${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (est)"} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
+    notify(`${side} ${fillQty}x ${sym} @ $${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (est)"} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
     await savePositions();
 
     // Log to database so Vercel dashboard shows it
@@ -2754,7 +2792,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
         action: `${TRADE_ACTION_PREFIX}_${direction}`,
-        qty,
+        qty: fillQty,
         price: entryPrice,
         reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x. Fill: ${fillConfirmed ? "confirmed" : "unconfirmed(est)"}`,
         aiScore: confidenceScore,
@@ -3719,6 +3757,13 @@ async function main() {
         log(`[STARTUP] Synced ${MODE_TAG} SOD balance to today's snapshot: $${existing.value}`);
       }
     }
+    // CRITICAL: restore the daily-loss-limit baseline across restarts/deploys. Without this,
+    // startOfDayBalance stays 0 (gate falls back to live equity) and dailyPnl resets to 0 — so the
+    // engine FORGETS accumulated intraday losses after every deploy and re-arms the loss limit.
+    const sodNow = await prisma.agentConfig.findUnique({ where: { key: startupSodKey } });
+    startOfDayBalance = parseFloat(sodNow?.value || "") || tradovateEquity;
+    dailyPnl = tradovateEquity - startOfDayBalance; // balance-delta = realized intraday P&L
+    log(`[STARTUP] Loss-limit baseline restored: SOD $${startOfDayBalance.toFixed(2)}, intraday P&L $${dailyPnl.toFixed(2)}`);
   } catch {}
   await updateVIX();
   log(`VIX: ${currentVIX.toFixed(1)}`);
