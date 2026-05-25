@@ -2341,7 +2341,10 @@ function onBarClose(sym: string, bar: Bar) {
   }
 
   // SETUP 2: Trend Continuation (pullback to EMA9) — RTH only
-  if ((dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
+  // DISABLED 2026-05-25: 1yr backtest + walk-forward show it LOSES in-sample AND out-of-sample
+  // (PF 0.91/0.93, net negative on ES/NQ/GC). Flip to true to re-enable.
+  const TREND_CONTINUATION_ENABLED = false;
+  if (TREND_CONTINUATION_ENABLED && (dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
       (session === "morning" || session === "afternoon")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
     const isLong = nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
