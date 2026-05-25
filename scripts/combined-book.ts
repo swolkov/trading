@@ -45,13 +45,10 @@ function overnightMonthly(): Map<string, number> {
     const nrest = (a: { m: number; c: number }[], t: number) => { let b: number | null = null, bd = 1e9; for (const p of a) { const dd = Math.abs(p.m - t); if (dd < bd && dd <= 25) { bd = dd; b = p.c; } } return b; };
     for (const d of days) { const a = byDay.get(d)!; ref.set(d, { open: nrest(a, 570), close: nrest(a, 960) }); }
     // daily ATR proxy from close-to-close
-    const closes = days.map(d => ref.get(d)!.close).filter(Boolean) as number[];
     for (let i = 1; i < days.length; i++) {
       const prev = ref.get(days[i - 1])!, cur = ref.get(days[i])!;
-      if (prev.close && cur.open && inWindow(days[i])) {
-        const window = closes.slice(Math.max(0, i - 20), i); const atr = window.length > 1 ? window.reduce((s, v, k) => k ? s + Math.abs(v - window[k - 1]) : 0, 0) / (window.length - 1) : 1;
-        addM(out, days[i], (cur.open - prev.close) / (atr || 1));
-      }
+      if (prev.close && cur.open && inWindow(days[i]))
+        addM(out, days[i], ((cur.open - prev.close) / prev.close) / 3); // equal-weight % return across 3 markets (unlevered)
     }
   }
   return out;
@@ -68,7 +65,10 @@ function main() {
   const RISK = 0.01; // 1% per trade-unit
   const S = spreadMonthly(), O = overnightMonthly();
   const months = [...new Set([...S.keys(), ...O.keys()])].sort();
-  const sArr = months.map(m => (S.get(m) ?? 0) * RISK), oArr = months.map(m => (O.get(m) ?? 0) * RISK);
+  const sd = (a: number[]) => { const mn = a.reduce((s, v) => s + v, 0) / a.length; return Math.sqrt(a.reduce((s, v) => s + (v - mn) ** 2, 0) / a.length) || 1e-9; };
+  const sArr = months.map(m => (S.get(m) ?? 0) * RISK);
+  const oRaw = months.map(m => (O.get(m) ?? 0));                 // overnight already a % return (unlevered)
+  const oArr = oRaw.map(v => v * (sd(sArr) / sd(oRaw)));         // vol-match overnight to the spread sleeve (risk parity)
   const combo = months.map((_, i) => 0.5 * sArr[i] + 0.5 * oArr[i]);
   const pct = (x: number) => (x * 100).toFixed(0) + "%";
   console.log("\n" + "═".repeat(76));
