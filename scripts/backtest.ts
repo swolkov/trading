@@ -78,7 +78,7 @@ const MAX_HOLD = 78;              // bars (~6.5h) before time-exit if unresolved
 const GAP_THRESHOLDS: Record<string, number> = { ES: 10, NQ: 50, GC: 15 };
 
 // ===================== load + aggregate =====================
-function loadBars5m(sym: string): { bars: Bar[]; dates: Date[] } {
+function loadBars5m(sym: string): { bars: Bar[]; dates: Date[]; m1: Bar[] } {
   const path = new URL(`../data/${sym}_1m.csv`, import.meta.url);
   if (!fs.existsSync(path)) throw new Error(`missing data/${sym}_1m.csv — run dbn-fetch first`);
   const rows = fs.readFileSync(path, "utf8").trim().split("\n").slice(1);
@@ -98,7 +98,8 @@ function loadBars5m(sym: string): { bars: Bar[]; dates: Date[] } {
     else { ex.h = Math.max(ex.h, b.h); ex.l = Math.min(ex.l, b.l); ex.c = b.c; ex.v += b.v; }
   }
   const bars = [...buckets.values()].sort((a, b) => a.t - b.t);
-  return { bars, dates: bars.map(b => new Date(b.t)) };
+  m1.sort((a, b) => a.t - b.t);
+  return { bars, dates: bars.map(b => new Date(b.t)), m1 };
 }
 
 // ET session name (replicates getSessionName: RTH windows + ETH + halt)
@@ -229,14 +230,32 @@ function detectSetup(sym: string, bars: Bar[], st: { sessionBars: Bar[]; barCoun
 }
 
 // ===================== backtest loop =====================
-interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; }
+interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; }
+
+// Resolve a trade's exit by walking 1-MINUTE bars forward from entry — determines whether stop or
+// target was hit FIRST at minute resolution (far more accurate than the 5m stop-first assumption).
+function resolveExit(m1: Bar[], fromTime: number, dir: string, stop: number, target: number, maxTime: number): { px: number; outcome: string; exitTime: number; bars1m: number } {
+  const long = dir === "long";
+  let lo = 0, hi = m1.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (m1[mid].t < fromTime) lo = mid + 1; else hi = mid; }
+  let last = lo;
+  for (let j = lo; j < m1.length && m1[j].t <= maxTime; j++) {
+    last = j; const b = m1[j];
+    const hitStop = long ? b.l <= stop : b.h >= stop;
+    const hitTarget = long ? b.h >= target : b.l <= target;
+    if (hitStop && hitTarget) return { px: stop, outcome: "stop(1m-ambig)", exitTime: b.t, bars1m: j - lo }; // both in same minute → stop-first
+    if (hitStop) return { px: stop, outcome: "stop", exitTime: b.t, bars1m: j - lo };
+    if (hitTarget) return { px: target, outcome: "target", exitTime: b.t, bars1m: j - lo };
+  }
+  return { px: m1[last]?.c ?? stop, outcome: "time", exitTime: m1[last]?.t ?? maxTime, bars1m: last - lo };
+}
 function backtest(sym: string): Trade[] {
-  const { bars, dates } = loadBars5m(sym);
+  const { bars, dates, m1 } = loadBars5m(sym);
   const mult = MULT[sym], tick = TICK[sym];
   const trades: Trade[] = [];
   const st = { sessionBars: [] as Bar[], barCount: 0, orHigh: 0, orLow: 0, prevDayClose: 0, prevDayHigh: 0, prevDayLow: 0, session: "halt" };
   let lastDate = "";
-  let inTrade: { dir: string; entry: number; stop: number; target: number; type: string; score: number; entryIdx: number; stopDist: number } | null = null;
+  let blockedUntil = 0; // no new entry while a position is open (until its resolved exit time)
 
   for (let i = 0; i < bars.length; i++) {
     const d = dates[i], info = etInfo(d), session = sessionName(d);
@@ -256,40 +275,22 @@ function backtest(sym: string): Trade[] {
     st.sessionBars.push(bars[i]); st.barCount++;
     if (st.barCount <= 12) { st.orHigh = Math.max(st.orHigh, bars[i].h); st.orLow = st.orLow === 0 ? bars[i].l : Math.min(st.orLow, bars[i].l); }
 
-    // ---- manage open trade (check this bar's range for stop/target) ----
-    if (inTrade) {
-      const b = bars[i];
-      const long = inTrade.dir === "long";
-      const hitStop = long ? b.l <= inTrade.stop : b.h >= inTrade.stop;
-      const hitTarget = long ? b.h >= inTrade.target : b.l <= inTrade.target;
-      let exitPx: number | null = null, outcome = "";
-      if (hitStop && hitTarget) { exitPx = inTrade.stop; outcome = "stop(ambig)"; } // conservative: stop first
-      else if (hitStop) { exitPx = inTrade.stop; outcome = "stop"; }
-      else if (hitTarget) { exitPx = inTrade.target; outcome = "target"; }
-      else if (i - inTrade.entryIdx >= MAX_HOLD) { exitPx = b.c; outcome = "time"; }
-      if (exitPx !== null) {
-        const slip = tick; // 1 tick adverse on exit
-        const px = long ? exitPx - slip : exitPx + slip;
-        const gross = (long ? px - inTrade.entry : inTrade.entry - px) * mult;
-        const pnl = gross - COMMISSION_PER_SIDE * 2;
-        const riskDollars = inTrade.stopDist * mult;
-        trades.push({ sym, type: inTrade.type, dir: inTrade.dir, entry: inTrade.entry, exit: px, pnl, r: riskDollars > 0 ? pnl / riskDollars : 0, bars: i - inTrade.entryIdx, outcome });
-        inTrade = null;
-      }
-    }
-
-    // ---- detect new setup (no look-ahead; uses bars[0..i]) ----
-    if (!inTrade) {
-      // engine caps bars5m at 200 (shift on >200) — match it, and it keeps this O(n)
-      const setup = detectSetup(sym, bars.slice(Math.max(0, i - 199), i + 1), st);
-      if (setup) {
-        const entryRaw = bars[i].c;
-        const long = setup.dir === "long";
-        const entry = long ? entryRaw + TICK[sym] : entryRaw - TICK[sym]; // 1 tick adverse on entry
-        const stop = long ? entry - setup.stopDist : entry + setup.stopDist;
-        const target = long ? entry + setup.targetDist : entry - setup.targetDist;
-        inTrade = { dir: setup.dir, entry, stop, target, type: setup.type, score: setup.score, entryIdx: i, stopDist: setup.stopDist };
-      }
+    // ---- detect setup; resolve exit via 1-MINUTE intrabar bars (accurate fill order) ----
+    if (bars[i].t < blockedUntil) continue; // still in a trade — no new entry (state already updated above)
+    // engine caps bars5m at 200 (shift on >200) — match it; keeps this O(n)
+    const setup = detectSetup(sym, bars.slice(Math.max(0, i - 199), i + 1), st);
+    if (setup) {
+      const long = setup.dir === "long";
+      const entry = long ? bars[i].c + tick : bars[i].c - tick; // 1 tick adverse on entry
+      const stop = long ? entry - setup.stopDist : entry + setup.stopDist;
+      const target = long ? entry + setup.targetDist : entry - setup.targetDist;
+      const entryTime = bars[i].t + 300000; // resolve from the minute after the 5m bar closes
+      const ex = resolveExit(m1, entryTime, setup.dir, stop, target, entryTime + MAX_HOLD * 300000);
+      const exitPx = long ? ex.px - tick : ex.px + tick; // 1 tick adverse on exit
+      const pnl = (long ? exitPx - entry : entry - exitPx) * mult - COMMISSION_PER_SIDE * 2;
+      const riskDollars = setup.stopDist * mult;
+      trades.push({ sym, type: setup.type, dir: setup.dir, entry, exit: exitPx, pnl, r: riskDollars > 0 ? pnl / riskDollars : 0, bars: ex.bars1m, outcome: ex.outcome, entryTime: bars[i].t });
+      blockedUntil = ex.exitTime;
     }
   }
   return trades;
@@ -331,6 +332,16 @@ async function main() {
   console.log("\n" + "─".repeat(74));
   console.log("COMBINED (all symbols):"); printStats("ALL SETUPS", all);
   for (const type of [...new Set(all.map(x => x.type))]) printStats("• " + type, all.filter(x => x.type === type));
+
+  // ---- WALK-FORWARD: does the edge persist OUT-OF-SAMPLE? (train 2025 / test 2026) ----
+  const SPLIT = new Date("2026-01-01").getTime();
+  const fmt = (s: ReturnType<typeof stats>) => s ? `n=${String(s.n).padStart(4)} PF ${s.pf === Infinity ? "INF" : s.pf.toFixed(2)} net ${money(s.net).padStart(8)} ${(s.wr * 100).toFixed(0)}%w` : "n=0";
+  const wf = (label: string, ts: Trade[]) => console.log(`  ${label.padEnd(20)} IN: ${fmt(stats(ts.filter(t => t.entryTime < SPLIT))).padEnd(38)} | OUT: ${fmt(stats(ts.filter(t => t.entryTime >= SPLIT)))}`);
+  console.log("\n── WALK-FORWARD — in-sample 2025 vs OUT-OF-SAMPLE 2026 (edge must hold OOS to be real) ──");
+  wf("ALL", all);
+  for (const type of [...new Set(all.map(x => x.type))]) wf("• " + type, all.filter(x => x.type === type));
+  wf("** GC RSI bounce", all.filter(x => x.sym === "GC" && x.type === "RSI bounce"));
+
   console.log("\n⚠️  Caveats: technical setups only (no AI confirmation, which further filters live trades);");
   console.log("    VIX/macro=1.0; correlation/vault/macro gates not replicated; 1-tick slippage + $2.50/side comm.");
   console.log("    A SUPERSET of live trades — validate vs real fills before trusting. Expand window: dbn-fetch.ts 365");
