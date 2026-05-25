@@ -1031,29 +1031,34 @@ interface RiskConfig {
 }
 
 // Demo defaults — use actual $50K equity, trade aggressively for max learning
+// PROFESSIONAL RISK RULES (2026-05-25). Evidence: 3yr/12k-trade backtest shows >1% risk/trade
+// DESTROYS thin edges via sequence risk (gold edge: +4% over 3yr at 1%, but NEGATIVE at 2-3%).
+// 1% is the ceiling pros use. Even for a strong edge, more risk = bigger drawdowns + ruin risk.
+// Demo runs the SAME professional sizing so its track record is realistic + fundable (not a casino).
 const DEMO_DEFAULTS: RiskConfig = {
-  maxContractsPerTrade: 10,      // Aggressive — more contracts, more learning
-  maxTotalContracts: 8,          // Up to 8 open positions across ES/NQ/GC
-  maxTradesPerDay: 20,           // High volume — brain learns from every trade
-  riskPerTradePct: 8,            // 8% of $50K = $4,000 per trade
-  dailyLossLimitPct: 15,         // 15% of $50K = $7,500 daily limit
-  maxDrawdownPct: 25,
-  maxConcurrentPositions: 8,     // Match maxTotalContracts
+  maxContractsPerTrade: 10,      // ceiling; real size is set by 1% risk ÷ stop distance
+  maxTotalContracts: 8,
+  maxTradesPerDay: 20,           // high volume so the brain learns from many trades
+  riskPerTradePct: 1,            // 1% of $50K = $500/trade — professional, realistic track record
+  dailyLossLimitPct: 3,          // ~3 full losers → stop for the day
+  maxDrawdownPct: 15,            // 15% drawdown → kill switch (edge may be broken)
+  maxConcurrentPositions: 3,     // limit correlated heat (ES/NQ/GC move together)
   atrStopMultiplier: 1.5,
   atrTargetMultiplier: 4.0,
   simulatedEquity: 0,            // Use actual $50K demo equity (not simulated)
 };
 
-// Live defaults — conservative for a $1K REAL-money account (audit-hardened 2026-05-24).
-// 8%/trade + 15% daily was too hot for real money; tightened. Tunable later via live_futures_* DB keys.
+// Live defaults — $1K REAL money. At 1% ($10) NO micro fits (smallest stop ~$55+) → live correctly
+// STOPS trading: $1K is too small to trade futures at professional risk. That halt IS the right
+// outcome (live has no proven edge). Trade live only once funded to ~$10k+. Tunable via live_futures_* keys.
 const LIVE_DEFAULTS: RiskConfig = {
   maxContractsPerTrade: 3,
   maxTotalContracts: 4,
   maxTradesPerDay: 6,
-  riskPerTradePct: 5,            // 5% per trade (~$50 on $1K) — was 8%
-  dailyLossLimitPct: 8,          // 8% daily loss → full stop (~$80 on $1K) — was 15%
-  maxDrawdownPct: 15,            // 15% drawdown → kill switch — was 25%
-  maxConcurrentPositions: 2,     // tight on a small real account — was 4
+  riskPerTradePct: 1,            // 1% (~$10 on $1K) — pro standard; no micro fits → live pauses (correct)
+  dailyLossLimitPct: 3,          // 3% daily loss → full stop
+  maxDrawdownPct: 15,            // 15% drawdown → kill switch
+  maxConcurrentPositions: 2,     // tight on a small real account
   atrStopMultiplier: 1.5,
   atrTargetMultiplier: 4.0,
   simulatedEquity: 0,            // Use actual live equity
