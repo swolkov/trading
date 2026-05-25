@@ -16,7 +16,7 @@ const RULES: Record<string, string> = {
   live_futures_max_positions: "2",
   live_futures_simulated_equity: "0",   // use the REAL $1K (1% = $10 → no micro fits → live pauses, correct)
   // DEMO ($50K paper) — futures_* keys
-  futures_risk_per_trade_pct: "1",
+  futures_risk_per_trade_pct: "2",
   futures_daily_loss_limit_pct: "3",
   futures_max_drawdown_pct: "15",
   futures_max_positions: "3",
