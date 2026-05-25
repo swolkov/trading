@@ -89,6 +89,22 @@ function main() {
     console.log(`  @ ${String((r * 100).toFixed(0)).padStart(2)}%/trade:  ${eq.toFixed(1).padStart(7)}x over ${yrs}yr  =  ${(cagr * 100).toFixed(0)}%/yr  |  worst drawdown ${(maxDD * 100).toFixed(0)}%`);
   }
   console.log("  (sequential = GENEROUS; real spreads run concurrently + can gap THROUGH stops on a blow-up → worse)");
+
+  // ── MONTE CARLO — resample the trade sequence → honest distribution + risk of ruin ──
+  const allR = all.map(t => t.R);
+  const perYr = Math.max(1, Math.round(allR.length / yrs));
+  const pctl = (arr: number[], p: number) => arr.slice().sort((a, b) => a - b)[Math.floor(arr.length * p)];
+  const mc1 = (risk: number) => {
+    const ann: number[] = []; let loss = 0;
+    for (let s = 0; s < 10000; s++) { let eq = 1; for (let k = 0; k < perYr; k++) eq *= 1 + allR[(Math.random() * allR.length) | 0] * risk; ann.push(eq - 1); if (eq < 1) loss++; }
+    return { med: pctl(ann, 0.5), p5: pctl(ann, 0.05), p95: pctl(ann, 0.95), loss: loss / 10000 };
+  };
+  const ruin = (risk: number) => { let bad = 0; for (let s = 0; s < 10000; s++) { let eq = 1, peak = 1, dd = 0; for (let k = 0; k < perYr * 5; k++) { eq *= 1 + allR[(Math.random() * allR.length) | 0] * risk; peak = Math.max(peak, eq); dd = Math.min(dd, eq / peak - 1); } if (dd <= -0.40) bad++; } return bad / 10000; };
+  console.log(`\n  ── MONTE CARLO (${perYr} trades/yr resampled, 10k sims) — the honest range, not a single rosy number ──`);
+  for (const r of [0.01, 0.02]) {
+    const m = mc1(r);
+    console.log(`  @ ${(r * 100).toFixed(0)}% risk: 1yr median ${(m.med * 100).toFixed(0)}%  [5th pct ${(m.p5 * 100).toFixed(0)}% … 95th ${(m.p95 * 100).toFixed(0)}%]  P(down year) ${(m.loss * 100).toFixed(0)}%  | over 5yr, P(>40% drawdown) ${(ruin(r) * 100).toFixed(0)}%`);
+  }
   console.log("═".repeat(82) + "\n");
 }
 main();
