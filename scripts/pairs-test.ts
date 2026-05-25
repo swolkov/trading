@@ -13,7 +13,7 @@ function load(sym: string): Map<string, number> {
   return m;
 }
 
-interface T { year: number; R: number; test: boolean; }
+interface T { year: number; R: number; test: boolean; date: string; }
 const SPLIT = 2020; // train <2020, test >=2020 (includes COVID, inflation, war — stress-tests the spreads)
 
 function pair(a: string, b: string, look = 60): T[] | null {
@@ -36,7 +36,7 @@ function pair(a: string, b: string, look = 60): T[] | null {
       if (reverted || stopped || timeout) {
         const ret = pos.dir * (ratio[i] - pos.entry) / pos.entry;   // dollar-neutral spread return
         const R = ret / (1.5 * pos.fracStd);                        // risk = the 1.5σ stop distance
-        trades.push({ year: pos.year, R, test: pos.year >= SPLIT });
+        trades.push({ year: pos.year, R, test: pos.year >= SPLIT, date: dates[i] });
         pos = null;
       }
     }
@@ -77,6 +77,18 @@ function main() {
   console.log(`  IN-SAMPLE  (<2020): ${inR.toFixed(0)}R over ${inY}yr = ${(inR / inY).toFixed(1)}R/yr  → @1% risk ≈ ${(inR / inY * 1).toFixed(0)}%/yr`);
   console.log(`  OUT-SAMPLE (2020+): ${outR.toFixed(0)}R over ${outY}yr = ${(outR / outY).toFixed(1)}R/yr  → @1% risk ≈ ${(outR / outY * 1).toFixed(0)}%/yr  ← the real test`);
   console.log("\n  (R = profit ÷ the 1.5σ stop. @1% risk: a +Xr year ≈ +X% on the account, before 2-leg commissions.)");
+
+  // ── RISK SWEEP — what each risk-per-trade level does to THIS (real) edge, compounded chronologically ──
+  const sorted = [...all].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const yrs = years.length;
+  console.log("\n  ── RISK SWEEP — same real edge, different risk-per-trade (stops assumed to HOLD — generous) ──");
+  for (const r of [0.01, 0.02, 0.03, 0.05, 0.10]) {
+    let eq = 1, peak = 1, maxDD = 0, minEq = 1;
+    for (const t of sorted) { eq *= 1 + t.R * r; peak = Math.max(peak, eq); maxDD = Math.min(maxDD, eq / peak - 1); minEq = Math.min(minEq, eq); }
+    const cagr = eq > 0 ? Math.pow(eq, 1 / yrs) - 1 : -1;
+    console.log(`  @ ${String((r * 100).toFixed(0)).padStart(2)}%/trade:  ${eq.toFixed(1).padStart(7)}x over ${yrs}yr  =  ${(cagr * 100).toFixed(0)}%/yr  |  worst drawdown ${(maxDD * 100).toFixed(0)}%`);
+  }
+  console.log("  (sequential = GENEROUS; real spreads run concurrently + can gap THROUGH stops on a blow-up → worse)");
   console.log("═".repeat(82) + "\n");
 }
 main();
