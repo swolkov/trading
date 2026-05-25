@@ -357,6 +357,23 @@ async function main() {
   for (const s of ["ES", "NQ", "GC"]) yr(`${s} RSI-bounce`, all.filter(x => x.sym === s && x.type === "RSI bounce"));
   yr("NQ short rsi>80", all.filter(x => x.sym === "NQ" && x.type === "RSI bounce" && x.dir === "short" && x.rsi > 80));
 
+  // ---- GOLD EDGE — what could it actually make per year? (fixed-fractional risk sizing) ----
+  // At risk r% per trade, a year's return ≈ r% × (sum of that year's R-multiples). Compounded across years.
+  console.log("\n── GOLD (GC/MGC) RSI-bounce — annual return at fixed risk-per-trade (the only durable edge) ──");
+  const gold = all.filter(t => t.sym === "GC" && t.type === "RSI bounce");
+  const gy = [...new Set(gold.map(yearOf))].sort();
+  for (const risk of [0.01, 0.02, 0.03]) {
+    let eq = 1; const parts: string[] = [];
+    for (const y of gy) {
+      const rsum = gold.filter(t => yearOf(t) === y).reduce((s, t) => s + t.r, 0);
+      const ret = rsum * risk; eq *= (1 + ret);
+      parts.push(`${y} ${ret >= 0 ? "+" : ""}${(ret * 100).toFixed(0)}%`);
+    }
+    console.log(`  risk ${(risk * 100).toFixed(0)}%/trade:  ${parts.join("  ")}   →  3yr compounded ${((eq - 1) * 100).toFixed(0)}%`);
+  }
+  const totR = gold.reduce((s, t) => s + t.r, 0);
+  console.log(`  ${gold.length} gold trades / ~3yr, total ${totR.toFixed(0)}R (avg ${(totR / 3).toFixed(1)}R/yr). NEEDS ~$10k to size at 1% risk (gold stop ~$93).`);
+
   // ---- EDGE SCAN — hunt for STRONG, OOS-robust filtered edges on the live instruments ----
   // MES=ES, MNQ=NQ, MGC=GC (same price action, only $ multiplier differs).
   // DISCIPLINE: scanning many subsets WILL surface lucky in-sample edges. Trust ONLY what
