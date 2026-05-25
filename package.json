@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "futures:realtime": "npx tsx src/services/futures-realtime.ts",
+    "edge": "npx tsx scripts/edge-report.ts",
     "vault:sync": "npx tsx scripts/vault-sync.ts",
     "vault:pull": "npx tsx scripts/vault-sync.ts pull",
     "vault:push": "npx tsx scripts/vault-sync.ts push"
