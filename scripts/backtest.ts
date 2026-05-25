@@ -230,7 +230,7 @@ function detectSetup(sym: string, bars: Bar[], st: { sessionBars: Bar[]; barCoun
 }
 
 // ===================== backtest loop =====================
-interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; }
+interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; rsi: number; session: string; }
 
 // Resolve a trade's exit by walking 1-MINUTE bars forward from entry — determines whether stop or
 // target was hit FIRST at minute resolution (far more accurate than the 5m stop-first assumption).
@@ -278,7 +278,8 @@ function backtest(sym: string): Trade[] {
     // ---- detect setup; resolve exit via 1-MINUTE intrabar bars (accurate fill order) ----
     if (bars[i].t < blockedUntil) continue; // still in a trade — no new entry (state already updated above)
     // engine caps bars5m at 200 (shift on >200) — match it; keeps this O(n)
-    const setup = detectSetup(sym, bars.slice(Math.max(0, i - 199), i + 1), st);
+    const slice = bars.slice(Math.max(0, i - 199), i + 1);
+    const setup = detectSetup(sym, slice, st);
     if (setup) {
       const long = setup.dir === "long";
       const entry = long ? bars[i].c + tick : bars[i].c - tick; // 1 tick adverse on entry
@@ -289,7 +290,8 @@ function backtest(sym: string): Trade[] {
       const exitPx = long ? ex.px - tick : ex.px + tick; // 1 tick adverse on exit
       const pnl = (long ? exitPx - entry : entry - exitPx) * mult - COMMISSION_PER_SIDE * 2;
       const riskDollars = setup.stopDist * mult;
-      trades.push({ sym, type: setup.type, dir: setup.dir, entry, exit: exitPx, pnl, r: riskDollars > 0 ? pnl / riskDollars : 0, bars: ex.bars1m, outcome: ex.outcome, entryTime: bars[i].t });
+      const entryRsi = rsi(slice.map(b => b.c)) ?? 50; // RSI at entry — for the edge scan
+      trades.push({ sym, type: setup.type, dir: setup.dir, entry, exit: exitPx, pnl, r: riskDollars > 0 ? pnl / riskDollars : 0, bars: ex.bars1m, outcome: ex.outcome, entryTime: bars[i].t, rsi: entryRsi, session: st.session });
       blockedUntil = ex.exitTime;
     }
   }
@@ -341,6 +343,35 @@ async function main() {
   wf("ALL", all);
   for (const type of [...new Set(all.map(x => x.type))]) wf("• " + type, all.filter(x => x.type === type));
   wf("** GC RSI bounce", all.filter(x => x.sym === "GC" && x.type === "RSI bounce"));
+
+  // ---- EDGE SCAN — hunt for STRONG, OOS-robust filtered edges on the live instruments ----
+  // MES=ES, MNQ=NQ, MGC=GC (same price action, only $ multiplier differs).
+  // DISCIPLINE: scanning many subsets WILL surface lucky in-sample edges. Trust ONLY what
+  // holds OUT-of-sample on a real sample (>=25 OOS trades). Flag ✅ = in+ AND OOS expR>=0.10 AND OOS PF>=1.2.
+  console.log("\n── EDGE SCAN — filtered subsets, IN-sample 2025 / OUT 2026 (✅ = holds OOS; skeptical: most don't) ──");
+  type F = { label: string; fn: (t: Trade) => boolean };
+  const oversold = (t: Trade) => t.dir === "long", overbought = (t: Trade) => t.dir === "short";
+  const filters: F[] = [];
+  for (const [sym, micro] of [["ES", "MES"], ["NQ", "MNQ"], ["GC", "MGC"]]) {
+    filters.push({ label: `${micro} RSI-bounce`, fn: t => t.sym === sym && t.type === "RSI bounce" });
+    filters.push({ label: `${micro} RSI-bounce LONG`, fn: t => t.sym === sym && t.type === "RSI bounce" && oversold(t) });
+    filters.push({ label: `${micro} RSI-bounce SHORT`, fn: t => t.sym === sym && t.type === "RSI bounce" && overbought(t) });
+    filters.push({ label: `${micro} RSI-bounce LONG rsi<20`, fn: t => t.sym === sym && t.type === "RSI bounce" && oversold(t) && t.rsi < 20 });
+    filters.push({ label: `${micro} RSI-bounce SHORT rsi>80`, fn: t => t.sym === sym && t.type === "RSI bounce" && overbought(t) && t.rsi > 80 });
+    filters.push({ label: `${micro} OR-breakout`, fn: t => t.sym === sym && t.type === "OR breakout" });
+    filters.push({ label: `${micro} RSI-bounce morning`, fn: t => t.sym === sym && t.type === "RSI bounce" && t.session === "morning" });
+    filters.push({ label: `${micro} RSI-bounce afternoon`, fn: t => t.sym === sym && t.type === "RSI bounce" && t.session === "afternoon" });
+  }
+  const sf = (s: ReturnType<typeof stats>) => s ? `n=${String(s.n).padStart(3)} PF ${(s.pf === Infinity ? "INF" : s.pf.toFixed(2)).padStart(4)} ${s.expR >= 0 ? "+" : ""}${s.expR.toFixed(2)}R net ${money(s.net)}` : "n=0";
+  const scanned = filters.map(f => {
+    const ts = all.filter(f.fn);
+    return { f, si: stats(ts.filter(t => t.entryTime < SPLIT)), so: stats(ts.filter(t => t.entryTime >= SPLIT)) };
+  }).filter(r => r.so && r.so.n >= 25).sort((a, b) => (b.so!.expR) - (a.so!.expR));
+  for (const r of scanned) {
+    // robust = a REAL edge: positive in BOTH periods (not lucky in one), decent OOS strength + sample
+    const robust = r.si && r.si.pf >= 1.10 && r.si.expR > 0 && r.so!.expR >= 0.10 && r.so!.pf >= 1.20 && r.so!.n >= 40;
+    console.log(`  ${robust ? "✅" : "  "} ${r.f.label.padEnd(28)} IN ${sf(r.si).padEnd(34)} | OUT ${sf(r.so)}`);
+  }
 
   console.log("\n⚠️  Caveats: technical setups only (no AI confirmation, which further filters live trades);");
   console.log("    VIX/macro=1.0; correlation/vault/macro gates not replicated; 1-tick slippage + $2.50/side comm.");
