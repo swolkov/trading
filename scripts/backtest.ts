@@ -344,6 +344,19 @@ async function main() {
   for (const type of [...new Set(all.map(x => x.type))]) wf("• " + type, all.filter(x => x.type === type));
   wf("** GC RSI bounce", all.filter(x => x.sym === "GC" && x.type === "RSI bounce"));
 
+  // ---- BY YEAR — the cleanest robustness test: a real edge is positive in MOST years ----
+  const yearOf = (t: Trade) => new Date(t.entryTime).getUTCFullYear();
+  const years = [...new Set(all.map(yearOf))].sort();
+  const yr = (label: string, ts: Trade[]) => {
+    const parts = years.map(y => { const s = stats(ts.filter(t => yearOf(t) === y)); return s ? `${y} PF${(s.pf === Infinity ? "INF" : s.pf.toFixed(2))} ${s.expR >= 0 ? "+" : ""}${s.expR.toFixed(2)}R/${s.n}` : `${y} —`; });
+    console.log(`  ${label.padEnd(22)} ${parts.join("  ")}`);
+  };
+  console.log("\n── BY YEAR — real edge = positive in MOST years (one good year = regime ghost) ──");
+  yr("ALL", all);
+  for (const type of [...new Set(all.map(x => x.type))]) yr("• " + type, all.filter(x => x.type === type));
+  for (const s of ["ES", "NQ", "GC"]) yr(`${s} RSI-bounce`, all.filter(x => x.sym === s && x.type === "RSI bounce"));
+  yr("NQ short rsi>80", all.filter(x => x.sym === "NQ" && x.type === "RSI bounce" && x.dir === "short" && x.rsi > 80));
+
   // ---- EDGE SCAN — hunt for STRONG, OOS-robust filtered edges on the live instruments ----
   // MES=ES, MNQ=NQ, MGC=GC (same price action, only $ multiplier differs).
   // DISCIPLINE: scanning many subsets WILL surface lucky in-sample edges. Trust ONLY what
