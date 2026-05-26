@@ -91,6 +91,13 @@ def main():
         except Exception:
             print("[sidecar] stream error — reconnecting in 5s:\n" + traceback.format_exc(), flush=True)
             time.sleep(5)
+            try: conn.close()
+            except Exception: pass
+            try:
+                conn = db_connect()   # RE-ESTABLISH the DB connection (Neon drops idle conns → was crash-looping)
+                print("[sidecar] DB reconnected", flush=True)
+            except Exception:
+                print("[sidecar] DB reconnect failed — will retry", flush=True)
 
 if __name__ == "__main__":
     main()
