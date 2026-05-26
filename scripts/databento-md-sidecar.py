@@ -51,30 +51,33 @@ def upsert(conn, latest):
 def stream_once(conn):
     import databento as db
     client = db.Live(key=env("DATABENTO_API_KEY"))
-    client.subscribe(dataset="GLBX.MDP3", schema="mbp-1", stype_in="continuous", symbols=SYMBOLS)
-    print(f"[sidecar] subscribed {SYMBOLS}", flush=True)
-    id_to_sym, latest, last_write, last_log = {}, {}, 0.0, 0.0
+    client.subscribe(dataset="GLBX.MDP3", schema="mbp-1", stype_in="continuous", symbols=SYMBOLS)   # bid/ask
+    client.subscribe(dataset="GLBX.MDP3", schema="trades", stype_in="continuous", symbols=SYMBOLS)  # real traded volume
+    print(f"[sidecar] subscribed {SYMBOLS} (mbp-1 + trades)", flush=True)
+    id_to_sym, latest, cumvol, last_write, last_log = {}, {}, {}, 0.0, 0.0
     for rec in client:
         name = type(rec).__name__
         if name == "SymbolMappingMsg":
             raw = getattr(rec, "stype_in_symbol", None) or getattr(rec, "stype_out_symbol", "")
             id_to_sym[rec.instrument_id] = raw.split(".")[0]   # "ES.v.0" → "ES"
             continue
-        lv = getattr(rec, "levels", None)
-        if not lv:
-            continue
         sym = id_to_sym.get(getattr(rec, "instrument_id", None))
         if not sym:
             continue
+        if name == "TradeMsg":                                  # TRUE traded volume (cumulative)
+            cumvol[sym] = cumvol.get(sym, 0) + (getattr(rec, "size", 0) or 0)
+            continue
+        lv = getattr(rec, "levels", None)
+        if not lv:
+            continue
         bid, ask = lv[0].bid_px / 1e9, lv[0].ask_px / 1e9
-        vol = (getattr(lv[0], "bid_sz", 0) or 0) + (getattr(lv[0], "ask_sz", 0) or 0)   # top-of-book size = liquidity-weighted volume proxy
         if bid > 0 and ask > 0:
-            latest[sym] = (bid, ask, int(getattr(rec, "ts_event", time.time_ns()) // 1_000_000), vol)
+            latest[sym] = (bid, ask, int(getattr(rec, "ts_event", time.time_ns()) // 1_000_000), cumvol.get(sym, 0))   # cumulative traded volume
         now = time.time()
         if now - last_write >= WRITE_EVERY and latest:
             upsert(conn, latest); last_write = now
         if now - last_log >= 30:
-            print(f"[sidecar] {', '.join(f'{s} {v[0]:.2f}/{v[1]:.2f}' for s,v in latest.items())}", flush=True)
+            print(f"[sidecar] {', '.join(f'{s} {v[0]:.2f}/{v[1]:.2f} vol={int(v[3])}' for s,v in latest.items())}", flush=True)
             last_log = now
 
 def main():

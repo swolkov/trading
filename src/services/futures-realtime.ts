@@ -689,6 +689,7 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
 // DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
 let dbnMdLogged = 0;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
+const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
   if (!databentoMdEnabled) return new Map();
   try {
@@ -698,8 +699,13 @@ async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: n
     const out = new Map<string, { mid: number; vol: number }>();
     const now = Date.now();
     for (const r of rows) {
-      const ts = Number(r.ts), mid = Number(r.mid);
-      if (mid > 0 && now - ts < 30_000) out.set(r.symbol, { mid, vol: Number(r.vol) || 1 });   // only FRESH (<30s) quotes
+      const ts = Number(r.ts), mid = Number(r.mid), cum = Number(r.vol) || 0;
+      if (mid > 0 && now - ts < 30_000) {
+        const last = lastCumVol.get(r.symbol) ?? cum;
+        const delta = cum >= last ? cum - last : cum;   // reset-safe (sidecar restart drops the cumulative count)
+        lastCumVol.set(r.symbol, cum);
+        out.set(r.symbol, { mid, vol: Math.max(1, delta) });   // FRESH (<30s) quote + REAL traded volume since last poll
+      }
     }
     if (out.size !== dbnMdLogged) { log(`[MD] Databento primary: ${out.size} fresh symbols from live_quotes`); dbnMdLogged = out.size; }
     return out;
