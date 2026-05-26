@@ -2712,6 +2712,16 @@ async function evaluateAndTrade(
 
 // ── Trade Execution ─────────────────────────────────────
 
+// Phase-0 execution-quality capture (intended vs actual fill, slippage, latency). Fully isolated — never throws into trading.
+async function logExecutionQuality(e: { mode: string; sym: string; side: string; intended: number; fill: number; qty: number; latencyMs: number; status: string }) {
+  try {
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS execution_quality (id serial PRIMARY KEY, ts timestamptz DEFAULT now(), mode text, symbol text, side text, intended double precision, fill double precision, slippage double precision, qty int, latency_ms int, status text)`);
+    const slip = e.side === "Buy" ? (e.fill - e.intended) : (e.intended - e.fill);   // + = adverse (paid up)
+    await prisma.$executeRawUnsafe(`INSERT INTO execution_quality(mode,symbol,side,intended,fill,slippage,qty,latency_ms,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, e.mode, e.sym, e.side, e.intended, e.fill, slip, e.qty, e.latencyMs, e.status);
+    log(`[EXEC-Q] ${e.sym} ${e.side} intended ${e.intended.toFixed(2)} fill ${e.fill.toFixed(2)} slip ${slip.toFixed(2)} lat ${e.latencyMs}ms ${e.status}`);
+  } catch { /* telemetry must never affect trading */ }
+}
+
 async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string, setupContext?: { rsi: number; vwap: number; trend15m: string; dayType: string; session: string }) {
   const contract = contracts.get(sym);
   if (!contract) return;
@@ -2758,6 +2768,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
     const acct = accounts.find(a => a.id === accountId) || accounts[0];
 
+    const submitTs = Date.now();
     const entry = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
       accountSpec: acct.name, accountId, action: side, symbol: contract.id,
       orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
@@ -2776,6 +2787,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     const fillConfirmed = fillResult.status === "filled";
     const entryPrice = fillConfirmed ? fillResult.price : price; // real fill price when known
     const fillQty = fillConfirmed ? fillResult.qty : qty;        // size protective orders to ACTUAL fill, never larger
+    // EXECUTION TELEMETRY (Phase 0) — fire-and-forget; isolated so it can never affect the order
+    void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: entryPrice, qty: fillQty, latencyMs: Date.now() - submitTs, status: fillResult.status });
 
     // Protective STOP — retry once; for a real position this is non-negotiable.
     let stopOrderId: number | null = null;
