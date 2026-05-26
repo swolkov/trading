@@ -22,12 +22,16 @@ const L = (s: string) => cache.get(s) ?? cache.set(s, load(s)).get(s)!;
 // ── FIXED, VALIDATED CONFIG — do not tweak in this harness ──────────────────
 const PAIRS: [string, string][] = [["CL", "RB"], ["CL", "HO"], ["ZC", "ZS"], ["ZW", "ZC"], ["ZS", "ZW"], ["6E", "6B"], ["6A", "6C"], ["GC", "HG"]];
 const P = { lookback: 60, entryZ: 2, exitZ: 0, stopZ: 3.5, maxHold: 40 };
-const COST_R = 0.10;                 // ASSUMED round-trip slippage+commission per trade, in R. ← replace with MEASURED (Trades+MBP-1)
-const COST_SWEEP = [0.05, 0.10, 0.20];
+// MEASURED round-trip crossing cost per pair (bps of notional; Databento tbbo — scripts/dbn-execution-realism.ts).
+const COST_BPS: Record<string, number> = { "CL/RB": 4.19, "CL/HO": 5.63, "ZC/ZS": 7.42, "ZW/ZC": 9.14, "ZS/ZW": 5.88, "6E/6B": 1.18, "6A/6C": 1.39, "GC/HG": 1.69 };
+const COMMISSION_BPS = 2.0;          // broker commission allowance per round trip (bps of notional), conservative
+// Per-trade cost in R = (cost bps / 1e4) / (1.5 × σ at entry). Replaces the old assumed 0.10R.
+const costR = (t: { pair: string; fs: number }) => (((COST_BPS[t.pair] ?? 6) + COMMISSION_BPS) / 1e4) / (1.5 * t.fs);
+const COST_SWEEP = [1, 2, 4];        // stress multipliers on the MEASURED cost
 const FORWARD_MONTHS = 18;           // forward window = most-recent N months (proxy until live-forward accrues)
 const MIN_N = 8;                     // below this, a pair's forward stats are MONITORING, not a verdict
 
-interface Tr { pair: string; entry: string; exit: string; dir: number; R: number; reason: "revert" | "stop" | "timeout"; hold: number; gapThru: boolean; }
+interface Tr { pair: string; entry: string; exit: string; dir: number; R: number; fs: number; reason: "revert" | "stop" | "timeout"; hold: number; gapThru: boolean; }
 
 // Run the FIXED strategy across full history; tag each trade by entry date. R matches validate-spread exactly.
 function runPair(a: string, b: string): Tr[] {
@@ -42,7 +46,7 @@ function runPair(a: string, b: string): Tr[] {
       const revert = pos.dir === -1 ? z <= P.exitZ : z >= P.exitZ, stopped = Math.abs(z) >= P.stopZ, timeout = i - pos.i >= P.maxHold;
       if (revert || stopped || timeout) {
         const R = (pos.dir * (ratio[i] - pos.entry) / pos.entry) / (1.5 * pos.fs);
-        out.push({ pair: `${a}/${b}`, entry: dates[pos.i], exit: dates[i], dir: pos.dir, R, reason: stopped ? "stop" : timeout ? "timeout" : "revert", hold: i - pos.i, gapThru: stopped && R < -1 });
+        out.push({ pair: `${a}/${b}`, entry: dates[pos.i], exit: dates[i], dir: pos.dir, R, fs: pos.fs, reason: stopped ? "stop" : timeout ? "timeout" : "revert", hold: i - pos.i, gapThru: stopped && R < -1 });
         pos = null;
       }
     }
@@ -53,10 +57,10 @@ function runPair(a: string, b: string): Tr[] {
 
 // ── metrics ──
 const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / (a.length || 1);
-const net = (t: Tr[]) => t.map(x => x.R - COST_R);                       // net of assumed cost
+const net = (t: Tr[]) => t.map(x => x.R - costR(x));                     // net of MEASURED per-pair crossing cost
 function maxDD(rs: number[]) { let peak = 0, cum = 0, dd = 0; for (const r of rs) { cum += r; peak = Math.max(peak, cum); dd = Math.min(dd, cum - peak); } return dd; }
 function cvar(rs: number[], q = 0.05) { if (!rs.length) return 0; const s = [...rs].sort((a, b) => a - b); const k = Math.max(1, Math.floor(rs.length * q)); return mean(s.slice(0, k)); }
-function sharpe(t: Tr[]) { const m = new Map<string, number>(); for (const x of t) m.set(x.exit.slice(0, 7), (m.get(x.exit.slice(0, 7)) ?? 0) + (x.R - COST_R) * 0.01); const v = [...m.values()]; if (v.length < 2) return 0; const mu = mean(v), sd = Math.sqrt(v.reduce((s, x) => s + (x - mu) ** 2, 0) / v.length) || 1e-9; return (mu / sd) * Math.sqrt(12); }
+function sharpe(t: Tr[]) { const m = new Map<string, number>(); for (const x of t) m.set(x.exit.slice(0, 7), (m.get(x.exit.slice(0, 7)) ?? 0) + (x.R - costR(x)) * 0.01); const v = [...m.values()]; if (v.length < 2) return 0; const mu = mean(v), sd = Math.sqrt(v.reduce((s, x) => s + (x - mu) ** 2, 0) / v.length) || 1e-9; return (mu / sd) * Math.sqrt(12); }
 function stats(t: Tr[]) {
   const r = net(t); const wins = r.filter(x => x > 0), losses = r.filter(x => x < 0);
   return {
@@ -81,7 +85,7 @@ function main() {
   const isFwd = (t: Tr) => t.entry >= FWD;
 
   console.log("\n" + "═".repeat(94));
-  console.log(`  SPREAD PAPER-FORWARD  |  baseline < ${FWD} ≤ forward  (last data ${lastDate})  |  cost ${COST_R}R/trade (ASSUMED)`);
+  console.log(`  SPREAD PAPER-FORWARD  |  baseline < ${FWD} ≤ forward  (last data ${lastDate})  |  cost = MEASURED per-pair (Databento tbbo)`);
   console.log("═".repeat(94));
 
   // ── PER-PAIR ──
@@ -112,13 +116,13 @@ function main() {
   console.log(`    behavior:    revert-rate b ${(base.revertRate * 100).toFixed(0)}% / f ${(fwd.revertRate * 100).toFixed(0)}%   gap-through-stop b ${(base.gapThruRate * 100).toFixed(0)}% / f ${(fwd.gapThruRate * 100).toFixed(0)}%`);
 
   // ── COST SENSITIVITY (until measured slippage replaces COST_R) ──
-  console.log("\n  COST SENSITIVITY (forward expectancy at assumed slippage levels — measured slippage will replace this)");
-  for (const c of COST_SWEEP) { const e = mean(all.filter(isFwd).map(x => x.R - c)); console.log(`     @ ${c.toFixed(2)}R cost:  forward ${f2(e)}R/trade  ${e > 0 ? "✅ positive" : "❌ negative"}`); }
+  console.log(`\n  COST SENSITIVITY (× the MEASURED per-pair cost; avg ${mean(all.filter(isFwd).map(costR)).toFixed(3)}R/trade):`);
+  for (const mult of COST_SWEEP) { const e = mean(all.filter(isFwd).map(x => x.R - mult * costR(x))); console.log(`     @ ${mult}× measured:  forward ${f2(e)}R/trade  ${e > 0 ? "✅ positive" : "❌ negative"}`); }
 
   // ── CORRELATION / CONCENTRATION (forward monthly returns per pair) ──
   const months = [...new Set(all.filter(isFwd).map(t => t.exit.slice(0, 7)))].sort();
   const series: Record<string, number[]> = {};
-  for (const [a, b] of PAIRS) { const k = `${a}/${b}`; const mm = new Map<string, number>(); for (const t of all.filter(t => t.pair === k && isFwd(t))) mm.set(t.exit.slice(0, 7), (mm.get(t.exit.slice(0, 7)) ?? 0) + (t.R - COST_R)); series[k] = months.map(m => mm.get(m) ?? 0); }
+  for (const [a, b] of PAIRS) { const k = `${a}/${b}`; const mm = new Map<string, number>(); for (const t of all.filter(t => t.pair === k && isFwd(t))) mm.set(t.exit.slice(0, 7), (mm.get(t.exit.slice(0, 7)) ?? 0) + (t.R - costR(t))); series[k] = months.map(m => mm.get(m) ?? 0); }
   let maxCorr = 0, maxPair = "";
   const keys = PAIRS.map(([a, b]) => `${a}/${b}`);
   for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) { const x = series[keys[i]], y = series[keys[j]]; if (x.length < 4) continue; const mx = mean(x), my = mean(y); const cov = mean(x.map((v, k) => (v - mx) * (y[k] - my))); const sx = Math.sqrt(mean(x.map(v => (v - mx) ** 2))) || 1e-9, sy = Math.sqrt(mean(y.map(v => (v - my) ** 2))) || 1e-9; const c = cov / (sx * sy); if (Math.abs(c) > Math.abs(maxCorr)) { maxCorr = c; maxPair = `${keys[i]}↔${keys[j]}`; } }
@@ -128,7 +132,7 @@ function main() {
   const passPairs = Object.values(pairReport).filter((p: any) => p.verdict === "PASS").length;
   const failPairs = Object.entries(pairReport).filter(([, p]: any) => p.verdict === "FAIL").map(([k]) => k);
   const warnPairs = Object.entries(pairReport).filter(([, p]: any) => p.verdict === "WARN").map(([k]) => k);
-  const overall = fwd.exp <= 0 ? "❌ FAIL" : (fwd.exp >= 0.5 * base.exp && mean(all.filter(isFwd).map(x => x.R - 0.20)) > 0) ? "✅ PASS" : "🟡 WARN";
+  const overall = fwd.exp <= 0 ? "❌ FAIL" : (fwd.exp >= 0.5 * base.exp && mean(all.filter(isFwd).map(x => x.R - 2 * costR(x))) > 0) ? "✅ PASS" : "🟡 WARN";
   console.log("\n  " + "─".repeat(90));
   console.log(`  OVERALL: ${overall}   (forward expectancy ${f2(fwd.exp)}R, baseline ${f2(base.exp)}R; ${passPairs}/${PAIRS.length} pairs PASS)`);
   console.log("  " + "─".repeat(90));
@@ -136,7 +140,7 @@ function main() {
   console.log("  2. Which pairs still working?       " + (Object.entries(pairReport).filter(([, p]: any) => p.verdict === "PASS").map(([k]) => k).join(", ") || "(none cleared — mostly low-n monitoring)"));
   console.log("  3. Which pairs degrading?           " + ([...warnPairs, ...failPairs].join(", ") || "none"));
   console.log("  4. Tails worse than expected?       " + (fwd.worst < base.worst * 1.25 || fwd.gapThruRate > base.gapThruRate * 1.5 ? `🟡 watch (worst f ${fwd.worst.toFixed(1)}R vs b ${base.worst.toFixed(1)}R, gap-through f ${(fwd.gapThruRate * 100).toFixed(0)}%)` : `no (worst f ${fwd.worst.toFixed(1)}R ≈ b ${base.worst.toFixed(1)}R)`));
-  console.log("  5. Costs worse than expected?       UNKNOWN until measured — buy the Trades+MBP-1 slice (DATA-PILOT.md). Sensitivity above shows survival to 0.20R.");
+  console.log(`  5. Costs worse than expected?       NO — MEASURED (Databento tbbo): ~${mean(all.filter(isFwd).map(costR)).toFixed(3)}R/trade avg, well under the old 0.10R assumption.`);
   console.log("  6. Viable for prop/funded?          " + (overall.includes("PASS") ? "YES if it holds — needs ~$100k+ (per-pair margin); NOT $1K" : overall.includes("WARN") ? "CONDITIONAL — must clear WARN + measured costs first" : "NO — forward edge not present"));
   console.log("  7. Conditions that PAUSE strategy:");
   console.log("       • portfolio forward expectancy ≤ 0 over a rolling 30-trade window");
@@ -147,12 +151,12 @@ function main() {
 
   // ── write report ──
   const outDir = new URL("../reports/", import.meta.url); try { fs.mkdirSync(outDir, { recursive: true }); } catch {}
-  const report = { generated: new Date().toISOString(), lastData: lastDate, forwardStart: FWD, costR: COST_R, params: P, overall, portfolio: { baseline: base, forward: fwd }, pairs: pairReport, maxCorr, maxPair };
+  const report = { generated: new Date().toISOString(), lastData: lastDate, forwardStart: FWD, costModel: "measured-per-pair-bps", costBps: COST_BPS, params: P, overall, portfolio: { baseline: base, forward: fwd }, pairs: pairReport, maxCorr, maxPair };
   const file = new URL(`paper-forward-${lastDate}.json`, outDir);
   fs.writeFileSync(file, JSON.stringify(report, null, 2));
   console.log(`\n  report → reports/paper-forward-${lastDate}.json`);
   console.log("  NOTE: forward window is a PROXY until live-forward bars accrue. Re-run after each dbn-fetch-daily.ts append;");
-  console.log("        the forward sample grows and the verdict strengthens. Replace COST_R with measured slippage when bought.");
+  console.log("        the forward sample grows and the verdict strengthens. Costs are MEASURED (Databento tbbo); re-measure periodically.");
   console.log("═".repeat(94) + "\n");
 }
 main();

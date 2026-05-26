@@ -11,8 +11,8 @@ function apiKey(): string {
   if (!m) throw new Error("DATABENTO_API_KEY not found"); return m[1].trim();
 }
 const auth = "Basic " + Buffer.from(apiKey() + ":").toString("base64");
-const LEGS = ["CL", "RB", "ZC", "ZS"];                 // the two priority pairs' legs (crack + grains)
-const TICK: Record<string, number> = { CL: 0.01, RB: 0.0001, ZC: 0.25, ZS: 0.25 };
+const LEGS = ["CL", "RB", "HO", "ZC", "ZS", "ZW", "6E", "6B", "6A", "6C", "GC", "HG"];   // all spread-book legs
+const TICK: Record<string, number> = { CL: 0.01, RB: 0.0001, HO: 0.0001, ZC: 0.25, ZS: 0.25, ZW: 0.25, "6E": 0.00005, "6B": 0.0001, "6A": 0.00005, "6C": 0.00005, GC: 0.10, HG: 0.0005 };
 const end = new Date(Date.now() - 2 * 86_400_000);
 const start = new Date(end.getTime() - 7 * 86_400_000);  // ~5 trading days — plenty to measure typical spread
 const day = (d: Date) => d.toISOString().slice(0, 10);
@@ -51,11 +51,11 @@ async function main() {
     } catch (e) { console.log(`  ${sym}: ERROR — ${e instanceof Error ? e.message : e}`); }
   }
   // A spread trade crosses BOTH legs on entry AND exit ≈ (half-spread_A + half-spread_B) each way → ~2×(hA+hB) round-trip in price-fraction terms.
-  const pairs: [string, string][] = [["CL", "RB"], ["ZC", "ZS"]];
-  console.log("\n  ROUND-TRIP crossing cost per spread trade (both legs, in + out):");
+  const pairs: [string, string][] = [["CL", "RB"], ["CL", "HO"], ["ZC", "ZS"], ["ZW", "ZC"], ["ZS", "ZW"], ["6E", "6B"], ["6A", "6C"], ["GC", "HG"]];
+  console.log("\n  ROUND-TRIP crossing cost per spread trade (both legs, in + out) — paste into paper-forward COST_BPS:");
   for (const [a, b] of pairs) {
-    const ha = halfSpreadFrac[a], hb = halfSpreadFrac[b]; if (ha == null || hb == null) continue;
-    console.log(`     ${a}/${b}: ≈ ${((2 * (ha + hb)) * 1e4).toFixed(2)} bps of notional per round trip (vs the assumed 0.10R placeholder in paper-forward)`);
+    const ha = halfSpreadFrac[a], hb = halfSpreadFrac[b]; if (ha == null || hb == null) { console.log(`     ${a}/${b}: (missing leg data)`); continue; }
+    console.log(`     "${a}/${b}": ${((2 * (ha + hb)) * 1e4).toFixed(2)},   // bps of notional per round trip`);
   }
   console.log("\n  NEXT: convert these to R using each pair's 1.5σ risk unit → set paper-forward COST_R to MEASURED.");
   console.log("  (This is the cheap execution-realism win — uses included L1 data, $0, zero engine impact.)");
