@@ -3,6 +3,7 @@
  * vs a prop-firm-funded account. No fantasy. Models the FORCED risk on tiny capital honestly.
  *   npx tsx scripts/microaccount-ruin.ts
  */
+export {};   // module scope — avoids global redeclare clash that breaks `next build` type-check
 const SIMS = 100_000, TRADES_YR = 250;
 
 // On $1K, one micro with a NOISE-SURVIVING stop ≈ 5% of the account (MES 10pt=$50, MGC ~8pt=$80,

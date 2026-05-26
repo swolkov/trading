@@ -3,6 +3,7 @@
  * Frames the aggressive-compounding attempt as gambler's-ruin-to-target. Tests realistic edges.
  *   npx tsx scripts/smallaccount-mc.ts
  */
+export {};   // module scope — avoids global redeclare clash that breaks `next build` type-check
 const START = 1000, TARGET = 5000, FLOOR = 500;       // ruin-floor: stop the attempt at -50%
 const TRADES = 60;                                     // ~2 selective trades/day × 30 days
 const SLIP = 3;                                        // $ cost per trade (commission + slippage, micro)
