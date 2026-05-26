@@ -57,17 +57,20 @@ function aggregate(bars: BarData[], minutes: number): BarData[] {
   return [...buckets.values()].sort((x, y) => x.t - y.t);
 }
 
-/** Databento chart bars (primary). Returns [] if unavailable so the caller falls back. */
-export async function getDatabentoIntradayBars(symbol: string, interval: "5m" | "15m" | "1h", range: "1d" | "5d"): Promise<BarData[]> {
+/** Databento chart bars (primary). Supports 1s/1m/5m/15m/1h. Returns [] if unavailable → caller falls back. */
+export async function getDatabentoIntradayBars(symbol: string, interval: "1s" | "1m" | "5m" | "15m" | "1h", range: "1d" | "5d"): Promise<BarData[]> {
   const auth = authHeader(); const dbnSym = DBN_MAP[symbol];
   if (!auth || !dbnSym) return [];
   const key = `${dbnSym}|${interval}|${range}`;
+  const ttl = interval === "1s" ? 4_000 : TTL_MS;   // seconds charts refresh faster
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.bars;
+  if (hit && Date.now() - hit.at < ttl) return hit.bars;
   try {
     const now = new Date();
-    const start = new Date(now.getTime() - (range === "5d" ? 5 : 1) * 86_400_000).toISOString();
-    const schema = interval === "1h" ? "ohlcv-1h" : "ohlcv-1m";
+    // window per interval — 1s only needs a short recent span; coarser intervals want more history
+    const windowMs = interval === "1s" ? 60 * 60_000 : interval === "1m" ? 86_400_000 : (range === "5d" ? 5 : 1) * 86_400_000;
+    const start = new Date(now.getTime() - windowMs).toISOString();
+    const schema = interval === "1s" ? "ohlcv-1s" : interval === "1h" ? "ohlcv-1h" : "ohlcv-1m";
     let bars = parseOhlcv(await getRange(dbnSym, schema, start, now.toISOString(), auth));
     if (interval === "5m") bars = aggregate(bars, 5);
     else if (interval === "15m") bars = aggregate(bars, 15);

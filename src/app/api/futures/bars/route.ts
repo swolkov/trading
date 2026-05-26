@@ -1,6 +1,28 @@
 import { getFuturesIntradayBars, getFuturesDailyBars } from "@/lib/futures-data";
 import { getDatabentoIntradayBars } from "@/lib/databento";
 import { getViewMode } from "@/lib/trading-mode";
+import { prisma } from "@/lib/db";
+
+// Map chart symbol → the live_quotes symbol the Databento sidecar writes (ES/NQ/GC)
+const LIVE_MAP: Record<string, string> = { ES: "ES", NQ: "NQ", GC: "GC", MES: "ES", MNQ: "NQ", MGC: "GC" };
+
+// Real-time edge: extend the latest bar with the sidecar's live mid (clears the ~7-min historical lag).
+async function appendLiveTick(bars: { t: number; o: number; h: number; l: number; c: number; v: number }[], symbol: string, interval: string) {
+  try {
+    const lqSym = LIVE_MAP[symbol] || symbol;
+    const rows = await prisma.$queryRawUnsafe<{ mid: number; ts: bigint | number }[]>("SELECT mid, ts FROM live_quotes WHERE symbol = $1 LIMIT 1", lqSym);
+    const r = rows?.[0]; if (!r) return bars;
+    const mid = Number(r.mid), ts = Number(r.ts);
+    if (!(mid > 0) || Date.now() - ts > 60_000) return bars;   // only a FRESH (<60s) live quote
+    const sec = interval === "1s" ? 1 : interval === "1m" ? 60 : interval === "5m" ? 300 : interval === "15m" ? 900 : 3600;
+    const bucket = Math.floor(Date.now() / 1000 / sec) * sec;
+    const out = bars.slice();   // don't mutate the cached array
+    const last = out[out.length - 1];
+    if (last && last.t === bucket) out[out.length - 1] = { ...last, h: Math.max(last.h, mid), l: Math.min(last.l, mid), c: mid };
+    else if (!last || bucket > last.t) out.push({ t: bucket, o: mid, h: mid, l: mid, c: mid, v: 0 });
+    return out;
+  } catch { return bars; }
+}
 
 // VWAP calculation (running, per-bar values for chart overlay)
 function calcVwapSeries(bars: { t: number; h: number; l: number; c: number; v: number }[]): { t: number; vwap: number; upper: number; lower: number }[] {
@@ -27,15 +49,16 @@ export async function GET(request: Request) {
     const viewMode = await getViewMode("futures");
 
     // Intraday intervals — include VWAP + key levels
-    if (interval === "5m" || interval === "15m" || interval === "1h") {
+    if (interval === "1s" || interval === "1m" || interval === "5m" || interval === "15m" || interval === "1h") {
       const range = interval === "1h" ? "5d" : "1d";
-      // PRIMARY: Databento (canonical, ~7-min-delayed historical). Fall back to Tradovate→Yahoo if empty.
+      // PRIMARY: Databento. 1s/1m are Databento-only; 5m/15m/1h fall back to Tradovate→Yahoo if empty.
       let provider = "databento";
-      let bars = await getDatabentoIntradayBars(symbol, interval as "5m" | "15m" | "1h", range as "1d" | "5d");
-      if (!bars || bars.length === 0) {
+      let bars = await getDatabentoIntradayBars(symbol, interval as "1s" | "1m" | "5m" | "15m" | "1h", range as "1d" | "5d");
+      if ((!bars || bars.length === 0) && (interval === "5m" || interval === "15m" || interval === "1h")) {
         provider = "tradovate-yahoo";
-        bars = await getFuturesIntradayBars(symbol, interval as "5m" | "15m" | "1h", range as "1d" | "5d", viewMode);
+        bars = await getFuturesIntradayBars(symbol, interval, range as "1d" | "5d", viewMode);
       }
+      bars = await appendLiveTick(bars, symbol, interval);   // real-time latest price from the sidecar
 
       // Compute VWAP series (running values per bar)
       const vwapSeries = bars.length > 0 ? calcVwapSeries(bars) : [];

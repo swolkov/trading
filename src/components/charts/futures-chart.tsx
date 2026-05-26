@@ -52,6 +52,8 @@ interface Position {
 }
 
 const TIMEFRAMES = [
+  { label: "1s", interval: "1s", intraday: true },
+  { label: "1m", interval: "1m", intraday: true },
   { label: "5m", interval: "5m", intraday: true },
   { label: "15m", interval: "15m", intraday: true },
   { label: "1H", interval: "1h", intraday: true },
