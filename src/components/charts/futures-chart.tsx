@@ -108,7 +108,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
   const [showEMA, setShowEMA] = useState(true);
   const [showVWAP, setShowVWAP] = useState(true);
   // Honest data-state — no more silent white chart; surfaces provider/env/freshness truthfully.
-  const [dataInfo, setDataInfo] = useState<{ state: "loading" | "ok" | "empty" | "error"; msg?: string; count: number; lastTs: number | null; viewMode: string | null }>({ state: "loading", count: 0, lastTs: null, viewMode: null });
+  const [dataInfo, setDataInfo] = useState<{ state: "loading" | "ok" | "empty" | "error"; msg?: string; count: number; lastTs: number | null; viewMode: string | null; provider?: string | null }>({ state: "loading", count: 0, lastTs: null, viewMode: null, provider: null });
   const [isLive, setIsLive] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<string>("");
   const [crosshairData, setCrosshairData] = useState<{
@@ -267,6 +267,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       const overlays = Array.isArray(barsJson) ? null : barsJson.overlays;
       const meta = (!Array.isArray(barsJson) && barsJson.meta) || null;
       const viewMode: string | null = meta?.viewMode ?? null;
+      const provider: string | null = meta?.provider ?? null;
 
       if (bars.length === 0) {
         // Tell the truth instead of leaving a blank white chart.
@@ -274,7 +275,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         setDataInfo({
           state: barsJson?.error ? "error" : "empty",
           msg: barsJson?.error || `No ${tf.label} bars for ${symbol} — market may be closed, or the data provider returned nothing for this session.`,
-          count: 0, lastTs: meta?.lastBarTs ?? null, viewMode,
+          count: 0, lastTs: meta?.lastBarTs ?? null, viewMode, provider,
         });
         return;
       }
@@ -482,7 +483,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         chartRef.current?.timeScale().fitContent();
       }
 
-      setDataInfo({ state: "ok", count: bars.length, lastTs: meta?.lastBarTs ?? null, viewMode });
+      setDataInfo({ state: "ok", count: bars.length, lastTs: meta?.lastBarTs ?? null, viewMode, provider });
       setLastUpdate(new Date().toLocaleTimeString());
     } catch (err) {
       console.error("Failed to load futures bars:", err);
@@ -574,8 +575,8 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
             {dataInfo.viewMode === "live" ? "LIVE · Phase 0" : "DEMO · research"}
           </span>
         )}
-        <span className="px-1.5 py-0.5 rounded bg-white/5 text-muted-foreground border border-white/10" title="Databento migration is Phase 1 — this chart still reads Tradovate→Yahoo. See DATABENTO-MIGRATION.md.">
-          Data: Tradovate → Yahoo <span className="text-muted-foreground/50">(Databento: migrating, Phase 1)</span>
+        <span className={`px-1.5 py-0.5 rounded border ${dataInfo.provider === "databento" ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`} title="Chart bars: Databento historical (~7-min delayed) when available, else Tradovate→Yahoo fallback. Engine real-time feed migrates after 4 PM.">
+          Data: {dataInfo.provider === "databento" ? "Databento" : dataInfo.provider === "tradovate-yahoo" ? "Tradovate → Yahoo (fallback)" : "…"}
         </span>
         <span className="px-1.5 py-0.5 rounded bg-white/5 text-muted-foreground border border-white/10">Execution: Tradovate</span>
         {dataInfo.state === "ok" && (

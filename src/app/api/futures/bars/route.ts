@@ -1,4 +1,5 @@
 import { getFuturesIntradayBars, getFuturesDailyBars } from "@/lib/futures-data";
+import { getDatabentoIntradayBars } from "@/lib/databento";
 import { getViewMode } from "@/lib/trading-mode";
 
 // VWAP calculation (running, per-bar values for chart overlay)
@@ -28,12 +29,13 @@ export async function GET(request: Request) {
     // Intraday intervals — include VWAP + key levels
     if (interval === "5m" || interval === "15m" || interval === "1h") {
       const range = interval === "1h" ? "5d" : "1d";
-      const bars = await getFuturesIntradayBars(
-        symbol,
-        interval as "5m" | "15m" | "1h",
-        range as "1d" | "5d",
-        viewMode,
-      );
+      // PRIMARY: Databento (canonical, ~7-min-delayed historical). Fall back to Tradovate→Yahoo if empty.
+      let provider = "databento";
+      let bars = await getDatabentoIntradayBars(symbol, interval as "5m" | "15m" | "1h", range as "1d" | "5d");
+      if (!bars || bars.length === 0) {
+        provider = "tradovate-yahoo";
+        bars = await getFuturesIntradayBars(symbol, interval as "5m" | "15m" | "1h", range as "1d" | "5d", viewMode);
+      }
 
       // Compute VWAP series (running values per bar)
       const vwapSeries = bars.length > 0 ? calcVwapSeries(bars) : [];
@@ -68,7 +70,7 @@ export async function GET(request: Request) {
         },
         // Honest meta so the UI can tell the truth (provider/env/freshness). Databento not yet wired into
         // this path — bars still come from Tradovate→Yahoo (see DATABENTO-MIGRATION.md, Phase 1).
-        meta: { viewMode, provider: "tradovate-yahoo", count: bars.length, lastBarTs: bars.length && typeof bars[bars.length - 1].t === "number" ? (bars[bars.length - 1].t as number) : null },
+        meta: { viewMode, provider, count: bars.length, lastBarTs: bars.length && typeof bars[bars.length - 1].t === "number" ? (bars[bars.length - 1].t as number) : null },
       });
     }
 
