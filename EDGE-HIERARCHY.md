@@ -18,8 +18,23 @@ cost-stress, tail accounting). Real, but with hard constraints.*
 |------|----------|------------|
 | **Relative-value spread book** (crack CL/RB, grain ZC/ZS, FX 6E/6B, metals) | Ann. Sharpe ~1.59 gross → ~1.13 net @0.10R slip; 14/14 rolling 3yr windows positive (2011–2026); 16/16 parameter combos positive (plateau, not spike); deflated Sharpe ~100% vs ~40 trials; +0.59R in 2022 crisis | **Needs ~$100k+ capital.** One full-size spread margins at $1,210–$24,133 risk; at 1% sizing that's $121k–$2.4M min capital. $1K **cannot** trade it. Tail is idiosyncratic per-pair (gap-through-stop: 19.6% of exits worse than −1R) → needs **per-pair structural-break controls, not market-regime stand-down** (regime overlay tested, FAILED to cut the tail). |
 
-**Deployment path:** funded/prop-firm account ($50–150k for a ~$150–300 eval fee, capped downside),
+**Deployment path:** real capital ($100k+) is the gate. User REJECTED the prop-firm route (2026-05-26),
+so the path is: forward track record (`scripts/spread-track.ts`) → raise investor capital → deploy.
 NOT the $1K live account. This is the *only* edge cleared for real capital.
+
+**Independent red-team caveats (Claude fresh review, 2026-05-26 — open questions BEFORE funding):**
+- **Adverse selection at entry.** z=2 fires exactly when the spread is moving *against* the relationship;
+  the measured ~0.03R cost is a *resting-quote* cost, not what we'd actually fill at. Expect 2–4× on the
+  entry tick. The forward tracker's SIMULATED fills do NOT capture this.
+- **Possibly short-vol, not alpha.** −6.3R worst + 38% gap-through-stop ⇒ the stop is advisory; +0.43R ≈
+  many small reversions minus rare regime breaks. 3yr of 1m data under-samples the true left tail; Sharpe
+  1.59 with that skew is not a 1.59 risk profile (insurance-selling masquerading as edge).
+- **"Economic, not data-mined" is a story, not a full defense.** Real search space (pair × lookback × 3
+  z-thresholds × maxHold) is in the hundreds → deflated Sharpe likely overstated; effective independent
+  bets ≈ 2–3, not 8 (shared USD/growth/risk factors push correlation → 0.85+ in stress).
+- **THE falsifying test:** live SHADOW EXECUTION (60–90 days, real broker fills, marketable limits, realized
+  R vs backtest R). If realized < ~0.15R/trade → execution-fragile, do NOT fund. This — not more
+  backtesting — is the real next step.
 
 ---
 

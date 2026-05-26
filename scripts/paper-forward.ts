@@ -27,7 +27,7 @@ const COST_BPS: Record<string, number> = { "CL/RB": 4.19, "CL/HO": 5.63, "ZC/ZS"
 const COMMISSION_BPS = 2.0;          // broker commission allowance per round trip (bps of notional), conservative
 // Per-trade cost in R = (cost bps / 1e4) / (1.5 × σ at entry). Replaces the old assumed 0.10R.
 const costR = (t: { pair: string; fs: number }) => (((COST_BPS[t.pair] ?? 6) + COMMISSION_BPS) / 1e4) / (1.5 * t.fs);
-const COST_SWEEP = [1, 2, 4];        // stress multipliers on the MEASURED cost
+const COST_SWEEP = [1, 2, 4, 8, 16];  // stress multipliers on the MEASURED cost (real-fill robustness)
 const FORWARD_MONTHS = 18;           // forward window = most-recent N months (proxy until live-forward accrues)
 const MIN_N = 8;                     // below this, a pair's forward stats are MONITORING, not a verdict
 
@@ -118,6 +118,12 @@ function main() {
   // ── COST SENSITIVITY (until measured slippage replaces COST_R) ──
   console.log(`\n  COST SENSITIVITY (× the MEASURED per-pair cost; avg ${mean(all.filter(isFwd).map(costR)).toFixed(3)}R/trade):`);
   for (const mult of COST_SWEEP) { const e = mean(all.filter(isFwd).map(x => x.R - mult * costR(x))); console.log(`     @ ${mult}× measured:  forward ${f2(e)}R/trade  ${e > 0 ? "✅ positive" : "❌ negative"}`); }
+  // BREAKEVEN: net exp is linear in the cost multiple → m* = grossExp / meanCost. This is the "real-fill margin
+  // of safety" the red-team asked for: how many × the MEASURED cost real fills can be before the edge dies.
+  const fwdTr = all.filter(isFwd); const grossExp = mean(fwdTr.map(x => x.R)); const costExp = mean(fwdTr.map(costR));
+  const breakeven = costExp > 0 ? grossExp / costExp : Infinity;
+  console.log(`     → BREAKEVEN at ${breakeven.toFixed(1)}× measured cost — real fills would have to be ${breakeven.toFixed(1)}× WORSE than the measured bid/ask crossing to erase the edge.`);
+  console.log(`       (Caveat: this bounds cost MAGNITUDE, not fill CERTAINTY — whether you get filled at all during a fast z=2 move only live shadow execution settles.)`);
 
   // ── CORRELATION / CONCENTRATION (forward monthly returns per pair) ──
   const months = [...new Set(all.filter(isFwd).map(t => t.exit.slice(0, 7)))].sort();

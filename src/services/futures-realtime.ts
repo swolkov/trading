@@ -689,6 +689,7 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
 // DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
 let dbnMdLogged = 0;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
+let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
   if (!databentoMdEnabled) return new Map();
@@ -1121,7 +1122,7 @@ async function loadRiskConfig() {
       `${kp}_max_contracts`, `${kp}_max_total_contracts`, `${kp}_max_trades_per_day`,
       `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
-      `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`,
+      `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -1149,6 +1150,7 @@ async function loadRiskConfig() {
     const symbolsCfg = cfg[`${kp}_symbols`];
     symbolWhitelist = symbolsCfg && symbolsCfg.trim() ? symbolsCfg.split(",").map(s => s.trim()).filter(Boolean) : null;
     databentoMdEnabled = cfg[`${kp}_databento_md`] === "true";   // flip Databento MD on/off without a restart
+    aiVetoEnabled = IS_LIVE || cfg[`${kp}_ai_grader`] !== "false";   // LIVE always keeps the AI veto (real-money safety); DEMO can disable it (futures_ai_grader="false") for the AI-on/off test
     updateTradingSymbols();
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
   } catch (err) {
@@ -2637,9 +2639,13 @@ async function evaluateAndTrade(
     if (ai.agree) {
       finalScore += Math.min(10, Math.round(ai.confidence / 10));
       log(`  AI CONFIRMS (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
-    } else {
+    } else if (aiVetoEnabled) {
       log(`  AI REJECTS (${ai.confidence}%): ${ai.reasoning} — trade blocked`);
       return;
+    } else {
+      // AI-OFF EXPERIMENT (demo only): the AI would block, but take the MECHANICAL trade anyway and log
+      // the veto, so we can compare AI-approved vs AI-rejected outcomes (is the AI overlay worth its trade-suppression?).
+      log(`  AI WOULD REJECT (${ai.confidence}%): ${ai.reasoning} — TAKING ANYWAY [ai_grader off, demo experiment]`);
     }
   } else {
     log(`  AI: ${ai.reasoning}`);
