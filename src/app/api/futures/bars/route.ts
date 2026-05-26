@@ -41,6 +41,21 @@ function calcVwapSeries(bars: { t: number; h: number; l: number; c: number; v: n
   return result;
 }
 
+// Shared DB bars-cache → fast even on COLD Vercel instances (per-instance memory cache misses on cold starts).
+async function cachedBars<T>(key: string, maxAgeSec: number, fetcher: () => Promise<T>): Promise<T> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<{ payload: unknown; age: number }[]>(
+      "SELECT payload, EXTRACT(EPOCH FROM (now()-ts)) AS age FROM bars_cache WHERE key=$1", key);
+    if (rows?.[0] && Number(rows[0].age) < maxAgeSec) return rows[0].payload as T;
+  } catch { /* table may not exist yet — fall through to fetch */ }
+  const data = await fetcher();
+  try {
+    await prisma.$executeRawUnsafe("CREATE TABLE IF NOT EXISTS bars_cache(key text PRIMARY KEY, payload jsonb, ts timestamptz DEFAULT now())");
+    await prisma.$executeRawUnsafe("INSERT INTO bars_cache(key,payload,ts) VALUES($1,$2::jsonb,now()) ON CONFLICT(key) DO UPDATE SET payload=$2::jsonb, ts=now()", key, JSON.stringify(data));
+  } catch { /* cache write best-effort */ }
+  return data;
+}
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -53,7 +68,7 @@ export async function GET(request: Request) {
       const range = interval === "1h" ? "5d" : "1d";
       // PRIMARY: Databento. 1s/1m are Databento-only; 5m/15m/1h fall back to Tradovate→Yahoo if empty.
       let provider = "databento";
-      let bars = await getDatabentoIntradayBars(symbol, interval as "1s" | "1m" | "5m" | "15m" | "1h", range as "1d" | "5d");
+      let bars = await cachedBars(`dbn|${symbol}|${interval}|${range}`, 30, () => getDatabentoIntradayBars(symbol, interval as "1s" | "1m" | "5m" | "15m" | "1h", range as "1d" | "5d"));
       if ((!bars || bars.length === 0) && (interval === "5m" || interval === "15m" || interval === "1h")) {
         provider = "tradovate-yahoo";
         bars = await getFuturesIntradayBars(symbol, interval, range as "1d" | "5d", viewMode);
@@ -66,7 +81,7 @@ export async function GET(request: Request) {
       // Key levels from yesterday's bars
       let prevDayHigh = 0, prevDayLow = 0;
       try {
-        const dailyBars = await getFuturesDailyBars(symbol, 5, viewMode);
+        const dailyBars = await cachedBars(`daily|${symbol}|${viewMode}`, 600, () => getFuturesDailyBars(symbol, 5, viewMode));
         if (dailyBars.length >= 2) {
           const prevDay = dailyBars[dailyBars.length - 2];
           prevDayHigh = prevDay.h;
