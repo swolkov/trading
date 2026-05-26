@@ -49,16 +49,23 @@ const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
 
 // Active trading symbols — recalculated when equity updates
 let SYMBOLS = FULL_SIZE_SYMBOLS; // default to full-size (demo), downgraded to micros for small live accounts
+// PHASE 0 (live): optional symbol whitelist from DB config (live_futures_symbols), e.g. "MES" for day-1.
+let symbolWhitelist: string[] | null = null;
+// PHASE 0 (live): pyramiding OFF by default on live (1-contract rule); demo may still pyramid for learning.
+const ALLOW_PYRAMID = process.env.ALLOW_PYRAMID ? process.env.ALLOW_PYRAMID === "true" : IS_DEMO;
 
 function updateTradingSymbols() {
-  const prev = SYMBOLS;
+  const prev = SYMBOLS.join(",");
   // DEMO: Always trade full-size (ES, NQ, GC) — $50K demo account, max learning
   // LIVE: Micros until equity >= $25K, then full-size
-  SYMBOLS = IS_LIVE
+  let next = IS_LIVE
     ? (tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
     : FULL_SIZE_SYMBOLS;
-  if (prev !== SYMBOLS) {
-    log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ")} (${SYMBOLS === FULL_SIZE_SYMBOLS ? "full-size" : "micros"})`);
+  // PHASE 0: restrict to the whitelist if set (e.g. ["MES"] for live day-1)
+  if (symbolWhitelist && symbolWhitelist.length > 0) next = next.filter(s => symbolWhitelist!.includes(s));
+  SYMBOLS = next;
+  if (prev !== SYMBOLS.join(",")) {
+    log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ") || "(none)"}${symbolWhitelist ? ` [whitelist: ${symbolWhitelist.join(",")}]` : ""}`);
   }
 }
 
@@ -1075,7 +1082,7 @@ async function loadRiskConfig() {
       `${kp}_max_contracts`, `${kp}_max_total_contracts`, `${kp}_max_trades_per_day`,
       `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
-      `${kp}_simulated_equity`,
+      `${kp}_simulated_equity`, `${kp}_symbols`,
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -1099,7 +1106,11 @@ async function loadRiskConfig() {
       atrTargetMultiplier: parseFloat(cfg[`${kp}_atr_target_multiplier`]) || defaults.atrTargetMultiplier,
       simulatedEquity: parseFloat(cfg[`${kp}_simulated_equity`]) || defaults.simulatedEquity,
     };
-    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}`);
+    // PHASE 0: optional symbol whitelist (e.g. live_futures_symbols="MES"). Empty/unset = default behavior.
+    const symbolsCfg = cfg[`${kp}_symbols`];
+    symbolWhitelist = symbolsCfg && symbolsCfg.trim() ? symbolsCfg.split(",").map(s => s.trim()).filter(Boolean) : null;
+    updateTradingSymbols();
+    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
   } catch (err) {
     riskConfig = defaults;
     log(`[CONFIG] Failed to load from DB, using defaults: ${err}`);
@@ -1324,7 +1335,7 @@ function checkPositions(sym: string, price: number) {
 
   // 1R+: PYRAMID — add to winners (original position now risk-free at breakeven)
   // Only pyramid if: breakeven reached, haven't already pyramided, equity allows it
-  if (pos.reachedBreakeven && diff >= stopDist * 1.2 && diff < stopDist * 2 && !pos.pyramided) {
+  if (ALLOW_PYRAMID && pos.reachedBreakeven && diff >= stopDist * 1.2 && diff < stopDist * 2 && !pos.pyramided) {
     const addQty = Math.max(1, Math.floor(pos.quantity * 0.5)); // Add 50% of original size
     const maxTotalContracts = Math.max(2, Math.floor(tradovateEquity / 500)); // Scale with account
     if (pos.quantity + addQty <= maxTotalContracts) {
@@ -2061,6 +2072,7 @@ function scoreSetup(factors: {
 // ── Setup Detection (on 5-min bar close) ────────────────
 
 function onBarClose(sym: string, bar: Bar) {
+  if (!SYMBOLS.includes(sym)) return;   // PHASE 0: only evaluate/trade whitelisted symbols (e.g. MES-only live)
   const b = barBuilders.get(sym);
   if (!b || b.bars5m.length < 25) return;
 

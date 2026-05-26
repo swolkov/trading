@@ -9,13 +9,17 @@
 import fs from "node:fs";
 
 const RULES: Record<string, string> = {
-  // LIVE ($1K real money) — live_futures_* keys
-  live_futures_risk_per_trade_pct: "1",
-  live_futures_daily_loss_limit_pct: "3",
+  // LIVE ($1K real money) — PHASE 0 DAY 1: MES only, ONE trade, ONE contract. Prove the chain, then inspect.
+  live_futures_symbols: "MES",            // day-1 restricted to the single most-liquid micro
+  live_futures_max_contracts: "1",        // hard cap qty = 1 contract
+  live_futures_max_total_contracts: "1",  // belt-and-suspenders: no scaling/pyramid past 1
+  live_futures_max_trades_per_day: "1",   // ONE live trade total, then stop for the day
+  live_futures_max_positions: "1",        // one position at a time
+  live_futures_risk_per_trade_pct: "5",   // 5% of $1K = $50 budget → exactly 1 micro fits (1% = $10 fits none)
+  live_futures_daily_loss_limit_pct: "8", // guard (~$80); largely moot at 1 trade/day
   live_futures_max_drawdown_pct: "15",
-  live_futures_max_positions: "2",
-  live_futures_simulated_equity: "0",   // use the REAL $1K (1% = $10 → no micro fits → live pauses, correct)
-  // DEMO ($50K paper) — futures_* keys
+  live_futures_simulated_equity: "0",     // use the REAL $1K
+  // DEMO ($50K paper) — futures_* keys (unchanged: demo keeps trading broad for research)
   futures_risk_per_trade_pct: "2",
   futures_daily_loss_limit_pct: "3",
   futures_max_drawdown_pct: "15",
