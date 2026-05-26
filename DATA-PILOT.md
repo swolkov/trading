@@ -22,6 +22,24 @@ paper-forward, not instead of it.
 ES/NQ. So execution-realism data for *our edge* means the **spread legs**, not equity index. ES/NQ are
 the right instruments for the *speculative order-flow* track only. Don't conflate the two.
 
+## Databento plan: usage-based vs the $179/mo membership
+Two different needs → two different answers:
+- **Research data (now): usage-based pay-as-you-go, HISTORICAL only.** Covers the execution-realism
+  slice (Trades + MBP-1) and the later MBP-10 order-flow pilot. Note: the **Standard plan *excludes*
+  MBP-10/MBO**, so the flat membership wouldn't even serve the pilot. No monthly fee; cost previewed per pull.
+- **Live feed (NOT now): Standard $179/mo** = real-time + L1 historical (all schemas *except* MBP-10/MBO),
+  CME license fees covered for **personal use**. It's a genuine future upgrade — it would replace the
+  **Yahoo market-data fallback the engines currently limp on** (Tradovate has no native MD) and cover CME
+  personal-use licensing. But $179/mo ≈ **18% of the $1K account per month** — unjustifiable for a
+  one-trade Phase 0. Buy it when (a) the spread engine reaches funded capital, or (b) we need continuous
+  clean live data. Phase 0 execution validation does **not** need it: fills come from Tradovate (the broker),
+  so slippage is measured correctly regardless of the market-data source.
+- **Fund-use caveat:** "$179, license fees covered" is **personal use**. A fund / commercial deployment
+  triggers CME **professional / non-display** licensing (materially higher) — budget that at the funded
+  stage, separate from the $179 tier.
+
+**Net:** start **usage-based, historical only**. Revisit the live membership at the funded-capital stage.
+
 ---
 
 ## A. Would order-book data materially improve our ability to find/validate edge?
