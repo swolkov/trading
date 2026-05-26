@@ -66,13 +66,16 @@ export async function GET(request: Request) {
           openingRangeHigh: orHigh,
           openingRangeLow: orLow,
         },
+        // Honest meta so the UI can tell the truth (provider/env/freshness). Databento not yet wired into
+        // this path — bars still come from Tradovate→Yahoo (see DATABENTO-MIGRATION.md, Phase 1).
+        meta: { viewMode, provider: "tradovate-yahoo", count: bars.length, lastBarTs: bars.length && typeof bars[bars.length - 1].t === "number" ? (bars[bars.length - 1].t as number) : null },
       });
     }
 
     // Daily bars — no overlays
     const days = interval === "1W" ? 7 : interval === "1M" ? 30 : interval === "3M" ? 90 : interval === "1Y" ? 365 : 30;
     const bars = await getFuturesDailyBars(symbol, days, viewMode);
-    return Response.json({ bars, overlays: null });
+    return Response.json({ bars, overlays: null, meta: { viewMode, provider: "tradovate-yahoo", count: bars.length, lastBarTs: null } });
   } catch (error) {
     console.error("[/api/futures/bars]", error);
     return Response.json(
