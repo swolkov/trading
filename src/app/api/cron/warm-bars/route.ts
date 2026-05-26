@@ -1,5 +1,6 @@
 import { getDatabentoIntradayBars } from "@/lib/databento";
 import { getFuturesDailyBars } from "@/lib/futures-data";
+import type { TradingMode } from "@/lib/trading-mode";
 import { prisma } from "@/lib/db";
 
 // Keeps the chart's bars_cache hot in the background so user loads NEVER wait on the slow Databento pull.
@@ -29,7 +30,7 @@ export async function GET(request: Request) {
   })));
   // Daily levels (both view modes share the same key space)
   await Promise.allSettled(SYMS.flatMap(s => (["live", "demo"] as const).map(async vm => {
-    const d = await getFuturesDailyBars(s, 5, vm);
+    const d = await getFuturesDailyBars(s, 5, vm as TradingMode);
     if (d.length) await writeCache(`daily|${s}|${vm}`, d);
   })));
   return Response.json({ ok: true, warmed, at: new Date().toISOString() });
