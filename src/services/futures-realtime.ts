@@ -688,8 +688,9 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
 // Phase 4: read the Databento sidecar's real-time L1 from live_quotes. OFF by default (set
 // DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
 let dbnMdLogged = 0;
+let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
 async function fetchDatabentoQuotes(): Promise<Map<string, number>> {
-  if (process.env.DATABENTO_MD_ENABLED !== "true") return new Map();
+  if (!databentoMdEnabled) return new Map();
   try {
     const rows = await prisma.$queryRawUnsafe<{ symbol: string; mid: number; ts: bigint | number }[]>(
       "SELECT symbol, mid, ts FROM live_quotes",
@@ -1114,7 +1115,7 @@ async function loadRiskConfig() {
       `${kp}_max_contracts`, `${kp}_max_total_contracts`, `${kp}_max_trades_per_day`,
       `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
-      `${kp}_simulated_equity`, `${kp}_symbols`,
+      `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`,
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -1141,6 +1142,7 @@ async function loadRiskConfig() {
     // PHASE 0: optional symbol whitelist (e.g. live_futures_symbols="MES"). Empty/unset = default behavior.
     const symbolsCfg = cfg[`${kp}_symbols`];
     symbolWhitelist = symbolsCfg && symbolsCfg.trim() ? symbolsCfg.split(",").map(s => s.trim()).filter(Boolean) : null;
+    databentoMdEnabled = cfg[`${kp}_databento_md`] === "true";   // flip Databento MD on/off without a restart
     updateTradingSymbols();
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
   } catch (err) {
