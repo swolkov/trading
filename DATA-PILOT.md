@@ -38,8 +38,16 @@ the right instruments for the *speculative order-flow* track only. Don't conflat
 - **Fund-use caveat:** included live license fees are **personal use**; commercial/fund use triggers CME
   **professional / non-display** licensing (materially higher) — budget separately at the funded stage.
 
-**Net:** **usage-based, historical, pay-as-you-go — no membership yet.** Revisit Standard (for the live
-feed) at funded stage; Plus/Unlimited only at institutional scale.
+**Net:** **usage-based, historical, pay-as-you-go — no membership yet.** $179 Standard is a *superset*
+(it can pull everything usage-based can, PLUS included 1yr-L1 / 1mo-L2/L3 + a live L1 feed, license fees
+covered) and is fair value for live CME data. But strip out the historical data usage-based already gives
+us and the thing $179 *uniquely* adds is the **live real-time feed** — whose value is **intraday** execution.
+Our only validated edge (the spread book) is a **daily** strategy: it enters at settlement, is fine on
+settlement prices, and its only execution question (crossing cost at the close) is answered by **historical**
+order-book data, not a live feed. Phase 0 fills come from Tradovate; the paper-forward harness runs on daily
+bars. So the live feed serves the **speculative intraday side** — which has no validated edge yet — not the
+validated daily edge. Buy Standard when we (a) run an intraday strategy needing real-time precision, or
+(b) take the spread engine to funded capital. Plus/Unlimited only at institutional scale.
 
 ---
 
