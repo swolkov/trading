@@ -689,17 +689,17 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
 // DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
 let dbnMdLogged = 0;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
-async function fetchDatabentoQuotes(): Promise<Map<string, number>> {
+async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
   if (!databentoMdEnabled) return new Map();
   try {
-    const rows = await prisma.$queryRawUnsafe<{ symbol: string; mid: number; ts: bigint | number }[]>(
-      "SELECT symbol, mid, ts FROM live_quotes",
+    const rows = await prisma.$queryRawUnsafe<{ symbol: string; mid: number; vol: number; ts: bigint | number }[]>(
+      "SELECT symbol, mid, vol, ts FROM live_quotes",
     );
-    const out = new Map<string, number>();
+    const out = new Map<string, { mid: number; vol: number }>();
     const now = Date.now();
     for (const r of rows) {
       const ts = Number(r.ts), mid = Number(r.mid);
-      if (mid > 0 && now - ts < 30_000) out.set(r.symbol, mid);   // only FRESH (<30s) quotes
+      if (mid > 0 && now - ts < 30_000) out.set(r.symbol, { mid, vol: Number(r.vol) || 1 });   // only FRESH (<30s) quotes
     }
     if (out.size !== dbnMdLogged) { log(`[MD] Databento primary: ${out.size} fresh symbols from live_quotes`); dbnMdLogged = out.size; }
     return out;
@@ -726,8 +726,8 @@ async function pollPrices() {
     const served = new Set<string>();
     const dbn = await fetchDatabentoQuotes();
     for (const sym of SYMBOLS) {
-      const px = dbn.get(sym) ?? dbn.get(FULL_EQUIVALENT[sym] || "") ?? dbn.get(MICRO_EQUIVALENT[sym] || "");
-      if (px && px > 0) { onPrice(sym, px, 1); received++; served.add(sym); }
+      const q = dbn.get(sym) ?? dbn.get(FULL_EQUIVALENT[sym] || "") ?? dbn.get(MICRO_EQUIVALENT[sym] || "");
+      if (q && q.mid > 0) { onPrice(sym, q.mid, q.vol); received++; served.add(sym); }
     }
     const querySymbols = SYMBOLS.filter(s => !served.has(s));
 
@@ -855,9 +855,9 @@ function getSizeMultiplier(sym?: string): number {
 
   // Equities
   if (s === "morning" || s === "afternoon") return 1.0;  // RTH prime
-  if (s === "midday") return 0.5;  // Lunch — test if midday works
-  if (s === "open" || s === "close") return 0.5;  // Open/close — learning
-  return 0.3; // ETH — minimal size, maximum learning
+  if (s === "open" || s === "close") return 1.0;  // Open/close — full size (high-edge times)
+  if (s === "midday") return 0.75; // Lunch
+  return 0.5; // ETH (Asia + Europe overnight) — active 24/7 research, meaningful size
 }
 
 function checkSessionReset() {
@@ -2653,7 +2653,7 @@ async function evaluateAndTrade(
   if (cooldownExpiry && Date.now() >= cooldownExpiry) reEntryCooldowns.delete(cooldownKey);
 
   // Final gate: live needs 75%+ (A+ only), demo needs 65%+
-  const MIN_CONFIDENCE = IS_LIVE ? 75 : 65;
+  const MIN_CONFIDENCE = IS_LIVE ? 75 : 55;   // live: A+ only (selective growth); demo: more active for research signal
   if (finalScore < MIN_CONFIDENCE) {
     log(`  SKIPPED: Final confidence ${finalScore}% below ${MIN_CONFIDENCE}% threshold (${MODE_TAG})`);
     return;
