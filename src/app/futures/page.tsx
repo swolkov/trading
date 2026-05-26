@@ -416,6 +416,16 @@ export default function FuturesPage() {
         </div>
       </div>
 
+      {/* ── Architecture truth: Databento data · Tradovate execution · environment ── */}
+      <div className="flex flex-wrap items-center gap-2 text-[10px] -mt-1">
+        <span className={`px-1.5 py-0.5 rounded font-bold border ${isLiveView ? "bg-red-500/15 text-red-400 border-red-500/30" : "bg-amber-500/15 text-amber-400 border-amber-500/30"}`}>
+          {isLiveView ? "LIVE · PHASE 0 — execution validation, not proven alpha" : "DEMO · RESEARCH LAB — P&L is not proof"}
+        </span>
+        <span className="px-1.5 py-0.5 rounded border bg-cyan-500/10 text-cyan-300 border-cyan-500/30" title="Chart bars from Databento (~7-min historical). The engine's real-time Databento feed activates after 4 PM.">Databento = market data</span>
+        <span className={`px-1.5 py-0.5 rounded border ${status?.connected ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`}>Tradovate = execution{status?.connected ? " ✓" : ""}</span>
+        <span className="px-1.5 py-0.5 rounded border bg-white/5 text-muted-foreground/70 border-white/10">Spread book = validated edge (research) · directional = unvalidated</span>
+      </div>
+
       {/* ── Live Price Tiles ── */}
       <div className={`grid ${CONTRACTS.length <= 2 ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
         {CONTRACTS.map((sym) => {
@@ -527,6 +537,9 @@ export default function FuturesPage() {
                 <CardTitle className="text-sm">5 Expert Setups — Priority Order</CardTitle>
               </CardHeader>
               <CardContent>
+                <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
+                  ⚠️ These directional setups are <b>unvalidated / research-only</b> — most were rejected in testing (see EDGE-HIERARCHY). The only validated edge is the <b>spread book</b> (paper-forward, not deployable on the $1K). Demo P&L is not proof.
+                </div>
                 <div className="space-y-2">
                   {STRATEGIES.map((s) => (
                     <div key={s.priority} className="flex items-start gap-3 bg-white/[0.02] border border-white/[0.04] rounded-lg p-3">
@@ -560,6 +573,9 @@ export default function FuturesPage() {
           {activeTab === "backtest" && (
             <Card className="border-white/[0.06]">
               <CardContent className="pt-4">
+                <div className="mb-3 text-[10px] rounded-md bg-white/5 text-muted-foreground/70 border border-white/10 px-2.5 py-1.5">
+                  Backtest = historical ES 5-min (in-sample). A passing backtest is <b>not</b> a validated edge — that needs forward validation (paper-forward). Research only, not proven alpha.
+                </div>
                 {backtestLoading ? (
                   <div className="text-center py-12">
                     <p className="text-sm text-muted-foreground/60 animate-pulse">Running backtest on ~55 days of ES 5-min data...</p>
