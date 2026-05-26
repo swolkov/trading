@@ -40,7 +40,7 @@ function pnlColor(val: number) {
 
 const CONFIG_GROUPS = [
   {
-    label: "Futures — DEMO ($50K paper)",
+    label: "Futures — DEMO ($50K paper) · RESEARCH LAB (P&L is not proof)",
     modeKey: "futures_mode",
     modeLabelMap: { disabled: "Disabled", demo: "Demo — 24/7 Learning", live: "Live — RTH Mirror" } as Record<string, string>,
     icon: "D",
@@ -59,10 +59,11 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Futures — LIVE ($1K real money)",
+    label: "Futures — LIVE ($1K real money) · PHASE 0 (execution validation, not proven alpha)",
     icon: "L",
     color: "from-red-500 to-rose-500",
     fields: [
+      { key: "live_futures_symbols", label: "Symbol Whitelist (Phase 0: MES only)", type: "text" as const, placeholder: "MES" },
       { key: "live_futures_risk_per_trade_pct", label: "Risk Per Trade %", type: "number" as const },
       { key: "live_futures_daily_loss_limit_pct", label: "Daily Loss Limit %", type: "number" as const },
       { key: "live_futures_max_drawdown_pct", label: "Max Drawdown Kill %", type: "number" as const },
