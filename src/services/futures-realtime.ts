@@ -2042,12 +2042,11 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-opus-4-6",
-        max_tokens: 8000,
-        thinking: { type: "enabled", budget_tokens: 5000 },
+        model: "claude-sonnet-4-6",     // fast grader — Opus+thinking was timing out (>30s) → starved all trading
+        max_tokens: 512,                // one JSON line; no extended thinking needed for a confidence grade
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(20000),
     });
 
     if (!res.ok) {
