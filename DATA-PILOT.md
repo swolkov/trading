@@ -22,23 +22,24 @@ paper-forward, not instead of it.
 ES/NQ. So execution-realism data for *our edge* means the **spread legs**, not equity index. ES/NQ are
 the right instruments for the *speculative order-flow* track only. Don't conflate the two.
 
-## Databento plan: usage-based vs the $179/mo membership
-Two different needs → two different answers:
-- **Research data (now): usage-based pay-as-you-go, HISTORICAL only.** Covers the execution-realism
-  slice (Trades + MBP-1) and the later MBP-10 order-flow pilot. Note: the **Standard plan *excludes*
-  MBP-10/MBO**, so the flat membership wouldn't even serve the pilot. No monthly fee; cost previewed per pull.
-- **Live feed (NOT now): Standard $179/mo** = real-time + L1 historical (all schemas *except* MBP-10/MBO),
-  CME license fees covered for **personal use**. It's a genuine future upgrade — it would replace the
-  **Yahoo market-data fallback the engines currently limp on** (Tradovate has no native MD) and cover CME
-  personal-use licensing. But $179/mo ≈ **18% of the $1K account per month** — unjustifiable for a
-  one-trade Phase 0. Buy it when (a) the spread engine reaches funded capital, or (b) we need continuous
-  clean live data. Phase 0 execution validation does **not** need it: fills come from Tradovate (the broker),
-  so slippage is measured correctly regardless of the market-data source.
-- **Fund-use caveat:** "$179, license fees covered" is **personal use**. A fund / commercial deployment
-  triggers CME **professional / non-display** licensing (materially higher) — budget that at the funded
-  stage, separate from the $179 tier.
+## Databento plan: which tier (accurate breakdown)
+- **Usage-based — pay-as-you-go, HISTORICAL only. ← our tier.** Buy any schema/instrument/range, pay per
+  pull, cost previewed first. Covers the execution-realism slice (mbp-1/tbbo) *and* the MBP-10 order-flow
+  pilot. No monthly fee, no recurring commitment.
+- **Standard $179/mo:** adds a LIVE feed (core + **L1 only**, CME license fees included, ≤2 devices,
+  *personal use*) + included historical of **1 year L1** and **1 month L2/L3 (MBP-10/MBO)**, pay-as-you-go
+  beyond. Worth it only when we want the live feed (it would replace the **Yahoo MD fallback the engines
+  limp on** — Tradovate has no native MD) or recurring monthly access. Its included 1-month L2 is *less*
+  than our 3–6mo pilot need, so we'd pay usage-based on top regardless. **Not now — ≈18% of the $1K/mo**,
+  and Phase 0 doesn't need it (fills come from Tradovate, so slippage is measured correctly regardless of MD source).
+- **Plus $1,500/mo** (15+yr L1, **external distribution**, annual) / **Unlimited $4,000/mo** (15+yr *all*
+  schemas, annual): institutional / funded-stage. "External distribution" is exactly what a fund
+  redistributing data needs — a funded-stage line item, not now.
+- **Fund-use caveat:** included live license fees are **personal use**; commercial/fund use triggers CME
+  **professional / non-display** licensing (materially higher) — budget separately at the funded stage.
 
-**Net:** start **usage-based, historical only**. Revisit the live membership at the funded-capital stage.
+**Net:** **usage-based, historical, pay-as-you-go — no membership yet.** Revisit Standard (for the live
+feed) at funded stage; Plus/Unlimited only at institutional scale.
 
 ---
 
