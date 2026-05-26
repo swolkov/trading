@@ -49,6 +49,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/cron/warm-bars",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/token-refresh",
       "schedule": "0 4,16 * * *"
     }
