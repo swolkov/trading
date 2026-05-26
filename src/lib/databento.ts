@@ -19,16 +19,21 @@ function authHeader(): string | null {
   return k ? "Basic " + Buffer.from(k + ":").toString("base64") : null;
 }
 
+// Cache Databento's available-end (data lags real-time ~7min) so we DON'T 422+retry on every chart load.
+let availEndMs = 0, availAt = 0;
 async function getRange(dbnSym: string, schema: string, startISO: string, endISO: string, auth: string): Promise<string> {
   const mk = (end: string) => new URLSearchParams({ dataset: "GLBX.MDP3", symbols: dbnSym, stype_in: "continuous", schema, start: startISO, end, encoding: "csv", pretty_px: "true", pretty_ts: "true" });
   const url = "https://hist.databento.com/v0/timeseries.get_range";
   const headers = { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded" };
-  let res = await fetch(url, { method: "POST", headers, body: mk(endISO) });
+  // If we know the available-end (cached <60s), clamp end to it → single round-trip, no 422.
+  let end = endISO;
+  if (availEndMs > 0 && Date.now() - availAt < 60_000 && new Date(endISO).getTime() > availEndMs) end = new Date(availEndMs).toISOString();
+  let res = await fetch(url, { method: "POST", headers, body: mk(end) });
   if (res.status === 422) {
-    // historical lags real-time by a few min — retry clamped to the available end
     const j = await res.json().catch(() => null);
     const avail = j?.detail?.payload?.available_end;
     if (!avail) throw new Error("422 (no available_end)");
+    availEndMs = new Date(avail).getTime(); availAt = Date.now();   // cache it
     res = await fetch(url, { method: "POST", headers, body: mk(String(avail)) });
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -68,7 +73,7 @@ export async function getDatabentoIntradayBars(symbol: string, interval: "1s" | 
   try {
     const now = new Date();
     // window per interval — 1s only needs a short recent span; coarser intervals want more history
-    const windowMs = interval === "1s" ? 60 * 60_000 : interval === "1m" ? 86_400_000 : (range === "5d" ? 5 : 1) * 86_400_000;
+    const windowMs = interval === "1s" ? 20 * 60_000 : interval === "1m" ? 86_400_000 : (range === "5d" ? 5 : 1) * 86_400_000;
     const start = new Date(now.getTime() - windowMs).toISOString();
     const schema = interval === "1s" ? "ohlcv-1s" : interval === "1h" ? "ohlcv-1h" : "ohlcv-1m";
     let bars = parseOhlcv(await getRange(dbnSym, schema, start, now.toISOString(), auth));
