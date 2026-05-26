@@ -577,7 +577,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
             {dataInfo.viewMode === "live" ? "LIVE · Phase 0" : "DEMO · research"}
           </span>
         )}
-        <span className={`px-1.5 py-0.5 rounded border ${dataInfo.provider === "databento" ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`} title="Chart bars: Databento historical (~7-min delayed) when available, else Tradovate→Yahoo fallback. Engine real-time feed migrates after 4 PM.">
+        <span className={`px-1.5 py-0.5 rounded border ${dataInfo.provider === "databento" ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`} title="Databento: chart bars (historical + real-time live tick) AND both engines' market data, via the sidecar. Execution stays on Tradovate.">
           Data: {dataInfo.provider === "databento" ? "Databento" : dataInfo.provider === "tradovate-yahoo" ? "Tradovate → Yahoo (fallback)" : "…"}
         </span>
         <span className="px-1.5 py-0.5 rounded bg-white/5 text-muted-foreground border border-white/10">Execution: Tradovate</span>

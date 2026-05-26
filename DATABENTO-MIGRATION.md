@@ -62,20 +62,18 @@ bid, ask, last, ts)` Postgres table. Engine MD layer gains `fetchDatabentoQuotes
 freshness-checked) as the **primary** source; Tradovate/Yahoo remain fallbacks. **Execution routing does NOT
 change — Tradovate stays the broker.** Roll to DEMO first, validate a full session, then LIVE in a safe window.
 
-**STATUS (2026-05-26): BUILT + PROVEN, not yet activated.** `scripts/databento-md-sidecar.py` streams
-ES/NQ/GC mbp-1 → `live_quotes` (verified live: real-time bid/ask written for all three). Engine
-`fetchDatabentoQuotes()` is committed, **gated OFF** (`DATABENTO_MD_ENABLED`), fail-safe (stale/missing →
-existing Tradovate→Yahoo chain, unchanged). **Not pushed yet on purpose:** deploying = a live-engine restart,
-and the reader is inert until the sidecar is hosted — so activation is staged to avoid disturbing the first
-Phase-0 trade.
+**STATUS (2026-05-26): ✅ ACTIVE — both engines on Databento.** `scripts/databento-md-sidecar.py` runs on
+launchd (KeepAlive) streaming ES/NQ/GC mbp-1 → `live_quotes` (verified fresh 0–1s). Engine
+`fetchDatabentoQuotes()` reads it; activation is a **DB-config flag** (`{kp}_databento_md`, no restart) via
+`scripts/set-databento-md.ts`. Confirmed in logs: both engines `[MD] Databento primary: 3 fresh symbols`.
+Fail-safe: stale/missing `live_quotes` → falls back to Tradovate→Yahoo. Execution unchanged (Tradovate).
 
-**Activation runbook (one monitored session, market open, NOT right before a live trade):**
-1. Host the sidecar persistently (Railway Python service or macOS launchd) so `live_quotes` stays fresh.
-2. Push the engine reader (restarts both engines — pick a window with no live trade in flight).
-3. Set `DATABENTO_MD_ENABLED=true` on the **DEMO** service only → confirm demo logs show
-   `[MD] Databento primary: N fresh symbols`, prices match `live_quotes`, and fail-safe works (stop sidecar → Yahoo resumes).
-4. After a clean demo session, set `DATABENTO_MD_ENABLED=true` on **LIVE**.
-5. Then demote Yahoo to last-resort only.
+**Remaining hardening (post-close):**
+1. **Move the sidecar from the Mac (launchd) to a Railway Python service** for always-on robustness (today it
+   depends on this Mac being awake; if it sleeps, engines fail-safe to Yahoo — safe but degraded).
+2. **Stream `trades` alongside mbp-1** so the engines get real volume (currently volume=1 → VWAP is ≈time-weighted).
+3. Reconcile git origin with the Vercel-CLI UI deploys (push after close).
+4. Flip off with `set-databento-md.ts off` if any issue.
 
 ## PHASE 5 — Order-book pipeline (optional R&D)
 Once canonical bars are stable: pull `mbp-1`/`mbp-10`/`trades` (1mo L2 included, usage-based beyond) for

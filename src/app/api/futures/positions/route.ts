@@ -291,21 +291,23 @@ export async function GET() {
       // Risk metrics for dashboard gauge — mode-aware (demo $50K vs live $1K)
       riskMetrics: await (async () => {
         try {
-          const keys = ["futures_daily_loss_limit_pct", "futures_max_trades_per_day", "futures_risk_per_trade_pct", "futures_simulated_equity"];
+          // Read the ENV-CORRECT config keys: live view → live_futures_*, demo → futures_*
+          const isDemoView = viewMode !== "live";
+          const kp = isDemoView ? "futures" : "live_futures";
+          const keys = [`${kp}_daily_loss_limit_pct`, `${kp}_max_trades_per_day`, `${kp}_risk_per_trade_pct`, `${kp}_simulated_equity`];
           const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
           const cfg: Record<string, string> = {};
           for (const c of configs) cfg[c.key] = c.value;
 
-          const dailyLossPct = parseFloat(cfg.futures_daily_loss_limit_pct) || 15;
-          const riskPct = parseFloat(cfg.futures_risk_per_trade_pct) || 8;
+          const dailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || (isDemoView ? 15 : 8);
+          const riskPct = parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || (isDemoView ? 8 : 5);
 
-          // DEMO: Use actual account equity + expanded limits
-          // LIVE: Use simulated equity ($1K) + conservative limits
-          const isDemoView = viewMode !== "live";
+          // DEMO: actual account equity + expanded limits. LIVE: real $1K (sim=0) + Phase-0 caps.
+          const simCfg = parseFloat(cfg[`${kp}_simulated_equity`]) || 0;
           const simEquity = isDemoView
             ? (accountSummary.netLiq || accountSummary.balance || 50000)
-            : (parseFloat(cfg.futures_simulated_equity) || 1000);
-          const maxTrades = isDemoView ? 20 : (parseInt(cfg.futures_max_trades_per_day) || 6);
+            : (simCfg > 0 ? simCfg : (accountSummary.netLiq || accountSummary.balance || 1000));
+          const maxTrades = isDemoView ? 20 : (parseInt(cfg[`${kp}_max_trades_per_day`]) || 1);
 
           const dailyLossLimit = simEquity * (dailyLossPct / 100);
           const riskPerTrade = simEquity * (riskPct / 100);
