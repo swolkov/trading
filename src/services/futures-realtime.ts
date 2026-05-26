@@ -685,6 +685,28 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
   return result;
 }
 
+// Phase 4: read the Databento sidecar's real-time L1 from live_quotes. OFF by default (set
+// DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
+let dbnMdLogged = 0;
+async function fetchDatabentoQuotes(): Promise<Map<string, number>> {
+  if (process.env.DATABENTO_MD_ENABLED !== "true") return new Map();
+  try {
+    const rows = await prisma.$queryRawUnsafe<{ symbol: string; mid: number; ts: bigint | number }[]>(
+      "SELECT symbol, mid, ts FROM live_quotes",
+    );
+    const out = new Map<string, number>();
+    const now = Date.now();
+    for (const r of rows) {
+      const ts = Number(r.ts), mid = Number(r.mid);
+      if (mid > 0 && now - ts < 30_000) out.set(r.symbol, mid);   // only FRESH (<30s) quotes
+    }
+    if (out.size !== dbnMdLogged) { log(`[MD] Databento primary: ${out.size} fresh symbols from live_quotes`); dbnMdLogged = out.size; }
+    return out;
+  } catch {
+    return new Map();   // fail-safe: never let an MD-source error halt the engine
+  }
+}
+
 async function pollPrices() {
   // Skip polling when WebSocket is streaming real-time data
   if (wsConnected) return;
@@ -697,15 +719,25 @@ async function pollPrices() {
   }
 
   try {
-    // Primary: Tradovate md/getChart (parallel per symbol)
+    let received = 0;
+    // PRIMARY (Phase 4): real-time L1 from the Databento sidecar's live_quotes. Fresh quotes used directly;
+    // anything missing/stale falls through to the existing Tradovate→Yahoo chain UNCHANGED (fail-safe).
+    const served = new Set<string>();
+    const dbn = await fetchDatabentoQuotes();
+    for (const sym of SYMBOLS) {
+      const px = dbn.get(sym) ?? dbn.get(FULL_EQUIVALENT[sym] || "") ?? dbn.get(MICRO_EQUIVALENT[sym] || "");
+      if (px && px > 0) { onPrice(sym, px, 1); received++; served.add(sym); }
+    }
+    const querySymbols = SYMBOLS.filter(s => !served.has(s));
+
+    // Tradovate md/getChart (parallel) — only for symbols Databento didn't serve
     const tradovateResults = await Promise.allSettled(
-      SYMBOLS.map(async (sym) => {
+      querySymbols.map(async (sym) => {
         const quote = await fetchTradovateQuote(sym);
         return quote ? { sym, ...quote } : null;
       })
     );
 
-    let received = 0;
     const needYahoo: string[] = [];
 
     for (const r of tradovateResults) {
@@ -713,7 +745,7 @@ async function pollPrices() {
         onPrice(r.value.sym, r.value.price, r.value.volume);
         received++;
       } else {
-        const sym = SYMBOLS[tradovateResults.indexOf(r)];
+        const sym = querySymbols[tradovateResults.indexOf(r)];
         needYahoo.push(sym);
       }
     }
