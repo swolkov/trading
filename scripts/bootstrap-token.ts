@@ -8,6 +8,15 @@
 //   npx tsx scripts/bootstrap-token.ts both    # Bootstrap both
 
 import pg from "pg";
+import fs from "node:fs";
+
+// Load .env.local into process.env so manual runs work WITHOUT a hardcoded credential.
+try {
+  for (const line of fs.readFileSync(new URL("../.env.local", import.meta.url), "utf8").split("\n")) {
+    const m = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
+  }
+} catch { /* no .env.local — rely on the real environment */ }
 
 // ── Config ──────────────────────────────────────────────
 
@@ -16,7 +25,7 @@ const LIVE_URL = "https://live.tradovateapi.com/v1";
 
 const DATABASE_URL = process.env.DATABASE_URL_UNPOOLED
   || process.env.DATABASE_URL
-  || "postgresql://neondb_owner:npg_tkvK5BwNfp9D@ep-jolly-field-anjir64r.c-6.us-east-1.aws.neon.tech/neondb?sslmode=require";
+  || "";
 
 // Tradovate creds — reads from env, or prompts
 const USERNAME = process.env.TRADOVATE_USERNAME || "";
