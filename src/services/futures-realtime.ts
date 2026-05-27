@@ -845,12 +845,13 @@ function getSizeMultiplier(sym?: string): number {
 
   if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
-  // LIVE ENGINE: RTH prime + midday at half size. No ETH, no open/close.
+  // LIVE ENGINE: 24/7 (user request 2026-05-26) — RTH prime full size, everything else reduced.
+  // NOTE: overnight/ETH is thinner + wider spreads; with no directional edge this adds cost, not alpha.
   if (IS_LIVE) {
-    if (s === "morning") return getMinutesSinceRTHOpen() >= 15 ? 1.0 : 0;
-    if (s === "afternoon") return 1.0;
-    if (s === "midday") return 0.5; // Half size 12-2 PM — reduced but not blocked
-    return 0; // Block: open, close, all ETH sessions
+    if (s === "morning" || s === "afternoon") return 1.0;   // RTH prime — full size
+    if (s === "midday") return 0.5;                         // lunch — half size
+    if (s === "open" || s === "close") return 0.5;          // volatile open/close — reduced
+    return 0.5;                                             // ETH overnight — reduced size, but active 24/7
   }
 
   // DEMO ENGINE: trades 24/7 for maximum learning

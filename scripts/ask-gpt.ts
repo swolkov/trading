@@ -58,7 +58,7 @@ async function main() {
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST", headers,
-    body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0.7 }),
+    body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] }),
   });
   if (!res.ok) {
     console.error(`\n⛔ OpenAI HTTP ${res.status}: ${(await res.text()).slice(0, 400)}\n`);
