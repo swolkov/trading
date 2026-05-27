@@ -419,7 +419,7 @@ export default function FuturesPage() {
       {/* ── Architecture truth: Databento data · Tradovate execution · environment ── */}
       <div className="flex flex-wrap items-center gap-2 text-[10px] -mt-1">
         <span className={`px-1.5 py-0.5 rounded font-bold border ${isLiveView ? "bg-red-500/15 text-red-400 border-red-500/30" : "bg-amber-500/15 text-amber-400 border-amber-500/30"}`}>
-          {isLiveView ? "LIVE · PHASE 0 — execution validation, not proven alpha" : "DEMO · RESEARCH LAB — P&L is not proof"}
+          {isLiveView ? "LIVE · $1K real money — validating execution, not proven alpha" : "DEMO · RESEARCH LAB — P&L is not proof"}
         </span>
         <span className="px-1.5 py-0.5 rounded border bg-cyan-500/10 text-cyan-300 border-cyan-500/30" title="Chart bars from Databento (~7-min historical). The engine's real-time Databento feed activates after 4 PM.">Databento = market data</span>
         <span className={`px-1.5 py-0.5 rounded border ${status?.connected ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`}>Tradovate = execution{status?.connected ? " ✓" : ""}</span>

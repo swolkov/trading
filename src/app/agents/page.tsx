@@ -59,11 +59,11 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Futures — LIVE ($1K real money) · PHASE 0 (execution validation, not proven alpha)",
+    label: "Futures — LIVE ($1K real money) · validating execution, not proven alpha",
     icon: "L",
     color: "from-red-500 to-rose-500",
     fields: [
-      { key: "live_futures_symbols", label: "Symbol Whitelist (Phase 0: MES only)", type: "text" as const, placeholder: "MES" },
+      { key: "live_futures_symbols", label: "Symbol Whitelist (MES, MNQ)", type: "text" as const, placeholder: "MES,MNQ" },
       { key: "live_futures_risk_per_trade_pct", label: "Risk Per Trade %", type: "number" as const },
       { key: "live_futures_daily_loss_limit_pct", label: "Daily Loss Limit %", type: "number" as const },
       { key: "live_futures_max_drawdown_pct", label: "Max Drawdown Kill %", type: "number" as const },
