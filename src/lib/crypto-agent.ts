@@ -302,8 +302,11 @@ export async function runCryptoAgent(): Promise<{
       const riskPerUnit = Math.abs(setup.price - setup.stopPrice);
       if (riskPerUnit <= 0) continue;
 
-      // For crypto, we can use notional (dollar amount) instead of qty
-      const notionalSize = riskDollars / (riskPerUnit / setup.price);
+      // For crypto, we can use notional (dollar amount) instead of qty.
+      // Cap any single position at 35% of equity so one tight-stop trade can't swallow the
+      // whole (shared $1K) account and leaves room to diversify / for the stock sleeve.
+      const maxNotionalPerTrade = config.simulatedEquity * 0.35;
+      const notionalSize = Math.min(riskDollars / (riskPerUnit / setup.price), maxNotionalPerTrade);
       const qty = (notionalSize / setup.price).toFixed(6);
 
       details.push(`[crypto-agent] EXECUTING ${setup.symbol} ${setup.direction}: ${qty} @ $${setup.price.toFixed(2)} | AI: ${ai.conviction} | Conf: ${adjustedConfidence}`);

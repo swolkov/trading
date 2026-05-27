@@ -158,7 +158,8 @@ export async function getOrders(
 
 export interface PlaceOrderParams {
   symbol: string;
-  qty: string;
+  qty?: string;        // whole/decimal share count — supply this OR notional, not both
+  notional?: string;   // fractional dollar amount (e.g. "20.00") — enables fractional shares
   side: "buy" | "sell";
   type: "market" | "limit" | "stop" | "stop_limit";
   time_in_force: "day" | "gtc" | "ioc" | "fok";
@@ -168,9 +169,16 @@ export interface PlaceOrderParams {
 }
 
 export async function placeOrder(params: PlaceOrderParams, modeOverride?: TradingMode): Promise<Order> {
+  // Alpaca rejects an order carrying both qty and notional. Prefer notional (fractional) when given.
+  const body: Record<string, unknown> = { ...params };
+  if (params.notional && Number(params.notional) > 0) {
+    delete body.qty;
+  } else {
+    delete body.notional;
+  }
   return alpacaFetch(`${BASE_URL}/v2/orders`, {
     method: "POST",
-    body: JSON.stringify(params),
+    body: JSON.stringify(body),
   }, modeOverride);
 }
 

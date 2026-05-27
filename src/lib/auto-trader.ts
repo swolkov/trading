@@ -88,6 +88,22 @@ async function loadRules() {
   return rules;
 }
 
+// Single source of truth for whether options trading is allowed.
+// Default is DISABLED. Every options order path MUST consult this — fail closed on error.
+async function isOptionsEnabled(): Promise<boolean> {
+  try {
+    const [optModeConfig, tradeOptionsConfig] = await Promise.all([
+      prisma.agentConfig.findUnique({ where: { key: "options_mode" } }),
+      prisma.agentConfig.findUnique({ where: { key: "trade_options" } }),
+    ]);
+    // options_mode takes precedence, fall back to legacy trade_options
+    const optMode = optModeConfig?.value || (tradeOptionsConfig?.value === "true" ? "paper" : "disabled");
+    return optMode !== "disabled";
+  } catch {
+    return false; // never trade options when the gate can't be read
+  }
+}
+
 interface AgentResult {
   runType: string;
   stocksScanned: number;
@@ -132,11 +148,12 @@ function sma(data: number[], period: number): number | null {
   return data.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
-function calculatePositionSize(
+// Dollar value to allocate to a position (pre-price, pre-floor).
+// Used for fractional sizing so a small account can buy a $20 slice of a $400 stock.
+function calculatePositionValueUSD(
   equity: number,
   score: number,
   confidence: number,
-  price: number,
   regimeMultiplier: number = 1.0,
   rules: { MIN_POSITION_PCT: number; MAX_POSITION_PCT: number; MIN_SCORE_TO_BUY: number } = DEFAULT_RULES,
   annualizedVol?: number // stock's 20-day annualized volatility (0-1 scale)
@@ -160,8 +177,20 @@ function calculatePositionSize(
     ratio *= volAdjust;
   }
 
-  const positionValue = equity * ratio;
-  return Math.floor(positionValue / price);
+  return equity * ratio;
+}
+
+function calculatePositionSize(
+  equity: number,
+  score: number,
+  confidence: number,
+  price: number,
+  regimeMultiplier: number = 1.0,
+  rules: { MIN_POSITION_PCT: number; MAX_POSITION_PCT: number; MIN_SCORE_TO_BUY: number } = DEFAULT_RULES,
+  annualizedVol?: number // stock's 20-day annualized volatility (0-1 scale)
+): number {
+  if (price <= 0) return 0;
+  return Math.floor(calculatePositionValueUSD(equity, score, confidence, regimeMultiplier, rules, annualizedVol) / price);
 }
 
 // Calculate annualized volatility from price bars
@@ -306,6 +335,9 @@ export async function runTradingAgent(): Promise<AgentResult> {
     const cash = parseFloat(account.cash);
     const positions = await getPositions();
 
+    // Options gate — read once, enforced on every options path below. Default OFF.
+    const optionsEnabled = await isOptionsEnabled();
+
     // PDT CHECK: if day trading buying power is $0, we can only manage existing positions
     const dtBuyingPower = parseFloat(account.daytrading_buying_power || "0");
     const isPDTRestricted = account.pattern_day_trader && dtBuyingPower <= 0;
@@ -319,10 +351,11 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // ============ SPENDING & SAFETY LIMITS ============
     // Safety limits — scale with account size (defaults for ~$5k account)
     // These are overridden by database config if set
-    let dailyLossLimit = Math.max(100, equity * 0.05);     // 5% of equity
-    let dailySpendCap = Math.max(500, equity * 0.50);      // 50% of equity
-    let maxOptionsExposure = Math.max(1000, equity * 0.75); // 75% of equity
-    let perTradeMax = Math.max(50, equity * 0.02);          // 2% of equity
+    // Floors kept small so the % governs on a small ($1K) account instead of the absolute minimum.
+    let dailyLossLimit = Math.max(30, equity * 0.05);      // 5% of equity
+    let dailySpendCap = Math.max(100, equity * 0.50);      // 50% of equity
+    let maxOptionsExposure = Math.max(200, equity * 0.75);  // 75% of equity
+    let perTradeMax = Math.max(15, equity * 0.03);          // up to 3% of equity (matches MAX_POSITION_PCT)
     let drawdownKillPct = 10;                                // 10% always
     try {
       const configs = await prisma.agentConfig.findMany();
@@ -338,10 +371,21 @@ export async function runTradingAgent(): Promise<AgentResult> {
     // DRAWDOWN KILL SWITCH: if account dropped too much from persisted peak, stop
     const portfolioValue = parseFloat(account.portfolio_value || account.equity);
     const lastEquityVal = parseFloat(account.last_equity);
-    const startingCapital = 100000; // paper trading start
-    // Fetch persisted high-water mark from DB
+    // Fetch persisted high-water mark from DB. Seed from the LIVE account value (not a hardcoded
+    // number) so drawdown works at any account size ($1K, $10K, …).
     const peakConfig = await prisma.agentConfig.findUnique({ where: { key: "peak_equity_alpaca" } });
-    const persistedPeak = peakConfig ? parseFloat(peakConfig.value) : startingCapital;
+    let persistedPeak = peakConfig ? parseFloat(peakConfig.value) : portfolioValue;
+    // Self-heal a stale high-water mark left by a balance RESET (e.g. paper $50K → clean $1K) — otherwise
+    // it reads as a ~99% drawdown and trips the kill switch forever.
+    // CRITICAL SAFETY: only heal when this run shows essentially NO intraday loss. A reset moves the
+    // balance without a trading loss; a real crash shows a large negative move and must NOT heal — that
+    // is exactly when the kill switch should fire. (A slow bleed can't reach here: the 10% kill switch
+    // halts long before peak/value diverge by >1.5×.)
+    const intradayMovePct = lastEquityVal > 0 ? Math.abs(portfolioValue - lastEquityVal) / lastEquityVal : 1;
+    if (persistedPeak > portfolioValue * 1.5 && intradayMovePct < 0.15) {
+      persistedPeak = portfolioValue;
+      await prisma.agentConfig.upsert({ where: { key: "peak_equity_alpaca" }, update: { value: String(portfolioValue) }, create: { key: "peak_equity_alpaca", value: String(portfolioValue) } });
+    }
     const peakValue = Math.max(persistedPeak, portfolioValue);
     // Update peak if new high
     if (portfolioValue > persistedPeak) {
@@ -854,8 +898,9 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     // ============ STEP 5: AI RESEARCH + MECHANICAL TRADES ============
     const activePositions = positions.filter((p) => Math.abs(parseFloat(p.market_value)) > 1);
-    if (!isPDTRestricted && activePositions.length < RULES.MAX_POSITIONS && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
-      details.push("\n=== MECHANICAL TRADES (pairs + sector signals — no AI needed) ===");
+    // Pairs is an OPTIONS-only strategy (buys calls/puts). Gate the whole block on the options switch.
+    if (optionsEnabled && !isPDTRestricted && activePositions.length < RULES.MAX_POSITIONS && tradesPlaced + todayTrades < RULES.MAX_DAILY_TRADES) {
+      details.push("\n=== MECHANICAL TRADES (pairs — options) ===");
 
       // Cooldown: skip symbols traded in the last 4 hours to prevent churning
       const cooldownTime = new Date(Date.now() - 4 * 60 * 60 * 1000);
@@ -1274,29 +1319,21 @@ export async function runTradingAgent(): Promise<AgentResult> {
             if (price <= 0) continue;
 
             const stockVol = calculateAnnualizedVol(bars);
-            const qty = calculatePositionSize(equity, analysis.score, analysis.confidence, price, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore }, stockVol);
-            if (qty <= 0) {
-              details.push(`  ${symbol}: SKIP — position too small`);
+            // Size by DOLLARS, then cap by per-trade max and available cash. This lets a small
+            // ($1K) account take a FRACTIONAL slice of a pricey stock instead of rounding to 0 shares.
+            const dollarTarget = calculatePositionValueUSD(equity, analysis.score, analysis.confidence, effectiveSizeMultiplier, { ...RULES, MIN_SCORE_TO_BUY: effectiveMinScore }, stockVol);
+            const spend = Math.min(dollarTarget, perTradeMax, availableCash);
+            if (spend < 5) {
+              details.push(`  ${symbol}: SKIP — position too small ($${spend.toFixed(2)} < $5 min)`);
               continue;
             }
+            const wholeQty = Math.floor(spend / price);
+            const useFractional = wholeQty < 1; // can't afford a whole share → buy a dollar slice
+            const qty = useFractional ? Number((spend / price).toFixed(6)) : wholeQty;
+            const positionValue = useFractional ? spend : wholeQty * price;
 
-            const positionValue = qty * price;
-            if (positionValue > availableCash) {
-              details.push(`  ${symbol}: SKIP — exceeds available cash`);
-              continue;
-            }
-
-            // Check options mode — "disabled" skips options, "paper"/"live" enables them
-            let optionsOnlyMode = false;
-            try {
-              const [optModeConfig, tradeOptionsConfig] = await Promise.all([
-                prisma.agentConfig.findUnique({ where: { key: "options_mode" } }),
-                prisma.agentConfig.findUnique({ where: { key: "trade_options" } }),
-              ]);
-              // options_mode takes precedence, fall back to legacy trade_options
-              const optMode = optModeConfig?.value || (tradeOptionsConfig?.value === "true" ? "paper" : "disabled");
-              optionsOnlyMode = optMode !== "disabled";
-            } catch { /* default false */ }
+            // Options gate (read once at run start). When disabled, no options orders at all.
+            const optionsOnlyMode = optionsEnabled;
 
             if (!optionsOnlyMode && isBullish) {
               // === STOCK ENTRY GATE ===
@@ -1399,17 +1436,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
                   }, "auto-trader");
                 } catch {}
               } else {
-                // Live stock execution
-                details.push(`  BUY ${symbol}: ${qty} shares, ${execType} $${limitPrice} (score: ${analysis.score}, R:R ${riskReward.toFixed(1)}:1, ${reason})`);
+                // Live stock execution. Fractional budgets (< 1 share) go as a notional MARKET order
+                // (Alpaca only allows fractional via market/notional); whole-share budgets keep the limit path.
+                details.push(`  BUY ${symbol}: ${useFractional ? `$${spend.toFixed(2)} notional (~${qty} sh)` : `${wholeQty} sh ${execType} $${limitPrice}`} ≈ $${positionValue.toFixed(2)} (score: ${analysis.score}, R:R ${riskReward.toFixed(1)}:1, ${reason})`);
 
-                const order = await placeOrder({
-                  symbol,
-                  qty: String(qty),
-                  side: "buy",
-                  type: execType,
-                  time_in_force: "day",
-                  ...(execType === "limit" ? { limit_price: limitPrice } : {}),
-                });
+                const order = useFractional
+                  ? await placeOrder({
+                      symbol,
+                      notional: spend.toFixed(2),
+                      side: "buy",
+                      type: "market",
+                      time_in_force: "day",
+                    })
+                  : await placeOrder({
+                      symbol,
+                      qty: String(wholeQty),
+                      side: "buy",
+                      type: execType,
+                      time_in_force: "day",
+                      ...(execType === "limit" ? { limit_price: limitPrice } : {}),
+                    });
 
                 heldSectors[sector] = (heldSectors[sector] || 0) + 1;
 
@@ -1441,10 +1487,17 @@ export async function runTradingAgent(): Promise<AgentResult> {
                 } catch { /* vault optional */ }
               }
               continue; // Stock trade handled (paper or live) — don't also buy options
-            } else if (optionsOnlyMode || isBearish) {
+            } else if (optionsOnlyMode) {
+              // Options enabled: bullish-in-options-mode buys calls, bearish buys puts.
               details.push(`  ${symbol}: ${isBearish ? "BEARISH — buying puts" : "OPTIONS-ONLY mode — buying options"}`);
             } else {
-              continue; // Neither bullish stock nor options path matched
+              // Options DISABLED. Bullish was already handled by the stock path above.
+              // A bearish signal has no vehicle here (we don't short stock), so skip — never buy puts.
+              if (isBearish) {
+                details.push(`  ${symbol}: BEARISH but options disabled — no short vehicle, skipping (no put bought)`);
+                await logTrade(symbol, "skip", 0, null, "Bearish signal but options disabled — no trade", analysis.score, analysis.signal);
+              }
+              continue;
             }
 
             // === RISK AGENT REVIEW — final gatekeeper before any options trade ===
