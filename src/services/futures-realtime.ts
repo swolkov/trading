@@ -845,13 +845,13 @@ function getSizeMultiplier(sym?: string): number {
 
   if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
-  // LIVE ENGINE: 24/7 (user request 2026-05-26) — RTH prime full size, everything else reduced.
-  // NOTE: overnight/ETH is thinner + wider spreads; with no directional edge this adds cost, not alpha.
+  // LIVE ENGINE: RTH-only (reverted from 24/7 on 2026-05-27 — overnight initial margin for 1 MES (~$2,657,
+  // confirmed real from Tradovate's cashBalance API) EXCEEDS the $1K account → margin deficit / liquidation
+  // risk. Day-trade margin (~$50) only applies during RTH, so the $1K can only safely hold positions intraday.
   if (IS_LIVE) {
     if (s === "morning" || s === "afternoon") return 1.0;   // RTH prime — full size
     if (s === "midday") return 0.5;                         // lunch — half size
-    if (s === "open" || s === "close") return 0.5;          // volatile open/close — reduced
-    return 0.5;                                             // ETH overnight — reduced size, but active 24/7
+    return 0;                                               // BLOCK open, close, and all ETH — overnight margin > $1K
   }
 
   // DEMO ENGINE: trades 24/7 for maximum learning

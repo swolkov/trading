@@ -13,7 +13,7 @@ const RULES: Record<string, string> = {
   live_futures_symbols: "MES,MNQ",        // NOT MGC on $1K: gold is $10/pt × ~7-15pt stop = $75-150 risk > the 5%=$50 budget → can't size without breaking limits. The gold edge is traded on the $50K DEMO (GC), where capital fits.
   live_futures_max_contracts: "1",        // 1 micro per trade
   live_futures_max_total_contracts: "1",  // no pyramiding
-  live_futures_max_trades_per_day: "3",   // selective — only the best setups, capped at 3/day
+  live_futures_max_trades_per_day: "10",  // raised from 3 (user request) — ceiling only; AI veto + setup-scarcity are the real limiter
   live_futures_max_positions: "1",        // one at a time (correlation gate blocks doubling the index bet)
   live_futures_risk_per_trade_pct: "5",   // 1 micro ≈ 5% of $1K
   live_futures_daily_loss_limit_pct: "12",// hard stop ~$120/day → a bad day can't compound
