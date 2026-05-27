@@ -555,7 +555,10 @@ let tickCount = 0;
 let lastResetDate = "";
 let lastEODDate = "";
 
-function onPrice(sym: string, price: number, volume: number) {
+// `reliable` = price came from a real-time exchange feed (Databento/Tradovate).
+// Yahoo fallback quotes lag 15-60s and flap overnight — they must NOT drive the
+// software emergency close (the broker bracket stop is the real, on-exchange protection).
+function onPrice(sym: string, price: number, volume: number, reliable = true) {
   const b = barBuilders.get(sym);
   if (!b || price <= 0) return;
 
@@ -592,7 +595,7 @@ function onPrice(sym: string, price: number, volume: number) {
   }
 
   // Tick-by-tick position management
-  checkPositions(sym, price);
+  checkPositions(sym, price, reliable);
 }
 
 async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume: number } | null> {
@@ -783,7 +786,7 @@ async function pollPrices() {
       for (const sym of stillNeedYahoo) {
         const yq = yahooQuotes.get(sym);
         if (yq) {
-          onPrice(sym, yq.price, yq.volume);
+          onPrice(sym, yq.price, yq.volume, false); // Yahoo fallback → unreliable: bars OK, but won't trip the emergency cut-out
           received++;
         }
       }
@@ -1302,9 +1305,20 @@ async function loadPositions() {
   }
 }
 
-function checkPositions(sym: string, price: number) {
+function checkPositions(sym: string, price: number, reliable = true) {
   const pos = positions.get(sym);
   if (!pos) return;
+
+  // FEED GATE: when the price is from the Yahoo fallback (real-time feed down, e.g. right after a
+  // deploy restart), pause ALL software position-management. Yahoo quotes lag 15-60s and flap
+  // overnight — acting on them caused a phantom emergency close (a +$1,700 winner round-tripped to
+  // a -$900 cut on noisy quotes). The broker's on-exchange bracket (stop + target, placed at entry)
+  // is the real protection and fires on true exchange prices regardless. Management resumes the
+  // instant real-time data returns. Bars/setup-detection already updated upstream in onPrice().
+  if (!reliable) {
+    if (pos.emergencyWarningTick) pos.emergencyWarningTick = 0; // drop any stale warning
+    return;
+  }
 
   // AGGREGATE DRAWDOWN CHECK: close ALL positions if total drawdown exceeds 15% of equity
   const MAX_DRAWDOWN_PCT = 0.15;
