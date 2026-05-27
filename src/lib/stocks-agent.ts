@@ -328,17 +328,20 @@ export async function runStocksAgent(): Promise<{
     return { trades, managed: 0, details: ["Stocks agent disabled"] };
   }
 
-  // DEMO: Use Alpaca paper account's actual equity for aggressive learning
-  // LIVE: Stay conservative with simulated $1K equity
+  // Paper sizing basis: if alpaca_account_size is set (the $1K paper test), size off THAT so paper
+  // mirrors a real small account. Otherwise fall back to the paper shell's real equity (legacy demo).
   if (config.mode === "paper") {
     try {
       const account = await getAccount(config.mode);
       const actualEquity = parseFloat(account.equity);
-      if (actualEquity > 0) {
-        config.simulatedEquity = actualEquity;
-        config.maxPositions = 10;
-        config.maxTradesPerDay = 8;
-        config.riskPerTradePct = 5;
+      const sizeCfg = await prisma.agentConfig.findUnique({ where: { key: "alpaca_account_size" } });
+      const simSize = sizeCfg ? parseFloat(sizeCfg.value) : 0;
+      const baseEquity = simSize > 0 ? simSize : actualEquity;
+      if (baseEquity > 0) {
+        config.simulatedEquity = baseEquity;
+        config.maxPositions = simSize > 0 ? 4 : 10;       // tighter on a small shared pool
+        config.maxTradesPerDay = simSize > 0 ? 4 : 8;
+        config.riskPerTradePct = simSize > 0 ? 2 : 5;
         config.confidenceThreshold = 65;
       }
     } catch { /* fall back to defaults */ }
@@ -373,9 +376,12 @@ export async function runStocksAgent(): Promise<{
 
   // ── 3. Get existing stock positions ──
   let stockPositions: Position[] = [];
+  let poolUsed = 0;
   try {
     const allPositions = await getPositions(config.mode);
     stockPositions = allPositions.filter((p) => p.asset_class === "us_equity");
+    // Capital deployed across the SHARED Alpaca account (stocks + crypto + options) — caps the pool.
+    poolUsed = allPositions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value || "0")), 0);
   } catch (err) {
     details.push(`[stocks-agent] Failed to fetch positions: ${err}`);
     return { trades, managed: 0, details };
@@ -445,22 +451,34 @@ export async function runStocksAgent(): Promise<{
         continue;
       }
 
-      // Position sizing
+      // Position sizing — dollar-based + fractional so a small ($1K) account takes a real slice
+      // instead of being forced into ≥1 whole share of a pricey stock, and never exceeds the pool.
       const riskDollars = config.simulatedEquity * (config.riskPerTradePct / 100);
       const riskPerShare = Math.abs(setup.price - setup.stopPrice);
       if (riskPerShare <= 0) continue;
-      const shares = Math.max(1, Math.floor(riskDollars / riskPerShare));
+      const maxPerTrade = config.simulatedEquity * 0.25;            // ≤25% of the book per name
+      const poolRemaining = Math.max(0, config.simulatedEquity - poolUsed);
+      const notional = Math.min(riskDollars / (riskPerShare / setup.price), maxPerTrade, poolRemaining);
+      if (notional < 5) {
+        details.push(`[stocks-agent] SKIP ${setup.symbol}: ${poolRemaining < 5 ? "shared pool full" : "size too small"} ($${notional.toFixed(0)})`);
+        continue;
+      }
+      const wholeShares = Math.floor(notional / setup.price);
+      const useFractional = wholeShares < 1;                        // can't afford a whole share → notional order
+      const shares = useFractional ? +(notional / setup.price).toFixed(6) : wholeShares;
+      const orderNotional = useFractional ? notional : wholeShares * setup.price;
 
-      details.push(`[stocks-agent] EXECUTING ${setup.symbol}: ${shares} shares @ $${setup.price.toFixed(2)} | AI: ${ai.conviction} | Conf: ${adjustedConfidence}`);
+      details.push(`[stocks-agent] EXECUTING ${setup.symbol}: ${useFractional ? `$${notional.toFixed(0)} notional (~${shares} sh)` : `${wholeShares} sh`} @ $${setup.price.toFixed(2)} | AI: ${ai.conviction} | Conf: ${adjustedConfidence}`);
 
       try {
         const order = await placeOrder({
           symbol: setup.symbol,
-          qty: String(shares),
+          ...(useFractional ? { notional: notional.toFixed(2) } : { qty: String(wholeShares) }),
           side: "buy",
           type: "market",
           time_in_force: "day",
         }, config.mode);
+        poolUsed += orderNotional;
 
         const orderId = order.id;
         const tradeId = `${new Date().toISOString().slice(0, 10)}-STK-${orderId.slice(-4)}`;
