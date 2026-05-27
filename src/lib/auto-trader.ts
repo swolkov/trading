@@ -331,9 +331,26 @@ export async function runTradingAgent(): Promise<AgentResult> {
 
     // Step 2: Get account state
     const account = await getAccount();
-    const equity = parseFloat(account.equity);
-    const cash = parseFloat(account.cash);
+    const realEquity = parseFloat(account.equity);
+    const realCash = parseFloat(account.cash);
     const positions = await getPositions();
+
+    // Account-size simulation: when `alpaca_account_size` is set (paper $1K test), size/limit/drawdown
+    // as if the account were that size — regardless of the paper shell's real balance. Leave it UNSET
+    // for live (real funded account) so real equity governs and this sim path never runs.
+    let accountSize = realEquity;
+    let simActive = false;
+    try {
+      const sizeCfg = await prisma.agentConfig.findUnique({ where: { key: "alpaca_account_size" } });
+      const v = sizeCfg ? parseFloat(sizeCfg.value) : 0;
+      if (v > 0) { accountSize = v; simActive = true; }
+    } catch { /* fall back to real equity */ }
+    const equity = accountSize; // sizing + dollar-limit basis
+    // Capital deployed across the (shared) account — caps the simulated pool.
+    const openExposure = positions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value || "0")), 0);
+    // Real cash bounds fills; in sim, bound to the simulated pool so stocks+crypto+options can't deploy
+    // more than `accountSize` even though the paper shell holds far more.
+    const cash = simActive ? Math.max(0, accountSize - openExposure) : realCash;
 
     // Options gate — read once, enforced on every options path below. Default OFF.
     const optionsEnabled = await isOptionsEnabled();
@@ -369,27 +386,28 @@ export async function runTradingAgent(): Promise<AgentResult> {
     } catch { /* use defaults */ }
 
     // DRAWDOWN KILL SWITCH: if account dropped too much from persisted peak, stop
-    const portfolioValue = parseFloat(account.portfolio_value || account.equity);
+    const realPortfolioValue = parseFloat(account.portfolio_value || account.equity);
     const lastEquityVal = parseFloat(account.last_equity);
-    // Fetch persisted high-water mark from DB. Seed from the LIVE account value (not a hardcoded
-    // number) so drawdown works at any account size ($1K, $10K, …).
-    const peakConfig = await prisma.agentConfig.findUnique({ where: { key: "peak_equity_alpaca" } });
+    // In sim, value the simulated book (base + open P&L) for drawdown; else the real account value.
+    const openUnrealized = positions.reduce((s, p) => s + parseFloat(p.unrealized_pl || "0"), 0);
+    const portfolioValue = simActive ? (accountSize + openUnrealized) : realPortfolioValue;
+    // Sim uses its own scale-correct peak key so it never collides with the real-account peak.
+    const peakKey = simActive ? "sim_peak_equity_alpaca" : "peak_equity_alpaca";
+    const peakConfig = await prisma.agentConfig.findUnique({ where: { key: peakKey } });
     let persistedPeak = peakConfig ? parseFloat(peakConfig.value) : portfolioValue;
-    // Self-heal a stale high-water mark left by a balance RESET (e.g. paper $50K → clean $1K) — otherwise
-    // it reads as a ~99% drawdown and trips the kill switch forever.
-    // CRITICAL SAFETY: only heal when this run shows essentially NO intraday loss. A reset moves the
-    // balance without a trading loss; a real crash shows a large negative move and must NOT heal — that
-    // is exactly when the kill switch should fire. (A slow bleed can't reach here: the 10% kill switch
-    // halts long before peak/value diverge by >1.5×.)
-    const intradayMovePct = lastEquityVal > 0 ? Math.abs(portfolioValue - lastEquityVal) / lastEquityVal : 1;
-    if (persistedPeak > portfolioValue * 1.5 && intradayMovePct < 0.15) {
+    // Self-heal a stale high-water mark left by a real-account balance RESET (paper $50K → clean $1K).
+    // CRITICAL SAFETY: only heal when this run shows essentially NO intraday loss — a reset moves the
+    // balance without a trading loss; a real crash shows a large negative move and must NOT heal (that
+    // is exactly when the kill switch should fire). Sim uses a fresh scale-correct peak, so skip it there.
+    const intradayMovePct = lastEquityVal > 0 ? Math.abs(realPortfolioValue - lastEquityVal) / lastEquityVal : 1;
+    if (!simActive && persistedPeak > portfolioValue * 1.5 && intradayMovePct < 0.15) {
       persistedPeak = portfolioValue;
-      await prisma.agentConfig.upsert({ where: { key: "peak_equity_alpaca" }, update: { value: String(portfolioValue) }, create: { key: "peak_equity_alpaca", value: String(portfolioValue) } });
+      await prisma.agentConfig.upsert({ where: { key: peakKey }, update: { value: String(portfolioValue) }, create: { key: peakKey, value: String(portfolioValue) } });
     }
     const peakValue = Math.max(persistedPeak, portfolioValue);
     // Update peak if new high
     if (portfolioValue > persistedPeak) {
-      await prisma.agentConfig.upsert({ where: { key: "peak_equity_alpaca" }, update: { value: String(portfolioValue) }, create: { key: "peak_equity_alpaca", value: String(portfolioValue) } });
+      await prisma.agentConfig.upsert({ where: { key: peakKey }, update: { value: String(portfolioValue) }, create: { key: peakKey, value: String(portfolioValue) } });
     }
     const drawdownPct = ((peakValue - portfolioValue) / peakValue) * 100;
     if (drawdownPct >= drawdownKillPct) {
@@ -401,7 +419,7 @@ export async function runTradingAgent(): Promise<AgentResult> {
     }
 
     // DAILY LOSS CHECK: if already lost too much today, stop
-    const dailyPnl = portfolioValue - lastEquityVal;
+    const dailyPnl = realPortfolioValue - lastEquityVal; // real $ delta = our book's real P&L
     if (dailyPnl < -dailyLossLimit) {
       const summary = `DAILY LOSS LIMIT: Down $${Math.abs(dailyPnl).toFixed(2)} today (limit: $${dailyLossLimit}). Stopping.`;
       details.push(summary);

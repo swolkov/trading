@@ -166,18 +166,21 @@ export async function runCryptoAgent(): Promise<{
     return { trades, managed: 0, details: ["Crypto agent disabled"] };
   }
 
-  // DEMO: Use Alpaca paper account's actual equity for aggressive learning
-  // LIVE: Stay conservative with simulated $1K equity
+  // Paper sizing basis: if alpaca_account_size is set (the $1K paper test), size off THAT so paper
+  // mirrors a real small account. Otherwise fall back to the paper shell's real equity (legacy demo).
   if (config.mode === "paper") {
     try {
       const { getAccount } = await import("./alpaca");
       const account = await getAccount(config.mode);
       const actualEquity = parseFloat(account.equity);
-      if (actualEquity > 0) {
-        config.simulatedEquity = actualEquity;
-        config.maxPositions = 6;
-        config.maxTradesPerDay = 15;
-        config.riskPerTradePct = 5;
+      const sizeCfg = await prisma.agentConfig.findUnique({ where: { key: "alpaca_account_size" } });
+      const simSize = sizeCfg ? parseFloat(sizeCfg.value) : 0;
+      const baseEquity = simSize > 0 ? simSize : actualEquity;
+      if (baseEquity > 0) {
+        config.simulatedEquity = baseEquity;
+        config.maxPositions = simSize > 0 ? 3 : 6;       // tighter on a small shared pool
+        config.maxTradesPerDay = simSize > 0 ? 6 : 15;
+        config.riskPerTradePct = simSize > 0 ? 3 : 5;
         config.confidenceThreshold = 65;
       }
     } catch { /* fall back to defaults */ }
@@ -265,6 +268,14 @@ export async function runCryptoAgent(): Promise<{
     const setups = await scanCryptoSetups(scanSymbols, regimeResult.regime);
     details.push(`[crypto-agent] Found ${setups.length} setups across ${scanSymbols.length} symbols`);
 
+    // Capital already deployed across the SHARED Alpaca account (stocks + crypto + options).
+    // Crypto must respect it so the two sleeves together can't exceed the simulated account size.
+    let poolUsed = 0;
+    try {
+      const allPos = await getPositions(config.mode);
+      poolUsed = allPos.reduce((s, p) => s + Math.abs(parseFloat(p.market_value || "0")), 0);
+    } catch { /* best-effort pool accounting */ }
+
     // ── 7. AI confirm and execute top setups ──
     for (const setup of setups) {
       if (cryptoPositions.length >= config.maxPositions) break;
@@ -303,10 +314,18 @@ export async function runCryptoAgent(): Promise<{
       if (riskPerUnit <= 0) continue;
 
       // For crypto, we can use notional (dollar amount) instead of qty.
-      // Cap any single position at 35% of equity so one tight-stop trade can't swallow the
-      // whole (shared $1K) account and leaves room to diversify / for the stock sleeve.
+      // Cap a single position at 35% of equity, AND cap to capital still free in the shared pool so
+      // stocks + crypto together stay within the simulated account size.
       const maxNotionalPerTrade = config.simulatedEquity * 0.35;
-      const notionalSize = Math.min(riskDollars / (riskPerUnit / setup.price), maxNotionalPerTrade);
+      const poolRemaining = Math.max(0, config.simulatedEquity - poolUsed);
+      const notionalSize = Math.min(riskDollars / (riskPerUnit / setup.price), maxNotionalPerTrade, poolRemaining);
+      if (notionalSize < 5) {
+        const reason = poolRemaining < 5
+          ? `shared pool full ($${poolUsed.toFixed(0)}/$${config.simulatedEquity.toFixed(0)} deployed)`
+          : `risk-based size too small ($${notionalSize.toFixed(2)})`;
+        details.push(`[crypto-agent] SKIP ${setup.symbol}: ${reason}`);
+        continue;
+      }
       const qty = (notionalSize / setup.price).toFixed(6);
 
       details.push(`[crypto-agent] EXECUTING ${setup.symbol} ${setup.direction}: ${qty} @ $${setup.price.toFixed(2)} | AI: ${ai.conviction} | Conf: ${adjustedConfidence}`);
@@ -319,6 +338,7 @@ export async function runCryptoAgent(): Promise<{
           side: setup.direction === "long" ? "buy" : "sell",
           type: "market",
         }, config.mode);
+        poolUsed += notionalSize; // reserve pool capital so later setups this run account for it
 
         const orderId = order.id;
         const tradeId = `${new Date().toISOString().slice(0, 10)}-CRY-${orderId.slice(-4)}`;
