@@ -1512,6 +1512,15 @@ function checkPositions(sym: string, price: number, reliable = true) {
     }
   }
 
+  // Sanity: if quantity is zero or negative the position was already fully closed by a concurrent
+  // exit (scale-out + breakeven both firing in the same second). Delete and bail.
+  if (pos.quantity <= 0) {
+    log(`${sym}: checkPositions found qty=${pos.quantity} — stale position object, purging`);
+    positions.delete(sym);
+    recentlyClosedAt.set(sym, Date.now());
+    return;
+  }
+
   // Per-position emergency: cap single-position loss at 10% of equity or $750, whichever is lower
   // IMPORTANT: Require 2 consecutive ticks (10s) past the limit before closing.
   // Yahoo prices lag 15-60s and can show phantom losses that don't exist on the exchange.
@@ -1789,6 +1798,13 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
 // Lock to prevent concurrent close attempts on the same symbol
 const closingLocks = new Map<string, boolean>();
 
+// Track recently closed symbols so syncPositions doesn't re-adopt settlement-lag residuals.
+// Root cause of the phantom -$24k emergency: scale-out stop + breakeven close both fired as BUY
+// orders within the same second, creating a net-LONG residual on Tradovate's paper account.
+// syncPositions saw that LONG and adopted it, then the emergency misfired on it with wrong direction.
+const recentlyClosedAt = new Map<string, number>(); // sym → epoch ms of last close
+const RECENTLY_CLOSED_TTL = 5 * 60_000; // 5 minutes
+
 async function closePosition(sym: string, price: number, reason: string) {
   // Prevent double-close: if another close is already in progress, skip
   if (closingLocks.get(sym)) {
@@ -1956,6 +1972,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     // Vault journal + pattern memory logged by deferredPnlCheck() with REAL fill P&L
 
     positions.delete(sym);
+    recentlyClosedAt.set(sym, Date.now()); // guard against syncPositions re-adopting settlement lag
 
     await savePositions();
 
@@ -3057,6 +3074,23 @@ async function syncPositions() {
         if (contract.id === tp.contractId) { sym = s; break; }
       }
       if (!sym || positions.has(sym)) continue;
+
+      // Guard: if we closed this symbol recently, this Tradovate position is almost certainly a
+      // settlement-lag residual from overlapping close orders (e.g. scale-out stop + breakeven
+      // both firing as BUY orders in the same second, creating a net-LONG remnant on the paper
+      // account). Adopting it caused a phantom emergency close with a wrong direction and
+      // inflated P&L (-$24k). Instead, cancel any working orders and let it settle.
+      const lastClose = recentlyClosedAt.get(sym);
+      if (lastClose && Date.now() - lastClose < RECENTLY_CLOSED_TTL) {
+        log(`[SYNC] ${sym}: Tradovate shows residual position but we closed ${Math.round((Date.now() - lastClose) / 1000)}s ago — skipping adoption (settlement lag), cancelling orphaned orders`);
+        try {
+          const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
+          const orphans = allOrders.filter(o => o.contractId === tp.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
+          for (const o of orphans) { try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {} }
+          if (orphans.length > 0) log(`[SYNC] ${sym}: Cancelled ${orphans.length} orphaned orders for residual position`);
+        } catch {}
+        continue;
+      }
 
       // Orphaned position on Tradovate — adopt it with correct entry price from DB
       const direction: "long" | "short" = tp.netPos > 0 ? "long" : "short";
