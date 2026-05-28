@@ -370,12 +370,16 @@ export default function FuturesPage() {
 
   // Balance history for period P&L
   const balanceHistory = posData?.balanceHistory || [];
-  // Period P&L from balance history — clean account, no exclusions
+  // Period P&L from balance history — clean account, no exclusions.
+  // Guard: ignore any startBalance < 10% of starting capital — these are corrupted entries from the
+  // live account ($994-$1009) accidentally written to the demo vault, which inflated "This Week"
+  // to $66k by computing demo_balance($67k) - live_balance($1k) instead of the real delta.
   const computePeriodPnlFromBalance = (periodStartDate: Date): number | null => {
     if (currentBalance == null) return null;
+    const minSane = STARTING_CAPITAL * 0.1; // below 10% of starting capital = corrupted live-account data
     const periodKey = `${periodStartDate.getUTCFullYear()}-${String(periodStartDate.getUTCMonth() + 1).padStart(2, "0")}-${String(periodStartDate.getUTCDate()).padStart(2, "0")}`;
     const sorted = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
-    const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null);
+    const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null && b.startBalance >= minSane);
     if (startSnapshot?.startBalance != null) {
       return currentBalance - startSnapshot.startBalance;
     }
