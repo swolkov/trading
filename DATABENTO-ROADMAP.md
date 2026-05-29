@@ -16,6 +16,14 @@ We pay ~$15/mo for Databento. This doc tracks what we're using and what we could
 
 ## High-leverage next ideas
 
+### Shipped this session (2026-05-29)
+
+| New capability | Where |
+|---|---|
+| Cross-asset correlation matrix | `/research/correlations` page + `/api/research/correlations` |
+| Slippage sensitivity sweep | `scripts/backtest-crypto-slippage-sweep.ts` (revealed MBT NR4 is execution-robust; PF 1.71 honest baseline) |
+| Statistics schema confirmed available | `scripts/research-h1-auction-imbalance.ts` proved CME GLOBEX statistics returns IOP (stat_type 2), settlement, open interest. **H1 microstructure hypothesis is testable on our current plan** — just need analysis logic added. |
+
 ### Tier 1 — quick wins (each ~1-2 hours)
 
 1. **Order book ladder (MBP-10)** — currently we only subscribe to MBP-1 (best bid/ask). Subscribing to MBP-10 gives 10 levels of depth. Useful for:

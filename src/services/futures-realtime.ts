@@ -472,7 +472,7 @@ const contracts: Map<string, ContractInfo> = new Map();
 
 async function resolveContracts() {
   // Resolve both full-size and micro contracts so we can switch dynamically
-  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS, "YM"]) {
     try {
       const results = await apiFetch(`/contract/suggest?t=${sym}&l=5`) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
       if (results.length > 0) {
@@ -3313,9 +3313,16 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
 async function preloadBars() {
   log("Pre-loading historical bars (Tradovate primary, Yahoo fallback)...");
 
-  // Preload for ALL symbols (both full-size and micro)
-  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
-    await preloadBarsForSymbol(sym);
+  // Preload for ALL symbols (both full-size and micro) — 20s cap per symbol prevents startup hang
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS, "YM"]) {
+    try {
+      await Promise.race([
+        preloadBarsForSymbol(sym),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("timeout")), 20_000)),
+      ]);
+    } catch (err) {
+      log(`  ${sym}: preload skipped (${err instanceof Error ? err.message : err}) — will build bars from live feed`);
+    }
   }
 
   log("Pre-load complete — engine ready to trade immediately");
@@ -4042,15 +4049,26 @@ process.on("unhandledRejection", (reason) => {
 // ── Startup with auto-restart ────────────────────────────
 
 const MAX_RESTART_DELAY = 120_000;
+// If main() hangs during startup (e.g. stuck Yahoo/Tradovate call), exit so Railway restarts.
+// 6 minutes is generous: auth (up to 30s), preload bars (up to 2 min), cross-asset calls (60s).
+const STARTUP_TIMEOUT_MS = 6 * 60_000;
 
 (async function startWithRetry() {
   let restartCount = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    // Arm a watchdog: if main() doesn't return within STARTUP_TIMEOUT_MS, exit for Railway restart
+    const startupWatchdog = setTimeout(() => {
+      log(`[STARTUP WATCHDOG] main() timed out after ${Math.round(STARTUP_TIMEOUT_MS / 60000)} min — exiting so Railway restarts the engine`);
+      process.exit(1);
+    }, STARTUP_TIMEOUT_MS);
+
     try {
       await main();
+      clearTimeout(startupWatchdog); // startup succeeded — disarm
       break; // main() sets up intervals and returns — success
     } catch (err) {
+      clearTimeout(startupWatchdog);
       restartCount++;
       const delay = Math.min(5000 * Math.pow(2, restartCount - 1), MAX_RESTART_DELAY);
       log(`[STARTUP] main() failed (attempt ${restartCount}): ${err}`);

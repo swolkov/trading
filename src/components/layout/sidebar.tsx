@@ -65,6 +65,7 @@ const sections = [
     links: [
       { href: "/edges", label: "Edge Hierarchy", icon: Brain },
       { href: "/admin/strategies", label: "Strategies", icon: Layers },
+      { href: "/research/correlations", label: "Correlations", icon: Link2 },
       { href: "/research", label: "Symbol Research", icon: Search },
       { href: "/watchlist", label: "Watchlist", icon: Eye },
       { href: "/backtest", label: "Backtest", icon: FlaskConical },
