@@ -6,6 +6,7 @@ import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
+import { DepthTapeView } from "@/components/databento/depth-tape-view";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -258,7 +259,7 @@ export default function FuturesPage() {
     [ALL_CONTRACTS, activeAssetClass],
   );
   const [selectedContract, setSelectedContract] = useState("ES");
-  const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "backtest">("chart");
+  const [activeTab, setActiveTab] = useState<"chart" | "depth" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
@@ -612,7 +613,7 @@ export default function FuturesPage() {
         <div className="space-y-3">
           {/* Tab bar */}
           <div className="flex gap-1 border-b border-white/[0.06] pb-2">
-            {(["chart", "strategy", "backtest"] as const).map((tab) => (
+            {(["chart", "depth", "strategy", "backtest"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => {
@@ -632,7 +633,7 @@ export default function FuturesPage() {
                     : "text-muted-foreground/60 hover:text-foreground"
                 }`}
               >
-                {tab === "chart" ? "Chart" : tab === "strategy" ? "Strategy" : "Backtest"}
+                {tab === "chart" ? "Chart" : tab === "depth" ? "Depth · Tape" : tab === "strategy" ? "Strategy" : "Backtest"}
               </button>
             ))}
           </div>
@@ -644,6 +645,11 @@ export default function FuturesPage() {
                 <FuturesChart symbol={selectedContract} height={560} />
               </CardContent>
             </Card>
+          )}
+
+          {/* Depth & Tape tab — Databento volume profile + time and sales */}
+          {activeTab === "depth" && (
+            <DepthTapeView symbol={selectedContract} />
           )}
 
           {/* Strategy tab */}
