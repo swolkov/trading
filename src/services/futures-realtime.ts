@@ -2029,6 +2029,7 @@ async function getAIConfirmation(setup: {
   price: number; rsi: number; atr: number; vwap: number;
   dayType: string; session: string; trend15: string;
   prevDayHigh: number; prevDayLow: number;
+  patternStats?: { matchCount: number; winRate: number; avgR: number } | null;
 }): Promise<{ agree: boolean; confidence: number; reasoning: string }> {
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -2047,12 +2048,30 @@ GOLD-SPECIFIC RULES:
 - Gold trends for HOURS — let winners run, wide stops needed
 - COMEX open (8:20 AM ET) is the most important session for gold` : "";
 
+    // 2026-05-29: Data-driven grader. Live no longer reflexively conservative;
+    // empirical historical performance from pattern memory carries the decision.
     const liveContext = IS_LIVE
-      ? `\nTHIS IS REAL MONEY ($${tradovateEquity.toFixed(0)} account). Be EXTREMELY selective. Only confirm genuine A+ setups with clear, unambiguous edge. Reject anything borderline or uncertain. A missed trade costs nothing — a bad trade costs real capital.\n`
+      ? `\nThis is the LIVE $1K account. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
       : "";
 
-    const prompt = `You are an elite futures day trader. You only take A+ setups with clear edge.
+    // Pattern-memory empirical evidence block
+    const ps = setup.patternStats;
+    const patternBlock = ps && ps.matchCount >= 10
+      ? `\n📊 EMPIRICAL EVIDENCE (from ${ps.matchCount} matching historical trades — THIS DOMINATES):
+   Historical win rate: ${(ps.winRate * 100).toFixed(0)}%
+   Average R-multiple: ${ps.avgR.toFixed(2)}R
+
+   DECISION RULE (apply first, before reasoning):
+   - WR ≥ 55% → APPROVE. The data says this works. Don't second-guess.
+   - WR ≤ 30% → REJECT. The data says this loses.
+   - WR 30-55% → consider context below, but DEFAULT TO APPROVE if pre-AI confidence > 65%.\n`
+      : ps && ps.matchCount > 0
+      ? `\n📊 Sparse history: only ${ps.matchCount} matching trades (need 10+ for confidence). Use reasoning, but lean toward APPROVE if pre-AI confidence > 65%.\n`
+      : `\n📊 No matching historical pattern yet. Lean toward APPROVE on technical confidence > 65% — we need data to populate.\n`;
+
+    const prompt = `You are a DATA-DRIVEN futures trader. Empirical historical performance is your primary signal. Subjective reasoning is secondary.
 ${liveContext}
+${patternBlock}
 ${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()} | ${isMetal ? "MICRO GOLD" : "EQUITY INDEX"}
 Setup: ${setup.reasoning}
 RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
@@ -2066,10 +2085,15 @@ Macro events: ${eventCtx}
 ${metalContext}
 ${vaultLessonsCache?.lessons ? `\nLESSONS FROM PAST TRADES (apply these):\n${vaultLessonsCache.lessons.match(/\*\*LESSON\*\*:\s*(.+)/g)?.slice(0, 5).map(l => "- " + l.replace("**LESSON**: ", "")).join("\n") || "none"}\n` : ""}
 ${vaultLessonsCache?.antiPatterns ? `ANTI-PATTERNS (avoid these proven losers):\n${vaultLessonsCache.antiPatterns.match(/\*\*PATTERN\*\*:\s*(.+)/g)?.slice(0, 5).map(l => "- " + l.replace("**PATTERN**: ", "")).join("\n") || "none"}\n` : ""}
-REJECT if: fighting 15m trend, no volume confirmation, price in no-man's land (not at a key level), R:R < 2:1${isMetal ? ", or USD strengthening while going long gold" : ", or macro signals strongly oppose direction (risk_off + long, risk_on + short)"}, or matches any ANTI-PATTERN above.
-ACCEPT if: aligned with higher timeframe, at a key level, with volume, in the right session${isMetal ? ", and USD/macro confirms gold direction" : ", and macro confirms or is neutral"}, and aligns with LESSONS above.
+DEFAULT TO APPROVE unless:
+- Pattern data clearly says this loses (WR < 30%), OR
+- Macro event in next 5 min creates directional uncertainty, OR
+- Matches a confirmed anti-pattern, OR
+- R:R < 1.5:1
 
-Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence"}`;
+Reasoning is a tiebreaker, NOT the primary filter. We want to TRADE and gather data to feed the learning loop.
+
+Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence citing data or specific block reason"}`;
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -2662,11 +2686,37 @@ async function evaluateAndTrade(
   dayType: string, session: string, trend15: string,
   prevDayHigh: number, prevDayLow: number,
 ) {
-  // Get AI confirmation
+  // 2026-05-29: Compute pattern-memory stats BEFORE the AI call so they feed the AI's decision.
+  // The AI grader is now data-driven: historical WR dominates over subjective reasoning.
+  let patternStats: { matchCount: number; winRate: number; avgR: number } | null = null;
+  try {
+    const { predictOutcome } = await import("../lib/pattern-memory");
+    const pred = await predictOutcome({
+      regime: cachedRegime,
+      session, instrument: sym, setupType: reasoning.split("]")[0]?.replace("[", "") || "unknown",
+      direction: direction as "long" | "short",
+      rsi: rsiVal, vixLevel: currentVIX, vixTrend: currentVIX > 20 ? "rising" : "falling",
+      atr: atrVal / price * 1000, priceVsVwap: vwapVal > 0 ? (price - vwapVal) / vwapVal * 100 : 0,
+      trend15m: trend15 as "up" | "down" | "flat",
+      trendDaily: dayType.includes("trend") ? (direction === "long" ? "up" : "down") : "flat",
+      riskReward: targetDist / stopDist,
+      dollarTrend: "flat", bondTrend: "flat",
+    });
+    patternStats = { matchCount: pred.matchCount, winRate: pred.winRate, avgR: pred.score };
+    log(`  [PATTERN] ${pred.matchCount} matches, ${(pred.winRate * 100).toFixed(0)}% historical WR`);
+    // Hard block: only setups with clearly proven losing history (< 25% WR, 10+ matches)
+    if (IS_LIVE && pred.matchCount >= 10 && pred.winRate < 0.25) {
+      log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
+      return;
+    }
+  } catch { /* pattern memory is optional */ }
+
+  // Get AI confirmation (now with pattern stats baked into the prompt)
   const ai = await getAIConfirmation({
     sym, direction, reasoning, price,
     rsi: rsiVal, atr: atrVal, vwap: vwapVal,
     dayType, session, trend15, prevDayHigh, prevDayLow,
+    patternStats,
   });
 
   // Adjust confidence based on AI
@@ -2699,8 +2749,9 @@ async function evaluateAndTrade(
   // Clear expired cooldowns
   if (cooldownExpiry && Date.now() >= cooldownExpiry) reEntryCooldowns.delete(cooldownKey);
 
-  // Final gate: live needs 75%+ (A+ only), demo needs 65%+
-  const MIN_CONFIDENCE = IS_LIVE ? 75 : 55;   // live: A+ only (selective growth); demo: more active for research signal
+  // 2026-05-29: lowered live threshold from 75 → 60 so the data-driven AI grader has room to
+  // approve setups that historical data supports without needing pre-AI 75%+ technicals.
+  const MIN_CONFIDENCE = IS_LIVE ? 60 : 55;
   if (finalScore < MIN_CONFIDENCE) {
     log(`  SKIPPED: Final confidence ${finalScore}% below ${MIN_CONFIDENCE}% threshold (${MODE_TAG})`);
     return;
@@ -2722,32 +2773,8 @@ async function evaluateAndTrade(
     && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
 
   if (canExec) {
-    // SHADOW LOG: Record what confluence/pattern would have said (doesn't affect execution)
-    // This data trains the next-generation decision system
-    try {
-      const { predictOutcome } = await import("../lib/pattern-memory");
-      const patternPrediction = await predictOutcome({
-        regime: cachedRegime,
-        session, instrument: sym, setupType: reasoning.split("]")[0]?.replace("[", "") || "unknown",
-        direction: direction as "long" | "short",
-        rsi: rsiVal, vixLevel: currentVIX, vixTrend: currentVIX > 20 ? "rising" : "falling",
-        atr: atrVal / price * 1000, priceVsVwap: vwapVal > 0 ? (price - vwapVal) / vwapVal * 100 : 0,
-        trend15m: trend15 as "up" | "down" | "flat",
-        trendDaily: dayType.includes("trend") ? (direction === "long" ? "up" : "down") : "flat",
-        riskReward: targetDist / stopDist,
-        dollarTrend: "flat", bondTrend: "flat", // TODO: wire cross-asset
-      });
-      log(`  [PATTERN] ${patternPrediction.matchCount} matches, ${(patternPrediction.winRate * 100).toFixed(0)}% historical WR, score ${patternPrediction.score}`);
-
-      // LIVE: Active gate — block setups with proven low win rate.
-      // 2026-05-29: Threshold relaxed from 0.45 → 0.25 per Spencer explicit override.
-      // Storage still happens (we keep learning), but only clearly-losing patterns block.
-      if (IS_LIVE && patternPrediction.matchCount >= 10 && patternPrediction.winRate < 0.25) {
-        log(`  BLOCKED by pattern memory: ${(patternPrediction.winRate * 100).toFixed(0)}% WR < 25% on ${patternPrediction.matchCount} matches — skipping for live`);
-        return;
-      }
-    } catch { /* pattern memory is optional */ }
-
+    // Pattern memory hard block was already evaluated up front before the AI call,
+    // so by the time we reach here the setup has cleared both the empirical floor and the AI.
     log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}% | ${MODE_TAG}`);
     feedLog("trade", `**${MODE_TAG} ${direction.toUpperCase()} ${sym}** @ $${price.toFixed(2)} | ${finalScore}% confidence`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
