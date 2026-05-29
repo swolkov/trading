@@ -3536,51 +3536,64 @@ async function updateEarningsWeekFilter() {
 
 let crossAssetSummary = "";
 
+// Fetch a symbol's daily % change from Databento historical API (GLBX.MDP3).
+// Returns null on failure — callers treat null as "no data" gracefully.
+async function fetchDbnDailyChangePct(symbol: string): Promise<number | null> {
+  const apiKey = process.env.DATABENTO_API_KEY;
+  if (!apiKey) return null;
+  const auth = "Basic " + Buffer.from(apiKey + ":").toString("base64");
+  // 4 days back to cover weekends (we need at least 2 trading sessions)
+  const start = new Date(Date.now() - 4 * 86_400_000).toISOString();
+  const body = new URLSearchParams({
+    dataset: "GLBX.MDP3", symbols: symbol, stype_in: "continuous",
+    schema: "ohlcv-1d", start, end: new Date().toISOString(),
+    encoding: "csv", pretty_px: "true", pretty_ts: "true",
+  });
+  const res = await fetch("https://hist.databento.com/v0/timeseries.get_range", {
+    method: "POST",
+    headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!res.ok) return null;
+  const csv = await res.text();
+  const lines = csv.trim().split("\n").filter((_, i) => i > 0).filter(Boolean);
+  if (lines.length < 2) return null;
+  const closeOf = (line: string) => parseFloat(line.split(",")[7]); // close column (pretty_px)
+  const prev = closeOf(lines[lines.length - 2]);
+  const curr = closeOf(lines[lines.length - 1]);
+  if (!isFinite(prev) || !isFinite(curr) || prev === 0) return null;
+  return ((curr - prev) / prev) * 100;
+}
+
 async function updateCrossAssetSignals() {
   try {
-    const symbols = ["^VIX", "UUP", "TLT", "USO", "GLD"];
-    // 10s timeout per quote — Yahoo can hang indefinitely on cold network
-    const timeout = <T>(p: Promise<T>): Promise<T | null> =>
-      Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), 10_000))]);
-    const quotes = await Promise.all(
-      symbols.map(s => timeout(getYfEngine().quote(s)).catch(() => null))
-    );
+    // Databento GLBX.MDP3 — daily % change for gold, oil, bonds
+    // GC = gold, CL = crude oil, ZN = 10-yr note (bonds proxy)
+    const [goldChange, oilChange, bondsChange] = await Promise.all([
+      fetchDbnDailyChangePct("GC.v.0").catch(() => null),
+      fetchDbnDailyChangePct("CL.v.0").catch(() => null),
+      fetchDbnDailyChangePct("ZN.v.0").catch(() => null),
+    ]);
 
-    const data: Record<string, { price: number; change: number }> = {};
-    for (let i = 0; i < symbols.length; i++) {
-      const q = quotes[i];
-      if (q?.regularMarketPrice) {
-        data[symbols[i]] = {
-          price: q.regularMarketPrice,
-          change: q.regularMarketChangePercent || 0,
-        };
-      }
-    }
-
-    const vix = data["^VIX"];
-    const dollar = data["UUP"];
-    const bonds = data["TLT"];
-    const oil = data["USO"];
-    const gold = data["GLD"];
-
+    // VIX — CBOE index, not on GLBX; read from module var set by updateVIX()
     const signals: string[] = [];
-    if (vix) signals.push(`VIX:${vix.price.toFixed(1)}(${vix.change > 0 ? "+" : ""}${vix.change.toFixed(1)}%)`);
-    if (dollar) signals.push(`Dollar:${dollar.change > 0 ? "+" : ""}${dollar.change.toFixed(1)}%`);
-    if (bonds) signals.push(`TLT:${bonds.change > 0 ? "+" : ""}${bonds.change.toFixed(1)}%`);
-    if (oil) signals.push(`Oil:${oil.change > 0 ? "+" : ""}${oil.change.toFixed(1)}%`);
-    if (gold) signals.push(`Gold:${gold.change > 0 ? "+" : ""}${gold.change.toFixed(1)}%`);
+    if (currentVIX > 0) signals.push(`VIX:${currentVIX.toFixed(1)}(${vixTermStructure})`);
+    if (bondsChange != null) signals.push(`ZN:${bondsChange > 0 ? "+" : ""}${bondsChange.toFixed(1)}%`);
+    if (oilChange != null) signals.push(`Oil:${oilChange > 0 ? "+" : ""}${oilChange.toFixed(1)}%`);
+    if (goldChange != null) signals.push(`Gold:${goldChange > 0 ? "+" : ""}${goldChange.toFixed(1)}%`);
 
-    // Determine macro stance
+    // Risk stance: bonds up + gold down = risk-on; bonds down + gold up + VIX spike = risk-off
     let riskSignal = "mixed";
     const riskOnCount = [
-      vix && vix.change < -3,
-      bonds && bonds.change > 0,
-      gold && gold.change < 0,
+      bondsChange != null && bondsChange > 0,
+      goldChange != null && goldChange < 0,
+      currentVIX > 0 && currentVIX < 18,
     ].filter(Boolean).length;
     const riskOffCount = [
-      vix && vix.change > 3,
-      bonds && bonds.change < 0,
-      gold && gold.change > 1,
+      bondsChange != null && bondsChange < 0,
+      goldChange != null && goldChange > 1,
+      currentVIX > 23,
     ].filter(Boolean).length;
 
     if (riskOnCount >= 2) riskSignal = "risk_on";
@@ -3602,50 +3615,37 @@ let sectorContext = "";
 
 async function updateSectorRotation() {
   try {
-    const sectors = [
-      { sym: "XLK", name: "Tech" },
-      { sym: "XLF", name: "Financials" },
-      { sym: "XLE", name: "Energy" },
-      { sym: "XLV", name: "Healthcare" },
-      { sym: "XLI", name: "Industrials" },
-      { sym: "XLY", name: "Discretionary" },
-      { sym: "XLP", name: "Staples" },
-      { sym: "XLU", name: "Utilities" },
-    ];
+    // Use barBuilders — prevDayClose populated at startup via preloadBars(), lastPrice from live feed.
+    // Micros and full-size share the same index, prefer micro builders since those are always initialized.
+    const esB = barBuilders.get("MES") ?? barBuilders.get("ES");
+    const nqB = barBuilders.get("MNQ") ?? barBuilders.get("NQ");
+    const ymB = barBuilders.get("MYM") ?? barBuilders.get("YM");
 
-    // 10s timeout per quote — prevents startup hang on slow network
-    const timeout = <T>(p: Promise<T>): Promise<T | null> =>
-      Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), 10_000))]);
-    const quotes = await Promise.all(
-      sectors.map(s => timeout(getYfEngine().quote(s.sym)).catch(() => null))
-    );
+    const dayChgPct = (b: typeof esB): number | null => {
+      if (!b || b.prevDayClose === 0 || b.lastPrice === 0) return null;
+      return ((b.lastPrice - b.prevDayClose) / b.prevDayClose) * 100;
+    };
 
-    const results: { name: string; change: number }[] = [];
-    for (let i = 0; i < sectors.length; i++) {
-      const q = quotes[i];
-      if (q?.regularMarketChangePercent != null) {
-        results.push({ name: sectors[i].name, change: q.regularMarketChangePercent });
-      }
-    }
+    const esChg = dayChgPct(esB);
+    const nqChg = dayChgPct(nqB);
+    const ymChg = dayChgPct(ymB);
 
-    if (results.length < 4) return;
+    const available = [esChg, nqChg, ymChg].filter((x): x is number => x !== null);
+    if (available.length === 0) { sectorContext = "Sectors: no data"; return; }
 
-    results.sort((a, b) => b.change - a.change);
-    const leaders = results.slice(0, 3).map(r => r.name);
-    const laggards = results.slice(-3).map(r => r.name);
+    const allPos = available.every(x => x > 0);
+    const allNeg = available.every(x => x < 0);
+    // NQ outperforms ES by >0.3% = tech leading; YM > NQ = value/defensive rotation
+    const nqLeadsEs = nqChg != null && esChg != null && (nqChg - esChg) > 0.3;
+    const ymLeadsNq = ymChg != null && nqChg != null && (ymChg - nqChg) > 0.3;
 
-    // Determine bias
-    if (leaders.includes("Tech") && leaders.includes("Discretionary")) {
-      sectorBias = "tech_leads";
-    } else if (leaders.includes("Utilities") || leaders.includes("Staples")) {
-      sectorBias = "defensive";
-    } else if (results.filter(r => r.change > 0).length >= 6) {
-      sectorBias = "broad_rally";
-    } else {
-      sectorBias = "mixed";
-    }
+    if (nqLeadsEs && allPos) sectorBias = "tech_leads";
+    else if (allPos) sectorBias = "broad_rally";
+    else if (ymLeadsNq || allNeg) sectorBias = "defensive";
+    else sectorBias = "mixed";
 
-    sectorContext = `Sectors: ${sectorBias.toUpperCase()} | Leaders: ${leaders.join(",")} | Laggards: ${laggards.join(",")}`;
+    const fmt = (v: number | null) => v != null ? `${v > 0 ? "+" : ""}${v.toFixed(2)}%` : "—";
+    sectorContext = `Sectors: ${sectorBias.toUpperCase()} | ES:${fmt(esChg)} NQ:${fmt(nqChg)} YM:${fmt(ymChg)}`;
     log(`[SECTORS] ${sectorContext}`);
   } catch (err) {
     log(`[SECTORS] Update failed: ${err}`);
