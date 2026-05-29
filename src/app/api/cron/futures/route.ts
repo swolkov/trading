@@ -124,6 +124,19 @@ export async function GET(request: Request) {
       liveReconciliation = { error: String(err) };
     }
 
+    // ALWAYS run the registry-only path — fires crypto/NR4 strategies that the realtime engine
+    // doesn't know about. Safe to run alongside healthy realtime engine because registry-only
+    // mode filters to symbols the realtime engine never trades (MBT/MET/BFF/MXR/MSL).
+    let registryResult: { trades: unknown[]; managed: number; details: string[] } | null = null;
+    try {
+      registryResult = await runFuturesAgent({ registryOnly: true });
+      if (registryResult && registryResult.trades.length > 0) {
+        console.log(`[cron/futures] Registry strategies fired ${registryResult.trades.length} trades`);
+      }
+    } catch (err) {
+      console.error("[cron/futures] Registry-only path error:", err);
+    }
+
     // Check both engine heartbeats
     const demoStatus = await checkEngine("demo");
     const liveStatus = await checkEngine("live");

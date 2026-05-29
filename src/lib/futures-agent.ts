@@ -856,7 +856,20 @@ interface FuturesTradeResult {
   success: boolean;
 }
 
-export async function runFuturesAgent(): Promise<{
+/**
+ * Run the futures agent.
+ *
+ * Two modes:
+ * - Default (no options): full agent — runs as the failover when realtime engine on Railway is stalled.
+ *   Handles ALL priority symbols including legacy 5m intraday on ES/NQ/GC/MES/MNQ.
+ * - `{ registryOnly: true }`: ONLY processes symbols routed through the strategy registry
+ *   (crypto futures like MBT NR4). Skips legacy 5m intraday. Safe to run every minute alongside
+ *   the realtime engine because the realtime engine doesn't trade these symbols.
+ *
+ * The registry-only path is how MBT NR4 actually fires in production — the realtime engine
+ * on Railway scans ES/NQ/GC, this cron path scans the registry symbols. No overlap.
+ */
+export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Promise<{
   trades: FuturesTradeResult[];
   managed: number;
   details: string[];
@@ -1119,6 +1132,12 @@ export async function runFuturesAgent(): Promise<{
   }
 
   for (const pos of futuresPositions) {
+    // Registry-only mode: skip position management for non-registry symbols. Those positions
+    // are owned by the realtime engine on Railway — don't try to manage them from the cron.
+    if (opts.registryOnly) {
+      const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
+      if (!sym || !isRegistryOnlySymbol(sym)) continue;
+    }
     managed++;
     const qty = pos.netPos;
     const absQty = Math.abs(qty);
@@ -1414,9 +1433,20 @@ export async function runFuturesAgent(): Promise<{
   // Determine which symbols to trade based on equity + regime
   const tradePriority = getTradePriority(equity, tradingMode);
   details.push(`CONTRACTS: ${tradingMode === "paper" ? "DEMO ALL" : equity >= FULL_SIZE_EQUITY_THRESHOLD ? "FULL-SIZE" : "MICROS"} — ${tradePriority.map(s => s.symbol).join(", ")} (equity $${equity.toLocaleString()})`);
-  const symbolsToTrade = tradePriority
+  let symbolsToTrade = tradePriority
     .filter((s) => s.when === "always" || (s.when === "trending" && (regime === "bull" || regime === "bear")))
     .map((s) => s.symbol);
+
+  // Registry-only mode: skip legacy intraday symbols, only process registry-routed symbols.
+  // Used by the cron to fire crypto-futures strategies (e.g. MBT NR4) alongside the realtime
+  // engine without conflict — realtime trades ES/NQ/GC, this runs MBT/MET/BFF/etc.
+  if (opts.registryOnly) {
+    symbolsToTrade = symbolsToTrade.filter((sym) => isRegistryOnlySymbol(sym));
+    details.push(`[REGISTRY-ONLY MODE] Scanning ${symbolsToTrade.length} symbols: ${symbolsToTrade.join(", ") || "(none)"}`);
+    if (symbolsToTrade.length === 0) {
+      return { trades, managed, details };
+    }
+  }
 
   for (const symbol of symbolsToTrade) {
     // Skip if already have position in this symbol
