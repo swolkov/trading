@@ -213,7 +213,21 @@ export default function StrategiesAdminPage() {
             <div className="mt-2 space-y-2 pl-1">
               {/* Registry strategies (compact rows) */}
               {strats.map((s) => (
-                <StrategyRowCompact key={s.id} strategy={s} defaultOpen={s.tier === 2 && strats.length === 1} />
+                <StrategyRowCompact
+                  key={s.id}
+                  strategy={{
+                    id: s.id,
+                    name: s.name,
+                    timeframe: s.timeframe,
+                    tier: s.tier,
+                    description: s.description,
+                    applicableSymbols: s.applicableSymbols,
+                    backtest: s.backtest,
+                    vaultDoc: s.vaultDoc,
+                    codePath: s.codePath,
+                  }}
+                  defaultOpen={s.tier === 2 && strats.length === 1}
+                />
               ))}
 
               {/* Legacy strategies (not in registry, show as info cards) */}
