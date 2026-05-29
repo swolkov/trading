@@ -6,6 +6,8 @@
 import { prisma } from "./db";
 import { getTradovateFills, checkTradovateAuth, TRADOVATE_CONTRACTS, resolveContractSymbol, type TradovateFill } from "./tradovate";
 import { logTradeToJournal, logDecision } from "./vault";
+import { closeRegistryTrade } from "./strategy-performance";
+import { accountKeyForFuturesMode } from "./strategy-assignments";
 
 // Contract ID → symbol mapping (populated from fills + known contracts)
 async function buildContractMap(fills: TradovateFill[]): Promise<Record<number, string>> {
@@ -339,6 +341,18 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
             exitReason: `Reconciled from Tradovate fill #${rt.exitFill.id}`,
           }, "reconciliation-agent");
         } catch { /* vault write is best-effort */ }
+
+        // Mark the corresponding open StrategyTrade row closed (no-op if it was a legacy trade)
+        try {
+          const accountKey = accountKeyForFuturesMode(modeOverride ?? "paper");
+          await closeRegistryTrade({
+            accountKey,
+            symbol: rt.symbol,
+            exitPrice: rt.exitPrice,
+            pnl: rt.pnl,
+            reason: rt.pnl >= 0 ? "target" : "stop",
+          });
+        } catch { /* registry close is best-effort */ }
       }
     }
 

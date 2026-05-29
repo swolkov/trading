@@ -48,6 +48,62 @@ export async function logRegistryTradeOpen(args: {
   }
 }
 
+/**
+ * Close the most recent open StrategyTrade row for (accountKey, symbol).
+ * Engine enforces 1-position-per-symbol so there's at most one open row to close.
+ * No-op if no matching open trade exists (the close came from a legacy/non-registry trade).
+ *
+ * SAFETY: wrapped in try/catch; never blocks the engine's close path.
+ */
+export async function closeRegistryTrade(args: {
+  accountKey: AccountKey;
+  symbol: string;
+  exitPrice: number;
+  pnl: number;
+  reason: "stop" | "target" | "time" | "manual" | "breakeven" | "emergency" | "session_close";
+}) {
+  try {
+    const { accountKey, symbol, exitPrice, pnl, reason } = args;
+    const openRow = await prisma.strategyTrade.findFirst({
+      where: { accountKey, symbol, status: "open" },
+      orderBy: { openedAt: "desc" },
+    });
+    if (!openRow) return; // close came from a legacy/non-registry trade — nothing to update
+
+    const isLong = openRow.direction === "long";
+    const rDollars = openRow.stopDistance * Math.abs(pnl > 0 ? 1 : 1); // placeholder; recomputed below
+    const stopDollarsPerContract = openRow.stopDistance; // already in price points; pnl is in dollars
+    // pnl is in dollars, stopDistance is in price points. To compute R-multiple we need price→$ multiplier.
+    // For simplicity: r ≈ pnl / abs(entry*0.005) if stopDistance unknown — but we have stopDistance in
+    // PRICE units. The caller passes dollar pnl. R-multiple = pnl / (stopDistance × multiplier × contracts).
+    // We don't have the multiplier here, so we approximate from entryPrice as a proxy for $/point.
+    // BETTER: caller can pass rMultiple directly if known. For now we store pnl + dollar-per-point inference.
+    // Mark the row closed; rMultiple left null if not computable cleanly.
+    let rMultiple: number | null = null;
+    if (stopDollarsPerContract > 0 && openRow.contracts > 0) {
+      // Assume the caller's pnl is final dollar P&L. If we knew the contract multiplier we could compute
+      // exact rMultiple. Leave null and let aggregator recompute from sym lookup if needed.
+      rMultiple = null;
+    }
+    void isLong; void rDollars; // silence unused warnings — kept for future expansion
+
+    await prisma.strategyTrade.update({
+      where: { id: openRow.id },
+      data: {
+        exitPrice,
+        pnl,
+        rMultiple,
+        status: reason === "stop" ? "stopped" : "closed",
+        closedAt: new Date(),
+      },
+    });
+  } catch (e) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn(`[strategy-performance] closeRegistryTrade failed:`, e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 export interface StrategyPerfSummary {
   strategyId: string;
   accountKey: string;

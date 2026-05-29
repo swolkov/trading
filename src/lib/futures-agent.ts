@@ -21,7 +21,15 @@ import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, u
 import { strategiesFor, isRegistryOnlySymbol } from "./strategies/registry";
 import type { OHLCBar, StrategySignal } from "./strategies/types";
 import { accountKeyForFuturesMode, getAssignment, resolveMaxContracts, type AccountKey } from "./strategy-assignments";
-import { logRegistryTradeOpen } from "./strategy-performance";
+import { logRegistryTradeOpen, closeRegistryTrade } from "./strategy-performance";
+
+/** Extract root symbol from a contract name like "MBTM6" -> "MBT". */
+function rootSymbolFromContract(name: string): string | null {
+  for (const sym of Object.keys(TRADOVATE_CONTRACTS)) {
+    if (name.startsWith(sym)) return sym;
+  }
+  return null;
+}
 import { evaluateDrawdownState } from "./drawdown-protocol";
 import { getSessionInfo, getETDateString, getRTHStartUTC, type Session } from "./session-time";
 
@@ -1220,6 +1228,8 @@ export async function runFuturesAgent(): Promise<{
           try {
             await logTradeToJournal({ tradeId: `BE-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "breakeven_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Breakeven stop — was at 1R+, pulled back" }, "futures-agent");
             await logObservation("futures-agent", `BREAKEVEN EXIT ${pos.contractName} | Was at 1R+ but pulled back to ${(priceDiff / stopDistance).toFixed(2)}R | P&L: $${unrealizedPnl.toFixed(0)} | Review: was the target too ambitious?`);
+            const rootSym = rootSymbolFromContract(pos.contractName);
+            if (rootSym) await closeRegistryTrade({ accountKey: accountKeyForFuturesMode(tradingMode), symbol: rootSym, exitPrice: currentPrice, pnl: unrealizedPnl, reason: "breakeven" });
           } catch {}
         } catch (err) { details.push(`    Breakeven close failed: ${err}`); }
         continue; // position closed, skip remaining checks
@@ -1243,6 +1253,8 @@ export async function runFuturesAgent(): Promise<{
           try {
             await logTradeToJournal({ tradeId: `HS-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "hard_stop", contracts: absQty, entryPrice: avgPrice, stopPrice: origStop, targetPrice: origTarget, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "Hard stop — broker stop failed" }, "futures-agent");
             await logObservation("futures-agent", `HARD STOP ${pos.contractName} — broker stop FAILED at $${origStop.toFixed(2)}, closed at $${currentPrice.toFixed(2)} | P&L: $${unrealizedPnl.toFixed(0)} | INVESTIGATE: broker order reliability`);
+            const rootSym = rootSymbolFromContract(pos.contractName);
+            if (rootSym) await closeRegistryTrade({ accountKey: accountKeyForFuturesMode(tradingMode), symbol: rootSym, exitPrice: currentPrice, pnl: unrealizedPnl, reason: "stop" });
           } catch {}
         } catch (err) { details.push(`    Hard stop close FAILED: ${err}`); }
         continue; // position closed, skip remaining checks
@@ -1306,6 +1318,10 @@ export async function runFuturesAgent(): Promise<{
           reason: `Session close: EOD in choppy market. P&L: $${unrealizedPnl.toFixed(0)}`,
         }});
         try { await logTradeToJournal({ tradeId: `EOD-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "session_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: "EOD close — choppy market" }, "futures-agent"); } catch {}
+        try {
+          const rootSym = rootSymbolFromContract(pos.contractName);
+          if (rootSym) await closeRegistryTrade({ accountKey: accountKeyForFuturesMode(tradingMode), symbol: rootSym, exitPrice: currentPrice, pnl: unrealizedPnl, reason: "session_close" });
+        } catch {}
       } catch (err) { details.push(`  Failed to close: ${err}`); }
       continue;
     }
@@ -1325,6 +1341,8 @@ export async function runFuturesAgent(): Promise<{
         try {
           await logTradeToJournal({ tradeId: `EMRG-${Date.now().toString(36)}`, timestamp: new Date().toISOString(), instrument: `FUT:${pos.contractName}`, direction: direction === "long" ? "LONG" : "SHORT", strategy: "futures-scalping", setupType: "emergency_close", contracts: absQty, entryPrice: pos.netPrice, stopPrice: 0, targetPrice: 0, exitPrice: currentPrice, pnlDollars: unrealizedPnl, conviction: 0, exitReason: `EMERGENCY: Drawdown kill switch` }, "futures-agent");
           await logObservation("futures-agent", `EMERGENCY CLOSE: ${pos.contractName} drawdown $${Math.abs(unrealizedPnl).toFixed(0)} exceeded ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity limit`);
+          const rootSym = rootSymbolFromContract(pos.contractName);
+          if (rootSym) await closeRegistryTrade({ accountKey: accountKeyForFuturesMode(tradingMode), symbol: rootSym, exitPrice: currentPrice, pnl: unrealizedPnl, reason: "emergency" });
         } catch {}
       } catch (err) { details.push(`  Emergency close failed: ${err}`); }
     }
