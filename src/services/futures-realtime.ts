@@ -1023,6 +1023,7 @@ interface Position {
   entryTrend15m: string;
   entryDayType: string;
   entrySession: string;
+  entrySetupType: string;  // canonical setup ID (trend_continuation, vwap_bounce, …) — keys pattern memory
   // Emergency confirmation — require 2 consecutive ticks past limit before closing
   // Prevents stale Yahoo prices from triggering phantom emergency closes
   emergencyWarningTick: number;
@@ -1293,6 +1294,7 @@ async function loadPositions() {
         scaledOut: false, originalQty: qty, consecutiveStops: 0,
         pyramided: false,
         entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
+        entrySetupType: "unknown",
         emergencyWarningTick: 0,
       });
 
@@ -1674,6 +1676,7 @@ interface CloseMeta {
   entryVwap: number;
   entryTrend15m: string;
   entryDayType: string;
+  entrySetupType: string;
 }
 
 async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
@@ -1745,7 +1748,7 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         regime: cachedRegime,
         session: meta.entrySession,
         instrument: meta.sym,
-        setupType: meta.reason,
+        setupType: meta.entrySetupType || "unknown",  // canonical entry setup, NOT exit reason
         direction: meta.direction,
         rsi: meta.entryRsi,
         vixLevel: currentVIX,
@@ -1966,6 +1969,7 @@ async function closePosition(sym: string, price: number, reason: string) {
       entryVwap: pos.entryVwap,
       entryTrend15m: pos.entryTrend15m || "flat",
       entryDayType: pos.entryDayType || "unknown",
+      entrySetupType: pos.entrySetupType || "unknown",
     };
     // First check after 15s, retry at 60s if no fill yet
     setTimeout(() => deferredPnlCheck(closeMeta, 1), 15_000);
@@ -2313,7 +2317,8 @@ function onBarClose(sym: string, bar: Bar) {
       if (score >= 75) {
         evaluateAndTrade(sym, dir, price, stopDistRSI, targetDist, effectiveSizeMult, score,
           `Extreme RSI ${isOversold ? "oversold" : "overbought"} bounce: RSI ${currentRSI.toFixed(0)}, ATR target ${targetDist.toFixed(2)}, conf ${score}%`,
-          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+          "extreme_rsi_bounce");
         return;
       }
     } else {
@@ -2349,7 +2354,8 @@ function onBarClose(sym: string, bar: Bar) {
         if (score >= 75) {
           evaluateAndTrade(sym, dir, price, gapStop, gapTarget, effectiveSizeMult, score,
             `Gap fill ${dir}: gap ${gap.toFixed(1)} pts, targeting PDC $${b.prevDayClose.toFixed(2)}, 78% fill rate, conf ${score}%`,
-            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "gap_fill");
         }
         return;
       }
@@ -2379,7 +2385,8 @@ function onBarClose(sym: string, bar: Bar) {
       if (score >= 75) {
         evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), orSize * 2.5, effectiveSizeMult, score,
           `OR breakout ${dir} $${price.toFixed(2)} ${isLong ? ">" : "<"} OR ${isLong ? "high" : "low"} $${(isLong ? b.openingRangeHigh : b.openingRangeLow).toFixed(2)}, vol ${volRatio.toFixed(1)}x, conf ${score}%`,
-          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+          "or_breakout");
       }
       return;
     }
@@ -2415,7 +2422,8 @@ function onBarClose(sym: string, bar: Bar) {
         if (score >= 75) {
           evaluateAndTrade(sym, dir, price, failStop, failTarget, effectiveSizeMult, score,
             `Failed IB breakout ${dir}: price tested ${testedHigh ? "IB high" : "IB low"} and returned, fading to mid $${ibMid.toFixed(2)}, conf ${score}%`,
-            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "failed_ib_breakout");
         }
         return;
       }
@@ -2451,7 +2459,8 @@ function onBarClose(sym: string, bar: Bar) {
         if (score >= 72) {
           evaluateAndTrade(sym, dir, price, Math.max(orSize * 0.5, adjustedATR), distToTarget, effectiveSizeMult, score,
             `IB extension ${dir}: price $${price.toFixed(2)} ${breakAbove ? ">" : "<"} IB ${breakAbove ? "high" : "low"} $${(breakAbove ? b.openingRangeHigh : b.openingRangeLow).toFixed(2)}, targeting 1.5x ext $${targetLevel.toFixed(2)}, conf ${score}%`,
-            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "ib_extension");
         }
         return;
       }
@@ -2487,7 +2496,8 @@ function onBarClose(sym: string, bar: Bar) {
       if (score >= 75) {
         evaluateAndTrade(sym, dir, price, adjustedATR * 1.5, adjustedATR * 4.0, effectiveSizeMult, score,
           `Trend pullback ${dir} near EMA9 $${fastEMA.toFixed(2)}, RSI ${currentRSI.toFixed(0)}, 15m ${tf15.trend}, conf ${score}%`,
-          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+          currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+          "trend_continuation");
       }
       return;
     }
@@ -2527,7 +2537,8 @@ function onBarClose(sym: string, bar: Bar) {
         if (score >= 70) {
           evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, adjustedATR * 3.0, effectiveSizeMult, score,
             `VWAP bounce ${dir} at $${vwapData.vwap.toFixed(2)}, rejection candle, 15m ${tf15.trend}, conf ${score}%`,
-            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "vwap_bounce");
         }
         return;
       }
@@ -2546,7 +2557,8 @@ function onBarClose(sym: string, bar: Bar) {
         if (score >= 70) {
           evaluateAndTrade(sym, dir, price, adjustedATR * 1.2, adjustedATR * 3.0, effectiveSizeMult, score,
             `VWAP bounce ${dir} at $${vwapData.vwap.toFixed(2)}, rejection candle, 15m ${tf15.trend}, conf ${score}%`,
-            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "vwap_bounce");
         }
         return;
       }
@@ -2604,7 +2616,8 @@ function onBarClose(sym: string, bar: Bar) {
           if (score >= 72) {
             evaluateAndTrade(sym, dir, price, rangeStop, rangeTarget, effectiveSizeMult, score,
               `Range bounce ${dir} at ${levelName} $${levelPrice.toFixed(2)}, rejection candle, RSI ${currentRSI.toFixed(0)}, targeting VWAP/mid, conf ${score}%`,
-              currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow);
+              currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+              "range_bounce");
           }
           return;
         }
@@ -2687,6 +2700,7 @@ async function evaluateAndTrade(
   reasoning: string, rsiVal: number, atrVal: number, vwapVal: number,
   dayType: string, session: string, trend15: string,
   prevDayHigh: number, prevDayLow: number,
+  setupType: string,  // canonical: extreme_rsi_bounce, gap_fill, or_breakout, failed_ib_breakout, ib_extension, trend_continuation, vwap_bounce, range_bounce
 ) {
   // 2026-05-29: Compute pattern-memory stats BEFORE the AI call so they feed the AI's decision.
   // The AI grader is now data-driven: historical WR dominates over subjective reasoning.
@@ -2695,7 +2709,7 @@ async function evaluateAndTrade(
     const { predictOutcome } = await import("../lib/pattern-memory");
     const pred = await predictOutcome({
       regime: cachedRegime,
-      session, instrument: sym, setupType: reasoning.split("]")[0]?.replace("[", "") || "unknown",
+      session, instrument: sym, setupType,
       direction: direction as "long" | "short",
       rsi: rsiVal, vixLevel: currentVIX, vixTrend: currentVIX > 20 ? "rising" : "falling",
       atr: atrVal / price * 1000, priceVsVwap: vwapVal > 0 ? (price - vwapVal) / vwapVal * 100 : 0,
@@ -2781,7 +2795,7 @@ async function evaluateAndTrade(
     feedLog("trade", `**${MODE_TAG} ${direction.toUpperCase()} ${sym}** @ $${price.toFixed(2)} | ${finalScore}% confidence`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`,
-      { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session });
+      { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session, setupType });
   } else {
     // Hit daily limit or tilt — done for the day. Demo handles learning independently.
     log(`  BLOCKED: ${direction.toUpperCase()} ${sym} (${dailyTradeCount >= 10 ? "daily limit" : "tilt/position limit"}). Done.`);
@@ -2800,7 +2814,7 @@ async function logExecutionQuality(e: { mode: string; sym: string; side: string;
   } catch { /* telemetry must never affect trading */ }
 }
 
-async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string, setupContext?: { rsi: number; vwap: number; trend15m: string; dayType: string; session: string }) {
+async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string, setupContext?: { rsi: number; vwap: number; trend15m: string; dayType: string; session: string; setupType: string }) {
   const contract = contracts.get(sym);
   if (!contract) return;
 
@@ -2925,6 +2939,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       entryTrend15m: setupContext?.trend15m ?? "flat",
       entryDayType: setupContext?.dayType ?? "unknown",
       entrySession: setupContext?.session ?? getSessionName(),
+      entrySetupType: setupContext?.setupType ?? "unknown",
       emergencyWarningTick: 0,
     });
     dailyTradeCount++;
@@ -3190,6 +3205,7 @@ async function syncPositions() {
         entryTime: Date.now(),
         pyramided: false,
         entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
+        entrySetupType: "unknown",
         emergencyWarningTick: 0,
       });
 
