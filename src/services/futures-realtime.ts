@@ -2739,9 +2739,11 @@ async function evaluateAndTrade(
       });
       log(`  [PATTERN] ${patternPrediction.matchCount} matches, ${(patternPrediction.winRate * 100).toFixed(0)}% historical WR, score ${patternPrediction.score}`);
 
-      // LIVE: Active gate — block setups with proven low win rate
-      if (IS_LIVE && patternPrediction.matchCount >= 10 && patternPrediction.winRate < 0.45) {
-        log(`  BLOCKED by pattern memory: ${(patternPrediction.winRate * 100).toFixed(0)}% WR < 45% on ${patternPrediction.matchCount} matches — skipping for live`);
+      // LIVE: Active gate — block setups with proven low win rate.
+      // 2026-05-29: Threshold relaxed from 0.45 → 0.25 per Spencer explicit override.
+      // Storage still happens (we keep learning), but only clearly-losing patterns block.
+      if (IS_LIVE && patternPrediction.matchCount >= 10 && patternPrediction.winRate < 0.25) {
+        log(`  BLOCKED by pattern memory: ${(patternPrediction.winRate * 100).toFixed(0)}% WR < 25% on ${patternPrediction.matchCount} matches — skipping for live`);
         return;
       }
     } catch { /* pattern memory is optional */ }
