@@ -2459,12 +2459,11 @@ function onBarClose(sym: string, bar: Bar) {
   }
 
   // SETUP 2: Trend Continuation (pullback to EMA9) — RTH only
-  // 2026-05-25: raw-backtest PF 0.91 → disabled. 2026-05-29: re-enabled on DEMO only.
+  // 2026-05-25: raw-backtest PF 0.91 → disabled. 2026-05-29: re-enabled on BOTH demo and live.
   // The data-driven AI grader (pattern-memory WR + R-multiple) is now the empirical filter
   // that the raw backtest didn't have — it rejects sub-30% WR setups and approves the rest.
-  // Trend days are the bulk of profitable days; without this setup, the engine sits idle.
-  // Live stays off until demo proves the AI filter recovers the edge.
-  const TREND_CONTINUATION_ENABLED = IS_DEMO;
+  // Trend days are the bulk of profitable days; without this setup the engine sits idle.
+  const TREND_CONTINUATION_ENABLED = true;
   if (TREND_CONTINUATION_ENABLED && (dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
       (session === "morning" || session === "afternoon")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
