@@ -13,20 +13,30 @@ interface LegacyStrategy {
   setupTypes: string[];
   symbols: string[];
   assetClass: AssetClass;
-  tier: 2;
+  tier: 1 | 2 | 3;
   description: string;
   backtest?: { pf: number; trades: number; period: string };
 }
 
-const LEGACY_STRATEGIES: LegacyStrategy[] = [
+type StatusTag = "active" | "research" | "disabled" | "untested";
+
+interface LegacyStrategyExtra {
+  status: StatusTag;
+  codeFile?: string;
+  capitalRequirement?: string;
+}
+
+const LEGACY_STRATEGIES: (LegacyStrategy & LegacyStrategyExtra)[] = [
   {
     name: "Equity index 5m intraday (combined setups)",
     setupTypes: ["RSI bounce", "OR breakout", "IB extension", "Gap fill", "Trend continuation", "VWAP mean-reversion"],
     symbols: ["ES", "NQ", "MES", "MNQ"],
     assetClass: "equity_index_futures",
     tier: 2,
+    status: "active",
     description: "The original detectSetup() in futures-agent.ts + futures-realtime.ts tries multiple setup types per 5m bar close. Runs on the Railway realtime engines. PF ~0.98 (break-even) on equity indexes — Tier 2 marginal.",
     backtest: { pf: 0.98, trades: 4400, period: "1yr (2025-05 → 2026-05)" },
+    codeFile: "futures-realtime.ts",
   },
   {
     name: "Gold RSI extreme bounce (5m)",
@@ -34,10 +44,61 @@ const LEGACY_STRATEGIES: LegacyStrategy[] = [
     symbols: ["GC", "MGC"],
     assetClass: "metals_futures",
     tier: 2,
+    status: "active",
     description: "Same 5m intraday library, but gold-specific RSI<25/>75 bounce is the only setup type that consistently profits on GC. Verified Tier 2 edge — needs $10K+ to deploy 1 full-size contract.",
     backtest: { pf: 1.23, trades: 720, period: "1yr (2025-05 → 2026-05)" },
+    codeFile: "futures-realtime.ts",
+  },
+  {
+    name: "Spread book (relative-value z-score mean reversion)",
+    setupTypes: ["Z-score entry", "Mean reversion target", "Per-pair structural break stop"],
+    symbols: ["CL-RB (crack)", "ZC-ZS (grain)", "6E-6B (FX)", "GC-SI (metals)"],
+    assetClass: "relative_value_spreads",
+    tier: 2,
+    status: "research",
+    description: "The ONLY Tier-1 validated edge in the system. 14/14 rolling 3yr windows positive (2011-2026), Sharpe 1.59 gross. Per-pair multi-leg spreads with z-score entry signals. Forward-tracking via scripts/spread-track.ts. NOT YET deployed — needs $100k+ real capital. Path: forward track record → raise investor capital → deploy.",
+    backtest: { pf: 1.59, trades: 280, period: "15yr (2011-2026)" },
+    codeFile: "scripts/spread-track.ts",
+    capitalRequirement: "$100K+",
+  },
+  {
+    name: "Stocks swing (Alpaca daily)",
+    setupTypes: ["AI grader signal", "Watchlist screen", "Earnings/catalyst plays"],
+    symbols: ["watchlist-driven"],
+    assetClass: "stocks",
+    tier: 3,
+    status: "untested",
+    description: "Daily swing trades on US equities via Alpaca. Symbol universe comes from /watchlist + /research watchlist scoring. Currently in 30-day paper test mode at $1K. No validated edge yet — sample size too small.",
+    codeFile: "auto-trader.ts",
+  },
+  {
+    name: "Crypto spot 24/7 (Alpaca)",
+    setupTypes: ["Long-only mean reversion", "Watchlist signals"],
+    symbols: ["BTCUSD", "ETHUSD"],
+    assetClass: "crypto_spot",
+    tier: 3,
+    status: "untested",
+    description: "24/7 spot crypto via Alpaca. No margin, no expiry — simpler than CME crypto futures. Fractional sizing supported. Currently observation-only; no validated strategy.",
+    codeFile: "auto-trader.ts",
+  },
+  {
+    name: "Wheel (covered calls + cash-secured puts)",
+    setupTypes: ["CSP entry", "Assignment → CC roll", "Bearish put hedge"],
+    symbols: ["disabled"],
+    assetClass: "options",
+    tier: 3,
+    status: "disabled",
+    description: "Options wheel strategy. DISABLED per project memory (Options Disabled, 2026-05-23). Bearish-put bypass leak fixed. Wheel reserved for isolated paper forward-test, NOT live at $1K. Re-enable only after account grows.",
+    codeFile: "wheel/page.tsx",
   },
 ];
+
+function statusBadge(s: StatusTag) {
+  if (s === "active") return <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">● Live</span>;
+  if (s === "research") return <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">● Research</span>;
+  if (s === "disabled") return <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30">● Disabled</span>;
+  return <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">● Untested</span>;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -225,7 +286,7 @@ export default function StrategiesAdminPage() {
               </Card>
             ))}
 
-            {/* Legacy strategies for this asset class (5m intraday, runs on Railway realtime engines) */}
+            {/* Legacy strategies — runs outside the registry (realtime engine / scripts / Alpaca) */}
             {legacy.map((l) => (
               <Card key={l.name} className="border-amber-500/20">
                 <CardHeader className="pb-2">
@@ -233,29 +294,36 @@ export default function StrategiesAdminPage() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <CardTitle className="text-base">{l.name}</CardTitle>
+                        {statusBadge(l.status)}
                         <span className="inline-flex items-center gap-1 text-[10px] text-amber-300/80 bg-amber-500/[0.08] border border-amber-500/20 px-1.5 py-0.5 rounded">
                           <AlertCircle className="w-2.5 h-2.5" />
-                          Legacy — not yet in registry
+                          Not in registry
                         </span>
                       </div>
                       <div className="flex items-center gap-2 mt-1 flex-wrap">
-                        <Badge variant="outline" className="text-[10px]">5m</Badge>
-                        {l.symbols.map((sym) => (
+                        {l.symbols.slice(0, 6).map((sym) => (
                           <Badge key={sym} variant="outline" className="text-[10px] font-mono">{sym}</Badge>
                         ))}
                         {tierBadge(l.tier)}
+                        {l.capitalRequirement && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/[0.06] text-blue-300/80 border border-blue-500/20">
+                            Needs {l.capitalRequirement}
+                          </span>
+                        )}
                       </div>
                     </div>
-                    <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground/70 border border-border rounded px-1.5 py-1 font-mono shrink-0" title="src/services/futures-realtime.ts + src/lib/futures-agent.ts">
-                      <Code2 className="w-3 h-3" />
-                      futures-realtime.ts
-                    </span>
+                    {l.codeFile && (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground/70 border border-border rounded px-1.5 py-1 font-mono shrink-0" title={l.codeFile}>
+                        <Code2 className="w-3 h-3" />
+                        {l.codeFile}
+                      </span>
+                    )}
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <p className="text-xs text-muted-foreground">{l.description}</p>
                   <div>
-                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground/70 mb-1.5">Setup types in this library</div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground/70 mb-1.5">Setup types</div>
                     <div className="flex flex-wrap gap-1.5">
                       {l.setupTypes.map((s) => (
                         <span key={s} className="text-[11px] px-1.5 py-0.5 rounded bg-muted/40 border border-border">{s}</span>
@@ -281,9 +349,6 @@ export default function StrategiesAdminPage() {
                       </div>
                     </div>
                   )}
-                  <div className="text-[10px] text-muted-foreground/60 border-t border-border/40 pt-2">
-                    Controlled by the realtime engine code, not the registry assignment table. Toggle via Agent Hub mode / equity threshold rather than per-account here.
-                  </div>
                 </CardContent>
               </Card>
             ))}

@@ -18,6 +18,12 @@ import {
   RefreshCw,
   Brain,
   Layers,
+  Calendar,
+  FlaskConical,
+  Eye,
+  Search,
+  Sparkles,
+  Crosshair,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -41,6 +47,8 @@ const sections = [
     label: "CONTROL",
     links: [
       { href: "/agents", label: "Agent Hub", icon: Bot },
+      { href: "/trade", label: "Manual Trade", icon: Crosshair },
+      { href: "/ai", label: "Claude Console", icon: Sparkles },
     ],
   },
   {
@@ -57,6 +65,10 @@ const sections = [
     links: [
       { href: "/edges", label: "Edge Hierarchy", icon: Brain },
       { href: "/admin/strategies", label: "Strategies", icon: Layers },
+      { href: "/research", label: "Symbol Research", icon: Search },
+      { href: "/watchlist", label: "Watchlist", icon: Eye },
+      { href: "/backtest", label: "Backtest", icon: FlaskConical },
+      { href: "/calendar", label: "Calendar", icon: Calendar },
     ],
   },
 ];

@@ -333,7 +333,12 @@ export default function AgentHubPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Agent Hub</h1>
-          <p className="text-sm text-muted-foreground">Command center — agents, brokers, risk controls</p>
+          <p className="text-sm text-muted-foreground">
+            Command center — agents, brokers, risk controls.{" "}
+            <a href="/admin/strategies" className="underline text-emerald-400 hover:text-emerald-300">
+              Configure strategies →
+            </a>
+          </p>
         </div>
         <div className="flex gap-2">
           {hasChanges && (

@@ -9,7 +9,11 @@
 export type AssetClass =
   | "equity_index_futures"
   | "metals_futures"
-  | "crypto_futures";
+  | "crypto_futures"
+  | "relative_value_spreads"
+  | "stocks"
+  | "crypto_spot"
+  | "options";
 
 export interface AssetClassMeta {
   id: AssetClass;
@@ -41,6 +45,38 @@ export const ASSET_CLASSES: AssetClassMeta[] = [
     description:
       "CME micro crypto futures: MBT (Bitcoin), MET (Ether), BFF (Bitcoin weekly), MXR (XRP), MSL (Solana).",
     symbols: ["MBT", "MET", "BFF", "MXR", "MSL"],
+  },
+  {
+    id: "relative_value_spreads",
+    label: "Relative-Value Spreads",
+    shortLabel: "Spreads",
+    description:
+      "Multi-leg commodity, metals, FX, and grain spread book — the only Tier-1 validated edge. Needs $100k+ capital. Pairs include crack (CL/RB), grains (ZC/ZS), FX (6E/6B), and metals spreads.",
+    symbols: ["CL-RB", "ZC-ZS", "6E-6B", "GC-SI"],
+  },
+  {
+    id: "stocks",
+    label: "Stocks (Alpaca)",
+    shortLabel: "Stocks",
+    description:
+      "US equities via Alpaca. Swing trades from research watchlist + AI grader. $1K paper / live mode controlled separately.",
+    symbols: ["AAPL", "NVDA", "TSLA", "MSFT", "GOOGL"],
+  },
+  {
+    id: "crypto_spot",
+    label: "Crypto Spot (Alpaca)",
+    shortLabel: "Crypto Spot",
+    description:
+      "24/7 spot crypto on Alpaca — no expiry, no margin. Trades fractional BTC/ETH from $1K paper account.",
+    symbols: ["BTCUSD", "ETHUSD"],
+  },
+  {
+    id: "options",
+    label: "Stock Options",
+    shortLabel: "Options",
+    description:
+      "Stock options strategies (wheel / covered calls / bearish puts). Currently disabled — see Rules/anti-patterns.md.",
+    symbols: [],
   },
 ];
 
