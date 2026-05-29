@@ -16,6 +16,8 @@ export default async function middleware(request: NextRequest, event: NextFetchE
       "/api/cron/(.*)",      // Cron jobs use CRON_SECRET, not user auth
       "/api/futures/(.*)",   // Internal engine endpoints
       "/fund",               // Public investor-facing track record
+      "/proof",              // Public real-time engine performance proof
+      "/api/fund/(.*)",      // Read-only fund stats endpoints
     ]);
 
     const handler = clerkMiddleware(async (auth, req) => {

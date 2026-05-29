@@ -2793,6 +2793,19 @@ async function evaluateAndTrade(
   prevDayHigh: number, prevDayLow: number,
   setupType: string,  // canonical: extreme_rsi_bounce, gap_fill, or_breakout, failed_ib_breakout, ib_extension, trend_continuation, vwap_bounce, range_bounce
 ) {
+  // 2026-05-29: AUTO-PRUNE gate. The "brilliant agent" self-improves: any setupType that
+  // accumulates 30+ trades with sub-30% WR AND negative expectancy retires itself mechanically.
+  // No human override required. Re-evaluated each fire — if the next 30 trades recover, the
+  // gate re-opens automatically. This is the proof the system gets smarter without intervention.
+  try {
+    const { getSetupTypeHealth } = await import("../lib/pattern-memory");
+    const health = await getSetupTypeHealth(setupType, 30);
+    if (health.shouldDisable) {
+      log(`  AUTO-PRUNED ${setupType}: ${health.matchCount} trades, ${(health.winRate * 100).toFixed(0)}% WR, ${health.expectancy.toFixed(2)}R expectancy — setup mechanically retired (trend: ${health.recentTrend})`);
+      return;
+    }
+  } catch { /* pattern memory is optional — fail open on read errors */ }
+
   // 2026-05-29: Compute pattern-memory stats BEFORE the AI call so they feed the AI's decision.
   // The AI grader is now data-driven: historical WR dominates over subjective reasoning.
   let patternStats: { matchCount: number; winRate: number; avgR: number } | null = null;

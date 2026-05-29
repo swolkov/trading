@@ -140,6 +140,59 @@ export async function predictOutcome(current: Omit<SetupVector, "outcome" | "pnl
   }
 }
 
+/**
+ * Per-setupType performance over the last N completed trades. Used by the engine's auto-prune gate:
+ * a setupType with persistent sub-30% WR over a meaningful sample retires itself mechanically.
+ * Re-evaluated on every check — if the next 30 trades recover, the gate re-opens automatically.
+ */
+export async function getSetupTypeHealth(setupType: string, lookback = 30): Promise<{
+  matchCount: number;
+  winRate: number;
+  avgR: number;
+  expectancy: number;       // avgR × winRate — positive means edge
+  recentTrend: "improving" | "declining" | "stable";
+  shouldDisable: boolean;   // true if matchCount ≥ lookback AND winRate < 0.30 AND expectancy < 0
+}> {
+  try {
+    const stored = await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } });
+    if (!stored?.value) return { matchCount: 0, winRate: 0.5, avgR: 0, expectancy: 0, recentTrend: "stable", shouldDisable: false };
+
+    const all: SetupVector[] = JSON.parse(stored.value)
+      .filter((p: SetupVector) => p.outcome && p.setupType === setupType);
+    if (all.length < lookback) {
+      // Not enough data to make a disable decision — keep firing.
+      const wr = all.length > 0 ? all.filter((p) => p.outcome === "win").length / all.length : 0.5;
+      const avgR = all.length > 0 ? all.reduce((s, p) => s + (p.pnlR || 0), 0) / all.length : 0;
+      return { matchCount: all.length, winRate: wr, avgR, expectancy: avgR, recentTrend: "stable", shouldDisable: false };
+    }
+
+    const recent = all.slice(-lookback);
+    const wins = recent.filter((p) => p.outcome === "win").length;
+    const winRate = wins / recent.length;
+    const avgR = recent.reduce((s, p) => s + (p.pnlR || 0), 0) / recent.length;
+    const expectancy = avgR;
+
+    // Trend: compare first half vs second half of the recent window
+    const half = Math.floor(lookback / 2);
+    const firstHalf = recent.slice(0, half);
+    const secondHalf = recent.slice(-half);
+    const firstAvgR = firstHalf.reduce((s, p) => s + (p.pnlR || 0), 0) / firstHalf.length;
+    const secondAvgR = secondHalf.reduce((s, p) => s + (p.pnlR || 0), 0) / secondHalf.length;
+    let recentTrend: "improving" | "declining" | "stable" = "stable";
+    if (secondAvgR > firstAvgR + 0.1) recentTrend = "improving";
+    else if (secondAvgR < firstAvgR - 0.1) recentTrend = "declining";
+
+    // Disable rule: meaningful sample, low WR, negative expectancy. Trend doesn't override —
+    // a "declining" setup with positive expectancy still trades; an "improving" setup with
+    // bad fundamentals still gets disabled. The mechanical filter doesn't trust narratives.
+    const shouldDisable = recent.length >= lookback && winRate < 0.30 && expectancy < 0;
+
+    return { matchCount: all.length, winRate, avgR, expectancy, recentTrend, shouldDisable };
+  } catch {
+    return { matchCount: 0, winRate: 0.5, avgR: 0, expectancy: 0, recentTrend: "stable", shouldDisable: false };
+  }
+}
+
 // Similarity function — weighted feature comparison
 function calculateSimilarity(a: Omit<SetupVector, "outcome" | "pnlR">, b: SetupVector): number {
   let score = 0;
