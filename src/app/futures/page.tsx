@@ -503,27 +503,36 @@ export default function FuturesPage() {
 
       {/* ── Asset Class Tabs ── */}
       {availableAssetClasses.length > 1 && (
-        <div className="flex items-center gap-1 border-b border-border">
-          {availableAssetClasses.map((ac) => {
-            const active = ac.id === activeAssetClass;
-            const count = filterByAssetClass(ALL_CONTRACTS, ac.id).length;
-            return (
-              <button
-                key={ac.id}
-                onClick={() => setActiveAssetClass(ac.id)}
-                className={`px-3 py-1.5 text-xs font-semibold border-b-2 -mb-px transition-colors ${
-                  active
-                    ? "border-emerald-500 text-emerald-400"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {ac.shortLabel}
-                <span className={`ml-1.5 text-[10px] ${active ? "text-emerald-500/70" : "text-muted-foreground/50"}`}>
-                  {count}
-                </span>
-              </button>
-            );
-          })}
+        <div className="flex items-center justify-between gap-2 border-b border-border">
+          <div className="flex items-center gap-1">
+            {availableAssetClasses.map((ac) => {
+              const active = ac.id === activeAssetClass;
+              const count = filterByAssetClass(ALL_CONTRACTS, ac.id).length;
+              return (
+                <button
+                  key={ac.id}
+                  onClick={() => setActiveAssetClass(ac.id)}
+                  className={`px-3 py-1.5 text-xs font-semibold border-b-2 -mb-px transition-colors ${
+                    active
+                      ? "border-emerald-500 text-emerald-400"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {ac.shortLabel}
+                  <span className={`ml-1.5 text-[10px] ${active ? "text-emerald-500/70" : "text-muted-foreground/50"}`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <a
+            href="/admin/strategies"
+            className="text-[10px] text-muted-foreground/60 hover:text-emerald-400 transition-colors px-2 py-1.5"
+            title="Configure which strategies trade which symbols"
+          >
+            Configure strategies →
+          </a>
         </div>
       )}
 

@@ -54,6 +54,16 @@ export const mbtNr4Daily: Strategy = {
   tier: 2,
   description:
     "Narrow-range day on daily Bitcoin chart -> directional breakout next day. 4-yr backtest PF 2.03.",
+  backtest: {
+    pf: 2.03,
+    trades: 136,
+    netPerContract: 4177,
+    winRate: 0.54,
+    period: "2022-05 → 2026-05",
+    yearsPositive: "4 of 5",
+  },
+  vaultDoc: "Strategies/mbt-nr4-range-expansion.md",
+  codePath: "src/lib/strategies/mbt-nr4-daily.ts",
 
   /**
    * Caller is responsible for passing DAILY-aggregated bars (timeframe === "1d" is declared above

@@ -42,6 +42,15 @@ export interface StrategySignal {
  */
 export type Tier = 1 | 2 | 3 | "rejected";
 
+export interface BacktestEvidence {
+  pf: number;
+  trades: number;
+  netPerContract: number;
+  winRate: number;
+  period: string; // "2022-05 → 2026-05"
+  yearsPositive: string; // "4 of 5"
+}
+
 export interface Strategy {
   /** Unique id — kebab-case, includes asset+timeframe+signal-family */
   id: string;
@@ -55,6 +64,12 @@ export interface Strategy {
   tier: Tier;
   /** One-line description of the edge */
   description: string;
+  /** Backtest evidence — what the historical data showed */
+  backtest?: BacktestEvidence;
+  /** Path to the vault doc with full strategy writeup */
+  vaultDoc?: string;
+  /** Path to the code file implementing the signal */
+  codePath: string;
   /**
    * Run the signal detector against the most recent bars.
    * Returns a signal if conditions are met, null otherwise.

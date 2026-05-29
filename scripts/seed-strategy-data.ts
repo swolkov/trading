@@ -52,25 +52,21 @@ async function seedInstruments() {
 
 async function seedStrategies() {
   for (const s of STRATEGIES) {
+    const payload = {
+      name: s.name,
+      timeframe: s.timeframe,
+      tier: s.tier === "rejected" ? 0 : s.tier,
+      description: s.description,
+      applicableSymbols: s.applicableSymbols,
+      codePath: s.codePath,
+      backtestPf: s.backtest?.pf ?? null,
+      backtestTrades: s.backtest?.trades ?? null,
+      backtestPeriod: s.backtest?.period ?? null,
+    };
     await prisma.strategy.upsert({
       where: { id: s.id },
-      update: {
-        name: s.name,
-        timeframe: s.timeframe,
-        tier: s.tier === "rejected" ? 0 : s.tier,
-        description: s.description,
-        applicableSymbols: s.applicableSymbols,
-        codePath: `src/lib/strategies/${s.id}.ts`,
-      },
-      create: {
-        id: s.id,
-        name: s.name,
-        timeframe: s.timeframe,
-        tier: s.tier === "rejected" ? 0 : s.tier,
-        description: s.description,
-        applicableSymbols: s.applicableSymbols,
-        codePath: `src/lib/strategies/${s.id}.ts`,
-      },
+      update: payload,
+      create: { id: s.id, ...payload },
     });
   }
   console.log(`  strategies upserted: ${STRATEGIES.length}`);
