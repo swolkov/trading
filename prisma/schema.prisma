@@ -196,3 +196,98 @@ model BrokerConnection {
   @@index([userId])
   @@index([broker])
 }
+
+// ─── Strategy / Instrument Registry (DB mirror of code-level registry) ───────
+// These tables let the engine + admin UI consult a single source of truth for
+// "which strategies run on which accounts with what caps". Code defines what
+// strategies EXIST (src/lib/strategies/registry.ts); DB defines where they RUN.
+// When tables are empty, the engine falls back to scattered code constants
+// (DEMO_PRIORITY, MICRO_PRIORITY, LIVE_MAX_CONTRACTS_PER_SYMBOL).
+
+model Instrument {
+  symbol         String   @id  // root symbol (no month code) e.g. "MBT"
+  assetClass     String   // "equity_index_futures" | "metals_futures" | "crypto_futures"
+  exchange       String
+  multiplier     Float
+  tickSize       Float
+  dayMarginEst   Float?   // approximate day margin in USD per contract
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([assetClass])
+}
+
+model Strategy {
+  id                     String   @id  // kebab-case e.g. "mbt-nr4-daily"
+  name                   String
+  timeframe              String   // "1m" | "5m" | "15m" | "1h" | "4h" | "1d"
+  tier                   Int      // 1 | 2 | 3 (rejected strategies aren't registered)
+  description            String
+  applicableSymbols      String[] // canonical symbols this strategy applies to
+  codePath               String   // path to signal-logic file
+  backtestPf             Float?   // backtest profit factor (overall)
+  backtestTrades         Int?     // backtest sample size
+  backtestPeriod         String?  // e.g. "2022-05 → 2026-05"
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  assignments            StrategyAssignment[]
+  trades                 StrategyTrade[]
+
+  @@index([tier])
+}
+
+model StrategyAssignment {
+  id                     Int      @id @default(autoincrement())
+  // Account identifier — for now we use the existing tradingMode keys:
+  // "demo-futures" | "live-futures" | "paper-stocks" | "paper-crypto"
+  accountKey             String
+  strategyId             String
+  status                 String   @default("observation") // "active" | "observation" | "disabled"
+  maxContractsOverride   Int?     // null = use account default
+  notes                  String?
+  // Forward performance (denormalized for fast admin reads — updated by aggregator)
+  forwardPf30d           Float?
+  forwardTrades30d       Int?
+  lastTradeAt            DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  strategy               Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  @@unique([accountKey, strategyId])
+  @@index([accountKey])
+  @@index([strategyId])
+  @@index([status])
+}
+
+// Records every trade fired by a registered strategy — feeds forward-P&L attribution.
+// Legacy trades (non-registry, from the 5m intraday library) live in AutoTradeLog only;
+// this table is additive and never replaces that.
+model StrategyTrade {
+  id              Int      @id @default(autoincrement())
+  strategyId      String
+  accountKey      String   // "demo-futures" | "live-futures" | ...
+  symbol          String
+  direction       String   // "long" | "short"
+  entryPrice      Float
+  exitPrice       Float?
+  contracts       Int
+  pnl             Float?
+  rMultiple       Float?
+  stopDistance    Float
+  targetDistance  Float
+  status          String   @default("open") // "open" | "closed" | "stopped"
+  reason          String?  // signal reason string
+  openedAt        DateTime @default(now())
+  closedAt        DateTime?
+
+  strategy        Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  @@index([strategyId])
+  @@index([accountKey])
+  @@index([symbol])
+  @@index([openedAt])
+  @@index([status])
+}

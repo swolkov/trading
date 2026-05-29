@@ -1,9 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
+import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
+
+const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
 const FuturesChart = dynamic(
   () =>
@@ -162,8 +166,12 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-const DEMO_CONTRACTS = ["ES", "NQ", "GC"]; // Demo: 3 uncorrelated markets for learning
-const LIVE_CONTRACTS = ["MES", "MNQ"]; // Live: micros only on $1K
+// Demo: equity indexes (active 5m strategy) + crypto micros via strategy registry.
+// MBT trades NR4 daily edge; MET/BFF/MXR/MSL are observation-only (sidecar streams price, no signal).
+const DEMO_CONTRACTS = ["ES", "NQ", "GC", "MBT", "MET", "BFF", "MXR", "MSL"];
+// Live: $1K micros. BFF mechanically fits but is observation-only until a strategy clears validation
+// (1-contract live cap is hard-coded in futures-agent.ts as a safety net for when it does).
+const LIVE_CONTRACTS = ["MES", "MNQ", "BFF"];
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
@@ -229,9 +237,26 @@ export default function FuturesPage() {
   const [posData, setPosData] = useState<PositionsData | null>(null);
   const [result, setResult] = useState<FuturesResult | null>(null);
   const [running, setRunning] = useState(false);
-  const isLiveView = posData?.viewMode === "live";
-  const CONTRACTS = isLiveView ? LIVE_CONTRACTS : DEMO_CONTRACTS;
+  const [modeSwitching, setModeSwitching] = useState(false);
+
+  // Subscribe to the global mode SWR cache so this page reacts instantly when the top-bar toggles
+  // demo↔live (instead of waiting up to 10s for the positions poll to carry the new mode).
+  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", modeFetcher, { refreshInterval: 30000 });
+  const swrLiveView = modeData?.modes?.futures === "live";
+  // isLiveView prefers the SWR signal (authoritative + instant) and falls back to posData while
+  // SWR is loading. This eliminates the stale-view-mode window during a toggle.
+  const isLiveView = modeData ? swrLiveView : posData?.viewMode === "live";
+  const ALL_CONTRACTS = isLiveView ? LIVE_CONTRACTS : DEMO_CONTRACTS;
   const RISK_RULES = isLiveView ? LIVE_RISK_RULES : DEMO_RISK_RULES;
+  // Asset class tab filter — only show tabs for classes actually present
+  const availableAssetClasses = useMemo(() => assetClassesIn(ALL_CONTRACTS), [ALL_CONTRACTS]);
+  const [activeAssetClass, setActiveAssetClass] = useState<AssetClass>(
+    availableAssetClasses[0]?.id ?? "equity_index_futures",
+  );
+  const CONTRACTS = useMemo(
+    () => filterByAssetClass(ALL_CONTRACTS, activeAssetClass),
+    [ALL_CONTRACTS, activeAssetClass],
+  );
   const [selectedContract, setSelectedContract] = useState("ES");
   const [activeTab, setActiveTab] = useState<"chart" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
@@ -264,10 +289,19 @@ export default function FuturesPage() {
     } catch { /* ignore */ }
   }, []);
 
-  // Reset selected contract when view mode changes (ES for demo, MES for live)
+  // Reset selected contract when view mode or asset class changes
   useEffect(() => {
-    setSelectedContract(CONTRACTS[0]);
-  }, [isLiveView]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (CONTRACTS.length > 0 && !CONTRACTS.includes(selectedContract)) {
+      setSelectedContract(CONTRACTS[0]);
+    }
+  }, [isLiveView, activeAssetClass, CONTRACTS, selectedContract]);
+
+  // If the current asset class becomes unavailable (e.g., live mode has no crypto), snap to first
+  useEffect(() => {
+    if (!availableAssetClasses.some((ac) => ac.id === activeAssetClass) && availableAssetClasses[0]) {
+      setActiveAssetClass(availableAssetClasses[0].id);
+    }
+  }, [availableAssetClasses, activeAssetClass]);
 
   useEffect(() => {
     loadQuotes();
@@ -279,6 +313,34 @@ export default function FuturesPage() {
     const statusInterval = setInterval(loadStatus, 30000);
     return () => { clearInterval(quoteInterval); clearInterval(posInterval); clearInterval(statusInterval); };
   }, [loadQuotes, loadStatus, loadPositions]);
+
+  // When the global view mode flips (demo↔live), refresh all page data immediately and clear
+  // stale positions/quotes so we never render the wrong-mode data for the 10s poll window.
+  const prevLiveViewRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (modeData === undefined) return; // wait for SWR first load
+    if (prevLiveViewRef.current === null) {
+      prevLiveViewRef.current = swrLiveView;
+      return;
+    }
+    if (prevLiveViewRef.current !== swrLiveView) {
+      prevLiveViewRef.current = swrLiveView;
+      // Show transient loading indicator + clear stale state so the wrong-mode data never flashes
+      setModeSwitching(true);
+      setPosData(null);
+      setQuotes([]);
+      setResult(null);
+      // Brief delay (~400ms) so the server-side mode write commits before we re-fetch — otherwise
+      // we'd race the POST and pull positions for the OLD mode. Matches the same 300ms guard the
+      // top-bar uses when revalidating other endpoints.
+      const t = setTimeout(() => {
+        Promise.all([loadQuotes(), loadPositions(), loadStatus()]).finally(() => {
+          setModeSwitching(false);
+        });
+      }, 400);
+      return () => clearTimeout(t);
+    }
+  }, [swrLiveView, modeData, loadQuotes, loadPositions, loadStatus]);
 
   const runAgent = async () => {
     setRunning(true);
@@ -425,12 +487,52 @@ export default function FuturesPage() {
         <span className={`px-1.5 py-0.5 rounded font-bold border ${isLiveView ? "bg-red-500/15 text-red-400 border-red-500/30" : "bg-amber-500/15 text-amber-400 border-amber-500/30"}`}>
           {isLiveView ? "LIVE · $1K real money — validating execution, not proven alpha" : "DEMO · RESEARCH LAB — P&L is not proof"}
         </span>
+        {modeSwitching && (
+          <span className="px-1.5 py-0.5 rounded font-bold border bg-blue-500/15 text-blue-300 border-blue-500/30 inline-flex items-center gap-1">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-blue-400" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-400" />
+            </span>
+            Switching view…
+          </span>
+        )}
         <span className="px-1.5 py-0.5 rounded border bg-cyan-500/10 text-cyan-300 border-cyan-500/30" title="Chart bars from Databento (~7-min historical). The engine's real-time Databento feed activates after 4 PM.">Databento = market data</span>
         <span className={`px-1.5 py-0.5 rounded border ${status?.connected ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`}>Tradovate = execution{status?.connected ? " ✓" : ""}</span>
         <span className="px-1.5 py-0.5 rounded border bg-white/5 text-muted-foreground/70 border-white/10">Spread book = validated edge (research) · directional = unvalidated</span>
       </div>
 
+      {/* ── Asset Class Tabs ── */}
+      {availableAssetClasses.length > 1 && (
+        <div className="flex items-center gap-1 border-b border-border">
+          {availableAssetClasses.map((ac) => {
+            const active = ac.id === activeAssetClass;
+            const count = filterByAssetClass(ALL_CONTRACTS, ac.id).length;
+            return (
+              <button
+                key={ac.id}
+                onClick={() => setActiveAssetClass(ac.id)}
+                className={`px-3 py-1.5 text-xs font-semibold border-b-2 -mb-px transition-colors ${
+                  active
+                    ? "border-emerald-500 text-emerald-400"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {ac.shortLabel}
+                <span className={`ml-1.5 text-[10px] ${active ? "text-emerald-500/70" : "text-muted-foreground/50"}`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* ── Live Price Tiles ── */}
+      {CONTRACTS.length === 0 ? (
+        <div className="text-xs text-muted-foreground py-4 text-center">
+          No {availableAssetClasses.find((ac) => ac.id === activeAssetClass)?.shortLabel ?? "matching"} contracts in this view.
+        </div>
+      ) : (
       <div className={`grid ${CONTRACTS.length <= 2 ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
         {CONTRACTS.map((sym) => {
           const q = quotes.find((x) => x.symbol === sym);
@@ -479,6 +581,7 @@ export default function FuturesPage() {
           );
         })}
       </div>
+      )}
 
       {/* ── Selected Contract Detail Bar ── */}
       {selectedQuote && (

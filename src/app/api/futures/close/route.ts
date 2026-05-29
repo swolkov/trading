@@ -3,12 +3,14 @@ import { prisma } from "@/lib/db";
 import { logTradeToJournal, logDecision } from "@/lib/vault";
 import { getViewMode } from "@/lib/trading-mode";
 
-// Multipliers for both micro (live) and full-size (demo) contracts
+// Multipliers for both micro (live) and full-size (demo) contracts.
+// Crypto micros: MBT/BFF underlying is BTC price; MET underlying is ETH; MXR XRP; MSL SOL.
 const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
   ES: 50, NQ: 20, GC: 100, YM: 5, RTY: 50,
+  MBT: 0.1, MET: 0.1, BFF: 0.01, MXR: 2500, MSL: 25,
 };
-const KNOWN_SYMBOLS = ["MES", "MNQ", "MGC", "MYM", "M2K", "ES", "NQ", "GC", "YM", "RTY"];
+const KNOWN_SYMBOLS = ["MES", "MNQ", "MGC", "MYM", "M2K", "ES", "NQ", "GC", "YM", "RTY", "MBT", "MET", "BFF", "MXR", "MSL"];
 
 export async function POST(request: Request) {
   try {

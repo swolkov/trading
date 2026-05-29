@@ -292,6 +292,13 @@ export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: strin
   MGC: { name: "Micro Gold", exchange: "COMEX", multiplier: 10, tickSize: 0.1 },
   MYM: { name: "Micro E-mini Dow", exchange: "CBOT", multiplier: 0.5, tickSize: 1 },
   M2K: { name: "Micro E-mini Russell 2000", exchange: "CME", multiplier: 5, tickSize: 0.1 },
+  // Crypto micros (CME GLBX.MDP3). MBT has a Tier-2 validated edge (NR4 daily); the rest are
+  // observation-only until an edge is found for them. See EDGE-HIERARCHY.md.
+  MBT: { name: "Micro Bitcoin", exchange: "CME", multiplier: 0.1, tickSize: 5 },
+  MET: { name: "Micro Ether", exchange: "CME", multiplier: 0.1, tickSize: 0.5 },
+  BFF: { name: "Bitcoin Friday weekly", exchange: "CME", multiplier: 0.01, tickSize: 5 },
+  MXR: { name: "Micro XRP", exchange: "CME", multiplier: 2500, tickSize: 0.0001 },
+  MSL: { name: "Micro Solana", exchange: "CME", multiplier: 25, tickSize: 0.01 },
 };
 
 export async function findContract(symbol: string, modeOverride?: TradingMode): Promise<{ id: number; name: string; tickSize: number } | null> {

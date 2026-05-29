@@ -16,6 +16,8 @@ import {
   Bot,
   Link2,
   RefreshCw,
+  Brain,
+  Layers,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -48,6 +50,13 @@ const sections = [
       { href: "/journal", label: "Journal", icon: BookOpen },
       { href: "/performance", label: "Performance", icon: TrendingUp },
       { href: "/wheel", label: "Wheel", icon: RefreshCw },
+    ],
+  },
+  {
+    label: "RESEARCH",
+    links: [
+      { href: "/edges", label: "Edge Hierarchy", icon: Brain },
+      { href: "/admin/strategies", label: "Strategies", icon: Layers },
     ],
   },
 ];

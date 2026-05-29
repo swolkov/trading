@@ -5,6 +5,7 @@ import { getViewMode } from "@/lib/trading-mode";
 
 const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
+  MBT: 0.1, MET: 0.1, BFF: 0.01, MXR: 2500, MSL: 25,
 };
 
 export const maxDuration = 60;
@@ -71,7 +72,9 @@ export async function PUT(req: NextRequest) {
     } else {
       // Fallback: reconstruct from fills + current balance (work backwards)
       // Filter trade logs by mode symbols to avoid cross-contamination
-      const modeSymbols = isLive ? ["FUT:MES", "FUT:MNQ"] : ["FUT:ES", "FUT:NQ", "FUT:GC"];
+      const modeSymbols = isLive
+        ? ["FUT:MES", "FUT:MNQ", "FUT:BFF"]
+        : ["FUT:ES", "FUT:NQ", "FUT:GC", "FUT:MBT", "FUT:MET", "FUT:BFF", "FUT:MXR", "FUT:MSL"];
       const tradeLogs = await prisma.autoTradeLog.findMany({
         where: { symbol: { in: modeSymbols }, pnl: { not: null } },
         orderBy: { createdAt: "desc" },

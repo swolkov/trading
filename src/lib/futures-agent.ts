@@ -18,6 +18,10 @@ import { detectMarketRegime } from "./market-regime";
 import { getCrossAssetSignals } from "./cross-asset";
 import { prisma } from "./db";
 import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, updateMarketRegime, updateVolatilityEnvironment } from "./vault";
+import { strategiesFor, isRegistryOnlySymbol } from "./strategies/registry";
+import type { OHLCBar, StrategySignal } from "./strategies/types";
+import { accountKeyForFuturesMode, getAssignment, resolveMaxContracts, type AccountKey } from "./strategy-assignments";
+import { logRegistryTradeOpen } from "./strategy-performance";
 import { evaluateDrawdownState } from "./drawdown-protocol";
 import { getSessionInfo, getETDateString, getRTHStartUTC, type Session } from "./session-time";
 
@@ -102,6 +106,9 @@ const DEMO_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "ES", when: "always" },     // $50/pt — S&P 500, full-size execution learning
   { symbol: "NQ", when: "always" },     // $20/pt — Nasdaq 100, learn trend character
   { symbol: "GC", when: "always" },     // $100/pt — Gold, uncorrelated, Asia/London sessions
+  { symbol: "MBT", when: "always" },    // $0.10/$1 BTC — has Tier-2 NR4 edge; routed via strategy registry
+  // MET/BFF/MXR/MSL are observation-only on demo (sidecar collects price, strategy registry has no
+  // signal for them yet). Not listed here — they never reach the priority selector.
 ];
 const FULL_SIZE_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "ES", when: "always" },     // $50/pt — primary money maker
@@ -112,7 +119,21 @@ const MICRO_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "MES", when: "always" },    // $5/pt — S&P micro
   { symbol: "MNQ", when: "trending" },  // $2/pt — Nasdaq micro
   // MGC removed: $10/pt × 15pt stop = $150 = 15% of $1K in one trade. Add back when account > $5K.
+  // Crypto micros: BFF is the ONLY one that mechanically fits $1K margin, but it has no validated
+  // edge (backtest PF 0.27-0.69). Live-add gated behind agent_config.bff_live_enabled flag, with
+  // a hard 1-contract cap (LIVE_MAX_CONTRACTS_PER_SYMBOL below) so a margin blowout is impossible.
 ];
+
+/**
+ * Live per-symbol contract ceiling — protects $1K account from margin overrun. Risk-budget sizing
+ * alone is not enough: at e.g. BFF's $3/contract risk, $50 risk budget = 16 contracts = $11k notional,
+ * which exceeds $1K margin capacity. This map caps contracts BEFORE risk-budget sizing.
+ */
+const LIVE_MAX_CONTRACTS_PER_SYMBOL: Record<string, number> = {
+  MES: 4,
+  MNQ: 4,
+  BFF: 1,  // ~$250 margin; one bad trade and we're at the dailyLoss limit, intentional.
+};
 
 function getTradePriority(equity: number, mode: string = "paper"): { symbol: string; when: string }[] {
   // DEMO: Always use full instrument set for maximum learning
@@ -1454,8 +1475,53 @@ export async function runFuturesAgent(): Promise<{
     details.push(`  DAY TYPE: ${dayClassification.reasoning}`);
     details.push(`  Levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} | PDL $${keyLevels.prevDayLow.toFixed(2)} | OR ${keyLevels.openingRangeLow.toFixed(2)}-${keyLevels.openingRangeHigh.toFixed(2)}`);
 
-    // Detect setup
-    const setup = detectSetup(price, closes5, bars5min, keyLevels, vwapData, session, regime, dayType, minutesSinceOpen, tradingMode, symbol);
+    // Detect setup — either via the strategy registry (per-symbol routing, validated edges only)
+    // or the legacy 5m intraday library. Registry-only symbols (e.g., crypto futures) bypass the
+    // legacy library entirely because that library was designed for equity index intraday and
+    // catastrophically loses on crypto futures. See EDGE-HIERARCHY.md.
+    let setup: Setup;
+    let firedStrategyId: string | null = null;
+    const accountKey: AccountKey = accountKeyForFuturesMode(tradingMode);
+    if (isRegistryOnlySymbol(symbol)) {
+      const strategies = strategiesFor(symbol);
+      // Filter to strategies that are ACTIVE for this account per DB assignment (falls back to
+      // code default "active" if no DB row exists, preserving existing behavior pre-migration).
+      const activeStrategies = [];
+      for (const s of strategies) {
+        const a = await getAssignment(accountKey, s.id);
+        if (!a || a.status === "active") activeStrategies.push(s);
+        else details.push(`  ${symbol}: skipping ${s.id} (assignment status: ${a.status})`);
+      }
+      let registrySignal: StrategySignal | null = null;
+      for (const strat of activeStrategies) {
+        let stratBars: OHLCBar[];
+        if (strat.timeframe === "1d") {
+          // barsDaily timestamps are seconds; OHLCBar expects ms
+          stratBars = barsDaily.map((b) => ({ t: b.t * 1000, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
+        } else {
+          stratBars = bars5min.map((b) => ({ t: typeof b.t === "string" ? new Date(b.t).getTime() : (b.t as number), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
+        }
+        const sig = strat.detect(stratBars, { symbol, now: Date.now() });
+        if (sig) { registrySignal = sig; firedStrategyId = strat.id; break; }
+      }
+      if (!registrySignal) {
+        details.push(`  ${symbol}: observation-only (no registered strategy fired) — holding`);
+        continue;
+      }
+      const stopDist = Math.abs(registrySignal.entryPrice - registrySignal.stopPrice);
+      const targetDist = Math.abs(registrySignal.targetPrice - registrySignal.entryPrice);
+      setup = {
+        type: "trend_continuation",
+        direction: registrySignal.direction,
+        confidence: registrySignal.confidence ?? 75,
+        reasoning: `[${registrySignal.strategyId}] ${registrySignal.reason}`,
+        stopDistance: stopDist,
+        targetDistance: targetDist,
+      };
+      details.push(`  REGISTRY SETUP: ${registrySignal.setupName} — ${registrySignal.direction.toUpperCase()} via ${registrySignal.strategyId}`);
+    } else {
+      setup = detectSetup(price, closes5, bars5min, keyLevels, vwapData, session, regime, dayType, minutesSinceOpen, tradingMode, symbol);
+    }
 
     if (setup.type === "none") {
       details.push(`  No setup — holding`);
@@ -1590,6 +1656,19 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       details.push(`  HARD CAP: Risk $${totalRisk.toFixed(0)} (${((totalRisk / equity) * 100).toFixed(1)}%) exceeds 15% ceiling — capped to ${contracts} contract(s)`);
     }
 
+    // Live per-symbol contract ceiling — guards against margin overrun on the $1K account where
+    // risk-budget sizing alone is insufficient (e.g. BFF $3/contract risk × 16 contracts = $11k
+    // notional, exceeding margin capacity even with risk budget honored). DB override (if set
+    // by admin) takes precedence over the code constant.
+    if (tradingMode === "live") {
+      const codeCap = LIVE_MAX_CONTRACTS_PER_SYMBOL[symbol];
+      const resolved = await resolveMaxContracts(accountKey, firedStrategyId, codeCap, contracts);
+      if (resolved < contracts) {
+        details.push(`  LIVE CAP: ${symbol} capped at ${resolved} contract(s) (was ${contracts}) — $1K margin safety`);
+        contracts = resolved;
+      }
+    }
+
     const side = setup.direction === "long" ? "BUY" as const : "SELL" as const;
     const stopPrice = setup.direction === "long" ? price - stopDistance : price + stopDistance;
     const targetPrice = setup.direction === "long" ? price + targetDistance : price - targetDistance;
@@ -1659,6 +1738,27 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
           orderId: String(order.orderId),
         },
       });
+
+      // Forward-performance hook: if this was fired by a registered strategy, log the OPEN side
+      // to StrategyTrade so the admin view can attribute forward P&L per strategy.
+      if (firedStrategyId) {
+        await logRegistryTradeOpen({
+          accountKey,
+          strategyId: firedStrategyId,
+          symbol,
+          signal: {
+            direction: setup.direction,
+            entryPrice: price,
+            stopPrice,
+            targetPrice,
+            setupName: setup.type,
+            strategyId: firedStrategyId,
+            reason: setup.reasoning,
+            confidence: setup.confidence,
+          },
+          contracts,
+        });
+      }
 
       if (order.status === "entry_not_filled") {
         details.push(`  ORDER CANCELLED — entry did not fill within 2s`);

@@ -13,7 +13,10 @@ Env: DATABENTO_API_KEY + DATABASE_URL (from .env.local).
 """
 import os, re, sys, time, traceback
 
-SYMBOLS = ["ES.v.0", "NQ.v.0", "GC.v.0"]   # full-size; engines map micros (MES→ES, etc.) to these prices
+SYMBOLS = [
+    "ES.v.0", "NQ.v.0", "GC.v.0",  # equity indexes + gold (engines map MES/MNQ/MGC to these prices)
+    "MBT.v.0", "MET.v.0", "BFF.v.0", "MXR.v.0", "MSL.v.0",  # CME crypto micros (BTC/ETH/BTC-weekly/XRP/SOL)
+]
 WRITE_EVERY = 1.0                           # seconds between DB upserts (throttle)
 
 def env(name):
