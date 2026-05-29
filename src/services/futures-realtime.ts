@@ -3357,9 +3357,11 @@ let vixTermStructure: "contango" | "backwardation" | "flat" = "contango";
 
 async function updateVIX() {
   try {
+    const yfTimeout = <T>(p: Promise<T>): Promise<T | null> =>
+      Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), 10_000))]);
     const [vixQ, vix3mQ] = await Promise.all([
-      getYfEngine().quote("^VIX").catch(() => null),
-      getYfEngine().quote("^VIX3M").catch(() => null),
+      yfTimeout(getYfEngine().quote("^VIX")).catch(() => null),
+      yfTimeout(getYfEngine().quote("^VIX3M")).catch(() => null),
     ]);
     if (vixQ?.regularMarketPrice) currentVIX = vixQ.regularMarketPrice;
     if (vix3mQ?.regularMarketPrice) vix3m = vix3mQ.regularMarketPrice;

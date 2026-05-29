@@ -1,6 +1,6 @@
 # Databento Maximization Roadmap
 
-We pay **$179/mo ($2,148/yr)** for Databento. At this price point we should be maximizing every schema in our subscription. If a research idea here says "plan upgrade required," double-check the portal first — old assumption was $15/mo and several items were marked gated that may not actually be.
+We pay **$179/mo ($2,148/yr)** for Databento on the **Standard tier** (verified via databento.com/pricing 2026-05-29). Standard tier includes MBP-1, trades, statistics, and historical pulls across all datasets. MBP-10 and MBO are gated to the **Unlimited tier** (contract required, no public price, likely $1K+/mo).
 
 ## Shipped (2026-05-29)
 
@@ -30,7 +30,7 @@ We pay **$179/mo ($2,148/yr)** for Databento. At this price point we should be m
    - Pre-trade depth check (is there real size at our target?)
    - Iceberg detection (refilling top-of-book)
    - Slippage prediction
-   - **STATUS (2026-05-29): subscribe error returned. NEEDS PORTAL VERIFICATION — at $179/mo subscription, MBP-10 is likely available, but the API key may not have this schema toggled on.** Server returns "Not authorized for mbp-10 schema". Code is ready (`ENABLE_MBP10` flag in sidecar, `/api/databento/book` endpoint, `OrderBookLadder` component all built). Upgrade Databento plan to Plus or Pro tier, flip the flag in sidecar, redeploy with `railway up ./sidecar --path-as-root --service databento-sidecar`. UI gracefully shows "unavailable" message until then.
+   - **STATUS (2026-05-29): verified plan-gated.** Databento Standard tier ($179/mo, what we have) does not include MBP-10. Upgrade to Unlimited tier required (contract-only pricing, likely $1K+/mo). Server returns "Not authorized for mbp-10 schema". Code is ready (`ENABLE_MBP10` flag in sidecar, `/api/databento/book` endpoint, `OrderBookLadder` component all built). Upgrade Databento plan to Plus or Pro tier, flip the flag in sidecar, redeploy with `railway up ./sidecar --path-as-root --service databento-sidecar`. UI gracefully shows "unavailable" message until then.
 
 2. **Volume profile overlay on chart** — currently volume profile is a separate tab. The pro UX is overlaid on the price chart as semi-transparent horizontal bars to the right. Lightweight-charts can do this.
 
