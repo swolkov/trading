@@ -46,7 +46,7 @@ export default function InsiderPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Insider & Congressional Trading</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Insider Activity</h1><p className="text-[11px] text-muted-foreground/50">SEC insider filings and congressional trading disclosures</p></div>
 
       <Card>
         <CardContent className="pt-6">

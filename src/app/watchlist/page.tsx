@@ -14,7 +14,7 @@ export default function WatchlistPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Watchlist</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Watchlist</h1><p className="text-[11px] text-muted-foreground/50">Symbols tracked for research and signal monitoring</p></div>
       <Card>
         <CardHeader>
           <CardTitle>Track Symbols</CardTitle>

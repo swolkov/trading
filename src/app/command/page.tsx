@@ -179,7 +179,7 @@ export default function CommandCenterPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Command Center</h1>
+          <h1 className="text-xl font-bold">Command Center</h1>
           <p className="text-sm text-muted-foreground">
             System health, risk, regime, events — auto-refreshes every 30s
           </p>

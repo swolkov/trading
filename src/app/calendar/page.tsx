@@ -60,7 +60,7 @@ export default function CalendarPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Market Calendar</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Market Calendar</h1><p className="text-[11px] text-muted-foreground/50">Economic events, earnings, and market holidays</p></div>
 
       <Tabs defaultValue="earnings">
         <TabsList>

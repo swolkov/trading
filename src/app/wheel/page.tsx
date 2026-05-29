@@ -71,7 +71,7 @@ export default function WheelPage() {
     <div className="space-y-5 animate-fade-up">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
+          <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
             Wheel
             <span className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded text-blue-400/60 bg-blue-500/[0.08]">Paper · Simulated</span>
           </h1>

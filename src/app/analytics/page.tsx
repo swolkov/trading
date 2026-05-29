@@ -228,7 +228,7 @@ export default function AnalyticsPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">P&L Analytics</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Analytics</h1><p className="text-[11px] text-muted-foreground/50">Aggregate P<h2 className="text-2xl font-bold tracking-tight">P&L Analytics</h2>L analysis and performance breakdown</p></div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">

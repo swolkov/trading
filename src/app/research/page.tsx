@@ -9,7 +9,7 @@ export default function ResearchIndexPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Company Research</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Symbol Research</h1><p className="text-[11px] text-muted-foreground/50">Company fundamentals, AI-generated reports, and watchlist scoring</p></div>
       <Card>
         <CardHeader>
           <CardTitle>Look up any company</CardTitle>

@@ -332,7 +332,7 @@ export default function AgentHubPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Agent Hub</h1>
+          <h1 className="text-xl font-bold">Agent Hub</h1>
           <p className="text-sm text-muted-foreground">
             Command center — agents, brokers, risk controls.{" "}
             <a href="/admin/strategies" className="underline text-emerald-400 hover:text-emerald-300">

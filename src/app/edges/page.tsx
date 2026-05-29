@@ -47,7 +47,7 @@ export default function EdgesPage() {
       {/* Header */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Edge Hierarchy</h1>
+          <h1 className="text-xl font-bold tracking-tight">Edge Hierarchy</h1>
           <p className="text-sm text-muted-foreground mt-1">
             The honest map of what we&apos;ve tested, what&apos;s deployable, what&apos;s speculative,
             and what isn&apos;t worth our time. Tier moves on evidence, never on hope.
@@ -67,6 +67,40 @@ export default function EdgesPage() {
         <Card>
           <CardContent className="py-4 text-sm text-red-400">{error}</CardContent>
         </Card>
+      )}
+
+      {/* Mobile TOC — collapsible card visible only on mobile, since the sticky sidebar is hidden there */}
+      {markdown && headings.length > 0 && (
+        <details className="lg:hidden">
+          <summary className="cursor-pointer list-none">
+            <Card className="border-dashed">
+              <CardContent className="py-2.5">
+                <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <FileText className="w-3 h-3" />
+                  On this page
+                  <span className="ml-auto text-muted-foreground/50">{headings.length} sections</span>
+                </div>
+              </CardContent>
+            </Card>
+          </summary>
+          <Card className="mt-2">
+            <CardContent className="py-4">
+              <nav className="space-y-0.5">
+                {headings.map((h, i) => (
+                  <a
+                    key={`${h.id}-${i}`}
+                    href={`#${h.id}`}
+                    className={`block text-[12px] py-0.5 hover:text-foreground transition-colors ${
+                      h.level === 1 ? "font-semibold text-foreground/80" : "text-muted-foreground pl-2"
+                    }`}
+                  >
+                    {h.text}
+                  </a>
+                ))}
+              </nav>
+            </CardContent>
+          </Card>
+        </details>
       )}
 
       {markdown && (

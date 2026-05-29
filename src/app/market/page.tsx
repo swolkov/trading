@@ -130,7 +130,7 @@ export default function MarketPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <h2 className="text-2xl font-bold">Market Intelligence</h2>
+        <div><h1 className="text-xl font-bold tracking-tight">Market</h1><p className="text-[11px] text-muted-foreground/50">Market intelligence and indicators</p></div>
         <div className="text-muted-foreground">Loading market data...</div>
       </div>
     );

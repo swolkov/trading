@@ -54,6 +54,10 @@ export async function logRegistryTradeOpen(args: {
  * No-op if no matching open trade exists (the close came from a legacy/non-registry trade).
  *
  * SAFETY: wrapped in try/catch; never blocks the engine's close path.
+ *
+ * R-multiple is computed by looking up the contract multiplier from the Instrument table:
+ *   rMultiple = pnl / (stopDistance × multiplier × contracts)
+ * Falls back to null if multiplier is unavailable (forward PF still works from raw dollar P&L).
  */
 export async function closeRegistryTrade(args: {
   accountKey: AccountKey;
@@ -70,22 +74,17 @@ export async function closeRegistryTrade(args: {
     });
     if (!openRow) return; // close came from a legacy/non-registry trade — nothing to update
 
-    const isLong = openRow.direction === "long";
-    const rDollars = openRow.stopDistance * Math.abs(pnl > 0 ? 1 : 1); // placeholder; recomputed below
-    const stopDollarsPerContract = openRow.stopDistance; // already in price points; pnl is in dollars
-    // pnl is in dollars, stopDistance is in price points. To compute R-multiple we need price→$ multiplier.
-    // For simplicity: r ≈ pnl / abs(entry*0.005) if stopDistance unknown — but we have stopDistance in
-    // PRICE units. The caller passes dollar pnl. R-multiple = pnl / (stopDistance × multiplier × contracts).
-    // We don't have the multiplier here, so we approximate from entryPrice as a proxy for $/point.
-    // BETTER: caller can pass rMultiple directly if known. For now we store pnl + dollar-per-point inference.
-    // Mark the row closed; rMultiple left null if not computable cleanly.
+    // R-multiple: look up the instrument multiplier so we can convert price-point stop distance
+    // into dollars and divide actual P&L by it. If instrument row is missing, leave rMultiple null
+    // (forward PF still works from raw dollar P&L via getPerformanceSummary).
     let rMultiple: number | null = null;
-    if (stopDollarsPerContract > 0 && openRow.contracts > 0) {
-      // Assume the caller's pnl is final dollar P&L. If we knew the contract multiplier we could compute
-      // exact rMultiple. Leave null and let aggregator recompute from sym lookup if needed.
-      rMultiple = null;
-    }
-    void isLong; void rDollars; // silence unused warnings — kept for future expansion
+    try {
+      const inst = await prisma.instrument.findUnique({ where: { symbol } });
+      if (inst && openRow.contracts > 0 && openRow.stopDistance > 0) {
+        const dollarRisk = openRow.stopDistance * inst.multiplier * openRow.contracts;
+        if (dollarRisk > 0) rMultiple = pnl / dollarRisk;
+      }
+    } catch { /* multiplier lookup is best-effort */ }
 
     await prisma.strategyTrade.update({
       where: { id: openRow.id },

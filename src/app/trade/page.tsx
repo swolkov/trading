@@ -24,7 +24,7 @@ export default function TradePage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Trade</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Manual Trade</h1><p className="text-[11px] text-muted-foreground/50">Direct order entry across all brokers</p></div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-4">
           <Card>

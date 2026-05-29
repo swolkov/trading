@@ -238,7 +238,7 @@ export default function AIAnalystPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">AI Analyst</h2>
+          <div><h1 className="text-xl font-bold tracking-tight">Claude Console</h1><p className="text-[11px] text-muted-foreground/50">AI-assisted research, idea generation, and trade analysis</p></div>
           <p className="text-sm text-muted-foreground">
             Deep research powered by Claude. Analyze any stock, scan the market, get trade ideas.
           </p>

@@ -80,7 +80,7 @@ export default function BacktestPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Backtesting Engine</h2>
+      <div><h1 className="text-xl font-bold tracking-tight">Backtest</h1><p className="text-[11px] text-muted-foreground/50">Historical strategy testing and parameter optimization</p></div>
       <p className="text-sm text-muted-foreground">
         Test trading strategies against historical data before risking real money.
       </p>
