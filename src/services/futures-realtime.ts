@@ -38,12 +38,12 @@ const MODE_TAG = IS_LIVE ? "LIVE" : "DEMO";
 const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
-// LIVE ($1K): Micros only MES, MNQ until equity scales
+// LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
 const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC"];
-const MICRO_SYMBOLS = ["MES", "MNQ"];
+const MICRO_SYMBOLS = ["MES", "MNQ", "MYM"];  // MYM = Micro Dow, $0.50/pt, ~$150 margin — fits $1K
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
-const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC" };
-const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC" };
+const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
+const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
 // $25k threshold for live: below this, trade micros. Above, trade full-size.
 const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
 
@@ -71,8 +71,8 @@ function updateTradingSymbols() {
 
 // Yahoo fallback symbol mapping (used only if Tradovate MD fails)
 const YAHOO_MAP: Record<string, string> = {
-  ES: "ES=F", NQ: "NQ=F", GC: "GC=F",
-  MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F",
+  ES: "ES=F", NQ: "NQ=F", GC: "GC=F", YM: "YM=F",
+  MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F", MYM: "YM=F",
 };
 // Lazy-load Yahoo only when needed (fallback path)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -88,7 +88,7 @@ function getYfEngine() {
 const CONTRACT_MULTIPLIERS: Record<string, number> = {
   // Full-size
   ES: 50, NQ: 20, GC: 100, YM: 5, RTY: 50,
-  // Micros
+  // Micros — MYM at $0.50/pt is the lowest-risk micro, ideal for $1K live
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
 };
 // Symbols that are metals (different session timing + strategy)
@@ -449,7 +449,7 @@ async function resolveDemoContracts(): Promise<void> {
   if (IS_DEMO) return; // demo engine doesn't need separate demo contracts
   const token = await authenticateDemoMd();
   if (!token) return;
-  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) {
+  for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS, "YM"]) {
     try {
       const res = await fetch(`${DEMO_API}/contract/suggest?t=${sym}&l=5`, {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -2154,6 +2154,7 @@ function onBarClose(sym: string, bar: Bar) {
 
   // CORRELATION GATE: don't hold two equity index positions simultaneously
   // ES and NQ are 90%+ correlated — holding both is doubling the same bet
+  // Exception: allow MES + MYM since Dow/S&P diverge meaningfully ~20% of sessions
   const EQUITY_INDICES = new Set(["ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K"]);
   if (EQUITY_INDICES.has(sym)) {
     const holdingEquityIndex = [...positions.keys()].some(s => EQUITY_INDICES.has(s));
@@ -3529,8 +3530,11 @@ let crossAssetSummary = "";
 async function updateCrossAssetSignals() {
   try {
     const symbols = ["^VIX", "UUP", "TLT", "USO", "GLD"];
+    // 10s timeout per quote — Yahoo can hang indefinitely on cold network
+    const timeout = <T>(p: Promise<T>): Promise<T | null> =>
+      Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), 10_000))]);
     const quotes = await Promise.all(
-      symbols.map(s => getYfEngine().quote(s).catch(() => null))
+      symbols.map(s => timeout(getYfEngine().quote(s)).catch(() => null))
     );
 
     const data: Record<string, { price: number; change: number }> = {};
@@ -3600,8 +3604,11 @@ async function updateSectorRotation() {
       { sym: "XLU", name: "Utilities" },
     ];
 
+    // 10s timeout per quote — prevents startup hang on slow network
+    const timeout = <T>(p: Promise<T>): Promise<T | null> =>
+      Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), 10_000))]);
     const quotes = await Promise.all(
-      sectors.map(s => getYfEngine().quote(s.sym).catch(() => null))
+      sectors.map(s => timeout(getYfEngine().quote(s.sym)).catch(() => null))
     );
 
     const results: { name: string; change: number }[] = [];
