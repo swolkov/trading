@@ -1154,7 +1154,10 @@ async function loadRiskConfig() {
     const symbolsCfg = cfg[`${kp}_symbols`];
     symbolWhitelist = symbolsCfg && symbolsCfg.trim() ? symbolsCfg.split(",").map(s => s.trim()).filter(Boolean) : null;
     databentoMdEnabled = cfg[`${kp}_databento_md`] === "true";   // flip Databento MD on/off without a restart
-    aiVetoEnabled = IS_LIVE || cfg[`${kp}_ai_grader`] !== "false";   // LIVE always keeps the AI veto (real-money safety); DEMO can disable it (futures_ai_grader="false") for the AI-on/off test
+    // 2026-05-29: Spencer explicit override — AI grader now config-toggleable on LIVE too.
+    // Set live_futures_ai_grader="false" in DB to disable; default true preserves the original
+    // real-money safety. Demo uses futures_ai_grader.
+    aiVetoEnabled = cfg[`${kp}_ai_grader`] !== "false";
     updateTradingSymbols();
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
   } catch (err) {
