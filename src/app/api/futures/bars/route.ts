@@ -79,13 +79,14 @@ export async function GET(request: Request) {
       const vwapSeries = bars.length > 0 ? calcVwapSeries(bars) : [];
 
       // Key levels from yesterday's bars
-      let prevDayHigh = 0, prevDayLow = 0;
+      let prevDayHigh = 0, prevDayLow = 0, prevDayClose = 0;
       try {
         const dailyBars = await cachedBars(`daily|${symbol}|${viewMode}`, 600, () => getFuturesDailyBars(symbol, 5, viewMode));
         if (dailyBars.length >= 2) {
           const prevDay = dailyBars[dailyBars.length - 2];
           prevDayHigh = prevDay.h;
           prevDayLow = prevDay.l;
+          prevDayClose = prevDay.c;
         }
       } catch {}
 
@@ -103,6 +104,7 @@ export async function GET(request: Request) {
           vwapSeries,
           prevDayHigh,
           prevDayLow,
+          prevDayClose,
           openingRangeHigh: orHigh,
           openingRangeLow: orLow,
         },

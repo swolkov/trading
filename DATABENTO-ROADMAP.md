@@ -22,7 +22,7 @@ We pay ~$15/mo for Databento. This doc tracks what we're using and what we could
    - Pre-trade depth check (is there real size at our target?)
    - Iceberg detection (refilling top-of-book)
    - Slippage prediction
-   - Cost: +1 dataset slot, +bandwidth. Already in our subscription tier.
+   - **STATUS (2026-05-29): attempted, NOT AVAILABLE on current Databento plan.** Server returns "Not authorized for mbp-10 schema". Code is ready (`ENABLE_MBP10` flag in sidecar, `/api/databento/book` endpoint, `OrderBookLadder` component all built). Upgrade Databento plan to Plus or Pro tier, flip the flag in sidecar, redeploy with `railway up ./sidecar --path-as-root --service databento-sidecar`. UI gracefully shows "unavailable" message until then.
 
 2. **Volume profile overlay on chart** — currently volume profile is a separate tab. The pro UX is overlaid on the price chart as semi-transparent horizontal bars to the right. Lightweight-charts can do this.
 

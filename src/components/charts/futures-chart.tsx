@@ -349,6 +349,11 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
             price: overlays.prevDayLow, color: "#f59e0b", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "PDL",
           }));
         }
+        if (overlays.prevDayClose > 0) {
+          priceLinesRef.current.push(candleRef.current!.createPriceLine({
+            price: overlays.prevDayClose, color: "#a78bfa", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "PDC",
+          }));
+        }
         if (overlays.openingRangeHigh > 0) {
           priceLinesRef.current.push(candleRef.current!.createPriceLine({
             price: overlays.openingRangeHigh, color: "#6b7280", lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: "OR-H",

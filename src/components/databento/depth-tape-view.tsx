@@ -4,6 +4,7 @@ import useSWR from "swr";
 import { Card, CardContent } from "@/components/ui/card";
 import { VolumeProfile } from "./volume-profile";
 import { TimeAndSales } from "./time-and-sales";
+import { OrderBookLadder } from "./order-book-ladder";
 import { TrendingUp, TrendingDown, Wifi } from "lucide-react";
 
 interface DepthResponse {
@@ -82,8 +83,13 @@ export function DepthTapeView({ symbol }: { symbol: string }) {
         </CardContent>
       </Card>
 
-      {/* Volume profile + Time & sales side-by-side */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {/* Order book + Volume profile + Time & sales */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <Card className="border-white/[0.06]">
+          <CardContent className="py-3">
+            <OrderBookLadder symbol={symbol} height={420} />
+          </CardContent>
+        </Card>
         <Card className="border-white/[0.06]">
           <CardContent className="py-3">
             <VolumeProfile data={data.volumeProfile} currentPrice={data.live?.mid} height={420} />
