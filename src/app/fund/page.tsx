@@ -1,9 +1,8 @@
-import fs from "node:fs";
-import path from "node:path";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import snapshot from "@/data/fund-snapshot.json";
 
-export const dynamic = "force-dynamic";
+export const dynamic = "force-static";
 export const metadata = {
   title: "Esbueno Capital — Quant Fund",
   description: "Market-neutral relative-value spread strategy on CME futures. Validated edge with forward-track verification.",
@@ -34,36 +33,6 @@ interface PaperAccount {
   positions: Record<string, { dir: number; entryRatio: number; entryDate: string; barsHeld: number }>;
 }
 
-function loadJSON<T>(p: string): T | null {
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
-}
-
-function newestPaperForward(): PaperForwardReport | null {
-  const dir = path.join(process.cwd(), "reports");
-  if (!fs.existsSync(dir)) return null;
-  const files = fs.readdirSync(dir)
-    .filter((f) => /^paper-forward-.*\.json$/.test(f))
-    .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
-    .sort((a, b) => b.t - a.t);
-  if (!files.length) return null;
-  return loadJSON(path.join(dir, files[0].f));
-}
-
-function loadEquityCurve(): { month: string; equity: number }[] {
-  // Parse the launchd run log which always prints the monthly equity rollup as the last block.
-  try {
-    const log = fs.readFileSync("/tmp/spread-track.log", "utf8");
-    const matches = [...log.matchAll(/(20\d{2}-\d{2})\s+\$\s*([\d,]+)/g)];
-    const seen = new Map<string, number>();
-    for (const [, month, equity] of matches) {
-      seen.set(month, parseInt(equity.replace(/,/g, ""), 10));
-    }
-    return [...seen.entries()].map(([month, equity]) => ({ month, equity }));
-  } catch {
-    return [];
-  }
-}
-
 function fmt(n: number, d = 2): string {
   return n.toFixed(d);
 }
@@ -72,9 +41,9 @@ function fmtMoney(n: number): string {
 }
 
 export default function FundPage() {
-  const report = newestPaperForward();
-  const account = loadJSON<PaperAccount>(path.join(process.cwd(), "reports", "spread-paper-account.json"));
-  const equityCurve = loadEquityCurve();
+  const report = snapshot.report as PaperForwardReport;
+  const account = snapshot.account as PaperAccount | null;
+  const equityCurve = snapshot.equityCurve as { month: string; equity: number }[];
 
   if (!report) {
     return <div className="p-8 text-white">Track record not loaded.</div>;

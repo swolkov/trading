@@ -4,7 +4,7 @@
 **Strategy:** Market-neutral relative-value spread arbitrage on CME futures
 **Structure:** Delaware LP · 2% management / 20% performance · high-water mark
 **Target raise:** $1M – $10M anchor round → scale to $50M capacity
-**Live demonstration:** [esbueno.trade/fund](https://esbueno.trade/fund) (real-time forward track)
+**Live demonstration:** live demonstration URL provided on diligence call (real-time forward track)
 
 ---
 
@@ -77,7 +77,7 @@ Ours improved, because the underlying market-microstructure conditions that crea
 - Max drawdown from peak: -0.4%
 - 4 active positions: 6A/6C, GC/HG, ZS/ZW, ZW/ZC
 
-Full equity curve and per-pair forward verification: [esbueno.trade/fund](https://esbueno.trade/fund)
+Full equity curve and per-pair forward verification: live demonstration URL provided on diligence call
 
 ---
 
@@ -150,7 +150,7 @@ $50M to preserve performance.
 ---
 
 **Contact:** Spencer Wolkov · swolkov@medasynq.com
-**Live track:** [esbueno.trade/fund](https://esbueno.trade/fund) (real-time, reproducible)
+**Live track:** live demonstration URL provided on diligence call (real-time, reproducible)
 
 *Past performance does not guarantee future results. This is not an offer to sell or solicitation to
 buy securities. Offers are made only via the Private Placement Memorandum to accredited investors.*
