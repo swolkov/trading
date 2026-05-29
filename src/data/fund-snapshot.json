@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-05-29T20:07:59.794Z",
+  "generatedAt": "2026-05-29T22:11:49.039Z",
   "sourceReport": "paper-forward-2026-05-12.json",
   "report": {
-    "generated": "2026-05-28T22:37:39.567Z",
+    "generated": "2026-05-29T22:03:05.184Z",
     "lastData": "2026-05-12",
     "forwardStart": "2024-11-12",
     "costModel": "measured-per-pair-bps",
