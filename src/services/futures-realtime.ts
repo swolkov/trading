@@ -1917,8 +1917,11 @@ async function closePosition(sym: string, price: number, reason: string) {
       reEntryCooldowns.set(cooldownKey, Date.now() + 15 * 60_000);
       log(`[COOLDOWN] ${cooldownKey} blocked for 15min (re-entry cooldown after stop)`);
 
-      const pauseSchedule = [0, 0, 30, 60, 120];
-      const pauseMin = consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0);
+      // Demo (paper): no tilt pause — let the engine press through variance and accumulate data.
+      // Auto-prune disables truly broken setupTypes mechanically, so tilt protection is redundant
+      // for paper testing. Live keeps full tilt protection (real money discipline).
+      const pauseSchedule = IS_DEMO ? [0, 0, 0, 0, 0] : [0, 0, 30, 60, 120];
+      const pauseMin = (IS_DEMO ? 0 : (consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0)));
 
       if (pauseMin > 0) {
         tiltPauseUntil = pauseMin === Infinity ? Infinity : Date.now() + pauseMin * 60_000;
@@ -2869,9 +2872,12 @@ async function evaluateAndTrade(
   // Clear expired cooldowns
   if (cooldownExpiry && Date.now() >= cooldownExpiry) reEntryCooldowns.delete(cooldownKey);
 
-  // 2026-05-29: lowered live threshold from 75 → 60 so the data-driven AI grader has room to
-  // approve setups that historical data supports without needing pre-AI 75%+ technicals.
-  const MIN_CONFIDENCE = IS_LIVE ? 60 : 55;
+  // 2026-05-29 evening: pushed both lower so the engines FIRE more — pattern memory + auto-prune
+  // are the empirical filters now. Demo is paper (no margin constraint), so we test the upper bound
+  // of how much we can fire and let the auto-prune mechanic retire whatever doesn't earn its keep.
+  // Live stays disciplined-but-aggressive: 55 lets validated setups (trend continuation, VWAP reclaim)
+  // through that the prior 60 cutoff was blocking. Auto-prune retires anything that bleeds.
+  const MIN_CONFIDENCE = IS_LIVE ? 55 : 50;
   if (finalScore < MIN_CONFIDENCE) {
     log(`  SKIPPED: Final confidence ${finalScore}% below ${MIN_CONFIDENCE}% threshold (${MODE_TAG})`);
     return;
