@@ -126,10 +126,23 @@ mechanical rule on minute bars failed after costs" — NOT "the market is effici
 
 ---
 
+## Shipped to live engine (2026-05-29 evening)
+
+| Strategy | Status | Notes |
+|---|---|---|
+| **MBT NR4 (daily)** | **Live in demo engine** via strategy-runner adapter | Engine fetches MBT daily bars from Databento once/day, runs detect(), routes signals through evaluateAndTrade with setupType=`mbt-nr4-daily`. Demo-only — $1K live can't fit MBT day margin (~$2k). |
+| **VWAP reclaim (5m)** | **Live on both engines** as setup #4.5 | Detects 5-of-6 bars on one side of VWAP, then close-back-through. Setup type `vwap_reclaim`. Joins the 5m library; pattern memory will rate it like any other setup. |
+| **Overnight equity drift** | **Deferred** | Code exists at `/lib/strategies/overnight-strategy.ts`. Wiring requires adding `isOvernight` flag to Position + gating 4 management code paths (trail stop, breakeven, stale-trade, pyramiding) so the time-based hold-through-globex thesis isn't broken. Needs its own session. |
+| **Spread book** | **Deferred** | Validated pairs (CL/RB, ZC/ZS, 6E/6B) need symbols/data we don't subscribe to via Databento sidecar. ES/NQ is not in the validated pair set. |
+| **GC-tuned RSI bounce** | **Not needed** | Pattern memory keys on instrument; GC-specific WR will naturally cluster from the generic `extreme_rsi_bounce` setupType. |
+| **Volume profile POC reversion** | **Deferred — needs build+backtest** | Databento data is captured (used in UI) but not yet used as entry signal. Unvalidated. |
+| **Order flow / cumulative delta** | **Deferred — needs build+backtest** | Databento trades schema captured but not aggregated by direction for entry signals. Unvalidated. |
+| **Asia/London session opens** | **Deferred — needs build+backtest** | Engine only handles US RTH OR. Non-US session detection + open-range tracking would be a separate setup. Unvalidated. |
+
 ## The bottom line
 
 - **One validated edge:** the spread book — and it needs real capital ($100k+ / prop-firm), not $1K.
-- **Three plausible-unvalidated:** overnight equity drift, failed-reaction fade, and **MBT NR4 range expansion** (new, 4-yr backtest, PF 2.03). All need forward shadow execution before real capital.
+- **Three plausible-unvalidated:** overnight equity drift, failed-reaction fade, and **MBT NR4 range expansion** (new, 4-yr backtest, PF 2.03; **now wired into demo engine 2026-05-29**). All need forward shadow execution before real capital.
 - **A defined speculative frontier:** five microstructure hypotheses, gated behind a deliberate
   tick/L2 data decision, prioritized by executability (H1/H4 first).
 - **A large, honestly-labeled rejected pile** — including the academically-famous pre-FOMC drift

@@ -2175,7 +2175,7 @@ function scoreSetup(factors: {
 
 // ── Setup Detection (on 5-min bar close) ────────────────
 
-function onBarClose(sym: string, bar: Bar) {
+async function onBarClose(sym: string, bar: Bar) {
   if (!SYMBOLS.includes(sym)) return;   // PHASE 0: only evaluate/trade whitelisted symbols (e.g. MES-only live)
   const b = barBuilders.get(sym);
   if (!b || b.bars5m.length < 25) return;
@@ -2285,6 +2285,37 @@ function onBarClose(sym: string, bar: Bar) {
 
   log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
   feedLog("scan", `**${sym}** $${price.toFixed(2)} | RSI ${currentRSI.toFixed(0)} | ${tf15.trend} | ${dayType} | ${session}`);
+
+  // ── REGISTRY STRATEGIES (Tier 1/2 validated edges from /lib/strategies) ──
+  // Crypto futures (MBT/MET/BFF/MXR/MSL) ARE the registry's exclusive domain — the 5m equity-index
+  // setups catastrophically lose on them per backtest (MET PF 0.06, BFF PF 0.27). So registry-only
+  // symbols return after the registry pass even if no signal fired.
+  try {
+    const { strategiesFor, isRegistryOnlySymbol } = await import("../lib/strategies/registry");
+    const registered = strategiesFor(sym);
+    if (registered.length > 0 && IS_DEMO) {  // demo only — MBT day margin (~$2k) won't fit $1K live
+      const { runStrategy, buildTodayDailyBar } = await import("../lib/strategy-runner");
+      const today = buildTodayDailyBar(b.bars5m, Date.now());
+      for (const strat of registered) {
+        const sig = await runStrategy(strat, today, sym, Date.now());
+        if (!sig) continue;
+        const stopDist = Math.abs(sig.entryPrice - sig.stopPrice);
+        const targetDist = Math.abs(sig.targetPrice - sig.entryPrice);
+        if (stopDist <= 0 || targetDist <= 0) continue;
+        log(`  → ${sig.setupName.toUpperCase()} ${sig.direction.toUpperCase()} | strategy:${sig.strategyId} | entry:${sig.entryPrice.toFixed(2)} stop:${sig.stopPrice.toFixed(2)} target:${sig.targetPrice.toFixed(2)} | ${sig.reason}`);
+        evaluateAndTrade(sym, sig.direction, sig.entryPrice, stopDist, targetDist, effectiveSizeMult, sig.confidence ?? 75,
+          sig.reason, currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+          sig.strategyId);
+        return;
+      }
+    }
+    if (isRegistryOnlySymbol(sym)) {
+      // Registry symbols don't fall through to 5m setups (proven failures on these instruments).
+      return;
+    }
+  } catch (err) {
+    log(`  [REGISTRY] ${sym} skipped: ${err instanceof Error ? err.message : err}`);
+  }
 
   // ── EVALUATE ALL SETUPS WITH CONFIDENCE SCORING ──
 
@@ -2559,6 +2590,66 @@ function onBarClose(sym: string, bar: Bar) {
             `VWAP bounce ${dir} at $${vwapData.vwap.toFixed(2)}, rejection candle, 15m ${tf15.trend}, conf ${score}%`,
             currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
             "vwap_bounce");
+        }
+        return;
+      }
+    }
+  }
+
+  // SETUP 4.5: VWAP Reclaim — price was on one side of VWAP for most of session, then closes back through.
+  // Strong continuation signal: institutions defending the level. Enter in direction of reclaim.
+  // Works on TREND days; "reclaim" = breaking back through VWAP after a sustained one-sided session.
+  if (vwapData.vwap > 0 && b.sessionBars.length >= 12) {
+    const RECLAIM_LOOKBACK = 6;  // last 30 min of 5m bars
+    const recent = b.sessionBars.slice(-RECLAIM_LOOKBACK - 1, -1);  // exclude current bar
+    if (recent.length === RECLAIM_LOOKBACK) {
+      const aboveCount = recent.filter((br) => br.c > vwapData.vwap).length;
+      const belowCount = recent.filter((br) => br.c < vwapData.vwap).length;
+      const wasAllAbove = aboveCount >= RECLAIM_LOOKBACK - 1;  // 5 of 6 bars above
+      const wasAllBelow = belowCount >= RECLAIM_LOOKBACK - 1;
+      const closedBelow = bar.c < vwapData.vwap;
+      const closedAbove = bar.c > vwapData.vwap;
+      const distFromVwap = Math.abs(bar.c - vwapData.vwap) / vwapData.vwap;
+
+      // Short reclaim: was above all session, now closed below → expect continuation lower
+      if (wasAllAbove && closedBelow && distFromVwap < 0.003 && tf15.trend !== "up" && currentRSI < 60) {
+        const dir = "short";
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 73,
+          volTrend, volRatio,
+          trend15Aligns: tf15.trend === "down",
+          rsiExtreme: false,
+          priceAboveVWAP: false,
+          dayTypeMatch: dayType === "trend",
+          sessionQuality,
+        });
+        log(`  → VWAP RECLAIM SHORT | VWAP:$${vwapData.vwap.toFixed(2)} | Closed below after ${aboveCount}/${RECLAIM_LOOKBACK} above | Confidence: ${score}% | ${reasons.join(", ")}`);
+        if (score >= 72) {
+          evaluateAndTrade(sym, dir, price, adjustedATR * 1.3, adjustedATR * 3.5, effectiveSizeMult, score,
+            `VWAP reclaim ${dir}: ${aboveCount}/${RECLAIM_LOOKBACK} bars above VWAP $${vwapData.vwap.toFixed(2)}, now broken below, 15m ${tf15.trend}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "vwap_reclaim");
+        }
+        return;
+      }
+      // Long reclaim: was below all session, now closed above → expect continuation higher
+      if (wasAllBelow && closedAbove && distFromVwap < 0.003 && tf15.trend !== "down" && currentRSI > 40) {
+        const dir = "long";
+        const { score, reasons } = scoreSetup({
+          baseConfidence: 73,
+          volTrend, volRatio,
+          trend15Aligns: tf15.trend === "up",
+          rsiExtreme: false,
+          priceAboveVWAP: true,
+          dayTypeMatch: dayType === "trend",
+          sessionQuality,
+        });
+        log(`  → VWAP RECLAIM LONG | VWAP:$${vwapData.vwap.toFixed(2)} | Closed above after ${belowCount}/${RECLAIM_LOOKBACK} below | Confidence: ${score}% | ${reasons.join(", ")}`);
+        if (score >= 72) {
+          evaluateAndTrade(sym, dir, price, adjustedATR * 1.3, adjustedATR * 3.5, effectiveSizeMult, score,
+            `VWAP reclaim ${dir}: ${belowCount}/${RECLAIM_LOOKBACK} bars below VWAP $${vwapData.vwap.toFixed(2)}, now broken above, 15m ${tf15.trend}, conf ${score}%`,
+            currentRSI, currentATR, vwapData.vwap, dayType, session, tf15.trend, b.prevDayHigh, b.prevDayLow,
+            "vwap_reclaim");
         }
         return;
       }
