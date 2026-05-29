@@ -21,6 +21,11 @@ export interface AssetClassMeta {
   shortLabel: string;
   description: string;
   symbols: string[]; // canonical symbols (root, no month code)
+  // Infrastructure
+  exchange: string;       // e.g. "CME GLOBEX"
+  dataFeed: string;       // e.g. "Databento GLBX.MDP3"
+  broker: string;         // e.g. "Tradovate"
+  hours: string;          // e.g. "Sun 6pm ET → Fri 5pm ET, 1h daily break"
 }
 
 export const ASSET_CLASSES: AssetClassMeta[] = [
@@ -30,6 +35,10 @@ export const ASSET_CLASSES: AssetClassMeta[] = [
     shortLabel: "Equity",
     description: "ES, NQ, YM, RTY + their micro counterparts (MES, MNQ, MYM, M2K).",
     symbols: ["ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K"],
+    exchange: "CME GLOBEX",
+    dataFeed: "Databento GLBX.MDP3",
+    broker: "Tradovate",
+    hours: "Sun 6pm → Fri 5pm ET (1h daily break)",
   },
   {
     id: "metals_futures",
@@ -37,6 +46,10 @@ export const ASSET_CLASSES: AssetClassMeta[] = [
     shortLabel: "Metals",
     description: "Gold + Micro Gold (GC, MGC).",
     symbols: ["GC", "MGC"],
+    exchange: "COMEX",
+    dataFeed: "Databento GLBX.MDP3",
+    broker: "Tradovate",
+    hours: "Sun 6pm → Fri 5pm ET (1h daily break)",
   },
   {
     id: "crypto_futures",
@@ -45,38 +58,58 @@ export const ASSET_CLASSES: AssetClassMeta[] = [
     description:
       "CME micro crypto futures: MBT (Bitcoin), MET (Ether), BFF (Bitcoin weekly), MXR (XRP), MSL (Solana).",
     symbols: ["MBT", "MET", "BFF", "MXR", "MSL"],
+    exchange: "CME GLOBEX",
+    dataFeed: "Databento GLBX.MDP3",
+    broker: "Tradovate",
+    hours: "Sun 6pm → Fri 5pm ET (1h daily break)",
   },
   {
     id: "relative_value_spreads",
     label: "Relative-Value Spreads",
     shortLabel: "Spreads",
     description:
-      "Multi-leg commodity, metals, FX, and grain spread book — the only Tier-1 validated edge. Needs $100k+ capital. Pairs include crack (CL/RB), grains (ZC/ZS), FX (6E/6B), and metals spreads.",
+      "Multi-leg commodity, metals, FX, and grain spread book — the only Tier-1 validated edge. Needs $100k+ capital.",
     symbols: ["CL-RB", "ZC-ZS", "6E-6B", "GC-SI"],
+    exchange: "CME / NYMEX / CBOT / COMEX",
+    dataFeed: "Databento (GLBX + XNAS)",
+    broker: "Tradovate (multi-leg)",
+    hours: "Sun 6pm → Fri 5pm ET",
   },
   {
     id: "stocks",
     label: "Stocks (Alpaca)",
     shortLabel: "Stocks",
     description:
-      "US equities via Alpaca. Swing trades from research watchlist + AI grader. $1K paper / live mode controlled separately.",
+      "US equities via Alpaca. Swing trades from research watchlist + AI grader.",
     symbols: ["AAPL", "NVDA", "TSLA", "MSFT", "GOOGL"],
+    exchange: "NYSE / NASDAQ",
+    dataFeed: "Alpaca Market Data (IEX)",
+    broker: "Alpaca",
+    hours: "Mon-Fri 9:30am–4pm ET (RTH)",
   },
   {
     id: "crypto_spot",
     label: "Crypto Spot (Alpaca)",
     shortLabel: "Crypto Spot",
     description:
-      "24/7 spot crypto on Alpaca — no expiry, no margin. Trades fractional BTC/ETH from $1K paper account.",
+      "24/7 spot crypto on Alpaca — no expiry, no margin. Trades fractional BTC/ETH.",
     symbols: ["BTCUSD", "ETHUSD"],
+    exchange: "Alpaca aggregator (Coinbase + Binance.US routing)",
+    dataFeed: "Alpaca Crypto WS",
+    broker: "Alpaca",
+    hours: "24 / 7 / 365",
   },
   {
     id: "options",
     label: "Stock Options",
     shortLabel: "Options",
     description:
-      "Stock options strategies (wheel / covered calls / bearish puts). Currently disabled — see Rules/anti-patterns.md.",
+      "Stock options strategies (wheel / covered calls / bearish puts). Currently disabled.",
     symbols: [],
+    exchange: "CBOE / OCC",
+    dataFeed: "Alpaca Options",
+    broker: "Alpaca",
+    hours: "Mon-Fri 9:30am–4pm ET (RTH)",
   },
 ];
 
