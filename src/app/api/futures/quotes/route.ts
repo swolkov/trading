@@ -1,7 +1,11 @@
 import { getDashboardQuotes } from "@/lib/futures-data";
 
-// All contracts needed across demo (ES, NQ, GC) and live (MES, MNQ) views
-const ALL_SYMBOLS = ["ES", "NQ", "GC", "MES", "MNQ", "MGC", "MYM", "M2K"];
+// All contracts needed across demo + live views, including crypto futures.
+// Crypto quotes flow via the live_quotes table (sidecar) since Tradovate/Yahoo don't carry them.
+const ALL_SYMBOLS = [
+  "ES", "NQ", "GC", "MES", "MNQ", "MGC", "MYM", "M2K",
+  "MBT", "MET", "BFF", "MXR", "MSL",
+];
 
 export async function GET() {
   try {

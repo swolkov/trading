@@ -234,6 +234,8 @@ export async function getFuturesQuotes(symbols: string[], modeOverride?: Trading
 const DAY_MARGINS: Record<string, number> = {
   ES: 12_650, NQ: 18_700, GC: 10_200, YM: 9_900, RTY: 7_150,
   MES: 1_265, MNQ: 1_870, MGC: 1_020, MYM: 990, M2K: 715,
+  // Crypto micros (CME)
+  MBT: 2_000, MET: 350, BFF: 200, MXR: 850, MSL: 650,
 };
 
 export interface DashboardQuote {
@@ -253,7 +255,7 @@ export interface DashboardQuote {
   bid: number;
   ask: number;
   timestamp: string;
-  source: "tradovate" | "yahoo" | "none";
+  source: "tradovate" | "yahoo" | "databento" | "none";
 }
 
 export async function getDashboardQuotes(symbols: string[]): Promise<DashboardQuote[]> {
@@ -265,7 +267,7 @@ export async function getDashboardQuotes(symbols: string[]): Promise<DashboardQu
 
     // Try to get a recent bar for OHLC + change data
     let price = 0, open = 0, high = 0, low = 0, volume = 0, prevClose = 0, bid = 0, ask = 0;
-    let source: "tradovate" | "yahoo" | "none" = "none";
+    let source: "tradovate" | "yahoo" | "databento" | "none" = "none";
 
     try {
       const contract = await resolveContract(sym);
@@ -300,6 +302,27 @@ export async function getDashboardQuotes(symbols: string[]): Promise<DashboardQu
           }
         } catch { /* no data */ }
       }
+    }
+
+    // Last-resort fallback: read the sidecar's live_quotes table (Databento).
+    // For crypto futures (MBT/MET/BFF/MXR/MSL) Tradovate + Yahoo both return nothing,
+    // so the sidecar is the only source. For equity futures this also kicks in if
+    // Tradovate is down.
+    if (price === 0) {
+      try {
+        const { prisma } = await import("./db");
+        const rows = await prisma.$queryRaw<{ bid: number | null; ask: number | null; mid: number | null; vol: number | null }[]>`
+          SELECT bid, ask, mid, vol FROM live_quotes WHERE symbol = ${sym} LIMIT 1
+        `;
+        if (rows[0] && rows[0].mid && rows[0].mid > 0) {
+          price = rows[0].mid;
+          bid = rows[0].bid ?? 0;
+          ask = rows[0].ask ?? 0;
+          volume = rows[0].vol ?? 0;
+          // OHL aren't available from live_quotes — leave as 0; UI shows "—" gracefully
+          source = "databento";
+        }
+      } catch { /* fall through; price stays 0 */ }
     }
 
     const change = prevClose > 0 ? price - prevClose : 0;
