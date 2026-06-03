@@ -2061,9 +2061,10 @@ GOLD-SPECIFIC RULES:
       ? `\nThis is the LIVE $1K account. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
       : "";
 
-    // Pattern-memory empirical evidence block
+    // Pattern-memory empirical evidence block — 2026-06-03: thresholds raised because 10 trades
+    // is variance, not signal. Only treat the data as authoritative at 25+ matching trades.
     const ps = setup.patternStats;
-    const patternBlock = ps && ps.matchCount >= 10
+    const patternBlock = ps && ps.matchCount >= 25
       ? `\n📊 EMPIRICAL EVIDENCE (from ${ps.matchCount} matching historical trades — THIS DOMINATES):
    Historical win rate: ${(ps.winRate * 100).toFixed(0)}%
    Average R-multiple: ${ps.avgR.toFixed(2)}R
@@ -2072,9 +2073,11 @@ GOLD-SPECIFIC RULES:
    - WR ≥ 55% → APPROVE. The data says this works. Don't second-guess.
    - WR ≤ 30% → REJECT. The data says this loses.
    - WR 30-55% → consider context below, but DEFAULT TO APPROVE if pre-AI confidence > 65%.\n`
+      : ps && ps.matchCount >= 10
+      ? `\n📊 Early pattern signal: ${ps.matchCount} matching trades (need 25+ for the hard rule), current WR ${(ps.winRate * 100).toFixed(0)}%, avg R ${ps.avgR.toFixed(2)}. This is informative but NOT authoritative — variance dominates at this sample size. **Default to APPROVE on pre-AI confidence > 60%** unless WR is catastrophically low (under 15%) AND avg R is negative.\n`
       : ps && ps.matchCount > 0
-      ? `\n📊 Sparse history: only ${ps.matchCount} matching trades (need 10+ for confidence). Use reasoning, but lean toward APPROVE if pre-AI confidence > 65%.\n`
-      : `\n📊 No matching historical pattern yet. Lean toward APPROVE on technical confidence > 65% — we need data to populate.\n`;
+      ? `\n📊 Sparse history: only ${ps.matchCount} matching trades. Use reasoning. **Default to APPROVE if pre-AI confidence > 60%** — we need to fire to populate the data.\n`
+      : `\n📊 No matching historical pattern yet (cold-start). **Default to APPROVE on pre-AI confidence > 60%** — we need data to populate.\n`;
 
     const prompt = `You are a DATA-DRIVEN futures trader. Empirical historical performance is your primary signal. Subjective reasoning is secondary.
 ${liveContext}
@@ -2827,8 +2830,12 @@ async function evaluateAndTrade(
     });
     patternStats = { matchCount: pred.matchCount, winRate: pred.winRate, avgR: pred.score };
     log(`  [PATTERN] ${pred.matchCount} matches, ${(pred.winRate * 100).toFixed(0)}% historical WR`);
-    // Hard block: only setups with clearly proven losing history (< 25% WR, 10+ matches)
-    if (IS_LIVE && pred.matchCount >= 10 && pred.winRate < 0.25) {
+    // 2026-06-03: Raised from 10 → 25 matches. 10 trades is variance, not signal — with the AI
+    // grader prompt baking the WR rule in already, the redundant low-sample hard-block was
+    // killing every fire on the first bad week. Auto-prune (30-match window) handles persistent
+    // underperformers; this early hard-block only fires if we have a genuine 25-trade sample
+    // of statistical losing.
+    if (IS_LIVE && pred.matchCount >= 25 && pred.winRate < 0.25) {
       log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
       return;
     }
