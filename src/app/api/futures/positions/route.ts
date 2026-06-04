@@ -397,10 +397,31 @@ export async function GET() {
         }
         return null;
       })(),
-      // Historical daily balance snapshots — vault is source of truth (demo only)
+      // Historical daily balance snapshots — vault for demo, agentConfig for live
       balanceHistory: await (async () => {
-        // Vault/DB balance history is from the demo account only
-        if (viewMode === "live") return [];
+        if (viewMode === "live") {
+          // Live: read live_daily_balance_* (SOD) and live_eod_balance_* (EOD) from agentConfig
+          try {
+            const [liveDailyBalances, liveEodBalances] = await Promise.all([
+              prisma.agentConfig.findMany({ where: { key: { startsWith: "live_daily_balance_" } } }),
+              prisma.agentConfig.findMany({ where: { key: { startsWith: "live_eod_balance_" } } }),
+            ]);
+            const liveHistory: Record<string, { sod?: number; eod?: number }> = {};
+            for (const b of liveDailyBalances) {
+              const date = b.key.replace("live_daily_balance_", "");
+              if (!liveHistory[date]) liveHistory[date] = {};
+              liveHistory[date].sod = parseFloat(b.value);
+            }
+            for (const b of liveEodBalances) {
+              const date = b.key.replace("live_eod_balance_", "");
+              if (!liveHistory[date]) liveHistory[date] = {};
+              liveHistory[date].eod = parseFloat(b.value);
+            }
+            return Object.entries(liveHistory)
+              .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
+              .sort((a, b) => a.date.localeCompare(b.date));
+          } catch { return []; }
+        }
 
         try {
           // Primary: parse from vault daily-balances.md

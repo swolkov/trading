@@ -130,12 +130,20 @@ export async function GET() {
     const liveBalance = liveBrokerLive?.balance ?? liveHistory[liveHistory.length - 1]?.balance ?? null;
     const liveBalanceSource = liveBrokerLive ? "broker_live" : liveHistory.length > 0 ? "daily_cache" : "unavailable";
 
+    // Today P&L: balance delta (source of truth) — DB trade sums double-log and are inflated
+    // SOD = most recent daily_balance_* entry (written by engine before trading each day)
+    const today = new Date().toISOString().slice(0, 10);
+    const demoSodEntry = demoHistory.find((h) => h.date === today) ?? demoHistory[demoHistory.length - 1];
+    const liveSodEntry = liveHistory.find((h) => h.date === today) ?? liveHistory[liveHistory.length - 1];
+    const demoTodayPnl = demoBrokerLive && demoSodEntry ? demoBrokerLive.balance - demoSodEntry.balance : demoToday.pnl;
+    const liveTodayPnl = liveBrokerLive && liveSodEntry ? liveBrokerLive.balance - liveSodEntry.balance : liveToday.pnl;
+
     const demoEquity = demoBalance ?? 50_000;
     const liveEquity = liveBalance ?? 1_000;
     const demoMaxLoss = demoEquity * (demoDailyLimitPct / 100);
     const liveMaxLoss = liveEquity * (liveDailyLimitPct / 100);
-    const demoRiskUsed = demoToday.pnl < 0 ? Math.min(100, Math.abs(demoToday.pnl) / demoMaxLoss * 100) : 0;
-    const liveRiskUsed = liveToday.pnl < 0 ? Math.min(100, Math.abs(liveToday.pnl) / liveMaxLoss * 100) : 0;
+    const demoRiskUsed = demoTodayPnl < 0 ? Math.min(100, Math.abs(demoTodayPnl) / demoMaxLoss * 100) : 0;
+    const liveRiskUsed = liveTodayPnl < 0 ? Math.min(100, Math.abs(liveTodayPnl) / liveMaxLoss * 100) : 0;
 
     // Drawdown vs session-start (yesterday's EOD balance)
     const demoStartBal = demoHistory[demoHistory.length - 2]?.balance ?? demoEquity;
@@ -151,7 +159,7 @@ export async function GET() {
         balance: demoBalance,
         balanceSource: demoBalanceSource as AccountInfo["balanceSource"],
         unrealizedPnl: demoBrokerLive?.unrealized ?? 0,
-        todayPnl: demoToday.pnl,
+        todayPnl: demoTodayPnl,
         todayTrades: demoToday.trades,
         dailyLossLimitPct: demoDailyLimitPct,
         riskUsedPct: demoRiskUsed,
@@ -168,7 +176,7 @@ export async function GET() {
         balance: liveBalance,
         balanceSource: liveBalanceSource as AccountInfo["balanceSource"],
         unrealizedPnl: liveBrokerLive?.unrealized ?? 0,
-        todayPnl: liveToday.pnl,
+        todayPnl: liveTodayPnl,
         todayTrades: liveToday.trades,
         dailyLossLimitPct: liveDailyLimitPct,
         riskUsedPct: liveRiskUsed,

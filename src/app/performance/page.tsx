@@ -527,7 +527,14 @@ export default function PerformancePage() {
 
         // ── Daily P&L from balance deltas (source of truth) ──
         // Per risk-management.md: NEVER sum trade P&L. Use Tradovate balance deltas.
-        const balanceHistory = (futures?.balanceHistory || []).filter((b) => !EXCLUDED_DATES.includes(b.date));
+        // Sanity filter: reject entries where balance is outside a plausible range for this account.
+        // Guards against cross-contamination (demo $50K values written to live $1K keys, or vice versa).
+        const balSanityMin = STARTING_CAPITAL * 0.1;
+        const balSanityMax = STARTING_CAPITAL * 20;
+        const isSaneBalance = (v: number | null) => v == null || (v >= balSanityMin && v <= balSanityMax);
+        const balanceHistory = (futures?.balanceHistory || [])
+          .filter((b) => !EXCLUDED_DATES.includes(b.date))
+          .filter((b) => isSaneBalance(b.startBalance) && isSaneBalance(b.endBalance));
         const balancePnlByDate: Record<string, number> = {};
         const dayMap: Record<string, { trades: number; wins: number; losses: number; totalPnl: number; label: string; hasBalanceData: boolean }> = {};
 

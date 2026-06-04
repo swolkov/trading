@@ -439,10 +439,11 @@ export default function FuturesPage() {
   // to $66k by computing demo_balance($67k) - live_balance($1k) instead of the real delta.
   const computePeriodPnlFromBalance = (periodStartDate: Date): number | null => {
     if (currentBalance == null) return null;
-    const minSane = STARTING_CAPITAL * 0.1; // below 10% of starting capital = corrupted live-account data
+    const minSane = STARTING_CAPITAL * 0.1; // below 10% = corrupted (e.g. live $1K written to demo)
+    const maxSane = STARTING_CAPITAL * 20;  // above 20x = corrupted (e.g. demo $50K written to live $1K)
     const periodKey = `${periodStartDate.getUTCFullYear()}-${String(periodStartDate.getUTCMonth() + 1).padStart(2, "0")}-${String(periodStartDate.getUTCDate()).padStart(2, "0")}`;
     const sorted = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
-    const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null && b.startBalance >= minSane);
+    const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null && b.startBalance >= minSane && b.startBalance <= maxSane);
     if (startSnapshot?.startBalance != null) {
       return currentBalance - startSnapshot.startBalance;
     }
@@ -1558,9 +1559,9 @@ export default function FuturesPage() {
                 </div>
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Fills</p>
-                  <p className="text-lg font-bold">{posData?.fillCount ?? closedTrades.length}</p>
+                  <p className="text-lg font-bold">{(posData?.fillCount ?? 0) > 0 ? posData!.fillCount : closedTrades.length}</p>
                   <p className="text-[9px] text-muted-foreground/30">
-                    {posData?.fillCount ? "from Tradovate" : "logged"}
+                    {(posData?.fillCount ?? 0) > 0 ? "from Tradovate" : "DB logged"}
                   </p>
                 </div>
               </div>
