@@ -56,37 +56,43 @@ const DEFAULTS: CryptoConfig = {
   simulatedEquity: 1000,
 };
 
-async function loadCryptoConfig(): Promise<CryptoConfig> {
+async function loadCryptoConfig(liveMode = false): Promise<CryptoConfig> {
   try {
+    const p = liveMode ? "live_crypto" : "crypto"; // config key prefix
     const keys = [
-      "crypto_enabled",
-      "crypto_risk_per_trade_pct",
-      "crypto_daily_loss_limit_pct",
-      "crypto_max_positions",
-      "crypto_max_trades_per_day",
-      "crypto_confidence_threshold",
-      "crypto_focus_symbols",
-      "crypto_simulated_equity",
+      `${p}_enabled`,
+      `${p}_risk_per_trade_pct`,
+      `${p}_daily_loss_limit_pct`,
+      `${p}_max_positions`,
+      `${p}_max_trades_per_day`,
+      `${p}_confidence_threshold`,
+      `${p}_focus_symbols`,
+      `${p}_simulated_equity`,
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
     for (const c of configs) cfg[c.key] = c.value;
 
+    const enabledVal = cfg[`${p}_enabled`] ?? "";
+    const enabled = liveMode
+      ? enabledVal === "true" || enabledVal === "live"
+      : enabledVal === "paper" || enabledVal === "live";
+
     return {
-      enabled: cfg.crypto_enabled === "paper" || cfg.crypto_enabled === "live",
-      mode: (cfg.crypto_enabled === "live" ? "live" : "paper") as TradingMode,
-      riskPerTradePct: parseFloat(cfg.crypto_risk_per_trade_pct) || DEFAULTS.riskPerTradePct,
-      dailyLossLimitPct: parseFloat(cfg.crypto_daily_loss_limit_pct) || DEFAULTS.dailyLossLimitPct,
-      maxPositions: parseInt(cfg.crypto_max_positions) || DEFAULTS.maxPositions,
-      maxTradesPerDay: parseInt(cfg.crypto_max_trades_per_day) || DEFAULTS.maxTradesPerDay,
-      confidenceThreshold: parseFloat(cfg.crypto_confidence_threshold) || DEFAULTS.confidenceThreshold,
-      focusSymbols: cfg.crypto_focus_symbols
-        ? cfg.crypto_focus_symbols.split(",").map((s) => s.trim())
+      enabled,
+      mode: liveMode ? "live" : "paper",
+      riskPerTradePct: parseFloat(cfg[`${p}_risk_per_trade_pct`]) || DEFAULTS.riskPerTradePct,
+      dailyLossLimitPct: parseFloat(cfg[`${p}_daily_loss_limit_pct`]) || DEFAULTS.dailyLossLimitPct,
+      maxPositions: parseInt(cfg[`${p}_max_positions`]) || DEFAULTS.maxPositions,
+      maxTradesPerDay: parseInt(cfg[`${p}_max_trades_per_day`]) || DEFAULTS.maxTradesPerDay,
+      confidenceThreshold: parseFloat(cfg[`${p}_confidence_threshold`]) || (liveMode ? 80 : 75),
+      focusSymbols: cfg[`${p}_focus_symbols`]
+        ? cfg[`${p}_focus_symbols`].split(",").map((s) => s.trim())
         : DEFAULTS.focusSymbols,
-      simulatedEquity: parseFloat(cfg.crypto_simulated_equity) || DEFAULTS.simulatedEquity,
+      simulatedEquity: parseFloat(cfg[`${p}_simulated_equity`]) || DEFAULTS.simulatedEquity,
     };
   } catch {
-    return DEFAULTS;
+    return { ...DEFAULTS, mode: liveMode ? "live" : "paper" };
   }
 }
 
@@ -153,40 +159,47 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
 
 // ── Main Agent ──
 
-export async function runCryptoAgent(): Promise<{
+// liveMode=false → Alpaca paper (demo), reads crypto_* config keys
+// liveMode=true  → Alpaca live (real $), reads live_crypto_* config keys
+export async function runCryptoAgent(liveMode = false): Promise<{
   trades: CryptoTradeResult[];
   managed: number;
   details: string[];
 }> {
-  const config = await loadCryptoConfig();
+  const config = await loadCryptoConfig(liveMode);
   const trades: CryptoTradeResult[] = [];
   const details: string[] = [];
 
   if (!config.enabled) {
-    return { trades, managed: 0, details: ["Crypto agent disabled"] };
+    return { trades, managed: 0, details: [`Crypto ${liveMode ? "live" : "demo"} agent disabled`] };
   }
 
-  // Paper sizing basis: if alpaca_account_size is set (the $1K paper test), size off THAT so paper
-  // mirrors a real small account. Otherwise fall back to the paper shell's real equity (legacy demo).
-  if (config.mode === "paper") {
-    try {
-      const { getAccount } = await import("./alpaca");
-      const account = await getAccount(config.mode);
-      const actualEquity = parseFloat(account.equity);
+  // Size off the actual Alpaca account balance so we don't over- or under-size.
+  // Paper: cap to alpaca_account_size ($1K simulated pool so stocks+crypto stay within budget).
+  // Live: use real live account equity directly.
+  try {
+    const { getAccount } = await import("./alpaca");
+    const account = await getAccount(config.mode);
+    const actualEquity = parseFloat(account.equity);
+    if (liveMode) {
+      // Live: size off real balance, config keys control risk%/limits
+      if (actualEquity > 0) config.simulatedEquity = actualEquity;
+    } else {
+      // Paper/demo: cap to alpaca_account_size if set (the $1K shared pool)
       const sizeCfg = await prisma.agentConfig.findUnique({ where: { key: "alpaca_account_size" } });
       const simSize = sizeCfg ? parseFloat(sizeCfg.value) : 0;
       const baseEquity = simSize > 0 ? simSize : actualEquity;
       if (baseEquity > 0) {
         config.simulatedEquity = baseEquity;
-        config.maxPositions = simSize > 0 ? 3 : 6;       // tighter on a small shared pool
+        config.maxPositions = simSize > 0 ? 3 : 6;
         config.maxTradesPerDay = simSize > 0 ? 6 : 15;
         config.riskPerTradePct = simSize > 0 ? 3 : 5;
         config.confidenceThreshold = 65;
       }
-    } catch { /* fall back to defaults */ }
-  }
+    }
+  } catch { /* fall back to loaded config */ }
 
-  details.push(`[crypto-agent] Starting scan. Mode: ${config.mode.toUpperCase()}, Equity: $${config.simulatedEquity.toLocaleString()}, Symbols: ${config.focusSymbols.join(", ")}`);
+  details.push(`[crypto-agent:${liveMode ? "LIVE" : "DEMO"}] Starting scan. Equity: $${config.simulatedEquity.toLocaleString()}, Symbols: ${config.focusSymbols.join(", ")}`);
 
   // ── 1. Load vault context ──
   const context = await loadAgentContext("crypto-agent", "crypto-day-trading.md");

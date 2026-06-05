@@ -13,6 +13,10 @@
       "schedule": "*/15 * * * *"
     },
     {
+      "path": "/api/cron/crypto-live",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/stocks",
       "schedule": "*/30 13-20 * * 1-5"
     },
