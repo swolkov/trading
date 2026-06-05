@@ -270,12 +270,12 @@ export async function scanCryptoSetups(
 
       // 3. Trend Continuation (pullback to EMA 21)
       if (
-        regime === "CRYPTO_BULL" &&
+        (regime === "CRYPTO_BULL" || regime === "CRYPTO_CHOPPY") &&
         ema9 > ema21 &&
         currentPrice > ema21 * 0.99 &&
-        currentPrice < ema21 * 1.01 &&
+        currentPrice < ema21 * 1.02 &&
         currentRsi !== null &&
-        currentRsi > 40 &&
+        currentRsi > 38 &&
         currentRsi < 60
       ) {
         const stop = ema21 - currentAtr * 1.5;
@@ -290,10 +290,95 @@ export async function scanCryptoSetups(
             stopPrice: stop,
             targetPrice: target,
             riskReward: rr,
-            confidence: 65 + (currentRsi > 45 && currentRsi < 55 ? 5 : 0),
-            reasoning: `Pullback to EMA 21 at ${ema21.toFixed(2)} in uptrend. RSI ${currentRsi?.toFixed(1)} neutral — room to run.`,
+            confidence: 65 + (currentRsi > 43 && currentRsi < 55 ? 5 : 0),
+            reasoning: `Pullback to EMA 21 at ${ema21.toFixed(2)} in ${regime === "CRYPTO_BULL" ? "uptrend" : "range"}. RSI ${currentRsi?.toFixed(1)} neutral — room to run.`,
             indicators,
           });
+        }
+      }
+
+      // 4. Fear Dip Buy — fires specifically in CRYPTO_FEAR (extreme fear/capitulation)
+      // RSI < 30 on daily but 1H often bounces 30-45; this catches those recovery entries
+      if (
+        regime === "CRYPTO_FEAR" &&
+        currentRsi !== null &&
+        currentRsi < 45
+      ) {
+        const stop = currentPrice - currentAtr * 2.0; // wider stop — fear = big ATR
+        const target = Math.max(ema21, ema9);         // target nearest EMA overhead
+        if (target > currentPrice) {
+          const rr = (target - currentPrice) / (currentPrice - stop);
+          if (rr >= 1.5) {
+            setups.push({
+              symbol,
+              type: "mean_reversion",
+              direction: "long",
+              price: currentPrice,
+              stopPrice: stop,
+              targetPrice: target,
+              riskReward: rr,
+              confidence: 65 + (currentRsi < 35 ? 10 : 0) + (currentRsi < 25 ? 5 : 0),
+              reasoning: `Extreme Fear dip buy — 1H RSI ${currentRsi.toFixed(1)}, regime CRYPTO_FEAR (F&G Extreme Fear). Target EMA recovery at ${target.toFixed(2)}.`,
+              indicators,
+            });
+          }
+        }
+      }
+
+      // 5. EMA Stack Long — price bouncing off EMA9 in intact uptrend (BULL/CHOPPY)
+      if (
+        (regime === "CRYPTO_BULL" || regime === "CRYPTO_CHOPPY") &&
+        ema9 > ema21 &&
+        currentPrice >= ema9 * 0.995 &&   // within 0.5% below EMA9
+        currentPrice <= ema9 * 1.015 &&   // not extended above
+        currentRsi !== null &&
+        currentRsi >= 40 &&
+        currentRsi <= 65
+      ) {
+        const stop = ema21 - currentAtr * 0.8;
+        const target = currentPrice + currentAtr * 2.5;
+        const rr = (target - currentPrice) / (currentPrice - stop);
+        if (rr >= 2) {
+          setups.push({
+            symbol,
+            type: "trend_continuation",
+            direction: "long",
+            price: currentPrice,
+            stopPrice: stop,
+            targetPrice: target,
+            riskReward: rr,
+            confidence: 65 + (currentRsi >= 45 && currentRsi <= 55 ? 5 : 0) + (volumeRatio > 1.2 ? 5 : 0),
+            reasoning: `EMA9 stack long — price ${currentPrice.toFixed(2)} at EMA9 ${ema9.toFixed(2)} support, RSI ${currentRsi?.toFixed(1)} neutral.`,
+            indicators,
+          });
+        }
+      }
+
+      // 6. Fade Overbought Short — implements the missing fade_extreme type (EUPHORIA/CHOPPY)
+      if (
+        (regime === "CRYPTO_EUPHORIA" || regime === "CRYPTO_CHOPPY") &&
+        currentRsi !== null &&
+        currentRsi > 72 &&
+        currentPrice >= high20 * 0.995
+      ) {
+        const stop = currentPrice + currentAtr * 1.5;
+        const target = ema21;
+        if (target < currentPrice) {
+          const rr = (currentPrice - target) / (stop - currentPrice);
+          if (rr >= 1.5) {
+            setups.push({
+              symbol,
+              type: "fade_extreme",
+              direction: "short",
+              price: currentPrice,
+              stopPrice: stop,
+              targetPrice: target,
+              riskReward: rr,
+              confidence: 65 + (currentRsi > 80 ? 10 : 0) + (regime === "CRYPTO_EUPHORIA" ? 5 : 0),
+              reasoning: `Overbought fade short — RSI ${currentRsi.toFixed(1)} at 20H high. Target mean reversion to EMA21 at ${ema21.toFixed(2)}.`,
+              indicators,
+            });
+          }
         }
       }
 
