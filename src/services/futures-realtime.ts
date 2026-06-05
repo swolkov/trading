@@ -39,7 +39,7 @@ const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
-const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC"];
+const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC", "MBT"];
 const MICRO_SYMBOLS = ["MES", "MNQ", "MYM"];  // MYM = Micro Dow, $0.50/pt, ~$150 margin — fits $1K
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
@@ -73,6 +73,7 @@ function updateTradingSymbols() {
 const YAHOO_MAP: Record<string, string> = {
   ES: "ES=F", NQ: "NQ=F", GC: "GC=F", YM: "YM=F",
   MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F", MYM: "YM=F",
+  MBT: "BTC=F",
 };
 // Lazy-load Yahoo only when needed (fallback path)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -90,6 +91,8 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
   ES: 50, NQ: 20, GC: 100, YM: 5, RTY: 50,
   // Micros — MYM at $0.50/pt is the lowest-risk micro, ideal for $1K live
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
+  // Crypto futures — MBT (Micro Bitcoin) = 0.1 BTC/contract, $0.10/pt
+  MBT: 0.1,
 };
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
@@ -2206,13 +2209,17 @@ async function onBarClose(sym: string, bar: Bar) {
   if (vaultLessonsCache?.antiPatterns) {
     const ap = vaultLessonsCache.antiPatterns.toLowerCase();
 
-    // Map synthesis agent time buckets to engine session names
+    // Map synthesis agent time buckets to engine session names.
+    // Synthesis buckets are now ET-aware (fixed June 2026):
+    //   first_30_min = 9:30-10:00 AM ET (open), last_30_min = 3:30-4:00 PM ET (real RTH close),
+    //   after_hours = 4:00 PM+ (ETH sessions: eth_evening, eth_asia, eth_europe, pre_market).
     const sessionAntiPatterns: { pattern: string; sessions: string[]; label: string }[] = [
-      { pattern: "first_30_min", sessions: ["open"], label: "first 30 min" },
+      { pattern: "first_30_min", sessions: ["open", "morning"], label: "first 30 min" },
       { pattern: "mid_morning", sessions: ["morning"], label: "mid-morning" },
       { pattern: "midday", sessions: ["midday"], label: "midday/lunch" },
       { pattern: "afternoon", sessions: ["afternoon"], label: "afternoon" },
       { pattern: "last_30_min", sessions: ["close"], label: "last 30 min" },
+      { pattern: "after_hours", sessions: ["eth_evening", "eth_asia", "eth_europe", "pre_market"], label: "after hours / ETH" },
     ];
 
     for (const rule of sessionAntiPatterns) {
