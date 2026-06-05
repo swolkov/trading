@@ -17,16 +17,18 @@ export async function GET() {
     // Dashboard shows data from whichever account the VIEW mode points to.
     // This is independent of the agent execution mode (trading_mode_futures).
     const viewMode = await getViewMode("futures");
-    const auth = await checkTradovateAuth(viewMode);
-
-    // Get recent trade logs — filtered by ACTION PREFIX (reliable mode tag)
-    // Demo engine uses "futures_*" prefix, live engine uses "live_*" prefix.
-    // Symbol-only filtering is unreliable: demo can trade MES/MNQ with simulated equity.
     const actionPrefix = viewMode === "live" ? "live_" : "futures_";
-    const recentLogs = await prisma.autoTradeLog.findMany({
-      where: { symbol: { startsWith: "FUT:" }, action: { startsWith: actionPrefix } },
-      orderBy: { createdAt: "desc" },
-    });
+
+    // Kick off auth + all DB prefetches in parallel — none depend on each other
+    const [auth, recentLogs, demoHB, liveHB] = await Promise.all([
+      checkTradovateAuth(viewMode),
+      prisma.autoTradeLog.findMany({
+        where: { symbol: { startsWith: "FUT:" }, action: { startsWith: actionPrefix } },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_demo" } }).catch(() => null),
+      prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } }).catch(() => null),
+    ]);
 
     const activity = recentLogs.map((log) => ({
       id: log.id,
@@ -42,13 +44,9 @@ export async function GET() {
       time: log.createdAt.toISOString(),
     }));
 
-    // Check Railway engine heartbeats (demo + live)
+    // Parse engine heartbeats
     let engineStatus: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number; demo?: { alive: boolean; ageMinutes: number }; live?: { alive: boolean; ageMinutes: number } } = { alive: false, lastHeartbeat: null, ageMinutes: 999 };
     try {
-      const [demoHB, liveHB] = await Promise.all([
-        prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_demo" } }),
-        prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } }),
-      ]);
       const parseAge = (hb: typeof demoHB) => {
         if (!hb?.value) return { alive: false, ageMinutes: 999 };
         try {
@@ -62,7 +60,6 @@ export async function GET() {
       };
       const demo = parseAge(demoHB);
       const live = parseAge(liveHB);
-      // Overall status: alive if the relevant engine for current view mode is alive
       const relevantHB = viewMode === "live" ? liveHB : demoHB;
       const relevantAge = viewMode === "live" ? live : demo;
       engineStatus = {
@@ -77,15 +74,13 @@ export async function GET() {
     if (!auth.authenticated) {
       // Still return viewMode and balance data even when Tradovate auth fails
       // This prevents the dashboard from flickering to demo view during rate limits
-      const startingCapital = await (async () => {
-        try {
-          const key = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
-          const cfg = await prisma.agentConfig.findUnique({ where: { key } });
-          return cfg?.value ? parseFloat(cfg.value) : (viewMode === "live" ? 1025 : 50000);
-        } catch { return viewMode === "live" ? 1025 : 50000; }
-      })();
+      const scKey = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
       const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
-      const sodCfg = await prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null);
+      const [scCfg, sodCfg] = await Promise.all([
+        prisma.agentConfig.findUnique({ where: { key: scKey } }).catch(() => null),
+        prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null),
+      ]);
+      const startingCapital = scCfg?.value ? parseFloat(scCfg.value) : (viewMode === "live" ? 1025 : 50000);
       const startOfDayBalance = sodCfg?.value ? parseFloat(sodCfg.value) : null;
 
       return Response.json({
@@ -278,6 +273,114 @@ export async function GET() {
     // multiple trades on the same symbol happen within minutes. Aggregate P&L uses broker
     // account balance (source of truth), so per-trade reconciliation is not needed.
 
+    // Run all response-level DB computations in parallel — none depend on each other
+    const isDemoView = viewMode !== "live";
+    const kp = isDemoView ? "futures" : "live_futures";
+    const todayET = new Date().toISOString().slice(0, 10);
+    const todayStart = new Date(todayET + "T00:00:00-04:00");
+    const scKey = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
+    const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
+    const modeActionPrefix = isDemoView ? "futures_" : "live_";
+
+    const [riskMetrics, startingCapital, startOfDayBalance, balanceHistory] = await Promise.all([
+
+      // riskMetrics: dashboard risk gauge (mode-aware)
+      (async () => {
+        try {
+          const rmKeys = [`${kp}_daily_loss_limit_pct`, `${kp}_max_trades_per_day`, `${kp}_risk_per_trade_pct`, `${kp}_simulated_equity`];
+          const [configs, todayTrades] = await Promise.all([
+            prisma.agentConfig.findMany({ where: { key: { in: rmKeys } } }),
+            prisma.autoTradeLog.count({
+              where: { symbol: { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
+            }),
+          ]);
+          const cfg: Record<string, string> = {};
+          for (const c of configs) cfg[c.key] = c.value;
+          const dailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || (isDemoView ? 15 : 8);
+          const riskPct = parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || (isDemoView ? 8 : 5);
+          const simCfg = parseFloat(cfg[`${kp}_simulated_equity`]) || 0;
+          const simEquity = isDemoView
+            ? (accountSummary.netLiq || accountSummary.balance || 50000)
+            : (simCfg > 0 ? simCfg : (accountSummary.netLiq || accountSummary.balance || 1000));
+          const maxTrades = isDemoView ? 20 : (parseInt(cfg[`${kp}_max_trades_per_day`]) || 1);
+          return { dailyLossLimit: simEquity * (dailyLossPct / 100), maxTradesPerDay: maxTrades, riskPerTrade: simEquity * (riskPct / 100), simEquity, todayTradeCount: todayTrades };
+        } catch { return null; }
+      })(),
+
+      // startingCapital: SC for total P&L calculation
+      (async () => {
+        try {
+          const cfg = await prisma.agentConfig.findUnique({ where: { key: scKey } });
+          return cfg?.value ? parseFloat(cfg.value) : (viewMode === "live" ? 1025 : 50000);
+        } catch { return viewMode === "live" ? 1025 : 50000; }
+      })(),
+
+      // startOfDayBalance: for today P&L = balance - SOD
+      (async () => {
+        try {
+          const sodConfig = await prisma.agentConfig.findUnique({ where: { key: sodKey } });
+          if (sodConfig?.value) { const v = parseFloat(sodConfig.value); if (!isNaN(v) && v > 0) return v; }
+        } catch {}
+        const todayKey = todayET;
+        try {
+          const vaultDoc = await prisma.vaultDocument.findUnique({ where: { path: "Performance/daily-balances.md" } });
+          if (vaultDoc?.content) {
+            const todayMatch = vaultDoc.content.match(new RegExp(`${todayKey}:\\s*\\n\\s*sod:\\s*(\\d+(?:\\.\\d+)?)`));
+            if (todayMatch) { const v = parseFloat(todayMatch[1]); if (!isNaN(v) && v > 0) return v; }
+            const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+            const ydKey = yesterday.toISOString().slice(0, 10);
+            const ydMatch = vaultDoc.content.match(new RegExp(`${ydKey}:\\s*\\n\\s*sod:\\s*\\S+[^\\n]*\\n\\s*eod:\\s*(\\d+(?:\\.\\d+)?)`));
+            if (ydMatch) { const v = parseFloat(ydMatch[1]); if (!isNaN(v) && v > 0) return v; }
+          }
+        } catch {}
+        try {
+          const snap = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${todayKey}` } });
+          if (snap?.value) { const v = parseFloat(snap.value); if (!isNaN(v) && v !== accountSummary.balance) return v; }
+        } catch {}
+        if (accountSummary?.balance != null && accountSummary?.realizedPnl != null && accountSummary.realizedPnl !== 0) {
+          return accountSummary.balance - accountSummary.realizedPnl;
+        }
+        return null;
+      })(),
+
+      // balanceHistory: 30-day snapshots for period P&L (week/month/total)
+      (async () => {
+        if (viewMode === "live") {
+          try {
+            const [liveDailyBalances, liveEodBalances] = await Promise.all([
+              prisma.agentConfig.findMany({ where: { key: { startsWith: "live_daily_balance_" } } }),
+              prisma.agentConfig.findMany({ where: { key: { startsWith: "live_eod_balance_" } } }),
+            ]);
+            const liveHistory: Record<string, { sod?: number; eod?: number }> = {};
+            for (const b of liveDailyBalances) { const d = b.key.replace("live_daily_balance_", ""); if (!liveHistory[d]) liveHistory[d] = {}; liveHistory[d].sod = parseFloat(b.value); }
+            for (const b of liveEodBalances) { const d = b.key.replace("live_eod_balance_", ""); if (!liveHistory[d]) liveHistory[d] = {}; liveHistory[d].eod = parseFloat(b.value); }
+            return Object.entries(liveHistory).map(([date, v]) => ({ date, startBalance: v.sod ?? null, endBalance: v.eod ?? null })).sort((a, b) => a.date.localeCompare(b.date));
+          } catch { return []; }
+        }
+        try {
+          const vaultDoc = await prisma.vaultDocument.findUnique({ where: { path: "Performance/daily-balances.md" } });
+          if (vaultDoc?.content) {
+            const vaultHistory: Record<string, { sod?: number; eod?: number }> = {};
+            const dayRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)[^\n]*\n\s*eod:\s*(\d+(?:\.\d+)?|null)/g;
+            for (const m of vaultDoc.content.matchAll(dayRegex)) {
+              vaultHistory[m[1]] = { sod: m[2] === "null" ? undefined : parseFloat(m[2]), eod: m[3] === "null" ? undefined : parseFloat(m[3]) };
+            }
+            if (Object.keys(vaultHistory).length > 0) {
+              return Object.entries(vaultHistory).map(([date, v]) => ({ date, startBalance: v.sod ?? null, endBalance: v.eod ?? null })).sort((a, b) => a.date.localeCompare(b.date));
+            }
+          }
+          const [dailyBalances, eodBalances] = await Promise.all([
+            prisma.agentConfig.findMany({ where: { key: { startsWith: "daily_balance_" } } }),
+            prisma.agentConfig.findMany({ where: { key: { startsWith: "eod_balance_" } } }),
+          ]);
+          const configHistory: Record<string, { sod?: number; eod?: number }> = {};
+          for (const b of dailyBalances) { const d = b.key.replace("daily_balance_", ""); if (!configHistory[d]) configHistory[d] = {}; configHistory[d].sod = parseFloat(b.value); }
+          for (const b of eodBalances) { const d = b.key.replace("eod_balance_", ""); if (!configHistory[d]) configHistory[d] = {}; configHistory[d].eod = parseFloat(b.value); }
+          return Object.entries(configHistory).map(([date, v]) => ({ date, startBalance: v.sod ?? null, endBalance: v.eod ?? null })).sort((a, b) => a.date.localeCompare(b.date));
+        } catch { return []; }
+      })(),
+    ]);
+
     return Response.json({
       connected: true,
       viewMode,
@@ -288,39 +391,7 @@ export async function GET() {
         unrealizedPnl: accountSummary.unrealizedPnl,
         marginUsed: accountSummary.marginUsed,
       },
-      // Risk metrics for dashboard gauge — mode-aware (demo $50K vs live $1K)
-      riskMetrics: await (async () => {
-        try {
-          // Read the ENV-CORRECT config keys: live view → live_futures_*, demo → futures_*
-          const isDemoView = viewMode !== "live";
-          const kp = isDemoView ? "futures" : "live_futures";
-          const keys = [`${kp}_daily_loss_limit_pct`, `${kp}_max_trades_per_day`, `${kp}_risk_per_trade_pct`, `${kp}_simulated_equity`];
-          const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
-          const cfg: Record<string, string> = {};
-          for (const c of configs) cfg[c.key] = c.value;
-
-          const dailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || (isDemoView ? 15 : 8);
-          const riskPct = parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || (isDemoView ? 8 : 5);
-
-          // DEMO: actual account equity + expanded limits. LIVE: real $1K (sim=0) + Phase-0 caps.
-          const simCfg = parseFloat(cfg[`${kp}_simulated_equity`]) || 0;
-          const simEquity = isDemoView
-            ? (accountSummary.netLiq || accountSummary.balance || 50000)
-            : (simCfg > 0 ? simCfg : (accountSummary.netLiq || accountSummary.balance || 1000));
-          const maxTrades = isDemoView ? 20 : (parseInt(cfg[`${kp}_max_trades_per_day`]) || 1);
-
-          const dailyLossLimit = simEquity * (dailyLossPct / 100);
-          const riskPerTrade = simEquity * (riskPct / 100);
-          // Count today's closed trades — filtered by action prefix (reliable mode tag)
-          const modeActionPrefix = isDemoView ? "futures_" : "live_";
-          const todayET = new Date().toISOString().slice(0, 10);
-          const todayStart = new Date(todayET + "T00:00:00-04:00");
-          const todayTrades = await prisma.autoTradeLog.count({
-            where: { symbol: { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
-          });
-          return { dailyLossLimit, maxTradesPerDay: maxTrades, riskPerTrade, simEquity, todayTradeCount: todayTrades };
-        } catch { return null; }
-      })(),
+      riskMetrics,
       positions: enrichedPositions,
       orders: openOrders.map((o) => ({
         id: o.id,
@@ -334,139 +405,10 @@ export async function GET() {
       fillBasedPnl,
       activity,
       engineStatus,
-      // Today's P&L from balance delta — DB trade P&L sums are double-logged and inflated
-      todayTradesPnl: null, // Force fallback to calendarDayPnl (balance delta) on the frontend
-      // Starting capital for P&L calculations (mode-aware)
-      startingCapital: await (async () => {
-        const key = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
-        try {
-          const cfg = await prisma.agentConfig.findUnique({ where: { key } });
-          return cfg?.value ? parseFloat(cfg.value) : (viewMode === "live" ? 1025 : 50000);
-        } catch { return viewMode === "live" ? 1025 : 50000; }
-      })(),
-      startOfDayBalance: await (async () => {
-        // Mode-aware SOD: demo uses start_of_day_balance, live uses live_start_of_day_balance
-        const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
-        try {
-          const sodConfig = await prisma.agentConfig.findUnique({ where: { key: sodKey } });
-          if (sodConfig?.value) {
-            const sodVal = parseFloat(sodConfig.value);
-            if (!isNaN(sodVal) && sodVal > 0) return sodVal;
-          }
-        } catch {}
-
-        const todayKey = new Date().toISOString().slice(0, 10);
-        // 1. Best source: vault daily-balances.md (Railway engine writes SOD before trading)
-        try {
-          const vaultDoc = await prisma.vaultDocument.findUnique({
-            where: { path: "Performance/daily-balances.md" },
-          });
-          if (vaultDoc?.content) {
-            // Parse today's SOD from the YAML block
-            const todayRegex = new RegExp(`${todayKey}:\\s*\\n\\s*sod:\\s*(\\d+(?:\\.\\d+)?)`);
-            const match = vaultDoc.content.match(todayRegex);
-            if (match) {
-              const sodVal = parseFloat(match[1]);
-              if (!isNaN(sodVal) && sodVal > 0) return sodVal;
-            }
-            // Fallback: yesterday's EOD from vault
-            const yesterday = new Date();
-            yesterday.setDate(yesterday.getDate() - 1);
-            const ydKey = yesterday.toISOString().slice(0, 10);
-            const ydRegex = new RegExp(`${ydKey}:\\s*\\n\\s*sod:\\s*\\S+[^\\n]*\\n\\s*eod:\\s*(\\d+(?:\\.\\d+)?)`);
-            const ydMatch = vaultDoc.content.match(ydRegex);
-            if (ydMatch) {
-              const eodVal = parseFloat(ydMatch[1]);
-              if (!isNaN(eodVal) && eodVal > 0) return eodVal;
-            }
-          }
-        } catch {}
-        // 2. Fallback: agentConfig snapshots
-        try {
-          const sodSnapshot = await prisma.agentConfig.findUnique({
-            where: { key: `daily_balance_${todayKey}` },
-          });
-          if (sodSnapshot?.value) {
-            const sodVal = parseFloat(sodSnapshot.value);
-            if (!isNaN(sodVal) && sodVal !== accountSummary.balance) return sodVal;
-          }
-        } catch {}
-        // 3. Fallback: balance minus realized P&L (works during active trading only)
-        if (accountSummary?.balance != null && accountSummary?.realizedPnl != null && accountSummary.realizedPnl !== 0) {
-          return accountSummary.balance - accountSummary.realizedPnl;
-        }
-        return null;
-      })(),
-      // Historical daily balance snapshots — vault for demo, agentConfig for live
-      balanceHistory: await (async () => {
-        if (viewMode === "live") {
-          // Live: read live_daily_balance_* (SOD) and live_eod_balance_* (EOD) from agentConfig
-          try {
-            const [liveDailyBalances, liveEodBalances] = await Promise.all([
-              prisma.agentConfig.findMany({ where: { key: { startsWith: "live_daily_balance_" } } }),
-              prisma.agentConfig.findMany({ where: { key: { startsWith: "live_eod_balance_" } } }),
-            ]);
-            const liveHistory: Record<string, { sod?: number; eod?: number }> = {};
-            for (const b of liveDailyBalances) {
-              const date = b.key.replace("live_daily_balance_", "");
-              if (!liveHistory[date]) liveHistory[date] = {};
-              liveHistory[date].sod = parseFloat(b.value);
-            }
-            for (const b of liveEodBalances) {
-              const date = b.key.replace("live_eod_balance_", "");
-              if (!liveHistory[date]) liveHistory[date] = {};
-              liveHistory[date].eod = parseFloat(b.value);
-            }
-            return Object.entries(liveHistory)
-              .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
-              .sort((a, b) => a.date.localeCompare(b.date));
-          } catch { return []; }
-        }
-
-        try {
-          // Primary: parse from vault daily-balances.md
-          const vaultDoc = await prisma.vaultDocument.findUnique({
-            where: { path: "Performance/daily-balances.md" },
-          });
-          if (vaultDoc?.content) {
-            const vaultHistory: Record<string, { sod?: number; eod?: number }> = {};
-            const dayRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)[^\n]*\n\s*eod:\s*(\d+(?:\.\d+)?|null)/g;
-            let m;
-            while ((m = dayRegex.exec(vaultDoc.content)) !== null) {
-              vaultHistory[m[1]] = {
-                sod: m[2] === "null" ? undefined : parseFloat(m[2]),
-                eod: m[3] === "null" ? undefined : parseFloat(m[3]),
-              };
-            }
-            if (Object.keys(vaultHistory).length > 0) {
-              return Object.entries(vaultHistory)
-                .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
-                .sort((a, b) => a.date.localeCompare(b.date));
-            }
-          }
-          // Fallback: agentConfig table
-          const dailyBalances = await prisma.agentConfig.findMany({
-            where: { key: { startsWith: "daily_balance_" } },
-          });
-          const eodBalances = await prisma.agentConfig.findMany({
-            where: { key: { startsWith: "eod_balance_" } },
-          });
-          const configHistory: Record<string, { sod?: number; eod?: number }> = {};
-          for (const b of dailyBalances) {
-            const date = b.key.replace("daily_balance_", "");
-            if (!configHistory[date]) configHistory[date] = {};
-            configHistory[date].sod = parseFloat(b.value);
-          }
-          for (const b of eodBalances) {
-            const date = b.key.replace("eod_balance_", "");
-            if (!configHistory[date]) configHistory[date] = {};
-            configHistory[date].eod = parseFloat(b.value);
-          }
-          return Object.entries(configHistory)
-            .map(([date, vals]) => ({ date, startBalance: vals.sod ?? null, endBalance: vals.eod ?? null }))
-            .sort((a, b) => a.date.localeCompare(b.date));
-        } catch { return []; }
-      })(),
+      todayTradesPnl: null, // Force balance delta path on frontend (DB sums are double-logged)
+      startingCapital,
+      startOfDayBalance,
+      balanceHistory,
     });
   } catch (error) {
     console.error("[/api/futures/positions]", error);

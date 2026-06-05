@@ -326,10 +326,9 @@ export default function FuturesPage() {
     }
     if (prevLiveViewRef.current !== swrLiveView) {
       prevLiveViewRef.current = swrLiveView;
-      // Show transient loading indicator + clear stale state so the wrong-mode data never flashes
+      // Show transient loading indicator — keep old data visible while new data loads so the
+      // panel never goes blank. setResult cleared since it's mode-specific (agent run output).
       setModeSwitching(true);
-      setPosData(null);
-      setQuotes([]);
       setResult(null);
       // Brief delay (~400ms) so the server-side mode write commits before we re-fetch — otherwise
       // we'd race the POST and pull positions for the OLD mode. Matches the same 300ms guard the
