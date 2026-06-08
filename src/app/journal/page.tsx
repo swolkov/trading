@@ -286,6 +286,9 @@ export default function JournalPage() {
       }
       if (balancePnl != null) {
         if (!dayMap[date]) dayMap[date] = initDay(date);
+        // Skip balance deltas on days with 0 trades — these are account resets/adjustments, not trading P&L
+        const hasTrades = dayMap[date].futuresTrades.length > 0;
+        if (!hasTrades && Math.abs(balancePnl) > 10000) continue;
         dayMap[date].futuresPnl += balancePnl;
         dayMap[date].totalPnl += balancePnl;
         datesWithBalancePnl.add(date);
