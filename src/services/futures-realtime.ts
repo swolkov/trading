@@ -2949,13 +2949,25 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const equity = riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity;
   const riskPct = riskConfig.riskPerTradePct / 100;
   const maxRisk = equity * riskPct * sizeMult;
-  const riskPer = stopDist * mult; // Dollar risk per 1 contract
+  let riskPer = stopDist * mult; // Dollar risk per 1 contract
 
-  // REJECT if even 1 contract exceeds the risk-per-trade cap
-  // This prevents the old bug: Math.max(1,...) forced 1 contract even when risk was 2x the cap
+  // ADAPTIVE STOP SIZING: if the ideal stop doesn't fit, tighten it to the max affordable level.
+  // Floor: 0.75× ATR — below that the stop is too tight to survive normal volatility.
+  // This lets small accounts trade with the same entries but tighter risk, improving R:R.
   if (riskPer > maxRisk) {
-    log(`${sym}: SKIP — 1 contract risk $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)} (${(riskPct * 100)}% of $${equity.toFixed(0)}). Stop too wide.`);
-    return;
+    const b = barBuilders.get(sym);
+    const currentATR = b ? atr(b.bars5m) : 0;
+    const maxAffordableStop = maxRisk / mult; // max stop distance in points
+    const minViableStop = currentATR * 0.75;  // floor: 0.75× ATR
+
+    if (currentATR > 0 && maxAffordableStop >= minViableStop) {
+      log(`${sym}: TIGHT STOP — ideal $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)}, tightening stop from ${stopDist.toFixed(1)} to ${maxAffordableStop.toFixed(1)} pts (${(maxAffordableStop / currentATR).toFixed(2)}× ATR). R:R improves ${(targetDist / stopDist).toFixed(1)} → ${(targetDist / maxAffordableStop).toFixed(1)}`);
+      stopDist = maxAffordableStop;
+      riskPer = stopDist * mult;
+    } else {
+      log(`${sym}: SKIP — 1 contract risk $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)} (${(riskPct * 100)}% of $${equity.toFixed(0)}). Even min stop (0.75× ATR = $${(minViableStop * mult).toFixed(0)}) too wide.`);
+      return;
+    }
   }
 
   let qty = Math.min(riskConfig.maxContractsPerTrade, Math.floor(maxRisk / riskPer));
