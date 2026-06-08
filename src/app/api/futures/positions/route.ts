@@ -397,7 +397,7 @@ export async function GET() {
         id: o.id,
         action: o.action,
         type: o.orderType,
-        qty: o.orderQty,
+        qty: o.orderQty ?? 0,
         status: o.orderStatus,
       })),
       fills: mappedFills,

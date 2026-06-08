@@ -428,7 +428,7 @@ export default function FuturesPage() {
     : null;
   const dailyPnl = tradePnl != null
     ? tradePnl + unrealizedPnl
-    : (calendarDayPnl ?? (posData?.account?.realizedPnl || 0));
+    : (calendarDayPnl ?? 0);
 
   // Balance history for period P&L
   const balanceHistory = posData?.balanceHistory || [];
@@ -1335,9 +1335,17 @@ export default function FuturesPage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  <div>
-                    <p className="text-[10px] text-muted-foreground/40">Net Liquidation</p>
-                    <p className="text-xl font-bold tabular-nums">${posData.account.netLiq.toLocaleString()}</p>
+                  <div className="flex items-baseline justify-between">
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Net Liquidation</p>
+                      <p className="text-xl font-bold tabular-nums">${posData.account.netLiq.toLocaleString()}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
+                      <p className={`text-lg font-bold tabular-nums ${pnlColor(totalPnl)}`}>
+                        {totalPnl >= 0 ? "+" : ""}${totalPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </p>
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-[10px]">
                     <div>
@@ -1351,9 +1359,9 @@ export default function FuturesPage() {
                       </p>
                     </div>
                     <div>
-                      <span className="text-muted-foreground/40">Realized P&L</span>
-                      <p className={`font-bold tabular-nums ${pnlColor(posData.account.realizedPnl)}`}>
-                        {posData.account.realizedPnl >= 0 ? "+" : ""}${posData.account.realizedPnl.toLocaleString()}
+                      <span className="text-muted-foreground/40">Today P&L</span>
+                      <p className={`font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+                        {dailyPnl >= 0 ? "+" : ""}${dailyPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </p>
                     </div>
                     <div>

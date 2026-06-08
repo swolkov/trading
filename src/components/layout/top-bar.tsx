@@ -97,7 +97,7 @@ export function TopBar() {
   const balanceDelta = (sod != null && balance) ? balance - sod : null;
   const dailyPnl = tradePnl != null
     ? tradePnl + unrealizedPnl
-    : (balanceDelta != null ? balanceDelta : (futuresData?.account?.realizedPnl || 0));
+    : (balanceDelta ?? 0);
   const dailyPct = sod && sod > 0 ? dailyPnl / sod : (balance > 0 ? dailyPnl / balance : 0);
   const hasFutures = futuresData?.connected && futuresData.account;
   const equity = futuresEquity;

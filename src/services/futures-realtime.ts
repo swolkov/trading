@@ -1841,16 +1841,16 @@ async function closePosition(sym: string, price: number, reason: string) {
   // Helper: cancel ALL working orders for this contract (catches orphans after restarts)
   const cancelAllOrdersForContract = async () => {
     try {
-      if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
-      if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+      if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch (e) { log(`${sym}: Failed to cancel stop #${pos.stopOrderId}: ${e}`); }
+      if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch (e) { log(`${sym}: Failed to cancel target #${pos.targetOrderId}: ${e}`); }
       // Also scan for ANY working orders on this contract (catches orphans with unknown IDs)
       const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
       const orphans = allOrders.filter(o => o.contractId === pos.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
       for (const o of orphans) {
-        try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {}
+        try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch (e) { log(`${sym}: Failed to cancel orphan order #${o.id}: ${e}`); }
       }
       if (orphans.length > 0) log(`${sym}: Cancelled ${orphans.length} orphaned orders for contract`);
-    } catch {}
+    } catch (e) { log(`${sym}: cancelAllOrdersForContract FAILED: ${e}`); }
   };
 
   if (positionAlreadyClosed) {
@@ -2835,7 +2835,7 @@ async function evaluateAndTrade(
       riskReward: targetDist / stopDist,
       dollarTrend: "flat", bondTrend: "flat",
     });
-    patternStats = { matchCount: pred.matchCount, winRate: pred.winRate, avgR: pred.score };
+    patternStats = { matchCount: pred.matchCount, winRate: pred.winRate, avgR: pred.avgPnlR };
     log(`  [PATTERN] ${pred.matchCount} matches, ${(pred.winRate * 100).toFixed(0)}% historical WR`);
     // 2026-06-03: Raised from 10 → 25 matches. 10 trades is variance, not signal — with the AI
     // grader prompt baking the WR rule in already, the redundant low-sample hard-block was
@@ -3353,6 +3353,20 @@ async function syncPositions() {
         // which corrupts P&L calculations after partial fills or scale-outs
       }
     }
+
+    // Step 4: Cancel orphaned working orders with no matching position (engine or Tradovate)
+    try {
+      const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
+      const working = allOrders.filter(o => o.ordStatus === "Working" || o.ordStatus === "Accepted");
+      const activeContractIds = new Set<number>();
+      for (const [, pos] of positions) activeContractIds.add(pos.contractId);
+      for (const tp of tvPos) { if (tp.netPos !== 0) activeContractIds.add(tp.contractId); }
+      const orphans = working.filter(o => !activeContractIds.has(o.contractId));
+      for (const o of orphans) {
+        try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch (e) { log(`[SYNC] Failed to cancel orphan #${o.id}: ${e}`); }
+      }
+      if (orphans.length > 0) log(`[SYNC] Swept ${orphans.length} orphaned orders with no matching position`);
+    } catch {}
 
     await savePositions();
   } catch (err) { log(`[SYNC] Position sync failed: ${err}`); }
@@ -4080,6 +4094,13 @@ async function main() {
     const sodNow = await prisma.agentConfig.findUnique({ where: { key: startupSodKey } });
     startOfDayBalance = parseFloat(sodNow?.value || "") || tradovateEquity;
     dailyPnl = tradovateEquity - startOfDayBalance; // balance-delta = realized intraday P&L
+    // Prevent checkSessionReset() from re-firing and overwriting the restored SOD.
+    // Without this, lastResetDate is "" on restart → session reset fires on next tick →
+    // overwrites SOD with current equity → Today P&L loses pre-restart trades.
+    // Only set if past the threshold — before 9:29 AM, we WANT the session reset to fire.
+    const startupETH = getETHour();
+    if (startupETH >= 9.483) lastResetDate = getETDateString();
+    if (startupETH >= 15.833) lastEODDate = getETDateString();
     log(`[STARTUP] Loss-limit baseline restored: SOD $${startOfDayBalance.toFixed(2)}, intraday P&L $${dailyPnl.toFixed(2)}`);
   } catch {}
   await updateVIX();

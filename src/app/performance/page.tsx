@@ -757,8 +757,8 @@ export default function PerformancePage() {
                       <p className="text-xl font-bold mt-1">${Math.round(futures.account.netLiq).toLocaleString()}</p>
                     </div>
                     <div>
-                      <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Today Realized</p>
-                      <p className={`text-xl font-bold mt-1 ${pnl(futures.account.realizedPnl)}`}>{fmt(Math.round(futures.account.realizedPnl))}</p>
+                      <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Total P&L</p>
+                      <p className={`text-xl font-bold mt-1 ${pnl(futures.account.balance - (futures.startingCapital ?? 50_000))}`}>{fmt(Math.round(futures.account.balance - (futures.startingCapital ?? 50_000)))}</p>
                     </div>
                   </div>
                 </CardContent>

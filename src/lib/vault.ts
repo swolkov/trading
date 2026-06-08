@@ -540,16 +540,28 @@ export async function runSynthesis(): Promise<SynthesisResult> {
   }
   const bestWeekInst = Object.entries(weekByInst).sort((a, b) => b[1] - a[1])[0];
 
-  // Time-of-day analysis
+  // Time-of-day analysis (DST-aware: converts to America/New_York)
+  // Buckets match the engine's session names for correct vault-gate alignment.
+  // IMPORTANT: "last_30_min" = 3:30-4:00 PM ET (real RTH close); "after_hours" = 4:00 PM+ ETH session.
+  // Previous version used raw UTC hours which placed ETH trades (4 PM+) into "last_30_min" — now corrected.
+  const etFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
   const hourBuckets: Record<string, { trades: number; wins: number }> = {};
   for (const t of allTrades) {
-    const hour = t.createdAt.getUTCHours();
+    const parts = etFormatter.formatToParts(t.createdAt);
+    const etH = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0")
+              + parseInt(parts.find((p) => p.type === "minute")?.value ?? "0") / 60;
     let bucket = "other";
-    if (hour >= 13 && hour < 14) bucket = "first_30_min";
-    else if (hour >= 14 && hour < 16) bucket = "mid_morning";
-    else if (hour >= 16 && hour < 18) bucket = "midday";
-    else if (hour >= 18 && hour < 20) bucket = "afternoon";
-    else if (hour >= 20) bucket = "last_30_min";
+    if (etH >= 9.5 && etH < 10) bucket = "first_30_min";      // 9:30-10:00 AM ET (open)
+    else if (etH >= 10 && etH < 12) bucket = "mid_morning";    // 10:00 AM - 12:00 PM ET
+    else if (etH >= 12 && etH < 14) bucket = "midday";         // 12:00 PM - 2:00 PM ET
+    else if (etH >= 14 && etH < 15.5) bucket = "afternoon";    // 2:00 PM - 3:30 PM ET
+    else if (etH >= 15.5 && etH < 16) bucket = "last_30_min";  // 3:30-4:00 PM ET (real last 30 min of RTH)
+    else bucket = "after_hours";                                // 4:00 PM+ and pre-market (ETH session)
     if (!hourBuckets[bucket]) hourBuckets[bucket] = { trades: 0, wins: 0 };
     hourBuckets[bucket].trades++;
     if ((t.pnl || 0) > 0) hourBuckets[bucket].wins++;
@@ -573,6 +585,43 @@ export async function runSynthesis(): Promise<SynthesisResult> {
       const pnl = balance - balances.startingCapital;
       return `${e.date},${balance},${pnl}`;
     });
+
+  // ── Fund pitch metrics: Sharpe ratio, peak-to-trough drawdown, monthly P&L ──
+  const equityPoints = balances.entries.filter((e) => e.eod != null || e.sod != null);
+  const dailyReturns: number[] = [];
+  let peakBalance = balances.startingCapital;
+  let peakDate = "";
+  let maxDrawdownPct = 0;
+
+  for (let i = 1; i < equityPoints.length; i++) {
+    const prev = equityPoints[i - 1].eod ?? equityPoints[i - 1].sod!;
+    const curr = equityPoints[i].eod ?? equityPoints[i].sod!;
+    if (prev > 0) dailyReturns.push((curr - prev) / prev);
+    if (curr > peakBalance) { peakBalance = curr; peakDate = equityPoints[i].date; }
+    const dd = peakBalance > 0 ? (peakBalance - curr) / peakBalance * 100 : 0;
+    if (dd > maxDrawdownPct) maxDrawdownPct = dd;
+  }
+
+  let sharpeRatio = 0;
+  if (dailyReturns.length >= 5) {
+    const meanReturn = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
+    const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / dailyReturns.length;
+    const stdDev = Math.sqrt(variance);
+    sharpeRatio = stdDev > 0 ? (meanReturn / stdDev) * Math.sqrt(252) : 0;
+  }
+
+  // Monthly P&L from balance history
+  const monthlyPnl: Record<string, { startBalance: number; endBalance: number; pnl: number; pnlPct: number }> = {};
+  for (const e of equityPoints) {
+    const month = e.date.slice(0, 7);
+    const bal = e.eod ?? e.sod!;
+    if (!monthlyPnl[month]) monthlyPnl[month] = { startBalance: bal, endBalance: bal, pnl: 0, pnlPct: 0 };
+    monthlyPnl[month].endBalance = bal;
+  }
+  for (const data of Object.values(monthlyPnl)) {
+    data.pnl = data.endBalance - data.startBalance;
+    data.pnlPct = data.startBalance > 0 ? (data.pnl / data.startBalance) * 100 : 0;
+  }
 
   // Format week date range
   const weekEnd = new Date(monday);
@@ -650,6 +699,20 @@ ${Object.entries(scoreGroups).map(([k, v]) => `conviction_${k}: { trades: ${v.tr
 ## By Time of Day
 \`\`\`yaml
 ${Object.entries(hourBuckets).map(([k, v]) => `${k}: { trades: ${v.trades}, win_rate: ${v.trades > 0 ? ((v.wins / v.trades) * 100).toFixed(1) : 0} }`).join("\n")}
+\`\`\`
+
+## Fund Pitch Metrics
+\`\`\`yaml
+sharpe_ratio: ${sharpeRatio.toFixed(2)}  # annualized from ${dailyReturns.length} daily balance deltas
+max_drawdown_peak_to_trough: ${maxDrawdownPct.toFixed(1)}%  # from balance history (source of truth)
+peak_balance: ${peakBalance.toFixed(0)}
+peak_date: ${peakDate || "n/a"}
+note: "Fund pitch targets: Sharpe >1.0, max drawdown <15% peak-to-trough, 6+ months track record"
+\`\`\`
+
+## Monthly Returns
+\`\`\`yaml
+${Object.entries(monthlyPnl).map(([m, d]) => `${m}: { pnl: ${d.pnl >= 0 ? "+" : ""}${d.pnl.toFixed(0)}, return_pct: ${d.pnlPct >= 0 ? "+" : ""}${d.pnlPct.toFixed(1)}%, start: ${d.startBalance.toFixed(0)}, end: ${d.endBalance.toFixed(0)} }`).join("\n") || "insufficient_data: true"}
 \`\`\`
 
 ## Equity Curve (from Tradovate daily balances)
@@ -1296,11 +1359,11 @@ tags: [jarvis, daily-brief]
 > - **Session focus:** 9:45-11:30 + 2:00-3:30 ET
 > - **Note:** ${playbook.note}
 
-### Futures (Demo $50K)
-> [!tip] Ultra-Aggressive Learning Mode
-> - All setup types active, 55% confidence gate
-> - 20 contracts max, 50 trades/day (100 with A+)
-> - ES/NQ/GC — full instrument coverage
+### Futures (Demo $50K — Professional Track Record)
+> [!tip] 1% Risk — Same as Live (Fundable Track Record)
+> - 55% confidence gate, all setup types active (trend continuation disabled)
+> - Max 10 contracts; actual = 1% risk ÷ stop distance (~1-2 contracts typical)
+> - ES/NQ/GC — full-size for realistic track record
 
 ### Crypto (Alpaca)
 > - **Regime:** ${cryptoRegime} → ${cryptoPlay}
