@@ -155,6 +155,8 @@ Respond ONLY with JSON (no markdown):
       model: advisorModel,
       max_tokens: 16000,
       thinking: getThinkingConfig(advisorModel),
+      // xhigh effort: strategic daily plan deserves deep thinking (runs once per day, cost is negligible)
+      output_config: { effort: "xhigh" },
       messages: [{ role: "user", content: prompt }],
     });
 

@@ -9,7 +9,7 @@ import { prisma } from "../lib/db";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateBrain, appendLiveFeed } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
-import { getDailyPlan, getPlanContextForGrading, escalateToAdvisor, shouldEscalate } from "../lib/advisor";
+import { getPlanContextForGrading } from "../lib/advisor";
 
 
 // ── Config ──────────────────────────────────────────────
@@ -2112,7 +2112,20 @@ DEFAULT TO APPROVE unless:
 
 Reasoning is a tiebreaker, NOT the primary filter. We want to TRADE and gather data to feed the learning loop.
 
+You have access to an advisor tool backed by a stronger model. If you are UNCERTAIN about this grade — borderline edge, conflicting signals, mixed pattern history (WR 30-55%), or setup conflicts with today's plan — call the advisor before responding. For clear-cut decisions (obvious approve with WR > 55%, or obvious reject with WR < 30% or confirmed anti-pattern), respond directly without the advisor.
+
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence citing data or specific block reason"}`;
+
+    // Native Advisor Tool (beta): Sonnet executor + Opus 4.8 advisor in a single request.
+    // Sonnet decides when to consult the advisor — no hardcoded escalation rules.
+    // The advisor sub-inference adds ~5-15s latency only when called.
+    const useAdvisor = IS_LIVE || (setup.patternStats && setup.patternStats.matchCount >= 10 && setup.patternStats.winRate < 0.55);
+    const advisorTool = useAdvisor ? [{
+      type: "advisor_20260301",
+      name: "advisor",
+      model: "claude-opus-4-8",
+      max_tokens: 2048,          // cap advisor output (~7x reduction, near-zero quality loss per Anthropic benchmarks)
+    }] : [];
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -2120,13 +2133,15 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         "Content-Type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        ...(useAdvisor ? { "anthropic-beta": "advisor-tool-2026-03-01" } : {}),
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",     // fast grader — Opus+thinking was timing out (>30s) → starved all trading
-        max_tokens: 512,                // one JSON line; no extended thinking needed for a confidence grade
+        model: "claude-sonnet-4-6",
+        max_tokens: 1024,                // increased from 512 to allow advisor flow text
+        ...(advisorTool.length > 0 ? { tools: advisorTool } : {}),
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(useAdvisor ? 45000 : 20000),  // longer timeout when advisor available
     });
 
     if (!res.ok) {
@@ -2135,8 +2150,15 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
       return { agree: true, confidence: 0, reasoning: `AI ${res.status}` };
     }
 
-    const data = await res.json() as { content: { type: string; text: string }[] };
-    const text = data.content?.find(b => b.type === "text")?.text || "";
+    const data = await res.json() as {
+      content: { type: string; text?: string; name?: string; content?: { type: string; text?: string } }[];
+    };
+    // With advisor tool, response may include server_tool_use + advisor_tool_result blocks.
+    // Extract the LAST text block which contains the final JSON grade.
+    const textBlocks = data.content?.filter(b => b.type === "text" && b.text) || [];
+    const advisorUsed = data.content?.some(b => b.type === "server_tool_use" && b.name === "advisor");
+    const text = textBlocks.length > 0 ? textBlocks[textBlocks.length - 1].text! : "";
+    if (advisorUsed) log(`  [AI] Advisor tool consulted (Opus 4.8)`);
     // Handle Claude sometimes wrapping JSON in markdown code blocks
     let jsonText = text.trim();
     const jsonMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
@@ -2879,56 +2901,6 @@ async function evaluateAndTrade(
   } else {
     log(`  AI: ${ai.reasoning}`);
   }
-
-  // ─── FABLE 5 ESCALATION: borderline calls get advisor review ───
-  // Map Sonnet's agree+confidence to a grade for escalation logic:
-  // agree + confidence >= 80 = "A+", agree + 60-79 = "A", agree + 40-59 = "B", below 40 = "C"
-  const workerGrade = !ai.agree ? "C" : ai.confidence >= 80 ? "A+" : ai.confidence >= 60 ? "A" : ai.confidence >= 40 ? "B" : "C";
-  try {
-    const plan = await getDailyPlan();
-    const planConflict = plan && ((plan.bias === "bearish" && direction === "long") || (plan.bias === "bullish" && direction === "short"));
-    if (ai.agree && shouldEscalate({
-      workerGrade,
-      workerAgree: ai.agree,
-      mode: IS_LIVE ? "live" : "demo",
-      contracts: 1,
-      recentRegimeShift: false,
-      planConflict: !!planConflict,
-    })) {
-      log(`  ESCALATING to Fable 5 advisor (${workerGrade} grade, ${IS_LIVE ? "live" : "demo"})...`);
-      const escalation = await escalateToAdvisor({
-        symbol: sym, direction, setupType: reasoning.split(" ")[0] || "unknown",
-        reasoning, price,
-        stopDistance: stopDist, targetDistance: targetDist,
-        rsi: rsiVal, atr: atrVal, vwap: vwapVal,
-        trend15, dayType, session,
-        workerGrade, workerReasoning: ai.reasoning,
-        technicalScore, mode: IS_LIVE ? "live" : "demo",
-        patternStats: patternStats ?? undefined,
-      });
-      if (escalation) {
-        log(`  ADVISOR: ${escalation.finalGrade} — ${escalation.reasoning}${escalation.overrideWorker ? " [OVERRIDE]" : ""}`);
-        if (escalation.overrideWorker) {
-          if (!escalation.agree || escalation.finalGrade === "C") {
-            log(`  ADVISOR KILLS TRADE — blocking`);
-            return;
-          }
-          // Advisor overrides worker grade — adjust confidence accordingly
-          if (escalation.finalGrade === "A+") {
-            finalScore += 10;
-            log(`  Advisor upgrade: ${workerGrade} → A+ (+10 → ${finalScore}%)`);
-          } else if (escalation.finalGrade === "A" && workerGrade === "B") {
-            finalScore += 5;
-            log(`  Advisor upgrade: B → A (+5 → ${finalScore}%)`);
-          } else if (escalation.finalGrade === "B" && IS_LIVE) {
-            // B on live = marginal, reduce confidence
-            finalScore -= 5;
-            log(`  Advisor downgrade: ${workerGrade} → B on live (-5 → ${finalScore}%)`);
-          }
-        }
-      }
-    }
-  } catch { /* escalation is optional — never block trading on advisor failure */ }
 
   // Re-entry cooldown check: was this symbol+direction recently stopped out?
   const cooldownKey = `${sym}:${direction}`;
