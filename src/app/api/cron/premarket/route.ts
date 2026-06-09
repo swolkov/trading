@@ -5,7 +5,7 @@ import { detectMarketRegime } from "@/lib/market-regime";
 import { scanSector, SECTOR_UNIVERSES } from "@/lib/sector-scanner";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { updateMarketRegime, updateVolatilityEnvironment, vaultWrite, generateDailyBrief, updateJARVIS } from "@/lib/vault";
+import { updateMarketRegime, updateVolatilityEnvironment, vaultWrite, generateDailyBrief, updateBrain } from "@/lib/vault";
 
 export const maxDuration = 120;
 
@@ -235,9 +235,9 @@ ${sectorInsights.map((s) => `- ${s}`).join("\n")}
 
     await prisma.agentConfig.upsert({ where: { key: "premarket_last_run" }, update: { value: new Date().toISOString() }, create: { key: "premarket_last_run", value: new Date().toISOString() } }).catch(() => {});
 
-    // JARVIS: Generate daily brief + update dashboard
-    try { await generateDailyBrief(); } catch { /* jarvis optional */ }
-    try { await updateJARVIS("premarket"); } catch { /* jarvis optional */ }
+    // Generate daily brief + update dashboard
+    try { await generateDailyBrief(); } catch { /* brain optional */ }
+    try { await updateBrain("premarket"); } catch { /* brain optional */ }
 
     return Response.json({ status: "ok", briefing, details });
   } catch (error) {

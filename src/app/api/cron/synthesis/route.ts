@@ -1,7 +1,7 @@
 import { runSynthesisAgent } from "@/lib/synthesis-agent";
 import { sendNotification } from "@/lib/notifications";
 import { prisma } from "@/lib/db";
-import { updateJARVIS } from "@/lib/vault";
+import { updateBrain } from "@/lib/vault";
 
 export const maxDuration = 120;
 
@@ -37,7 +37,7 @@ export async function GET(request: Request) {
       ].join("\n");
 
       try { await sendNotification(summary, "futures"); } catch {}
-      try { await updateJARVIS("synthesis"); } catch { /* jarvis optional */ }
+      try { await updateBrain("synthesis"); } catch { /* brain optional */ }
     }
 
     await prisma.agentConfig.upsert({ where: { key: "synthesis_last_run" }, update: { value: new Date().toISOString() }, create: { key: "synthesis_last_run", value: new Date().toISOString() } }).catch(() => {});

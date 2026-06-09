@@ -16,7 +16,7 @@ import {
   SessionKeys,
 } from "./session-context";
 import { sendNotification } from "./notifications";
-import { appendLiveFeed, updateJARVIS } from "./vault";
+import { appendLiveFeed, updateBrain } from "./vault";
 
 // ============ ORCHESTRATOR ============
 // Event-driven workflow coordinator. Runs every 1 min via cron.
@@ -233,8 +233,8 @@ async function handleSynthesisCompleted(events: AgentEvent[]): Promise<void> {
   // Reset trades-since-synthesis counter
   await setSessionValue(SessionKeys.TRADES_SINCE_SYNTHESIS, 0);
 
-  // Refresh JARVIS
-  try { await updateJARVIS("orchestrator-synthesis"); } catch {}
+  // Refresh Brain dashboard
+  try { await updateBrain("orchestrator-synthesis"); } catch {}
 
   await appendLiveFeed(
     "orchestrator",

@@ -258,10 +258,10 @@ export async function logObservation(agentName: string, observation: string): Pr
   await vaultAppend("Lessons/raw-observations.md", entry, agentName);
 }
 
-// ============ JARVIS LIVE FEED ============
+// ============ LIVE FEED ============
 // Real-time engine activity log in Obsidian — appends entries, trims to last 50
 
-const LIVE_FEED_PATH = "Brain/JARVIS-live-feed.md";
+const LIVE_FEED_PATH = "Brain/brain-live-feed.md";
 const MAX_FEED_ENTRIES = 50;
 
 export async function appendLiveFeed(
@@ -299,10 +299,10 @@ export async function appendLiveFeed(
     // Create fresh feed
     const header = `---
 aliases: [Live Feed, Engine Log]
-tags: [jarvis, live-feed]
+tags: [brain, live-feed]
 ---
 
-# JARVIS Live Feed
+# Live Feed
 
 > [!live] REAL-TIME ENGINE ACTIVITY
 > Auto-updated by trading engines. Most recent first.
@@ -923,11 +923,11 @@ ${antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}
   return { totalTrades, winRate, profitFactor, lessonsExtracted, antiPatternsFound };
 }
 
-// ============ J.A.R.V.I.S. — OBSIDIAN INTELLIGENCE SYSTEM ============
-// Generates Brain/JARVIS.md (dashboard) and Brain/JARVIS-daily-brief.md (pre-session)
+// ============ TRADING BRAIN — OBSIDIAN INTELLIGENCE SYSTEM ============
+// Generates Brain/dashboard.md and Brain/daily-brief.md (pre-session)
 // Called by agents after key events: trade entry/exit, premarket, synthesis, regime change
 
-interface JARVISState {
+interface BrainState {
   // Vault docs
   regime: string | null;
   volatility: string | null;
@@ -945,7 +945,7 @@ interface JARVISState {
   recentJournals: string[];
 }
 
-async function gatherJARVISState(): Promise<JARVISState> {
+async function gatherBrainState(): Promise<BrainState> {
   const [vaultDocs, configs, todayTrades, journals] = await Promise.all([
     vaultReadMultiple([
       "Brain/market-regime.md",
@@ -1061,8 +1061,8 @@ function jHeartbeatDetail(raw: string | undefined): string {
   }
 }
 
-export async function updateJARVIS(triggeredBy: string): Promise<void> {
-  const s = await gatherJARVISState();
+export async function updateBrain(triggeredBy: string): Promise<void> {
+  const s = await gatherBrainState();
   const now = new Date();
   const isoNow = now.toISOString();
 
@@ -1158,16 +1158,16 @@ export async function updateJARVIS(triggeredBy: string): Promise<void> {
   const openEntries = s.todayTrades.filter((t) => t.pnl == null && !t.action.includes("skip"));
 
   const content = `---
-aliases: [JARVIS, Command Center, Dashboard]
+aliases: [Trading Brain, Command Center, Dashboard]
 last_updated: "${isoNow}"
-updated_by: "jarvis-system"
+updated_by: "brain-system"
 triggered_by: "${triggeredBy}"
-tags: [jarvis, dashboard, system]
-cssclasses: [jarvis]
+tags: [brain, dashboard, system]
+cssclasses: [brain]
 ---
 
-# J.A.R.V.I.S.
-> *Just A Rather Very Intelligent System — Trading Intelligence v2*
+# Trading Brain
+> *Obsidian Intelligence System — Trading Intelligence v2*
 
 ---
 
@@ -1215,7 +1215,7 @@ ${apLines.map((ap) => `> - ${ap}`).join("\n")}` : "*No active anti-patterns*"}
 ## System Architecture
 \`\`\`mermaid
 graph TD
-    J[🧠 JARVIS] --> B[Brain]
+    J[🧠 Brain] --> B[Brain]
     J --> AF[Agent Fleet]
     J --> ORC[⚡ Orchestrator]
     B --> MR[Market Regime]
@@ -1242,17 +1242,20 @@ graph TD
 \`\`\`
 
 ## Live Engine Feed
-![[JARVIS-live-feed#REAL-TIME ENGINE ACTIVITY]]
+![[brain-live-feed#REAL-TIME ENGINE ACTIVITY]]
 
 ---
-*Auto-updated by JARVIS · Triggered by: ${triggeredBy} · ${now.toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" })}*
+*Auto-updated by Trading Brain · Triggered by: ${triggeredBy} · ${now.toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" })}*
 `;
 
-  await vaultWrite("Brain/JARVIS.md", content, "jarvis-system");
+  await vaultWrite("Brain/dashboard.md", content, "brain-system");
 }
 
+/** @deprecated Use updateBrain instead — kept for backward compatibility */
+export const updateJARVIS = updateBrain;
+
 export async function generateDailyBrief(): Promise<void> {
-  const s = await gatherJARVISState();
+  const s = await gatherBrainState();
   const now = new Date();
   const isoNow = now.toISOString();
   const dateStr = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" });
@@ -1333,12 +1336,12 @@ export async function generateDailyBrief(): Promise<void> {
 
   const content = `---
 date: "${now.toISOString().slice(0, 10)}"
-generated_by: "jarvis-premarket"
+generated_by: "brain-premarket"
 generated_at: "${isoNow}"
-tags: [jarvis, daily-brief]
+tags: [brain, daily-brief]
 ---
 
-# JARVIS Daily Brief — ${dateStr}
+# Daily Brief — ${dateStr}
 
 > [!info] MARKET ENVIRONMENT
 > **Regime:** ${regime} · **VIX:** ${vix} (${volRegime}) · **Crypto:** ${cryptoRegime}
@@ -1384,10 +1387,10 @@ ${tradingRules.length > 0 ? `\n**Trading Rules:**\n${tradingRules.join("\n")}` :
 > ${yesterdayReview}
 
 ---
-*Generated by JARVIS premarket synthesis · Valid for ${now.toISOString().slice(0, 10)} session*
+*Generated by premarket synthesis · Valid for ${now.toISOString().slice(0, 10)} session*
 `;
 
-  await vaultWrite("Brain/JARVIS-daily-brief.md", content, "jarvis-premarket");
+  await vaultWrite("Brain/daily-brief.md", content, "brain-premarket");
 }
 
 // ============ BUILD VAULT CONTEXT STRING FOR AI PROMPTS ============

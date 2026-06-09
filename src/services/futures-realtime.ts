@@ -6,7 +6,7 @@
 // Deploy on Railway — two instances: ENGINE_MODE=demo and ENGINE_MODE=live.
 
 import { prisma } from "../lib/db";
-import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateJARVIS, appendLiveFeed } from "../lib/vault";
+import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateBrain, appendLiveFeed } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 
@@ -97,13 +97,13 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
 
-// ── JARVIS Dashboard Update (throttled) ──────────────────
-let lastJARVISUpdate = 0;
-const JARVIS_THROTTLE_MS = 30_000; // 30s min between updates
-async function throttledJARVIS(trigger: string) {
-  if (Date.now() - lastJARVISUpdate < JARVIS_THROTTLE_MS) return;
-  lastJARVISUpdate = Date.now();
-  try { await updateJARVIS(trigger); } catch { /* jarvis optional */ }
+// ── Brain Dashboard Update (throttled) ──────────────────
+let lastBrainUpdate = 0;
+const BRAIN_THROTTLE_MS = 30_000; // 30s min between updates
+async function throttledBrainUpdate(trigger: string) {
+  if (Date.now() - lastBrainUpdate < BRAIN_THROTTLE_MS) return;
+  lastBrainUpdate = Date.now();
+  try { await updateBrain(trigger); } catch { /* brain optional */ }
 }
 
 // Live feed logging (throttled for scans, immediate for trades)
@@ -1793,8 +1793,8 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         realPnl > 0 ? 4 : 2);
     } catch { /* vault optional */ }
 
-    // JARVIS: update dashboard after trade close (throttled)
-    throttledJARVIS(`trade-exit-${meta.sym}`);
+    // Brain: update dashboard after trade close (throttled)
+    throttledBrainUpdate(`trade-exit-${meta.sym}`);
 
   } catch (err) {
     log(`[DEFERRED] ${meta.sym}: Error: ${err}`);
@@ -3099,8 +3099,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       }});
     } catch {}
 
-    // JARVIS: update dashboard after trade entry (throttled)
-    throttledJARVIS(`trade-entry-${sym}`);
+    // Brain: update dashboard after trade entry (throttled)
+    throttledBrainUpdate(`trade-entry-${sym}`);
   } catch (err) { log(`TRADE FAILED: ${err}`); }
 
 }
@@ -3245,7 +3245,7 @@ async function syncPositions() {
             }, AGENT_NAME);
             await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `${closeType}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
           } catch { /* vault optional */ }
-          throttledJARVIS(`synced-close-${sym}`);
+          throttledBrainUpdate(`synced-close-${sym}`);
         }
 
         positions.delete(sym);

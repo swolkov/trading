@@ -1,5 +1,5 @@
 import { runTransitionCheck } from "@/lib/regime-transition";
-import { updateJARVIS } from "@/lib/vault";
+import { updateBrain } from "@/lib/vault";
 
 export const maxDuration = 60;
 
@@ -14,7 +14,7 @@ export async function GET(request: Request) {
 
   try {
     const result = await runTransitionCheck();
-    try { await updateJARVIS("regime-transition"); } catch { /* jarvis optional */ }
+    try { await updateBrain("regime-transition"); } catch { /* brain optional */ }
     return Response.json(result);
   } catch (error) {
     console.error("[/api/cron/regime-transition]", error);
