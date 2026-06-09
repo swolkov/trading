@@ -1251,8 +1251,6 @@ graph TD
   await vaultWrite("Brain/dashboard.md", content, "brain-system");
 }
 
-/** @deprecated Use updateBrain instead — kept for backward compatibility */
-export const updateJARVIS = updateBrain;
 
 export async function generateDailyBrief(): Promise<void> {
   const s = await gatherBrainState();
