@@ -1392,24 +1392,34 @@ function checkPositions(sym: string, price: number, reliable = true) {
       stopMoveLocks.set(sym, true);
       (async () => {
         try {
-          // Cancel existing broker stop
+          // ROOT FIX (Fable 5 review): modify the stop IN PLACE — no cancel-then-place naked window.
+          // If the modify fails, the ORIGINAL stop stays live (nothing was cancelled), so the position
+          // is never left unprotected — the exact failure that caused the -$24,100 runaway.
           if (pos.stopOrderId) {
-            await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+            await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+              orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: breakevenPrice, isAutomated: true,
+            })});
+            pos.stopLoss = breakevenPrice;
+            log(`${sym}: Broker stop MODIFIED to breakeven $${breakevenPrice.toFixed(2)} (order #${pos.stopOrderId})`);
+          } else {
+            // No tracked stop order — place a fresh protective stop.
+            const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+            const acct = accounts.find(a => a.id === accountId) || accounts[0];
+            const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+            const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+              accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+              orderQty: pos.quantity, orderType: "Stop", stopPrice: breakevenPrice, timeInForce: "GTC", isAutomated: true,
+            })}) as { orderId: number };
+            pos.stopOrderId = s.orderId;
+            pos.stopLoss = breakevenPrice;
+            log(`${sym}: Broker stop placed at breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
           }
-          // Place new stop at breakeven
-          const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-          const acct = accounts.find(a => a.id === accountId) || accounts[0];
-          const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-          const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-            accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-            orderQty: pos.quantity, orderType: "Stop", stopPrice: breakevenPrice, timeInForce: "GTC", isAutomated: true,
-          })}) as { orderId: number };
-          pos.stopOrderId = s.orderId;
-          pos.stopLoss = breakevenPrice;
-          log(`${sym}: Broker stop moved to breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
 
         } catch (err) {
-          log(`${sym}: WARNING — failed to move broker stop to breakeven: ${err}`);
+          // modify failed → the original broker stop is still live (modify never cancels). Alert loudly;
+          // the hard-loss backstop also covers. Do NOT pretend the stop moved to breakeven.
+          log(`🚨 ${sym}: stop-move to breakeven FAILED (${err}) — original stop still live + backstop active.`);
+          notify(`🚨 ${sym}: stop-move FAILED — original stop intact, backstop covering. Check broker.`, "general");
         } finally {
           stopMoveLocks.set(sym, false);
         }
@@ -1440,14 +1450,20 @@ function checkPositions(sym: string, price: number, reliable = true) {
           pos.quantity += addQty;
           pos.entryPrice = (oldEntry * oldQty + price * addQty) / pos.quantity;
           pos.pyramided = true;
-          // Update broker stop to cover full new quantity at breakeven (use NEW average entry)
-          if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+          // ROOT FIX: modify the existing stop IN PLACE to cover the new total quantity at the new
+          // average entry — no cancel-then-place naked window. Falls back to place only if untracked.
           const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-          const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-            accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-            orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.entryPrice, timeInForce: "GTC", isAutomated: true,
-          })}) as { orderId: number };
-          pos.stopOrderId = s.orderId;
+          if (pos.stopOrderId) {
+            await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+              orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: pos.entryPrice, isAutomated: true,
+            })});
+          } else {
+            const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+              accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+              orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.entryPrice, timeInForce: "GTC", isAutomated: true,
+            })}) as { orderId: number };
+            pos.stopOrderId = s.orderId;
+          }
           log(`${sym}: Pyramid filled — ${oldQty}x@$${oldEntry.toFixed(2)} + ${addQty}x@$${price.toFixed(2)} = ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}`);
           notify(`PYRAMID ${sym}: +${addQty}x @ $${price.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}.`);
 
