@@ -12,9 +12,22 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 
 // ─── Model Configuration (DB-overridable) ─────────────────────────────────────
 
-// Default to Opus until Fable 5 model ID is confirmed — set advisor_model in AgentConfig DB to switch
-const DEFAULT_ADVISOR_MODEL = "claude-opus-4-6";
+// Fable 5 confirmed: model ID "claude-fable-5", $10 input / $50 output per MTok
+// Uses adaptive thinking (NOT the old enabled+budget_tokens style)
+const DEFAULT_ADVISOR_MODEL = "claude-fable-5";
 const DEFAULT_WORKER_MODEL = "claude-sonnet-4-6";
+
+// Models that require adaptive thinking (reject type: "enabled" + budget_tokens)
+const ADAPTIVE_THINKING_MODELS = new Set(["claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7"]);
+
+/** Get the correct thinking config for a given model */
+function getThinkingConfig(model: string): { type: "adaptive" } | { type: "enabled"; budget_tokens: number } {
+  if (ADAPTIVE_THINKING_MODELS.has(model)) {
+    return { type: "adaptive" };
+  }
+  // Legacy models (Opus 4.6, Sonnet 4.6) still support enabled+budget_tokens (deprecated but functional)
+  return { type: "enabled", budget_tokens: 8000 };
+}
 
 /** Read model config from AgentConfig DB. Falls back to defaults. */
 async function getModelConfig(): Promise<{ advisorModel: string; workerModel: string }> {
@@ -140,8 +153,8 @@ Respond ONLY with JSON (no markdown):
   try {
     const response = await anthropic.messages.create({
       model: advisorModel,
-      max_tokens: 4000,
-      thinking: { type: "enabled", budget_tokens: 8000 },
+      max_tokens: 16000,
+      thinking: getThinkingConfig(advisorModel),
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -325,8 +338,8 @@ Respond ONLY with JSON:
   try {
     const response = await anthropic.messages.create({
       model: advisorModel,
-      max_tokens: 4000,
-      thinking: { type: "enabled", budget_tokens: 6000 },
+      max_tokens: 8000,
+      thinking: getThinkingConfig(advisorModel),
       messages: [{ role: "user", content: prompt }],
     });
 
