@@ -135,7 +135,8 @@ export async function predictOutcome(current: Omit<SetupVector, "outcome" | "pnl
         pnlR: s.pattern.pnlR || 0,
       })),
     };
-  } catch {
+  } catch (e) {
+    console.error("[pattern-memory] predictOutcome failed:", e);
     return { matchCount: 0, winRate: 0.5, avgPnlR: 0, score: 50, topMatches: [] };
   }
 }
@@ -149,7 +150,7 @@ export async function getSetupTypeHealth(setupType: string, lookback = 30): Prom
   matchCount: number;
   winRate: number;
   avgR: number;
-  expectancy: number;       // avgR × winRate — positive means edge
+  expectancy: number;       // average R-multiple across all trades in window — positive means edge
   recentTrend: "improving" | "declining" | "stable";
   shouldDisable: boolean;   // true if matchCount ≥ lookback AND winRate < 0.30 AND expectancy < 0
 }> {
@@ -188,7 +189,8 @@ export async function getSetupTypeHealth(setupType: string, lookback = 30): Prom
     const shouldDisable = recent.length >= lookback && winRate < 0.30 && expectancy < 0;
 
     return { matchCount: all.length, winRate, avgR, expectancy, recentTrend, shouldDisable };
-  } catch {
+  } catch (e) {
+    console.error("[pattern-memory] getSetupTypeHealth failed:", e);
     return { matchCount: 0, winRate: 0.5, avgR: 0, expectancy: 0, recentTrend: "stable", shouldDisable: false };
   }
 }

@@ -3,7 +3,7 @@ import { getFuturesQuotes } from "@/lib/futures-data";
 import { prisma } from "@/lib/db";
 import { getViewMode } from "@/lib/trading-mode";
 
-const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "ES", "NQ", "YM", "RTY", "GC"];
+const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "MBT", "MET", "BFF", "MXR", "MSL", "ES", "NQ", "YM", "RTY", "GC"];
 
 function matchSymbol(contractName: string): string | null {
   for (const sym of KNOWN_SYMBOLS) {

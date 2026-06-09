@@ -920,8 +920,8 @@ function checkSessionReset() {
         });
         log(`[RESET] Saved ${MODE_TAG} start-of-day balance: $${tradovateEquity.toFixed(2)} (${today}), EOD yesterday (${yesterday})`);
 
-        // Write to Obsidian vault — persistent brain for agents
-        try {
+        // Write to Obsidian vault — persistent brain for agents (demo only — live writes corrupt the shared doc)
+        if (IS_DEMO) try {
           const balancesDoc = await vaultRead("Performance/daily-balances.md");
           if (balancesDoc) {
             // Update today's SOD and yesterday's EOD in the vault
@@ -990,8 +990,8 @@ function checkSessionReset() {
             }
           }
 
-          // Update vault daily-balances.md with EOD
-          const balancesDoc = await vaultRead("Performance/daily-balances.md");
+          // Update vault daily-balances.md with EOD (demo only — live writes corrupt the shared doc)
+          const balancesDoc = IS_DEMO ? await vaultRead("Performance/daily-balances.md") : null;
           if (balancesDoc && sodBalance != null) {
             const dayPnl = Math.round(eodBalance - sodBalance);
             const updatedDoc = balancesDoc
@@ -1235,7 +1235,7 @@ async function loadPositions() {
       const entryLog = await prisma.autoTradeLog.findFirst({
         where: {
           symbol: `FUT:${sym}`,
-          action: direction === "long" ? "futures_long" : "futures_short",
+          action: direction === "long" ? `${TRADE_ACTION_PREFIX}_long` : `${TRADE_ACTION_PREFIX}_short`,
         },
         orderBy: { createdAt: "desc" },
       });
@@ -2908,7 +2908,9 @@ async function evaluateAndTrade(
   } catch { /* fail-open: proceed normally if the pause check fails */ }
 
   // Execution gates — limits from DB config (Agent Hub manages these)
+  const currentTotalContracts = [...positions.values()].reduce((s, p) => s + p.quantity, 0);
   const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < riskConfig.maxConcurrentPositions
+    && currentTotalContracts < riskConfig.maxTotalContracts
     && dailyTradeCount < riskConfig.maxTradesPerDay && dailyPnl >= -(startOfDayBalance || tradovateEquity) * (riskConfig.dailyLossLimitPct / 100)
     && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
 
@@ -3292,7 +3294,7 @@ async function syncPositions() {
         const entryLog = await prisma.autoTradeLog.findFirst({
           where: {
             symbol: `FUT:${sym}`,
-            action: direction === "long" ? "futures_long" : "futures_short",
+            action: direction === "long" ? `${TRADE_ACTION_PREFIX}_long` : `${TRADE_ACTION_PREFIX}_short`,
           },
           orderBy: { createdAt: "desc" },
         });
