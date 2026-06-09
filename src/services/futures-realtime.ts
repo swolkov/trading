@@ -48,8 +48,10 @@ const MICRO_SYMBOLS = ["MNQ"];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
-// $25k threshold for live: below this, trade micros. Above, trade full-size.
-const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
+// Live full-size threshold — set so the MNQ→NQ switch is a RAMP, not a cliff (Fable 5 review).
+// At 1% risk a ~30pt NQ stop ($600) needs ~$60k for 1 NQ to equal the ~10 MNQ the account was already
+// trading; below $60k MNQ scales smoothly via risk-based sizing. (Was $25k — a 10× exposure jump.)
+const FULL_SIZE_EQUITY_THRESHOLD = 60_000;
 
 // Active trading symbols — recalculated when equity updates
 let SYMBOLS = FULL_SIZE_SYMBOLS; // default to full-size (demo), downgraded to micros for small live accounts
