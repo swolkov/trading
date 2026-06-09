@@ -40,8 +40,11 @@ const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
-const FULL_SIZE_SYMBOLS = ["ES", "NQ", "GC", "MBT"];
-const MICRO_SYMBOLS = ["MES", "MNQ", "MYM"];  // MYM = Micro Dow, $0.50/pt, ~$150 margin — fits $1K
+// FOCUS (June 9, from P&L attribution): NQ is the only instrument the demo actually made money on;
+// ES (-$5,662) and GC/MBT (flat/negative) were cut. Demo + live≥$25k trade NQ full-size.
+const FULL_SIZE_SYMBOLS = ["NQ"];
+// Live <$25k mirrors demo's NQ via the micro (MNQ, $2/pt) — same Nasdaq index, 1/10 size on the $1k account.
+const MICRO_SYMBOLS = ["MNQ"];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
@@ -1352,6 +1355,21 @@ function checkPositions(sym: string, price: number, reliable = true) {
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
   const pnlDollars = diff * mult * pos.quantity;
 
+  // HARD LOSS BACKSTOP (fixes the -$24,100 naked-stop runaway): if a position's loss blows far past
+  // what any working stop would allow, the broker bracket has failed — or a cancel-then-place stop
+  // move left it naked — so force-close NOW. Runs only on reliable quotes (the !reliable gate above
+  // already returned) and only at 2× the intended risk, so it never pre-empts the broker stop (which
+  // fills at 1×) in normal operation — it ONLY catches genuine stop failures. The 5%-equity fallback
+  // covers the post-breakeven case where the stop sits at entry and intended risk is ~0.
+  const intendedRisk = Math.abs(pos.entryPrice - pos.stopLoss) * mult * pos.quantity;
+  const hardLossCap = intendedRisk > 0 ? intendedRisk * 2 : (tradovateEquity > 0 ? tradovateEquity * 0.05 : Infinity);
+  if (pnlDollars <= -hardLossCap) {
+    log(`🚨 ${sym}: HARD LOSS BACKSTOP — loss $${pnlDollars.toFixed(0)} exceeds cap $${hardLossCap.toFixed(0)} (broker stop failed). Force-closing.`);
+    notify(`🚨 ${sym} hard backstop fired — broker stop failed, cut at $${pnlDollars.toFixed(0)}`, "general");
+    closePosition(sym, price, "stop_backstop");
+    return;
+  }
+
   // TIME-BASED EXIT: Close stale trades that haven't moved 1R in 30 minutes
   // Saves $40-80 per dead trade instead of waiting for full stop loss
   const STALE_TRADE_MINUTES = 30;
@@ -1403,7 +1421,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // Only pyramid if: breakeven reached, haven't already pyramided, equity allows it
   if (ALLOW_PYRAMID && pos.reachedBreakeven && diff >= stopDist * 1.2 && diff < stopDist * 2 && !pos.pyramided) {
     const addQty = Math.max(1, Math.floor(pos.quantity * 0.5)); // Add 50% of original size
-    const maxTotalContracts = Math.max(2, Math.floor(tradovateEquity / 500)); // Scale with account
+    const maxTotalContracts = riskConfig.maxTotalContracts; // BUGFIX: enforce the CONFIGURED cap (was equity/500 → 118 on $59k, letting pyramids balloon to 30+ contracts past the 8/10 limit)
     if (pos.quantity + addQty <= maxTotalContracts) {
       log(`${sym}: PYRAMID +${addQty}x @ $${price.toFixed(2)} (1.2R, original at breakeven). Total: ${pos.quantity + addQty}x`);
       // Place add order — stop for NEW contracts at breakeven (same as original)
@@ -2123,8 +2141,7 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
     const advisorTool = useAdvisor ? [{
       type: "advisor_20260301",
       name: "advisor",
-      model: "claude-opus-4-8",
-      max_tokens: 2048,          // cap advisor output (~7x reduction, near-zero quality loss per Anthropic benchmarks)
+      model: "claude-opus-4-8",  // Opus 4.8 advises the Sonnet 4.6 executor
     }] : [];
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
