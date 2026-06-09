@@ -303,6 +303,24 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
           }
         }
       } else {
+        // FORWARD-ONLY DEDUP GUARD: the primary match (orderId / 5-min window) misses some existing
+        // logs (timestamp skew, scale-outs), so it backfill-creates a duplicate = the ~3x P&L inflation.
+        // Before creating, do a WIDER tolerant check; if a near-identical row already exists, SKIP the
+        // create. This can ONLY prevent a duplicate row — it never updates/deletes/corrupts an existing
+        // one — so it's safe to deploy without historical-data verification. Stops NEW inflation; the
+        // one-time cleanup of EXISTING dupe rows still needs prod-DB access (db-reconcile-diagnostic.ts).
+        const suspectedDup = existingExits.find((log) => {
+          if (log.orderId && log.orderId === String(rt.exitFill.orderId)) return true;
+          const s2 = log.symbol.replace("FUT:", "");
+          return s2 === rt.symbol && log.pnl != null && Math.abs(log.pnl - rt.pnl) <= 1
+            && Math.abs(log.createdAt.getTime() - exitTime.getTime()) < 15 * 60 * 1000;
+        });
+        if (suspectedDup) {
+          result.alreadyLogged++;
+          details.push(`SKIP backfill (suspected dup of #${suspectedDup.id}): ${rt.symbol} $${rt.pnl.toFixed(0)} @ ${exitTime.toISOString().slice(0, 16)}`);
+          continue;
+        }
+
         // Missing exit — backfill it
         const exitAction = rt.pnl >= 0 ? "take_profit" : "stop_loss";
         const newLog = await prisma.autoTradeLog.create({
