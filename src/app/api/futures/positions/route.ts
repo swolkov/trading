@@ -358,17 +358,8 @@ export async function GET() {
           } catch { return []; }
         }
         try {
-          const vaultDoc = await prisma.vaultDocument.findUnique({ where: { path: "Performance/daily-balances.md" } });
-          if (vaultDoc?.content) {
-            const vaultHistory: Record<string, { sod?: number; eod?: number }> = {};
-            const dayRegex = /(\d{4}-\d{2}-\d{2}):\s*\n\s*sod:\s*(\d+(?:\.\d+)?|null)[^\n]*\n\s*eod:\s*(\d+(?:\.\d+)?|null)/g;
-            for (const m of vaultDoc.content.matchAll(dayRegex)) {
-              vaultHistory[m[1]] = { sod: m[2] === "null" ? undefined : parseFloat(m[2]), eod: m[3] === "null" ? undefined : parseFloat(m[3]) };
-            }
-            if (Object.keys(vaultHistory).length > 0) {
-              return Object.entries(vaultHistory).map(([date, v]) => ({ date, startBalance: v.sod ?? null, endBalance: v.eod ?? null })).sort((a, b) => a.date.localeCompare(b.date));
-            }
-          }
+          // SKIP vault document for balance history — it mixes live/demo balances (bug).
+          // DB snapshots (daily_balance_* / eod_balance_*) are the reliable source.
           const [dailyBalances, eodBalances] = await Promise.all([
             prisma.agentConfig.findMany({ where: { key: { startsWith: "daily_balance_" } } }),
             prisma.agentConfig.findMany({ where: { key: { startsWith: "eod_balance_" } } }),
