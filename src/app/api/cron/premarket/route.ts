@@ -6,6 +6,7 @@ import { scanSector, SECTOR_UNIVERSES } from "@/lib/sector-scanner";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { updateMarketRegime, updateVolatilityEnvironment, vaultWrite, generateDailyBrief, updateBrain } from "@/lib/vault";
+import { generateDailyPlan } from "@/lib/advisor";
 
 export const maxDuration = 120;
 
@@ -239,7 +240,23 @@ ${sectorInsights.map((s) => `- ${s}`).join("\n")}
     try { await generateDailyBrief(); } catch { /* brain optional */ }
     try { await updateBrain("premarket"); } catch { /* brain optional */ }
 
-    return Response.json({ status: "ok", briefing, details });
+    // Generate Fable 5 daily trading plan — strategic advisor for all agents
+    let dailyPlan = null;
+    try {
+      dailyPlan = await generateDailyPlan({
+        regime: regime?.regime || "unknown",
+        regimeRecommendation: regime?.recommendation || "",
+        macroBias: macroBriefingSummary.includes("BULLISH") ? "bullish" : macroBriefingSummary.includes("BEARISH") ? "bearish" : "neutral",
+        macroSummary: macroBriefingSummary,
+        tradingRules: [],
+        futuresGap: futuresGapContext,
+        newsHighlights,
+        vixLevel: undefined,
+      });
+      details.push(`DAILY PLAN: ${dailyPlan.bias.toUpperCase()} (${dailyPlan.biasConfidence}%), risk: ${dailyPlan.riskAdjustment}`);
+    } catch { details.push("DAILY PLAN: Advisor unavailable — agents proceed on technicals"); }
+
+    return Response.json({ status: "ok", briefing, details, dailyPlan });
   } catch (error) {
     console.error("[premarket]", error);
     try { await sendNotification(`🚨 PREMARKET CRON CRASH: ${error instanceof Error ? error.message : "Unknown"}`, "general"); } catch {}

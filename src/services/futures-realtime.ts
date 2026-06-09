@@ -9,6 +9,7 @@ import { prisma } from "../lib/db";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateBrain, appendLiveFeed } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
+import { getDailyPlan, getPlanContextForGrading, escalateToAdvisor, shouldEscalate } from "../lib/advisor";
 
 
 // ── Config ──────────────────────────────────────────────
@@ -2082,9 +2083,14 @@ GOLD-SPECIFIC RULES:
       ? `\n📊 Sparse history: only ${ps.matchCount} matching trades. Use reasoning. **Default to APPROVE if pre-AI confidence > 60%** — we need to fire to populate the data.\n`
       : `\n📊 No matching historical pattern yet (cold-start). **Default to APPROVE on pre-AI confidence > 60%** — we need data to populate.\n`;
 
+    // Inject daily plan context from Fable 5 advisor (if available)
+    let planCtx = "";
+    try { planCtx = await getPlanContextForGrading(setup.sym); } catch { /* plan optional */ }
+
     const prompt = `You are a DATA-DRIVEN futures trader. Empirical historical performance is your primary signal. Subjective reasoning is secondary.
 ${liveContext}
 ${patternBlock}
+${planCtx}
 ${setup.sym} @ $${setup.price.toFixed(2)} | ${setup.direction.toUpperCase()} | ${isMetal ? "MICRO GOLD" : "EQUITY INDEX"}
 Setup: ${setup.reasoning}
 RSI(14): ${setup.rsi.toFixed(0)} | ATR: ${setup.atr.toFixed(2)} | VWAP: $${setup.vwap.toFixed(2)}
@@ -2873,6 +2879,56 @@ async function evaluateAndTrade(
   } else {
     log(`  AI: ${ai.reasoning}`);
   }
+
+  // ─── FABLE 5 ESCALATION: borderline calls get advisor review ───
+  // Map Sonnet's agree+confidence to a grade for escalation logic:
+  // agree + confidence >= 80 = "A+", agree + 60-79 = "A", agree + 40-59 = "B", below 40 = "C"
+  const workerGrade = !ai.agree ? "C" : ai.confidence >= 80 ? "A+" : ai.confidence >= 60 ? "A" : ai.confidence >= 40 ? "B" : "C";
+  try {
+    const plan = await getDailyPlan();
+    const planConflict = plan && ((plan.bias === "bearish" && direction === "long") || (plan.bias === "bullish" && direction === "short"));
+    if (ai.agree && shouldEscalate({
+      workerGrade,
+      workerAgree: ai.agree,
+      mode: IS_LIVE ? "live" : "demo",
+      contracts: 1,
+      recentRegimeShift: false,
+      planConflict: !!planConflict,
+    })) {
+      log(`  ESCALATING to Fable 5 advisor (${workerGrade} grade, ${IS_LIVE ? "live" : "demo"})...`);
+      const escalation = await escalateToAdvisor({
+        symbol: sym, direction, setupType: reasoning.split(" ")[0] || "unknown",
+        reasoning, price,
+        stopDistance: stopDist, targetDistance: targetDist,
+        rsi: rsiVal, atr: atrVal, vwap: vwapVal,
+        trend15, dayType, session,
+        workerGrade, workerReasoning: ai.reasoning,
+        technicalScore, mode: IS_LIVE ? "live" : "demo",
+        patternStats: patternStats ?? undefined,
+      });
+      if (escalation) {
+        log(`  ADVISOR: ${escalation.finalGrade} — ${escalation.reasoning}${escalation.overrideWorker ? " [OVERRIDE]" : ""}`);
+        if (escalation.overrideWorker) {
+          if (!escalation.agree || escalation.finalGrade === "C") {
+            log(`  ADVISOR KILLS TRADE — blocking`);
+            return;
+          }
+          // Advisor overrides worker grade — adjust confidence accordingly
+          if (escalation.finalGrade === "A+") {
+            finalScore += 10;
+            log(`  Advisor upgrade: ${workerGrade} → A+ (+10 → ${finalScore}%)`);
+          } else if (escalation.finalGrade === "A" && workerGrade === "B") {
+            finalScore += 5;
+            log(`  Advisor upgrade: B → A (+5 → ${finalScore}%)`);
+          } else if (escalation.finalGrade === "B" && IS_LIVE) {
+            // B on live = marginal, reduce confidence
+            finalScore -= 5;
+            log(`  Advisor downgrade: ${workerGrade} → B on live (-5 → ${finalScore}%)`);
+          }
+        }
+      }
+    }
+  } catch { /* escalation is optional — never block trading on advisor failure */ }
 
   // Re-entry cooldown check: was this symbol+direction recently stopped out?
   const cooldownKey = `${sym}:${direction}`;

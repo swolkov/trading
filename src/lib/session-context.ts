@@ -98,6 +98,8 @@ export const SessionKeys = {
   VIX_SPIKE: "vix_spike",               // { level: 32, change: +30%, time: "..." }
   // Synthesis tracking
   TRADES_SINCE_SYNTHESIS: "trades_since_synthesis",
+  // Strategic advisor
+  DAILY_PLAN: "daily_plan",              // Fable 5 daily trading plan (generated at premarket)
 } as const;
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
