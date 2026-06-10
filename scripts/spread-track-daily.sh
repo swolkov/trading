@@ -6,4 +6,4 @@ cd /Users/user/trading || exit 1
 npx tsx scripts/spread-track.ts --refresh    # refresh daily data + bank the metrics ledger row
 npx tsx scripts/spread-paper-trade.ts        # advance the $50K spread paper account on the fresh data
 npx tsx scripts/spread-shadow.ts             # capture REAL bid/ask fills on new signals → fill-certainty ledger
-npx tsx scripts/fable5-system-review.ts      # Fable 5 head-of-desk: reconcile books + review system → Brain/system-review.md
+railway run npx tsx scripts/fable5-system-review.ts  # Fable 5 head-of-desk on clean prod-DB data → Brain/system-review.md
