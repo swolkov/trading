@@ -170,9 +170,8 @@ interface BacktestData {
 // Demo: equity indexes (active 5m strategy) + crypto micros via strategy registry.
 // MBT trades NR4 daily edge; MET/BFF/MXR/MSL are observation-only (sidecar streams price, no signal).
 const DEMO_CONTRACTS = ["ES", "NQ", "GC", "MBT", "MET", "BFF", "MXR", "MSL"];
-// Live: $1K micros. BFF mechanically fits but is observation-only until a strategy clears validation
-// (1-contract live cap is hard-coded in futures-agent.ts as a safety net for when it does).
-const LIVE_CONTRACTS = ["MES", "MNQ", "BFF"];
+// Live: MNQ only — mirrors demo's NQ at 1/10 size (the sole instrument live trades; auto-upgrades to NQ at $60k).
+const LIVE_CONTRACTS = ["MNQ"];
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
