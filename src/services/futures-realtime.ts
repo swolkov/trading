@@ -1752,7 +1752,15 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .slice(0, meta.quantity);
 
-    if (myFills.length === 0) {
+    // ACCURACY GUARD: without an exact close orderId, the fuzzy match (contract+side+recency) can grab
+    // the WRONG fills when several trades on this symbol close in the same window — producing a wrong P&L.
+    // Only trust the fuzzy match when its total quantity exactly equals the close size; otherwise treat
+    // it as "no fill yet" and defer to the reconciliation cron, which sees the full fill history.
+    const matchedQty = myFills.reduce((s, f) => s + f.qty, 0);
+    const untrustworthyFuzzy = !meta.closeOrderId && matchedQty !== meta.quantity;
+
+    if (myFills.length === 0 || untrustworthyFuzzy) {
+      if (untrustworthyFuzzy) log(`[DEFERRED] ${meta.sym}: fuzzy match qty ${matchedQty}≠${meta.quantity} — not trusting, deferring to reconciler`);
       if (attempt < 2) {
         log(`[DEFERRED] ${meta.sym}: No fills yet (attempt ${attempt}). Retrying in 60s...`);
         setTimeout(() => deferredPnlCheck(meta, attempt + 1), 60_000);

@@ -135,8 +135,11 @@ export async function GET() {
     const today = new Date().toISOString().slice(0, 10);
     const demoSodEntry = demoHistory.find((h) => h.date === today) ?? demoHistory[demoHistory.length - 1];
     const liveSodEntry = liveHistory.find((h) => h.date === today) ?? liveHistory[liveHistory.length - 1];
-    const demoTodayPnl = demoBrokerLive && demoSodEntry ? demoBrokerLive.balance - demoSodEntry.balance : demoToday.pnl;
-    const liveTodayPnl = liveBrokerLive && liveSodEntry ? liveBrokerLive.balance - liveSodEntry.balance : liveToday.pnl;
+    // Balance delta, ALWAYS. Use the live broker balance when available, else the cached EOD balance —
+    // but NEVER fall back to the DB trade sum (it double-logs and inflates ~3x). DB sum is a last resort
+    // only when there is no balance history at all (a brand-new account).
+    const demoTodayPnl = demoSodEntry && demoBalance != null ? demoBalance - demoSodEntry.balance : demoToday.pnl;
+    const liveTodayPnl = liveSodEntry && liveBalance != null ? liveBalance - liveSodEntry.balance : liveToday.pnl;
 
     const demoEquity = demoBalance ?? 50_000;
     const liveEquity = liveBalance ?? 1_000;

@@ -165,6 +165,11 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     details,
   };
 
+  // Backfilled rows MUST carry the mode-correct action prefix, or a reconciled LIVE trade gets logged
+  // as "futures_*" and shows up in the DEMO account (and vice-versa). The dashboard separates accounts
+  // purely by this prefix, so this is the difference between a correct and a misattributed ledger.
+  const actionPrefix = modeOverride === "live" ? "live" : "futures";
+
   try {
     // 1. Check auth
     const auth = await checkTradovateAuth(modeOverride);
@@ -191,8 +196,11 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     // Try to get contract names from Tradovate API (via positions or direct lookup)
     // For now, use the fills themselves — if we can't resolve, mark as UNKNOWN
     // We'll also check DB for any existing mappings
+    // Scope to THIS mode's rows. The fills/round-trips are already single-account (modeOverride), so the
+    // matchers and dedup must compare against same-mode logs only — otherwise a live run that can't see a
+    // mis-attributed demo row (or vice-versa) creates a duplicate, reintroducing P&L inflation.
     const dbLogs = await prisma.autoTradeLog.findMany({
-      where: { symbol: { startsWith: "FUT:" } },
+      where: { symbol: { startsWith: "FUT:" }, action: { startsWith: `${actionPrefix}_` } },
       orderBy: { createdAt: "desc" },
     });
 
@@ -326,7 +334,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
         const newLog = await prisma.autoTradeLog.create({
           data: {
             symbol: `FUT:${rt.symbol}`,
-            action: `futures_${exitAction}`,
+            action: `${actionPrefix}_${exitAction}`,
             qty: rt.qty,
             price: rt.exitPrice,
             pnl: rt.pnl,
@@ -386,7 +394,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
         return (
           sym === rt.symbol &&
           Math.abs(logTime - entryTime.getTime()) < timeWindow &&
-          (log.action === "futures_long" || log.action === "futures_short") &&
+          (log.action === `${actionPrefix}_long` || log.action === `${actionPrefix}_short`) &&
           log.pnl == null
         );
       });
@@ -396,7 +404,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
         await prisma.autoTradeLog.create({
           data: {
             symbol: `FUT:${rt.symbol}`,
-            action: rt.direction === "long" ? "futures_long" : "futures_short",
+            action: rt.direction === "long" ? `${actionPrefix}_long` : `${actionPrefix}_short`,
             qty: rt.qty,
             price: rt.entryPrice,
             pnl: null,

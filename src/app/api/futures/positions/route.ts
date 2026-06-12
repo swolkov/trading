@@ -30,19 +30,23 @@ export async function GET() {
       prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } }).catch(() => null),
     ]);
 
-    const activity = recentLogs.map((log) => ({
-      id: log.id,
-      symbol: log.symbol.replace("FUT:", ""),
-      action: log.action,
-      qty: log.qty,
-      price: log.price,
-      pnl: log.pnl,
-      reason: log.reason,
-      aiScore: log.aiScore,
-      aiSignal: log.aiSignal,
-      orderId: log.orderId,
-      time: log.createdAt.toISOString(),
-    }));
+    const activity = recentLogs
+      // Hide phantom rows: close attempts that never filled (swept to pnl:0 and tagged SUPERSEDED).
+      // These are non-events — showing them as "$0" trades clutters the list and confuses the P&L picture.
+      .filter((log) => !(log.reason?.includes("SUPERSEDED")))
+      .map((log) => ({
+        id: log.id,
+        symbol: log.symbol.replace("FUT:", ""),
+        action: log.action,
+        qty: log.qty,
+        price: log.price,
+        pnl: log.pnl,
+        reason: log.reason,
+        aiScore: log.aiScore,
+        aiSignal: log.aiSignal,
+        orderId: log.orderId,
+        time: log.createdAt.toISOString(),
+      }));
 
     // Parse engine heartbeats
     let engineStatus: { alive: boolean; lastHeartbeat: string | null; ageMinutes: number; demo?: { alive: boolean; ageMinutes: number }; live?: { alive: boolean; ageMinutes: number } } = { alive: false, lastHeartbeat: null, ageMinutes: 999 };
