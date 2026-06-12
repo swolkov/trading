@@ -1775,6 +1775,9 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         log(`[DEFERRED] ${meta.sym}: DB log #${meta.dbLogId} updated with fill P&L $${realPnl.toFixed(2)}`);
       } catch (err) { log(`[DEFERRED] DB update failed: ${err}`); }
     }
+    // Post the ACCURATE, reconciled fill P&L to Slack/feed (closePosition no longer broadcasts the estimate).
+    notify(`${meta.sym} ${meta.reason} actual fill: ${realPnl >= 0 ? "+$" : "-$"}${Math.abs(realPnl).toFixed(0)} @ $${fillPrice.toFixed(2)} | Daily: ${dailyPnl >= 0 ? "+$" : "-$"}${Math.abs(dailyPnl).toFixed(0)}`);
+    feedLog("exit", `**${MODE_TAG} ${meta.sym} ${meta.reason} filled** ${realPnl >= 0 ? "+$" : "-$"}${Math.abs(realPnl).toFixed(0)} @ $${fillPrice.toFixed(2)}`);
 
     // Correct dailyPnl estimate with real value
     const estimatedPnl = (meta.direction === "long" ? -1 : 1) * 0; // we already added estimate, adjust delta
@@ -1973,8 +1976,10 @@ async function closePosition(sym: string, price: number, reason: string) {
       consecutiveStops = 0;
     }
     log(`CLOSED ${sym}: ${reason} | Est P&L: $${estimatedPnl.toFixed(0)} (Yahoo) | Daily: $${dailyPnl.toFixed(0)} | Fill P&L pending...`);
-    feedLog("exit", `**${MODE_TAG} CLOSED ${sym}** ${reason} | ~${estimatedPnl >= 0 ? "+" : ""}$${estimatedPnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
-    notify(`CLOSED ${sym}: ${reason} | ~$${estimatedPnl >= 0 ? "+" : ""}${estimatedPnl.toFixed(0)} (fill pending) | Daily: ${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(0)}`);
+    // Do NOT broadcast the Yahoo estimate (it can be wildly wrong on fast/emergency closes — e.g. a
+    // phantom -$17,200 vs a real -$9,325). Announce the close; deferredPnlCheck() posts the ACTUAL fill P&L.
+    feedLog("exit", `**${MODE_TAG} CLOSED ${sym}** ${reason} — confirming actual fill, P&L posting…`);
+    notify(`CLOSED ${sym}: ${reason} — confirming actual fill, P&L posting shortly…`);
 
     // Log close to database with pnl: null — real P&L set by deferredPnlCheck()
     // NEVER use Yahoo price for DB P&L. The deferred check gets the actual Tradovate fill.
