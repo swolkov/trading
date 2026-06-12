@@ -1345,7 +1345,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   const totalDrawdown = aggregateUnrealized + dailyPnl;
   if (tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * MAX_DRAWDOWN_PCT)) {
     log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${(MAX_DRAWDOWN_PCT * 100)}% of equity $${tradovateEquity.toFixed(0)} — CLOSING ALL`);
-    notify(`🚨 AGGREGATE DRAWDOWN KILL: $${totalDrawdown.toFixed(0)} loss. Closing all positions.`, "general");
+    notify(`🚨 AGGREGATE DRAWDOWN KILL: ~$${totalDrawdown.toFixed(0)} (est) — closing all positions; actual fill P&L posts per-position as it reconciles.`, "general");
     for (const [s, p] of positions) {
       closePosition(s, barBuilders.get(s)?.currentBar?.c || p.entryPrice, "emergency");
     }
@@ -1367,7 +1367,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   const hardLossCap = intendedRisk > 0 ? intendedRisk * 2 : (tradovateEquity > 0 ? tradovateEquity * 0.05 : Infinity);
   if (pnlDollars <= -hardLossCap) {
     log(`🚨 ${sym}: HARD LOSS BACKSTOP — loss $${pnlDollars.toFixed(0)} exceeds cap $${hardLossCap.toFixed(0)} (broker stop failed). Force-closing.`);
-    notify(`🚨 ${sym} hard backstop fired — broker stop failed, cut at $${pnlDollars.toFixed(0)}`, "general");
+    notify(`🚨 ${sym} hard backstop fired — broker stop failed, cut at ~$${pnlDollars.toFixed(0)} (est); actual fill P&L posts on reconcile.`, "general");
     closePosition(sym, price, "stop_backstop");
     return;
   }
