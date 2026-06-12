@@ -707,16 +707,11 @@ export async function getTradovateFills(modeOverride?: TradingMode): Promise<Tra
   try {
     const mode = await resolveMode(modeOverride);
 
-    // Use /fill/ldeps (historical fills by account) instead of /fill/list (current session only).
-    // /fill/list loses fills when the CME session rolls (~5 PM CT), so losses from previous
-    // sessions would vanish — causing phantom 100% win rates.
-    const auth = await checkTradovateAuth(mode);
-    if (auth.accountId) {
-      const fills = await tvFetch(`/fill/ldeps?masterid=${auth.accountId}`, undefined, mode) as TradovateFill[];
-      return Array.isArray(fills) ? fills : [];
-    }
-
-    // Fallback to /fill/list if no accountId
+    // /fill/list returns the authed account's current-session fills — the SAME endpoint the engine's
+    // deferred P&L check uses successfully. The previous `/fill/ldeps?masterid=accountId` returned 0
+    // (fills depend on ORDERS, not the account, so that masterid query is invalid) — which silently
+    // broke reconciliation, leaving broker-bracket fills unlogged (orders ≠ balance). NOTE: /fill/list
+    // is session-scoped, so reconciliation must run intraday (before the ~5 PM CT roll) to catch fills.
     const fills = await tvFetch("/fill/list", undefined, mode) as TradovateFill[];
     return Array.isArray(fills) ? fills : [];
   } catch {
