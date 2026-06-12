@@ -1719,6 +1719,25 @@ interface CloseMeta {
   entrySetupType: string;
 }
 
+// Auto-clean phantom close-rows: a close attempt that never reconciled to a real fill (double-close /
+// orphan-adoption artifacts). >2h cutoff is far past any legitimate fill delay, and open-entry rows
+// (_long/_short, also pnl:null) are excluded — so this never touches a genuinely-pending trade. Mark
+// superseded (pnl 0 + reconciled) so they drop out of "pending" and out of P&L stats.
+async function sweepPhantomCloseRows() {
+  try {
+    const cutoff = new Date(Date.now() - 2 * 3600_000);
+    const r = await prisma.autoTradeLog.updateMany({
+      where: {
+        symbol: { startsWith: "FUT:" }, pnl: null, reconciledAt: null, createdAt: { lt: cutoff },
+        action: { startsWith: `${TRADE_ACTION_PREFIX}_` },
+        NOT: [{ action: { contains: "_long" } }, { action: { contains: "_short" } }],
+      },
+      data: { pnl: 0, reconciledAt: new Date() },
+    });
+    if (r.count > 0) log(`[SWEEP] Marked ${r.count} phantom close-row(s) superseded (never reconciled >2h)`);
+  } catch (e) { log(`[SWEEP] phantom sweep failed: ${e}`); }
+}
+
 async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
   try {
     const closeSide = meta.direction === "long" ? "Sell" : "Buy";
@@ -2181,7 +2200,7 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         ...(advisorTool.length > 0 ? { tools: advisorTool } : {}),
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(useAdvisor ? 45000 : 20000),  // longer timeout when advisor available
+      signal: AbortSignal.timeout(useAdvisor ? 75000 : 30000),  // Opus 4.8 advisor + adaptive thinking can exceed 45s → was timing out and dropping AI grading; give it room (graceful degrade on timeout still applies)
     });
 
     if (!res.ok) {
@@ -4250,6 +4269,7 @@ async function main() {
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
+  safeInterval(sweepPhantomCloseRows, 1800_000, "sweepPhantoms"); // auto-clean phantom close-rows every 30min
   safeInterval(proactiveTokenRefresh, 600_000, "tokenRefresh"); // check token expiry every 10min
   // Mode is fixed by ENGINE_MODE env var — no polling needed
   safeInterval(updateEconomicCalendar, 3600_000, "updateEconomicCalendar"); // hourly
