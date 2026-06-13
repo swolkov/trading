@@ -2109,10 +2109,10 @@ async function getAIConfirmation(setup: {
   dayType: string; session: string; trend15: string;
   prevDayHigh: number; prevDayLow: number;
   patternStats?: { matchCount: number; winRate: number; avgR: number } | null;
-}): Promise<{ agree: boolean; confidence: number; reasoning: string }> {
+}): Promise<{ agree: boolean; confidence: number; reasoning: string; aiDown?: boolean }> {
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return { agree: true, confidence: 0, reasoning: "AI unavailable" };
+    if (!apiKey) return { agree: true, confidence: 0, reasoning: "AI unavailable", aiDown: true };
 
     const macroCtx = crossAssetSummary || "No macro data";
     const eventCtx = macroBlockReason || "No macro events nearby";
@@ -2184,59 +2184,89 @@ You have access to an advisor tool backed by a stronger model. If you are UNCERT
 
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence citing data or specific block reason"}`;
 
-    // Native Advisor Tool (beta): Sonnet executor + Opus 4.8 advisor in a single request.
-    // Sonnet decides when to consult the advisor — no hardcoded escalation rules.
-    // The advisor sub-inference adds ~5-15s latency only when called.
-    const useAdvisor = IS_LIVE || (setup.patternStats && setup.patternStats.matchCount >= 10 && setup.patternStats.winRate < 0.55);
-    const advisorTool = useAdvisor ? [{
-      type: "advisor_20260301",
-      name: "advisor",
-      model: "claude-opus-4-8",  // Opus 4.8 advises the Sonnet 4.6 executor
-    }] : [];
+    // GRADER MODEL CHAIN (resilience): primary uses the native advisor tool (Sonnet 4.6 executor +
+    // Opus 4.8 advisor). If a model is UNAVAILABLE (pulled/region-blocked/5xx/network), fall through to
+    // a plain strong model so a grade is still produced. A TIMEOUT is NOT failed-over (it would stack
+    // latency on a time-sensitive 5-min decision) — it degrades to approve as before. If EVERY model is
+    // unavailable, return aiDown so LIVE pauses (demo keeps trading). The chain is tried fresh on every
+    // call, so grading auto-recovers the instant a model is reachable again — no manual reset.
+    const escalate = IS_LIVE || (setup.patternStats && setup.patternStats.matchCount >= 10 && setup.patternStats.winRate < 0.55);
+    const graderChain: { model: string; advisor: boolean }[] = escalate
+      ? [{ model: "claude-sonnet-4-6", advisor: true }, { model: "claude-opus-4-8", advisor: false }, { model: "claude-haiku-4-5", advisor: false }]
+      : [{ model: "claude-sonnet-4-6", advisor: false }, { model: "claude-haiku-4-5", advisor: false }];
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        ...(useAdvisor ? { "anthropic-beta": "advisor-tool-2026-03-01" } : {}),
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1024,                // increased from 512 to allow advisor flow text
-        ...(advisorTool.length > 0 ? { tools: advisorTool } : {}),
-        messages: [{ role: "user", content: prompt }],
-      }),
-      signal: AbortSignal.timeout(useAdvisor ? 75000 : 30000),  // Opus 4.8 advisor + adaptive thinking can exceed 45s → was timing out and dropping AI grading; give it room (graceful degrade on timeout still applies)
-    });
+    let anyUnavailable = false;
+    let lastDetail = "";
+    for (let i = 0; i < graderChain.length; i++) {
+      const att = graderChain[i];
+      const isLast = i === graderChain.length - 1;
+      try {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            ...(att.advisor ? { "anthropic-beta": "advisor-tool-2026-03-01" } : {}),
+          },
+          body: JSON.stringify({
+            model: att.model,
+            max_tokens: 1024,                // room for advisor flow text
+            ...(att.advisor ? { tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-4-8" }] } : {}),
+            messages: [{ role: "user", content: prompt }],
+          }),
+          signal: AbortSignal.timeout(att.advisor ? 75000 : 30000),
+        });
 
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      log(`[AI] Call failed (${res.status}): ${errBody.slice(0, 200)}`);
-      return { agree: true, confidence: 0, reasoning: `AI ${res.status}` };
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          anyUnavailable = true;
+          lastDetail = String(res.status);
+          log(`[AI] model "${att.model}"${att.advisor ? "+advisor" : ""} failed (${res.status})${isLast ? "" : " — trying next model"}: ${errBody.slice(0, 160)}`);
+          continue; // unavailability is a fast failure → fall through to the next model
+        }
+
+        const data = await res.json() as {
+          content: { type: string; text?: string; name?: string; content?: { type: string; text?: string } }[];
+        };
+        // With advisor tool, response may include server_tool_use + advisor_tool_result blocks.
+        // Extract the LAST text block which contains the final JSON grade.
+        const textBlocks = data.content?.filter(b => b.type === "text" && b.text) || [];
+        const advisorUsed = data.content?.some(b => b.type === "server_tool_use" && b.name === "advisor");
+        const text = textBlocks.length > 0 ? textBlocks[textBlocks.length - 1].text! : "";
+        if (advisorUsed) log(`  [AI] Advisor tool consulted (Opus 4.8)`);
+        if (i > 0) log(`  [AI] primary grader unavailable — graded by fallback "${att.model}"`);
+        // Handle Claude sometimes wrapping JSON in markdown code blocks
+        let jsonText = text.trim();
+        const jsonMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (jsonMatch) jsonText = jsonMatch[1].trim();
+        const parsed = JSON.parse(jsonText);
+        return { agree: !!parsed.agree, confidence: parsed.confidence || 50, reasoning: parsed.reasoning || "" };
+      } catch (err) {
+        const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        if (isTimeout) {
+          // Model exists but was slow — don't stack more timeouts on a time-sensitive decision.
+          // Degrade to approve (not "down"), preserving prior behavior so a slow grade can't halt live.
+          log(`[AI] grader timeout on "${att.model}" — degrading (not failing over)`);
+          return { agree: true, confidence: 0, reasoning: "AI timeout", aiDown: false };
+        }
+        // Network/parse error → treat as unavailable and try the next model.
+        anyUnavailable = true;
+        lastDetail = msg.slice(0, 80);
+        log(`[AI] model "${att.model}" error${isLast ? "" : " — trying next model"}: ${lastDetail}`);
+        continue;
+      }
     }
 
-    const data = await res.json() as {
-      content: { type: string; text?: string; name?: string; content?: { type: string; text?: string } }[];
-    };
-    // With advisor tool, response may include server_tool_use + advisor_tool_result blocks.
-    // Extract the LAST text block which contains the final JSON grade.
-    const textBlocks = data.content?.filter(b => b.type === "text" && b.text) || [];
-    const advisorUsed = data.content?.some(b => b.type === "server_tool_use" && b.name === "advisor");
-    const text = textBlocks.length > 0 ? textBlocks[textBlocks.length - 1].text! : "";
-    if (advisorUsed) log(`  [AI] Advisor tool consulted (Opus 4.8)`);
-    // Handle Claude sometimes wrapping JSON in markdown code blocks
-    let jsonText = text.trim();
-    const jsonMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (jsonMatch) jsonText = jsonMatch[1].trim();
-    const parsed = JSON.parse(jsonText);
-    return { agree: !!parsed.agree, confidence: parsed.confidence || 50, reasoning: parsed.reasoning || "" };
+    // Whole chain exhausted without producing a grade.
+    log(`[AI] all grader models unavailable (${lastDetail})`);
+    return { agree: true, confidence: 0, reasoning: `AI unavailable: ${lastDetail}`, aiDown: anyUnavailable };
   } catch (err) {
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     log(`[AI] ERROR — ${msg}`);
-    // AI unavailable: still allow trades but with reduced confidence (no AI boost)
-    return { agree: true, confidence: 0, reasoning: `AI error: ${msg.slice(0, 80)}` };
+    // Unexpected error (not a model availability failure): degrade to approve as before.
+    return { agree: true, confidence: 0, reasoning: `AI error: ${msg.slice(0, 80)}`, aiDown: false };
   }
 }
 
@@ -2950,6 +2980,17 @@ async function evaluateAndTrade(
     dayType, session, trend15, prevDayHigh, prevDayLow,
     patternStats,
   });
+
+  // SAFEGUARD (live only): never trade real money blind. If every AI grader model is unreachable
+  // (API/models down — not just a slow timeout), pause this entry instead of default-approving on
+  // mechanical signals alone. Demo keeps trading (learning mode). Stateless — auto-resumes the moment
+  // a grader model is reachable again.
+  if (IS_LIVE && ai.aiDown) {
+    log(`  LIVE ENTRY PAUSED: AI unreachable (${ai.reasoning}) — skipping ${sym} ${direction} to protect real money. Auto-resumes when AI is back.`);
+    feedLog("cooldown", `LIVE entry paused — AI unreachable (${ai.reasoning})`);
+    notify(`LIVE entry paused: AI grader unreachable (${ai.reasoning}). Skipping ${sym} ${direction} to protect real money — auto-resumes when AI is back.`, "general");
+    return;
+  }
 
   // Adjust confidence based on AI
   let finalScore = technicalScore;

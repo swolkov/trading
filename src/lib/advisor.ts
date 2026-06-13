@@ -17,8 +17,15 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 const DEFAULT_ADVISOR_MODEL = "claude-fable-5";
 const DEFAULT_WORKER_MODEL = "claude-sonnet-4-6";
 
-// Models that require adaptive thinking (reject type: "enabled" + budget_tokens)
-const ADAPTIVE_THINKING_MODELS = new Set(["claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7"]);
+// RESILIENCE: if the primary advisor model becomes unavailable (deprecated, pulled, region-blocked,
+// overloaded), fall through this chain so strategic grading keeps its full capability instead of
+// silently dropping to "no advisor." Most → least preferred. DB-overridable via advisor_fallback_models.
+const DEFAULT_ADVISOR_FALLBACKS = ["claude-opus-4-8", "claude-sonnet-4-6"];
+
+// Models that require adaptive thinking (reject type: "enabled" + budget_tokens).
+// Sonnet 4.6 is included so it works as a fallback advisor — its legacy budget_tokens (8000) would
+// otherwise equal escalation's max_tokens (8000) and 400 (budget must be < max_tokens).
+const ADAPTIVE_THINKING_MODELS = new Set(["claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"]);
 
 /** Get the correct thinking config for a given model */
 function getThinkingConfig(model: string): { type: "adaptive" } | { type: "enabled"; budget_tokens: number } {
@@ -30,19 +37,65 @@ function getThinkingConfig(model: string): { type: "adaptive" } | { type: "enabl
 }
 
 /** Read model config from AgentConfig DB. Falls back to defaults. */
-async function getModelConfig(): Promise<{ advisorModel: string; workerModel: string }> {
+async function getModelConfig(): Promise<{ advisorModel: string; workerModel: string; advisorChain: string[] }> {
+  let advisorModel = DEFAULT_ADVISOR_MODEL;
+  let workerModel = DEFAULT_WORKER_MODEL;
+  let fallbacks = DEFAULT_ADVISOR_FALLBACKS;
   try {
-    const keys = ["advisor_model", "worker_model"];
+    const keys = ["advisor_model", "worker_model", "advisor_fallback_models"];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
     for (const c of configs) cfg[c.key] = c.value;
-    return {
-      advisorModel: cfg.advisor_model || DEFAULT_ADVISOR_MODEL,
-      workerModel: cfg.worker_model || DEFAULT_WORKER_MODEL,
-    };
-  } catch {
-    return { advisorModel: DEFAULT_ADVISOR_MODEL, workerModel: DEFAULT_WORKER_MODEL };
+    advisorModel = cfg.advisor_model || DEFAULT_ADVISOR_MODEL;
+    workerModel = cfg.worker_model || DEFAULT_WORKER_MODEL;
+    if (cfg.advisor_fallback_models) {
+      const parsed = cfg.advisor_fallback_models.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parsed.length > 0) fallbacks = parsed;
+    }
+  } catch { /* use defaults */ }
+  // Build the resilience chain: primary first, then fallbacks, deduped (so the primary is never retried).
+  const advisorChain = [...new Set([advisorModel, ...fallbacks])];
+  return { advisorModel, workerModel, advisorChain };
+}
+
+type AdvisorCallParams = {
+  max_tokens: number;
+  messages: Anthropic.MessageParam[];
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+};
+
+/**
+ * Call messages.create with automatic model fallback. Tries each model in the chain in order; on any
+ * model-availability failure (model pulled/deprecated/region-blocked, 5xx, overloaded) it falls through
+ * to the next. Bails immediately only on 401 (bad API key — no model would work). Throws if the whole
+ * chain fails, so the caller's own graceful fallback (neutral plan / null) still applies.
+ */
+async function createWithModelFallback(
+  params: AdvisorCallParams,
+  chain: string[],
+): Promise<{ response: Anthropic.Message; modelUsed: string; fellBack: boolean }> {
+  let lastErr: unknown;
+  for (let i = 0; i < chain.length; i++) {
+    const model = chain[i];
+    try {
+      const response = await anthropic.messages.create({
+        model,
+        max_tokens: params.max_tokens,
+        thinking: getThinkingConfig(model),
+        ...(params.effort ? { output_config: { effort: params.effort } } : {}),
+        messages: params.messages,
+      });
+      if (i > 0) console.warn(`[ADVISOR] primary model unavailable — request served by fallback "${model}"`);
+      return { response, modelUsed: model, fellBack: i > 0 };
+    } catch (err) {
+      lastErr = err;
+      const status = (err as { status?: number })?.status;
+      const more = i < chain.length - 1 ? " — trying next model" : "";
+      console.error(`[ADVISOR] model "${model}" failed (status ${status ?? "?"})${more}: ${err instanceof Error ? err.message : String(err)}`);
+      if (status === 401) throw err; // auth failure — every model will reject; don't waste calls
+    }
   }
+  throw lastErr;
 }
 
 // ─── Daily Plan ───────────────────────────────────────────────────────────────
@@ -82,7 +135,7 @@ export async function generateDailyPlan(context: {
   newsHighlights: string[];
   vixLevel?: number;
 }): Promise<DailyPlan> {
-  const { advisorModel } = await getModelConfig();
+  const { advisorChain } = await getModelConfig();
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 
   // Load vault intelligence for richer context
@@ -151,14 +204,13 @@ Respond ONLY with JSON (no markdown):
 }`;
 
   try {
-    const response = await anthropic.messages.create({
-      model: advisorModel,
+    // xhigh effort: strategic daily plan deserves deep thinking (runs once per day, cost is negligible).
+    // Auto-falls through the model chain if the primary advisor model is unavailable.
+    const { response, modelUsed, fellBack } = await createWithModelFallback({
       max_tokens: 16000,
-      thinking: getThinkingConfig(advisorModel),
-      // xhigh effort: strategic daily plan deserves deep thinking (runs once per day, cost is negligible)
-      output_config: { effort: "xhigh" },
+      effort: "xhigh",
       messages: [{ role: "user", content: prompt }],
-    });
+    }, advisorChain);
 
     const text = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
@@ -181,7 +233,7 @@ Respond ONLY with JSON (no markdown):
       preferredSetups: raw.preferredSetups || [],
       avoidSetups: raw.avoidSetups || [],
       riskAdjustment: raw.riskAdjustment || "normal",
-      warnings: raw.warnings || [],
+      warnings: [...(raw.warnings || []), ...(fellBack ? [`⚠️ Primary advisor model unavailable — plan generated by fallback model ${modelUsed}`] : [])],
       reasoning: raw.reasoning || "",
     };
 
@@ -193,7 +245,7 @@ Respond ONLY with JSON (no markdown):
       await vaultWrite("Brain/daily-plan.md", `---
 date: "${today}"
 generated_by: "fable-5-advisor"
-model: "${advisorModel}"
+model: "${modelUsed}"
 bias: "${plan.bias}"
 bias_confidence: ${plan.biasConfidence}
 risk_adjustment: "${plan.riskAdjustment}"
@@ -289,7 +341,7 @@ export interface EscalationResult {
  * Called when the worker model grades A or B (the ambiguous zone).
  */
 export async function escalateToAdvisor(req: EscalationRequest): Promise<EscalationResult | null> {
-  const { advisorModel } = await getModelConfig();
+  const { advisorChain } = await getModelConfig();
 
   // Read today's daily plan for strategic context
   const plan = await getDailyPlan();
@@ -338,12 +390,12 @@ Respond ONLY with JSON:
 {"finalGrade": "A+"|"A"|"B"|"C", "agree": true/false, "reasoning": "one decisive sentence", "overrideWorker": true/false}`;
 
   try {
-    const response = await anthropic.messages.create({
-      model: advisorModel,
+    // Auto-falls through the model chain if the primary advisor model is unavailable, so live
+    // borderline setups keep their senior second opinion instead of dropping to the worker grade.
+    const { response } = await createWithModelFallback({
       max_tokens: 8000,
-      thinking: getThinkingConfig(advisorModel),
       messages: [{ role: "user", content: prompt }],
-    });
+    }, advisorChain);
 
     const text = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
