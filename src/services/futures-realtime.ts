@@ -2215,7 +2215,10 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
             ...(att.advisor ? { tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-4-8" }] } : {}),
             messages: [{ role: "user", content: prompt }],
           }),
-          signal: AbortSignal.timeout(att.advisor ? 75000 : 30000),
+          // Measured advisor-flow latency: ~30s small prompt, ~46-48s at full context; real prompts can
+          // touch ~50-60s with thinking variance. 90s gives solid headroom (5-min bar cadence affords it).
+          // A timeout past this is a genuine outlier → live skips (safe), so erring generous is fine.
+          signal: AbortSignal.timeout(att.advisor ? 90000 : 30000),
         });
 
         if (!res.ok) {
@@ -2246,10 +2249,12 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
         const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
         if (isTimeout) {
-          // Model exists but was slow — don't stack more timeouts on a time-sensitive decision.
-          // Degrade to approve (not "down"), preserving prior behavior so a slow grade can't halt live.
-          log(`[AI] grader timeout on "${att.model}" — degrading (not failing over)`);
-          return { agree: true, confidence: 0, reasoning: "AI timeout", aiDown: false };
+          // Model exists but was abnormally slow. Measured normal latency is ~30s vs the 75s limit, so a
+          // timeout is a 2.5x outlier (degraded API). Don't stack more timeouts on a time-sensitive
+          // decision. Surface as aiDown so LIVE SKIPS the entry (never trade real money on a missing
+          // verdict); demo ignores aiDown and still trades (learning). Auto-recovers next setup.
+          log(`[AI] grader timeout on "${att.model}" — no verdict; live will skip, demo proceeds`);
+          return { agree: true, confidence: 0, reasoning: "AI timeout (no verdict)", aiDown: true };
         }
         // Network/parse error → treat as unavailable and try the next model.
         anyUnavailable = true;
@@ -2986,9 +2991,9 @@ async function evaluateAndTrade(
   // mechanical signals alone. Demo keeps trading (learning mode). Stateless — auto-resumes the moment
   // a grader model is reachable again.
   if (IS_LIVE && ai.aiDown) {
-    log(`  LIVE ENTRY PAUSED: AI unreachable (${ai.reasoning}) — skipping ${sym} ${direction} to protect real money. Auto-resumes when AI is back.`);
-    feedLog("cooldown", `LIVE entry paused — AI unreachable (${ai.reasoning})`);
-    notify(`LIVE entry paused: AI grader unreachable (${ai.reasoning}). Skipping ${sym} ${direction} to protect real money — auto-resumes when AI is back.`, "general");
+    log(`  LIVE ENTRY PAUSED: AI gave no verdict (${ai.reasoning}) — skipping ${sym} ${direction} to protect real money. Auto-resumes next setup.`);
+    feedLog("cooldown", `LIVE entry paused — AI no verdict (${ai.reasoning})`);
+    notify(`LIVE entry paused: AI grader gave no verdict (${ai.reasoning}). Skipping ${sym} ${direction} to protect real money — auto-resumes when AI is back.`, "general");
     return;
   }
 
