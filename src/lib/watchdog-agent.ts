@@ -29,8 +29,10 @@ const CRON_EXPECTATIONS: Record<string, { maxStaleMinutes: number; description: 
   // Equities crons run during market hours only
   trade_last_run: { maxStaleMinutes: 40, description: "Auto-trader (runs every 20-30min during market hours)" },
   monitor_last_run: { maxStaleMinutes: 15, description: "Position monitor (every 5min during market hours)" },
-  premarket_last_run: { maxStaleMinutes: 1500, description: "Pre-market research (once daily at 9AM ET)" },
-  review_last_run: { maxStaleMinutes: 1500, description: "Post-market review (once daily at 4:30PM ET)" },
+  // 4380 min (~73h) tolerates a Fri→Mon weekend gap — these run only on trading days, so a Friday
+  // run is the last until Monday. A 25h limit false-alarmed all weekend + every Monday morning.
+  premarket_last_run: { maxStaleMinutes: 4380, description: "Pre-market research (once daily at 9AM ET, trading days)" },
+  review_last_run: { maxStaleMinutes: 4380, description: "Post-market review (once daily at 4:30PM ET, trading days)" },
   // Futures runs 24/5
   futures_engine_heartbeat_demo: { maxStaleMinutes: 15, description: "Futures demo engine (Railway)" },
   futures_engine_heartbeat_live: { maxStaleMinutes: 15, description: "Futures live engine (Railway)" },
@@ -223,7 +225,11 @@ export async function runWatchdog(): Promise<WatchdogResult> {
       take: 20,
     });
 
-    const errorRuns = recentRuns.filter((r) => r.errors > 0);
+    // Exclude the watchdog's OWN runs: it records `errors: criticals` (its critical-check count),
+    // so counting those here creates a self-feeding loop — the watchdog's own criticals get
+    // re-flagged as "agent errors", which is itself another critical, forever. This check is meant
+    // to catch TRADING-agent execution errors, not the monitor's own findings.
+    const errorRuns = recentRuns.filter((r) => r.errors > 0 && r.runType !== "watchdog");
     const totalErrors = errorRuns.reduce((sum, r) => sum + r.errors, 0);
 
     if (totalErrors > 5) {
