@@ -32,15 +32,40 @@ export async function generateMacroBriefing(): Promise<MacroBriefing> {
     getNews(["SPY", "QQQ"], 10).catch(() => []),
   ]);
 
-  // Get recent agent performance
+  // Recent performance — CLEAN, MODE-SEPARATED. Bug fixed 2026-06-15: this previously summed
+  // autoTradeLog.pnl across BOTH demo and live (no filter). Demo's $59K-account 7%-risk swings
+  // dominated, producing a bogus "desk down $15.7K" that got written into the brain docs and then
+  // read back by the advisor/grader. Real-money P&L now = LIVE balance delta (never a DB trade-pnl
+  // sum, which is double-logged/inflated); demo is reported separately as research, not desk capital.
+  const since7 = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const recentTrades = await prisma.autoTradeLog.findMany({
-    where: { pnl: { not: null } },
+    where: {
+      pnl: { not: null },
+      createdAt: { gte: since7 },
+      OR: [{ action: { startsWith: "live_" } }, { action: { startsWith: "futures_" } }],
+    },
     orderBy: { createdAt: "desc" },
-    take: 20,
+    take: 80,
+    select: { action: true, pnl: true },
   });
-  const wins = recentTrades.filter((t) => (t.pnl || 0) > 0).length;
-  const losses = recentTrades.filter((t) => (t.pnl || 0) < 0).length;
-  const totalPnl = recentTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const liveRows = recentTrades.filter((t) => t.action.startsWith("live_"));
+  const demoRows = recentTrades.filter((t) => t.action.startsWith("futures_"));
+  const wrPct = (rows: { pnl: number | null }[]) =>
+    rows.length ? Math.round(rows.filter((r) => (r.pnl || 0) > 0).length / rows.length * 100) : 0;
+  // Live real-money P&L from balance delta (clean source of truth — NOT a sum of trade pnl)
+  let liveDelta: number | null = null, liveLast = 0, livePrior = 0;
+  try {
+    const bal = await prisma.agentConfig.findMany({ where: { key: { startsWith: "live_eod_balance_" } } });
+    const series = bal
+      .map((k) => ({ d: k.key.slice("live_eod_balance_".length), v: parseFloat(k.value) }))
+      .filter((x) => !Number.isNaN(x.v))
+      .sort((a, b) => a.d.localeCompare(b.d));
+    if (series.length >= 2) {
+      liveLast = series[series.length - 1].v;
+      livePrior = series[Math.max(0, series.length - 6)].v;
+      liveDelta = liveLast - livePrior;
+    }
+  } catch { /* balance optional */ }
 
   const newsText = marketNews.map((n) => `- ${n.headline}`).join("\n");
 
@@ -53,9 +78,10 @@ ${crossAsset ? `Cross-asset: ${crossAsset.summary}` : ""}
 RECENT MARKET NEWS:
 ${newsText || "No major news"}
 
-OUR DESK PERFORMANCE (last 20 trades):
-Wins: ${wins} | Losses: ${losses} | Net P&L: $${totalPnl.toFixed(0)}
-${wins + losses > 0 ? `Win rate: ${((wins / (wins + losses)) * 100).toFixed(0)}%` : "No closed trades yet"}
+OUR DESK PERFORMANCE — real money is the LIVE $1K account ONLY. Demo ($59K paper, 7% risk) is
+research throughput, NOT the desk's capital — do NOT treat demo swings as a desk drawdown.
+LIVE ($1K, real): ${liveDelta !== null ? `7-day balance $${livePrior.toFixed(0)}→$${liveLast.toFixed(0)} (${liveDelta >= 0 ? "+" : ""}$${liveDelta.toFixed(0)}), ` : ""}${liveRows.length} trades, ${wrPct(liveRows)}% WR
+DEMO ($59K paper, research): ${demoRows.length} trades, ${wrPct(demoRows)}% WR
 
 Provide a CONCISE morning briefing in this JSON format (no markdown, raw JSON):
 {

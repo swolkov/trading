@@ -144,24 +144,50 @@ export async function generateDailyPlan(context: {
     vaultContext = await getVaultContextForAI("advisor", "Strategies/futures-scalping.md");
   } catch { /* vault optional */ }
 
-  // Load recent performance from DB
+  // Load recent performance — CLEAN sources only, MODE-SEPARATED.
+  // Bug fixed 2026-06-15: this previously summed autoTradeLog.pnl across BOTH demo and live with no
+  // mode filter. Demo's $59K-account swings (7% risk) got attributed to "the desk" and applied to LIVE
+  // grading — the advisor reasoned "desk down $15.7K → A+ only" on a $1K account that was actually +$62.
+  // Real-money P&L now comes from the LIVE balance delta (never a DB trade-pnl sum — those are
+  // double-logged/inflated); demo is reported separately and explicitly flagged as research, not the desk.
   let recentPerf = "";
   try {
-    const recentTrades = await prisma.autoTradeLog.findMany({
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recent = await prisma.autoTradeLog.findMany({
       where: {
         pnl: { not: null },
-        createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-        symbol: { in: ["MES", "MNQ", "ES", "NQ", "GC", "MBT", "MGC"] },
+        createdAt: { gte: since },
+        OR: [{ action: { startsWith: "live_" } }, { action: { startsWith: "futures_" } }],
       },
       orderBy: { createdAt: "desc" },
-      take: 20,
-      select: { symbol: true, aiSignal: true, pnl: true, createdAt: true },
+      take: 80,
+      select: { action: true, symbol: true, pnl: true },
     });
-    if (recentTrades.length > 0) {
-      const wins = recentTrades.filter(t => (t.pnl ?? 0) > 0).length;
-      const totalPnl = recentTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
-      recentPerf = `\nRECENT 7-DAY PERFORMANCE: ${recentTrades.length} trades, ${wins} wins (${(wins / recentTrades.length * 100).toFixed(0)}% WR), $${totalPnl.toFixed(0)} total P&L`;
-      recentPerf += `\nLast 5 trades: ${recentTrades.slice(0, 5).map(t => `${t.symbol} ${t.aiSignal} $${(t.pnl ?? 0).toFixed(0)}`).join(" | ")}`;
+    const wr = (rows: { pnl: number | null }[]) =>
+      rows.length ? `${rows.length} trades, ${Math.round(rows.filter(r => (r.pnl ?? 0) > 0).length / rows.length * 100)}% WR` : "no trades";
+    const liveRows = recent.filter(r => r.action.startsWith("live_"));
+    const demoRows = recent.filter(r => r.action.startsWith("futures_"));
+
+    // Real-money LIVE P&L from balance delta (clean) — NOT a sum of trade pnl.
+    let livePnl = "";
+    try {
+      const bal = await prisma.agentConfig.findMany({ where: { key: { startsWith: "live_eod_balance_" } } });
+      const series = bal
+        .map(k => ({ d: k.key.slice("live_eod_balance_".length), v: parseFloat(k.value) }))
+        .filter(x => !Number.isNaN(x.v))
+        .sort((a, b) => a.d.localeCompare(b.d));
+      if (series.length >= 2) {
+        const last = series[series.length - 1];
+        const prior = series[Math.max(0, series.length - 6)];
+        const delta = last.v - prior.v;
+        livePnl = ` | balance $${prior.v.toFixed(0)}→$${last.v.toFixed(0)} (Δ ${delta >= 0 ? "+" : ""}$${delta.toFixed(0)})`;
+      }
+    } catch { /* balance optional */ }
+
+    if (liveRows.length || demoRows.length) {
+      recentPerf = `\nRECENT 7-DAY PERFORMANCE (LIVE = real money; DEMO = research only, NOT the desk's capital — do not let demo swings drive live caution):`
+        + `\n- LIVE ($1K): ${wr(liveRows)}${livePnl}`
+        + `\n- DEMO ($59K paper, 7% risk research): ${wr(demoRows)} — aggressive throughput, not a real-money signal`;
     }
   } catch { /* perf optional */ }
 
@@ -177,9 +203,9 @@ ${context.newsHighlights.length > 0 ? `OVERNIGHT NEWS:\n${context.newsHighlights
 ${vaultContext}
 ${recentPerf}
 
-INSTRUMENTS AVAILABLE:
-- LIVE ($1K account): MES (S&P micro, $5/pt), MNQ (Nasdaq micro, $2/pt — currently removed)
-- DEMO ($59K account): ES ($50/pt), NQ ($20/pt), GC ($100/pt gold), MBT ($0.10/$1 BTC micro)
+INSTRUMENTS AVAILABLE (as of 2026-06-15):
+- LIVE ($1K account): MNQ (Nasdaq micro, $2/pt) ONLY — ramps to NQ at $60K equity. MES/MGC are NOT traded live.
+- DEMO ($59K account): NQ ($20/pt) + MBT ($0.10/$1 BTC micro, via registry). ES and GC were CUT June 9 (they lost money).
 
 SETUP TYPES AVAILABLE: opening_range_breakout, gap_fill, vwap_reversion, trend_continuation, ema_momentum, pullback_to_ema, rsi_bounce, nr4 (narrow range breakout)
 
@@ -190,11 +216,9 @@ Respond ONLY with JSON (no markdown):
   "bias": "bullish"|"bearish"|"neutral",
   "biasConfidence": 50-95,
   "instruments": {
-    "MES": {"priority": "high"|"medium"|"low"|"avoid", "direction": "long"|"short"|"both"|"avoid", "notes": "why"},
-    "ES": {"priority": "...", "direction": "...", "notes": "..."},
-    "NQ": {"priority": "...", "direction": "...", "notes": "..."},
-    "GC": {"priority": "...", "direction": "...", "notes": "..."},
-    "MBT": {"priority": "...", "direction": "...", "notes": "..."}
+    "MNQ": {"priority": "high"|"medium"|"low"|"avoid", "direction": "long"|"short"|"both"|"avoid", "notes": "why (LIVE $1K — Nasdaq micro)"},
+    "NQ": {"priority": "...", "direction": "...", "notes": "... (DEMO — Nasdaq full-size)"},
+    "MBT": {"priority": "...", "direction": "...", "notes": "... (DEMO — BTC micro, NR4)"}
   },
   "preferredSetups": ["setup_type_1", "setup_type_2"],
   "avoidSetups": ["setup_type_to_avoid"],
@@ -289,11 +313,9 @@ ${plan.reasoning}
       bias: "neutral",
       biasConfidence: 50,
       instruments: {
-        MES: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals" },
-        ES: { priority: "medium", direction: "both", notes: "advisor unavailable" },
-        NQ: { priority: "medium", direction: "both", notes: "advisor unavailable" },
-        GC: { priority: "medium", direction: "both", notes: "advisor unavailable" },
-        MBT: { priority: "low", direction: "both", notes: "advisor unavailable" },
+        MNQ: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (LIVE)" },
+        NQ: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (DEMO)" },
+        MBT: { priority: "low", direction: "both", notes: "advisor unavailable (DEMO, NR4)" },
       },
       preferredSetups: [],
       avoidSetups: [],
