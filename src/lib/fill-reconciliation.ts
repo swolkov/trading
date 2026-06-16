@@ -151,6 +151,42 @@ export interface ReconciliationResult {
   details: string[];
 }
 
+export interface CleanPerformance {
+  mode: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number; // 0-100, of decided (non-breakeven) trades
+  netPnl: number;
+  avgPnl: number;
+  source: "round_trip_ledger";
+}
+
+/**
+ * Clean win-rate / P&L from the broker-fill RoundTrip ledger — the trustworthy source.
+ * Use this instead of summing autoTradeLog.pnl (fragmented + only partially reconciled).
+ * Money headline P&L should still use balance delta; this is for win-rate + per-trade stats.
+ * Returns zeros until the ledger has accumulated (forward-only; /fill/list is session-scoped).
+ */
+export async function getCleanPerformance(mode: "live" | "paper", sinceDays?: number): Promise<CleanPerformance> {
+  const where: { mode: string; exitTime?: { gte: Date } } = { mode };
+  if (sinceDays) where.exitTime = { gte: new Date(Date.now() - sinceDays * 86_400_000) };
+  const trips = await prisma.roundTrip.findMany({ where, select: { pnl: true } });
+  const wins = trips.filter((t) => t.pnl > 0).length;
+  const losses = trips.filter((t) => t.pnl < 0).length;
+  const netPnl = trips.reduce((s, t) => s + t.pnl, 0);
+  return {
+    mode,
+    trades: trips.length,
+    wins,
+    losses,
+    winRate: wins + losses ? Math.round((wins / (wins + losses)) * 100) : 0,
+    netPnl,
+    avgPnl: trips.length ? netPnl / trips.length : 0,
+    source: "round_trip_ledger",
+  };
+}
+
 export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<ReconciliationResult> {
   const details: string[] = [];
   const result: ReconciliationResult = {
@@ -230,6 +266,29 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     result.roundTrips = roundTrips.length;
     result.tradovatePnl = roundTrips.reduce((s, rt) => s + rt.pnl, 0);
     details.push(`Matched ${roundTrips.length} round-trip trades, total P&L: $${result.tradovatePnl.toFixed(2)}`);
+
+    // 4b. Persist clean round-trips to the RoundTrip ledger (idempotent). This is the CLEAN source of
+    // truth for win-rate / per-trade P&L — autoTradeLog is fragmented + only partially reconciled.
+    // Best-effort: a persist failure must never break reconciliation. /fill/list is session-scoped, so
+    // this accumulates forward from deploy day.
+    const rtMode = modeOverride === "live" ? "live" : "paper";
+    let rtPersisted = 0;
+    for (const rt of roundTrips) {
+      try {
+        await prisma.roundTrip.upsert({
+          where: { mode_entryFillId_exitFillId: { mode: rtMode, entryFillId: String(rt.entryFill.id), exitFillId: String(rt.exitFill.id) } },
+          update: { pnl: rt.pnl, exitPrice: rt.exitPrice, contracts: rt.qty },
+          create: {
+            mode: rtMode, symbol: rt.symbol, direction: rt.direction, contracts: rt.qty,
+            entryPrice: rt.entryPrice, exitPrice: rt.exitPrice, pnl: rt.pnl,
+            entryFillId: String(rt.entryFill.id), exitFillId: String(rt.exitFill.id),
+            entryTime: new Date(rt.entryTime), exitTime: new Date(rt.exitTime),
+          },
+        });
+        rtPersisted++;
+      } catch { /* best-effort ledger write */ }
+    }
+    if (rtPersisted > 0) details.push(`Persisted ${rtPersisted} round-trip(s) to RoundTrip ledger (${rtMode})`);
 
     // 5. Get existing DB exit trades for comparison (including pnl: null from deferred logging)
     const exitActions = ["futures_stop_loss", "futures_take_profit", "futures_trail_stop", "futures_breakeven",
