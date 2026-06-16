@@ -2142,9 +2142,13 @@ GOLD-SPECIFIC RULES:
    Average R-multiple: ${ps.avgR.toFixed(2)}R
 
    DECISION RULE (apply first, before reasoning):
-   - WR ≥ 55% → APPROVE. The data says this works. Don't second-guess.
-   - WR ≤ 30% → REJECT. The data says this loses.
-   - WR 30-55% → consider context below, but DEFAULT TO APPROVE if pre-AI confidence > 65%.\n`
+   - WR ≥ 50% → APPROVE. The data says this works. Don't second-guess.
+   - WR ≤ 25% → REJECT. The data says this loses.
+   - WR 25-50% → DEFAULT TO APPROVE if pre-AI confidence > 58%. A counter-bias direction or an
+     avoid-list setup type is a STRONG negative — drop conviction one grade so it sizes smaller —
+     but is NOT by itself a reason to reject. Only hard-REJECT when it ALSO carries WR ≤ 30%,
+     negative/impossible R:R, or an active anti-pattern. We want to fire a bit more and let the
+     stop-loss + auto-prune cull whatever doesn't earn its keep (2026-06-16: loosened a notch).\n`
       : ps && ps.matchCount >= 10
       ? `\n📊 Early pattern signal: ${ps.matchCount} matching trades (need 25+ for the hard rule), current WR ${(ps.winRate * 100).toFixed(0)}%, avg R ${ps.avgR.toFixed(2)}. This is informative but NOT authoritative — variance dominates at this sample size. **Default to APPROVE on pre-AI confidence > 60%** unless WR is catastrophically low (under 15%) AND avg R is negative.\n`
       : ps && ps.matchCount > 0
