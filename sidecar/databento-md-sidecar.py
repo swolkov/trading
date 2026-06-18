@@ -110,16 +110,30 @@ def stream_once(conn):
 
     id_to_sym, latest, depth_latest, cumvol = {}, {}, {}, {}
     last_write, last_depth_write, last_log = 0.0, 0.0, 0.0
+    # Stale-mapping watchdog: detect quarterly contract rollovers (e.g. NQM→NQU) without a stream crash.
+    # After the first successful symbol match, count consecutive messages with unrecognized instrument IDs.
+    # >200 in a row OR >120s of all-unknown messages → reconnect so Databento re-sends SymbolMappingMsg.
+    had_match, consec_unknown, unknown_start = False, 0, 0.0
 
     for rec in client:
         name = type(rec).__name__
         if name == "SymbolMappingMsg":
             raw = getattr(rec, "stype_in_symbol", None) or getattr(rec, "stype_out_symbol", "")
             id_to_sym[rec.instrument_id] = raw.split(".")[0]
+            consec_unknown = 0  # fresh mapping = connection is healthy
             continue
         sym = id_to_sym.get(getattr(rec, "instrument_id", None))
         if not sym:
+            if had_match:  # only count unknowns after we've proven mappings work
+                consec_unknown += 1
+                if consec_unknown == 1:
+                    unknown_start = time.time()
+                elapsed = time.time() - unknown_start
+                if consec_unknown > 200 or elapsed > 120:
+                    raise Exception(f"Stale instrument mapping — {consec_unknown} unrecognized msgs over {elapsed:.0f}s. Contract rollover? Reconnecting.")
             continue
+        had_match = True
+        consec_unknown = 0
 
         if name == "TradeMsg":
             cumvol[sym] = cumvol.get(sym, 0) + (getattr(rec, "size", 0) or 0)

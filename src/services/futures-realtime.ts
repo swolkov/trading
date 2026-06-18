@@ -701,6 +701,7 @@ async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: 
 // DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
 let dbnMdLogged = 0;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
+let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
 let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
@@ -748,6 +749,7 @@ async function pollPrices() {
       const q = dbn.get(sym) ?? dbn.get(FULL_EQUIVALENT[sym] || "") ?? dbn.get(MICRO_EQUIVALENT[sym] || "");
       if (q && q.mid > 0) { onPrice(sym, q.mid, q.vol); received++; served.add(sym); }
     }
+    if (served.size > 0) lastMdSource = "databento";
     const querySymbols = SYMBOLS.filter(s => !served.has(s));
 
     // Tradovate md/getChart (parallel) — only for symbols Databento didn't serve
@@ -801,6 +803,7 @@ async function pollPrices() {
       }
       if (yahooQuotes.size > 0) {
         log(`[MD] Tradovate missed ${stillNeedYahoo.join(",")}, Yahoo fallback served ${yahooQuotes.size}`);
+        if (served.size === 0) lastMdSource = "yahoo"; // only label yahoo if Databento served nothing
       }
     }
 
@@ -948,6 +951,9 @@ function checkSessionReset() {
     })();
     // Clean slate: cancel any orphaned orders from yesterday
     cancelAllOrders().catch(err => log(`[RESET] Order cleanup failed: ${err}`));
+    // Re-resolve contracts each morning so quarterly rollovers (e.g. NQM→NQU) are picked up
+    // without requiring a manual Railway redeploy.
+    resolveContracts().catch(err => log(`[RESET] Contract re-resolution failed: ${err}`));
   }
 
   // EOD forced close: flatten all positions AND cancel all orders at 3:50 PM ET (DST-aware)
@@ -3262,7 +3268,7 @@ async function writeHeartbeat() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
-      mdHealth: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "yahoo",
+      mdHealth: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : lastMdSource,
     });
     await prisma.agentConfig.upsert({
       where: { key: HEARTBEAT_KEY },
@@ -4061,7 +4067,7 @@ function startHealthServer() {
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
-      md: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "yahoo",
+      md: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : lastMdSource,
       tilt: tiltPauseUntil === Infinity ? "session_done" : Date.now() < tiltPauseUntil ? `paused(${consecutiveStops})` : "ok",
       consecutiveStops,
       symbols: SYMBOLS.map(s => {
