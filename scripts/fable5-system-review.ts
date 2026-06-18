@@ -103,15 +103,17 @@ ${recon}
 5. NEXT ACTIONS: top 2-3 ranked.
 Keep it tight.`;
 
-  console.error("Running Fable 5 head-of-desk review on clean DB data…\n");
-  const stream = anthropic.messages.stream({ model: "claude-fable-5", max_tokens: 32000, thinking: { type: "adaptive" }, output_config: { effort: "high" }, messages: [{ role: "user", content: prompt }] });
+  // Fable 5 is not entitled on this account (API 404 → "use Opus 4.8"). Opus 4.8 is the head-of-desk
+  // model and supports the same adaptive-thinking / high-effort config.
+  console.error("Running Opus 4.8 head-of-desk review on clean DB data…\n");
+  const stream = anthropic.messages.stream({ model: "claude-opus-4-8", max_tokens: 32000, thinking: { type: "adaptive" }, output_config: { effort: "high" }, messages: [{ role: "user", content: prompt }] });
   let txt = "";
   stream.on("text", (t) => { txt += t; process.stdout.write(t); });
   const final = await stream.finalMessage();
   if (!txt) txt = final.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
 
   const date = new Date().toISOString().slice(0, 10);
-  try { fs.writeFileSync(OUT, `---\ndate: "${date}"\nreviewer: "fable-5"\nsource: "production-db-deduped"\n---\n\n# System Review — ${date}\n\n${recon}\n\n## Fable 5 Head-of-Desk Review\n\n${txt}\n`); } catch (e) { console.error("vault write failed:", e); }
+  try { fs.writeFileSync(OUT, `---\ndate: "${date}"\nreviewer: "opus-4-8"\nsource: "production-db-deduped"\n---\n\n# System Review — ${date}\n\n${recon}\n\n## Opus 4.8 Head-of-Desk Review\n\n${txt}\n`); } catch (e) { console.error("vault write failed:", e); }
   const verdict = txt.match(/\b(YES|NOT YET|NO)\b/)?.[1] || "?";
   if (!fs.existsSync(LEDGER)) fs.writeFileSync(LEDGER, "date,demo_net,live_net,25k_verdict\n");
   fs.appendFileSync(LEDGER, `${date},${demo.reduce((s, t) => s + t.pnl, 0).toFixed(0)},${live.reduce((s, t) => s + t.pnl, 0).toFixed(0)},${verdict}\n`);
