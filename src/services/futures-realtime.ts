@@ -1745,6 +1745,35 @@ async function sweepPhantomCloseRows() {
 }
 
 async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
+  // Build + store this trade's pattern-memory vector with a given outcome. Used in BOTH the
+  // real-fill path (accurate) and the give-up path (estimate) so the learning loop captures
+  // ~100% of closed trades — not just the clean stop-outs whose fills match by orderId.
+  const storeOutcomePattern = async (outcome: "win" | "loss", pnlRVal: number) => {
+    try {
+      const { storePattern } = await import("../lib/pattern-memory");
+      const sd = Math.abs(meta.entryPrice - meta.stopLoss);
+      await storePattern({
+        regime: cachedRegime,
+        session: meta.entrySession,
+        instrument: meta.sym,
+        setupType: meta.entrySetupType || "unknown",  // canonical entry setup, NOT exit reason
+        direction: meta.direction,
+        rsi: meta.entryRsi,
+        vixLevel: currentVIX,
+        vixTrend: currentVIX > 20 ? "rising" as const : "falling" as const,
+        atr: meta.entryPrice > 0 ? sd / meta.entryPrice * 1000 : 0,
+        priceVsVwap: meta.entryVwap > 0 ? (meta.entryPrice - meta.entryVwap) / meta.entryVwap * 100 : 0,
+        trend15m: (meta.entryTrend15m || "flat") as "up" | "down" | "flat",
+        trendDaily: (meta.entryDayType || "").includes("trend") ? (meta.direction === "long" ? "up" as const : "down" as const) : "flat" as const,
+        riskReward: sd > 0 ? Math.abs(meta.target - meta.entryPrice) / sd : 2,
+        dollarTrend: "flat" as const,
+        bondTrend: "flat" as const,
+        outcome,
+        pnlR: pnlRVal,
+      });
+    } catch { /* pattern storage optional */ }
+  };
+
   try {
     const closeSide = meta.direction === "long" ? "Sell" : "Buy";
     const fills = await apiFetch("/fill/list") as { id: number; orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
@@ -1772,6 +1801,15 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         setTimeout(() => deferredPnlCheck(meta, attempt + 1), 60_000);
       } else {
         log(`[DEFERRED] ${meta.sym}: No fills after ${attempt} attempts. Reconciliation cron will catch this.`);
+        // Capture the pattern from the engine's close estimate so the learning loop still sees this
+        // trade. Without this, unmatched-fill trades (disproportionately wins closed via fuzzy paths)
+        // were dropped, biasing pattern memory toward losses. The reconciliation cron corrects $ P&L
+        // later; this only feeds the win/loss + R signal the AI grader learns from.
+        const sd = Math.abs(meta.entryPrice - meta.stopLoss);
+        const estDiff = meta.mult > 0 && meta.quantity > 0 ? meta.estimatedPnl / (meta.mult * meta.quantity) : 0;
+        const estR = sd > 0 ? estDiff / sd : 0;
+        await storeOutcomePattern(meta.estimatedPnl >= 0 ? "win" : "loss", estR);
+        log(`[DEFERRED] ${meta.sym}: Pattern stored from ESTIMATE (${meta.estimatedPnl >= 0 ? "WIN" : "LOSS"} ${estR.toFixed(1)}R) — fills unmatched`);
       }
       return;
     }
@@ -1818,29 +1856,8 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
     // other trades may have happened. The reconciliation cron handles aggregate accuracy.
 
     // Store pattern memory with REAL P&L (not Yahoo estimate)
-    try {
-      const { storePattern } = await import("../lib/pattern-memory");
-      await storePattern({
-        regime: cachedRegime,
-        session: meta.entrySession,
-        instrument: meta.sym,
-        setupType: meta.entrySetupType || "unknown",  // canonical entry setup, NOT exit reason
-        direction: meta.direction,
-        rsi: meta.entryRsi,
-        vixLevel: currentVIX,
-        vixTrend: currentVIX > 20 ? "rising" as const : "falling" as const,
-        atr: stopDist / meta.entryPrice * 1000,
-        priceVsVwap: meta.entryVwap > 0 ? (meta.entryPrice - meta.entryVwap) / meta.entryVwap * 100 : 0,
-        trend15m: (meta.entryTrend15m || "flat") as "up" | "down" | "flat",
-        trendDaily: (meta.entryDayType || "").includes("trend") ? (meta.direction === "long" ? "up" as const : "down" as const) : "flat" as const,
-        riskReward: stopDist > 0 ? Math.abs(meta.target - meta.entryPrice) / stopDist : 2,
-        dollarTrend: "flat" as const,
-        bondTrend: "flat" as const,
-        outcome: realPnl > 0 ? "win" : "loss",
-        pnlR,
-      });
-      log(`[DEFERRED] ${meta.sym}: Pattern stored — ${realPnl > 0 ? "WIN" : "LOSS"} ${pnlR.toFixed(1)}R`);
-    } catch { /* pattern storage optional */ }
+    await storeOutcomePattern(realPnl > 0 ? "win" : "loss", pnlR);
+    log(`[DEFERRED] ${meta.sym}: Pattern stored — ${realPnl > 0 ? "WIN" : "LOSS"} ${pnlR.toFixed(1)}R`);
 
     // Log to vault journal with real fill price
     try {

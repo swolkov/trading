@@ -355,11 +355,25 @@ ${details.implications || "Follow standard strategy parameters for current regim
 
   await vaultWrite("Brain/market-regime.md", content, "research-agent");
 
-  // Emit regime change event
+  // Emit regime change event ONLY when the regime actually changed. Previously this fired on every
+  // research run (~140x/day, almost always CHOPPY→CHOPPY), which spammed the event bus and — via the
+  // orchestrator's handleRegimeChange → signal.tighten_stops — held the engines' stops permanently
+  // tightened at 0.75x. Compare against the last-emitted regime (DB-backed, process-safe) and skip no-ops.
+  const upper = regime.toUpperCase();
+  try {
+    const last = await prisma.agentConfig.findUnique({ where: { key: "last_emitted_regime" } });
+    if (last?.value === upper) return; // unchanged — do not re-emit
+    await prisma.agentConfig.upsert({
+      where: { key: "last_emitted_regime" },
+      update: { value: upper },
+      create: { key: "last_emitted_regime", value: upper },
+    });
+  } catch { /* if the compare fails, fall through and emit (fail-open) */ }
+
   emitEventSafe("regime.changed", "research-agent", {
-    toRegime: regime.toUpperCase(),
+    toRegime: upper,
     confidence: 70,
-    message: `Regime updated: ${regime.toUpperCase()} | Trend: ${details.trend || "unknown"}`,
+    message: `Regime updated: ${upper} | Trend: ${details.trend || "unknown"}`,
   });
 }
 
