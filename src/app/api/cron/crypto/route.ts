@@ -22,8 +22,17 @@ export async function GET(request: Request) {
       });
     } catch {}
 
+    // One-off paper reset: if a flatten was requested (DB flag), do it here where the sealed
+    // Alpaca keys resolve. No-op on every normal run.
+    let flatten: string | null = null;
+    try {
+      const { maybeFlattenPaper } = await import("@/lib/paper-reset");
+      flatten = await maybeFlattenPaper();
+      if (flatten) console.log("[/api/cron/crypto]", flatten);
+    } catch {}
+
     const result = await runCryptoAgent();
-    return Response.json(result);
+    return Response.json({ ...result, flatten });
   } catch (error) {
     console.error("[/api/cron/crypto]", error);
     try {
