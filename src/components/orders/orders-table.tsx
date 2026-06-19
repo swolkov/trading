@@ -96,6 +96,7 @@ export interface OrdersSummary {
   filledCount: number;
   todayPnl: number;
   todayFills: number;
+  pnlLabel: string; // which account the todayPnl reflects (prevents conflating Tradovate vs Alpaca)
 }
 
 function OrdersTableInner({
@@ -113,6 +114,8 @@ function OrdersTableInner({
     fetcher,
     { refreshInterval: 15000 }
   );
+  // Alpaca paper account (the $1K stocks+crypto day-trade test) — its OWN P&L, separate from futures.
+  const { data: alpacaAccount } = useSWR("/api/account", fetcher, { refreshInterval: 15000 });
   const [canceling, setCanceling] = useState<string | null>(null);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
 
@@ -232,30 +235,50 @@ function OrdersTableInner({
     return items;
   }, [unified, assetFilter]);
 
-  // Compute summary for parent
-  // Today's P&L: prefer actual trade fill sums (reliable), fallback to balance delta
+  // Compute summary for parent.
+  // CRITICAL: "Today's P&L" must reflect the ACCOUNT you're viewing — futures (Tradovate) and the
+  // stocks/crypto day-trade (Alpaca paper) are different accounts. Previously this always showed the
+  // FUTURES balance-delta even on the Crypto/Stocks views, making Alpaca orders look like they were
+  // producing the live Tradovate P&L. Now it's per-asset, with an explicit label.
   useMemo(() => {
     if (!onSummary) return;
     const today = new Date().toISOString().slice(0, 10);
     const todayItems = filtered.filter((o) => o.time.slice(0, 10) === today);
-    // Primary: sum of today's actual fills P&L from the engine (most accurate)
+
+    // Futures (Tradovate) today P&L = balance delta (todayTradesPnl is intentionally null server-side).
     const tradePnl = futuresData?.todayTradesPnl;
     const unrealizedPnl = futuresData?.account?.unrealizedPnl || 0;
-    // Fallback: balance delta (can be wrong if SOD is stale)
     const balancePnl = (futuresData?.startOfDayBalance != null && futuresData?.account?.balance != null)
       ? futuresData.account.balance - futuresData.startOfDayBalance
       : null;
-    const dailyPnl = tradePnl != null
-      ? tradePnl + unrealizedPnl
-      : (balancePnl ?? todayItems.reduce((s, o) => s + (o.pnl || 0), 0));
+    const futuresPnl = tradePnl != null ? tradePnl + unrealizedPnl : (balancePnl ?? 0);
+    const futuresMode = futuresData?.viewMode === "live" ? "live $1K" : "demo $50K";
+
+    // Alpaca paper account today P&L = equity − last_equity (the $1K stocks+crypto shared pool).
+    const alpacaPnl = (alpacaAccount?.equity != null && alpacaAccount?.last_equity != null)
+      ? parseFloat(alpacaAccount.equity) - parseFloat(alpacaAccount.last_equity)
+      : null;
+
+    let todayPnl: number; let pnlLabel: string;
+    if (assetFilter === "crypto" || assetFilter === "stocks") {
+      todayPnl = alpacaPnl ?? 0; pnlLabel = "Alpaca · $1K paper";
+    } else if (assetFilter === "options") {
+      todayPnl = 0; pnlLabel = "Options off";
+    } else {
+      // futures view, or "all" (the number is the real-money/active futures account — labeled so it's
+      // never mistaken for the crypto/stock orders shown alongside it).
+      todayPnl = futuresPnl; pnlLabel = `Futures · ${futuresMode}`;
+    }
+
     onSummary({
       totalShown: filtered.length,
       openCount: filtered.filter((o) => !["filled", "canceled", "cancelled", "expired", "rejected"].includes(o.status.toLowerCase())).length,
       filledCount: filtered.filter((o) => o.status.toLowerCase() === "filled").length,
-      todayPnl: dailyPnl,
+      todayPnl,
       todayFills: todayItems.filter((o) => o.status.toLowerCase() === "filled").length,
+      pnlLabel,
     });
-  }, [filtered, onSummary, futuresData]);
+  }, [filtered, onSummary, futuresData, alpacaAccount, assetFilter]);
 
   if (isLoading) {
     return (
@@ -420,6 +443,7 @@ export function OrdersTable() {
             <p className={`text-lg font-black tabular-nums ${pnlColor(summary.todayPnl)}`}>
               {summary.todayPnl !== 0 ? `${summary.todayPnl >= 0 ? "+" : ""}$${summary.todayPnl.toFixed(0)}` : "—"}
             </p>
+            <p className="text-[8px] text-muted-foreground/40 mt-0.5 truncate">{summary.pnlLabel}</p>
           </div>
         </div>
       )}
