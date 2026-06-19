@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/cron/crypto",
-      "schedule": "*/15 * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/cron/crypto-live",
@@ -18,7 +18,7 @@
     },
     {
       "path": "/api/cron/stocks",
-      "schedule": "*/30 13-20 * * 1-5"
+      "schedule": "*/5 13-21 * * 1-5"
     },
     {
       "path": "/api/cron/review",
@@ -59,10 +59,6 @@
     {
       "path": "/api/cron/token-refresh",
       "schedule": "0 4,16 * * *"
-    },
-    {
-      "path": "/api/cron/wheel-track",
-      "schedule": "30 19 * * 1-5"
     }
   ]
 }

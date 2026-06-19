@@ -37,6 +37,8 @@ interface StocksConfig {
   confidenceThreshold: number;
   focusSymbols: string[];
   simulatedEquity: number;
+  dayTrade: boolean;          // true → intraday buy-the-dip, flatten same day (vs multi-day swing)
+  eodFlattenMinutes: number;  // flatten all positions this many minutes before the close
 }
 
 const DEFAULTS: StocksConfig = {
@@ -49,6 +51,8 @@ const DEFAULTS: StocksConfig = {
   confidenceThreshold: 75,
   focusSymbols: ["NVDA", "AAPL", "TSLA", "META", "AMZN", "GOOGL", "MSFT", "AMD", "AVGO", "NFLX"],
   simulatedEquity: 1000,
+  dayTrade: false,
+  eodFlattenMinutes: 10,
 };
 
 async function loadStocksConfig(): Promise<StocksConfig> {
@@ -57,6 +61,7 @@ async function loadStocksConfig(): Promise<StocksConfig> {
       "stocks_enabled", "stocks_risk_per_trade_pct", "stocks_daily_loss_limit_pct",
       "stocks_max_positions", "stocks_max_trades_per_day", "stocks_confidence_threshold",
       "stocks_focus_symbols", "stocks_simulated_equity",
+      "stocks_day_trade", "stocks_eod_flatten_minutes",
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -74,6 +79,8 @@ async function loadStocksConfig(): Promise<StocksConfig> {
         ? cfg.stocks_focus_symbols.split(",").map((s) => s.trim())
         : DEFAULTS.focusSymbols,
       simulatedEquity: parseFloat(cfg.stocks_simulated_equity) || DEFAULTS.simulatedEquity,
+      dayTrade: cfg.stocks_day_trade === "true",
+      eodFlattenMinutes: parseInt(cfg.stocks_eod_flatten_minutes) || DEFAULTS.eodFlattenMinutes,
     };
   } catch {
     return DEFAULTS;
@@ -119,7 +126,7 @@ function atr(bars: { h: number; l: number; c: number }[], period: number = 14): 
 
 interface StockSetup {
   symbol: string;
-  type: "breakout" | "pullback_to_ema" | "relative_strength" | "earnings_momentum";
+  type: "breakout" | "pullback_to_ema" | "relative_strength" | "earnings_momentum" | "intraday_dip";
   direction: "long";
   price: number;
   stopPrice: number;
@@ -266,17 +273,110 @@ async function scanStockSetups(symbols: string[]): Promise<StockSetup[]> {
   return setups.sort((a, b) => b.confidence - a.confidence);
 }
 
+// ── Intraday Dip Scanner (buy-the-dip / sell-high, same-day) ──
+// Looks for an oversold pullback within a name that is NOT in a broken downtrend, and that
+// is starting to stabilize off its intraday low. Targets a reversion back toward VWAP.
+async function scanIntradayDips(symbols: string[]): Promise<StockSetup[]> {
+  const setups: StockSetup[] = [];
+  // Intraday bars (15-min) for today's session; daily bars for trend context.
+  const sessionStart = new Date();
+  sessionStart.setHours(0, 0, 0, 0);
+
+  for (const symbol of symbols) {
+    try {
+      const [intraday, daily] = await Promise.all([
+        getBars(symbol, "15Min", sessionStart.toISOString()),
+        getBars(symbol, "1Day").catch(() => [] as Bar[]),
+      ]);
+      if (intraday.length < 6) continue; // need a bit of session to define a dip
+
+      const closes = intraday.map((b) => b.c);
+      const currentPrice = closes[closes.length - 1];
+      const intradayRsi = rsi(closes, 14);
+      const intradayAtr = atr(intraday.map((b) => ({ h: b.h, l: b.l, c: b.c })), 14);
+
+      // Session VWAP (typical price weighted by volume).
+      let pv = 0, vol = 0;
+      for (const b of intraday) {
+        const typical = (b.h + b.l + b.c) / 3;
+        pv += typical * b.v;
+        vol += b.v;
+      }
+      const vwap = vol > 0 ? pv / vol : currentPrice;
+
+      const sessionLow = Math.min(...intraday.map((b) => b.l));
+      const sessionHigh = Math.max(...intraday.map((b) => b.h));
+      const lastBar = intraday[intraday.length - 1];
+
+      // Trend filter: don't catch a falling knife. Price should be above its 50-day EMA
+      // (broader uptrend intact) — if we lack daily history, allow it through.
+      let trendOk = true;
+      if (daily.length >= 50) {
+        const dCloses = daily.map((b) => b.c);
+        const ema50Arr = ema(dCloses, 50);
+        trendOk = currentPrice > ema50Arr[ema50Arr.length - 1] * 0.98;
+      }
+
+      // Dip conditions:
+      //  - oversold on the 15-min (RSI < 38)
+      //  - trading below VWAP (stretched to the downside)
+      //  - within ~0.6 ATR of the session low (a real dip, not mid-range)
+      //  - stabilizing: last bar closed up / off its low (not still free-falling)
+      const belowVwap = currentPrice < vwap;
+      const nearLow = intradayAtr > 0 && currentPrice <= sessionLow + intradayAtr * 0.6;
+      const stabilizing = lastBar.c >= lastBar.o || currentPrice > sessionLow * 1.001;
+      const oversold = intradayRsi !== null && intradayRsi < 38;
+
+      if (!(oversold && belowVwap && nearLow && stabilizing && trendOk)) continue;
+      if (intradayAtr <= 0) continue;
+
+      // Stop just under the session low; target a reversion toward VWAP (capped to a sane R:R).
+      const stop = sessionLow - intradayAtr * 0.5;
+      const target = Math.min(vwap, currentPrice + intradayAtr * 2);
+      const riskPerShare = currentPrice - stop;
+      if (riskPerShare <= 0) continue;
+      const rr = (target - currentPrice) / riskPerShare;
+      if (rr < 1.2 || target <= currentPrice) continue; // need room to the upside
+
+      // Confidence: deeper oversold + further below VWAP + a clean stabilization bar = stronger.
+      const rsiDepth = Math.max(0, 38 - (intradayRsi as number)); // 0–38
+      const vwapStretch = (vwap - currentPrice) / vwap;           // fraction below VWAP
+      const confidence = Math.min(85,
+        Math.round(55 + rsiDepth * 0.7 + Math.min(15, vwapStretch * 1000) + (lastBar.c > lastBar.o ? 5 : 0)),
+      );
+
+      setups.push({
+        symbol, type: "intraday_dip", direction: "long",
+        price: currentPrice, stopPrice: stop, targetPrice: target, riskReward: rr, confidence,
+        reasoning: `Intraday dip: 15-min RSI ${(intradayRsi as number).toFixed(0)} oversold, ${(vwapStretch * 100).toFixed(1)}% below VWAP ($${vwap.toFixed(2)}), holding above session low $${sessionLow.toFixed(2)}. Target VWAP reversion.`,
+        indicators: {
+          rsi: intradayRsi, atr: intradayAtr, ema9: vwap, ema21: vwap, ema50: vwap,
+          relativeStrength: (currentPrice - sessionHigh) / sessionHigh, volumeRatio: 1,
+        },
+      });
+    } catch (err) {
+      console.error(`[stocks-agent] Intraday scan error ${symbol}:`, err);
+    }
+  }
+
+  return setups.sort((a, b) => b.confidence - a.confidence);
+}
+
 // ── AI Confirmation ──
 
 async function aiConfirmSetup(
   setup: StockSetup,
   vaultContext: string,
   equity: number,
+  dayTrade = false,
 ): Promise<{ agree: boolean; conviction: string; reasoning: string }> {
   const anthropic = new Anthropic();
 
-  const prompt = `You are a disciplined swing trader managing a $${equity} stock account on Alpaca.
-CRITICAL: Only A+ and A setups execute. B and C are KILLED. Swing holds 3-10 days.
+  const styleLine = dayTrade
+    ? "You are a disciplined intraday trader buying oversold dips to sell into a same-day bounce. The position WILL be closed before today's close."
+    : "You are a disciplined swing trader. Swing holds 3-10 days.";
+  const prompt = `${styleLine} Managing a $${equity} stock account on Alpaca.
+CRITICAL: Only A+ and A setups execute. B and C are KILLED.
 
 ${setup.symbol} setup:
 Price: $${setup.price.toFixed(2)} | RSI: ${setup.indicators.rsi?.toFixed(1) || "N/A"} | ATR: $${setup.indicators.atr.toFixed(2)}
@@ -340,7 +440,8 @@ export async function runStocksAgent(): Promise<{
       if (baseEquity > 0) {
         config.simulatedEquity = baseEquity;
         config.maxPositions = simSize > 0 ? 4 : 10;       // tighter on a small shared pool
-        config.maxTradesPerDay = simSize > 0 ? 4 : 8;
+        // Day-trading round-trips through more setups per day than multi-day swing does.
+        config.maxTradesPerDay = config.dayTrade ? (simSize > 0 ? 10 : 20) : (simSize > 0 ? 4 : 8);
         config.riskPerTradePct = simSize > 0 ? 2 : 5;
         config.confidenceThreshold = 65;
       }
@@ -350,6 +451,7 @@ export async function runStocksAgent(): Promise<{
   details.push(`[stocks-agent] Starting. Mode: ${config.mode.toUpperCase()}, Equity: $${config.simulatedEquity.toLocaleString()}, Watchlist: ${config.focusSymbols.length} symbols`);
 
   // ── 1. Check market hours ──
+  let minutesToClose = Infinity; // how long until today's close (for same-day flatten)
   try {
     const clock = await (await fetch(`${process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets"}/v2/clock`, {
       headers: {
@@ -361,9 +463,16 @@ export async function runStocksAgent(): Promise<{
       details.push("[stocks-agent] Market closed. Skipping scan.");
       return { trades, managed: 0, details };
     }
+    if (clock.next_close) {
+      minutesToClose = (new Date(clock.next_close).getTime() - Date.now()) / 60000;
+    }
   } catch {
     details.push("[stocks-agent] Could not check market hours. Proceeding.");
   }
+
+  // Same-day flatten window: in the last N minutes of the session, stop opening new dips and
+  // close everything so nothing is held overnight.
+  const inFlattenWindow = config.dayTrade && minutesToClose <= config.eodFlattenMinutes;
 
   // ── 2. Load vault context ──
   const context = await loadAgentContext("stocks-agent", "stock-swing.md");
@@ -399,31 +508,43 @@ export async function runStocksAgent(): Promise<{
     },
   });
 
-  if (todayTrades >= config.maxTradesPerDay) {
-    details.push(`[stocks-agent] Max trades reached (${todayTrades}/${config.maxTradesPerDay}).`);
-    return { trades, managed: stockPositions.length, details };
+  // Cap NEW entries when the daily trade limit is hit — but DON'T return: the manage/flatten
+  // loop below must still run so same-day positions get closed (incl. the EOD flatten).
+  const entryCapReached = todayTrades >= config.maxTradesPerDay;
+  if (entryCapReached) {
+    details.push(`[stocks-agent] Max trades reached (${todayTrades}/${config.maxTradesPerDay}). Managing/flattening only.`);
   }
 
-  // ── 5. PDT check — avoid day trades if < $25K ──
+  // ── 5. PDT check — avoid day trades if < $25K (swing mode only) ──
+  // In day-trade mode we intentionally round-trip same day; PDT deferral is skipped (Spencer's
+  // paper account is large enough that PDT doesn't bite, and same-day exit is the whole point).
   let pdtSafe = true;
-  try {
-    const account = await getAccount(config.mode);
-    const accountEquity = parseFloat(account.equity);
-    if (accountEquity < 25000 && account.daytrade_count >= 3) {
-      pdtSafe = false;
-      details.push(`[stocks-agent] PDT warning: ${account.daytrade_count}/3 day trades used. Swing-only mode.`);
-    }
-  } catch {}
+  if (!config.dayTrade) {
+    try {
+      const account = await getAccount(config.mode);
+      const accountEquity = parseFloat(account.equity);
+      if (accountEquity < 25000 && account.daytrade_count >= 3) {
+        pdtSafe = false;
+        details.push(`[stocks-agent] PDT warning: ${account.daytrade_count}/3 day trades used. Swing-only mode.`);
+      }
+    } catch {}
+  }
 
   // ── 6. Scan for setups ──
-  if (stockPositions.length >= config.maxPositions) {
+  if (inFlattenWindow || entryCapReached) {
+    if (inFlattenWindow) details.push(`[stocks-agent] Within ${config.eodFlattenMinutes}m of close — no new entries, flattening only.`);
+    // entryCapReached already logged above
+  } else if (stockPositions.length >= config.maxPositions) {
     details.push(`[stocks-agent] Max positions reached (${stockPositions.length}/${config.maxPositions}). Managing only.`);
   } else {
     const heldSymbols = stockPositions.map((p) => p.symbol);
     const scanSymbols = config.focusSymbols.filter((s) => !heldSymbols.includes(s));
 
-    const setups = await scanStockSetups(scanSymbols);
-    details.push(`[stocks-agent] Found ${setups.length} setups across ${scanSymbols.length} symbols`);
+    // Day-trade mode → intraday buy-the-dip scanner; otherwise multi-day swing setups.
+    const setups = config.dayTrade
+      ? await scanIntradayDips(scanSymbols)
+      : await scanStockSetups(scanSymbols);
+    details.push(`[stocks-agent] Found ${setups.length} ${config.dayTrade ? "dip" : "swing"} setups across ${scanSymbols.length} symbols`);
 
     // ── 7. AI confirm and execute ──
     for (const setup of setups) {
@@ -437,7 +558,7 @@ export async function runStocksAgent(): Promise<{
         continue;
       }
 
-      const ai = await aiConfirmSetup(setup, vaultContext, config.simulatedEquity);
+      const ai = await aiConfirmSetup(setup, vaultContext, config.simulatedEquity, config.dayTrade);
 
       if (!ai.agree) adjustedConfidence -= 30;
       if (ai.conviction === "C") adjustedConfidence -= 25;
@@ -501,7 +622,7 @@ export async function runStocksAgent(): Promise<{
           timestamp: new Date().toISOString(),
           instrument: `STK:${setup.symbol}`,
           direction: "LONG",
-          strategy: "stock-swing",
+          strategy: config.dayTrade ? "stock-daytrade" : "stock-swing",
           setupType: setup.type,
           contracts: shares,
           entryPrice: setup.price,
@@ -558,6 +679,20 @@ export async function runStocksAgent(): Promise<{
         closeReason = "Target reached";
       }
 
+      // Same-day flatten: near the close, exit everything regardless of stop/target.
+      if (inFlattenWindow) {
+        shouldClose = true;
+        closeReason = "EOD flatten";
+      }
+
+      // Backstop: never let a day-trade position live into a new session. If the EOD-flatten
+      // tick was ever missed (cron hiccup / clock gap), close anything opened before today at
+      // the next run so nothing is ever held more than one overnight.
+      if (config.dayTrade && !shouldClose && openingLog?.createdAt && new Date(openingLog.createdAt) < todayStart) {
+        shouldClose = true;
+        closeReason = "EOD flatten";
+      }
+
       // PDT check: only close if it won't trigger a day trade, OR if it's a stop loss
       if (shouldClose && !pdtSafe && closeReason !== "Stop loss hit") {
         const openDate = openingLog?.createdAt;
@@ -571,6 +706,11 @@ export async function runStocksAgent(): Promise<{
       }
 
       if (shouldClose) {
+        // Classify the exit: profit target, same-day flatten, or stop.
+        const closeAction = closeReason === "Target reached" ? "take_profit"
+          : closeReason === "EOD flatten" ? "eod_flatten"
+          : "stop_loss";
+        const exitTag = closeReason === "Target reached" ? "TP" : closeReason === "EOD flatten" ? "EOD" : "SL";
         details.push(`[stocks-agent] CLOSING ${pos.symbol}: ${closeReason} @ $${currentPrice.toFixed(2)} P&L: $${unrealizedPnl.toFixed(2)}`);
 
         try {
@@ -583,12 +723,12 @@ export async function runStocksAgent(): Promise<{
           }, config.mode);
 
           await logTradeToJournal({
-            tradeId: `${closeReason === "Target reached" ? "TP" : "SL"}-${Date.now().toString(36)}`,
+            tradeId: `${exitTag}-${Date.now().toString(36)}`,
             timestamp: new Date().toISOString(),
             instrument: `STK:${pos.symbol}`,
             direction: "LONG",
-            strategy: "stock-swing",
-            setupType: closeReason === "Target reached" ? "take_profit" : "stop_loss",
+            strategy: config.dayTrade ? "stock-daytrade" : "stock-swing",
+            setupType: closeAction,
             contracts: Math.abs(qty),
             entryPrice,
             stopPrice: stopPrice || 0,
@@ -602,7 +742,7 @@ export async function runStocksAgent(): Promise<{
           await prisma.autoTradeLog.create({
             data: {
               symbol: `STK:${pos.symbol}`,
-              action: closeReason === "Target reached" ? "take_profit" : "stop_loss",
+              action: closeAction,
               qty: Math.abs(qty),
               price: currentPrice,
               pnl: unrealizedPnl,
@@ -612,7 +752,7 @@ export async function runStocksAgent(): Promise<{
           });
 
           trades.push({
-            symbol: pos.symbol, action: closeReason === "Target reached" ? "take_profit" : "stop_loss",
+            symbol: pos.symbol, action: closeAction,
             qty: String(Math.abs(qty)), price: currentPrice, orderId: closeOrder.id,
             pnl: unrealizedPnl, reason: closeReason,
           });

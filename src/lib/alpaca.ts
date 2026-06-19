@@ -515,7 +515,7 @@ export async function getOptionsExpirations(
 
 // ---------- Crypto ----------
 
-export const DEFAULT_CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "LINK/USD"];
+export const DEFAULT_CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "LINK/USD", "XRP/USD"];
 
 export interface CryptoBar {
   t: string;

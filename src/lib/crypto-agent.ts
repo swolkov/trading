@@ -42,6 +42,7 @@ interface CryptoConfig {
   confidenceThreshold: number;
   focusSymbols: string[];
   simulatedEquity: number;
+  maxHoldHours: number; // same-day round-trip: flatten dip-buys older than this (0 = off)
 }
 
 const DEFAULTS: CryptoConfig = {
@@ -54,6 +55,7 @@ const DEFAULTS: CryptoConfig = {
   confidenceThreshold: 75,
   focusSymbols: ["BTC/USD", "ETH/USD", "SOL/USD"],
   simulatedEquity: 1000,
+  maxHoldHours: 12, // buy-the-dip / sell-high is intraday — don't hold a coin for days
 };
 
 async function loadCryptoConfig(liveMode = false): Promise<CryptoConfig> {
@@ -90,6 +92,9 @@ async function loadCryptoConfig(liveMode = false): Promise<CryptoConfig> {
         ? cfg[`${p}_focus_symbols`].split(",").map((s) => s.trim())
         : DEFAULTS.focusSymbols,
       simulatedEquity: parseFloat(cfg[`${p}_simulated_equity`]) || DEFAULTS.simulatedEquity,
+      maxHoldHours: cfg[`${p}_max_hold_hours`] !== undefined
+        ? parseFloat(cfg[`${p}_max_hold_hours`])
+        : DEFAULTS.maxHoldHours,
     };
   } catch {
     return { ...DEFAULTS, mode: liveMode ? "live" : "paper" };
@@ -248,9 +253,11 @@ export async function runCryptoAgent(liveMode = false): Promise<{
     },
   });
 
-  if (todayTrades >= config.maxTradesPerDay) {
-    details.push(`[crypto-agent] Max trades reached (${todayTrades}/${config.maxTradesPerDay}). Skipping scan.`);
-    return { trades, managed: cryptoPositions.length, details };
+  // Cap NEW entries when the trade limit is hit — but DON'T return: existing positions still
+  // need to be managed/exited (incl. the same-day time-exit) on every run.
+  const entryCapReached = todayTrades >= config.maxTradesPerDay;
+  if (entryCapReached) {
+    details.push(`[crypto-agent] Max trades reached (${todayTrades}/${config.maxTradesPerDay}). Managing only.`);
   }
 
   // ── 5. Check daily P&L limit ──
@@ -265,14 +272,17 @@ export async function runCryptoAgent(liveMode = false): Promise<{
   const dailyPnl = todayPnl._sum.pnl || 0;
   const dailyLimit = config.simulatedEquity * (config.dailyLossLimitPct / 100);
 
-  if (dailyPnl < -dailyLimit) {
-    details.push(`[crypto-agent] Daily loss limit hit ($${dailyPnl.toFixed(2)} / -$${dailyLimit.toFixed(2)}). Stopping.`);
-    return { trades, managed: cryptoPositions.length, details };
+  // Halt NEW entries on a daily loss-limit breach — but keep managing/exiting open positions.
+  const entryHaltedLoss = dailyPnl < -dailyLimit;
+  if (entryHaltedLoss) {
+    details.push(`[crypto-agent] Daily loss limit hit ($${dailyPnl.toFixed(2)} / -$${dailyLimit.toFixed(2)}). No new entries; managing only.`);
   }
 
   // ── 6. Scan for setups ──
-  if (cryptoPositions.length >= config.maxPositions) {
-    details.push(`[crypto-agent] Max positions reached (${cryptoPositions.length}/${config.maxPositions}). Managing only.`);
+  if (cryptoPositions.length >= config.maxPositions || entryCapReached || entryHaltedLoss) {
+    if (cryptoPositions.length >= config.maxPositions) {
+      details.push(`[crypto-agent] Max positions reached (${cryptoPositions.length}/${config.maxPositions}). Managing only.`);
+    }
   } else {
     // Only scan symbols we don't already hold
     const heldSymbols = cryptoPositions.map((p) => p.symbol);
@@ -462,7 +472,22 @@ export async function runCryptoAgent(liveMode = false): Promise<{
         closeReason = "Target reached";
       }
 
+      // Same-day round-trip: flatten anything held longer than maxHoldHours so dip-buys
+      // don't turn into multi-day bags. Skip if maxHoldHours is 0 (disabled).
+      if (!shouldClose && config.maxHoldHours > 0 && openingLog?.createdAt) {
+        const heldHours = (Date.now() - new Date(openingLog.createdAt).getTime()) / 3_600_000;
+        if (heldHours >= config.maxHoldHours) {
+          shouldClose = true;
+          closeReason = "Time exit";
+        }
+      }
+
       if (shouldClose) {
+        // Classify the exit: profit target, stop, or same-day time flatten.
+        const closeAction = closeReason === "Target reached" ? "take_profit"
+          : closeReason === "Time exit" ? "time_exit"
+          : "stop_loss";
+        const exitTag = closeReason === "Target reached" ? "TP" : closeReason === "Time exit" ? "TX" : "SL";
         details.push(`[crypto-agent] CLOSING ${pos.symbol}: ${closeReason} @ $${currentPrice.toFixed(2)} P&L: $${unrealizedPnl.toFixed(2)}`);
 
         try {
@@ -473,7 +498,7 @@ export async function runCryptoAgent(liveMode = false): Promise<{
             type: "market",
           }, config.mode);
 
-          const exitId = `${closeReason === "Target reached" ? "TP" : "SL"}-${Date.now().toString(36)}`;
+          const exitId = `${exitTag}-${Date.now().toString(36)}`;
 
           await logTradeToJournal(
             {
@@ -482,7 +507,7 @@ export async function runCryptoAgent(liveMode = false): Promise<{
               instrument: `CRY:${pos.symbol}`,
               direction: direction === "long" ? "LONG" : "SHORT",
               strategy: "crypto-day-trading",
-              setupType: closeReason === "Target reached" ? "take_profit" : "stop_loss",
+              setupType: closeAction,
               contracts: Math.abs(qty),
               entryPrice,
               stopPrice: stopPrice || 0,
@@ -498,7 +523,7 @@ export async function runCryptoAgent(liveMode = false): Promise<{
           await prisma.autoTradeLog.create({
             data: {
               symbol: `CRY:${pos.symbol}`,
-              action: closeReason === "Target reached" ? "take_profit" : "stop_loss",
+              action: closeAction,
               qty: Math.abs(qty),
               price: currentPrice,
               pnl: unrealizedPnl,
@@ -509,7 +534,7 @@ export async function runCryptoAgent(liveMode = false): Promise<{
 
           trades.push({
             symbol: pos.symbol,
-            action: closeReason === "Target reached" ? "take_profit" : "stop_loss",
+            action: closeAction,
             qty: Math.abs(qty).toFixed(6),
             price: currentPrice,
             orderId: closeOrder.id,
