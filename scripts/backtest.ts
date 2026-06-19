@@ -43,6 +43,25 @@ function atr(bars: Bar[], period = 14): number {
     trs.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i - 1].c), Math.abs(bars[i].l - bars[i - 1].c)));
   return trs.reduce((a, b) => a + b, 0) / trs.length;
 }
+// ADX(14) — Wilder trend strength from bars UP TO entry (no lookahead). 0-100; >25 trending, <20 chop.
+function adx(bars: Bar[], period = 14): number {
+  if (bars.length < period * 2 + 1) return 0;
+  const tr: number[] = [], pDM: number[] = [], nDM: number[] = [];
+  for (let i = 1; i < bars.length; i++) {
+    const up = bars[i].h - bars[i - 1].h, dn = bars[i - 1].l - bars[i].l;
+    pDM.push(up > dn && up > 0 ? up : 0);
+    nDM.push(dn > up && dn > 0 ? dn : 0);
+    tr.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i - 1].c), Math.abs(bars[i].l - bars[i - 1].c)));
+  }
+  const smooth = (arr: number[]) => { let s = arr.slice(0, period).reduce((a, b) => a + b, 0); const out = [s]; for (let i = period; i < arr.length; i++) { s = s - s / period + arr[i]; out.push(s); } return out; };
+  const trS = smooth(tr), pS = smooth(pDM), nS = smooth(nDM);
+  const dx: number[] = [];
+  for (let i = 0; i < trS.length; i++) {
+    const pDI = 100 * pS[i] / (trS[i] || 1e-9), nDI = 100 * nS[i] / (trS[i] || 1e-9);
+    dx.push(100 * Math.abs(pDI - nDI) / ((pDI + nDI) || 1e-9));
+  }
+  return dx.length < period ? (dx.length ? dx[dx.length - 1] : 0) : dx.slice(-period).reduce((a, b) => a + b, 0) / period;
+}
 function calcVwap(bars: Bar[]): { vwap: number } {
   let cumPV = 0, cumV = 0;
   for (const b of bars) { const tp = (b.h + b.l + b.c) / 3; cumPV += tp * b.v; cumV += b.v; }
@@ -230,7 +249,7 @@ function detectSetup(sym: string, bars: Bar[], st: { sessionBars: Bar[]; barCoun
 }
 
 // ===================== backtest loop =====================
-export interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; rsi: number; session: string; }
+export interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; rsi: number; session: string; adx: number; sessRangeAtr: number; }
 
 // Resolve a trade's exit by walking 1-MINUTE bars forward from entry — determines whether stop or
 // target was hit FIRST at minute resolution (far more accurate than the 5m stop-first assumption).
@@ -291,7 +310,13 @@ export function backtest(sym: string): Trade[] {
       const pnl = (long ? exitPx - entry : entry - exitPx) * mult - COMMISSION_PER_SIDE * 2;
       const riskDollars = setup.stopDist * mult;
       const entryRsi = rsi(slice.map(b => b.c)) ?? 50; // RSI at entry — for the edge scan
-      trades.push({ sym, type: setup.type, dir: setup.dir, entry, exit: exitPx, pnl, r: riskDollars > 0 ? pnl / riskDollars : 0, bars: ex.bars1m, outcome: ex.outcome, entryTime: bars[i].t, rsi: entryRsi, session: st.session });
+      // REAL-TIME trend metrics known AT ENTRY (no lookahead — slice/sessionBars end at the entry bar):
+      const entryAdx = adx(slice);                                  // trend strength
+      const entryAtr = atr(slice) || 1e-9;
+      const sessHi = st.sessionBars.length ? Math.max(...st.sessionBars.map(b => b.h)) : bars[i].h;
+      const sessLo = st.sessionBars.length ? Math.min(...st.sessionBars.map(b => b.l)) : bars[i].l;
+      const sessRangeAtr = (sessHi - sessLo) / entryAtr;            // how far the day has expanded by entry
+      trades.push({ sym, type: setup.type, dir: setup.dir, entry, exit: exitPx, pnl, r: riskDollars > 0 ? pnl / riskDollars : 0, bars: ex.bars1m, outcome: ex.outcome, entryTime: bars[i].t, rsi: entryRsi, session: st.session, adx: entryAdx, sessRangeAtr });
       blockedUntil = ex.exitTime;
     }
   }
