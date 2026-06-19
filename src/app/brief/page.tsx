@@ -11,11 +11,18 @@ export const dynamic = "force-dynamic";
 // and the market-chronicle job:
 //   - Brain/morning-brief.md   (daily brief, key levels, historical analogues)
 //   - Brain/market-history.md  (market chronicle)
-// The brief embeds SVG charts via Obsidian "![[charts/NQ-morning.svg]]" syntax, but
-// those SVGs live only in the local Obsidian vault (not the DB), so we render the
-// markdown text cleanly and replace each embed with a labeled placeholder.
+// The brief embeds SVG charts via Obsidian "![[charts/NQ-morning.svg]]" syntax. The
+// SVGs are persisted in the DB vault at Brain/charts/<name>.svg (written by the daily
+// research / morning-brief jobs), so we fetch each one and render it inline where the
+// embed appears. Missing charts fall back to a labeled placeholder.
 
 const CHART_EMBED_SRC = String.raw`!\[\[charts\/([^\]]+?)\.svg\]\]`;
+
+// Unique sentinel we inject in place of a chart embed so the markdown renderer can swap
+// it for the inlined SVG (or a placeholder) via a custom component. Wrapped in newlines
+// so remark treats it as its own paragraph.
+const CHART_SENTINEL = (name: string) => `\n\n%%CHART:${name}%%\n\n`;
+const CHART_SENTINEL_RE = /^%%CHART:(.+?)%%$/;
 
 // Strip YAML frontmatter (--- ... ---) the vault docs carry at the top.
 function stripFrontmatter(md: string): string {
@@ -25,17 +32,35 @@ function stripFrontmatter(md: string): string {
   return md.slice(end + 4).replace(/^\n+/, "");
 }
 
-// Does this doc contain any Obsidian chart embeds?
-function hasChartEmbeds(md: string): boolean {
-  return new RegExp(CHART_EMBED_SRC).test(md);
+// Collect the chart names referenced by a doc's embeds, e.g. "NQ-morning".
+function extractChartNames(md: string): string[] {
+  const names = new Set<string>();
+  const re = new RegExp(CHART_EMBED_SRC, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) names.add(m[1]);
+  return [...names];
 }
 
-// Replace Obsidian chart embeds with a marker we can render as a placeholder card.
+// Replace Obsidian chart embeds with sentinels we render via the custom `p` component.
 function markChartEmbeds(md: string): string {
-  return md.replace(new RegExp(CHART_EMBED_SRC, "g"), (_m, name) => `\n\n> 📈 **Chart: ${name}** — view in the Obsidian vault (Brain/charts/${name}.svg)\n\n`);
+  return md.replace(new RegExp(CHART_EMBED_SRC, "g"), (_m, name) => CHART_SENTINEL(name));
 }
 
-const markdownComponents = {
+function makeMarkdownComponents(charts: Record<string, string>) {
+  // Pull the chart name out of a paragraph node's plain-text content, if it is a sentinel.
+  // The sentinel is plain text, so the paragraph's children are a single string (or a
+  // one-element array of that string); anything else is a normal paragraph.
+  const sentinelName = (children: React.ReactNode): string | null => {
+    const text = typeof children === "string"
+      ? children
+      : Array.isArray(children) && children.length === 1 && typeof children[0] === "string"
+        ? children[0]
+        : null;
+    if (text == null) return null;
+    const m = text.trim().match(CHART_SENTINEL_RE);
+    return m ? m[1] : null;
+  };
+  return {
   h1: ({ children, ...rest }: React.ComponentPropsWithoutRef<"h1">) => (
     <h1 className="text-2xl font-bold mt-6 mb-3 text-foreground" {...rest}>{children}</h1>
   ),
@@ -45,7 +70,11 @@ const markdownComponents = {
   h3: ({ children, ...rest }: React.ComponentPropsWithoutRef<"h3">) => (
     <h3 className="text-base font-semibold mt-4 mb-2 text-foreground" {...rest}>{children}</h3>
   ),
-  p: (props: React.ComponentPropsWithoutRef<"p">) => <p className="my-2.5" {...props} />,
+  p: ({ children, ...rest }: React.ComponentPropsWithoutRef<"p">) => {
+    const name = sentinelName(children);
+    if (name) return <ChartEmbed name={name} svg={charts[name]} />;
+    return <p className="my-2.5" {...rest}>{children}</p>;
+  },
   ul: (props: React.ComponentPropsWithoutRef<"ul">) => <ul className="list-disc pl-5 my-2 space-y-1" {...props} />,
   ol: (props: React.ComponentPropsWithoutRef<"ol">) => <ol className="list-decimal pl-5 my-2 space-y-1" {...props} />,
   li: (props: React.ComponentPropsWithoutRef<"li">) => <li className="text-foreground/90" {...props} />,
@@ -63,25 +92,41 @@ const markdownComponents = {
   hr: () => <hr className="my-6 border-border" />,
   em: (props: React.ComponentPropsWithoutRef<"em">) => <em className="italic text-foreground/80" {...props} />,
   strong: (props: React.ComponentPropsWithoutRef<"strong">) => <strong className="font-semibold text-foreground" {...props} />,
-};
+  };
+}
 
-function VaultMarkdown({ raw }: { raw: string }) {
-  const hadCharts = hasChartEmbeds(raw);
-  const md = markChartEmbeds(stripFrontmatter(raw));
+// Renders a self-generated chart SVG inline, or the placeholder note if it's missing.
+// The SVGs are first-party, produced by src/lib/svg-chart.ts (no scripts, no user input),
+// so inlining the markup is safe here.
+function ChartEmbed({ name, svg }: { name: string; svg: string | undefined }) {
+  if (!svg) {
+    return (
+      <div className="my-3 flex items-center gap-2 text-[11px] text-muted-foreground/60 px-2.5 py-1.5 rounded-md bg-muted/30 border border-dashed border-border">
+        <ImageOff className="w-3.5 h-3.5 shrink-0" />
+        Chart <span className="font-mono text-foreground/70">{name}</span> not available yet (Brain/charts/{name}.svg).
+      </div>
+    );
+  }
   return (
-    <>
-      {hadCharts && (
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/60 mb-3 px-2.5 py-1.5 rounded-md bg-muted/30 border border-dashed border-border">
-          <ImageOff className="w-3.5 h-3.5 shrink-0" />
-          Brief charts are SVGs stored in the local Obsidian vault and are shown there, not in this view.
-        </div>
-      )}
-      <article className="text-[13.5px] leading-relaxed text-foreground/90">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-          {md}
-        </ReactMarkdown>
-      </article>
-    </>
+    <div
+      className="my-4 w-full overflow-x-auto rounded-md border border-border bg-card [&_svg]:max-w-full [&_svg]:h-auto"
+      role="img"
+      aria-label={`Chart: ${name}`}
+      // eslint-disable-next-line react/no-danger -- first-party, self-generated SVG (svg-chart.ts), not user input
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+function VaultMarkdown({ raw, charts }: { raw: string; charts: Record<string, string> }) {
+  const md = markChartEmbeds(stripFrontmatter(raw));
+  const components = makeMarkdownComponents(charts);
+  return (
+    <article className="text-[13.5px] leading-relaxed text-foreground/90">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        {md}
+      </ReactMarkdown>
+    </article>
   );
 }
 
@@ -100,10 +145,29 @@ export default async function BriefPage() {
   let marketHistory: string | null = null;
   let error: string | null = null;
 
+  let charts: Record<string, string> = {};
+
   try {
     const docs = await vaultReadMultiple(["Brain/morning-brief.md", "Brain/market-history.md"]);
     morningBrief = docs["Brain/morning-brief.md"] ?? null;
     marketHistory = docs["Brain/market-history.md"] ?? null;
+
+    // Collect every chart referenced across both docs, fetch the SVGs from the DB vault
+    // (Brain/charts/<name>.svg), and map them by name for inline rendering.
+    const chartNames = [
+      ...extractChartNames(morningBrief ?? ""),
+      ...extractChartNames(marketHistory ?? ""),
+    ];
+    const uniqueNames = [...new Set(chartNames)];
+    if (uniqueNames.length > 0) {
+      const chartPaths = uniqueNames.map((n) => `Brain/charts/${n}.svg`);
+      const chartDocs = await vaultReadMultiple(chartPaths);
+      charts = uniqueNames.reduce<Record<string, string>>((acc, name) => {
+        const svg = chartDocs[`Brain/charts/${name}.svg`];
+        if (svg) acc[name] = svg;
+        return acc;
+      }, {});
+    }
   } catch (e) {
     error = e instanceof Error ? e.message : "Unable to read the vault.";
   }
@@ -128,7 +192,7 @@ export default async function BriefPage() {
             <Sunrise className="w-3.5 h-3.5 text-amber-400" />
             Daily Brief
           </div>
-          {morningBrief ? <VaultMarkdown raw={morningBrief} /> : <EmptyState doc="Brain/morning-brief.md" />}
+          {morningBrief ? <VaultMarkdown raw={morningBrief} charts={charts} /> : <EmptyState doc="Brain/morning-brief.md" />}
         </CardContent>
       </Card>
 
@@ -138,7 +202,7 @@ export default async function BriefPage() {
             <Globe className="w-3.5 h-3.5 text-blue-400" />
             Market Chronicle
           </div>
-          {marketHistory ? <VaultMarkdown raw={marketHistory} /> : <EmptyState doc="Brain/market-history.md" />}
+          {marketHistory ? <VaultMarkdown raw={marketHistory} charts={charts} /> : <EmptyState doc="Brain/market-history.md" />}
         </CardContent>
       </Card>
     </div>
