@@ -29,19 +29,24 @@ function loadAccount() {
   return JSON.parse(fs.readFileSync(p, "utf8"));
 }
 
-function loadEquityCurve(): { month: string; equity: number }[] {
-  try {
-    const log = fs.readFileSync("/tmp/spread-track.log", "utf8");
-    const matches = [...log.matchAll(/(20\d{2}-\d{2})\s+\$\s*([\d,]+)/g)];
-    const seen = new Map<string, number>();
-    for (const [, month, equity] of matches) seen.set(month, parseInt(equity.replace(/,/g, ""), 10));
-    return [...seen.entries()].map(([month, equity]) => ({ month, equity }));
-  } catch { return []; }
+function loadEquityCurve(account: { curve?: { date: string; equity: number }[] } | null): { month: string; equity: number }[] {
+  // Authoritative source: the daily equity `curve` written by scripts/spread-paper-trade.ts into
+  // reports/spread-paper-account.json. We down-sample to one point per calendar month (last value
+  // wins) for the public chart. (Previously this scraped /tmp/spread-track.log, which is fragile —
+  // that file doesn't exist on CI/Vercel and its format changed, so a refresh silently produced an
+  // empty curve. Read the JSON the account already persists instead.)
+  if (!account?.curve?.length) return [];
+  const seen = new Map<string, number>();
+  for (const p of account.curve) {
+    if (!p?.date || typeof p.equity !== "number") continue;
+    seen.set(p.date.slice(0, 7), Math.round(p.equity));
+  }
+  return [...seen.entries()].map(([month, equity]) => ({ month, equity }));
 }
 
 const report = newestPaperForward();
 const account = loadAccount();
-const equity = loadEquityCurve();
+const equity = loadEquityCurve(account);
 
 const snapshot = {
   generatedAt: new Date().toISOString(),

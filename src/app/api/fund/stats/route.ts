@@ -4,109 +4,127 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 /**
- * Public proof endpoint — aggregates the futures engine's actual trade ledger into
- * verifiable statistics. Anyone can fetch this. The numbers come straight from autoTradeLog;
- * we don't render counterfactuals or backtests, only what actually happened.
+ * Public proof endpoint — honest, LIVE-ONLY performance of the $1K real-money futures engine.
  *
- * Includes a SPX buy-and-hold comparison over the same period using closes from FRED-ish
- * proxy (we just compare against the ES front-month change captured in the engine's price
- * cache when it logged trades — proxy enough for a 60-day comparison).
+ * P&L source of truth = CLEAN BALANCE-DELTA (broker EOD balances), the same series the internal
+ * scoreboard (scripts/scoreboard.ts) trusts. We read the `live_eod_balance_<YYYY-MM-DD>` agentConfig
+ * keys (written by the engine each session from the actual Tradovate account equity), sort by date,
+ * and take latest − first. We do NOT sum autoTradeLog.pnl for dollars — those rows are double-logged
+ * and run ~3x inflated, and they commingle the $50K demo account with the $1K live account.
+ *
+ * autoTradeLog is used ONLY for COUNTS (number of trades, win/loss counts) filtered to the LIVE
+ * engine (action prefix `live_`, which is MNQ/MES only). It is never used as a dollar figure here.
+ *
+ * The live sample is small (~1 month). The response carries an explicit `sampleNote` so the page
+ * cannot imply statistical significance.
  */
+
+const LIVE_START_CAPITAL = 1000;
+
 export async function GET() {
   try {
-    // Window: last 60 days of completed (P&L recorded) futures trades
-    const since = new Date(Date.now() - 60 * 86_400_000);
-    const trades = await prisma.autoTradeLog.findMany({
-      where: {
-        createdAt: { gte: since },
-        symbol: { startsWith: "FUT:" },
-        pnl: { not: null },
-      },
-      orderBy: { createdAt: "asc" },
-      select: { symbol: true, action: true, qty: true, pnl: true, createdAt: true, reason: true },
+    // ---- 1. Clean P&L from the LIVE balance-delta series ----
+    const balRows = await prisma.agentConfig.findMany({
+      where: { key: { startsWith: "live_eod_balance_" } },
     });
+    const balanceSeries = balRows
+      .map((r) => ({ date: r.key.slice("live_eod_balance_".length), balance: parseFloat(r.value) }))
+      .filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(x.date) && isFinite(x.balance))
+      .sort((a, b) => a.date.localeCompare(b.date));
 
-    if (trades.length === 0) {
+    if (balanceSeries.length === 0) {
       return Response.json({
-        windowDays: 60,
-        totalTrades: 0,
         empty: true,
-        message: "No completed trades in the window yet — system is in cold-start.",
+        account: "live",
+        startCapital: LIVE_START_CAPITAL,
+        message: "No live end-of-day balances recorded yet — the $1K live engine is in cold-start.",
+        generatedAt: new Date().toISOString(),
       });
     }
 
-    // Overall metrics
-    const totalPnl = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const wins = trades.filter((t) => (t.pnl ?? 0) > 0);
-    const losses = trades.filter((t) => (t.pnl ?? 0) < 0);
-    const winRate = wins.length / trades.length;
-    const grossProfit = wins.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const grossLoss = Math.abs(losses.reduce((s, t) => s + (t.pnl ?? 0), 0));
-    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
-    const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
-    const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
-    const expectancy = (winRate * avgWin) - ((1 - winRate) * avgLoss);
+    // Anchor to the ACTUAL first recorded broker balance (the funded starting capital — the live
+    // account was funded with ~$1,025, not a round $1,000). Anchoring to a hardcoded $1,000 would
+    // count $25 of deposited capital as "profit" and overstate the return on a public page.
+    const firstBalance = balanceSeries[0].balance;
+    const latestBalance = balanceSeries[balanceSeries.length - 1].balance;
+    const netPnl = latestBalance - firstBalance;
+    const returnPct = netPnl / firstBalance;
 
-    // Running equity curve + max drawdown
-    let peak = 0; let trough = 0; let maxDD = 0; let running = 0;
-    const equityCurve: { t: string; equity: number }[] = [];
-    for (const t of trades) {
-      running += (t.pnl ?? 0);
-      equityCurve.push({ t: t.createdAt.toISOString(), equity: running });
-      if (running > peak) { peak = running; trough = running; }
-      const dd = trough - running > 0 ? peak - running : 0;
-      if (running < trough) trough = running;
+    // Clean equity curve straight from broker balances (already starts at the funded balance).
+    const equityCurve: { date: string; equity: number }[] =
+      balanceSeries.map((b) => ({ date: b.date, equity: Math.round(b.balance * 100) / 100 }));
+
+    // Per-day deltas → max drawdown + days-with-a-move (honest concentration read).
+    let peak = firstBalance;
+    let maxDD = 0;
+    for (const pt of equityCurve) {
+      if (pt.equity > peak) peak = pt.equity;
+      const dd = peak - pt.equity;
       if (dd > maxDD) maxDD = dd;
     }
+    const movesUp = balanceSeries.filter((b, i) => i > 0 && b.balance - balanceSeries[i - 1].balance > 0.01).length;
+    const movesDown = balanceSeries.filter((b, i) => i > 0 && b.balance - balanceSeries[i - 1].balance < -0.01).length;
 
-    // Sharpe-like: mean of per-trade returns / stdev (annualized by sqrt(252/avg-trades-per-day))
-    const returns = trades.map((t) => t.pnl ?? 0);
-    const meanR = returns.reduce((s, r) => s + r, 0) / returns.length;
-    const variance = returns.reduce((s, r) => s + Math.pow(r - meanR, 2), 0) / returns.length;
-    const stdev = Math.sqrt(variance) || 1;
-    const tradesPerDay = trades.length / 60;
-    const sharpe = (meanR / stdev) * Math.sqrt(252 * tradesPerDay);
+    // ---- 2. Trade COUNTS from autoTradeLog (LIVE engine only) — never dollars ----
+    // Live trades are tagged with action prefix `live_` (demo uses `futures_`). This is the engine's
+    // own mode marker and is MNQ/MES-only by construction.
+    const liveCloses = await prisma.autoTradeLog.findMany({
+      where: {
+        symbol: { startsWith: "FUT:" },
+        action: { startsWith: "live_" },
+        pnl: { not: null },
+      },
+      orderBy: { createdAt: "asc" },
+      select: { symbol: true, pnl: true, createdAt: true },
+    });
+    const totalTrades = liveCloses.length;
+    const winCount = liveCloses.filter((t) => (t.pnl ?? 0) > 0).length;
+    const lossCount = liveCloses.filter((t) => (t.pnl ?? 0) < 0).length;
+    const winRate = totalTrades > 0 ? winCount / totalTrades : null;
 
-    // Per-setup-type breakdown (from reason text — engine prefixes with [setupType])
-    const bySetup: Record<string, { n: number; wins: number; pnl: number }> = {};
-    for (const t of trades) {
-      // reason format: "[FUTURES SYM] EXIT_REASON: Closed ..." — we extract instrument from symbol
-      // and use the EXIT_REASON as proxy for the setup family that closed it
-      const exit = t.action.replace(/^futures_/, "");
-      const key = exit || "unknown";
-      bySetup[key] = bySetup[key] || { n: 0, wins: 0, pnl: 0 };
-      bySetup[key].n++;
-      if ((t.pnl ?? 0) > 0) bySetup[key].wins++;
-      bySetup[key].pnl += t.pnl ?? 0;
-    }
-
-    // Per-symbol breakdown
-    const bySymbol: Record<string, { n: number; wins: number; pnl: number }> = {};
-    for (const t of trades) {
+    // Per-instrument COUNTS only (no dollar P&L — trade-log dollars are unreliable).
+    const bySymbol: Record<string, { trades: number; wins: number }> = {};
+    for (const t of liveCloses) {
       const sym = t.symbol.replace(/^FUT:/, "");
-      bySymbol[sym] = bySymbol[sym] || { n: 0, wins: 0, pnl: 0 };
-      bySymbol[sym].n++;
+      bySymbol[sym] = bySymbol[sym] || { trades: 0, wins: 0 };
+      bySymbol[sym].trades++;
       if ((t.pnl ?? 0) > 0) bySymbol[sym].wins++;
-      bySymbol[sym].pnl += t.pnl ?? 0;
     }
+
+    // ---- 3. Honest sample note ----
+    const tradingDays = movesUp + movesDown;
+    const sampleNote =
+      `LIVE account only ($1K real money). P&L is clean broker balance-delta. ` +
+      `Sample is small — ${totalTrades} trades across ${tradingDays} active days ` +
+      `(${balanceSeries[0].date} → ${balanceSeries[balanceSeries.length - 1].date}). ` +
+      `This is far too short to establish a statistical edge; treat as an early forward-test, not proof.`;
 
     return Response.json({
-      windowDays: 60,
-      windowStart: trades[0].createdAt.toISOString(),
-      windowEnd: trades[trades.length - 1].createdAt.toISOString(),
-      totalTrades: trades.length,
-      totalPnl: Math.round(totalPnl * 100) / 100,
-      winRate: Math.round(winRate * 10000) / 10000,
-      profitFactor: isFinite(profitFactor) ? Math.round(profitFactor * 100) / 100 : null,
-      avgWin: Math.round(avgWin * 100) / 100,
-      avgLoss: Math.round(avgLoss * 100) / 100,
-      expectancy: Math.round(expectancy * 100) / 100,
-      sharpe: Math.round(sharpe * 100) / 100,
+      account: "live",
+      startCapital: Math.round(firstBalance * 100) / 100,
+      pnlSource: "broker-balance-delta",
+      // Clean dollar figures
+      netPnl: Math.round(netPnl * 100) / 100,
+      returnPct: Math.round(returnPct * 10000) / 10000,
+      latestBalance: Math.round(latestBalance * 100) / 100,
+      firstBalance: Math.round(firstBalance * 100) / 100,
       maxDrawdown: Math.round(maxDD * 100) / 100,
-      tradesPerDay: Math.round(tradesPerDay * 100) / 100,
-      bySetup,
+      // Counts (not dollars)
+      totalTrades,
+      winCount,
+      lossCount,
+      winRate: winRate === null ? null : Math.round(winRate * 10000) / 10000,
+      activeDays: tradingDays,
+      daysUp: movesUp,
+      daysDown: movesDown,
       bySymbol,
-      equityCurve: equityCurve.filter((_, i) => i % Math.max(1, Math.floor(equityCurve.length / 100)) === 0),
+      // Clean equity curve (balance-based), downsampled to ~100 points
+      equityCurve: equityCurve.filter(
+        (_, i) => i % Math.max(1, Math.floor(equityCurve.length / 100)) === 0 || i === equityCurve.length - 1,
+      ),
+      windowStart: balanceSeries[0].date,
+      windowEnd: balanceSeries[balanceSeries.length - 1].date,
+      sampleNote,
       generatedAt: new Date().toISOString(),
     });
   } catch (err) {

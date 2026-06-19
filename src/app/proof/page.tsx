@@ -5,26 +5,30 @@ export const revalidate = 60;
 
 export const metadata = {
   title: "Proof — Live engine performance",
-  description: "Real-time, verifiable performance of the live futures trading engine. Every number from the actual trade ledger.",
+  description: "Real-time, verifiable performance of the $1K live futures engine, measured by actual broker account balance.",
 };
 
 interface Stats {
-  windowDays: number;
-  totalTrades: number;
-  totalPnl?: number;
-  winRate?: number;
-  profitFactor?: number | null;
-  avgWin?: number;
-  avgLoss?: number;
-  expectancy?: number;
-  sharpe?: number;
+  account?: string;
+  startCapital?: number;
+  pnlSource?: string;
+  netPnl?: number;
+  returnPct?: number;
+  latestBalance?: number;
+  firstBalance?: number;
   maxDrawdown?: number;
-  tradesPerDay?: number;
-  bySetup?: Record<string, { n: number; wins: number; pnl: number }>;
-  bySymbol?: Record<string, { n: number; wins: number; pnl: number }>;
-  equityCurve?: { t: string; equity: number }[];
+  totalTrades?: number;
+  winCount?: number;
+  lossCount?: number;
+  winRate?: number | null;
+  activeDays?: number;
+  daysUp?: number;
+  daysDown?: number;
+  bySymbol?: Record<string, { trades: number; wins: number }>;
+  equityCurve?: { date: string; equity: number }[];
   windowStart?: string;
   windowEnd?: string;
+  sampleNote?: string;
   empty?: boolean;
   message?: string;
   generatedAt: string;
@@ -40,18 +44,14 @@ async function getStats(): Promise<Stats | null> {
   } catch { return null; }
 }
 
-function fmt(n: number | undefined, d = 2): string {
-  if (n === undefined || n === null || !isFinite(n)) return "—";
-  return n.toFixed(d);
-}
 function fmtMoney(n: number | undefined): string {
   if (n === undefined || n === null || !isFinite(n)) return "—";
   const s = Math.abs(Math.round(n)).toLocaleString();
   return (n < 0 ? "−$" : "$") + s;
 }
-function pct(n: number | undefined): string {
+function pct(n: number | undefined | null): string {
   if (n === undefined || n === null || !isFinite(n)) return "—";
-  return (n * 100).toFixed(0) + "%";
+  return (n * 100).toFixed(1) + "%";
 }
 
 export default async function ProofPage() {
@@ -68,21 +68,26 @@ export default async function ProofPage() {
     );
   }
 
-  const pnlColor = (stats.totalPnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400";
-  const sharpeColor = (stats.sharpe ?? 0) >= 1 ? "text-emerald-400" : (stats.sharpe ?? 0) >= 0 ? "text-amber-400" : "text-rose-400";
+  const pnlColor = (stats.netPnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400";
+  const curve = stats.equityCurve ?? [];
+  const minEq = curve.length ? Math.min(...curve.map((p) => p.equity)) : 0;
+  const maxEq = curve.length ? Math.max(...curve.map((p) => p.equity)) : 0;
+  const sparkW = 800;
+  const sparkH = 160;
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="max-w-5xl mx-auto px-6 py-12">
         {/* Hero */}
         <div className="mb-10">
-          <div className="text-xs uppercase tracking-widest text-emerald-400 font-mono mb-2">Live proof · verifiable</div>
+          <div className="text-xs uppercase tracking-widest text-emerald-400 font-mono mb-2">Live proof · $1K real money</div>
           <h1 className="text-4xl font-light leading-tight mb-3">
-            Engine performance — <span className="text-emerald-400">{stats.windowDays}-day rolling window</span>
+            Live futures engine — <span className="text-emerald-400">$1,000 real account</span>
           </h1>
           <p className="text-slate-400 max-w-3xl">
-            Every number on this page is read live from the production trade ledger. No backtest, no
-            counterfactual, no smoothing. Updated whenever this page loads. Reproducible from
+            Net P&amp;L on this page is measured the only honest way: the change in the engine&apos;s actual
+            broker account balance (end-of-day equity straight from Tradovate). No trade-log sums, no
+            backtest, no demo account mixed in — this is the live $1K account only. Reproducible from
             <code className="text-emerald-400 mx-1">/api/fund/stats</code>.
           </p>
         </div>
@@ -96,85 +101,102 @@ export default async function ProofPage() {
           </Card>
         ) : (
           <>
+            {/* Honesty banner */}
+            {stats.sampleNote && (
+              <Card className="bg-amber-950/20 border-amber-900/40 mb-8">
+                <CardContent className="p-4">
+                  <div className="text-xs uppercase text-amber-400 mb-1 font-mono">Read this first · sample size</div>
+                  <div className="text-sm text-amber-100/90 leading-relaxed">{stats.sampleNote}</div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Headline metrics */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
               <Card className="bg-slate-900/60 border-slate-800">
                 <CardContent className="p-5">
-                  <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Net P&L</div>
-                  <div className={`text-3xl font-mono ${pnlColor}`}>{fmtMoney(stats.totalPnl)}</div>
-                  <div className="text-xs text-slate-500 mt-1">{stats.totalTrades} trades</div>
+                  <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Net P&L (balance Δ)</div>
+                  <div className={`text-3xl font-mono ${pnlColor}`}>{fmtMoney(stats.netPnl)}</div>
+                  <div className="text-xs text-slate-500 mt-1">{pct(stats.returnPct)} on ${stats.startCapital?.toLocaleString()}</div>
                 </CardContent>
               </Card>
               <Card className="bg-slate-900/60 border-slate-800">
                 <CardContent className="p-5">
-                  <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Win rate</div>
+                  <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Account balance</div>
+                  <div className="text-3xl font-mono">{fmtMoney(stats.latestBalance)}</div>
+                  <div className="text-xs text-slate-500 mt-1">started {fmtMoney(stats.startCapital)}</div>
+                </CardContent>
+              </Card>
+              <Card className="bg-slate-900/60 border-slate-800">
+                <CardContent className="p-5">
+                  <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Win rate (count)</div>
                   <div className="text-3xl font-mono">{pct(stats.winRate)}</div>
-                  <div className="text-xs text-slate-500 mt-1">PF {fmt(stats.profitFactor ?? undefined)}</div>
-                </CardContent>
-              </Card>
-              <Card className="bg-slate-900/60 border-slate-800">
-                <CardContent className="p-5">
-                  <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Sharpe (annualized)</div>
-                  <div className={`text-3xl font-mono ${sharpeColor}`}>{fmt(stats.sharpe)}</div>
-                  <div className="text-xs text-slate-500 mt-1">{fmt(stats.tradesPerDay)} trades/day</div>
+                  <div className="text-xs text-slate-500 mt-1">{stats.winCount}W / {stats.lossCount}L · {stats.totalTrades} trades</div>
                 </CardContent>
               </Card>
               <Card className="bg-slate-900/60 border-slate-800">
                 <CardContent className="p-5">
                   <div className="text-xs uppercase text-slate-500 mb-2 font-mono">Max drawdown</div>
                   <div className="text-3xl font-mono text-amber-400">{fmtMoney(stats.maxDrawdown)}</div>
-                  <div className="text-xs text-slate-500 mt-1">avg W {fmtMoney(stats.avgWin)} · L {fmtMoney(stats.avgLoss)}</div>
+                  <div className="text-xs text-slate-500 mt-1">{stats.activeDays} active days</div>
                 </CardContent>
               </Card>
             </div>
 
-            {/* Per-symbol */}
-            <Card className="bg-slate-900/60 border-slate-800 mb-6">
-              <CardContent className="p-5">
-                <div className="text-xs uppercase text-slate-500 mb-3 font-mono">By instrument</div>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  {Object.entries(stats.bySymbol ?? {})
-                    .sort((a, b) => b[1].pnl - a[1].pnl)
-                    .map(([sym, m]) => (
-                      <div key={sym} className="bg-slate-950/50 rounded p-3 border border-slate-800">
-                        <div className="font-mono text-lg">{sym}</div>
-                        <div className={`text-sm font-mono ${m.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                          {fmtMoney(m.pnl)}
-                        </div>
-                        <div className="text-xs text-slate-500 font-mono mt-1">
-                          {m.n} trades · {pct(m.wins / m.n)} WR
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </CardContent>
-            </Card>
+            {/* Equity curve (clean, balance-based) */}
+            {curve.length > 1 && maxEq > minEq && (
+              <Card className="bg-slate-900/60 border-slate-800 mb-10">
+                <CardContent className="p-6">
+                  <div className="text-xs uppercase text-slate-500 mb-3 font-mono">Account equity · broker end-of-day balance</div>
+                  <svg viewBox={`0 0 ${sparkW} ${sparkH}`} className="w-full h-40">
+                    {(() => {
+                      const points = curve.map((p, i) => {
+                        const x = (i / (curve.length - 1)) * sparkW;
+                        const y = sparkH - ((p.equity - minEq) / (maxEq - minEq)) * (sparkH - 20) - 10;
+                        return { x, y };
+                      });
+                      const pathD = points.map((p, i) => (i === 0 ? `M ${p.x} ${p.y}` : `L ${p.x} ${p.y}`)).join(" ");
+                      const startY = sparkH - (((stats.startCapital ?? minEq) - minEq) / (maxEq - minEq)) * (sparkH - 20) - 10;
+                      return (
+                        <>
+                          <line x1="0" y1={startY} x2={sparkW} y2={startY} stroke="rgb(71,85,105)" strokeDasharray="3 4" />
+                          <path d={pathD} fill="none" stroke="rgb(52,211,153)" strokeWidth="2" />
+                        </>
+                      );
+                    })()}
+                  </svg>
+                  <div className="flex justify-between text-xs text-slate-500 font-mono mt-2">
+                    <span>{stats.windowStart}</span>
+                    <span>{stats.windowEnd}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
-            {/* Per-setup-type (exit reason proxy) */}
-            <Card className="bg-slate-900/60 border-slate-800 mb-10">
-              <CardContent className="p-5">
-                <div className="text-xs uppercase text-slate-500 mb-3 font-mono">By exit type</div>
-                <div className="text-xs text-slate-600 mb-3">
-                  How each trade ended. <code className="text-emerald-400">target</code> &amp;{" "}
-                  <code className="text-emerald-400">trail_stop</code> are wins; the rest are managed exits or stops.
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  {Object.entries(stats.bySetup ?? {})
-                    .sort((a, b) => b[1].pnl - a[1].pnl)
-                    .map(([exit, m]) => (
-                      <div key={exit} className="bg-slate-950/50 rounded p-3 border border-slate-800">
-                        <div className="font-mono text-sm">{exit}</div>
-                        <div className={`text-sm font-mono ${m.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                          {fmtMoney(m.pnl)}
+            {/* Per-symbol counts */}
+            {stats.bySymbol && Object.keys(stats.bySymbol).length > 0 && (
+              <Card className="bg-slate-900/60 border-slate-800 mb-6">
+                <CardContent className="p-5">
+                  <div className="text-xs uppercase text-slate-500 mb-3 font-mono">By instrument · trade counts</div>
+                  <div className="text-xs text-slate-600 mb-3">
+                    Counts and win rate only. Per-instrument dollar P&amp;L is intentionally not shown here —
+                    the trade log double-counts fills, so only the account-balance total above is trustworthy.
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    {Object.entries(stats.bySymbol)
+                      .sort((a, b) => b[1].trades - a[1].trades)
+                      .map(([sym, m]) => (
+                        <div key={sym} className="bg-slate-950/50 rounded p-3 border border-slate-800">
+                          <div className="font-mono text-lg">{sym}</div>
+                          <div className="text-xs text-slate-500 font-mono mt-1">
+                            {m.trades} trades · {pct(m.trades ? m.wins / m.trades : 0)} WR
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-500 font-mono mt-1">
-                          {m.n} trades · {pct(m.wins / m.n)} WR
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </CardContent>
-            </Card>
+                      ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {/* How to interpret */}
             <Card className="bg-slate-900/40 border-slate-800 mb-10">
@@ -182,31 +204,29 @@ export default async function ProofPage() {
                 <div className="text-xs uppercase text-slate-500 mb-3 font-mono">Honest reading guide</div>
                 <ul className="text-sm text-slate-300 space-y-2 leading-relaxed">
                   <li>
-                    <span className="text-emerald-400 font-mono">Sharpe ≥ 1.0</span> means risk-adjusted returns
-                    that beat passive equity exposure. <span className="text-amber-400">0 – 1</span> is positive
-                    but not yet professional-grade. <span className="text-rose-400">&lt; 0</span> means losing money.
+                    <span className="text-emerald-400 font-mono">Net P&amp;L</span> is the change in the real
+                    broker balance — money actually in or out of the account. It is not derived from the
+                    trade log, which over-counts.
                   </li>
                   <li>
-                    <span className="text-emerald-400 font-mono">PF ≥ 1.3</span> across 100+ trades is the threshold
-                    for a tradeable edge. <span className="text-amber-400">1.0 – 1.3</span> is variance, not yet
-                    statistically confirmed.
+                    <span className="text-emerald-400 font-mono">Win rate</span> is a simple count of winning
+                    vs losing closes on the live engine (MNQ/MES). It says nothing about edge on its own.
                   </li>
                   <li>
-                    <span className="text-emerald-400 font-mono">Max DD relative to net P&amp;L</span> tells you risk
-                    discipline. A drawdown larger than total profit means the system isn&apos;t protecting capital.
+                    <span className="text-amber-400 font-mono">Sample size</span> is tiny (~1 month). A handful
+                    of trades cannot distinguish skill from luck. Do not read this as a validated edge.
                   </li>
                   <li>
-                    These numbers will <em className="text-emerald-400">improve</em> as pattern memory accumulates
-                    and the auto-prune mechanism retires underperforming setupTypes. The system gets measurably
-                    smarter without intervention.
+                    The demo / $50K paper account is deliberately excluded. This page is the $1K live account
+                    and nothing else.
                   </li>
                 </ul>
               </CardContent>
             </Card>
 
             <div className="text-xs text-slate-600 font-mono text-center">
-              Window: {stats.windowStart?.slice(0, 10)} → {stats.windowEnd?.slice(0, 10)} · Generated{" "}
-              {stats.generatedAt.slice(0, 19).replace("T", " ")} UTC
+              Live $1K account · {stats.windowStart} → {stats.windowEnd} · P&amp;L = broker balance delta ·
+              Generated {stats.generatedAt.slice(0, 19).replace("T", " ")} UTC
             </div>
           </>
         )}

@@ -61,9 +61,30 @@ export default function FundPage() {
 
   const passingPairs = Object.entries(report.pairs).filter(([, m]) => m.verdict === "PASS");
 
+  // Prominent staleness signal: this page renders a frozen JSON snapshot. Show how old the
+  // underlying data is so investors are never shown stale numbers without knowing it.
+  const lastDataDate = report.lastData ? new Date(report.lastData + "T00:00:00Z") : null;
+  const daysStale = lastDataDate ? Math.floor((Date.now() - lastDataDate.getTime()) / 86_400_000) : null;
+  const isStale = daysStale !== null && daysStale > 10;
+
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="max-w-6xl mx-auto px-6 py-12">
+        {/* Data freshness banner */}
+        <div
+          className={`mb-8 rounded border px-4 py-3 text-sm font-mono ${
+            isStale
+              ? "border-amber-900/50 bg-amber-950/20 text-amber-200"
+              : "border-slate-800 bg-slate-900/40 text-slate-400"
+          }`}
+        >
+          Forward-track data through <span className="font-semibold">{report.lastData}</span>
+          {daysStale !== null && (
+            <span> · {daysStale === 0 ? "today" : `${daysStale} day${daysStale === 1 ? "" : "s"} ago`}</span>
+          )}
+          {isStale && <span className="ml-1">— snapshot is stale; figures below may not reflect the latest sessions.</span>}
+        </div>
+
         {/* Hero */}
         <div className="mb-12">
           <div className="text-sm uppercase tracking-widest text-emerald-400 font-mono mb-3">
