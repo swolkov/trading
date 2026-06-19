@@ -180,7 +180,7 @@ export function PositionsTable() {
   if (!positions || positions.length === 0) {
     return (
       <div className="text-sm text-muted-foreground py-8 text-center">
-        No open positions. Go to the Trade page to place your first order.
+        No open positions. The agents will open positions automatically, or use Manual Trade to place an order yourself.
       </div>
     );
   }
@@ -216,7 +216,7 @@ export function PositionsTable() {
                   <Link href={`/research/${pos.symbol}`} className="text-lg font-bold hover:underline">
                     {pos.symbol}
                   </Link>
-                  <span className="text-sm text-muted-foreground">{pos.qty} shares</span>
+                  <span className="text-sm text-muted-foreground">{pos.qty} {parseFloat(pos.qty) === 1 ? "unit" : "units"}</span>
                   {idea?.timeframe && timeframeBadge(idea.timeframe)}
                   {trade?.aiScore != null && (
                     <Badge variant="outline" className={trade.aiScore > 50 ? "text-emerald-500 border-emerald-500/30" : "text-amber-500 border-amber-500/30"}>

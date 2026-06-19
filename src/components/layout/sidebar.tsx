@@ -23,6 +23,15 @@ import {
   Search,
   Sparkles,
   Crosshair,
+  Sunrise,
+  Bitcoin,
+  CandlestickChart,
+  Globe,
+  Users,
+  Wallet,
+  Gauge,
+  PlugZap,
+  PieChart,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -32,13 +41,25 @@ const sections = [
     label: "OVERVIEW",
     links: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/brief", label: "Morning Brief", icon: Sunrise },
+      { href: "/command", label: "Command Center", icon: Gauge },
+      { href: "/positions", label: "Positions", icon: Wallet },
+      { href: "/performance", label: "Performance", icon: TrendingUp },
     ],
   },
   {
-    label: "MARKETS",
+    label: "FUTURES",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
+    ],
+  },
+  {
+    label: "STOCKS / CRYPTO",
+    links: [
       { href: "/day-trade", label: "Day Trade", icon: LineChart, broker: "Alpaca" },
+      { href: "/stocks", label: "Stocks", icon: CandlestickChart, broker: "Alpaca" },
+      { href: "/crypto", label: "Crypto", icon: Bitcoin, broker: "Alpaca" },
+      { href: "/wheel", label: "Wheel", icon: RefreshCw, broker: "Alpaca" },
     ],
   },
   {
@@ -54,21 +75,28 @@ const sections = [
     links: [
       { href: "/orders", label: "Orders", icon: ClipboardList },
       { href: "/journal", label: "Journal", icon: BookOpen },
-      { href: "/performance", label: "Performance", icon: TrendingUp },
-      { href: "/wheel", label: "Wheel", icon: RefreshCw },
+      { href: "/analytics", label: "Analytics", icon: PieChart },
     ],
   },
   {
     label: "RESEARCH",
     links: [
       { href: "/edges", label: "Edge Hierarchy", icon: Brain },
-      { href: "/admin/strategies", label: "Strategies", icon: Layers },
+      { href: "/research", label: "Symbol Research", icon: Search },
       { href: "/research/correlations", label: "Correlations", icon: Link2 },
       { href: "/research/positioning", label: "Positioning (OI)", icon: TrendingUp },
-      { href: "/research", label: "Symbol Research", icon: Search },
       { href: "/watchlist", label: "Watchlist", icon: Eye },
+      { href: "/market", label: "Market Movers", icon: Globe },
+      { href: "/insider", label: "Insider / Congress", icon: Users },
       { href: "/backtest", label: "Backtest", icon: FlaskConical },
       { href: "/calendar", label: "Calendar", icon: Calendar },
+    ],
+  },
+  {
+    label: "ADMIN",
+    links: [
+      { href: "/admin/strategies", label: "Strategies", icon: Layers },
+      { href: "/connect", label: "Connections", icon: PlugZap },
     ],
   },
 ];
@@ -84,10 +112,14 @@ export function Sidebar() {
     setMobileOpen(false);
   }, [pathname]);
 
-  const isActive = (href: string) => {
-    if (href === "/") return pathname === "/";
-    return pathname.startsWith(href);
-  };
+  // The active link is the one whose href is the longest prefix of the current path.
+  // This keeps "/research" from lighting up when we're on "/research/correlations".
+  const bestMatch = sections
+    .flatMap((s) => s.links.map((l) => l.href))
+    .filter((href) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/"))
+    .sort((a, b) => b.length - a.length)[0];
+
+  const isActive = (href: string) => href === bestMatch;
 
   const sidebarContent = (
     <>
