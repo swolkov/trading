@@ -230,7 +230,7 @@ function detectSetup(sym: string, bars: Bar[], st: { sessionBars: Bar[]; barCoun
 }
 
 // ===================== backtest loop =====================
-interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; rsi: number; session: string; }
+export interface Trade { sym: string; type: string; dir: string; entry: number; exit: number; pnl: number; r: number; bars: number; outcome: string; entryTime: number; rsi: number; session: string; }
 
 // Resolve a trade's exit by walking 1-MINUTE bars forward from entry — determines whether stop or
 // target was hit FIRST at minute resolution (far more accurate than the 5m stop-first assumption).
@@ -249,7 +249,7 @@ function resolveExit(m1: Bar[], fromTime: number, dir: string, stop: number, tar
   }
   return { px: m1[last]?.c ?? stop, outcome: "time", exitTime: m1[last]?.t ?? maxTime, bars1m: last - lo };
 }
-function backtest(sym: string): Trade[] {
+export function backtest(sym: string): Trade[] {
   const { bars, dates, m1 } = loadBars5m(sym);
   const mult = MULT[sym], tick = TICK[sym];
   const trades: Trade[] = [];
@@ -408,4 +408,5 @@ async function main() {
   console.log("    A SUPERSET of live trades — validate vs real fills before trusting. Expand window: dbn-fetch.ts 365");
   console.log("═".repeat(74) + "\n");
 }
-main().catch(e => { console.error(e); process.exit(1); });
+// Only auto-run when invoked directly (not when imported by a probe that reuses backtest()).
+if (process.argv[1]?.endsWith("backtest.ts")) main().catch(e => { console.error(e); process.exit(1); });
