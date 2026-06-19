@@ -17,7 +17,7 @@ interface CryptoSnapshotData {
   prevDailyBar: { t: string; o: number; h: number; l: number; c: number; v: number; vw: number; n: number };
 }
 
-const SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "LINK/USD"];
+const SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "LINK/USD", "XRP/USD"];
 
 function formatCryptoPrice(price: number): string {
   if (price >= 1000) return price.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });

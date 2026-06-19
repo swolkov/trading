@@ -9,7 +9,6 @@ import {
   LayoutDashboard,
   BarChart3,
   LineChart,
-  Bitcoin,
   ClipboardList,
   BookOpen,
   TrendingUp,
@@ -39,8 +38,7 @@ const sections = [
     label: "MARKETS",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
-      { href: "/stocks", label: "Stocks", icon: LineChart, broker: "Alpaca" },
-      { href: "/crypto", label: "Crypto", icon: Bitcoin, broker: "Alpaca" },
+      { href: "/day-trade", label: "Day Trade", icon: LineChart, broker: "Alpaca" },
     ],
   },
   {
