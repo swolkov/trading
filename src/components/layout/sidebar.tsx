@@ -14,7 +14,6 @@ import {
   TrendingUp,
   Bot,
   Link2,
-  RefreshCw,
   Brain,
   Layers,
   Calendar,
@@ -24,42 +23,28 @@ import {
   Sparkles,
   Crosshair,
   Sunrise,
-  Bitcoin,
-  CandlestickChart,
-  Globe,
-  Users,
   Wallet,
-  Gauge,
   PlugZap,
-  PieChart,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
+// Curated for daily use — no duplicates, no options-off clutter. Pages not listed here
+// (e.g. /stocks, /crypto are folded into Day Trade; /wheel is options-off) stay reachable by URL.
 const sections = [
   {
     label: "OVERVIEW",
     links: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/brief", label: "Morning Brief", icon: Sunrise },
-      { href: "/command", label: "Command Center", icon: Gauge },
-      { href: "/positions", label: "Positions", icon: Wallet },
       { href: "/performance", label: "Performance", icon: TrendingUp },
     ],
   },
   {
-    label: "FUTURES",
+    label: "TRADING",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
-    ],
-  },
-  {
-    label: "STOCKS / CRYPTO",
-    links: [
       { href: "/day-trade", label: "Day Trade", icon: LineChart, broker: "Alpaca" },
-      { href: "/stocks", label: "Stocks", icon: CandlestickChart, broker: "Alpaca" },
-      { href: "/crypto", label: "Crypto", icon: Bitcoin, broker: "Alpaca" },
-      { href: "/wheel", label: "Wheel", icon: RefreshCw, broker: "Alpaca" },
     ],
   },
   {
@@ -73,9 +58,9 @@ const sections = [
   {
     label: "ACTIVITY",
     links: [
+      { href: "/positions", label: "Positions", icon: Wallet },
       { href: "/orders", label: "Orders", icon: ClipboardList },
       { href: "/journal", label: "Journal", icon: BookOpen },
-      { href: "/analytics", label: "Analytics", icon: PieChart },
     ],
   },
   {
@@ -86,8 +71,6 @@ const sections = [
       { href: "/research/correlations", label: "Correlations", icon: Link2 },
       { href: "/research/positioning", label: "Positioning (OI)", icon: TrendingUp },
       { href: "/watchlist", label: "Watchlist", icon: Eye },
-      { href: "/market", label: "Market Movers", icon: Globe },
-      { href: "/insider", label: "Insider / Congress", icon: Users },
       { href: "/backtest", label: "Backtest", icon: FlaskConical },
       { href: "/calendar", label: "Calendar", icon: Calendar },
     ],

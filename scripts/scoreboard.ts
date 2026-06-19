@@ -15,18 +15,23 @@ const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 const mean = (a: number[]) => a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0;
 const std = (a: number[]) => { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); };
 
-async function line(prefix: string, label: string) {
+async function line(prefix: string, label: string, poolSize?: number, baselineKey?: string) {
   const rows = await prisma.agentConfig.findMany({ where: { key: { startsWith: prefix } }, orderBy: { key: "asc" } });
   const series = rows.map(r => ({ d: r.key.replace(prefix, ""), bal: parseFloat(r.value) })).filter(x => isFinite(x.bal));
   console.log("\n" + "═".repeat(74));
   console.log(`  ${label}`);
   console.log("═".repeat(74));
-  if (series.length < 2) { console.log("  not enough history yet"); return; }
+  if (series.length < 1) { console.log("  not enough history yet"); return; }
+  // Anchor P&L to the test baseline when given (Alpaca paper shell is ~$90k; the test pool is $1k —
+  // measure delta from baseline and show % against the real pool size, not the shell equity).
+  let anchor = series[0].bal;
+  if (baselineKey) { const b = await prisma.agentConfig.findUnique({ where: { key: baselineKey } }); const bv = b ? parseFloat(b.value) : NaN; if (isFinite(bv)) anchor = bv; }
+  if (series.length < 2 && !baselineKey) { console.log("  not enough history yet"); return; }
   const deltas: number[] = [];
   for (let i = 1; i < series.length; i++) deltas.push(series[i].bal - series[i - 1].bal);
   const moves = deltas.filter(d => Math.abs(d) > 0.01);          // actual trading days
-  const tot = series[series.length - 1].bal - series[0].bal;
-  const pct = tot / series[0].bal * 100;
+  const tot = series[series.length - 1].bal - anchor;
+  const pct = (poolSize ?? series[0].bal) ? tot / (poolSize ?? series[0].bal) * 100 : 0;
   const sorted = [...deltas].sort((a, b) => b - a);
   const top3 = sorted.slice(0, 3).reduce((a, b) => a + b, 0);
   const m = mean(moves), sd = std(moves);
@@ -46,7 +51,7 @@ async function main() {
   console.log("\n  TRADING SCOREBOARD — clean balance-delta, honest read (run anytime)");
   await line("eod_balance_", "FUTURES DEMO ($50K paper)");
   await line("live_eod_balance_", "FUTURES LIVE ($1K real)");
-  await line("alpaca_test_eod_", "STOCKS + CRYPTO ($1K paper day-trade test)");
+  await line("alpaca_test_eod_", "STOCKS + CRYPTO ($1K paper day-trade test)", 1000, "alpaca_test_baseline_equity");
   console.log("\n  Rule: scale real capital only when a mode reads ✅ EDGE EMERGING. Until then it's a free test.");
   console.log("═".repeat(74) + "\n");
   await pool.end();
