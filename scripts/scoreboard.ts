@@ -44,8 +44,9 @@ async function line(prefix: string, label: string) {
 
 async function main() {
   console.log("\n  TRADING SCOREBOARD — clean balance-delta, honest read (run anytime)");
-  await line("eod_balance_", "DEMO ($50K paper)");
-  await line("live_eod_balance_", "LIVE ($1K real)");
+  await line("eod_balance_", "FUTURES DEMO ($50K paper)");
+  await line("live_eod_balance_", "FUTURES LIVE ($1K real)");
+  await line("alpaca_test_eod_", "STOCKS + CRYPTO ($1K paper day-trade test)");
   console.log("\n  Rule: scale real capital only when a mode reads ✅ EDGE EMERGING. Until then it's a free test.");
   console.log("═".repeat(74) + "\n");
   await pool.end();

@@ -22,6 +22,24 @@ export async function GET(request: Request) {
       });
     } catch {}
 
+    // Daily equity snapshot for the $1K paper day-trade test (stocks + crypto share this Alpaca
+    // account). Written HERE because the sealed Alpaca keys only resolve server-side. Upsert per-day
+    // so it settles to the EOD value — mirrors the futures eod_balance pattern, so the shared pool
+    // lands on the scoreboard as clean balance-delta P&L. Best-effort; never breaks the cron.
+    try {
+      const { getAccount } = await import("@/lib/alpaca");
+      const acct = await getAccount("paper");
+      const eq = parseFloat(acct.equity);
+      if (isFinite(eq) && eq > 0) {
+        const today = new Date().toISOString().slice(0, 10);
+        await prisma.agentConfig.upsert({
+          where: { key: `alpaca_test_eod_${today}` },
+          update: { value: String(eq) },
+          create: { key: `alpaca_test_eod_${today}`, value: String(eq) },
+        });
+      }
+    } catch {}
+
     // One-off paper reset: if a flatten was requested (DB flag), do it here where the sealed
     // Alpaca keys resolve. No-op on every normal run.
     let flatten: string | null = null;
