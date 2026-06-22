@@ -2207,20 +2207,21 @@ DEFAULT TO APPROVE unless:
 
 Reasoning is a tiebreaker, NOT the primary filter. We want to TRADE and gather data to feed the learning loop.
 
-You have access to an advisor tool backed by a stronger model. If you are UNCERTAIN about this grade — borderline edge, conflicting signals, mixed pattern history (WR 30-55%), or setup conflicts with today's plan — call the advisor before responding. For clear-cut decisions (obvious approve with WR > 55%, or obvious reject with WR < 30% or confirmed anti-pattern), respond directly without the advisor.
+Reason carefully on BORDERLINE grades — mixed pattern history (WR 30-55%), conflicting signals, or a setup that conflicts with today's plan. Be decisive on clear-cut cases (obvious approve with WR > 55%; obvious reject with WR < 30%, confirmed anti-pattern, or avoid-list setup).
 
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence citing data or specific block reason"}`;
 
-    // GRADER MODEL CHAIN (resilience): primary uses the native advisor tool (Sonnet 4.6 executor +
-    // Opus 4.8 advisor). If a model is UNAVAILABLE (pulled/region-blocked/5xx/network), fall through to
-    // a plain strong model so a grade is still produced. A TIMEOUT is NOT failed-over (it would stack
-    // latency on a time-sensitive 5-min decision) — it degrades to approve as before. If EVERY model is
-    // unavailable, return aiDown so LIVE pauses (demo keeps trading). The chain is tried fresh on every
-    // call, so grading auto-recovers the instant a model is reachable again — no manual reset.
+    // GRADER MODEL CHAIN (resilience): the escalation path (LIVE + borderline demo) grades with
+    // OPUS 4.8 DIRECTLY — the strongest model, and the daily-plan/avoid-list context is already in the
+    // prompt (planCtx above), so Opus needs no advisor-tool round-trip. This is BOTH higher quality and
+    // FASTER than the old Sonnet-4.6+Opus-advisor-tool flow (one call vs orchestrated tool call that was
+    // timing out at 90s and skipping live). On UNAVAILABLE or TIMEOUT, fall through to the fast fallback
+    // (Haiku) so a verdict is still produced; only if EVERY model fails does it return aiDown (LIVE
+    // pauses, demo keeps trading). Tried fresh every call → auto-recovers the instant a model responds.
     const escalate = IS_LIVE || (setup.patternStats && setup.patternStats.matchCount >= 10 && setup.patternStats.winRate < 0.55);
-    const graderChain: { model: string; advisor: boolean }[] = escalate
-      ? [{ model: "claude-sonnet-4-6", advisor: true }, { model: "claude-opus-4-8", advisor: false }, { model: "claude-haiku-4-5", advisor: false }]
-      : [{ model: "claude-sonnet-4-6", advisor: false }, { model: "claude-haiku-4-5", advisor: false }];
+    const graderChain: { model: string; advisor: boolean; timeoutMs: number }[] = escalate
+      ? [{ model: "claude-opus-4-8", advisor: false, timeoutMs: 60000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }]
+      : [{ model: "claude-sonnet-4-6", advisor: false, timeoutMs: 30000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }];
 
     let anyUnavailable = false;
     let lastDetail = "";
@@ -2242,10 +2243,9 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
             ...(att.advisor ? { tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-4-8" }] } : {}),
             messages: [{ role: "user", content: prompt }],
           }),
-          // Measured advisor-flow latency: ~30s small prompt, ~46-48s at full context; real prompts can
-          // touch ~50-60s with thinking variance. 90s gives solid headroom (5-min bar cadence affords it).
-          // A timeout past this is a genuine outlier → live skips (safe), so erring generous is fine.
-          signal: AbortSignal.timeout(att.advisor ? 90000 : 30000),
+          // Opus-direct grading is a single short call (~10-40s); 60s gives headroom. Haiku 30s.
+          // A timeout now falls through to the next (faster) model rather than skipping live.
+          signal: AbortSignal.timeout(att.timeoutMs),
         });
 
         if (!res.ok) {
@@ -2276,12 +2276,15 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
         const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
         const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
         if (isTimeout) {
-          // Model exists but was abnormally slow. Measured normal latency is ~30s vs the 75s limit, so a
-          // timeout is a 2.5x outlier (degraded API). Don't stack more timeouts on a time-sensitive
-          // decision. Surface as aiDown so LIVE SKIPS the entry (never trade real money on a missing
-          // verdict); demo ignores aiDown and still trades (learning). Auto-recovers next setup.
-          log(`[AI] grader timeout on "${att.model}" — no verdict; live will skip, demo proceeds`);
-          return { agree: true, confidence: 0, reasoning: "AI timeout (no verdict)", aiDown: true };
+          // Slow model. Fall through to the faster fallback so live still gets a verdict (90s worst-case
+          // total is well within the 5-min bar). Only if the LAST model also times out do we surface
+          // aiDown → LIVE skips (never trade real money on a missing verdict); demo ignores aiDown and
+          // still trades. Auto-recovers next setup.
+          anyUnavailable = true;
+          lastDetail = `timeout(${att.model})`;
+          log(`[AI] grader timeout on "${att.model}"${isLast ? " — no verdict; live will skip, demo proceeds" : " — trying faster fallback"}`);
+          if (isLast) return { agree: true, confidence: 0, reasoning: "AI timeout (all models)", aiDown: true };
+          continue;
         }
         // Network/parse error → treat as unavailable and try the next model.
         anyUnavailable = true;
