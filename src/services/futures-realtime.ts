@@ -2211,17 +2211,16 @@ Reason carefully on BORDERLINE grades — mixed pattern history (WR 30-55%), con
 
 Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sentence citing data or specific block reason"}`;
 
-    // GRADER MODEL CHAIN (resilience): the escalation path (LIVE + borderline demo) grades with
-    // OPUS 4.8 DIRECTLY — the strongest model, and the daily-plan/avoid-list context is already in the
-    // prompt (planCtx above), so Opus needs no advisor-tool round-trip. This is BOTH higher quality and
-    // FASTER than the old Sonnet-4.6+Opus-advisor-tool flow (one call vs orchestrated tool call that was
-    // timing out at 90s and skipping live). On UNAVAILABLE or TIMEOUT, fall through to the fast fallback
-    // (Haiku) so a verdict is still produced; only if EVERY model fails does it return aiDown (LIVE
-    // pauses, demo keeps trading). Tried fresh every call → auto-recovers the instant a model responds.
-    const escalate = IS_LIVE || (setup.patternStats && setup.patternStats.matchCount >= 10 && setup.patternStats.winRate < 0.55);
-    const graderChain: { model: string; advisor: boolean; timeoutMs: number }[] = escalate
-      ? [{ model: "claude-opus-4-8", advisor: false, timeoutMs: 60000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }]
-      : [{ model: "claude-sonnet-4-6", advisor: false, timeoutMs: 30000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }];
+    // GRADER MODEL CHAIN (resilience): ALL grading — demo + live, every setup — uses OPUS 4.8 DIRECTLY,
+    // the strongest judge. The daily-plan/avoid-list context is already in the prompt (planCtx above),
+    // so Opus needs no advisor-tool round-trip — one fast call vs the old Sonnet-4.6+Opus-advisor flow
+    // that timed out at 90s and skipped live. (Was Sonnet for clear-cut demo calls; unified to Opus for
+    // consistent top-quality grading + a cleaner learning signal — demo is paper, so the modest extra
+    // token cost is worth it.) On UNAVAILABLE or TIMEOUT, fall through to the fast Haiku fallback so a
+    // verdict is still produced; only if EVERY model fails does it return aiDown (LIVE pauses, demo keeps
+    // trading). Tried fresh every call → auto-recovers the instant a model responds.
+    const graderChain: { model: string; advisor: boolean; timeoutMs: number }[] =
+      [{ model: "claude-opus-4-8", advisor: false, timeoutMs: 60000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }];
 
     let anyUnavailable = false;
     let lastDetail = "";
