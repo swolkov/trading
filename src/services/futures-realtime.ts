@@ -1363,6 +1363,14 @@ function checkPositions(sym: string, price: number, reliable = true) {
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
   const pnlDollars = diff * mult * pos.quantity;
 
+  // PROFIT-LOCK LADDER (in R = multiples of stop distance). Pulled EARLY so a trade that goes our
+  // way doesn't round-trip back to a full stop — the old ladder only armed at 1R (≈15% of a $1k
+  // account), so almost nothing was ever protected before it reversed. Lock capital fast, then bank.
+  const BREAKEVEN_R = 0.6;  // move broker stop to entry once up 0.6R — winner can no longer become a loser
+  const SCALE_R = 1.0;      // take 50% off once up 1R (only possible at ≥2 contracts / larger accounts)
+  const TRAIL_R = 1.1;      // start trailing just ABOVE the scale level — banks the move on a 1-contract
+                            // position, and the offset stops scale-out + trail racing the broker stop on one tick
+
   // HARD LOSS BACKSTOP (fixes the -$24,100 naked-stop runaway): if a position's loss blows far past
   // what any working stop would allow, the broker bracket has failed — or a cancel-then-place stop
   // move left it naked — so force-close NOW. Runs only on reliable quotes (the !reliable gate above
@@ -1388,11 +1396,11 @@ function checkPositions(sym: string, price: number, reliable = true) {
     return;
   }
 
-  // 1R: Move stop to breakeven ON THE BROKER — protect capital, NO scale out yet
-  if (diff >= stopDist && !pos.reachedBreakeven) {
+  // 0.6R: Move stop to breakeven ON THE BROKER — protect capital early, NO scale out yet
+  if (diff >= stopDist * BREAKEVEN_R && !pos.reachedBreakeven) {
     pos.reachedBreakeven = true;
     const breakevenPrice = pos.entryPrice;
-    log(`${sym}: Reached 1R ($${pnlDollars.toFixed(0)}) — moving broker stop to breakeven $${breakevenPrice.toFixed(2)}`);
+    log(`${sym}: Reached ${BREAKEVEN_R}R ($${pnlDollars.toFixed(0)}) — moving broker stop to breakeven $${breakevenPrice.toFixed(2)} (winner can't become a loser now)`);
 
     // CRITICAL: Cancel old stop and place new one at breakeven on the broker
     // This protects against fast moves between bar closes
@@ -1492,15 +1500,24 @@ function checkPositions(sym: string, price: number, reliable = true) {
     }
   }
 
-  // 2R+: Scale out 50% of full (pyramided) position — lock profit
-  if (diff >= stopDist * 2 && !pos.scaledOut && pos.quantity >= 2) {
+  // 1R+: Scale out 50% — bank real profit. Only possible at ≥2 contracts; a $1k/1-contract account
+  // physically can't take "a little" off (no fractional futures), so for it the trailing stop below
+  // is the profit-banking mechanism. Taking partials requires a larger account (≥2 contracts).
+  if (diff >= stopDist * SCALE_R && !pos.scaledOut && pos.quantity >= 2 && (!ALLOW_PYRAMID || pos.pyramided)) {
     const scaleQty = Math.max(1, Math.floor(pos.quantity / 2));
-    log(`${sym}: Reached 2R ($${pnlDollars.toFixed(0)}) — scaling out ${scaleQty} of ${pos.quantity} contracts`);
-    scaleOutPosition(sym, price, scaleQty);
+    // Hold the stop-move lock across the scale-out so the trailing-stop block below (and breakeven)
+    // can't modify the same broker stop order concurrently — scale-out cancels/replaces the bracket,
+    // and a simultaneous trail modify could double-place or cancel each other's stop. The lock guard
+    // also means we won't scale while a breakeven/trail move is already in flight.
+    if (!stopMoveLocks.get(sym)) {
+      stopMoveLocks.set(sym, true);
+      log(`${sym}: Reached ${SCALE_R}R ($${pnlDollars.toFixed(0)}) — scaling out ${scaleQty} of ${pos.quantity} contracts`);
+      scaleOutPosition(sym, price, scaleQty).finally(() => stopMoveLocks.set(sym, false));
+    }
   }
 
-  // 1.5R+: Activate trailing stop with 1.5x ATR trail — capture profit tighter
-  if (diff >= stopDist * 1.5) {
+  // 1R+: Activate trailing stop — capture profit as price moves our way (banks gains on 1 contract)
+  if (diff >= stopDist * TRAIL_R) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
       const atrMult = METALS.has(sym) ? 1.5 : 1.0;

@@ -108,14 +108,40 @@ export async function GET() {
       getTradovateFills(viewMode),
     ]);
 
+    // RECONCILE against fills before showing anything. Tradovate's position snapshot can lag for
+    // minutes after a close — reporting a flat (closed) position as still OPEN. Marking that stale
+    // entry against the live price invents phantom unrealized P&L: a real −$136 closed trade once
+    // displayed as "+$140" because the snapshot still showed the short open while the market kept
+    // falling. Fills update in real time, so when a contract's fills net to zero it is actually flat.
+    const netByContract: Record<number, number> = {};
+    for (const f of fills) {
+      const delta = f.action === "Buy" ? f.qty : f.action === "Sell" ? -f.qty : 0;
+      netByContract[f.contractId] = (netByContract[f.contractId] ?? 0) + delta;
+    }
+    const livePositions = positions.filter((pos) => {
+      if (!(pos.contractId in netByContract)) return true;       // no fill data — can't reconcile, keep
+      if (netByContract[pos.contractId] !== 0) return true;      // fills confirm a live net — keep
+      // Fills net to flat. Only drop if a fill happened AFTER the snapshot's open time — that's real
+      // evidence the position closed since it opened (the lag bug). This guards against dropping a
+      // position carried from a prior session that this session's net-zero round-trips never touched.
+      // (/fill/list is session-scoped, so net-zero alone isn't proof a cross-session position is flat.)
+      const openTs = new Date(pos.timestamp).getTime();
+      const closedSinceOpen = fills.some((f) => f.contractId === pos.contractId && new Date(f.timestamp).getTime() > openTs);
+      return !closedSinceOpen;
+    });
+    const droppedPhantoms = positions.length - livePositions.length;
+    if (droppedPhantoms > 0) {
+      console.warn(`[/api/futures/positions] suppressed ${droppedPhantoms} stale phantom position(s) — fills net to flat`);
+    }
+
     // Get live quotes for position symbols (Tradovate primary, Yahoo fallback)
     const symbolsNeeded: string[] = [];
-    for (const pos of positions) {
+    for (const pos of livePositions) {
       const sym = matchSymbol(pos.contractName);
       if (sym && !symbolsNeeded.includes(sym)) symbolsNeeded.push(sym);
     }
 
-    let quotes: Record<string, number> = {};
+    const quotes: Record<string, number> = {};
     if (symbolsNeeded.length > 0) {
       try {
         const futuresQuotes = await getFuturesQuotes(symbolsNeeded, viewMode);
@@ -126,7 +152,7 @@ export async function GET() {
     }
 
     // Match positions with trade logs for stop/target info
-    const enrichedPositions = positions.map((pos) => {
+    const enrichedPositions = livePositions.map((pos) => {
       const sym = matchSymbol(pos.contractName);
       const currentPrice = sym ? quotes[sym] || pos.netPrice : pos.netPrice;
       const contractSpec = sym ? TRADOVATE_CONTRACTS[sym] : null;
