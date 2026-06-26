@@ -41,10 +41,13 @@ const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
 // FOCUS (June 9, from P&L attribution): NQ is the only instrument the demo actually made money on;
-// ES (-$5,662) and GC/MBT (flat/negative) were cut. Demo + live≥$25k trade NQ full-size.
-const FULL_SIZE_SYMBOLS = ["NQ"];
-// Live <$25k mirrors demo's NQ via the micro (MNQ, $2/pt) — same Nasdaq index, 1/10 size on the $1k account.
-const MICRO_SYMBOLS = ["MNQ"];
+// GOLD FOCUS (Jun 26): backtest (12k trades, walk-forward) shows GOLD RSI-bounce is the ONLY edge that
+// holds out-of-sample — GC PF 1.25 OOS, positive every recent year; index (NQ/ES) RSI-bounce loses OOS
+// at every stop width. So both engines trade gold full-size; live (<$60k) trades the micro MGC, whose
+// smaller stop (~$93) actually FITS a $1k account — unlike MNQ, where a proper stop is 20-30% of equity.
+const FULL_SIZE_SYMBOLS = ["GC"];
+// Live <$60k trades micro gold (MGC, $10/pt) — same gold edge, ~1/10 size, stop fits the small account.
+const MICRO_SYMBOLS = ["MGC"];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
@@ -2517,7 +2520,12 @@ async function onBarClose(sym: string, bar: Bar) {
   if (currentRSI < 25 || currentRSI > 75) {
     const isOversold = currentRSI < 25;
     const dir = isOversold ? "long" : "short";
-    const targetDist = currentATR * 3.5; // target 3.5 ATR bounce — bigger moves
+    // Target 3.5 ATR vs 1.5 ATR stop = 2.33:1 R:R — clears the engine's hard 2.0 R:R gate (line ~3178)
+    // AND is the exact config the backtest validated for gold (RSI-bounce PF 1.25 OOS). Win rate on this
+    // setup is ~37% but winners are ~2.3x losers, so it nets positive. The improved trailing stop (1.1R)
+    // banks gains on pullbacks BEFORE the far target, which lifts the effective win rate without a closer
+    // target (a closer 1:1 target would fail the R:R gate and block every gold trade — verified in review).
+    const targetDist = currentATR * 3.5;
     const stopDistRSI = adjustedATR * 1.5;
 
     // Need declining volume (exhaustion, not capitulation)
