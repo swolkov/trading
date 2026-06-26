@@ -41,12 +41,15 @@ const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
 // FOCUS (June 9, from P&L attribution): NQ is the only instrument the demo actually made money on;
-// GOLD FOCUS (Jun 26): backtest (12k trades, walk-forward) shows GOLD RSI-bounce is the ONLY edge that
-// holds out-of-sample — GC PF 1.25 OOS, positive every recent year; index (NQ/ES) RSI-bounce loses OOS
-// at every stop width. So both engines trade gold full-size; live (<$60k) trades the micro MGC, whose
-// smaller stop (~$93) actually FITS a $1k account — unlike MNQ, where a proper stop is 20-30% of equity.
-const FULL_SIZE_SYMBOLS = ["GC"];
-// Live <$60k trades micro gold (MGC, $10/pt) — same gold edge, ~1/10 size, stop fits the small account.
+// EDGE-FOCUSED MULTI-INSTRUMENT (Jun 26): backtest (12k trades, walk-forward) verdict —
+//   • GOLD RSI-bounce = the durable edge (GC PF 1.25 OOS, positive every recent year) → trade fully.
+//   • Index (NQ/ES) only has OOS edge on the OVERBOUGHT-SHORT fade (RSI>80 short, PF 1.4-1.8); index
+//     longs + other index setups LOSE OOS → the evaluateAndTrade gate trades ONLY that pocket on index.
+// DEMO ($60k) trades gold + NQ + ES (the index micros' stops fit a big account). LIVE ($924) trades
+// GOLD ONLY (MGC) — the index micros' stops are 15-30% of a $1k account (the June-23 ruin problem), so
+// they're excluded until the account grows. updateTradingSymbols auto-adds them once live ramps up.
+const FULL_SIZE_SYMBOLS = ["GC", "NQ", "ES"];
+// Live <$60k trades micro gold only (MGC, $10/pt) — its ~$93 stop is the only one that fits $924.
 const MICRO_SYMBOLS = ["MGC"];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
@@ -3002,6 +3005,20 @@ async function evaluateAndTrade(
       return;
     }
   } catch { /* pattern memory is optional — fail open on read errors */ }
+
+  // EDGE FOCUS (Jun 26): only trade what holds OUT-OF-SAMPLE (12k-trade walk-forward backtest).
+  // GOLD (METALS) RSI-bounce is the durable edge → trade it fully. INDEX (NQ/ES/MNQ/MES) only has OOS
+  // edge on the overbought-short fade (RSI≥80 short, PF 1.4-1.8 OOS); index longs + all other index
+  // setups LOSE out-of-sample. So on index symbols take ONLY the extreme-RSI-bounce SHORT at RSI≥80 and
+  // skip everything else — that's "only stop the losers" grounded in data, not a filter that can't exist.
+  // The auto-prune gate above + pattern memory keep learning ON TOP of this baseline.
+  if (!METALS.has(sym)) {
+    const isValidatedIndexEdge = setupType === "extreme_rsi_bounce" && direction === "short" && rsiVal >= 80;
+    if (!isValidatedIndexEdge) {
+      log(`  ${sym}: SKIP — index trades only the RSI≥80 overbought-short (got ${setupType}/${direction}/RSI ${rsiVal.toFixed(0)})`);
+      return;
+    }
+  }
 
   // 2026-05-29: Compute pattern-memory stats BEFORE the AI call so they feed the AI's decision.
   // The AI grader is now data-driven: historical WR dominates over subjective reasoning.
