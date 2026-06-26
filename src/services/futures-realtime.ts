@@ -45,12 +45,13 @@ const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 //   • GOLD RSI-bounce = the durable edge (GC PF 1.25 OOS, positive every recent year) → trade fully.
 //   • Index (NQ/ES) only has OOS edge on the OVERBOUGHT-SHORT fade (RSI>80 short, PF 1.4-1.8); index
 //     longs + other index setups LOSE OOS → the evaluateAndTrade gate trades ONLY that pocket on index.
-// DEMO ($60k) trades gold + NQ + ES (the index micros' stops fit a big account). LIVE ($924) trades
-// GOLD ONLY (MGC) — the index micros' stops are 15-30% of a $1k account (the June-23 ruin problem), so
-// they're excluded until the account grows. updateTradingSymbols auto-adds them once live ramps up.
+// DEMO ($60k) trades gold + NQ + ES full-size; LIVE ($924) trades all three via micros. Per-trade
+// 1-contract stop vs the $924 account: MES ~$75 (8%), MGC ~$93 (10%), MNQ ~$132 (14%) — all fit under
+// the 15% risk cap (MES is actually cheaper than gold). All trade only their validated pocket via the
+// evaluateAndTrade gate: gold = full RSI-bounce edge, index (NQ/ES) = RSI≥80 overbought-shorts only.
 const FULL_SIZE_SYMBOLS = ["GC", "NQ", "ES"];
-// Live <$60k trades micro gold only (MGC, $10/pt) — its ~$93 stop is the only one that fits $924.
-const MICRO_SYMBOLS = ["MGC"];
+// Live <$60k micros — same edges, ~1/10 size. Databento feeds them via FULL_EQUIVALENT (MGC→GC etc).
+const MICRO_SYMBOLS = ["MGC", "MNQ", "MES"];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
