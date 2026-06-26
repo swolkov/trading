@@ -167,11 +167,11 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-// Demo: equity indexes (active 5m strategy) + crypto micros via strategy registry.
-// MBT trades NR4 daily edge; MET/BFF/MXR/MSL are observation-only (sidecar streams price, no signal).
-const DEMO_CONTRACTS = ["ES", "NQ", "GC", "MBT", "MET", "BFF", "MXR", "MSL"];
-// Live: MNQ only — mirrors demo's NQ at 1/10 size (the sole instrument live trades; auto-upgrades to NQ at $60k).
-const LIVE_CONTRACTS = ["MNQ"];
+// Edge-focused (Jun 26): both engines trade GOLD (the OOS-validated edge) + NQ/ES overbought-shorts.
+// Demo trades full-size; live trades the micros (gold + index micros all fit the 15% cap on $924).
+const DEMO_CONTRACTS = ["GC", "NQ", "ES"];
+// Live: micro gold + index micros (MGC full RSI-bounce edge; MNQ/MES = RSI≥80 overbought-shorts only).
+const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
@@ -182,7 +182,7 @@ const STRATEGIES = [
 ];
 
 const DEMO_RISK_RULES = [
-  "8% risk/trade ($4,000) — ES, NQ, GC",
+  "7% risk/trade — GC (gold) + NQ/ES overbought-shorts",
   "Up to 10 contracts/trade, 8 total open",
   "ALL SESSIONS: 24/5 learning (Sun 6PM–Fri 5PM ET)",
   "$7,500 daily loss limit (15% of $50K)",
@@ -194,7 +194,7 @@ const DEMO_RISK_RULES = [
   "No re-entry on stopped symbols",
 ];
 const LIVE_RISK_RULES = [
-  "8% risk/trade ($80) — MES, MNQ only",
+  "15% risk/trade — MGC (gold) + MNQ/MES overbought-shorts",
   "Scale out 50% at 1R, trail rest for runners",
   "TWO WINDOWS: 9:45-11:30 AM + 2:00-3:30 PM",
   "$150 daily loss limit (15% of $1K)",
@@ -457,7 +457,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate {isLiveView ? "micro futures — MES, MNQ" : "futures — ES, NQ, GC"}
+            Tradovate {isLiveView ? "micro futures — MGC, MNQ, MES" : "futures — GC, NQ, ES"}
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}

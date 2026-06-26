@@ -63,7 +63,7 @@ const CONFIG_GROUPS = [
     icon: "L",
     color: "from-red-500 to-rose-500",
     fields: [
-      { key: "live_futures_symbols", label: "Symbol Whitelist (MES, MNQ)", type: "text" as const, placeholder: "MES,MNQ" },
+      { key: "live_futures_symbols", label: "Symbol Whitelist (blank = MGC,MNQ,MES)", type: "text" as const, placeholder: "MGC,MNQ,MES" },
       { key: "live_futures_risk_per_trade_pct", label: "Risk Per Trade %", type: "number" as const },
       { key: "live_futures_daily_loss_limit_pct", label: "Daily Loss Limit %", type: "number" as const },
       { key: "live_futures_max_drawdown_pct", label: "Max Drawdown Kill %", type: "number" as const },
