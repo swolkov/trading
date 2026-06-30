@@ -5,6 +5,10 @@
       "schedule": "0 13 * * 1-5"
     },
     {
+      "path": "/api/cron/dca",
+      "schedule": "0 15 * * 1"
+    },
+    {
       "path": "/api/cron/futures",
       "schedule": "*/10 * * * 0-5"
     },
