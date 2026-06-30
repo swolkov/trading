@@ -13,18 +13,6 @@
       "schedule": "*/10 * * * 0-5"
     },
     {
-      "path": "/api/cron/crypto",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/crypto-live",
-      "schedule": "*/15 * * * *"
-    },
-    {
-      "path": "/api/cron/stocks",
-      "schedule": "*/5 13-21 * * 1-5"
-    },
-    {
       "path": "/api/cron/review",
       "schedule": "30 20 * * 1-5"
     },

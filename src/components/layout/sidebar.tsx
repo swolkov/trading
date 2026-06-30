@@ -8,7 +8,6 @@ import useSWR from "swr";
 import {
   LayoutDashboard,
   BarChart3,
-  LineChart,
   ClipboardList,
   BookOpen,
   TrendingUp,
@@ -25,6 +24,8 @@ import {
   Sunrise,
   Wallet,
   PlugZap,
+  CandlestickChart,
+  Bitcoin,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -44,7 +45,8 @@ const sections = [
     label: "TRADING",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
-      { href: "/day-trade", label: "Day Trade", icon: LineChart, broker: "Alpaca" },
+      { href: "/options", label: "Options", icon: CandlestickChart, broker: "Alpaca" },
+      { href: "/kraken", label: "Kraken", icon: Bitcoin, broker: "Kraken" },
     ],
   },
   {
@@ -154,7 +156,9 @@ export function Sidebar() {
                     {"broker" in link && link.broker && (
                       <span className={cn(
                         "text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
-                        link.broker === "Tradovate" ? "text-amber-400/40 bg-amber-500/[0.06]" : "text-blue-400/40 bg-blue-500/[0.06]"
+                        link.broker === "Tradovate" ? "text-amber-400/40 bg-amber-500/[0.06]"
+                          : link.broker === "Kraken" ? "text-purple-400/40 bg-purple-500/[0.06]"
+                          : "text-blue-400/40 bg-blue-500/[0.06]"
                       )}>
                         {link.broker}
                       </span>
