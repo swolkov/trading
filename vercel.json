@@ -9,6 +9,10 @@
       "schedule": "0 15 * * 1"
     },
     {
+      "path": "/api/cron/options",
+      "schedule": "5,35 14-19 * * 1-5"
+    },
+    {
       "path": "/api/cron/futures",
       "schedule": "*/10 * * * 0-5"
     },

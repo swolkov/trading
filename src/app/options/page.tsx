@@ -63,6 +63,55 @@ function IVRankGauge({ rank }: { rank: number }) {
   );
 }
 
+interface AgentStatus {
+  enabled: boolean;
+  mode: "paper" | "live";
+  lastRun: string | null;
+  config: Record<string, string>;
+  scoreboard: { closed: number; wins: number; winRate: number; avgR: number; totalPnl: number; openGroups: number };
+}
+
+// Read-only status for the automated options agent (buy-only defined-risk debit spreads, 7-14 DTE).
+// Honest scoreboard — shows real expectancy and warns to stop if it's bleeding.
+function OptionsAgentPanel() {
+  const [s, setS] = useState<AgentStatus | null>(null);
+  useEffect(() => {
+    fetch("/api/options-agent").then((r) => r.json()).then((d) => { if (!d.error) setS(d); }).catch(() => {});
+  }, []);
+  if (!s) return null;
+  const sb = s.scoreboard || { closed: 0, wins: 0, winRate: 0, avgR: 0, totalPnl: 0, openGroups: 0 };
+  const negative = sb.closed >= 20 && sb.avgR < 0;
+  const maxRisk = s.config?.options_max_risk_usd || "50";
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">Auto Options Agent</span>
+          <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${s.enabled ? (s.mode === "live" ? "bg-red-500/15 text-red-400" : "bg-emerald-500/15 text-emerald-400") : "bg-muted text-muted-foreground/60"}`}>
+            {s.enabled ? `${s.mode} · ON` : "OFF"}
+          </span>
+        </div>
+        <span className="text-[10px] text-muted-foreground/50">Buy-only debit spreads · 7-14 DTE · max ${maxRisk}/trade</span>
+      </div>
+      <div className="grid grid-cols-5 gap-3 text-center">
+        <div><p className="text-[10px] text-muted-foreground/50">Open</p><p className="text-sm font-bold tabular-nums">{sb.openGroups}</p></div>
+        <div><p className="text-[10px] text-muted-foreground/50">Closed</p><p className="text-sm font-bold tabular-nums">{sb.closed}</p></div>
+        <div><p className="text-[10px] text-muted-foreground/50">Win rate</p><p className="text-sm font-bold tabular-nums">{sb.closed ? `${(sb.winRate * 100).toFixed(0)}%` : "—"}</p></div>
+        <div><p className="text-[10px] text-muted-foreground/50">Avg R</p><p className={`text-sm font-bold tabular-nums ${sb.avgR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{sb.closed ? sb.avgR.toFixed(2) : "—"}</p></div>
+        <div><p className="text-[10px] text-muted-foreground/50">Total P&L</p><p className={`text-sm font-bold tabular-nums ${sb.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{sb.closed ? `$${sb.totalPnl.toFixed(0)}` : "—"}</p></div>
+      </div>
+      {negative && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/[0.06] px-3 py-2 text-[11px] text-red-300">
+          ⚠️ Negative expectancy after {sb.closed} trades. Buying options is −EV by nature — consider turning this off (set <code className="bg-muted px-1 rounded">options_enabled=off</code>).
+        </div>
+      )}
+      {!s.enabled && (
+        <p className="text-[11px] text-muted-foreground/50">Disabled. Honest note: buying options is negative-expected-value; this agent uses tiny defined-risk size + hard loss caps to limit damage, not to promise profit.</p>
+      )}
+    </div>
+  );
+}
+
 function OptionsPageInner() {
   const searchParams = useSearchParams();
   const [symbol, setSymbol] = useState(searchParams.get("symbol") || "");
@@ -184,6 +233,8 @@ function OptionsPageInner() {
           </div>
         </div>
       </div>
+
+      <OptionsAgentPanel />
 
       {/* Header: Search + Price + IV Rank */}
       <div className="flex items-start gap-6">
