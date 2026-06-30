@@ -1,5 +1,6 @@
-# Local-only research artifacts — must never ship to Vercel (they bloat function bundles past the
-# 250MB limit). data/ is ~1.4GB of historical CSVs used only by local backtests; reports/ is local
-# output. The deployed app reads market data from the DB/live feeds, not these files.
-data/
-reports/
+# Local-only research artifacts — must never ship to Vercel (the top-level data/ is ~1.4GB of
+# backtest CSVs that blow past the 250MB function limit). The LEADING SLASH anchors to the project
+# root, so this excludes the root data/ WITHOUT matching src/data/ (which holds build-time JSON the
+# app imports, e.g. fund-snapshot.json). An unanchored "data/" matches src/data/ too and breaks the build.
+/data/
+/reports/
