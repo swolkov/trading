@@ -285,11 +285,10 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-blue-400" />
               <span className="text-xs font-bold">Alpaca</span>
-              <span className="text-[10px] text-muted-foreground/40">Stocks & Crypto</span>
+              <span className="text-[10px] text-muted-foreground/40">Options & Long-term</span>
             </div>
             <div className="flex gap-2">
-              <Link href="/stocks" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
-              <Link href="/crypto" className="text-[10px] text-purple-400 hover:underline">Crypto</Link>
+              <Link href="/options" className="text-[10px] text-blue-400 hover:underline">Options</Link>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-3">
@@ -378,8 +377,8 @@ export default function DashboardPage() {
             </div>
             <div className="flex gap-3">
               <Link href="/futures" className="text-[10px] text-amber-400 hover:underline">Futures</Link>
-              <Link href="/stocks" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
-              <Link href="/crypto" className="text-[10px] text-purple-400 hover:underline">Crypto</Link>
+              <Link href="/options" className="text-[10px] text-blue-400 hover:underline">Options</Link>
+              <Link href="/kraken" className="text-[10px] text-purple-400 hover:underline">Kraken</Link>
             </div>
           </div>
 
@@ -407,7 +406,7 @@ export default function DashboardPage() {
                   <span className="text-[9px] font-bold text-blue-400 uppercase tracking-wider">Stocks</span>
                   <span className="text-[9px] text-muted-foreground/30">{stockPositions.length}</span>
                   <div className="flex-1 border-t border-blue-500/10" />
-                  <Link href="/stocks" className="text-[9px] text-blue-400/60 hover:text-blue-400">View all</Link>
+                  <Link href="/options" className="text-[9px] text-blue-400/60 hover:text-blue-400">View all</Link>
                 </div>
               )}
               {stockPositions.map((pos) => {
