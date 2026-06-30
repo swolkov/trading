@@ -97,7 +97,6 @@ export async function GET() {
     const [
       futuresView, futuresTrading,
       stocksView, stocksTrading,
-      cryptoView, cryptoTrading,
       demoLossLimit, liveLossLimit,
       demoHistory, liveHistory,
       demoToday, liveToday,
@@ -107,8 +106,6 @@ export async function GET() {
       getMode("trading_mode_futures"),
       getMode("view_mode_stocks"),
       getMode("trading_mode_stocks"),
-      getMode("view_mode_crypto"),
-      getMode("trading_mode_crypto"),
       getConfig("futures_daily_loss_limit_pct", "8"),
       getConfig("live_futures_daily_loss_limit_pct", "8"),
       getBalanceHistory("daily_balance_", 30),
@@ -123,6 +120,17 @@ export async function GET() {
     const livePnlSpark = computeDailyPnl(liveHistory);
     const demoDailyLimitPct = parseFloat(demoLossLimit) || 8;
     const liveDailyLimitPct = parseFloat(liveLossLimit) || 8;
+
+    // Alpaca LIVE account ($500) — options + long-term S&P live here (real money, manual).
+    // Today P&L from Alpaca's own equity vs last_equity (true balance delta). Skipped if live keys absent.
+    let alpacaLive: { balance: number; todayPnl: number } | null = null;
+    try {
+      const { getAccount } = await import("@/lib/alpaca");
+      const a = await getAccount("live");
+      const eq = parseFloat(a.portfolio_value || a.equity);
+      const last = parseFloat(a.last_equity);
+      if (isFinite(eq)) alpacaLive = { balance: eq, todayPnl: isFinite(last) ? eq - last : 0 };
+    } catch { /* live Alpaca keys absent in this env → skip */ }
 
     // Demo balance: prefer broker live, fall back to last cached
     const demoBalance = demoBrokerLive?.balance ?? demoHistory[demoHistory.length - 1]?.balance ?? null;
@@ -190,37 +198,22 @@ export async function GET() {
         pnlSparkline: livePnlSpark,
       },
       {
-        key: "paper-stocks",
-        label: "Stocks (Paper)",
+        // Alpaca = one account, $500 real. Will run OPTIONS (credit spreads) + LONG-TERM S&P/stocks,
+        // both manual. Crypto moved off Alpaca → Kraken. Balance is the real broker value.
+        key: "alpaca-live",
+        label: "Options + Long-term S&P",
         broker: "Alpaca",
-        balance: null,
-        balanceSource: "unavailable",
+        balance: alpacaLive?.balance ?? null,
+        balanceSource: alpacaLive ? "broker_live" : "unavailable",
         unrealizedPnl: 0,
-        todayPnl: 0,
+        todayPnl: alpacaLive?.todayPnl ?? 0,
         todayTrades: 0,
-        dailyLossLimitPct: 5,
+        dailyLossLimitPct: 0,          // manual — no auto loss-limit / risk bar
         riskUsedPct: 0,
         drawdownPct: 0,
         viewMode: stocksView === "live" ? "live" : "paper",
-        tradingMode: stocksTrading,
-        liveTradingActivated: stocksTrading === "live",
-        pnlSparkline: [],
-      },
-      {
-        key: "paper-crypto",
-        label: "Crypto Spot",
-        broker: "Alpaca",
-        balance: null,
-        balanceSource: "unavailable",
-        unrealizedPnl: 0,
-        todayPnl: 0,
-        todayTrades: 0,
-        dailyLossLimitPct: 5,
-        riskUsedPct: 0,
-        drawdownPct: 0,
-        viewMode: cryptoView === "live" ? "live" : "paper",
-        tradingMode: cryptoTrading,
-        liveTradingActivated: cryptoTrading === "live",
+        tradingMode: stocksTrading,    // 'live' once you're trading the real account
+        liveTradingActivated: false,   // manual, no auto-engine — not an automated live bot
         pnlSparkline: [],
       },
     ];
