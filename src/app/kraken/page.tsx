@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Bitcoin, TrendingUp, ShieldCheck, AlertTriangle, PlugZap } from "lucide-react";
+import { DipScanner } from "@/components/kraken/dip-scanner";
 
 // Kraken — crypto trend-following. NOT day-trading. Crypto day-trading tested at PF 0.73 (loses);
 // the trend-following version is the one edge that survived out-of-sample, so that's what this is.
@@ -33,6 +34,8 @@ export default function KrakenPage() {
           </span>
         </div>
       </div>
+
+      <DipScanner />
 
       {/* The edge */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">

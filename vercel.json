@@ -13,6 +13,10 @@
       "schedule": "5,35 14-19 * * 1-5"
     },
     {
+      "path": "/api/cron/crypto-dip",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/futures",
       "schedule": "*/10 * * * 0-5"
     },
