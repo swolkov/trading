@@ -238,6 +238,15 @@ export default function AgentHubPage() {
       status: "active",
     },
     {
+      id: "options",
+      name: "Options Agent",
+      desc: "7-14 DTE debit spreads — Finnhub research + IV gate + AI veto (Alpaca live $500)",
+      schedule: "Twice/hr (RTH)",
+      endpoint: "/api/cron/options",
+      canRun: true,
+      status: "active",
+    },
+    {
       id: "premarket",
       name: "Pre-Market Briefing",
       desc: "Market regime, VIX, macro outlook, vault brain update",
