@@ -109,6 +109,23 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 };
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
+// Minimum price increment per contract. EVERY price sent to Tradovate (stop, target, trail) MUST be
+// aligned to this or the broker rejects the order as "Illegal Price" — and because /order/placeorder
+// returns an orderId BEFORE the async rejection, the engine would otherwise believe the stop was
+// placed and run the position NAKED. The engine computes stops/targets from ATR multiples that produce
+// arbitrary decimals (e.g. 4058.9794), so each must be snapped to the tick before it leaves.
+const TICK_SIZES: Record<string, number> = {
+  ES: 0.25, MES: 0.25, NQ: 0.25, MNQ: 0.25,
+  YM: 1, MYM: 1, RTY: 0.1, M2K: 0.1,
+  GC: 0.1, MGC: 0.1, MBT: 5,
+};
+function roundToTick(sym: string, price: number): number {
+  const tick = TICK_SIZES[sym] || contracts.get(sym)?.tickSize || 0.25;
+  const snapped = Math.round(price / tick) * tick;
+  // Kill binary-float dust (e.g. 4059.0000000000005) so the FIX price string is clean & legal.
+  const decimals = (String(tick).split(".")[1] || "").length;
+  return Number(snapped.toFixed(decimals));
+}
 
 // ── Brain Dashboard Update (throttled) ──────────────────
 let lastBrainUpdate = 0;
@@ -1406,7 +1423,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // 0.6R: Move stop to breakeven ON THE BROKER — protect capital early, NO scale out yet
   if (diff >= stopDist * BREAKEVEN_R && !pos.reachedBreakeven) {
     pos.reachedBreakeven = true;
-    const breakevenPrice = pos.entryPrice;
+    const breakevenPrice = roundToTick(sym, pos.entryPrice);
     log(`${sym}: Reached ${BREAKEVEN_R}R ($${pnlDollars.toFixed(0)}) — moving broker stop to breakeven $${breakevenPrice.toFixed(2)} (winner can't become a loser now)`);
 
     // CRITICAL: Cancel old stop and place new one at breakeven on the broker
@@ -1476,14 +1493,15 @@ function checkPositions(sym: string, price: number, reliable = true) {
           // ROOT FIX: modify the existing stop IN PLACE to cover the new total quantity at the new
           // average entry — no cancel-then-place naked window. Falls back to place only if untracked.
           const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+          const pyramidStop = roundToTick(sym, pos.entryPrice); // weighted avg → must snap to tick
           if (pos.stopOrderId) {
             await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
-              orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: pos.entryPrice, isAutomated: true,
+              orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: pyramidStop, isAutomated: true,
             })});
           } else {
             const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
               accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-              orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.entryPrice, timeInForce: "GTC", isAutomated: true,
+              orderQty: pos.quantity, orderType: "Stop", stopPrice: pyramidStop, timeInForce: "GTC", isAutomated: true,
             })}) as { orderId: number };
             pos.stopOrderId = s.orderId;
           }
@@ -1528,32 +1546,37 @@ function checkPositions(sym: string, price: number, reliable = true) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
       const atrMult = METALS.has(sym) ? 1.5 : 1.0;
-      const trail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
+      const rawTrail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
+      const trail = roundToTick(sym, rawTrail); // broker rejects un-tick-aligned stop prices
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
         const isNew = !pos.trailStop;
         if (isNew) log(`${sym}: 1.5R+ ($${pnlDollars.toFixed(0)}) — trailing stop at $${trail.toFixed(2)} (1.5x ATR)`);
         pos.trailStop = trail;
 
-        // Move broker stop to trail level (locked to prevent concurrent modifications)
+        // Ratchet the broker stop up to the trail (locked to prevent concurrent modifications).
+        // Modify IN PLACE — no cancel-then-place naked window; only place fresh if no stop is tracked.
         if (!stopMoveLocks.get(sym)) {
           stopMoveLocks.set(sym, true);
           (async () => {
             try {
               if (pos.stopOrderId) {
-                await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) });
+                await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+                  orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: trail, isAutomated: true,
+                })});
+                if (isNew) log(`${sym}: Broker trail stop MODIFIED to $${trail.toFixed(2)} (1.5x ATR, order #${pos.stopOrderId})`);
+              } else {
+                const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+                const acct = accounts.find(a => a.id === accountId) || accounts[0];
+                const closeSide = pos.direction === "long" ? "Sell" : "Buy";
+                const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+                  accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
+                  orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
+                })}) as { orderId: number };
+                pos.stopOrderId = s.orderId;
+                if (isNew) log(`${sym}: Broker trail stop PLACED at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
               }
-              const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-              const acct = accounts.find(a => a.id === accountId) || accounts[0];
-              const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-              const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-                accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-                orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
-              })}) as { orderId: number };
-              pos.stopOrderId = s.orderId;
-              if (isNew) log(`${sym}: Broker trail stop at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
-
             } catch (err) {
-              log(`${sym}: WARNING — failed to place broker trail stop: ${err}`);
+              log(`${sym}: WARNING — failed to set broker trail stop: ${err}`);
             } finally {
               stopMoveLocks.set(sym, false);
             }
@@ -1684,17 +1707,24 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
       }});
     } catch {}
 
-    // Update the stop bracket for remaining qty
-    if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch {}
+    // Resize the stop bracket to the remaining qty — modify IN PLACE (no cancel-then-place naked
+    // window); only place fresh if no stop is tracked.
     try {
       const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-      const accounts2 = await apiFetch("/account/list") as { id: number; name: string }[];
-      const acct2 = accounts2.find(a => a.id === accountId) || accounts2[0];
-      const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-        accountSpec: acct2.name, accountId, action: closeSide, symbol: pos.contractId,
-        orderQty: pos.quantity, orderType: "Stop", stopPrice: pos.stopLoss, timeInForce: "GTC", isAutomated: true,
-      })}) as { orderId: number };
-      pos.stopOrderId = s.orderId;
+      const remStop = roundToTick(sym, pos.stopLoss);
+      if (pos.stopOrderId) {
+        await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+          orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: remStop, isAutomated: true,
+        })});
+      } else {
+        const accounts2 = await apiFetch("/account/list") as { id: number; name: string }[];
+        const acct2 = accounts2.find(a => a.id === accountId) || accounts2[0];
+        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: acct2.name, accountId, action: closeSide, symbol: pos.contractId,
+          orderQty: pos.quantity, orderType: "Stop", stopPrice: remStop, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        pos.stopOrderId = s.orderId;
+      }
     } catch {}
     pos.targetOrderId = null; // target removed, trail handles exit
 
@@ -2948,6 +2978,24 @@ async function checkEntriesPaused(): Promise<{ paused: boolean; reason: string }
   return { paused: true, reason: v.reason || "orchestrator pause" };
 }
 
+// Confirm a just-placed order is actually LIVE at the broker, not rejected. CRITICAL: Tradovate's
+// /order/placeorder returns an orderId synchronously, then validates the order and may REJECT it a
+// moment later (e.g. illegal price, margin). Without this check the engine trusts the returned id and
+// believes a stop is protecting the position when nothing is — the exact failure that left a gold
+// position naked for 39 min. Polls briefly; fail-OPEN on uncertainty (don't flatten a possibly-good
+// stop over an API hiccup) — the price-rounding fix is what prevents rejection in the first place.
+async function orderRejected(orderId: number): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, i === 0 ? 600 : 500));
+    try {
+      const o = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
+      if (o?.ordStatus === "Rejected" || o?.ordStatus === "Canceled") return true;
+      if (o?.ordStatus === "Working" || o?.ordStatus === "Accepted" || o?.ordStatus === "Filled") return false;
+    } catch { /* keep polling */ }
+  }
+  return false; // status indeterminate after polling → trust it (rounding fix prevents real rejections)
+}
+
 // Verify an entry order actually filled before we commit a tracked position and rest
 // protective stop/target orders. SAFETY-BIASED: only reports "rejected" when positively
 // confirmed (order in a terminal non-filled state AND no fill exists). Any uncertainty
@@ -3196,8 +3244,10 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const rr = targetDist / stopDist;
   if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
 
-  const stopPrice = direction === "long" ? price - stopDist : price + stopDist;
-  const targetPrice = direction === "long" ? price + targetDist : price - targetDist;
+  // Snap to the contract tick — un-rounded prices are rejected by the broker as "Illegal Price",
+  // which would leave the just-filled entry running with no protection.
+  const stopPrice = roundToTick(sym, direction === "long" ? price - stopDist : price + stopDist);
+  const targetPrice = roundToTick(sym, direction === "long" ? price + targetDist : price - targetDist);
   const side = direction === "long" ? "Buy" : "Sell";
   const closeSide = direction === "long" ? "Sell" : "Buy";
 
@@ -3241,6 +3291,13 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
           accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
           orderQty: fillQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
         })}) as { orderId: number };
+        // placeorder returns an id even for orders the broker then REJECTS — confirm it's actually
+        // live before trusting it as protection, else the flatten-safety below never fires.
+        if (await orderRejected(s.orderId)) {
+          log(`  ${sym}: stop order #${s.orderId} REJECTED by broker (attempt ${a + 1}) — retrying`);
+          if (a === 0) await new Promise(r => setTimeout(r, 800));
+          continue;
+        }
         stopOrderId = s.orderId;
       } catch { if (a === 0) await new Promise(r => setTimeout(r, 800)); }
     }
