@@ -1,0 +1,5 @@
+# Local-only research artifacts — must never ship to Vercel (they bloat function bundles past the
+# 250MB limit). data/ is ~1.4GB of historical CSVs used only by local backtests; reports/ is local
+# output. The deployed app reads market data from the DB/live feeds, not these files.
+data/
+reports/
