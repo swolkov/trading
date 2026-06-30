@@ -1,5 +1,6 @@
 import { getOrders, placeOrder, cancelOrder } from "@/lib/alpaca";
 import type { PlaceOrderParams } from "@/lib/alpaca";
+import type { TradingMode } from "@/lib/trading-mode";
 
 export async function GET(request: Request) {
   try {
@@ -21,8 +22,13 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const body: PlaceOrderParams = await request.json();
-    const order = await placeOrder(body);
+    // `mode` is an optional routing hint (e.g. the options page forces "live").
+    // Strip it out so it isn't sent to Alpaca as an order field. When absent,
+    // placeOrder(orderParams, undefined) preserves the exact prior behavior for
+    // all other callers (e.g. the positions-table close buttons).
+    const { mode, ...orderParams }: PlaceOrderParams & { mode?: TradingMode } =
+      await request.json();
+    const order = await placeOrder(orderParams, mode);
     return Response.json(order);
   } catch (error) {
     console.error("[/api/orders POST]", error);

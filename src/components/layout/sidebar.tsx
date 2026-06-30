@@ -26,12 +26,13 @@ import {
   PlugZap,
   CandlestickChart,
   Bitcoin,
+  PiggyBank,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Curated for daily use — no duplicates, no options-off clutter. Pages not listed here
-// (e.g. /stocks, /crypto are folded into Day Trade; /wheel is options-off) stay reachable by URL.
+// Curated for daily use — the four pillars (Futures / Options / Long-term / Kraken) plus control,
+// activity, research, admin. Retired paper pages (/day-trade, /stocks, /crypto) were deleted.
 const sections = [
   {
     label: "OVERVIEW",
@@ -46,6 +47,7 @@ const sections = [
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
       { href: "/options", label: "Options", icon: CandlestickChart, broker: "Alpaca" },
+      { href: "/long-term", label: "Long-term", icon: PiggyBank, broker: "Alpaca" },
       { href: "/kraken", label: "Kraken", icon: Bitcoin, broker: "Kraken" },
     ],
   },

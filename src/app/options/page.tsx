@@ -78,6 +78,7 @@ function OptionsPageInner() {
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [ordering, setOrdering] = useState(false);
   const [orderResult, setOrderResult] = useState<{ success?: boolean; error?: string } | null>(null);
+  const [liveAccount, setLiveAccount] = useState<{ balance: number | null; todayPnl: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const loadExpirations = useCallback(async (sym: string) => {
@@ -107,22 +108,41 @@ function OptionsPageInner() {
     if (symbol && selectedExp) loadChain(symbol, selectedExp);
   }, [symbol, selectedExp, loadChain]);
 
+  // Live Alpaca account context. /api/admin/accounts is the only source that
+  // forces getAccount("live") (the $500 real account) regardless of view-mode.
+  useEffect(() => {
+    fetch("/api/admin/accounts")
+      .then((r) => r.json())
+      .then((d) => {
+        const a = (d.accounts || []).find((x: { key: string }) => x.key === "alpaca-live");
+        if (a) setLiveAccount({ balance: a.balance, todayPnl: a.todayPnl ?? 0 });
+      })
+      .catch(() => {});
+  }, []);
+
   const calls = contracts.filter((c) => c.type === "call").sort((a, b) => parseFloat(a.strike_price) - parseFloat(b.strike_price));
   const puts = contracts.filter((c) => c.type === "put").sort((a, b) => parseFloat(a.strike_price) - parseFloat(b.strike_price));
   const midPrice = quote ? (quote.bp + quote.ap) / 2 : 0;
   const selectedSnap = selected ? snapshots[selected.symbol] : null;
   const selectedMid = selectedSnap?.latestQuote ? (selectedSnap.latestQuote.ap + selectedSnap.latestQuote.bp) / 2 : selectedSnap?.latestTrade?.p || 0;
   const totalCost = selectedMid * 100 * qty;
+  // Affordability guard — applies to debit (buy) orders only. Sells collect a
+  // credit, so they're never blocked here. buyingPower is the live account's
+  // real broker balance (a conservative proxy for this cash account).
+  const buyingPower = liveAccount?.balance ?? null;
+  const insufficientFunds =
+    side === "buy" && buyingPower != null && totalCost > buyingPower;
 
   async function placeOrder() {
-    if (!selected) return;
+    if (!selected || insufficientFunds) return;
     setOrdering(true);
     setOrderResult(null);
     try {
       const res = await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: selected.symbol, qty: String(qty), side, type: "market", time_in_force: "day" }),
+        // mode: "live" forces this manual order to the real Alpaca account.
+        body: JSON.stringify({ symbol: selected.symbol, qty: String(qty), side, type: "market", time_in_force: "day", mode: "live" }),
       });
       const data = await res.json();
       if (data.error) setOrderResult({ error: data.error });
@@ -138,10 +158,31 @@ function OptionsPageInner() {
 
   return (
     <div className="space-y-4 animate-fade-up">
-      {/* Page title */}
-      <div>
-        <h1 className="text-xl font-bold tracking-tight">Options</h1>
-        <p className="text-[11px] text-muted-foreground/50">Alpaca options chain — search, analyze, and trade</p>
+      {/* Page title + live account context */}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">Options</h1>
+          <p className="text-[11px] text-muted-foreground/50">Alpaca options chain — search, analyze, and trade</p>
+        </div>
+        <div className="flex items-center gap-4 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] px-4 py-2">
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-widest bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/40">
+            LIVE
+          </span>
+          <div className="text-right">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Cash / Buying Power</p>
+            <p className="text-sm font-bold">
+              {liveAccount?.balance != null ? formatCurrency(liveAccount.balance) : "—"}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Today P&amp;L</p>
+            <p className={`text-sm font-bold ${
+              liveAccount && liveAccount.todayPnl < 0 ? "text-red-400" : liveAccount && liveAccount.todayPnl > 0 ? "text-emerald-400" : ""
+            }`}>
+              {liveAccount ? `${liveAccount.todayPnl >= 0 ? "+" : ""}${formatCurrency(liveAccount.todayPnl)}` : "—"}
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Header: Search + Price + IV Rank */}
@@ -164,7 +205,7 @@ function OptionsPageInner() {
         </div>
         {volData && (
           <div className="shrink-0 rounded-xl border border-white/5 bg-white/[0.02] backdrop-blur p-3">
-            <p className="text-[10px] text-center text-muted-foreground font-medium tracking-wider mb-1">IV RANK</p>
+            <p className="text-[10px] text-center text-muted-foreground font-medium tracking-wider mb-1">IV RANK <span className="opacity-50 normal-case">(est.)</span></p>
             <IVRankGauge rank={volData.ivRank} />
           </div>
         )}
@@ -394,8 +435,13 @@ function OptionsPageInner() {
                 </div>
               </div>
 
-              {/* P&L preview */}
-              <div className="grid grid-cols-3 gap-3 mb-4 text-xs">
+              {/* P&L preview — payoffs AT EXPIRATION, not an immediate move */}
+              <div className="mb-4">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">
+                  Est. value at expiration{" "}
+                  <span className="normal-case tracking-normal opacity-60">— if held to {selected.expiration_date}, not an immediate move</span>
+                </p>
+                <div className="grid grid-cols-3 gap-3 text-xs">
                 <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-2 text-center">
                   <p className="text-muted-foreground">If stock +5%</p>
                   <p className={`font-bold ${
@@ -432,6 +478,7 @@ function OptionsPageInner() {
                       : `-${formatCurrency(totalCost)}`}
                   </p>
                 </div>
+                </div>
               </div>
 
               {/* Warning for selling */}
@@ -441,10 +488,18 @@ function OptionsPageInner() {
                 </div>
               )}
 
+              {/* Affordability guard */}
+              {insufficientFunds && (
+                <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-2 mb-3 text-xs text-red-400 text-center">
+                  Insufficient funds: this order costs {formatCurrency(totalCost)} but your live buying power is{" "}
+                  {buyingPower != null ? formatCurrency(buyingPower) : "—"}. Reduce contracts or pick a cheaper strike.
+                </div>
+              )}
+
               <div className="flex gap-3">
                 <button
                   onClick={placeOrder}
-                  disabled={ordering}
+                  disabled={ordering || insufficientFunds}
                   className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all disabled:opacity-50 ${
                     side === "buy"
                       ? selected.type === "call"

@@ -371,7 +371,7 @@ export default function JournalPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Journal</h1>
-          <p className="text-[11px] text-muted-foreground/50">Trade journal — all activity across Alpaca + Tradovate</p>
+          <p className="text-[11px] text-muted-foreground/50">Trade journal — futures activity (Tradovate)</p>
         </div>
         <Link href="/performance" className="text-xs px-3 py-1.5 rounded-lg bg-white/[0.04] text-foreground hover:bg-white/[0.08] transition-colors border border-white/[0.06] font-medium">
           Performance

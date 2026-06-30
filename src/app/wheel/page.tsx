@@ -129,7 +129,7 @@ export default function WheelPage() {
       )}
 
       <p className="text-[11px] text-muted-foreground/40 leading-relaxed">
-        This is a forward measurement at a realistic size where the edge can express itself — it is <span className="text-foreground/60">not</span> a path to trading options live at $1K. Runs alongside the spread book and the live $1K stocks/crypto test.
+        This is a forward measurement at a realistic size where the edge can express itself — it is <span className="text-foreground/60">not</span> a path to trading options live at $1K. Runs alongside the spread book as a $0-risk forward measurement.
       </p>
     </div>
   );

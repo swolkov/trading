@@ -137,8 +137,8 @@ export default function DashboardPage() {
   const futuresUnrealized = futures?.account?.unrealizedPnl || 0;
   const futuresMargin = futures?.account?.marginUsed || 0;
 
-  // ── Portfolio metrics (futures-only for now) ──
-  const combinedEquity = futuresEquity;
+  // ── Portfolio metrics (futures + Alpaca combined) ──
+  const combinedEquity = futuresEquity + (account ? parseFloat(account.equity) || 0 : 0);
   const combinedDailyPnl = futuresDailyPnl;
   const combinedDailyPct = (futuresSOD || futuresBalance) > 0
     ? combinedDailyPnl / (futuresSOD || futuresBalance || 1)
@@ -289,6 +289,7 @@ export default function DashboardPage() {
             </div>
             <div className="flex gap-2">
               <Link href="/options" className="text-[10px] text-blue-400 hover:underline">Options</Link>
+              <Link href="/long-term" className="text-[10px] text-emerald-400 hover:underline">Long-term</Link>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-3">

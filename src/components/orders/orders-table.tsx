@@ -114,7 +114,7 @@ function OrdersTableInner({
     fetcher,
     { refreshInterval: 15000 }
   );
-  // Alpaca paper account (the $1K stocks+crypto day-trade test) — its OWN P&L, separate from futures.
+  // Alpaca LIVE account ($500 — options + long-term DCA) — its OWN P&L, separate from futures.
   const { data: alpacaAccount } = useSWR("/api/account", fetcher, { refreshInterval: 15000 });
   const [canceling, setCanceling] = useState<string | null>(null);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
@@ -237,9 +237,8 @@ function OrdersTableInner({
 
   // Compute summary for parent.
   // CRITICAL: "Today's P&L" must reflect the ACCOUNT you're viewing — futures (Tradovate) and the
-  // stocks/crypto day-trade (Alpaca paper) are different accounts. Previously this always showed the
-  // FUTURES balance-delta even on the Crypto/Stocks views, making Alpaca orders look like they were
-  // producing the live Tradovate P&L. Now it's per-asset, with an explicit label.
+  // Alpaca live account ($500 — options + long-term) are different accounts. This shows the
+  // FUTURES balance-delta on futures/all views and the ALPACA equity-delta on options/long-term views.
   useMemo(() => {
     if (!onSummary) return;
     const today = new Date().toISOString().slice(0, 10);
@@ -254,16 +253,14 @@ function OrdersTableInner({
     const futuresPnl = tradePnl != null ? tradePnl + unrealizedPnl : (balancePnl ?? 0);
     const futuresMode = futuresData?.viewMode === "live" ? "live $1K" : "demo $50K";
 
-    // Alpaca paper account today P&L = equity − last_equity (the $1K stocks+crypto shared pool).
+    // Alpaca live account today P&L = equity − last_equity ($500 — options + long-term DCA).
     const alpacaPnl = (alpacaAccount?.equity != null && alpacaAccount?.last_equity != null)
       ? parseFloat(alpacaAccount.equity) - parseFloat(alpacaAccount.last_equity)
       : null;
 
     let todayPnl: number; let pnlLabel: string;
-    if (assetFilter === "crypto" || assetFilter === "stocks") {
-      todayPnl = alpacaPnl ?? 0; pnlLabel = "Alpaca · $1K paper";
-    } else if (assetFilter === "options") {
-      todayPnl = 0; pnlLabel = "Options off";
+    if (assetFilter === "crypto" || assetFilter === "stocks" || assetFilter === "options") {
+      todayPnl = alpacaPnl ?? 0; pnlLabel = "Alpaca · live $500";
     } else {
       // futures view, or "all" (the number is the real-money/active futures account — labeled so it's
       // never mistaken for the crypto/stock orders shown alongside it).

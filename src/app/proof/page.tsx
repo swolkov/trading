@@ -210,7 +210,7 @@ export default async function ProofPage() {
                   </li>
                   <li>
                     <span className="text-emerald-400 font-mono">Win rate</span> is a simple count of winning
-                    vs losing closes on the live engine (MNQ/MES). It says nothing about edge on its own.
+                    vs losing closes on the live engine (MGC gold). It says nothing about edge on its own.
                   </li>
                   <li>
                     <span className="text-amber-400 font-mono">Sample size</span> is tiny (~1 month). A handful
