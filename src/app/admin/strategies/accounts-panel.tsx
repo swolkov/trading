@@ -194,15 +194,14 @@ export function AccountsPanel() {
         </CardContent>
       </Card>
 
-      {/* Per-account grid — rich with realtime info */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-        {data.accounts.map((acc) => {
+      {/* Broker-grouped — each broker is a SEPARATE, isolated money pool (can't affect each other) */}
+      {(() => {
+        const renderCard = (acc: AccountInfo) => {
           const isLive = acc.liveTradingActivated;
           const todayUp = acc.todayPnl >= 0;
           return (
             <Card key={acc.key} className={isLive ? "border-red-500/30" : ""}>
               <CardContent className="py-2.5 px-3 space-y-2">
-                {/* Header */}
                 <div className="flex items-center justify-between gap-1">
                   <div className="text-[11px] font-semibold truncate flex items-center gap-1">
                     {acc.label}
@@ -210,8 +209,6 @@ export function AccountsPanel() {
                   </div>
                   {brokerBadge(acc.broker)}
                 </div>
-
-                {/* Balance */}
                 <div>
                   <div className="text-base font-bold tabular-nums leading-tight">
                     {acc.balance !== null ? `$${acc.balance.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : <span className="text-muted-foreground/40 text-sm">—</span>}
@@ -220,8 +217,6 @@ export function AccountsPanel() {
                     {acc.balanceSource === "broker_live" ? "live broker" : acc.balanceSource === "daily_cache" ? "cached EOD" : "no data"}
                   </div>
                 </div>
-
-                {/* Today P&L + sparkline */}
                 <div className="flex items-center justify-between gap-1.5">
                   <div>
                     <div className="text-[9px] uppercase tracking-wider text-muted-foreground/60">Today P&L</div>
@@ -231,13 +226,9 @@ export function AccountsPanel() {
                   </div>
                   {acc.pnlSparkline.length > 1 && <Sparkline data={acc.pnlSparkline} width={56} height={20} />}
                 </div>
-
-                {/* Risk utilization bar */}
                 {acc.balance !== null && acc.dailyLossLimitPct > 0 && (
                   <RiskBar usedPct={acc.riskUsedPct} label={`Daily risk (${acc.dailyLossLimitPct.toFixed(0)}%)`} />
                 )}
-
-                {/* Mode */}
                 <div className="flex items-center gap-1 pt-1 border-t border-border/40">
                   {modeBadge(acc.tradingMode)}
                   {acc.drawdownPct !== 0 && (
@@ -249,8 +240,40 @@ export function AccountsPanel() {
               </CardContent>
             </Card>
           );
-        })}
-      </div>
+        };
+        // Each broker = its own walled-off account/money. Honest edge note per broker.
+        const BROKERS: { key: string; title: string; note: string }[] = [
+          { key: "Tradovate", title: "Tradovate · Futures", note: "Gold (MGC/GC) — the one edge that survived every test (thin, real)" },
+          { key: "Alpaca", title: "Alpaca · Options & Long-term", note: "Long-term S&P / quality stocks = genuinely sound · options = skill-building" },
+        ];
+        return (
+          <div className="space-y-3">
+            {BROKERS.map((b) => {
+              const accts = data.accounts.filter((a) => a.broker === b.key);
+              if (!accts.length) return null;
+              return (
+                <div key={b.key}>
+                  <div className="flex items-baseline gap-2 mb-1.5 px-0.5">
+                    <span className="text-xs font-bold tracking-wide">{b.title}</span>
+                    <span className="text-[10px] text-muted-foreground/55 truncate">{b.note}</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">{accts.map(renderCard)}</div>
+                </div>
+              );
+            })}
+            {/* Kraken — planned, not yet integrated */}
+            <div>
+              <div className="flex items-baseline gap-2 mb-1.5 px-0.5">
+                <span className="text-xs font-bold tracking-wide text-muted-foreground/70">Kraken · Crypto</span>
+                <span className="text-[10px] text-muted-foreground/55">day-trade — not wired up yet (backtested no edge; build when ready)</span>
+              </div>
+              <Card className="border-dashed border-border/50">
+                <CardContent className="py-3 text-[11px] text-muted-foreground/45">Coming soon — Kraken crypto integration isn&apos;t built. Separate account, won&apos;t touch futures or Alpaca.</CardContent>
+              </Card>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
