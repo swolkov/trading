@@ -1,11 +1,9 @@
 import { getPositions } from "@/lib/alpaca";
-import { getViewMode } from "@/lib/trading-mode";
 
 export async function GET() {
   try {
-    // Use view mode so dashboard shows paper/live based on toggle (mirrors futures pattern)
-    const viewMode = await getViewMode("stocks");
-    const positions = await getPositions(viewMode);
+    // Alpaca is live-only — always show real live positions (no paper/demo).
+    const positions = await getPositions("live");
     return Response.json(positions);
   } catch (error) {
     console.error("[/api/positions]", error);

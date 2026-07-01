@@ -151,7 +151,7 @@ export function PositionsTable() {
       await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, qty, side: closeSide, type: "market", time_in_force: "day" }),
+        body: JSON.stringify({ symbol, qty, side: closeSide, type: "market", time_in_force: "day", mode: "live" }),
       });
       setTimeout(() => mutate(), 2000);
     } catch { /* ignore */ }
@@ -166,7 +166,7 @@ export function PositionsTable() {
         await fetch("/api/orders", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbol: pos.symbol, qty: pos.qty, side: pos.side === "short" ? "buy" : "sell", type: "market", time_in_force: "day" }),
+          body: JSON.stringify({ symbol: pos.symbol, qty: pos.qty, side: pos.side === "short" ? "buy" : "sell", type: "market", time_in_force: "day", mode: "live" }),
         });
       } catch { /* ignore */ }
     }

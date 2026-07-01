@@ -1,11 +1,10 @@
 import { getAccount } from "@/lib/alpaca";
-import { getViewMode } from "@/lib/trading-mode";
 
 export async function GET() {
   try {
-    // Use view mode so dashboard shows paper/live based on toggle (mirrors futures pattern)
-    const viewMode = await getViewMode("stocks");
-    const account = await getAccount(viewMode);
+    // Alpaca is live-only — always show the real live account (no paper/demo).
+    // Tradovate keeps its own demo/live toggle on the Futures side.
+    const account = await getAccount("live");
     return Response.json(account);
   } catch (error) {
     console.error("[/api/account]", error);

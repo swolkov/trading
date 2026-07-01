@@ -9,7 +9,8 @@ export async function GET(request: Request) {
       | "open"
       | "closed"
       | "all";
-    const orders = await getOrders(status);
+    // Alpaca is live-only — always show real live order history (no paper/demo).
+    const orders = await getOrders(status, "live");
     return Response.json(orders);
   } catch (error) {
     console.error("[/api/orders GET]", error);

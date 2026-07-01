@@ -39,6 +39,7 @@ export function OrderForm({ symbol }: OrderFormProps) {
         side,
         type,
         time_in_force: tif,
+        mode: "live", // Alpaca is live-only — manual orders hit the real account
       };
       if ((type === "limit" || type === "stop_limit") && limitPrice) {
         body.limit_price = limitPrice;

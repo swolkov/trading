@@ -171,11 +171,11 @@ export function TopBar() {
 }
 
 // ── View Mode Toggle ──────────────────────────────────────
-// Switches which account data you VIEW (demo vs live).
+// Switches which account data you VIEW (demo vs live). Tradovate/futures only —
+// Alpaca (stocks, crypto, options) is live-only and has no demo/paper view.
 // Trade execution is separately gated by agent config on /agents page.
 const VIEW_TYPES = [
   { key: "futures", label: "Futures", broker: "Tradovate" },
-  { key: "stocks", label: "Stocks & Crypto", broker: "Alpaca" },
 ] as const;
 
 function ViewToggle() {
