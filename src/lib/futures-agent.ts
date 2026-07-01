@@ -1619,9 +1619,9 @@ ${tradingMode === "paper" ? 'A+ = textbook, high conviction. A = solid edge, cle
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
-        model: "claude-opus-4-6",
+        model: "claude-opus-4-8",
         max_tokens: 8000,
-        thinking: { type: "enabled", budget_tokens: 5000 },
+        thinking: { type: "adaptive" },
         messages: [{ role: "user", content: aiPrompt }],
       });
       const text = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
@@ -1629,6 +1629,9 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       let jsonText = text.trim();
       const jsonMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
       if (jsonMatch) jsonText = jsonMatch[1].trim();
+      // Model may prepend prose before bare JSON — extract the outermost object
+      const braceMatch = jsonText.match(/\{[\s\S]*\}/);
+      if (braceMatch) jsonText = braceMatch[0];
       const ai = JSON.parse(jsonText);
 
       // Save pre-worker confidence for clean advisor overrides

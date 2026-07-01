@@ -58,9 +58,9 @@ Respond in this exact JSON format (no markdown, no code fences):
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-opus-4-6",
+      model: "claude-fable-5",
       max_tokens: 12000,
-      thinking: { type: "enabled", budget_tokens: 8000 },
+      thinking: { type: "adaptive" },
       messages: [{ role: "user", content: prompt }],
     });
 
