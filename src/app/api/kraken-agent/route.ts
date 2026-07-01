@@ -8,7 +8,8 @@ export async function GET() {
     const status = await getKrakenStatus();
     // TEMP diagnostic: which env var NAMES (never values) contain "krak"? Helps debug env wiring.
     const envNames = Object.keys(process.env).filter((k) => /krak/i.test(k));
-    return Response.json({ ...status, _envDebug: envNames });
+    const lens = { keyLen: (process.env.Kraken_API_Key || "").length, secretLen: (process.env.Kraken_API_Secret || "").length };
+    return Response.json({ ...status, _envDebug: envNames, _lens: lens });
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 500 });
   }
