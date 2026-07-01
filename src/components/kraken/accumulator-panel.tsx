@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { useState } from "react";
 
 interface Holding { coin: string; amount: number; price: number; value: number; }
 interface Status {
@@ -20,12 +21,29 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 const fmt = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 
 export function AccumulatorPanel() {
-  const { data } = useSWR<Status>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
+  const { data, mutate } = useSWR<Status>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
   if (!data) return null;
 
   const perBuy = data.config?.kraken_per_buy_usd || "40";
   const coins = data.config?.kraken_coins || "BTC/USD,ETH/USD";
   const pnl = data.totalValue - data.totalInvested;
+
+  async function setLive(live: boolean) {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch("/api/kraken-agent/live", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw, live }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setMsg(d.error || "Failed"); }
+      else { setMsg(live ? "✅ LIVE — it will buy dips on the next check (~30 min)." : "Paused — back to safe validate mode."); setPw(""); mutate(); }
+    } catch (e) { setMsg(String(e)); }
+    setBusy(false);
+  }
 
   return (
     <div className="rounded-lg border border-border bg-card p-5 space-y-3">
@@ -68,6 +86,52 @@ export function AccumulatorPanel() {
             </div>
           )}
           <p className="text-[10px] text-muted-foreground/45">Buys: {data.buyCount} · ${perBuy}/dip · {coins.replace(/\/USD/g, "")} · buy &amp; hold (never sells){data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>
+
+          {/* Password-gated real-money arm/disarm */}
+          <div className="border-t border-border/60 pt-3 mt-1">
+            {data.validateOnly ? (
+              <div className="space-y-2">
+                <p className="text-[11px] text-amber-300/90">Safe mode — <span className="font-semibold">not buying yet</span>. Enter your live-trading password to arm real buying.</p>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={pw}
+                    onChange={(e) => setPw(e.target.value)}
+                    placeholder="Live-trading password"
+                    className="flex-1 rounded-md bg-background border border-border px-2.5 py-1.5 text-xs"
+                  />
+                  <button
+                    onClick={() => setLive(true)}
+                    disabled={busy || !pw}
+                    className="rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 text-xs font-semibold hover:bg-emerald-500/25 disabled:opacity-40"
+                  >
+                    {busy ? "…" : "Go Live"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — buying dips</span>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={pw}
+                    onChange={(e) => setPw(e.target.value)}
+                    placeholder="password"
+                    className="w-32 rounded-md bg-background border border-border px-2.5 py-1.5 text-xs"
+                  />
+                  <button
+                    onClick={() => setLive(false)}
+                    disabled={busy || !pw}
+                    className="rounded-md bg-white/[0.04] text-muted-foreground border border-border px-3 py-1.5 text-xs font-medium hover:bg-white/[0.08] disabled:opacity-40"
+                  >
+                    Pause
+                  </button>
+                </div>
+              </div>
+            )}
+            {msg && <p className="text-[11px] mt-2 text-muted-foreground">{msg}</p>}
+          </div>
         </>
       )}
     </div>
