@@ -26,8 +26,17 @@ export function krakenBalanceAsset(symbol: string): string {
   return BALANCE_ASSET[symbol.toUpperCase()] || symbol.split("/")[0];
 }
 
+// Tolerant of env var casing (KRAKEN_API_KEY, Kraken_API_Key, etc.) so it works regardless of how
+// the variables were named in the Vercel dashboard.
+function krakenKey(): string {
+  return process.env.KRAKEN_API_KEY || process.env.Kraken_API_Key || process.env.kraken_api_key || "";
+}
+function krakenSecret(): string {
+  return process.env.KRAKEN_API_SECRET || process.env.Kraken_API_Secret || process.env.kraken_api_secret || "";
+}
+
 export function krakenConfigured(): boolean {
-  return !!(process.env.KRAKEN_API_KEY && process.env.KRAKEN_API_SECRET);
+  return !!(krakenKey() && krakenSecret());
 }
 
 // ---- public ----
@@ -66,11 +75,11 @@ async function krakenPrivate(method: string, params: Record<string, string> = {}
   const path = `/0/private/${method}`;
   const nonce = String(Date.now() * 1000);
   const body = { nonce, ...params };
-  const signature = sign(path, body, process.env.KRAKEN_API_SECRET as string);
+  const signature = sign(path, body, krakenSecret());
   const r = await fetch(`${API_URL}${path}`, {
     method: "POST",
     headers: {
-      "API-Key": process.env.KRAKEN_API_KEY as string,
+      "API-Key": krakenKey(),
       "API-Sign": signature,
       "Content-Type": "application/x-www-form-urlencoded",
     },
