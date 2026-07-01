@@ -101,6 +101,7 @@ export default function DashboardPage() {
   const [futuresQuotes, setFuturesQuotes] = useState<FuturesQuote[]>([]);
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 10000 });
   const viewMode = modeData?.modes?.futures || "paper";
+  const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number }>("/api/kraken-agent", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 60000 });
 
   useEffect(() => {
     fetch("/api/regime").then((r) => r.json()).then((d) => { if (!d.error) setRegime(d); }).catch(() => {});
@@ -138,8 +139,9 @@ export default function DashboardPage() {
   const futuresUnrealized = futures?.account?.unrealizedPnl || 0;
   const futuresMargin = futures?.account?.marginUsed || 0;
 
-  // ── Portfolio metrics (futures + Alpaca combined) ──
-  const combinedEquity = futuresEquity + (account ? parseFloat(account.equity) || 0 : 0);
+  // ── Portfolio metrics (futures + Alpaca + Kraken combined — matches the 4-engines strip total) ──
+  const krakenEquity = krk?.connected ? krk.totalValue || 0 : 0;
+  const combinedEquity = futuresEquity + (account ? parseFloat(account.equity) || 0 : 0) + krakenEquity;
   const combinedDailyPnl = futuresDailyPnl;
   const combinedDailyPct = (futuresSOD || futuresBalance) > 0
     ? combinedDailyPnl / (futuresSOD || futuresBalance || 1)
