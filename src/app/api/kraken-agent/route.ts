@@ -5,7 +5,10 @@ export const maxDuration = 60;
 // Read-only status for the /kraken page: connection, cash, holdings, total invested, buys.
 export async function GET() {
   try {
-    return Response.json(await getKrakenStatus());
+    const status = await getKrakenStatus();
+    // TEMP diagnostic: which env var NAMES (never values) contain "krak"? Helps debug env wiring.
+    const envNames = Object.keys(process.env).filter((k) => /krak/i.test(k));
+    return Response.json({ ...status, _envDebug: envNames });
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 500 });
   }
