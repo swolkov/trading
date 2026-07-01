@@ -16,9 +16,10 @@ interface KrakenConfig {
   maxDeployUsd: number;
   minSignal: "DIP" | "DEEP DIP";
   validateOnly: boolean;
+  trendFilter: boolean;
 }
 
-const KEYS = ["kraken_enabled", "kraken_coins", "kraken_per_buy_usd", "kraken_dip_cooldown_hours", "kraken_max_deploy_usd", "kraken_min_signal", "kraken_validate_only"];
+const KEYS = ["kraken_enabled", "kraken_coins", "kraken_per_buy_usd", "kraken_dip_cooldown_hours", "kraken_max_deploy_usd", "kraken_min_signal", "kraken_validate_only", "kraken_trend_filter"];
 
 async function loadConfig(): Promise<KrakenConfig> {
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: KEYS } } });
@@ -32,6 +33,7 @@ async function loadConfig(): Promise<KrakenConfig> {
     maxDeployUsd: parseFloat(c.kraken_max_deploy_usd) || 500,
     minSignal: c.kraken_min_signal === "DEEP DIP" ? "DEEP DIP" : "DIP",
     validateOnly: c.kraken_validate_only !== "false", // default TRUE — safe until explicitly armed
+    trendFilter: c.kraken_trend_filter !== "false", // default TRUE — only accumulate dips in uptrends
   };
 }
 
@@ -90,6 +92,9 @@ export async function runKrakenAccumulator(opts?: { dry?: boolean }): Promise<Kr
   for (const coin of cfg.coins) {
     const row = byCoin[coin];
     if (!dipQualifies(row, cfg.minSignal)) { details.push(`${coin}: no qualifying dip (${row?.signal ?? "n/a"})`); continue; }
+    // Trend filter (validated edge): only accumulate a dip when the coin is above its 50-day average —
+    // don't deploy limited capital into a confirmed downtrend / falling knife.
+    if (cfg.trendFilter && row && !row.aboveTrend) { details.push(`${coin}: skip — below 50-day trend (waiting for uptrend; ${row.signal})`); continue; }
     if (usd < cfg.perBuyUsd) { details.push(`${coin}: skip — only $${usd.toFixed(2)} cash left`); continue; }
     if (deployed + cfg.perBuyUsd > cfg.maxDeployUsd) { details.push(`${coin}: skip — max deploy reached`); continue; }
     const age = await lastBuyAgeHours(coin);

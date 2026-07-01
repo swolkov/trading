@@ -11,6 +11,8 @@ interface DipRow {
   chg24h: number;
   signal: "DEEP DIP" | "DIP" | "neutral" | "extended";
   note: string;
+  sma50: number | null;
+  aboveTrend: boolean;
 }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
@@ -54,6 +56,7 @@ export function DipScanner() {
                 <th className="text-right font-medium px-2 py-1.5">24h</th>
                 <th className="text-right font-medium px-2 py-1.5">RSI</th>
                 <th className="text-right font-medium px-2 py-1.5">vs 7d high</th>
+                <th className="text-center font-medium px-2 py-1.5">50d trend</th>
                 <th className="text-center font-medium px-3 py-1.5">Signal</th>
               </tr>
             </thead>
@@ -65,6 +68,9 @@ export function DipScanner() {
                   <td className={`px-2 py-1.5 text-right tabular-nums ${r.chg24h >= 0 ? "text-emerald-400" : "text-red-400"}`}>{(r.chg24h * 100).toFixed(1)}%</td>
                   <td className="px-2 py-1.5 text-right tabular-nums">{r.rsi != null ? r.rsi.toFixed(0) : "—"}</td>
                   <td className={`px-2 py-1.5 text-right tabular-nums ${r.pctOff7dHigh <= -0.08 ? "text-red-400" : "text-muted-foreground/70"}`}>{(r.pctOff7dHigh * 100).toFixed(1)}%</td>
+                  <td className="px-2 py-1.5 text-center">
+                    <span className={r.aboveTrend ? "text-emerald-400" : "text-red-400"}>{r.aboveTrend ? "↑ up" : "↓ down"}</span>
+                  </td>
                   <td className="px-3 py-1.5 text-center">
                     <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${SIGNAL_STYLE[r.signal]}`}>{r.signal}</span>
                   </td>

@@ -41,6 +41,8 @@ export interface DipRow {
   chg24h: number;
   signal: DipSignal;
   note: string;
+  sma50: number | null;   // 50-day average (trend reference)
+  aboveTrend: boolean;    // price > 50-day SMA = uptrend (the validated edge)
 }
 
 function classify(rsiVal: number | null, off7: number): { signal: DipSignal; note: string } {
@@ -73,6 +75,9 @@ export async function runDipScan(): Promise<{ rows: DipRow[]; ts: string }> {
       const off30 = (price - high30) / high30;
       const rsiVal = rsi(closes);
       const { signal, note } = classify(rsiVal, off7);
+      const smaN = Math.min(50, closes.length);
+      const sma50 = smaN > 0 ? closes.slice(-smaN).reduce((a, b) => a + b, 0) / smaN : null;
+      const aboveTrend = sma50 != null ? price > sma50 : true;
       rows.push({
         symbol,
         price,
@@ -82,6 +87,8 @@ export async function runDipScan(): Promise<{ rows: DipRow[]; ts: string }> {
         chg24h: (price - prev) / prev,
         signal,
         note,
+        sma50,
+        aboveTrend,
       });
     } catch { /* skip coin on error */ }
   }
