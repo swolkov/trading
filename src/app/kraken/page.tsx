@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { Bitcoin, TrendingUp, ShieldCheck, AlertTriangle, PlugZap } from "lucide-react";
+import { Bitcoin, TrendingUp, ShieldCheck, PlugZap } from "lucide-react";
 import { DipScanner } from "@/components/kraken/dip-scanner";
+import { AccumulatorPanel } from "@/components/kraken/accumulator-panel";
 
 // Kraken — crypto trend-following. NOT day-trading. Crypto day-trading tested at PF 0.73 (loses);
 // the trend-following version is the one edge that survived out-of-sample, so that's what this is.
@@ -21,19 +22,7 @@ export default function KrakenPage() {
         </div>
       </div>
 
-      {/* Status */}
-      <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3 flex items-start gap-3">
-        <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-        <div className="text-sm">
-          <span className="font-semibold text-amber-300">Not connected yet.</span>{" "}
-          <span className="text-muted-foreground">
-            Kraken isn&apos;t funded or wired in. This is the strategy that activates here once the
-            account is connected on the{" "}
-            <Link href="/connect" className="text-amber-300 underline underline-offset-2">Connections</Link>{" "}
-            page. No money is at work on Kraken today.
-          </span>
-        </div>
-      </div>
+      <AccumulatorPanel />
 
       <DipScanner />
 
