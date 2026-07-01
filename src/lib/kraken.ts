@@ -125,3 +125,18 @@ export async function krakenBuyMarket(
   const descr = (res.descr as { order?: string } | undefined)?.order;
   return { placed: !validate, volume: parseFloat(volume), txid: res.txid as string[] | undefined, descr };
 }
+
+// Place a market SELL of a base-currency volume (e.g. sell 0.02 ETH). validate=true tests only.
+export async function krakenSellMarket(
+  symbol: string,
+  volume: number,
+  validate: boolean,
+): Promise<{ placed: boolean; volume: number; txid?: string[]; descr?: string }> {
+  const pair = krakenPair(symbol);
+  const vol = volume.toFixed(8);
+  const params: Record<string, string> = { pair, type: "sell", ordertype: "market", volume: vol };
+  if (validate) params.validate = "true";
+  const res = await krakenPrivate("AddOrder", params);
+  const descr = (res.descr as { order?: string } | undefined)?.order;
+  return { placed: !validate, volume: parseFloat(vol), txid: res.txid as string[] | undefined, descr };
+}

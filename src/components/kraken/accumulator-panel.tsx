@@ -3,7 +3,7 @@
 import useSWR from "swr";
 import { useState } from "react";
 
-interface Holding { coin: string; amount: number; price: number; value: number; }
+interface Holding { coin: string; amount: number; price: number; value: number; aboveTrend: boolean; }
 interface Status {
   connected: boolean;
   enabled: boolean;
@@ -11,7 +11,7 @@ interface Status {
   usd: number;
   holdings: Holding[];
   totalValue: number;
-  totalInvested: number;
+  totalInvested: number; // deposited capital
   buyCount: number;
   config: Record<string, string>;
   error?: string;
@@ -27,7 +27,7 @@ export function AccumulatorPanel() {
   const [msg, setMsg] = useState<string | null>(null);
   if (!data) return null;
 
-  const perBuy = data.config?.kraken_per_buy_usd || "40";
+  const perCoin = data.config?.kraken_per_coin_usd || "250";
   const coins = data.config?.kraken_coins || "BTC/USD,ETH/USD";
   const pnl = data.totalValue - data.totalInvested;
 
@@ -40,7 +40,7 @@ export function AccumulatorPanel() {
       });
       const d = await r.json();
       if (!r.ok) { setMsg(d.error || "Failed"); }
-      else { setMsg(live ? "✅ LIVE — it will buy dips on the next check (~30 min)." : "Paused — back to safe validate mode."); setPw(""); mutate(); }
+      else { setMsg(live ? "✅ LIVE — it trades on the next check (~30 min)." : "Paused — back to safe validate mode."); setPw(""); mutate(); }
     } catch (e) { setMsg(String(e)); }
     setBusy(false);
   }
@@ -48,7 +48,7 @@ export function AccumulatorPanel() {
   return (
     <div className="rounded-lg border border-border bg-card p-5 space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="font-semibold text-sm">Dip Accumulator (buy &amp; hold)</h2>
+        <h2 className="font-semibold text-sm">BTC/ETH Trend-Follower</h2>
         <div className="flex items-center gap-1.5">
           {data.connected ? (
             data.enabled ? (
@@ -64,34 +64,34 @@ export function AccumulatorPanel() {
 
       {!data.connected ? (
         <p className="text-[11px] text-muted-foreground/55 leading-relaxed">
-          Funded, built, and ready. Activates once <code className="bg-muted px-1 rounded">KRAKEN_API_KEY</code> / <code className="bg-muted px-1 rounded">KRAKEN_API_SECRET</code> (a fresh trade-only key) are added in the Vercel environment. Buys ${perBuy} of {coins.replace(/\/USD/g, "")} on each dip and holds — never sells.
+          Funded, built, and ready. Activates once <code className="bg-muted px-1 rounded">KRAKEN_API_KEY</code> / <code className="bg-muted px-1 rounded">KRAKEN_API_SECRET</code> (a fresh trade-only key) are added in the Vercel environment. Holds {coins.replace(/\/USD/g, "")} while above the 50-day trend, sells to cash below it.
         </p>
       ) : (
         <>
           <div className="grid grid-cols-4 gap-3 text-center">
             <div><p className="text-[10px] text-muted-foreground/50">Cash</p><p className="text-sm font-bold tabular-nums">{fmt(data.usd)}</p></div>
-            <div><p className="text-[10px] text-muted-foreground/50">Invested</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalInvested)}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">Deposited</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalInvested)}</p></div>
             <div><p className="text-[10px] text-muted-foreground/50">Value</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalValue)}</p></div>
-            <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{data.totalInvested ? fmt(pnl) : "—"}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(pnl)}</p></div>
           </div>
           {data.holdings.length > 0 && (
             <div className="space-y-1">
               {data.holdings.map((h) => (
                 <div key={h.coin} className="flex items-center justify-between text-[11px] px-2 py-1 rounded bg-white/[0.02]">
-                  <span className="font-semibold">{h.coin.replace("/USD", "")}</span>
+                  <span className="font-semibold">{h.coin.replace("/USD", "")} <span className={h.aboveTrend ? "text-emerald-400/70" : "text-red-400/70"}>{h.aboveTrend ? "↑ trend" : "↓ trend"}</span></span>
                   <span className="tabular-nums text-muted-foreground/70">{h.amount.toFixed(6)} @ {fmt(h.price)}</span>
                   <span className="tabular-nums font-medium">{fmt(h.value)}</span>
                 </div>
               ))}
             </div>
           )}
-          <p className="text-[10px] text-muted-foreground/45">Buys: {data.buyCount} · ${perBuy}/dip · {coins.replace(/\/USD/g, "")} · buy &amp; hold (never sells){data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>
+          <p className="text-[10px] text-muted-foreground/45">Trades: {data.buyCount} · ${perCoin}/coin · {coins.replace(/\/USD/g, "")} · hold above 50-day, sell below{data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>
 
           {/* Password-gated real-money arm/disarm */}
           <div className="border-t border-border/60 pt-3 mt-1">
             {data.validateOnly ? (
               <div className="space-y-2">
-                <p className="text-[11px] text-amber-300/90">Safe mode — <span className="font-semibold">not buying yet</span>. Enter your live-trading password to arm real buying.</p>
+                <p className="text-[11px] text-amber-300/90">Safe mode — <span className="font-semibold">not trading yet</span>. Enter your live-trading password to arm it.</p>
                 <div className="flex gap-2">
                   <input
                     type="password"
@@ -111,7 +111,7 @@ export function AccumulatorPanel() {
               </div>
             ) : (
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — buying dips</span>
+                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — trend-following</span>
                 <div className="flex gap-2">
                   <input
                     type="password"

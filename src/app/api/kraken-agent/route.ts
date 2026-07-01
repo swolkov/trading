@@ -1,4 +1,4 @@
-import { getKrakenStatus, runKrakenAccumulator } from "@/lib/kraken-agent";
+import { getKrakenStatus, runKrakenAgent } from "@/lib/kraken-agent";
 
 export const maxDuration = 60;
 
@@ -19,7 +19,7 @@ export async function POST(request: Request) {
   }
   try {
     const dry = new URL(request.url).searchParams.get("dry") === "1";
-    return Response.json(await runKrakenAccumulator({ dry }));
+    return Response.json(await runKrakenAgent({ dry }));
   } catch (error) {
     console.error("[/api/kraken-agent POST]", error);
     return Response.json({ error: String(error) }, { status: 500 });
