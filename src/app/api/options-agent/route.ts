@@ -1,38 +1,11 @@
-import { runOptionsAgent, getOptionsScoreboard } from "@/lib/options-agent";
-import { prisma } from "@/lib/db";
+import { runOptionsAgent, getOptionsStatus } from "@/lib/options-agent";
 
 export const maxDuration = 120;
 
-const CONFIG_KEYS = [
-  "options_enabled",
-  "options_account_size",
-  "options_max_risk_usd",
-  "options_risk_per_trade_pct",
-  "options_max_positions",
-  "options_max_trades_per_day",
-  "options_min_conviction",
-  "options_min_dte",
-  "options_max_dte",
-  "options_weekly_loss_budget_usd",
-  "options_account_floor_usd",
-  "options_universe",
-  "options_cron_last_run",
-];
-
-// Read-only status for the /options page: config + honest scoreboard + last run. Cheap, no auth.
+// Read-only status for the /options page: config + honest scoreboard + per-run reasoning. Cheap, no auth.
 export async function GET() {
   try {
-    const rows = await prisma.agentConfig.findMany({ where: { key: { in: CONFIG_KEYS } } });
-    const config: Record<string, string> = {};
-    for (const r of rows) config[r.key] = r.value;
-    const scoreboard = await getOptionsScoreboard();
-    return Response.json({
-      enabled: config.options_enabled === "paper" || config.options_enabled === "live",
-      mode: config.options_enabled === "live" ? "live" : "paper",
-      config,
-      scoreboard,
-      lastRun: config.options_cron_last_run || null,
-    });
+    return Response.json(await getOptionsStatus());
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 500 });
   }

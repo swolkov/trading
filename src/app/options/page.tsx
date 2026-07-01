@@ -63,10 +63,11 @@ function IVRankGauge({ rank }: { rank: number }) {
   );
 }
 
+interface LastRun { ts: string; opened: number; managed: string[]; halted: boolean; haltReasons: string[]; details: string[]; }
 interface AgentStatus {
   enabled: boolean;
   mode: "paper" | "live";
-  lastRun: string | null;
+  lastRun: LastRun | null;
   config: Record<string, string>;
   scoreboard: { closed: number; wins: number; winRate: number; avgR: number; totalPnl: number; openGroups: number };
 }
@@ -107,6 +108,17 @@ function OptionsAgentPanel() {
       )}
       {!s.enabled && (
         <p className="text-[11px] text-muted-foreground/50">Disabled. Honest note: buying options is negative-expected-value; this agent uses tiny defined-risk size + hard loss caps to limit damage, not to promise profit.</p>
+      )}
+      {s.lastRun && (
+        <div className="rounded-md border border-border/50 bg-white/[0.01] px-3 py-2 space-y-1">
+          <p className="text-[10px] text-muted-foreground/50">
+            Last run {new Date(s.lastRun.ts).toLocaleTimeString()} · opened {s.lastRun.opened} · {s.lastRun.managed?.length || 0} managed
+            {s.lastRun.halted && <span className="text-amber-400"> · HALTED: {s.lastRun.haltReasons?.join(", ")}</span>}
+          </p>
+          {(s.lastRun.details || []).map((d, i) => (
+            <p key={i} className="text-[10px] text-muted-foreground/45 truncate">· {d}</p>
+          ))}
+        </div>
       )}
     </div>
   );

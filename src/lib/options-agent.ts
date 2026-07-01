@@ -33,7 +33,7 @@ import {
   getPriceTargetConsensus,
   type EarningsCalendarItem,
 } from "./finnhub";
-import { logTradeToJournal, logDecision, logObservation } from "./vault";
+import { logTradeToJournal, logDecision, logObservation, loadAgentContext } from "./vault";
 import { areEntriesPaused } from "./orchestrator";
 
 // ---------- Config ----------
@@ -224,6 +224,7 @@ async function aiConfirmOptionsSetup(
   ivRank: number,
   debit: number,
   maxRisk: number,
+  brainContext = "",
 ): Promise<{ agree: boolean; conviction: string; reasoning: string }> {
   const anthropic = new Anthropic();
   const prompt = `You are a disciplined options trader managing a tiny (~$500) account. You ONLY buy DEFINED-RISK vertical DEBIT spreads, 7-14 DTE. Buying options is negative-EV on average, so you reject anything that isn't a clean, well-supported setup.
@@ -235,7 +236,7 @@ IV rank: ${ivRank.toFixed(0)}/100 (lower = options cheaper)
 Net debit (max loss): $${debit.toFixed(2)}/contract, total risk ~$${maxRisk.toFixed(0)}
 Post-earnings drift: ${sig.postEarningsDrift ? "yes (IV already crushed)" : "no"}
 Research signals: ${sig.reasons.join("; ") || "none"}
-
+${brainContext ? `\nTRADING BRAIN (respect the current regime + honor active lessons/anti-patterns):\n${brainContext}\n` : ""}
 A+ = strong catalyst + cheap IV + clean direction. A = solid edge. B = marginal. C = no real edge.
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
   try {
@@ -619,6 +620,17 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
     earnings = await getEarningsCalendar(from, to);
   } catch { /* ignore */ }
 
+  // Pull the trading brain once (market regime + active lessons + anti-patterns) to inform the grader.
+  let brainContext = "";
+  try {
+    const ctx = await loadAgentContext("options-agent", "options-spreads.md");
+    brainContext = [
+      ctx.marketRegime ? `REGIME: ${ctx.marketRegime.slice(0, 250)}` : "",
+      ctx.activeLessons ? `LESSONS: ${ctx.activeLessons.slice(0, 250)}` : "",
+      ctx.antiPatterns ? `ANTI-PATTERNS: ${ctx.antiPatterns.slice(0, 200)}` : "",
+    ].filter(Boolean).join("\n");
+  } catch { /* brain optional — never block a run on it */ }
+
   const candidates: SignalResult[] = [];
   for (const sym of cfg.universe) {
     try {
@@ -647,7 +659,7 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
 
     // AI veto (only A+/A execute).
     const debitGuess = perTradeCap; // probe already proved a fit; use cap for the prompt magnitude
-    const ai = await aiConfirmOptionsSetup(sig, ivRank, debitGuess / 100, perTradeCap);
+    const ai = await aiConfirmOptionsSetup(sig, ivRank, debitGuess / 100, perTradeCap, brainContext);
     if (!ai.agree || ai.conviction === "B" || ai.conviction === "C") {
       await logDecision("options-agent", "SKIP", `OPT:${sig.symbol}`, `AI ${ai.conviction}: ${ai.reasoning}`, 1).catch(() => {});
       details.push(`KILLED ${sig.symbol}: AI ${ai.conviction} — ${ai.reasoning}`);
@@ -663,6 +675,27 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
   if (result.opened > 0) {
     await logObservation("options-agent", `Session: opened ${result.opened}, ${result.managed.length} managed. ${details.slice(-3).join(" | ")}`).catch(() => {});
   }
+  // Persist per-run reasoning so the UI can show WHY it skipped/traded (mirrors kraken_last_run).
+  try {
+    const payload = JSON.stringify({ ts: new Date().toISOString(), opened: result.opened, managed: result.managed, halted: reasonsHalt.length > 0, haltReasons: reasonsHalt, details: details.slice(-10) });
+    await prisma.agentConfig.upsert({ where: { key: "options_last_run" }, update: { value: payload }, create: { key: "options_last_run", value: payload } });
+  } catch { /* best-effort */ }
   result.scoreboard = await getOptionsScoreboard();
   return result;
+}
+
+// Status for the /options page: config + scoreboard + last-run reasoning (mirrors getKrakenStatus).
+export async function getOptionsStatus() {
+  const rows = await prisma.agentConfig.findMany({ where: { key: { in: [...CONFIG_KEYS, "options_last_run", "options_cron_last_run"] } } });
+  const config: Record<string, string> = {};
+  for (const r of rows) config[r.key] = r.value;
+  let lastRun: unknown = null;
+  try { if (config.options_last_run) lastRun = JSON.parse(config.options_last_run); } catch { /* ignore */ }
+  return {
+    enabled: config.options_enabled === "paper" || config.options_enabled === "live",
+    mode: config.options_enabled === "live" ? "live" : "paper",
+    config,
+    scoreboard: await getOptionsScoreboard(),
+    lastRun,
+  };
 }

@@ -7,7 +7,7 @@
 import { prisma } from "./db";
 import { getDipScan, runDipScan, type DipRow } from "./crypto-dip-scanner";
 import { krakenConfigured, getKrakenBalance, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset } from "./kraken";
-import { logTradeToJournal, logDecision } from "./vault";
+import { logTradeToJournal, logDecision, loadAgentContext } from "./vault";
 
 interface KrakenConfig {
   enabled: boolean;
@@ -57,6 +57,13 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
   if (!scan || Date.now() - new Date(scan.ts).getTime() > 30 * 60_000) scan = await runDipScan();
   const byCoin: Record<string, DipRow> = {};
   for (const r of scan?.rows || []) byCoin[r.symbol] = r;
+
+  // Pull the trading brain (regime + active anti-patterns) so the agent reads context, not just writes.
+  try {
+    const ctx = await loadAgentContext("kraken-trend", "crypto-trend.md");
+    const regime = ctx.marketRegime ? ctx.marketRegime.split("\n").find((l) => l.trim())?.slice(0, 120) : null;
+    if (regime) details.push(`Brain regime: ${regime}`);
+  } catch { /* brain optional — never block a run on it */ }
 
   let bal: Record<string, number> = {};
   try { bal = await getKrakenBalance(); } catch (e) { details.push(`balance error: ${e}`); return res; }

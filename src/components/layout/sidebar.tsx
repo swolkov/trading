@@ -27,19 +27,19 @@ import {
   CandlestickChart,
   Bitcoin,
   PiggyBank,
+  Activity,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Curated for daily use — the four pillars (Futures / Options / Long-term / Kraken) plus control,
-// activity, research, admin. Retired paper pages (/day-trade, /stocks, /crypto) were deleted.
+// Curated 5-section IA around the four live pillars (Futures / Options / Long-term / Kraken).
+// Retired paper pages (/day-trade, /stocks, /crypto) + /market + /wheel were deleted.
 const sections = [
   {
     label: "OVERVIEW",
     links: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/brief", label: "Morning Brief", icon: Sunrise },
-      { href: "/performance", label: "Performance", icon: TrendingUp },
     ],
   },
   {
@@ -52,16 +52,10 @@ const sections = [
     ],
   },
   {
-    label: "CONTROL",
+    label: "PERFORMANCE",
     links: [
-      { href: "/agents", label: "Agent Hub", icon: Bot },
-      { href: "/trade", label: "Manual Trade", icon: Crosshair },
-      { href: "/ai", label: "Claude Console", icon: Sparkles },
-    ],
-  },
-  {
-    label: "ACTIVITY",
-    links: [
+      { href: "/performance", label: "Performance", icon: TrendingUp },
+      { href: "/analytics", label: "Analytics", icon: BarChart3 },
       { href: "/positions", label: "Positions", icon: Wallet },
       { href: "/orders", label: "Orders", icon: ClipboardList },
       { href: "/journal", label: "Journal", icon: BookOpen },
@@ -70,18 +64,22 @@ const sections = [
   {
     label: "RESEARCH",
     links: [
-      { href: "/edges", label: "Edge Hierarchy", icon: Brain },
       { href: "/research", label: "Symbol Research", icon: Search },
-      { href: "/research/correlations", label: "Correlations", icon: Link2 },
-      { href: "/research/positioning", label: "Positioning (OI)", icon: TrendingUp },
       { href: "/watchlist", label: "Watchlist", icon: Eye },
+      { href: "/edges", label: "Edge Hierarchy", icon: Brain },
       { href: "/backtest", label: "Backtest", icon: FlaskConical },
       { href: "/calendar", label: "Calendar", icon: Calendar },
+      { href: "/research/correlations", label: "Correlations", icon: Link2 },
+      { href: "/research/positioning", label: "Positioning (OI)", icon: TrendingUp },
     ],
   },
   {
-    label: "ADMIN",
+    label: "CONTROL",
     links: [
+      { href: "/agents", label: "Agent Hub", icon: Bot },
+      { href: "/command", label: "System Health", icon: Activity },
+      { href: "/trade", label: "Manual Trade", icon: Crosshair },
+      { href: "/ai", label: "Claude Console", icon: Sparkles },
       { href: "/admin/strategies", label: "Strategies", icon: Layers },
       { href: "/connect", label: "Connections", icon: PlugZap },
     ],

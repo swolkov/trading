@@ -6,6 +6,7 @@ import { usePositions } from "@/hooks/use-positions";
 import { formatCurrency, pnlColor } from "@/lib/utils";
 import { useEffect, useState, useMemo } from "react";
 import useSWR from "swr";
+import { PillarsStrip } from "@/components/dashboard/pillars-strip";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -240,6 +241,9 @@ export default function DashboardPage() {
           </>
         )}
       </div>
+
+      {/* ── The 4 Engines (command center) ── */}
+      <PillarsStrip />
 
       {/* ── Broker Accounts ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
