@@ -134,6 +134,13 @@ export async function runKrakenAccumulator(opts?: { dry?: boolean }): Promise<Kr
       details.push(`${coin}: order error — ${e}`);
     }
   }
+  try {
+    await prisma.agentConfig.upsert({
+      where: { key: "kraken_last_run" },
+      update: { value: JSON.stringify({ ts: new Date().toISOString(), buys: res.buys, validateOnly: cfg.validateOnly, details: res.details.slice(-6) }) },
+      create: { key: "kraken_last_run", value: JSON.stringify({ ts: new Date().toISOString(), buys: res.buys, validateOnly: cfg.validateOnly, details: res.details.slice(-6) }) },
+    });
+  } catch { /* best-effort */ }
   return res;
 }
 
@@ -148,6 +155,7 @@ export interface KrakenStatus {
   totalInvested: number;
   buyCount: number;
   config: Record<string, string>;
+  lastRun?: unknown;
   error?: string;
 }
 
@@ -158,7 +166,9 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
   for (const r of rows) config[r.key] = r.value;
   const invested = await totalDeployed();
   const buyCount = await prisma.autoTradeLog.count({ where: { symbol: { startsWith: "KRK:" }, action: "kraken_buy" } });
-  const base: KrakenStatus = { connected: krakenConfigured(), enabled: cfg.enabled, validateOnly: cfg.validateOnly, usd: 0, holdings: [], totalValue: 0, totalInvested: invested, buyCount, config };
+  let lastRun: unknown = null;
+  try { const lr = await prisma.agentConfig.findUnique({ where: { key: "kraken_last_run" } }); if (lr?.value) lastRun = JSON.parse(lr.value); } catch { /* ignore */ }
+  const base: KrakenStatus = { connected: krakenConfigured(), enabled: cfg.enabled, validateOnly: cfg.validateOnly, usd: 0, holdings: [], totalValue: 0, totalInvested: invested, buyCount, config, lastRun };
   if (!krakenConfigured()) return base;
   try {
     const bal = await getKrakenBalance();

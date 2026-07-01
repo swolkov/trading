@@ -18,7 +18,7 @@
     },
     {
       "path": "/api/cron/kraken",
-      "schedule": "0 */2 * * *"
+      "schedule": "*/30 * * * *"
     },
     {
       "path": "/api/cron/futures",
