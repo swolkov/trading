@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
 import { DepthTapeView } from "@/components/databento/depth-tape-view";
+import { EngineActivity } from "@/components/futures/engine-activity";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -639,11 +640,14 @@ export default function FuturesPage() {
 
           {/* Chart tab */}
           {activeTab === "chart" && (
-            <Card className="border-white/[0.06]">
-              <CardContent className="pt-4">
-                <FuturesChart symbol={selectedContract} height={560} />
-              </CardContent>
-            </Card>
+            <div className="space-y-4">
+              <Card className="border-white/[0.06]">
+                <CardContent className="pt-4">
+                  <FuturesChart symbol={selectedContract} height={560} />
+                </CardContent>
+              </Card>
+              <EngineActivity />
+            </div>
           )}
 
           {/* Depth & Tape tab — Databento volume profile + time and sales */}

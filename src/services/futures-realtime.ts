@@ -147,6 +147,24 @@ async function feedLog(type: "scan" | "setup" | "trade" | "exit" | "skip" | "coo
   try { await appendLiveFeed(AGENT_NAME, type, msg); } catch { /* feed optional */ }
 }
 
+// Every graded setup (confirmed AND killed) → DB ring buffer so the UI can show what the
+// engine is finding in real time, not just the trades it takes. Read by /api/futures/decisions.
+async function recordDecision(d: {
+  sym: string; direction: string; setupType: string; confidence: number;
+  verdict: "confirmed" | "rejected" | "pattern_blocked" | "no_verdict";
+  aiConfidence?: number; reason: string;
+}) {
+  try {
+    const key = `engine_decisions_${IS_LIVE ? "live" : "demo"}`;
+    const row = await prisma.agentConfig.findUnique({ where: { key } });
+    let arr: unknown[] = [];
+    try { arr = JSON.parse(row?.value || "[]"); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
+    arr.unshift({ ts: new Date().toISOString(), ...d });
+    const value = JSON.stringify(arr.slice(0, 40));
+    await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
+  } catch { /* best-effort — never block trading on telemetry */ }
+}
+
 // ── Tradovate Auth (for order execution) ────────────────
 
 let accessToken = "";
@@ -3094,6 +3112,8 @@ async function evaluateAndTrade(
     // of statistical losing.
     if (IS_LIVE && pred.matchCount >= 25 && pred.winRate < 0.25) {
       log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches` });
+      feedLog("skip", `${sym} ${setupType} ${direction} blocked by pattern memory (${(pred.winRate * 100).toFixed(0)}% WR)`);
       return;
     }
   } catch { /* pattern memory is optional */ }
@@ -3112,6 +3132,7 @@ async function evaluateAndTrade(
   // a grader model is reachable again.
   if (IS_LIVE && ai.aiDown) {
     log(`  LIVE ENTRY PAUSED: AI gave no verdict (${ai.reasoning}) — skipping ${sym} ${direction} to protect real money. Auto-resumes next setup.`);
+    recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "no_verdict", reason: ai.reasoning });
     feedLog("cooldown", `LIVE entry paused — AI no verdict (${ai.reasoning})`);
     notify(`LIVE entry paused: AI grader gave no verdict (${ai.reasoning}). Skipping ${sym} ${direction} to protect real money — auto-resumes when AI is back.`, "general");
     return;
@@ -3123,8 +3144,12 @@ async function evaluateAndTrade(
     if (ai.agree) {
       finalScore += Math.min(10, Math.round(ai.confidence / 10));
       log(`  AI CONFIRMS (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
+      recordDecision({ sym, direction, setupType, confidence: finalScore, verdict: "confirmed", aiConfidence: ai.confidence, reason: ai.reasoning });
+      feedLog("setup", `**${sym} ${setupType} ${direction}** ${finalScore}% — AI confirms: ${ai.reasoning}`);
     } else if (aiVetoEnabled) {
       log(`  AI REJECTS (${ai.confidence}%): ${ai.reasoning} — trade blocked`);
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", aiConfidence: ai.confidence, reason: ai.reasoning });
+      feedLog("skip", `${sym} ${setupType} ${direction} ${technicalScore}% — AI rejected: ${ai.reasoning}`);
       return;
     } else {
       // AI-OFF EXPERIMENT (demo only): the AI would block, but take the MECHANICAL trade anyway and log
