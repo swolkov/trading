@@ -1,7 +1,8 @@
 import { runOptionsAgent } from "@/lib/options-agent";
 import { prisma } from "@/lib/db";
 
-export const maxDuration = 120;
+// 300s: the Fable 5 veto thinks longer than the old Sonnet call — give the run headroom
+export const maxDuration = 300;
 
 // Options agent cron — scans the universe, scores from research, and trades 7-14 DTE defined-risk
 // debit spreads (buy-only) with hard risk caps. Manages open spreads on every tick. Scheduled

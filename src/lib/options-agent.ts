@@ -241,9 +241,12 @@ ${brainContext ? `\nTRADING BRAIN (respect the current regime + honor active les
 A+ = strong catalyst + cheap IV + clean direction. A = solid edge. B = marginal. C = no real edge.
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
   try {
+    // Fable 5 veto: rare call (≤1 trade/day), no tight clock, real money — worth the
+    // deepest skeptic. Thinking tokens count against max_tokens, so give them room.
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 500,
+      model: "claude-fable-5",
+      max_tokens: 6000,
+      thinking: { type: "adaptive" },
       messages: [{ role: "user", content: prompt }],
     });
     const text = response.content
@@ -253,6 +256,9 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     let jsonText = text.trim();
     const m = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
     if (m) jsonText = m[1].trim();
+    // Model may prepend prose before bare JSON — extract the outermost object
+    const braceMatch = jsonText.match(/\{[\s\S]*\}/);
+    if (braceMatch) jsonText = braceMatch[0];
     return JSON.parse(jsonText);
   } catch (err) {
     console.error("[options-agent] AI error:", err);
