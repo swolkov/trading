@@ -11,6 +11,7 @@
 // paper/live mode on every order, and unit-level `OPT:` logging for an honest scoreboard.
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "./db";
+import { sendNotification } from "./notifications";
 import type { TradingMode } from "./trading-mode";
 import {
   getAccount,
@@ -362,6 +363,12 @@ async function executeAgentDebitSpread(
 
   const meta: SpreadMeta = { groupId, buySym: buyC.symbol, sellSym: sellC.symbol, qty, debit, maxRisk, expiry, direction: sig.direction };
 
+  // Real-money fill — Slack alert on every spread open
+  await sendNotification(
+    `📊 OPTIONS OPEN [${cfg.mode}] ${sig.symbol} ${sig.direction} debit spread ${qty}x — debit $${debit.toFixed(2)}, max risk $${maxRisk.toFixed(0)}, exp ${expiry}`,
+    "options"
+  ).catch(() => {});
+
   await prisma.autoTradeLog.create({
     data: {
       symbol: `OPT:${sig.symbol}`,
@@ -422,6 +429,11 @@ async function getOpenGroups(): Promise<SpreadMeta[]> {
 
 async function logClose(meta: SpreadMeta, pnl: number, exitReason: string, mode: TradingMode) {
   const r = meta.maxRisk > 0 ? pnl / meta.maxRisk : 0;
+  // Real-money close — Slack alert with P&L
+  await sendNotification(
+    `📊 OPTIONS CLOSE [${mode}] ${meta.buySym.replace(/\d.*/, "")} ${exitReason}: ${pnl >= 0 ? "+" : "-"}$${Math.abs(pnl).toFixed(0)} (${r >= 0 ? "+" : ""}${r.toFixed(2)}R)`,
+    "options"
+  ).catch(() => {});
   await prisma.autoTradeLog.create({
     data: {
       symbol: `OPT:${meta.buySym.replace(/\d.*/, "")}`,

@@ -74,8 +74,9 @@ export function AccumulatorPanel() {
             <div><p className="text-[10px] text-muted-foreground/50">Value</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalValue)}</p></div>
             <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(pnl)}</p></div>
           </div>
-          {data.holdings.length > 0 && (
+          {data.holdings.length > 0 ? (
             <div className="space-y-1">
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider">Positions</p>
               {data.holdings.map((h) => (
                 <div key={h.coin} className="flex items-center justify-between text-[11px] px-2 py-1 rounded bg-white/[0.02]">
                   <span className="font-semibold">{h.coin.replace("/USD", "")} <span className={h.aboveTrend ? "text-emerald-400/70" : "text-red-400/70"}>{h.aboveTrend ? "↑ trend" : "↓ trend"}</span></span>
@@ -83,6 +84,10 @@ export function AccumulatorPanel() {
                   <span className="tabular-nums font-medium">{fmt(h.value)}</span>
                 </div>
               ))}
+            </div>
+          ) : (
+            <div className="text-[11px] text-muted-foreground/55 px-2 py-1.5 rounded bg-white/[0.02]">
+              <span className="font-semibold text-foreground/70">Positions: none — 100% cash.</span> Waiting for a dip in an uptrend; when it buys, BTC/ETH holdings appear right here.
             </div>
           )}
           <p className="text-[10px] text-muted-foreground/45">Trades: {data.buyCount} · ${perCoin}/coin · {coins.replace(/\/USD/g, "")} · hold above 50-day, sell below{data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>

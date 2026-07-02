@@ -70,17 +70,20 @@ export default function KrakenPage() {
         </p>
       </div>
 
-      {/* Activation */}
+      {/* Where positions live */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
         <div className="flex items-center gap-2">
           <PlugZap className="w-4 h-4 text-purple-400" />
-          <h2 className="font-semibold">To turn it on</h2>
+          <h2 className="font-semibold">Where Kraken positions show</h2>
         </div>
-        <ol className="text-sm text-muted-foreground space-y-1.5 list-decimal list-inside">
-          <li>Fund the Kraken account.</li>
-          <li>Connect the Kraken API on the <Link href="/connect" className="text-purple-300 underline underline-offset-2">Connections</Link> page.</li>
-          <li>The trend agent activates on a daily check and reports its positions here.</li>
-        </ol>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Right here — in the trend-follower panel at the top of this page. Each broker&apos;s tab shows
+          its own positions: <Link href="/futures" className="text-purple-300 underline underline-offset-2">Futures</Link> for
+          Tradovate, <Link href="/positions" className="text-purple-300 underline underline-offset-2">Positions</Link> for
+          Alpaca (options &amp; long-term), and this tab for Kraken crypto. The agent checks every 30
+          minutes and buys dips only in uptrends, so &ldquo;no positions&rdquo; often just means it&apos;s
+          waiting in cash — that&apos;s the strategy working, not a problem.
+        </p>
       </div>
     </div>
   );
