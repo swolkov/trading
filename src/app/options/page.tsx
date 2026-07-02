@@ -64,12 +64,14 @@ function IVRankGauge({ rank }: { rank: number }) {
 }
 
 interface LastRun { ts: string; opened: number; managed: string[]; halted: boolean; haltReasons: string[]; details: string[]; }
+interface VetoDecision { ts: string; sym: string; direction: string | null; conviction: string; agree: boolean; ivRank: number; maxRisk: number; reason: string; }
 interface AgentStatus {
   enabled: boolean;
   mode: "paper" | "live";
   lastRun: LastRun | null;
   config: Record<string, string>;
   scoreboard: { closed: number; wins: number; winRate: number; avgR: number; totalPnl: number; openGroups: number };
+  decisions?: VetoDecision[];
 }
 
 // Read-only status for the automated options agent (buy-only defined-risk debit spreads, 7-14 DTE).
@@ -120,6 +122,24 @@ function OptionsAgentPanel() {
           ))}
         </div>
       )}
+      {/* AI veto activity — every candidate the grader judged, kills included */}
+      <div className="rounded-md border border-border/50 bg-white/[0.01] px-3 py-2 space-y-1">
+        <p className="text-[10px] font-semibold text-muted-foreground/60 uppercase tracking-wider">AI Veto Activity (Fable 5)</p>
+        {(s.decisions?.length || 0) === 0 ? (
+          <p className="text-[10px] text-muted-foreground/45">No candidates have reached the AI veto yet — most get filtered earlier by signal strength or the IV gate. When one does, the verdict shows here.</p>
+        ) : (
+          (s.decisions || []).slice(0, 8).map((d, i) => (
+            <div key={`${d.ts}-${i}`} className="flex items-center gap-2 text-[10px]">
+              <span className={`shrink-0 font-bold px-1.5 py-0.5 rounded border text-[8px] uppercase tracking-wider ${d.agree ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-red-500/15 text-red-400 border-red-500/30"}`}>
+                {d.agree ? `${d.conviction} OPEN` : `${d.conviction} KILLED`}
+              </span>
+              <span className="font-semibold shrink-0">{d.sym} {d.direction || ""}</span>
+              <span className="text-muted-foreground/45 truncate" title={d.reason}>{d.reason}</span>
+              <span className="ml-auto shrink-0 text-muted-foreground/35 tabular-nums">{new Date(d.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

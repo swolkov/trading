@@ -220,6 +220,22 @@ async function scoreSymbol(symbol: string, earnings: EarningsCalendarItem[], cfg
 
 // ---------- AI grader veto ----------
 
+// Ring buffer of veto decisions so the /options page shows what the agent graded — kills included
+async function recordOptionsDecision(d: {
+  sym: string; direction: string | null; conviction: string; agree: boolean;
+  ivRank: number; maxRisk: number; reason: string;
+}) {
+  try {
+    const key = "options_decisions";
+    const row = await prisma.agentConfig.findUnique({ where: { key } });
+    let arr: unknown[] = [];
+    try { arr = JSON.parse(row?.value || "[]"); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
+    arr.unshift({ ts: new Date().toISOString(), ...d });
+    const value = JSON.stringify(arr.slice(0, 40));
+    await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
+  } catch { /* best-effort — never block trading on telemetry */ }
+}
+
 async function aiConfirmOptionsSetup(
   sig: SignalResult,
   ivRank: number,
@@ -259,9 +275,18 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     // Model may prepend prose before bare JSON — extract the outermost object
     const braceMatch = jsonText.match(/\{[\s\S]*\}/);
     if (braceMatch) jsonText = braceMatch[0];
-    return JSON.parse(jsonText);
+    const verdict = JSON.parse(jsonText) as { agree: boolean; conviction: string; reasoning: string };
+    await recordOptionsDecision({
+      sym: sig.symbol, direction: sig.direction, conviction: verdict.conviction || "?",
+      agree: !!verdict.agree, ivRank, maxRisk, reason: verdict.reasoning || "",
+    });
+    return verdict;
   } catch (err) {
     console.error("[options-agent] AI error:", err);
+    await recordOptionsDecision({
+      sym: sig.symbol, direction: sig.direction, conviction: "C", agree: false,
+      ivRank, maxRisk, reason: "AI error — skipping",
+    });
     return { agree: false, conviction: "C", reasoning: "AI error — skipping" };
   }
 }
@@ -704,16 +729,20 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
 
 // Status for the /options page: config + scoreboard + last-run reasoning (mirrors getKrakenStatus).
 export async function getOptionsStatus() {
-  const rows = await prisma.agentConfig.findMany({ where: { key: { in: [...CONFIG_KEYS, "options_last_run", "options_cron_last_run"] } } });
+  const rows = await prisma.agentConfig.findMany({ where: { key: { in: [...CONFIG_KEYS, "options_last_run", "options_cron_last_run", "options_decisions"] } } });
   const config: Record<string, string> = {};
   for (const r of rows) config[r.key] = r.value;
   let lastRun: unknown = null;
   try { if (config.options_last_run) lastRun = JSON.parse(config.options_last_run); } catch { /* ignore */ }
+  let decisions: unknown[] = [];
+  try { const d = JSON.parse(config.options_decisions || "[]"); if (Array.isArray(d)) decisions = d; } catch { /* ignore */ }
+  delete config.options_decisions; // don't double-ship the raw JSON string
   return {
     enabled: config.options_enabled === "paper" || config.options_enabled === "live",
     mode: config.options_enabled === "live" ? "live" : "paper",
     config,
     scoreboard: await getOptionsScoreboard(),
     lastRun,
+    decisions,
   };
 }

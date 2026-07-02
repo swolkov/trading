@@ -255,14 +255,16 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
     if (!isRefresh) setLoading(true);
 
     try {
-      // Fetch bars + positions/trades in parallel
-      const [barsRes, posRes] = await Promise.all([
+      // Fetch bars + positions/trades + engine decisions in parallel
+      const [barsRes, posRes, decRes] = await Promise.all([
         fetch(`/api/futures/bars?symbol=${symbol}&interval=${tf.interval}`),
         fetch("/api/futures/positions"),
+        fetch("/api/futures/decisions"),
       ]);
 
       const barsJson = await barsRes.json();
       const posData = await posRes.json().catch(() => null);
+      const decData = await decRes.json().catch(() => null);
 
       // API now returns { bars, overlays, meta } for intraday, or { bars, meta } for daily
       const bars: Bar[] = Array.isArray(barsJson) ? barsJson : (barsJson.bars || []);
@@ -366,10 +368,29 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         }
       }
 
-      // ── TRADE MARKERS ──
-      if (posData?.activity && tf.intraday) {
-        const trades: TradeMarker[] = posData.activity;
+      // ── TRADE + AI-DECISION MARKERS ──
+      if (tf.intraday) {
+        const trades: TradeMarker[] = posData?.activity || [];
         const markers: SeriesMarker<Time>[] = [];
+        const barInterval = tf.interval === "5m" ? 300 : tf.interval === "15m" ? 900 : tf.interval === "1m" ? 60 : 3600;
+        const firstBarT = candleData[0]?.time as unknown as number;
+        const lastBarT = candleData[candleData.length - 1]?.time as unknown as number;
+
+        // Engine decisions (AI confirmed/killed setups) for the chart's mode — shows the thinking, not just the trades
+        const chartMode = (viewMode === "live" ? "live" : "demo") as "live" | "demo";
+        const decisions: { ts: string; sym: string; direction: string; verdict: string; confidence: number }[] = decData?.[chartMode] || [];
+        for (const d of decisions) {
+          if (!matchesSymbol(d.sym, symbol) || !d.ts) continue;
+          const t = (Math.floor(new Date(d.ts).getTime() / 1000 / barInterval) * barInterval) as Time;
+          if ((t as unknown as number) < firstBarT || (t as unknown as number) > lastBarT) continue;
+          if (d.verdict === "confirmed") {
+            markers.push({ time: t, position: "aboveBar", color: "#10b981", shape: "square", text: `AI✓ ${d.confidence}%` });
+          } else if (d.verdict === "rejected") {
+            markers.push({ time: t, position: "aboveBar", color: "#6b7280", shape: "square", text: `AI✗ ${d.direction === "long" ? "L" : "S"} ${d.confidence}%` });
+          } else if (d.verdict === "pattern_blocked") {
+            markers.push({ time: t, position: "aboveBar", color: "#f59e0b", shape: "square", text: "BLK" });
+          }
+        }
 
         for (const trade of trades) {
           if (!matchesSymbol(trade.symbol, symbol)) continue;
@@ -377,13 +398,10 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
 
           const tradeTime = Math.floor(new Date(trade.time).getTime() / 1000);
           // Snap to nearest bar time
-          const barInterval = tf.interval === "5m" ? 300 : tf.interval === "15m" ? 900 : 3600;
           const snappedTime = (Math.floor(tradeTime / barInterval) * barInterval) as Time;
 
           // Check if this time is in our bar range
-          const firstBar = candleData[0]?.time as unknown as number;
-          const lastBar = candleData[candleData.length - 1]?.time as unknown as number;
-          if ((snappedTime as unknown as number) < firstBar || (snappedTime as unknown as number) > lastBar) continue;
+          if ((snappedTime as unknown as number) < firstBarT || (snappedTime as unknown as number) > lastBarT) continue;
 
           const isEntry = trade.action.includes("long") || trade.action.includes("short");
           const isWin = trade.pnl != null && trade.pnl > 0;
@@ -421,12 +439,8 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       }
 
       // ── POSITION PRICE LINES ──
-      // Clear old lines
-      for (const line of priceLinesRef.current) {
-        try { candleRef.current!.removePriceLine(line); } catch {}
-      }
-      priceLinesRef.current = [];
-
+      // Append to the same list — clearing again here would wipe the PDH/PDL/PDC/OR key
+      // levels that were just drawn above (that double-clear bug hid key levels entirely).
       if (posData?.positions) {
         const pos: Position | undefined = posData.positions.find(
           (p: Position) => matchesSymbol(p.symbol, symbol)
