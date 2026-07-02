@@ -19,7 +19,8 @@ interface RoundTrip {
 
 export async function GET() {
   try {
-    const [orders, positions] = await Promise.all([getOrders("all"), getPositions()]);
+    // Alpaca is live-only — win rate / daily P&L must come from the real account
+    const [orders, positions] = await Promise.all([getOrders("all", "live"), getPositions("live")]);
     // Fresh start: new directional strategy (after May 11 market close)
     const freshStart = new Date("2026-05-11T21:00:00Z");
     const filled = orders.filter((o) =>

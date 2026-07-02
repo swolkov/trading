@@ -4,7 +4,8 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") || "FILL";
-    const activities = await getAccountActivities(type);
+    // Alpaca is live-only — no paper fills in the trade history
+    const activities = await getAccountActivities(type, "live");
     return Response.json(activities);
   } catch (error) {
     console.error("[/api/activities]", error);

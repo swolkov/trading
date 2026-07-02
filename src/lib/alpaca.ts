@@ -283,10 +283,13 @@ export interface PortfolioHistory {
 
 export async function getPortfolioHistory(
   period: string = "1M",
-  timeframe: string = "1D"
+  timeframe: string = "1D",
+  modeOverride?: TradingMode
 ): Promise<PortfolioHistory> {
   return alpacaFetch(
-    `${BASE_URL}/v2/account/portfolio/history?period=${period}&timeframe=${timeframe}&intraday_reporting=market_hours&pnl_reset=per_day`
+    `${BASE_URL}/v2/account/portfolio/history?period=${period}&timeframe=${timeframe}&intraday_reporting=market_hours&pnl_reset=per_day`,
+    undefined,
+    modeOverride
   );
 }
 
@@ -308,10 +311,13 @@ export interface AccountActivity {
 }
 
 export async function getAccountActivities(
-  activityType: string = "FILL"
+  activityType: string = "FILL",
+  modeOverride?: TradingMode
 ): Promise<AccountActivity[]> {
   return alpacaFetch(
-    `${BASE_URL}/v2/account/activities/${activityType}?direction=desc&page_size=100`
+    `${BASE_URL}/v2/account/activities/${activityType}?direction=desc&page_size=100`,
+    undefined,
+    modeOverride
   );
 }
 

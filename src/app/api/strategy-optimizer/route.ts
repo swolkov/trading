@@ -34,15 +34,18 @@ interface OptimalPlaybook {
 
 export async function GET() {
   try {
-    // Get all trades
+    // Alpaca LIVE trades only (this page is Alpaca-scoped). The table has no mode
+    // column: "opt_" = live options agent, "live_" = live FUTURES (different page),
+    // unprefixed stock_/crypto_ rows = retired paper — all excluded.
     const allTrades = await prisma.autoTradeLog.findMany({
+      where: { OR: [{ action: { startsWith: "opt_" } }, { symbol: { startsWith: "OPT:" } }] },
       orderBy: { createdAt: "desc" },
     });
 
     // Get current positions for context
     let positionCount = 0;
     try {
-      const positions = await getPositions();
+      const positions = await getPositions("live");
       positionCount = positions.length;
     } catch { /* ignore */ }
 

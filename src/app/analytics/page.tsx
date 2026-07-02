@@ -228,14 +228,14 @@ export default function AnalyticsPage() {
 
   return (
     <div className="space-y-6">
-      <div><h1 className="text-xl font-bold tracking-tight">Analytics</h1><p className="text-[11px] text-muted-foreground/50">Aggregate P<h2 className="text-2xl font-bold tracking-tight">P&L Analytics</h2>L analysis and performance breakdown</p></div>
+      <div><h1 className="text-xl font-bold tracking-tight">P&L Analytics</h1><p className="text-[11px] text-muted-foreground/50">Alpaca live account — aggregate P&L analysis and performance breakdown</p></div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-muted-foreground">
-              Total Equity
+              Alpaca Equity
             </CardTitle>
           </CardHeader>
           <CardContent>

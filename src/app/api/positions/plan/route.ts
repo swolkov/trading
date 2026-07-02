@@ -36,7 +36,7 @@ interface PositionPlan {
 
 export async function GET() {
   try {
-    const positions = await getPositions();
+    const positions = await getPositions("live");
     const optPositions = positions.filter((p) => p.symbol.length > 10);
     const plans: PositionPlan[] = [];
 

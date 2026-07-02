@@ -73,6 +73,9 @@ export function TopBar() {
   // Check if live trading is active for visual styling
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
+  // All-accounts equity: Alpaca live + Kraken join futures below (matches the dashboard total)
+  const { data: alpacaAcct } = useSWR<{ equity?: string; last_equity?: string }>("/api/account", fetcher, { refreshInterval: 30000 });
+  const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
 
   if (futuresLoading) {
     return (
@@ -95,12 +98,19 @@ export function TopBar() {
   const tradePnl = futuresData?.todayTradesPnl;
   const unrealizedPnl = futuresData?.account?.unrealizedPnl || 0;
   const balanceDelta = (sod != null && balance) ? balance - sod : null;
-  const dailyPnl = tradePnl != null
+  const futuresDailyPnl = tradePnl != null
     ? tradePnl + unrealizedPnl
     : (balanceDelta ?? 0);
-  const dailyPct = sod && sod > 0 ? dailyPnl / sod : (balance > 0 ? dailyPnl / balance : 0);
   const hasFutures = futuresData?.connected && futuresData.account;
-  const equity = futuresEquity;
+  // True total across all 3 accounts (futures + Alpaca live + Kraken) — matches the dashboard
+  const alpacaEquity = alpacaAcct?.equity ? parseFloat(alpacaAcct.equity) || 0 : 0;
+  const alpacaDailyPnl = alpacaAcct?.equity && alpacaAcct?.last_equity
+    ? (parseFloat(alpacaAcct.equity) || 0) - (parseFloat(alpacaAcct.last_equity) || 0)
+    : 0;
+  const krakenEquity = krk?.connected ? krk.totalValue || 0 : 0;
+  const equity = futuresEquity + alpacaEquity + krakenEquity;
+  const dailyPnl = futuresDailyPnl + alpacaDailyPnl;
+  const dailyPct = equity - dailyPnl > 0 ? dailyPnl / (equity - dailyPnl) : 0;
 
   return (
     <header className={`h-11 border-b flex items-center transition-colors relative ${
