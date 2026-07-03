@@ -12,6 +12,49 @@ function matchSymbol(contractName: string): string | null {
   return null;
 }
 
+// RESILIENCE: surface the engine's OWN open positions from its persisted record when the Tradovate
+// snapshot is unavailable (auth rate-limited after a restart, or a transient API failure). The engine
+// writes futures_positions_{live,demo} on every entry, and broker stops protect the trade regardless —
+// so the dashboard should never hide a real open position just because the read-side API hiccupped.
+async function enginePositionsFallback(viewMode: string) {
+  try {
+    const blobKey = viewMode === "live" ? "futures_positions_live" : "futures_positions_demo";
+    const blobRaw = (await prisma.agentConfig.findUnique({ where: { key: blobKey } }))?.value;
+    const blob = blobRaw ? JSON.parse(blobRaw) as Record<string, {
+      symbol: string; direction: "long" | "short"; quantity: number; entryPrice: number;
+      stopLoss: number; target: number; entryTime: number; entrySetupType?: string; contractId?: number;
+    }> : {};
+    const enginePos = Object.values(blob);
+    if (enginePos.length === 0) return [];
+    const syms = [...new Set(enginePos.map((p) => p.symbol))];
+    const q = await getFuturesQuotes(syms, viewMode as "live").catch(() => ({} as Record<string, { price: number }>));
+    return enginePos.map((p) => {
+      const cur = q[p.symbol]?.price || p.entryPrice;
+      const mult = TRADOVATE_CONTRACTS[p.symbol]?.multiplier || 5;
+      const diff = p.direction === "long" ? cur - p.entryPrice : p.entryPrice - cur;
+      return {
+        id: p.contractId ?? 0,
+        contractName: p.symbol,
+        symbol: p.symbol,
+        direction: p.direction,
+        quantity: p.quantity,
+        entryPrice: p.entryPrice,
+        currentPrice: cur,
+        unrealizedPnl: diff * mult * p.quantity,
+        stopLoss: p.stopLoss ?? null,
+        target: p.target ?? null,
+        pctToStop: p.stopLoss ? ((cur - p.stopLoss) / cur * 100) * (p.direction === "long" ? 1 : -1) : null,
+        pctToTarget: p.target ? ((p.target - cur) / cur * 100) * (p.direction === "long" ? 1 : -1) : null,
+        multiplier: mult,
+        setup: p.entrySetupType || null,
+        aiScore: null,
+        openedAt: new Date(p.entryTime).toISOString(),
+        source: "engine" as const,
+      };
+    });
+  } catch { return []; }
+}
+
 export async function GET() {
   try {
     // Dashboard shows data from whichever account the VIEW mode points to.
@@ -90,7 +133,9 @@ export async function GET() {
       return Response.json({
         connected: false,
         account: null,
-        positions: [],
+        // Auth failed (usually a transient rate-limit) — still show the engine's own open positions
+        // so the dashboard never goes blind on a real trade.
+        positions: await enginePositionsFallback(viewMode),
         orders: [],
         activity,
         engineStatus,
@@ -101,11 +146,14 @@ export async function GET() {
     }
 
     // Fetch positions, account, orders, and fills in parallel — using view mode
+    // RESILIENT: one failing Tradovate call (e.g. the account snapshot getting rate-limited right
+    // after an engine restart) must NOT blank the whole dashboard. Catch each independently so a
+    // transient failure on one degrades gracefully instead of hiding real open positions.
     const [positions, accountSummary, openOrders, fills] = await Promise.all([
-      getTradovatePositions(viewMode),
-      getTradovateAccountSummary(viewMode),
-      getOpenOrders(viewMode),
-      getTradovateFills(viewMode),
+      getTradovatePositions(viewMode).catch(() => [] as Awaited<ReturnType<typeof getTradovatePositions>>),
+      getTradovateAccountSummary(viewMode).catch(() => null),
+      getOpenOrders(viewMode).catch(() => [] as Awaited<ReturnType<typeof getOpenOrders>>),
+      getTradovateFills(viewMode).catch(() => [] as Awaited<ReturnType<typeof getTradovateFills>>),
     ]);
 
     // RECONCILE against fills before showing anything. Tradovate's position snapshot can lag for
@@ -215,6 +263,18 @@ export async function GET() {
         openedAt: tradeLog?.createdAt?.toISOString() || pos.timestamp,
       };
     });
+
+    // RESILIENCE FALLBACK: if Tradovate's snapshot returned no positions (rate-limited / transient),
+    // surface the engine's OWN position record so the dashboard never hides a real open trade. The
+    // engine writes futures_positions_{live,demo} on every entry; broker stops protect it regardless.
+    let displayPositions: Array<(typeof enrichedPositions)[number] & { source?: "engine" }> = enrichedPositions;
+    if (displayPositions.length === 0) {
+      const fromEngine = await enginePositionsFallback(viewMode);
+      if (fromEngine.length > 0) {
+        displayPositions = fromEngine;
+        console.warn(`[/api/futures/positions] Tradovate snapshot empty — showing ${fromEngine.length} position(s) from engine record (${viewMode})`);
+      }
+    }
 
     // Map fills with contract names — resolve via positions + Tradovate API
     const contractMap: Record<number, string> = {};
@@ -330,8 +390,8 @@ export async function GET() {
           const riskPct = parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || (isDemoView ? 8 : 5);
           const simCfg = parseFloat(cfg[`${kp}_simulated_equity`]) || 0;
           const simEquity = isDemoView
-            ? (accountSummary.netLiq || accountSummary.balance || 50000)
-            : (simCfg > 0 ? simCfg : (accountSummary.netLiq || accountSummary.balance || 1000));
+            ? (accountSummary?.netLiq || accountSummary?.balance || 50000)
+            : (simCfg > 0 ? simCfg : (accountSummary?.netLiq || accountSummary?.balance || 1000));
           const maxTrades = isDemoView ? 20 : (parseInt(cfg[`${kp}_max_trades_per_day`]) || 1);
           return { dailyLossLimit: simEquity * (dailyLossPct / 100), maxTradesPerDay: maxTrades, riskPerTrade: simEquity * (riskPct / 100), simEquity, todayTradeCount: todayTrades };
         } catch { return null; }
@@ -365,7 +425,7 @@ export async function GET() {
         } catch {}
         try {
           const snap = await prisma.agentConfig.findUnique({ where: { key: `daily_balance_${todayKey}` } });
-          if (snap?.value) { const v = parseFloat(snap.value); if (!isNaN(v) && v !== accountSummary.balance) return v; }
+          if (snap?.value) { const v = parseFloat(snap.value); if (!isNaN(v) && v !== accountSummary?.balance) return v; }
         } catch {}
         if (accountSummary?.balance != null && accountSummary?.realizedPnl != null && accountSummary.realizedPnl !== 0) {
           return accountSummary.balance - accountSummary.realizedPnl;
@@ -405,15 +465,15 @@ export async function GET() {
     return Response.json({
       connected: true,
       viewMode,
-      account: {
+      account: accountSummary ? {
         balance: accountSummary.balance,
         netLiq: accountSummary.netLiq,
         realizedPnl: accountSummary.realizedPnl,
         unrealizedPnl: accountSummary.unrealizedPnl,
         marginUsed: accountSummary.marginUsed,
-      },
+      } : null,
       riskMetrics,
-      positions: enrichedPositions,
+      positions: displayPositions,
       orders: openOrders.map((o) => ({
         id: o.id,
         action: o.action,
