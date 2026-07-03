@@ -162,6 +162,8 @@ model ShadowTrade {
   exitPrice    Float?
   rMultiple    Float?    // realized R of the counterfactual (win = +target/stop dist, loss = -1)
   exitReason   String?   // "target" | "stop" | "time_exit" | "eod"
+  contracts    Int?      // how many contracts the engine would have sized at this account/risk
+  dollarPnl    Float?    // counterfactual $ P&L = rMultiple × per-contract-risk × contracts
   resolvedAt   DateTime?
 
   @@index([mode, status])

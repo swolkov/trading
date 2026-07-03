@@ -12,6 +12,35 @@ interface Decision {
   verdict: "confirmed" | "rejected" | "pattern_blocked" | "no_verdict";
   aiConfidence?: number;
   reason: string;
+  // Counterfactual outcome of a BLOCKED setup (attached server-side from the shadow tracker).
+  shadow?: {
+    status: "open" | "win" | "loss" | "expired";
+    rMultiple: number | null;
+    dollarPnl: number | null;
+    contracts: number | null;
+    exitReason: string | null;
+  };
+}
+
+function fmtMoney(n: number): string {
+  const s = Math.abs(n) >= 100 ? Math.round(Math.abs(n)).toString() : Math.abs(n).toFixed(0);
+  return `${n >= 0 ? "+" : "−"}$${s}`;
+}
+
+// The little "would've made/lost $X" tag next to a killed setup.
+function ShadowTag({ shadow }: { shadow: NonNullable<Decision["shadow"]> }) {
+  if (shadow.status === "open" || shadow.dollarPnl == null) {
+    return <span className="shrink-0 text-[9px] font-semibold text-muted-foreground/40 tabular-nums" title="Marking to market — resolves within a few bars">tracking…</span>;
+  }
+  const won = shadow.dollarPnl > 0; // won = the blocked trade WOULD have profited (a missed winner)
+  return (
+    <span
+      className={`shrink-0 text-[10px] font-bold tabular-nums ${won ? "text-red-400" : "text-emerald-400"}`}
+      title={won ? "Would have PROFITED — the veto cost this" : "Would have LOST — the veto saved this"}
+    >
+      {fmtMoney(shadow.dollarPnl)}
+    </span>
+  );
 }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
@@ -74,6 +103,7 @@ export function EngineActivity() {
                   <span className="text-muted-foreground/60"> · {d.setupType?.replace(/_/g, " ")} · {d.confidence}%{d.aiConfidence ? ` (AI ${d.aiConfidence}%)` : ""}</span>
                   <p className="text-muted-foreground/55 truncate" title={d.reason}>{d.reason}</p>
                 </div>
+                {d.shadow && <ShadowTag shadow={d.shadow} />}
                 <span className="shrink-0 text-muted-foreground/40 tabular-nums">{timeAgo(d.ts)}</span>
               </div>
             );

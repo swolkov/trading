@@ -27,6 +27,8 @@ export async function GET() {
         blockReason: r.blockReason,
         status: r.status,
         rMultiple: r.rMultiple,
+        dollarPnl: r.dollarPnl,
+        contracts: r.contracts,
         exitReason: r.exitReason,
         reason: r.reason,
       })),

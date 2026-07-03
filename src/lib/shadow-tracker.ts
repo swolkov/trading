@@ -50,6 +50,32 @@ interface Resolution {
   exitReason: "target" | "stop" | "time_exit" | "eod";
 }
 
+// $ per point for each contract, so we can translate R into real dollars.
+const POINT_VALUE: Record<string, number> = { MGC: 10, GC: 100, MNQ: 2, MES: 5, NQ: 20, ES: 50, YM: 5, MYM: 0.5 };
+
+// Per-mode sizing the engine would have used (mirrors futures-realtime.ts risk sizing).
+function modeSizing(mode: string): { riskPct: number; maxContracts: number } {
+  return mode === "live" ? { riskPct: 15, maxContracts: 3 } : { riskPct: 7, maxContracts: 10 };
+}
+
+/**
+ * Translate a resolved counterfactual into real dollars using the same risk-based sizing the
+ * engine applies: contracts = min(maxContracts, floor(riskTarget / per-contract-stop-risk)).
+ */
+export function shadowDollars(
+  t: { symbol: string; entry: number; stop: number; rMultiple: number },
+  mode: string,
+  equity: number,
+): { contracts: number; dollarPnl: number } {
+  const { riskPct, maxContracts } = modeSizing(mode);
+  const pv = POINT_VALUE[t.symbol] ?? 10;
+  const perContractRisk = Math.abs(t.entry - t.stop) * pv;
+  if (perContractRisk <= 0 || equity <= 0) return { contracts: 1, dollarPnl: 0 };
+  const riskTarget = equity * (riskPct / 100);
+  const contracts = Math.max(1, Math.min(maxContracts, Math.floor(riskTarget / perContractRisk)));
+  return { contracts, dollarPnl: t.rMultiple * perContractRisk * contracts };
+}
+
 /**
  * Walk post-signal bars and resolve a single counterfactual trade.
  * Returns null if there isn't enough data yet (leave it open for the next pass).
@@ -121,6 +147,16 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
     take: 200,
   });
 
+  // Fetch the live account equity once so we can translate R into real dollars. Demo uses its
+  // simulated equity. Best-effort — if the balance call fails we fall back to a sane default.
+  let liveEquity = 1104;
+  try {
+    const { getTradovateAccountSummary } = await import("@/lib/tradovate");
+    const s = await getTradovateAccountSummary("live");
+    if (s?.netLiq > 0) liveEquity = s.netLiq;
+  } catch { /* keep fallback */ }
+  const equityFor = (mode: string) => (mode === "live" ? liveEquity : 59_000);
+
   // Group by symbol+mode so we fetch each symbol's bars once.
   const byKey = new Map<string, typeof open>();
   for (const t of open) {
@@ -160,6 +196,11 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
         nowMs,
       );
       if (!res) continue;
+      const { contracts, dollarPnl } = shadowDollars(
+        { symbol, entry: t.entry, stop: t.stop, rMultiple: res.rMultiple },
+        mode,
+        equityFor(mode),
+      );
       await prisma.shadowTrade.update({
         where: { id: t.id },
         data: {
@@ -167,6 +208,8 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
           exitPrice: res.exitPrice,
           rMultiple: res.rMultiple,
           exitReason: res.exitReason,
+          contracts,
+          dollarPnl,
           resolvedAt: new Date(),
         },
       }).catch(() => {});
@@ -186,6 +229,7 @@ export interface ShadowScoreboard {
   losses: number;
   winRate: number;      // over resolved with a directional outcome
   netR: number;         // sum of rMultiple over resolved
+  netDollars: number;   // sum of counterfactual $ P&L over resolved (real sizing)
   avgR: number;
   // Interpretation for the UI: net-R of the setups the veto BLOCKED.
   // netR < 0 → veto is saving money (good). netR > 0 → veto is costing money.
@@ -198,6 +242,7 @@ export async function getShadowScoreboard(mode: string): Promise<ShadowScoreboar
   const resolved = rows.filter((r) => r.status !== "open");
   const open = rows.length - resolved.length;
   const netR = resolved.reduce((s, r) => s + (r.rMultiple ?? 0), 0);
+  const netDollars = resolved.reduce((s, r) => s + (r.dollarPnl ?? 0), 0);
   // Win-rate is measured over DECISIVE exits only (hit target vs hit stop). Time-exits and
   // expiries still count toward net-R but aren't a clean win/loss, so they're excluded from WR.
   const wins = resolved.filter((r) => r.exitReason === "target").length;
@@ -215,6 +260,7 @@ export async function getShadowScoreboard(mode: string): Promise<ShadowScoreboar
     losses,
     winRate: decided > 0 ? wins / decided : 0,
     netR,
+    netDollars,
     avgR: resolved.length > 0 ? netR / resolved.length : 0,
     verdict,
   };

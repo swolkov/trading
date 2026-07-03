@@ -10,6 +10,7 @@ interface Board {
   losses: number;
   winRate: number;
   netR: number;
+  netDollars: number;
   avgR: number;
   verdict: "veto_helping" | "veto_costing" | "inconclusive";
 }
@@ -21,6 +22,7 @@ interface Recent {
   setupType: string;
   status: string;
   rMultiple: number | null;
+  dollarPnl: number | null;
   exitReason: string | null;
 }
 
@@ -46,6 +48,10 @@ const VERDICT: Record<Board["verdict"], { label: string; cls: string; blurb: str
 
 function fmtR(r: number): string {
   return `${r >= 0 ? "+" : ""}${r.toFixed(1)}R`;
+}
+
+function fmtMoney(n: number): string {
+  return `${n >= 0 ? "+" : "−"}$${Math.round(Math.abs(n))}`;
 }
 
 // AI-Veto Shadow Scoreboard: marks every BLOCKED setup to real price and asks whether
@@ -75,9 +81,9 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
       </div>
 
       <div className="grid grid-cols-4 gap-2 text-center">
+        <Stat label="Net $ (blocked)" value={fmtMoney(board.netDollars)} cls={board.netDollars < 0 ? "text-emerald-400" : board.netDollars > 0 ? "text-red-400" : ""} />
         <Stat label="Net R (blocked)" value={fmtR(board.netR)} cls={board.netR < 0 ? "text-emerald-400" : board.netR > 0 ? "text-red-400" : ""} />
         <Stat label="Would-be WR" value={board.wins + board.losses > 0 ? `${Math.round(board.winRate * 100)}%` : "—"} />
-        <Stat label="Target / Stop" value={`${board.wins}W / ${board.losses}L`} />
         <Stat label="Resolved / Open" value={`${board.resolved} / ${board.open}`} />
       </div>
 
@@ -86,14 +92,14 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
       {recent.length > 0 && (
         <div className="space-y-1 pt-1 border-t border-border/50">
           {recent.map((r, i) => {
-            const won = (r.rMultiple ?? 0) > 0;
+            const won = (r.dollarPnl ?? r.rMultiple ?? 0) > 0;
             return (
               <div key={i} className="flex items-center gap-2 text-[10px]">
-                <span className={`shrink-0 w-9 font-bold tabular-nums ${won ? "text-red-400" : "text-emerald-400"}`} title={won ? "would have WON — a missed trade" : "would have LOST — a good veto"}>
-                  {fmtR(r.rMultiple ?? 0)}
+                <span className={`shrink-0 w-12 font-bold tabular-nums ${won ? "text-red-400" : "text-emerald-400"}`} title={won ? "would have PROFITED — the veto cost this" : "would have LOST — the veto saved this"}>
+                  {r.dollarPnl != null ? fmtMoney(r.dollarPnl) : fmtR(r.rMultiple ?? 0)}
                 </span>
                 <span className="font-semibold">{r.symbol} {r.direction?.toUpperCase()}</span>
-                <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {r.exitReason}</span>
+                <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {fmtR(r.rMultiple ?? 0)} · {r.exitReason}</span>
               </div>
             );
           })}
