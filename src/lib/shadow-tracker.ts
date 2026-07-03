@@ -21,6 +21,7 @@
  */
 
 import { prisma } from "@/lib/db";
+import { getDatabentoIntradayBars } from "@/lib/databento";
 import { getFuturesIntradayBars } from "@/lib/futures-data";
 
 // Mirror the engine (futures-realtime.ts): time-exit a trade that hasn't reached +1R
@@ -136,14 +137,21 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
     const [mode, symbol] = k.split("|");
     let bars: Bar[] = [];
     try {
-      // Gold bars are market-wide — no account/mode override needed (Tradovate → Yahoo fallback).
-      const raw = await getFuturesIntradayBars(symbol, "5m", "5d");
+      // Databento FIRST — it's the same real-time source the engine trades on. The Tradovate/Yahoo
+      // path (getFuturesIntradayBars) 404s on gold and Yahoo's GC=F 5m feed runs hours stale, which
+      // silently expired every trade at 0R. Databento (present on Vercel) covers the signal window.
+      let raw = await getDatabentoIntradayBars(symbol, "5m", "5d").catch(() => []);
+      if (raw.length === 0) raw = await getFuturesIntradayBars(symbol, "5m", "5d").catch(() => []);
       bars = raw.map((b) => ({ tMs: toMs(b.t), h: b.h, l: b.l, c: b.c }));
     } catch (err) {
       details.push(`${symbol}: bar fetch failed (${err instanceof Error ? err.message : err})`);
       continue;
     }
     if (bars.length === 0) { details.push(`${symbol}: no bars`); continue; }
+    // Guard against a stale feed silently expiring everything: if the newest bar is hours old,
+    // skip this pass rather than mark trades to dead data. They stay open for a later, healthy pass.
+    const newestAgeMin = (nowMs - Math.max(...bars.map((b) => b.tMs))) / 60_000;
+    if (newestAgeMin > 90) { details.push(`${symbol}: freshest bar ${Math.round(newestAgeMin)}min stale — skipping`); continue; }
 
     for (const t of trades) {
       const res = resolveAgainstBars(
