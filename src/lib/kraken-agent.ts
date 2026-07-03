@@ -13,12 +13,14 @@ import { sendNotification } from "./notifications";
 interface KrakenConfig {
   enabled: boolean;
   coins: string[];
-  perCoinUsd: number;    // target allocation per coin when its trend is up
+  perCoinUsd: number;    // target allocation per coin when its trend is up (trend mode)
   startCapital: number;  // deposited capital (for honest balance-delta P&L)
   validateOnly: boolean;
+  mode: string;          // "trend" (50-day follower) | "dca" (daily accumulate & hold)
+  dcaUsd: number;        // per-coin $ bought each day in DCA mode
 }
 
-const KEYS = ["kraken_enabled", "kraken_coins", "kraken_per_coin_usd", "kraken_start_capital", "kraken_validate_only"];
+const KEYS = ["kraken_enabled", "kraken_coins", "kraken_per_coin_usd", "kraken_start_capital", "kraken_validate_only", "kraken_mode", "kraken_dca_usd"];
 const MIN_HOLD_USD = 5;    // holdings above this = "in a position" (ignores dust)
 const MIN_ORDER_USD = 10;  // don't place sub-$10 orders
 
@@ -32,6 +34,8 @@ async function loadConfig(): Promise<KrakenConfig> {
     perCoinUsd: parseFloat(c.kraken_per_coin_usd) || 250,
     startCapital: parseFloat(c.kraken_start_capital) || 500,
     validateOnly: c.kraken_validate_only !== "false", // default TRUE — safe until explicitly armed
+    mode: (c.kraken_mode || "trend").toLowerCase(),
+    dcaUsd: parseFloat(c.kraken_dca_usd) || 10,
   };
 }
 
@@ -69,9 +73,41 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
   let bal: Record<string, number> = {};
   try { bal = await getKrakenBalance(); } catch (e) { details.push(`balance error: ${e}`); return res; }
   let usd = bal.ZUSD ?? bal.USD ?? 0;
-  details.push(`USD cash: $${usd.toFixed(2)}${cfg.validateOnly ? " | VALIDATE-ONLY (no real orders)" : ""}`);
+  details.push(`USD cash: $${usd.toFixed(2)}${cfg.validateOnly ? " | VALIDATE-ONLY (no real orders)" : ""} | mode: ${cfg.mode}`);
 
-  for (const coin of cfg.coins) {
+  // ── DCA MODE: buy a fixed $ of each coin once per UTC day and HOLD. No trend gate, no selling.
+  // Accumulates daily until the deposited cash runs out (then refund to keep going). The 30-min cron
+  // can fire many times a day; the per-coin date guard ensures at most ONE buy per coin per day.
+  if (cfg.mode === "dca") {
+    const today = new Date().toISOString().slice(0, 10);
+    const lastRaw = (await prisma.agentConfig.findUnique({ where: { key: "kraken_dca_last" } }))?.value;
+    const last: Record<string, string> = lastRaw ? (() => { try { return JSON.parse(lastRaw); } catch { return {}; } })() : {};
+    const alloc = Math.max(cfg.dcaUsd, MIN_ORDER_USD);
+    for (const coin of cfg.coins) {
+      if (last[coin] === today) { details.push(`${coin}: already bought today — next daily buy tomorrow`); continue; }
+      if (usd < alloc) { details.push(`${coin}: only $${usd.toFixed(2)} cash left — DCA paused, refund Kraken to keep accumulating`); continue; }
+      let price = byCoin[coin]?.price ?? 0;
+      try { price = await getKrakenPrice(coin); } catch { /* fall back to scan price */ }
+      if (price <= 0) { details.push(`${coin}: no price — skip`); continue; }
+      if (dry) { details.push(`[DRY] ${coin}: would DCA-BUY $${alloc.toFixed(0)}`); continue; }
+      try {
+        const order = await krakenBuyMarket(coin, alloc, price, cfg.validateOnly);
+        details.push(`${coin}: ${cfg.validateOnly ? "VALIDATED DCA buy" : "DCA BOUGHT"} $${alloc.toFixed(0)} → ${order.volume} @ $${price.toFixed(2)}`);
+        if (!cfg.validateOnly) {
+          usd -= alloc; res.buys++; last[coin] = today;
+          await logTrade(coin, "kraken_buy", alloc, price, `Daily DCA: bought $${alloc.toFixed(0)} = ${order.volume} @ $${price.toFixed(2)} (accumulate & hold).`, order.txid?.[0]);
+          await logDecision("kraken-dca", "ENTRY", `KRK:${coin}`, `Daily DCA — bought $${alloc.toFixed(0)}`, 3).catch(() => {});
+        }
+      } catch (e) { details.push(`${coin}: DCA buy error — ${e}`); }
+    }
+    if (!cfg.validateOnly && !dry) {
+      await prisma.agentConfig.upsert({
+        where: { key: "kraken_dca_last" },
+        update: { value: JSON.stringify(last) },
+        create: { key: "kraken_dca_last", value: JSON.stringify(last) },
+      }).catch(() => {});
+    }
+  } else for (const coin of cfg.coins) {
     const row = byCoin[coin];
     if (!row) { details.push(`${coin}: no trend data — skip`); continue; }
     let price = row.price;
