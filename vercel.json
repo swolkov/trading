@@ -67,6 +67,10 @@
     {
       "path": "/api/cron/daily-research",
       "schedule": "30 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/shadow-resolve",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

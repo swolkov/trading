@@ -153,6 +153,9 @@ async function recordDecision(d: {
   sym: string; direction: string; setupType: string; confidence: number;
   verdict: "confirmed" | "rejected" | "pattern_blocked" | "no_verdict";
   aiConfidence?: number; reason: string;
+  // Would-be trade geometry — present on BLOCKED setups so the shadow tracker can
+  // mark the counterfactual to real price and score whether the veto helped.
+  entry?: number; stop?: number; target?: number;
 }) {
   try {
     const key = `engine_decisions_${IS_LIVE ? "live" : "demo"}`;
@@ -163,6 +166,33 @@ async function recordDecision(d: {
     const value = JSON.stringify(arr.slice(0, 40));
     await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
   } catch { /* best-effort — never block trading on telemetry */ }
+
+  // Shadow tracker: durably log every setup that was BLOCKED (would-be trade never fired)
+  // with its entry/stop/target so a resolver cron can score the counterfactual later.
+  // Confirmed setups actually trade — their real P&L lives in the fill/journal path.
+  if (d.verdict !== "confirmed" && Number.isFinite(d.entry) && Number.isFinite(d.stop) && Number.isFinite(d.target)) {
+    try {
+      await prisma.shadowTrade.create({
+        data: {
+          mode: IS_LIVE ? "live" : "demo",
+          symbol: d.sym, direction: d.direction, setupType: d.setupType,
+          blockReason: d.verdict, confidence: d.confidence, aiConfidence: d.aiConfidence ?? null,
+          reason: d.reason.slice(0, 500),
+          entry: d.entry!, stop: d.stop!, target: d.target!,
+        },
+      });
+    } catch { /* best-effort — telemetry must never block or crash trading */ }
+  }
+}
+
+// Compute would-be stop/target prices from the setup geometry (for the shadow tracker).
+function shadowGeometry(direction: string, price: number, stopDist: number, targetDist: number) {
+  const long = direction === "long";
+  return {
+    entry: price,
+    stop: long ? price - stopDist : price + stopDist,
+    target: long ? price + targetDist : price - targetDist,
+  };
 }
 
 // ── Tradovate Auth (for order execution) ────────────────
@@ -3112,7 +3142,7 @@ async function evaluateAndTrade(
     // of statistical losing.
     if (IS_LIVE && pred.matchCount >= 25 && pred.winRate < 0.25) {
       log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
-      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches` });
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} blocked by pattern memory (${(pred.winRate * 100).toFixed(0)}% WR)`);
       return;
     }
@@ -3132,7 +3162,7 @@ async function evaluateAndTrade(
   // a grader model is reachable again.
   if (IS_LIVE && ai.aiDown) {
     log(`  LIVE ENTRY PAUSED: AI gave no verdict (${ai.reasoning}) — skipping ${sym} ${direction} to protect real money. Auto-resumes next setup.`);
-    recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "no_verdict", reason: ai.reasoning });
+    recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "no_verdict", reason: ai.reasoning, ...shadowGeometry(direction, price, stopDist, targetDist) });
     feedLog("cooldown", `LIVE entry paused — AI no verdict (${ai.reasoning})`);
     notify(`LIVE entry paused: AI grader gave no verdict (${ai.reasoning}). Skipping ${sym} ${direction} to protect real money — auto-resumes when AI is back.`, "general");
     return;
@@ -3148,7 +3178,7 @@ async function evaluateAndTrade(
       feedLog("setup", `**${sym} ${setupType} ${direction}** ${finalScore}% — AI confirms: ${ai.reasoning}`);
     } else if (aiVetoEnabled) {
       log(`  AI REJECTS (${ai.confidence}%): ${ai.reasoning} — trade blocked`);
-      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", aiConfidence: ai.confidence, reason: ai.reasoning });
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", aiConfidence: ai.confidence, reason: ai.reasoning, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} ${technicalScore}% — AI rejected: ${ai.reasoning}`);
       return;
     } else {

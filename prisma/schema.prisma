@@ -138,6 +138,36 @@ model AgentConfig {
   value String
 }
 
+// ─── AI-Veto Shadow Tracker ───────────────────────────────────────────────────
+// Every setup the engine graded but did NOT trade (AI-rejected, pattern-blocked,
+// or no-verdict) is logged here with its would-be entry/stop/target, then marked
+// to real price afterward. Answers the unmeasured question: is the AI veto saving
+// money or leaving it on the table? Counterfactual — the trade never actually filled.
+model ShadowTrade {
+  id           String    @id @default(cuid())
+  mode         String    // "live" | "demo"
+  symbol       String
+  direction    String    // "long" | "short"
+  setupType    String
+  blockReason  String    // "rejected" | "pattern_blocked" | "no_verdict"
+  confidence   Float
+  aiConfidence Float?
+  reason       String    // grader's rationale (why it was blocked)
+  entry        Float
+  stop         Float
+  target       Float
+  createdAt    DateTime  @default(now())
+  // Resolution (filled in by the shadow-resolve cron)
+  status       String    @default("open") // "open" | "win" | "loss" | "expired"
+  exitPrice    Float?
+  rMultiple    Float?    // realized R of the counterfactual (win = +target/stop dist, loss = -1)
+  exitReason   String?   // "target" | "stop" | "time_exit" | "eod"
+  resolvedAt   DateTime?
+
+  @@index([mode, status])
+  @@index([createdAt])
+}
+
 model VaultDocument {
   id        Int      @id @default(autoincrement())
   path      String   @unique // e.g., "Brain/market-regime.md"

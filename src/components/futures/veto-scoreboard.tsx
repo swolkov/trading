@@ -1,0 +1,116 @@
+"use client";
+
+import useSWR from "swr";
+
+interface Board {
+  mode: string;
+  resolved: number;
+  open: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netR: number;
+  avgR: number;
+  verdict: "veto_helping" | "veto_costing" | "inconclusive";
+}
+interface Recent {
+  ts: string | null;
+  mode: string;
+  symbol: string;
+  direction: string;
+  setupType: string;
+  status: string;
+  rMultiple: number | null;
+  exitReason: string | null;
+}
+
+const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
+
+const VERDICT: Record<Board["verdict"], { label: string; cls: string; blurb: string }> = {
+  veto_helping: {
+    label: "VETO IS SAVING MONEY",
+    cls: "text-emerald-400",
+    blurb: "The setups the AI blocked would have lost, on net. The veto is earning its keep.",
+  },
+  veto_costing: {
+    label: "VETO IS COSTING MONEY",
+    cls: "text-red-400",
+    blurb: "The blocked setups would have been profitable, on net. The veto is too aggressive.",
+  },
+  inconclusive: {
+    label: "GATHERING EVIDENCE",
+    cls: "text-muted-foreground/70",
+    blurb: "Not enough resolved counterfactuals yet to call it. Need ~15+ and a clear net-R.",
+  },
+};
+
+function fmtR(r: number): string {
+  return `${r >= 0 ? "+" : ""}${r.toFixed(1)}R`;
+}
+
+// AI-Veto Shadow Scoreboard: marks every BLOCKED setup to real price and asks whether
+// the veto helped or hurt. Counterfactual — these trades never actually filled.
+export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
+  const { data } = useSWR<{ live: Board; demo: Board; recent: Recent[] }>(
+    "/api/futures/shadow-scoreboard",
+    fetcher,
+    { refreshInterval: 60000 },
+  );
+  const board = data?.[mode];
+  const recent = (data?.recent || []).filter((r) => r.mode === mode).slice(0, 6);
+
+  if (!board) return null;
+  const v = VERDICT[board.verdict];
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-bold">AI-Veto Shadow Scoreboard</h3>
+          <p className="text-[10px] text-muted-foreground/50">
+            Every setup the AI blocked, marked to real price. Is the veto helping or hurting? Counterfactual — these never filled.
+          </p>
+        </div>
+        <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${v.cls}`}>{v.label}</span>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 text-center">
+        <Stat label="Net R (blocked)" value={fmtR(board.netR)} cls={board.netR < 0 ? "text-emerald-400" : board.netR > 0 ? "text-red-400" : ""} />
+        <Stat label="Would-be WR" value={board.wins + board.losses > 0 ? `${Math.round(board.winRate * 100)}%` : "—"} />
+        <Stat label="Target / Stop" value={`${board.wins}W / ${board.losses}L`} />
+        <Stat label="Resolved / Open" value={`${board.resolved} / ${board.open}`} />
+      </div>
+
+      <p className="text-[10px] text-muted-foreground/55 leading-snug">{v.blurb}</p>
+
+      {recent.length > 0 && (
+        <div className="space-y-1 pt-1 border-t border-border/50">
+          {recent.map((r, i) => {
+            const won = (r.rMultiple ?? 0) > 0;
+            return (
+              <div key={i} className="flex items-center gap-2 text-[10px]">
+                <span className={`shrink-0 w-9 font-bold tabular-nums ${won ? "text-red-400" : "text-emerald-400"}`} title={won ? "would have WON — a missed trade" : "would have LOST — a good veto"}>
+                  {fmtR(r.rMultiple ?? 0)}
+                </span>
+                <span className="font-semibold">{r.symbol} {r.direction?.toUpperCase()}</span>
+                <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {r.exitReason}</span>
+              </div>
+            );
+          })}
+          <p className="text-[9px] text-muted-foreground/40 pt-0.5">
+            Green = the veto was right (blocked a loser). Red = a missed winner.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, cls = "" }: { label: string; value: string; cls?: string }) {
+  return (
+    <div className="rounded-lg bg-white/[0.02] py-2">
+      <p className={`text-base font-black tabular-nums ${cls}`}>{value}</p>
+      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/45 mt-0.5">{label}</p>
+    </div>
+  );
+}

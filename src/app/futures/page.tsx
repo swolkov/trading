@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
 import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
+import { VetoScoreboard } from "@/components/futures/veto-scoreboard";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -171,8 +172,9 @@ interface BacktestData {
 // Edge-focused (Jun 26): both engines trade GOLD (the OOS-validated edge) + NQ/ES overbought-shorts.
 // Demo trades full-size; live trades the micros (gold + index micros all fit the 15% cap on $924).
 const DEMO_CONTRACTS = ["GC", "NQ", "ES"];
-// Live: micro gold + index micros (MGC full RSI-bounce edge; MNQ/MES = RSI≥80 overbought-shorts only).
-const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
+// Live: gold only (MGC micro / GC full-size ≥$25K). Gold is the only OOS-validated futures edge;
+// MNQ/MES lose out-of-sample, so they're excluded from live via the live_futures_symbols whitelist.
+const LIVE_CONTRACTS = ["MGC"];
 
 const STRATEGIES = [
   { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
@@ -195,11 +197,11 @@ const DEMO_RISK_RULES = [
   "No re-entry on stopped symbols",
 ];
 const LIVE_RISK_RULES = [
-  "15% risk/trade — MGC (gold) + MNQ/MES overbought-shorts",
+  "15% risk/trade — MGC (gold) only, the sole OOS-validated edge",
   "Scale out 50% at 1R, trail rest for runners",
   "TWO WINDOWS: 9:45-11:30 AM + 2:00-3:30 PM",
   "$150 daily loss limit (15% of $1K)",
-  "Max 3 MES/trade, 6 trades/day",
+  "Max 3 MGC/trade, 6 trades/day",
   "AI hard gate — only A/A+ setups (80%+ conf)",
   "Tilt: pause after 2 stops, halt after 3",
   "Paper trades outside windows (learning mode)",
@@ -458,7 +460,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate {isLiveView ? "micro futures — MGC, MNQ, MES" : "futures — GC, NQ, ES"}
+            Tradovate {isLiveView ? "micro gold — MGC" : "futures — GC, NQ, ES"}
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
@@ -646,6 +648,7 @@ export default function FuturesPage() {
                   <FuturesChart symbol={selectedContract} height={560} />
                 </CardContent>
               </Card>
+              <VetoScoreboard mode={isLiveView ? "live" : "demo"} />
               <EngineActivity />
             </div>
           )}
