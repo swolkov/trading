@@ -27,18 +27,20 @@ function fmtMoney(n: number): string {
   return `${n >= 0 ? "+" : "−"}$${s}`;
 }
 
-// The little "would've made/lost $X" tag next to a killed setup.
+// Tag next to a killed setup: what BLOCKING it did for you (= −trade P&L).
+// + / green = the veto saved you money (dodged a loser); − / red = it cost you a winner.
 function ShadowTag({ shadow }: { shadow: NonNullable<Decision["shadow"]> }) {
   if (shadow.status === "open" || shadow.dollarPnl == null) {
     return <span className="shrink-0 text-[9px] font-semibold text-muted-foreground/40 tabular-nums" title="Marking to market — resolves within a few bars">tracking…</span>;
   }
-  const won = shadow.dollarPnl > 0; // won = the blocked trade WOULD have profited (a missed winner)
+  const vetoVal = -shadow.dollarPnl; // what the veto saved (+) or cost (−) you
+  const good = vetoVal >= 0;
   return (
     <span
-      className={`shrink-0 text-[10px] font-bold tabular-nums ${won ? "text-red-400" : "text-emerald-400"}`}
-      title={won ? "Would have PROFITED — the veto cost this" : "Would have LOST — the veto saved this"}
+      className={`shrink-0 text-[10px] font-bold tabular-nums ${good ? "text-emerald-400" : "text-red-400"}`}
+      title={good ? `Good block — the veto saved you ${fmtMoney(vetoVal)}` : `Missed winner — the veto cost you ${fmtMoney(vetoVal)}`}
     >
-      {fmtMoney(shadow.dollarPnl)}
+      {fmtMoney(vetoVal)}
     </span>
   );
 }

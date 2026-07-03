@@ -80,9 +80,11 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
         <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${v.cls}`}>{v.label}</span>
       </div>
 
+      {/* Numbers show what the VETO did for you (= −trade P&L). + / green = it saved you money by
+          blocking a loser; − / red = it cost you money by blocking a winner. Sign matches color. */}
       <div className="grid grid-cols-4 gap-2 text-center">
-        <Stat label="Net $ (blocked)" value={fmtMoney(board.netDollars)} cls={board.netDollars < 0 ? "text-emerald-400" : board.netDollars > 0 ? "text-red-400" : ""} />
-        <Stat label="Net R (blocked)" value={fmtR(board.netR)} cls={board.netR < 0 ? "text-emerald-400" : board.netR > 0 ? "text-red-400" : ""} />
+        <Stat label="Veto saved (+) / cost (−)" value={fmtMoney(-board.netDollars)} cls={-board.netDollars > 0 ? "text-emerald-400" : -board.netDollars < 0 ? "text-red-400" : ""} />
+        <Stat label="In R" value={fmtR(-board.netR)} cls={-board.netR > 0 ? "text-emerald-400" : -board.netR < 0 ? "text-red-400" : ""} />
         <Stat label="Would-be WR" value={board.wins + board.losses > 0 ? `${Math.round(board.winRate * 100)}%` : "—"} />
         <Stat label="Resolved / Open" value={`${board.resolved} / ${board.open}`} />
       </div>
@@ -92,19 +94,23 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
       {recent.length > 0 && (
         <div className="space-y-1 pt-1 border-t border-border/50">
           {recent.map((r, i) => {
-            const won = (r.dollarPnl ?? r.rMultiple ?? 0) > 0;
+            const vetoVal = -(r.dollarPnl ?? 0); // what blocking this did for you
+            const good = vetoVal >= 0;            // + = dodged a loser, − = missed a winner
             return (
               <div key={i} className="flex items-center gap-2 text-[10px]">
-                <span className={`shrink-0 w-12 font-bold tabular-nums ${won ? "text-red-400" : "text-emerald-400"}`} title={won ? "would have PROFITED — the veto cost this" : "would have LOST — the veto saved this"}>
-                  {r.dollarPnl != null ? fmtMoney(r.dollarPnl) : fmtR(r.rMultiple ?? 0)}
+                <span
+                  className={`shrink-0 w-12 font-bold tabular-nums ${good ? "text-emerald-400" : "text-red-400"}`}
+                  title={good ? `Good block — the veto saved you ${fmtMoney(vetoVal)}` : `Missed winner — the veto cost you ${fmtMoney(vetoVal)}`}
+                >
+                  {r.dollarPnl != null ? fmtMoney(vetoVal) : ""}
                 </span>
                 <span className="font-semibold">{r.symbol} {r.direction?.toUpperCase()}</span>
-                <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {fmtR(r.rMultiple ?? 0)} · {r.exitReason}</span>
+                <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {good ? "dodged a loser" : "missed a winner"}</span>
               </div>
             );
           })}
           <p className="text-[9px] text-muted-foreground/40 pt-0.5">
-            Green = the veto was right (blocked a loser). Red = a missed winner.
+            Green = the veto <b>saved</b> you money (blocked a loser). Red = it <b>cost</b> you money (missed a winner). The number is what the veto saved/cost — not the trade&apos;s own P&amp;L.
           </p>
         </div>
       )}
