@@ -3186,9 +3186,11 @@ async function evaluateAndTrade(
       feedLog("skip", `${sym} ${setupType} ${direction} ${technicalScore}% — AI rejected: ${ai.reasoning}`);
       return;
     } else {
-      // AI-OFF EXPERIMENT (demo only): the AI would block, but take the MECHANICAL trade anyway and log
-      // the veto, so we can compare AI-approved vs AI-rejected outcomes (is the AI overlay worth its trade-suppression?).
-      log(`  AI WOULD REJECT (${ai.confidence}%): ${ai.reasoning} — TAKING ANYWAY [ai_grader off, demo experiment]`);
+      // GRADER OFF: the AI would block, but we take the mechanical trade anyway (live + demo). Record it
+      // as CONFIRMED so it SHOWS in the activity feed as taken — otherwise the feed only ever displays the
+      // AI-approved and blocked setups, and the unfiltered trades we're now taking would be invisible.
+      log(`  AI WOULD REJECT (${ai.confidence}%): ${ai.reasoning} — TAKING ANYWAY [grader off]`);
+      recordDecision({ sym, direction, setupType, confidence: finalScore, verdict: "confirmed", aiConfidence: ai.confidence, reason: `Grader OFF — taking despite AI disagree: ${ai.reasoning}` });
     }
   } else {
     log(`  AI: ${ai.reasoning}`);
