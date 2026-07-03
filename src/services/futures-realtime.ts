@@ -3140,7 +3140,11 @@ async function evaluateAndTrade(
     // killing every fire on the first bad week. Auto-prune (30-match window) handles persistent
     // underperformers; this early hard-block only fires if we have a genuine 25-trade sample
     // of statistical losing.
-    if (IS_LIVE && pred.matchCount >= 25 && pred.winRate < 0.25) {
+    // Gated on aiVetoEnabled: this floor reads the SAME pattern-memory WR the AI grader uses, so when
+    // the grader is switched OFF (live_futures_ai_grader=false) the floor comes off too — otherwise the
+    // engine still blocks on the very data we chose to disregard (it was killing +2R winners). One switch
+    // controls all pattern-memory vetoing. Flip the grader back on to restore both.
+    if (IS_LIVE && aiVetoEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
       log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
       recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} blocked by pattern memory (${(pred.winRate * 100).toFixed(0)}% WR)`);
