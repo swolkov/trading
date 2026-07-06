@@ -23,6 +23,8 @@ import {
   getMarketClock,
   getNews,
   placeMultiLegOrder,
+  getOrder,
+  cancelOrder,
   type Position,
   type OptionsContract,
 } from "./alpaca";
@@ -437,6 +439,22 @@ async function executeAgentDebitSpread(
       { symbol: sellC.symbol, side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
     ],
   }, cfg.mode);
+
+  // A limit spread can sit unfilled. Only record the spread once it ACTUALLY fills — otherwise cancel
+  // and skip, so we never book a phantom position that fakes a max-loss and blocks the position/day caps.
+  let filled = false;
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    try {
+      const st = (await getOrder(order.id, cfg.mode)).status;
+      if (st === "filled" || st === "partially_filled") { filled = true; break; }
+      if (st === "canceled" || st === "rejected" || st === "expired") break;
+    } catch { /* keep polling */ }
+  }
+  if (!filled) {
+    await cancelOrder(order.id, cfg.mode).catch(() => {});
+    return { success: false, details: `spread limit ($${limitPrice}) did not fill — canceled, no position opened` };
+  }
 
   const meta: SpreadMeta = { groupId, buySym: buyC.symbol, sellSym: sellC.symbol, qty, debit, maxRisk, expiry, direction: sig.direction };
 

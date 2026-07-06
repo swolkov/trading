@@ -182,10 +182,14 @@ export async function placeOrder(params: PlaceOrderParams, modeOverride?: Tradin
   }, modeOverride);
 }
 
-export async function cancelOrder(orderId: string): Promise<void> {
+export async function getOrder(orderId: string, modeOverride?: TradingMode): Promise<Order> {
+  return alpacaFetch(`${BASE_URL}/v2/orders/${orderId}`, undefined, modeOverride);
+}
+
+export async function cancelOrder(orderId: string, modeOverride?: TradingMode): Promise<void> {
   await alpacaFetch(`${BASE_URL}/v2/orders/${orderId}`, {
     method: "DELETE",
-  });
+  }, modeOverride);
 }
 
 export interface MultiLegLeg {
