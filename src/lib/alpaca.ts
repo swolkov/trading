@@ -92,6 +92,8 @@ export interface Account {
   pattern_day_trader: boolean;
   daytrading_buying_power: string;
   options_buying_power: string;
+  options_approved_level?: number; // 0=none, 1=covered, 2=long, 3=spreads, 4=uncovered — spreads need ≥3
+  options_trading_level?: number;
 }
 
 export async function getAccount(modeOverride?: TradingMode): Promise<Account> {

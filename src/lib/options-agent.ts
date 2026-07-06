@@ -282,7 +282,7 @@ async function aiConfirmOptionsSetup(
 ): Promise<{ agree: boolean; conviction: string; reasoning: string }> {
   const anthropic = new Anthropic();
   const prompt = `You are a disciplined options trader managing a tiny (~$500) account. You ONLY buy DEFINED-RISK vertical DEBIT spreads, 7-14 DTE. Buying options is negative-EV on average, so you reject anything that isn't a clean, well-supported setup.
-CRITICAL: Only A+ and A execute. B and C are KILLED.
+CRITICAL: A+, A, and B execute. Only C (no real edge) is KILLED.
 
 ${sig.symbol} ${sig.direction} debit spread:
 Underlying price: $${sig.price.toFixed(2)}
@@ -700,6 +700,12 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
   let account;
   try { account = await getAccount(cfg.mode); } catch (e) { details.push(`account error: ${e}`); }
   const equity = account ? parseFloat(account.equity) : 0;
+  // Surface the options approval level — spreads (short leg) need ≥3. If it's <3, mleg orders will
+  // reject and we'd need single-leg calls/puts instead. This makes the unknown visible in every run.
+  if (account) {
+    const lvl = account.options_approved_level ?? account.options_trading_level;
+    details.push(`options approval level: ${lvl ?? "unknown"}${lvl != null && lvl < 3 ? " ⚠️ NOT spread-approved — mleg will reject" : lvl != null ? " ✓ spreads OK" : ""}`);
+  }
   const buyingPower = account ? (parseFloat(account.options_buying_power) || parseFloat(account.buying_power) || 0) : 0;
 
   if (equity > 0 && equity < cfg.accountFloorUsd) reasonsHalt.push(`account floor: equity $${equity.toFixed(0)} < $${cfg.accountFloorUsd}`);
@@ -776,7 +782,10 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
     // AI veto (only A+/A execute).
     const debitGuess = perTradeCap; // probe already proved a fit; use cap for the prompt magnitude
     const ai = await aiConfirmOptionsSetup(sig, ivRank, debitGuess / 100, perTradeCap, brainContext);
-    if (!ai.agree || ai.conviction === "B" || ai.conviction === "C") {
+    // Execute A+/A/B (only C is killed). Buy-only spreads are structurally −EV so the grader honestly
+    // rates most setups B — requiring A/A+ meant it almost never traded. Spencer wants it active; the
+    // $50/trade + 1/day + $300 floor caps bound the downside. C = no real edge, still killed.
+    if (!ai.agree || ai.conviction === "C") {
       await logDecision("options-agent", "SKIP", `OPT:${sig.symbol}`, `AI ${ai.conviction}: ${ai.reasoning}`, 1).catch(() => {});
       details.push(`KILLED ${sig.symbol}: AI ${ai.conviction} — ${ai.reasoning}`);
       continue;
