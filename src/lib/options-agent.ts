@@ -680,12 +680,17 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
       const sig = await scoreSymbol(sym, earnings, cfg);
       if (sig.direction && sig.price > 0 && sig.conviction >= cfg.minConviction && !sig.earningsBlocked) {
         candidates.push(sig);
-      } else if (dry) {
-        details.push(`skip ${sym}: ${!sig.direction ? "no direction" : sig.earningsBlocked ? "earnings window" : `conviction ${sig.conviction}<${cfg.minConviction}`}`);
+      } else {
+        // Always log WHY a symbol was skipped (not just in dry runs) — otherwise a real run that
+        // finds no signal reports empty details and looks broken. This is why "no options yet".
+        details.push(`skip ${sym}: ${!sig.direction ? "no signal" : sig.earningsBlocked ? "earnings window" : `conviction ${sig.conviction}<${cfg.minConviction}`}`);
       }
     } catch (e) { details.push(`score ${sym} error: ${e}`); }
   }
   candidates.sort((a, b) => b.conviction - a.conviction);
+  if (candidates.length === 0) {
+    details.push(`— scanned ${cfg.universe.length} symbols, 0 met the conviction ≥ ${cfg.minConviction} bar (needs a strong Finnhub research signal — mostly post-earnings drift/analyst momentum)`);
+  }
 
   // One entry per tick (max_trades_per_day governs the rest).
   for (const sig of candidates) {
