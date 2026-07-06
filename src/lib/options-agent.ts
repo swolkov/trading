@@ -21,6 +21,7 @@ import {
   getOptionsSnapshots,
   getSnapshot,
   getMarketClock,
+  getNews,
   type Position,
   type OptionsContract,
 } from "./alpaca";
@@ -32,6 +33,7 @@ import {
   getInsiderSentiment,
   getSocialSentiment,
   getPriceTargetConsensus,
+  getCongressionalTrading,
   type EarningsCalendarItem,
 } from "./finnhub";
 import { logTradeToJournal, logDecision, logObservation, loadAgentContext } from "./vault";
@@ -122,6 +124,7 @@ export interface SignalResult {
   reasons: string[];
   earningsBlocked: boolean; // earnings inside the DTE window → never BUY premium (IV crush)
   postEarningsDrift: boolean; // reported in last 1-3 sessions → IV crushed, drift play (preferred)
+  newsHeadlines?: string[]; // recent headlines — surfaced to the AI grader for a real catalyst read
 }
 
 function daysBetween(a: Date, b: Date): number {
@@ -213,9 +216,40 @@ async function scoreSymbol(symbol: string, earnings: EarningsCalendarItem[], cfg
     }
   } catch { /* ignore */ }
 
+  // News catalysts (Alpaca real-time news) — a keyword pass gives directional lean here; the actual
+  // headlines are also handed to the AI grader for a proper read. Fresh, high-volume news = a live catalyst.
+  let newsHeadlines: string[] = [];
+  try {
+    const news = await getNews([symbol], 15);
+    const recent = news.filter((n) => Date.now() - new Date(n.created_at).getTime() < 3 * 86_400_000); // last 3 days
+    newsHeadlines = recent.slice(0, 6).map((n) => n.headline);
+    const BULL = /\b(beat|beats|tops? estimates|surge|soar|jump|rally|record|upgrade|raises? guidance|outperform|approval|wins?|acqui|buyback)/i;
+    const BEAR = /\b(miss|misses|plunge|slump|fall|drop|downgrade|cut|slash|lawsuit|probe|recall|warn|weak|halts?|investigation|guidance cut)/i;
+    let ns = 0;
+    for (const n of recent) { const t = `${n.headline} ${n.summary}`; if (BULL.test(t)) ns += 1; if (BEAR.test(t)) ns -= 1; }
+    if (recent.length >= 3 && ns > 0) { score += 12; reasons.push(`${recent.length} recent headlines, net bullish`); }
+    else if (recent.length >= 3 && ns < 0) { score -= 12; reasons.push(`${recent.length} recent headlines, net bearish`); }
+  } catch { /* ignore */ }
+
+  // Congressional trading — following disclosed buys/sells is a documented alt-data edge.
+  try {
+    const ct = await getCongressionalTrading(symbol);
+    const cutoff = now.getTime() - 90 * 86_400_000; // last 90 days
+    let net = 0;
+    for (const t of ct) {
+      const rec = t as unknown as { transactionDate?: string; transactionType?: string };
+      if (new Date(rec.transactionDate || 0).getTime() < cutoff) continue;
+      const type = String(rec.transactionType || "").toLowerCase();
+      if (type.includes("purchase") || type.includes("buy")) net += 1;
+      else if (type.includes("sale") || type.includes("sell")) net -= 1;
+    }
+    if (net > 0) { score += 12; reasons.push(`${net} net congressional buy(s) 90d`); }
+    else if (net < 0) { score -= 12; reasons.push(`${net} net congressional sale(s) 90d`); }
+  } catch { /* ignore */ }
+
   const direction: SignalResult["direction"] = score > 0 ? "bullish" : score < 0 ? "bearish" : null;
   const conviction = Math.min(100, Math.abs(score));
-  return { symbol, price, direction, conviction, reasons, earningsBlocked, postEarningsDrift };
+  return { symbol, price, direction, conviction, reasons, earningsBlocked, postEarningsDrift, newsHeadlines };
 }
 
 // ---------- AI grader veto ----------
@@ -253,7 +287,7 @@ IV rank: ${ivRank.toFixed(0)}/100 (lower = options cheaper)
 Net debit (max loss): $${debit.toFixed(2)}/contract, total risk ~$${maxRisk.toFixed(0)}
 Post-earnings drift: ${sig.postEarningsDrift ? "yes (IV already crushed)" : "no"}
 Research signals: ${sig.reasons.join("; ") || "none"}
-${brainContext ? `\nTRADING BRAIN (respect the current regime + honor active lessons/anti-patterns):\n${brainContext}\n` : ""}
+${sig.newsHeadlines && sig.newsHeadlines.length ? `\nRecent news headlines (judge whether these are a REAL directional catalyst or already priced in):\n- ${sig.newsHeadlines.join("\n- ")}\n` : ""}${brainContext ? `\nTRADING BRAIN (respect the current regime + honor active lessons/anti-patterns):\n${brainContext}\n` : ""}
 A+ = strong catalyst + cheap IV + clean direction. A = solid edge. B = marginal. C = no real edge.
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
   try {
