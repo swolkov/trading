@@ -1,13 +1,17 @@
-// Automated options agent — buys 7–14 DTE DEFINED-RISK debit spreads on liquid US names, selected
-// from Finnhub research signals (post-earnings drift, analyst momentum, sentiment) gated by IV and
-// vetoed by an AI grader. BUY-ONLY (vertical debit spreads; max loss = net debit paid).
+// Automated options agent — trades 7–14 DTE DEFINED-RISK vertical spreads on liquid US names, selected
+// from Finnhub/Alpaca research signals (post-earnings drift, analyst momentum, news, congressional,
+// sentiment) gated by IV and vetoed by an AI grader. Two modes (options_strategy):
+//   • "credit" (DEFAULT, +EV): SELL out-of-the-money spreads ONLY when IV is rich — collect the
+//     volatility risk premium. Sized by GROSS WIDTH so max loss = width×100×qty ≤ the risk cap, which
+//     also defends against the (undocumented) Alpaca mleg credit-price sign convention.
+//   • "debit" (legacy, −EV): BUY near-ATM spreads when IV is cheap. Kept for comparison.
 //
-// HONEST STANCE: buying options is negative-EV on average. This agent's job is ruthless selectivity
-// plus HARD ruin-protection (tiny per-trade risk, weekly loss budget, account floor). Expect
-// break-even-to-negative; the caps + scoreboard exist so we SEE it and stop, not pretend.
+// HONEST STANCE: the credit edge is THIN — it depends on realized vol staying below implied, which the
+// IV gate (ivRank ≥ 35) is meant to secure. HARD ruin-protection regardless: tiny per-trade risk,
+// weekly loss budget, account floor, atomic multi-leg fills, fill-verify before booking.
 //
 // Self-contained executor (does NOT reuse options-trader.ts executeSpread, which is hardcoded to
-// 14–30 DTE and logs per-leg) so we get the right 7–14 DTE window, a real debit cost cap, explicit
+// 14–30 DTE and logs per-leg) so we get the right 7–14 DTE window, defined-risk sizing, explicit
 // paper/live mode on every order, and unit-level `OPT:` logging for an honest scoreboard.
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "./db";
@@ -20,6 +24,7 @@ import {
   getOptionsChain,
   getOptionsSnapshots,
   getSnapshot,
+  getQuote,
   getMarketClock,
   getNews,
   placeMultiLegOrder,
@@ -75,7 +80,7 @@ const DEFAULTS: OptionsAgentConfig = {
   weeklyLossBudgetUsd: 100,
   accountFloorUsd: 300,
   universe: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "META"],
-  strategy: "debit", // default stays debit until the credit executor is built + paper-validated
+  strategy: "credit", // SELL premium (+EV): only sells rich IV, sized by gross width so max loss ≤ cap
 };
 
 const CONFIG_KEYS = [
@@ -91,6 +96,7 @@ const CONFIG_KEYS = [
   "options_weekly_loss_budget_usd",
   "options_account_floor_usd",
   "options_universe",
+  "options_strategy",
 ];
 
 async function loadConfig(): Promise<OptionsAgentConfig> {
@@ -282,9 +288,23 @@ async function aiConfirmOptionsSetup(
   debit: number,
   maxRisk: number,
   brainContext = "",
+  isCredit = false,
 ): Promise<{ agree: boolean; conviction: string; reasoning: string }> {
   const anthropic = new Anthropic();
-  const prompt = `You are a disciplined options trader managing a tiny (~$500) account. You ONLY buy DEFINED-RISK vertical DEBIT spreads, 7-14 DTE. Buying options is negative-EV on average, so you reject anything that isn't a clean, well-supported setup.
+  const prompt = isCredit
+    ? `You are a disciplined options trader managing a tiny (~$1,000) account. You SELL DEFINED-RISK vertical CREDIT spreads, 7-14 DTE, ONLY when implied volatility is rich (you collect the volatility risk premium — that's the +EV edge). ${sig.direction === "bullish" ? "Bullish → sell an out-of-the-money PUT spread (profit if it stays above the short strike)." : "Bearish → sell an out-of-the-money CALL spread (profit if it stays below the short strike)."} You want price to stay AWAY from your short strike, so you favor setups where the move is likely done / mean-reverting / range-bound in your favor, NOT ones with a strong catalyst that could blow through your strike.
+CRITICAL: A+, A, and B execute. Only C (thesis says price runs toward/through your short strike, or IV isn't actually rich) is KILLED.
+
+${sig.symbol} ${sig.direction} CREDIT spread (selling premium):
+Underlying price: $${sig.price.toFixed(2)}
+IV rank: ${ivRank.toFixed(0)}/100 (HIGHER = richer premium = better for a seller)
+Defined max loss: ~$${maxRisk.toFixed(0)} total
+Post-earnings drift: ${sig.postEarningsDrift ? "yes (IV already crushed — less premium)" : "no"}
+Research signals: ${sig.reasons.join("; ") || "none"}
+${sig.newsHeadlines && sig.newsHeadlines.length ? `\nRecent news headlines (judge whether a fresh catalyst could push price THROUGH your short strike — that's bad for a seller):\n- ${sig.newsHeadlines.join("\n- ")}\n` : ""}${brainContext ? `\nTRADING BRAIN (respect the current regime + honor active lessons/anti-patterns):\n${brainContext}\n` : ""}
+A+ = rich IV + price likely to stay on your side (move exhausted / range-bound). A = solid. B = marginal. C = catalyst risk toward your strike or IV not rich.
+Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`
+    : `You are a disciplined options trader managing a tiny (~$1,000) account. You ONLY buy DEFINED-RISK vertical DEBIT spreads, 7-14 DTE. Buying options is negative-EV on average, so you reject anything that isn't a clean, well-supported setup.
 CRITICAL: A+, A, and B execute. Only C (no real edge) is KILLED.
 
 ${sig.symbol} ${sig.direction} debit spread:
@@ -338,10 +358,11 @@ interface SpreadMeta {
   buySym: string;
   sellSym: string;
   qty: number;
-  debit: number; // net debit per contract
-  maxRisk: number; // debit * 100 * qty
+  debit: number; // net premium per contract (debit paid, or credit received if isCredit)
+  maxRisk: number; // defined max loss ($)
   expiry: string;
   direction: "bullish" | "bearish";
+  credit?: boolean; // true = credit spread (sold premium) — exit logic takes profit at 50% of credit
 }
 
 function encodeMeta(prefix: string, meta: Partial<SpreadMeta> & Record<string, unknown>): string {
@@ -360,6 +381,15 @@ function mid(snap: { latestQuote?: { ap: number; bp: number } } | undefined): nu
   return ap || bp || 0;
 }
 
+// Parse an OCC option symbol (e.g. "AAPL250718C00190000") → underlying, put/call, strike ($).
+// Used to check a credit spread's short-strike moneyness at expiry so an ITM (assigned) expiration
+// is never mis-booked as a worthless win. Returns null if the symbol doesn't match.
+function parseOcc(sym: string): { underlying: string; type: "call" | "put"; strike: number } | null {
+  const m = sym.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+  if (!m) return null;
+  return { underlying: m[1], type: m[3] === "P" ? "put" : "call", strike: parseInt(m[4], 10) / 1000 };
+}
+
 // ---------- Executor: 7-14 DTE defined-risk debit spread ----------
 
 interface ExecResult { success: boolean; details: string; meta?: SpreadMeta; }
@@ -372,7 +402,12 @@ async function executeAgentDebitSpread(
   dry: boolean,
 ): Promise<ExecResult> {
   if (!sig.direction) return { success: false, details: "no direction" };
-  const type: "call" | "put" = sig.direction === "bullish" ? "call" : "put";
+  const isCredit = cfg.strategy === "credit";
+  // Credit (sell premium): bullish → bull PUT spread; bearish → bear CALL spread (type inverts).
+  // Debit (buy premium): bullish → call; bearish → put.
+  const type: "call" | "put" = isCredit
+    ? (sig.direction === "bullish" ? "put" : "call")
+    : (sig.direction === "bullish" ? "call" : "put");
   const now = Date.now();
   const gte = new Date(now + cfg.minDte * 86_400_000).toISOString().split("T")[0];
   const lte = new Date(now + cfg.maxDte * 86_400_000).toISOString().split("T")[0];
@@ -386,40 +421,82 @@ async function executeAgentDebitSpread(
   const expiry = [...new Set(contracts.map((c) => c.expiration_date))].sort()[0];
   const exp = contracts.filter((c) => c.expiration_date === expiry).sort((a, b) => parseFloat(a.strike_price) - parseFloat(b.strike_price));
   const px = sig.price;
-  const nearATM = exp.filter((c) => {
-    const s = parseFloat(c.strike_price);
-    return s >= px * 0.98 && s <= px * 1.02;
-  });
-  if (nearATM.length === 0) return { success: false, details: "no near-ATM strike" };
 
+  // ── Strike selection (strategy-aware). buyC = leg we BUY, sellC = leg we SELL. ──
   let buyC: OptionsContract, sellC: OptionsContract;
-  if (type === "call") {
-    buyC = nearATM[0];
-    const higher = exp.filter((c) => parseFloat(c.strike_price) > parseFloat(buyC.strike_price));
-    if (!higher.length) return { success: false, details: "no higher strike" };
-    sellC = higher[0];
+  if (isCredit) {
+    // SELL an OTM spread for a credit. Short leg ~3%+ OTM (still decent premium), long leg one strike
+    // further OTM (narrowest width = smallest defined risk). Puts below price / calls above price.
+    const otm = type === "put"
+      ? exp.filter((c) => parseFloat(c.strike_price) <= px * 0.97)
+      : exp.filter((c) => parseFloat(c.strike_price) >= px * 1.03);
+    if (otm.length < 2) return { success: false, details: "not enough OTM strikes for a credit spread" };
+    if (type === "put") {
+      sellC = otm[otm.length - 1]; // closest-to-money OTM put = short
+      const lower = otm.filter((c) => parseFloat(c.strike_price) < parseFloat(sellC.strike_price));
+      if (!lower.length) return { success: false, details: "no long put strike" };
+      buyC = lower[lower.length - 1]; // next strike down = long (protection)
+    } else {
+      sellC = otm[0]; // closest-to-money OTM call = short
+      const higher = otm.filter((c) => parseFloat(c.strike_price) > parseFloat(sellC.strike_price));
+      if (!higher.length) return { success: false, details: "no long call strike" };
+      buyC = higher[0]; // next strike up = long
+    }
   } else {
-    buyC = nearATM[nearATM.length - 1];
-    const lower = exp.filter((c) => parseFloat(c.strike_price) < parseFloat(buyC.strike_price));
-    if (!lower.length) return { success: false, details: "no lower strike" };
-    sellC = lower[lower.length - 1];
+    const nearATM = exp.filter((c) => { const s = parseFloat(c.strike_price); return s >= px * 0.98 && s <= px * 1.02; });
+    if (nearATM.length === 0) return { success: false, details: "no near-ATM strike" };
+    if (type === "call") {
+      buyC = nearATM[0];
+      const higher = exp.filter((c) => parseFloat(c.strike_price) > parseFloat(buyC.strike_price));
+      if (!higher.length) return { success: false, details: "no higher strike" };
+      sellC = higher[0];
+    } else {
+      buyC = nearATM[nearATM.length - 1];
+      const lower = exp.filter((c) => parseFloat(c.strike_price) < parseFloat(buyC.strike_price));
+      if (!lower.length) return { success: false, details: "no lower strike" };
+      sellC = lower[lower.length - 1];
+    }
   }
 
-  // Net debit from mid prices.
+  // Pricing from mid.
   let snaps: Record<string, { latestQuote?: { ap: number; bp: number } }> = {};
   try { snaps = await getOptionsSnapshots([buyC.symbol, sellC.symbol]); }
   catch (e) { return { success: false, details: `snapshot error: ${e}` }; }
-  const debit = mid(snaps[buyC.symbol]) - mid(snaps[sellC.symbol]);
-  if (!(debit > 0)) return { success: false, details: `bad pricing (debit ${debit.toFixed(2)})` };
-
-  const qty = Math.floor(maxRiskUsd / (debit * 100));
-  if (qty < 1) return { success: false, details: `too expensive: 1 spread = $${(debit * 100).toFixed(0)} > cap $${maxRiskUsd.toFixed(0)}` };
-  const maxRisk = debit * 100 * qty;
-  if (maxRisk > buyingPower) return { success: false, details: `insufficient buying power ($${buyingPower.toFixed(0)} < $${maxRisk.toFixed(0)})` };
-
   const buyStrike = parseFloat(buyC.strike_price);
   const sellStrike = parseFloat(sellC.strike_price);
-  const planned = `${sig.direction.toUpperCase()} ${type} debit spread ${sig.symbol} ${buyStrike}/${sellStrike} exp ${expiry} x${qty} @ $${debit.toFixed(2)} debit (max loss $${maxRisk.toFixed(0)})`;
+  const width = Math.abs(sellStrike - buyStrike);
+  const netCredit = mid(snaps[sellC.symbol]) - mid(snaps[buyC.symbol]); // >0 for a credit spread
+  const netDebit = mid(snaps[buyC.symbol]) - mid(snaps[sellC.symbol]);  // >0 for a debit spread
+
+  let qty: number, maxRisk: number, netPremium: number, limitPrice: string;
+  if (isCredit) {
+    if (!(netCredit > 0)) return { success: false, details: `no net credit (${netCredit.toFixed(2)})` };
+    // Require a decent credit-to-width ratio (≥25%) — risking $75 to make $25 is the floor; thinner than
+    // that is garbage R:R and pure negative EV even with rich IV. Skips the junk-premium fills.
+    if (netCredit < width * 0.25) return { success: false, details: `credit too thin ($${netCredit.toFixed(2)} < 25% of $${width.toFixed(2)} width)` };
+    // SIZE BY GROSS WIDTH so a bad/zero credit fill can NEVER lose more than the cap (defended against
+    // the unverified credit-price convention): worst-case loss = width*100 - credit ≤ width*100 ≤ cap.
+    const grossPerSpread = width * 100;
+    qty = Math.floor(maxRiskUsd / grossPerSpread);
+    if (qty < 1) return { success: false, details: `spread too wide: 1x gross $${grossPerSpread.toFixed(0)} > risk cap $${maxRiskUsd.toFixed(0)} (raise options_max_risk_usd)` };
+    maxRisk = grossPerSpread * qty - netCredit * 100 * qty;
+    netPremium = netCredit;
+    // Minimum credit we'll accept (marketable, so it fills): 60% of mid, positive = credit received.
+    limitPrice = Math.max(0.05, Math.floor(netCredit * 0.60 * 100) / 100).toFixed(2);
+  } else {
+    if (!(netDebit > 0)) return { success: false, details: `bad pricing (debit ${netDebit.toFixed(2)})` };
+    qty = Math.floor(maxRiskUsd / (netDebit * 100));
+    if (qty < 1) return { success: false, details: `too expensive: 1 spread = $${(netDebit * 100).toFixed(0)} > cap $${maxRiskUsd.toFixed(0)}` };
+    maxRisk = netDebit * 100 * qty;
+    netPremium = netDebit;
+    limitPrice = (Math.ceil(netDebit * 1.10 * 100) / 100).toFixed(2);
+  }
+  // Broker margin hold on a short vertical is the GROSS width (not the net max loss), so check gross for
+  // credit — otherwise a thin-BP account passes here and the order is rejected downstream.
+  const bpNeeded = isCredit ? width * 100 * qty : maxRisk;
+  if (bpNeeded > buyingPower) return { success: false, details: `insufficient buying power ($${buyingPower.toFixed(0)} < $${bpNeeded.toFixed(0)} required)` };
+
+  const planned = `${sig.direction.toUpperCase()} ${type} ${isCredit ? "CREDIT" : "debit"} spread ${sig.symbol} ${sellStrike}/${buyStrike} exp ${expiry} x${qty} @ $${netPremium.toFixed(2)} ${isCredit ? "credit" : "debit"} (max loss $${maxRisk.toFixed(0)})`;
 
   if (dry) return { success: true, details: `[DRY] would open: ${planned}` };
 
@@ -429,9 +506,8 @@ async function executeAgentDebitSpread(
   }
 
   const groupId = `OPTG-${Date.now().toString(36)}`;
-  // ATOMIC multi-leg entry — both legs fill together or neither (no naked-leg risk). Net-debit LIMIT
-  // at a 10% buffer so it fills but can never pay more than intended for the spread.
-  const limitPrice = (Math.ceil(debit * 1.10 * 100) / 100).toFixed(2);
+  // ATOMIC multi-leg entry — both legs fill together or neither (no naked leg). Net LIMIT: debit caps
+  // what we pay; credit sets the minimum we'll receive.
   const order = await placeMultiLegOrder({
     qty: String(qty),
     type: "limit",
@@ -459,11 +535,11 @@ async function executeAgentDebitSpread(
     return { success: false, details: `spread limit ($${limitPrice}) did not fill — canceled, no position opened` };
   }
 
-  const meta: SpreadMeta = { groupId, buySym: buyC.symbol, sellSym: sellC.symbol, qty, debit, maxRisk, expiry, direction: sig.direction };
+  const meta: SpreadMeta = { groupId, buySym: buyC.symbol, sellSym: sellC.symbol, qty, debit: netPremium, maxRisk, expiry, direction: sig.direction, credit: isCredit };
 
   // Real-money fill — Slack alert on every spread open
   await sendNotification(
-    `📊 OPTIONS OPEN [${cfg.mode}] ${sig.symbol} ${sig.direction} debit spread ${qty}x — debit $${debit.toFixed(2)}, max risk $${maxRisk.toFixed(0)}, exp ${expiry}`,
+    `📊 OPTIONS OPEN [${cfg.mode}] ${sig.symbol} ${sig.direction} ${isCredit ? "CREDIT" : "debit"} spread ${qty}x — ${isCredit ? "credit" : "debit"} $${netPremium.toFixed(2)}, max risk $${maxRisk.toFixed(0)}, exp ${expiry}`,
     "options"
   ).catch(() => {});
 
@@ -472,7 +548,7 @@ async function executeAgentDebitSpread(
       symbol: `OPT:${sig.symbol}`,
       action: "opt_open",
       qty,
-      price: debit,
+      price: netPremium,
       reason: encodeMeta(`[OPT-OPEN] ${planned}.`, { ...meta, reasons: sig.reasons, mlegOrderId: order.id, limitPrice }),
       aiSignal: sig.direction,
       orderId: order.id,
@@ -484,11 +560,11 @@ async function executeAgentDebitSpread(
     instrument: `OPT:${sig.symbol}`,
     direction: sig.direction === "bullish" ? "LONG" : "SHORT",
     strategy: "options-agent",
-    setupType: `${type}_debit_spread`,
+    setupType: `${type}_${isCredit ? "credit" : "debit"}_spread`,
     contracts: qty,
-    entryPrice: debit,
-    stopPrice: debit * 0.5,
-    targetPrice: debit * 1.5,
+    entryPrice: netPremium,
+    stopPrice: netPremium * 0.5,
+    targetPrice: netPremium * 1.5,
     conviction: Math.round(sig.conviction / 20),
   }, `options-agent-${cfg.mode}`);
   await logDecision("options-agent", "ENTRY", `OPT:${sig.symbol}`, `${planned}. ${sig.reasons.join("; ")}`, Math.round(sig.conviction / 20));
@@ -549,11 +625,13 @@ async function logClose(meta: SpreadMeta, pnl: number, exitReason: string, mode:
     instrument: `OPT:${meta.buySym.replace(/\d.*/, "")}`,
     direction: meta.direction === "bullish" ? "LONG" : "SHORT",
     strategy: "options-agent",
-    setupType: "debit_spread",
+    setupType: meta.credit ? "credit_spread" : "debit_spread",
     contracts: meta.qty,
+    // Entry = premium (credit received or debit paid). For a credit spread the profit target is a
+    // SMALLER premium to buy it back (0.5×), the stop a LARGER one (2×) — inverted vs a debit spread.
     entryPrice: meta.debit,
-    stopPrice: meta.debit * 0.5,
-    targetPrice: meta.debit * 1.5,
+    stopPrice: meta.credit ? meta.debit * 2 : meta.debit * 0.5,
+    targetPrice: meta.credit ? meta.debit * 0.5 : meta.debit * 1.5,
     exitPrice: meta.debit + pnl / (meta.qty * 100),
     pnlDollars: pnl,
     rMultiple: r,
@@ -574,23 +652,55 @@ async function manageAgentSpreads(positions: Position[], cfg: OptionsAgentConfig
     const sellP = posBySym[g.sellSym];
     const dte = Math.round((new Date(g.expiry + "T00:00:00Z").getTime() - now) / 86_400_000);
 
-    // Legs gone (expired / settled externally): close the group conservatively at max loss.
+    // Legs gone (expired / settled externally). DEBIT: worthless = max loss (−debit paid). CREDIT: a
+    // credit spread that expires OUT-of-the-money = win (keep the credit), but IN-the-money = MAX LOSS
+    // (assigned) — and both vanish from the positions list identically. So for credit we MUST check the
+    // short strike's moneyness against the underlying before booking, or a max loss gets logged as a win
+    // and poisons the scoreboard. Can't confirm OTM → book the conservative −maxRisk. (This path is a
+    // fallback; the DTE time-stop normally closes everything well before expiry.)
     if (!buyP && !sellP) {
       if (dte <= 0) {
-        if (!dry) await logClose(g, -g.maxRisk, "expired (assumed worthless)", cfg.mode);
-        out.push(`${g.buySym}: expired → assumed −$${g.maxRisk.toFixed(0)}`);
+        let settled: number;
+        let reason = "expired";
+        if (!g.credit) {
+          settled = -g.maxRisk;
+          reason = "expired (debit → assumed worthless, max loss)";
+        } else {
+          const short = parseOcc(g.sellSym); // short leg = the risk leg
+          let otm: boolean | null = null;
+          if (short) {
+            try {
+              const q = await getQuote(short.underlying);
+              const under = (q.ap && q.bp) ? (q.ap + q.bp) / 2 : (q.ap || q.bp || 0);
+              if (under > 0) otm = short.type === "put" ? under > short.strike : under < short.strike;
+            } catch { /* price unavailable → stay conservative */ }
+          }
+          if (otm === true) { settled = g.debit * 100 * g.qty; reason = "expired OTM (kept credit)"; }
+          else { settled = -g.maxRisk; reason = otm === false ? "expired ITM (assigned, max loss)" : "expired (unconfirmed → booked max loss)"; }
+        }
+        if (!dry) await logClose(g, settled, reason, cfg.mode);
+        out.push(`${g.buySym}: ${reason} → ${settled >= 0 ? "+" : "−"}$${Math.abs(settled).toFixed(0)}`);
       }
       continue;
     }
 
     const unitUnreal = (buyP ? parseFloat(buyP.unrealized_pl) : 0) + (sellP ? parseFloat(sellP.unrealized_pl) : 0);
-    const cost = g.maxRisk;
-    const pnlPct = cost > 0 ? unitUnreal / cost : 0;
+    const pnlPct = g.maxRisk > 0 ? unitUnreal / g.maxRisk : 0; // vs max loss, for the hold-line display
 
     let exit: string | null = null;
-    if (pnlPct >= 0.5) exit = "target +50%";
-    else if (pnlPct <= -0.5) exit = "stop -50%";
-    else if (dte <= cfg.minDte) exit = `time-stop (${dte} DTE)`;
+    if (g.credit) {
+      // Credit spread: max profit = the credit collected (never +50% of maxRisk, so the debit rule
+      // would never fire). Take the standard premium-seller profit at 50% of credit collected; cut the
+      // loss at 1× the credit (before it runs to full width). Roll off before expiry (assignment risk).
+      const creditRcvd = g.debit * 100 * g.qty; // max profit at expiry if it expires worthless
+      if (unitUnreal >= 0.5 * creditRcvd) exit = "target +50% of credit";
+      else if (unitUnreal <= -1.0 * creditRcvd) exit = "stop −1× credit";
+      else if (dte <= cfg.minDte) exit = `time-stop (${dte} DTE)`;
+    } else {
+      if (pnlPct >= 0.5) exit = "target +50%";
+      else if (pnlPct <= -0.5) exit = "stop -50%";
+      else if (dte <= cfg.minDte) exit = `time-stop (${dte} DTE)`;
+    }
     if (!exit) { out.push(`${g.buySym}: hold (${(pnlPct * 100).toFixed(0)}%, ${dte} DTE)`); continue; }
 
     if (dry) { out.push(`[DRY] ${g.buySym}: would close — ${exit} (${(pnlPct * 100).toFixed(0)}%)`); continue; }
@@ -788,7 +898,7 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
 
     // AI veto (only A+/A execute).
     const debitGuess = perTradeCap; // probe already proved a fit; use cap for the prompt magnitude
-    const ai = await aiConfirmOptionsSetup(sig, ivRank, debitGuess / 100, perTradeCap, brainContext);
+    const ai = await aiConfirmOptionsSetup(sig, ivRank, debitGuess / 100, perTradeCap, brainContext, sellPremium);
     // Execute A+/A/B (only C is killed). Buy-only spreads are structurally −EV so the grader honestly
     // rates most setups B — requiring A/A+ meant it almost never traded. Spencer wants it active; the
     // $50/trade + 1/day + $300 floor caps bound the downside. C = no real edge, still killed.
