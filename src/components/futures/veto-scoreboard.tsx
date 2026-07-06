@@ -68,10 +68,13 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
 
   if (!board) return null;
   const v = VERDICT[board.verdict];
-  // The veto only logs BLOCKED setups. With the grader off, nothing gets blocked → this list stops
-  // growing. Detect that (newest entry older than ~18h) and say so, so it doesn't look broken.
+  // The veto only logs BLOCKED setups. With the grader off, nothing gets blocked → this panel is a
+  // frozen historical record. HIDE it entirely when stale (newest entry >18h old) so it doesn't clutter
+  // or confuse next to the live feed. It reappears automatically if the veto is turned back on and starts
+  // blocking again. (The live truth while the veto is off is the MGC Scorecard.)
   const newestMs = recent[0]?.blockedAt ? new Date(recent[0].blockedAt).getTime() : 0;
-  const frozen = newestMs > 0 && Date.now() - newestMs > 18 * 3600 * 1000;
+  const frozen = newestMs === 0 || Date.now() - newestMs > 18 * 3600 * 1000;
+  if (frozen) return null;
 
   return (
     <div className="rounded-xl border border-border bg-card p-4 space-y-3">
@@ -85,11 +88,6 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
         <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${v.cls}`}>{v.label}</span>
       </div>
 
-      {frozen && (
-        <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-[10px] text-amber-300/90 leading-snug">
-          <b>Historical — not live.</b> The veto is <b>off</b>, so nothing new gets blocked and this list has stopped growing. The engine now <b>takes</b> every setup — see the Engine Activity feed below and the MGC Scorecard for what it&apos;s actually trading.
-        </div>
-      )}
 
       {/* Numbers show what the VETO did for you (= −trade P&L). + / green = it saved you money by
           blocking a loser; − / red = it cost you money by blocking a winner. Sign matches color. */}
