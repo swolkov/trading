@@ -292,7 +292,7 @@ async function aiConfirmOptionsSetup(
 ): Promise<{ agree: boolean; conviction: string; reasoning: string }> {
   const anthropic = new Anthropic();
   const prompt = isCredit
-    ? `You are a disciplined options trader managing a tiny (~$1,000) account. You SELL DEFINED-RISK vertical CREDIT spreads, 7-14 DTE, ONLY when implied volatility is rich (you collect the volatility risk premium — that's the +EV edge). ${sig.direction === "bullish" ? "Bullish → sell an out-of-the-money PUT spread (profit if it stays above the short strike)." : "Bearish → sell an out-of-the-money CALL spread (profit if it stays below the short strike)."} You want price to stay AWAY from your short strike, so you favor setups where the move is likely done / mean-reverting / range-bound in your favor, NOT ones with a strong catalyst that could blow through your strike.
+    ? `You are a disciplined options trader managing a tiny (~$500) account. You SELL DEFINED-RISK vertical CREDIT spreads, 7-14 DTE, ONLY when implied volatility is rich (you collect the volatility risk premium — that's the +EV edge). ${sig.direction === "bullish" ? "Bullish → sell an out-of-the-money PUT spread (profit if it stays above the short strike)." : "Bearish → sell an out-of-the-money CALL spread (profit if it stays below the short strike)."} You want price to stay AWAY from your short strike, so you favor setups where the move is likely done / mean-reverting / range-bound in your favor, NOT ones with a strong catalyst that could blow through your strike.
 CRITICAL: A+, A, and B execute. Only C (thesis says price runs toward/through your short strike, or IV isn't actually rich) is KILLED.
 
 ${sig.symbol} ${sig.direction} CREDIT spread (selling premium):
@@ -304,7 +304,7 @@ Research signals: ${sig.reasons.join("; ") || "none"}
 ${sig.newsHeadlines && sig.newsHeadlines.length ? `\nRecent news headlines (judge whether a fresh catalyst could push price THROUGH your short strike — that's bad for a seller):\n- ${sig.newsHeadlines.join("\n- ")}\n` : ""}${brainContext ? `\nTRADING BRAIN (respect the current regime + honor active lessons/anti-patterns):\n${brainContext}\n` : ""}
 A+ = rich IV + price likely to stay on your side (move exhausted / range-bound). A = solid. B = marginal. C = catalyst risk toward your strike or IV not rich.
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`
-    : `You are a disciplined options trader managing a tiny (~$1,000) account. You ONLY buy DEFINED-RISK vertical DEBIT spreads, 7-14 DTE. Buying options is negative-EV on average, so you reject anything that isn't a clean, well-supported setup.
+    : `You are a disciplined options trader managing a tiny (~$500) account. You ONLY buy DEFINED-RISK vertical DEBIT spreads, 7-14 DTE. Buying options is negative-EV on average, so you reject anything that isn't a clean, well-supported setup.
 CRITICAL: A+, A, and B execute. Only C (no real edge) is KILLED.
 
 ${sig.symbol} ${sig.direction} debit spread:
