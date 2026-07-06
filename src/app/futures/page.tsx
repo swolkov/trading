@@ -611,9 +611,11 @@ export default function FuturesPage() {
       )}
 
       {/* ── Main Content Area ── */}
-      <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
+      {/* minmax(0,1fr) lets the chart column shrink instead of pushing the side panel off-screen;
+          the panel itself flexes 280–340px. Two columns from lg up, stacks below. */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)] gap-4">
         {/* Left: Chart + Tabs */}
-        <div className="space-y-3">
+        <div className="space-y-3 min-w-0">
           {/* Tab bar */}
           <div className="flex gap-1 border-b border-white/[0.06] pb-2">
             {(["chart", "depth", "strategy", "backtest"] as const).map((tab) => (

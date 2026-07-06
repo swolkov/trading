@@ -462,15 +462,26 @@ export async function GET() {
       })(),
     ]);
 
+    // LEAK GUARD: the live account is a micro account (switches to full-size only at $25K by design),
+    // so a live netLiq wildly above the live starting capital means the account resolution crossed to
+    // the demo account on a cold call. Suppress the false balance and fall back to the engine-tracked
+    // start-of-day value rather than flash a $64K demo figure on the real $1K live view.
+    let safeAccount = accountSummary;
+    if (viewMode === "live" && accountSummary && accountSummary.netLiq > (startingCapital || 1025) * 20) {
+      console.warn(`[/api/futures/positions] LIVE balance leak suppressed: netLiq ${accountSummary.netLiq} >> live cap; falling back to SOD ${startOfDayBalance}`);
+      const sod = startOfDayBalance || accountSummary.balance || 0;
+      safeAccount = { ...accountSummary, netLiq: sod, balance: sod };
+    }
+
     return Response.json({
       connected: true,
       viewMode,
-      account: accountSummary ? {
-        balance: accountSummary.balance,
-        netLiq: accountSummary.netLiq,
-        realizedPnl: accountSummary.realizedPnl,
-        unrealizedPnl: accountSummary.unrealizedPnl,
-        marginUsed: accountSummary.marginUsed,
+      account: safeAccount ? {
+        balance: safeAccount.balance,
+        netLiq: safeAccount.netLiq,
+        realizedPnl: safeAccount.realizedPnl,
+        unrealizedPnl: safeAccount.unrealizedPnl,
+        marginUsed: safeAccount.marginUsed,
       } : null,
       riskMetrics,
       positions: displayPositions,
