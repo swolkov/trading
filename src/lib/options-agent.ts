@@ -58,6 +58,7 @@ interface OptionsAgentConfig {
   weeklyLossBudgetUsd: number;
   accountFloorUsd: number;
   universe: string[];
+  strategy: "credit" | "debit"; // "credit" = SELL OTM spreads (+EV, premium seller) | "debit" = BUY (legacy, -EV)
 }
 
 const DEFAULTS: OptionsAgentConfig = {
@@ -74,6 +75,7 @@ const DEFAULTS: OptionsAgentConfig = {
   weeklyLossBudgetUsd: 100,
   accountFloorUsd: 300,
   universe: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "META"],
+  strategy: "debit", // default stays debit until the credit executor is built + paper-validated
 };
 
 const CONFIG_KEYS = [
@@ -102,6 +104,7 @@ async function loadConfig(): Promise<OptionsAgentConfig> {
       mode: (enabledVal === "live" ? "live" : "paper") as TradingMode,
       accountSize: parseFloat(c.options_account_size) || DEFAULTS.accountSize,
       maxRiskUsd: parseFloat(c.options_max_risk_usd) || DEFAULTS.maxRiskUsd,
+      strategy: (c.options_strategy === "debit" ? "debit" : "credit") as "credit" | "debit",
       riskPerTradePct: parseFloat(c.options_risk_per_trade_pct) || DEFAULTS.riskPerTradePct,
       maxPositions: parseInt(c.options_max_positions) || DEFAULTS.maxPositions,
       maxTradesPerDay: parseInt(c.options_max_trades_per_day) || DEFAULTS.maxTradesPerDay,
@@ -767,11 +770,15 @@ export async function runOptionsAgent(opts?: { dry?: boolean }): Promise<Options
   }
 
   // One entry per tick (max_trades_per_day governs the rest).
+  const sellPremium = cfg.strategy === "credit";
   for (const sig of candidates) {
-    // IV gate: only BUY when options are cheap/fair (don't overpay for vol).
+    // IV gate. SELLING premium (credit spreads, +EV): only sell when IV is RICH — that IS the edge
+    // (collect the vol risk premium). BUYING premium (debit, -EV legacy): only buy when IV is cheap.
     let ivRank = 50, ivVsHv = "fair";
     try { const vol = await analyzeVolatility(sig.symbol); ivRank = vol.ivRank; ivVsHv = vol.ivVsHv; } catch { /* ignore */ }
-    if (ivVsHv === "expensive" && !sig.postEarningsDrift) {
+    if (sellPremium) {
+      if (ivRank < 35) { details.push(`skip ${sig.symbol}: IV rank ${ivRank.toFixed(0)} too low to sell premium (need rich IV for edge)`); continue; }
+    } else if (ivVsHv === "expensive" && !sig.postEarningsDrift) {
       details.push(`skip ${sig.symbol}: IV ${ivRank.toFixed(0)} expensive (buy-only would overpay)`);
       continue;
     }
