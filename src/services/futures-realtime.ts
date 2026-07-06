@@ -1153,6 +1153,7 @@ async function getCurrentRegime(): Promise<"bull" | "bear" | "choppy"> {
 
 // Re-entry cooldown — after stop-out, block same symbol+direction for 3 bars (15 min)
 const reEntryCooldowns = new Map<string, number>(); // "SYM:long" → timestamp when cooldown expires
+const lastTrackSaveAt = new Map<string, number>(); // sym → last time we persisted the position's high-water-mark (throttle)
 
 // ── Runtime Risk Config (loaded from DB — Agent Hub is the UI) ──────────
 // These are the LIVE values from AgentConfig table. Engine uses them at runtime.
@@ -1433,7 +1434,16 @@ function checkPositions(sym: string, price: number, reliable = true) {
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
-  pos.peakDiff = Math.max(pos.peakDiff ?? 0, diff); // track best favorable excursion for the profit-lock
+  const prevPeak = pos.peakDiff ?? 0;
+  pos.peakDiff = Math.max(prevPeak, diff); // track best favorable excursion for the profit-lock
+  // Persist the high-water-mark (and current reachedBreakeven/trail state — savePositions serializes the
+  // whole position) whenever it advances, throttled to ~12s. Without this, a restart/crash between the
+  // sparse event-driven saves resets peakDiff + reachedBreakeven, which caused a live long to time-exit
+  // early at +$68 after peaking ~+$186. Best-effort — never blocks trade logic.
+  if (pos.peakDiff > prevPeak && Date.now() - (lastTrackSaveAt.get(sym) ?? 0) > 12_000) {
+    lastTrackSaveAt.set(sym, Date.now());
+    savePositions().catch(() => {});
+  }
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
   const pnlDollars = diff * mult * pos.quantity;
 
@@ -1473,6 +1483,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // 0.6R: Move stop to breakeven ON THE BROKER — protect capital early, NO scale out yet
   if (diff >= stopDist * BREAKEVEN_R && !pos.reachedBreakeven) {
     pos.reachedBreakeven = true;
+    savePositions().catch(() => {}); // persist immediately — a restart must not reset this flag (else a premature time-exit)
     const breakevenPrice = roundToTick(sym, pos.entryPrice);
     log(`${sym}: Reached ${BREAKEVEN_R}R ($${pnlDollars.toFixed(0)}) — moving broker stop to breakeven $${breakevenPrice.toFixed(2)} (winner can't become a loser now)`);
 
