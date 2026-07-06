@@ -16,6 +16,7 @@ interface Board {
 }
 interface Recent {
   ts: string | null;
+  blockedAt: string | null;
   mode: string;
   symbol: string;
   direction: string;
@@ -63,7 +64,7 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
     { refreshInterval: 60000 },
   );
   const board = data?.[mode];
-  const recent = (data?.recent || []).filter((r) => r.mode === mode).slice(0, 6);
+  const recent = (data?.recent || []).filter((r) => r.mode === mode); // full resolved history for this mode
 
   if (!board) return null;
   const v = VERDICT[board.verdict];
@@ -92,24 +93,34 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
       <p className="text-[10px] text-muted-foreground/55 leading-snug">{v.blurb}</p>
 
       {recent.length > 0 && (
-        <div className="space-y-1 pt-1 border-t border-border/50">
-          {recent.map((r, i) => {
-            const vetoVal = -(r.dollarPnl ?? 0); // what blocking this did for you
-            const good = vetoVal >= 0;            // + = dodged a loser, − = missed a winner
-            return (
-              <div key={i} className="flex items-center gap-2 text-[10px]">
-                <span
-                  className={`shrink-0 w-12 font-bold tabular-nums ${good ? "text-emerald-400" : "text-red-400"}`}
-                  title={good ? `Good block — the veto saved you ${fmtMoney(vetoVal)}` : `Missed winner — the veto cost you ${fmtMoney(vetoVal)}`}
-                >
-                  {r.dollarPnl != null ? fmtMoney(vetoVal) : ""}
-                </span>
-                <span className="font-semibold">{r.symbol} {r.direction?.toUpperCase()}</span>
-                <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {good ? "dodged a loser" : "missed a winner"}</span>
-              </div>
-            );
-          })}
-          <p className="text-[9px] text-muted-foreground/40 pt-0.5">
+        <div className="pt-1 border-t border-border/50">
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground/45 pb-1">
+            Every blocked setup ({recent.length}), newest first — with the date it fired
+          </p>
+          <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
+            {recent.map((r, i) => {
+              const vetoVal = -(r.dollarPnl ?? 0); // what blocking this did for you
+              const good = vetoVal >= 0;            // + = dodged a loser, − = missed a winner
+              const when = r.blockedAt ? new Date(r.blockedAt) : null;
+              const dateStr = when
+                ? `${when.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+                : "—";
+              return (
+                <div key={i} className="flex items-center gap-2 text-[10px]">
+                  <span className="shrink-0 w-[68px] text-muted-foreground/45 tabular-nums">{dateStr}</span>
+                  <span
+                    className={`shrink-0 w-12 font-bold tabular-nums ${good ? "text-emerald-400" : "text-red-400"}`}
+                    title={good ? `Good block — the veto saved you ${fmtMoney(vetoVal)}` : `Missed winner — the veto cost you ${fmtMoney(vetoVal)}`}
+                  >
+                    {r.dollarPnl != null ? fmtMoney(vetoVal) : ""}
+                  </span>
+                  <span className="font-semibold">{r.symbol} {r.direction?.toUpperCase()}</span>
+                  <span className="text-muted-foreground/50 truncate">· {r.setupType?.replace(/_/g, " ")} · {good ? "dodged a loser" : "missed a winner"}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[9px] text-muted-foreground/40 pt-1">
             Green = the veto <b>saved</b> you money (blocked a loser). Red = it <b>cost</b> you money (missed a winner). The number is what the veto saved/cost — not the trade&apos;s own P&amp;L.
           </p>
         </div>

@@ -9,17 +9,18 @@ export async function GET() {
       getShadowScoreboard("live"),
       getShadowScoreboard("demo"),
     ]);
-    // Most recent resolved counterfactuals for the activity list.
+    // Full resolved history (not just recent) so the UI can show every blocked counterfactual with dates.
     const recent = await prisma.shadowTrade.findMany({
       where: { status: { not: "open" } },
       orderBy: { resolvedAt: "desc" },
-      take: 12,
+      take: 200,
     });
     return Response.json({
       live,
       demo,
       recent: recent.map((r) => ({
-        ts: r.resolvedAt,
+        ts: r.resolvedAt,          // when it resolved
+        blockedAt: r.createdAt,    // when the setup fired / was blocked
         mode: r.mode,
         symbol: r.symbol,
         direction: r.direction,
