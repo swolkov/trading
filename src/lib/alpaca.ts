@@ -188,6 +188,27 @@ export async function cancelOrder(orderId: string): Promise<void> {
   });
 }
 
+export interface MultiLegLeg {
+  symbol: string;                 // OCC option symbol
+  side: "buy" | "sell";
+  ratio_qty: string;              // "1" for a 1:1 vertical
+  position_intent: "buy_to_open" | "sell_to_open" | "buy_to_close" | "sell_to_close";
+}
+
+// Atomic multi-leg (mleg) order — BOTH legs fill together or neither. This is the correct way to
+// enter a defined-risk vertical spread: it removes the naked-leg risk of legging in with two
+// separate orders (one leg filling while the other is rejected/slips). Use a net LIMIT price so a
+// debit spread can never fill above the intended max cost.
+export async function placeMultiLegOrder(
+  params: { qty: string; type: "market" | "limit"; time_in_force: "day" | "gtc"; limit_price?: string; legs: MultiLegLeg[] },
+  modeOverride?: TradingMode,
+): Promise<Order> {
+  return alpacaFetch(`${BASE_URL}/v2/orders`, {
+    method: "POST",
+    body: JSON.stringify({ order_class: "mleg", ...params }),
+  }, modeOverride);
+}
+
 // ---------- Market Data ----------
 
 export interface Quote {

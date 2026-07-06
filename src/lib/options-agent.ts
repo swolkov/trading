@@ -22,6 +22,7 @@ import {
   getSnapshot,
   getMarketClock,
   getNews,
+  placeMultiLegOrder,
   type Position,
   type OptionsContract,
 } from "./alpaca";
@@ -423,8 +424,19 @@ async function executeAgentDebitSpread(
   }
 
   const groupId = `OPTG-${Date.now().toString(36)}`;
-  const buyOrder = await placeOrder({ symbol: buyC.symbol, qty: String(qty), side: "buy", type: "market", time_in_force: "day" }, cfg.mode);
-  const sellOrder = await placeOrder({ symbol: sellC.symbol, qty: String(qty), side: "sell", type: "market", time_in_force: "day" }, cfg.mode);
+  // ATOMIC multi-leg entry — both legs fill together or neither (no naked-leg risk). Net-debit LIMIT
+  // at a 10% buffer so it fills but can never pay more than intended for the spread.
+  const limitPrice = (Math.ceil(debit * 1.10 * 100) / 100).toFixed(2);
+  const order = await placeMultiLegOrder({
+    qty: String(qty),
+    type: "limit",
+    time_in_force: "day",
+    limit_price: limitPrice,
+    legs: [
+      { symbol: buyC.symbol, side: "buy", ratio_qty: "1", position_intent: "buy_to_open" },
+      { symbol: sellC.symbol, side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
+    ],
+  }, cfg.mode);
 
   const meta: SpreadMeta = { groupId, buySym: buyC.symbol, sellSym: sellC.symbol, qty, debit, maxRisk, expiry, direction: sig.direction };
 
@@ -440,9 +452,9 @@ async function executeAgentDebitSpread(
       action: "opt_open",
       qty,
       price: debit,
-      reason: encodeMeta(`[OPT-OPEN] ${planned}.`, { ...meta, reasons: sig.reasons, buyOrderId: buyOrder.id, sellOrderId: sellOrder.id }),
+      reason: encodeMeta(`[OPT-OPEN] ${planned}.`, { ...meta, reasons: sig.reasons, mlegOrderId: order.id, limitPrice }),
       aiSignal: sig.direction,
-      orderId: buyOrder.id,
+      orderId: order.id,
     },
   });
   await logTradeToJournal({
