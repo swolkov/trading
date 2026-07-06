@@ -1600,11 +1600,11 @@ function checkPositions(sym: string, price: number, reliable = true) {
       const atrMult = METALS.has(sym) ? 1.0 : 0.9;
       let rawTrail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
 
-      // PROFIT-LOCK RATCHET: once the trade has been up ≥1.5R, never give back more than ~35% of the
-      // best excursion. This is what stops a big unrealized gain from evaporating on a bounce — the
-      // trailing stop alone can't do it on a 1-contract account (no partial scale-out to bank profit).
+      // PROFIT-LOCK RATCHET: once the trade has been up ≥1.0R, never give back more than ~35% of the
+      // best excursion. Lowered from 1.5R → 1.0R so common spikes (e.g. a +$186 / ~1.3R peak on gold)
+      // actually get protected — the trailing stop alone can't bank profit on a 1-contract account.
       const peak = pos.peakDiff ?? diff;
-      if (peak >= stopDist * 1.5) {
+      if (peak >= stopDist * 1.0) {
         const lockDist = peak * 0.65; // protect 65% of the peak favorable move
         const lockStop = pos.direction === "long" ? pos.entryPrice + lockDist : pos.entryPrice - lockDist;
         rawTrail = pos.direction === "long" ? Math.max(rawTrail, lockStop) : Math.min(rawTrail, lockStop);
