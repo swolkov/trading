@@ -1098,6 +1098,7 @@ interface Position {
   symbol: string; contractId: number; direction: "long" | "short";
   quantity: number; entryPrice: number; stopLoss: number; target: number;
   trailStop: number | null; reachedBreakeven: boolean;
+  peakDiff?: number; // high-water-mark: best favorable excursion (points) — drives the profit-lock ratchet
   stopOrderId: number | null; targetOrderId: number | null;
   entryTime: number;
   scaledOut: boolean;
@@ -1432,6 +1433,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
+  pos.peakDiff = Math.max(pos.peakDiff ?? 0, diff); // track best favorable excursion for the profit-lock
   const stopDist = Math.abs(pos.entryPrice - pos.stopLoss);
   const pnlDollars = diff * mult * pos.quantity;
 
@@ -1593,8 +1595,20 @@ function checkPositions(sym: string, price: number, reliable = true) {
   if (diff >= stopDist * TRAIL_R) {
     const currentATRVal = atr(barBuilders.get(sym)?.bars5m || []);
     if (currentATRVal > 0) {
-      const atrMult = METALS.has(sym) ? 1.5 : 1.0;
-      const rawTrail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
+      // Tightened: gold was 1.5 (→ 2.25× ATR ≈ 12+ pts behind) which let a +$170 gain trail out at +$25.
+      // Now gold trails ~1.5× ATR, index ~1.35× ATR.
+      const atrMult = METALS.has(sym) ? 1.0 : 0.9;
+      let rawTrail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
+
+      // PROFIT-LOCK RATCHET: once the trade has been up ≥1.5R, never give back more than ~35% of the
+      // best excursion. This is what stops a big unrealized gain from evaporating on a bounce — the
+      // trailing stop alone can't do it on a 1-contract account (no partial scale-out to bank profit).
+      const peak = pos.peakDiff ?? diff;
+      if (peak >= stopDist * 1.5) {
+        const lockDist = peak * 0.65; // protect 65% of the peak favorable move
+        const lockStop = pos.direction === "long" ? pos.entryPrice + lockDist : pos.entryPrice - lockDist;
+        rawTrail = pos.direction === "long" ? Math.max(rawTrail, lockStop) : Math.min(rawTrail, lockStop);
+      }
       const trail = roundToTick(sym, rawTrail); // broker rejects un-tick-aligned stop prices
       if (!pos.trailStop || (pos.direction === "long" ? trail > pos.trailStop : trail < pos.trailStop)) {
         const isNew = !pos.trailStop;
@@ -3174,26 +3188,30 @@ async function evaluateAndTrade(
 
   // Adjust confidence based on AI
   let finalScore = technicalScore;
+  // We DON'T record "confirmed" here — a setup is only recorded as taken once it actually opens a
+  // position (see the canExec block below). Otherwise, while already holding gold, every 5-min re-grade
+  // of the same trend would log a fresh "confirmed" and the feed would look like it fired 12 trades
+  // when it holds 1. wouldTakeReason carries the reason forward to the execution point.
+  let wouldTakeReason: string | null = null;
   if (ai.confidence > 0) {
     if (ai.agree) {
       finalScore += Math.min(10, Math.round(ai.confidence / 10));
       log(`  AI CONFIRMS (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
-      recordDecision({ sym, direction, setupType, confidence: finalScore, verdict: "confirmed", aiConfidence: ai.confidence, reason: ai.reasoning });
       feedLog("setup", `**${sym} ${setupType} ${direction}** ${finalScore}% — AI confirms: ${ai.reasoning}`);
+      wouldTakeReason = ai.reasoning;
     } else if (aiVetoEnabled) {
       log(`  AI REJECTS (${ai.confidence}%): ${ai.reasoning} — trade blocked`);
       recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", aiConfidence: ai.confidence, reason: ai.reasoning, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} ${technicalScore}% — AI rejected: ${ai.reasoning}`);
       return;
     } else {
-      // GRADER OFF: the AI would block, but we take the mechanical trade anyway (live + demo). Record it
-      // as CONFIRMED so it SHOWS in the activity feed as taken — otherwise the feed only ever displays the
-      // AI-approved and blocked setups, and the unfiltered trades we're now taking would be invisible.
+      // GRADER OFF: the AI would block, but we take the mechanical trade anyway (live + demo).
       log(`  AI WOULD REJECT (${ai.confidence}%): ${ai.reasoning} — TAKING ANYWAY [grader off]`);
-      recordDecision({ sym, direction, setupType, confidence: finalScore, verdict: "confirmed", aiConfidence: ai.confidence, reason: `Grader OFF — taking despite AI disagree: ${ai.reasoning}` });
+      wouldTakeReason = `Grader OFF — taking despite AI disagree: ${ai.reasoning}`;
     }
   } else {
     log(`  AI: ${ai.reasoning}`);
+    wouldTakeReason = ai.reasoning || "mechanical setup";
   }
 
   // Re-entry cooldown check: was this symbol+direction recently stopped out?
@@ -3240,13 +3258,18 @@ async function evaluateAndTrade(
     // Pattern memory hard block was already evaluated up front before the AI call,
     // so by the time we reach here the setup has cleared both the empirical floor and the AI.
     log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}% | ${MODE_TAG}`);
+    // Record the decision as taken ONLY here — at the actual entry — so the feed shows one "confirmed"
+    // per real position, not one per re-grade while already holding.
+    recordDecision({ sym, direction, setupType, confidence: finalScore, verdict: "confirmed", aiConfidence: ai.confidence, reason: wouldTakeReason ?? ai.reasoning });
     feedLog("trade", `**${MODE_TAG} ${direction.toUpperCase()} ${sym}** @ $${price.toFixed(2)} | ${finalScore}% confidence`);
     await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
       `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`,
       { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session, setupType });
   } else {
-    // Hit daily limit or tilt — done for the day. Demo handles learning independently.
-    log(`  BLOCKED: ${direction.toUpperCase()} ${sym} (${dailyTradeCount >= 10 ? "daily limit" : "tilt/position limit"}). Done.`);
+    // Approved but can't enter — usually because we're already holding this symbol (one position per
+    // symbol), or a daily/tilt limit. This is a NON-EVENT (the engine is just holding); we deliberately
+    // don't log it to the feed so the activity list stays "1 confirmed per real trade", not a wall of re-grades.
+    log(`  HELD/SKIP: ${direction.toUpperCase()} ${sym} — ${positions.has(sym) ? "already in a position (one per symbol)" : dailyTradeCount >= riskConfig.maxTradesPerDay ? "daily limit" : "tilt/position limit"}`);
   }
 }
 
