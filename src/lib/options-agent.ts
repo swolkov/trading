@@ -592,8 +592,12 @@ async function manageAgentSpreads(positions: Position[], cfg: OptionsAgentConfig
 
     if (dry) { out.push(`[DRY] ${g.buySym}: would close — ${exit} (${(pnlPct * 100).toFixed(0)}%)`); continue; }
     try {
-      if (buyP) await placeOrder({ symbol: g.buySym, qty: String(Math.abs(parseFloat(buyP.qty))), side: "sell", type: "market", time_in_force: "day" }, cfg.mode);
+      // Close the SHORT (undefined-risk) leg FIRST. Market orders guarantee the exit fills — an atomic
+      // mleg LIMIT close (Alpaca has no market mleg) could fail to fill a stop and leave a loser open,
+      // which is worse and can't be validated without live testing. Short-first means a partial failure
+      // can only ever leave a naked LONG (defined risk) or the intact spread — never a naked short.
       if (sellP) await placeOrder({ symbol: g.sellSym, qty: String(Math.abs(parseFloat(sellP.qty))), side: "buy", type: "market", time_in_force: "day" }, cfg.mode);
+      if (buyP) await placeOrder({ symbol: g.buySym, qty: String(Math.abs(parseFloat(buyP.qty))), side: "sell", type: "market", time_in_force: "day" }, cfg.mode);
       await logClose(g, unitUnreal, exit, cfg.mode);
       out.push(`CLOSED ${g.buySym}: ${exit} → $${unitUnreal.toFixed(0)}`);
     } catch (e) {
