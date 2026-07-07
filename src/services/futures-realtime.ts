@@ -3134,7 +3134,17 @@ async function evaluateAndTrade(
   // setups LOSE out-of-sample. So on index symbols take ONLY the extreme-RSI-bounce SHORT at RSI≥80 and
   // skip everything else — that's "only stop the losers" grounded in data, not a filter that can't exist.
   // The auto-prune gate above + pattern memory keep learning ON TOP of this baseline.
-  if (!METALS.has(sym)) {
+  if (METALS.has(sym)) {
+    // GOLD: only the validated RSI-bounce edge (backtest PF 1.24 OOS / live PF 1.52 over 60d). EVERY other
+    // gold setup (trend_continuation, vwap_bounce, gap_fill, …) loses out-of-sample — trend_continuation is
+    // exactly what bled the live account ~−$242 since Jul 3 (e.g. the −$122 pullback long on Jul 7). Restrict
+    // gold to the one edge that actually holds. (Previously gold "traded fully" — the source of the losses.)
+    if (setupType !== "extreme_rsi_bounce") {
+      log(`  ${sym}: SKIP — gold trades ONLY the RSI-bounce edge (got ${setupType})`);
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `gold trades RSI-bounce edge only — skipped ${setupType}`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+      return;
+    }
+  } else {
     const isValidatedIndexEdge = setupType === "extreme_rsi_bounce" && direction === "short" && rsiVal >= 80;
     if (!isValidatedIndexEdge) {
       log(`  ${sym}: SKIP — index trades only the RSI≥80 overbought-short (got ${setupType}/${direction}/RSI ${rsiVal.toFixed(0)})`);
