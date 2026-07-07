@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { computeFuturesStats } from "./lib/compute-stats";
+import { TrackRecordHeader } from "@/components/futures/track-record-header";
 
 interface TradeAnalysis {
   stats: {
@@ -125,6 +126,8 @@ export default function PerformancePage() {
           {futuresViewMode === "live" ? "LIVE" : "DEMO"}
         </span>
       </div>
+
+      {futuresViewMode === "live" && <TrackRecordHeader />}
 
       {/* Futures Only */}
       <div className="flex gap-1.5">
