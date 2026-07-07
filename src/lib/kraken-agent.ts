@@ -1,9 +1,12 @@
 // Kraken BTC/ETH 50-day TREND-FOLLOWER — the one crypto method that survived out-of-sample testing
 // (comparable return to buy&hold but ~30pts less drawdown). Per-coin state machine:
-//   above the 50-day trend + not holding  → BUY (enter)
-//   below the 50-day trend + holding       → SELL to cash (exit before the deep bears)
-// Long-only spot, no leverage. Trades a few times a year (trend crosses) → tiny fee drag. Runs on a
-// cron. Honest: a real, disciplined edge with managed drawdown — not a $500-to-fortune machine.
+//   above the 50-day trend  → hold, and top up toward the target $ allocation with spare cash
+//                             (deploys idle cash + adds on pullbacks that stay above the 50-day)
+//   below the 50-day trend + holding → SELL to cash (exit before the deep bears)
+// Sizes off the LIVE account balance every run, so adding funds auto-deploys. BTC/ETH only —
+// the broad basket test showed almost every other coin (and every meme) lost money through a bull
+// market. Long-only spot, no leverage, trades rarely → tiny fee drag. Runs on a cron.
+// Honest: a real, disciplined edge with managed drawdown — not a $500-to-fortune machine.
 import { prisma } from "./db";
 import { getDipScan, runDipScan, type DipRow } from "./crypto-dip-scanner";
 import { krakenConfigured, getKrakenBalance, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset } from "./kraken";
@@ -116,24 +119,31 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
     const heldValue = held * price;
     const isHolding = heldValue >= MIN_HOLD_USD;
     const up = row.aboveTrend;
+    const target = cfg.perCoinUsd;                       // target $ allocation per coin while trending up
+    const band = Math.max(MIN_ORDER_USD, target * 0.1);  // rebalance band — don't churn on small wiggles
 
-    // ENTER: uptrend + flat → buy the per-coin allocation
-    if (up && !isHolding) {
-      const alloc = Math.min(cfg.perCoinUsd, usd);
-      if (alloc < MIN_ORDER_USD) { details.push(`${coin}: uptrend but only $${usd.toFixed(2)} cash — can't enter`); continue; }
-      if (dry) { details.push(`[DRY] ${coin}: would BUY $${alloc.toFixed(0)} (above 50-day, entering)`); continue; }
+    // UPTREND: hold, and top up toward the target with spare cash (deploys idle cash + adds on
+    // pullbacks that stay above the 50-day). Winners above target are left to run — never trimmed.
+    if (up) {
+      const deficit = target - heldValue;
+      const alloc = Math.min(deficit, usd);
+      if (deficit < band || alloc < MIN_ORDER_USD) {
+        details.push(`${coin}: ${isHolding ? `holding ~$${heldValue.toFixed(0)}` : "flat"} (uptrend, at/near $${target.toFixed(0)} target — hold)`);
+        continue;
+      }
+      if (dry) { details.push(`[DRY] ${coin}: would BUY $${alloc.toFixed(0)} (above 50-day, ${isHolding ? "topping up" : "entering"} toward $${target.toFixed(0)})`); continue; }
       try {
         const order = await krakenBuyMarket(coin, alloc, price, cfg.validateOnly);
-        details.push(`${coin}: ${cfg.validateOnly ? "VALIDATED buy" : "BOUGHT"} $${alloc.toFixed(0)} → ${order.volume} @ $${price.toFixed(2)} (trend entry)`);
+        details.push(`${coin}: ${cfg.validateOnly ? "VALIDATED buy" : "BOUGHT"} $${alloc.toFixed(0)} → ${order.volume} @ $${price.toFixed(2)} (${isHolding ? "trend top-up" : "trend entry"})`);
         if (!cfg.validateOnly) {
           usd -= alloc; res.buys++;
-          await logTrade(coin, "kraken_buy", alloc, price, `Trend entry: above 50-day. Bought $${alloc.toFixed(0)} = ${order.volume} @ $${price.toFixed(2)}.`, order.txid?.[0]);
-          await logDecision("kraken-trend", "ENTRY", `KRK:${coin}`, `Trend entry (above 50-day) — bought $${alloc.toFixed(0)}`, 3).catch(() => {});
+          await logTrade(coin, "kraken_buy", alloc, price, `Trend ${isHolding ? "top-up" : "entry"}: above 50-day. Bought $${alloc.toFixed(0)} = ${order.volume} @ $${price.toFixed(2)} toward $${target.toFixed(0)} target.`, order.txid?.[0]);
+          await logDecision("kraken-trend", "ENTRY", `KRK:${coin}`, `Trend ${isHolding ? "top-up" : "entry"} (above 50-day) — bought $${alloc.toFixed(0)}`, 3).catch(() => {});
         }
       } catch (e) { details.push(`${coin}: buy error — ${e}`); }
     }
     // EXIT: downtrend + holding → sell to cash
-    else if (!up && isHolding) {
+    else if (isHolding) {
       if (dry) { details.push(`[DRY] ${coin}: would SELL ${held} (~$${heldValue.toFixed(0)}) (below 50-day, exiting)`); continue; }
       try {
         const order = await krakenSellMarket(coin, held, cfg.validateOnly);
@@ -145,9 +155,9 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
         }
       } catch (e) { details.push(`${coin}: sell error — ${e}`); }
     }
-    // HOLD / WAIT
+    // DOWNTREND + flat → wait for the trend to turn up
     else {
-      details.push(`${coin}: ${isHolding ? `holding ~$${heldValue.toFixed(0)} (uptrend — hold)` : "flat (downtrend — waiting for uptrend)"}`);
+      details.push(`${coin}: flat (downtrend — waiting for uptrend)`);
     }
   }
 
