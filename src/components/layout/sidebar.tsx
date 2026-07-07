@@ -37,7 +37,6 @@ const sections = [
     label: "OVERVIEW",
     links: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
-      { href: "/brief", label: "Morning Brief", icon: Sunrise },
     ],
   },
   {
@@ -48,35 +47,17 @@ const sections = [
     ],
   },
   {
-    label: "PERFORMANCE",
+    // The investor-facing story: the track record + the edge evidence.
+    label: "TRACK RECORD",
     links: [
       { href: "/performance", label: "Performance", icon: TrendingUp },
-      { href: "/analytics", label: "Analytics", icon: BarChart3 },
-      { href: "/positions", label: "Positions", icon: Wallet },
-      { href: "/orders", label: "Orders", icon: ClipboardList },
-      { href: "/journal", label: "Journal", icon: BookOpen },
+      { href: "/backtest", label: "Edge / Backtest", icon: FlaskConical },
     ],
   },
   {
-    label: "RESEARCH",
+    label: "SYSTEM",
     links: [
-      { href: "/research", label: "Symbol Research", icon: Search },
-      { href: "/watchlist", label: "Watchlist", icon: Eye },
-      { href: "/edges", label: "Edge Hierarchy", icon: Brain },
-      { href: "/backtest", label: "Backtest", icon: FlaskConical },
-      { href: "/calendar", label: "Calendar", icon: Calendar },
-      { href: "/research/correlations", label: "Correlations", icon: Link2 },
-      { href: "/research/positioning", label: "Positioning (OI)", icon: TrendingUp },
-    ],
-  },
-  {
-    label: "CONTROL",
-    links: [
-      { href: "/agents", label: "Agent Hub", icon: Bot },
       { href: "/command", label: "System Health", icon: Activity },
-      { href: "/trade", label: "Manual Trade", icon: Crosshair },
-      { href: "/ai", label: "Claude Console", icon: Sparkles },
-      { href: "/admin/strategies", label: "Strategies", icon: Layers },
       { href: "/connect", label: "Connections", icon: PlugZap },
     ],
   },
