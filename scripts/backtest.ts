@@ -89,9 +89,9 @@ function scoreSetup(f: { baseConfidence: number; volTrend: string; volRatio: num
 }
 
 // ===================== config =====================
-const MULT: Record<string, number> = { ES: 50, NQ: 20, GC: 100 };   // $ per 1.00 point
-const TICK: Record<string, number> = { ES: 0.25, NQ: 0.25, GC: 0.10 };
-const METALS = new Set(["GC"]);
+const MULT: Record<string, number> = { ES: 50, NQ: 20, GC: 100, HG: 25000, SI: 5000, PL: 50, PA: 100, CL: 1000, NG: 10000 };   // $ per 1.00 point
+const TICK: Record<string, number> = { ES: 0.25, NQ: 0.25, GC: 0.10, HG: 0.0005, SI: 0.005, PL: 0.10, PA: 0.05, CL: 0.01, NG: 0.001 };
+const METALS = new Set(["GC", "HG", "SI", "PL", "PA"]);   // precious/industrial metals get the metals session treatment
 const COMMISSION_PER_SIDE = 2.5;  // full-size all-in estimate ($/contract/side)
 const MAX_HOLD = 78;              // bars (~6.5h) before time-exit if unresolved
 const GAP_THRESHOLDS: Record<string, number> = { ES: 10, NQ: 50, GC: 15 };

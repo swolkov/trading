@@ -10,6 +10,7 @@ import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
 import { VetoScoreboard } from "@/components/futures/veto-scoreboard";
 import { MgcScorecard } from "@/components/futures/mgc-scorecard";
+import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -651,6 +652,7 @@ export default function FuturesPage() {
                   <FuturesChart symbol={selectedContract} height={560} />
                 </CardContent>
               </Card>
+              {isLiveView && <EdgeScoreboard />}
               {isLiveView && <MgcScorecard />}
               <VetoScoreboard mode={isLiveView ? "live" : "demo"} />
               <EngineActivity />
