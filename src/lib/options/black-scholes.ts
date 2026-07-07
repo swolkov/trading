@@ -25,6 +25,17 @@ export function bsPrice(type: OptType, S: number, K: number, T: number, sigma: n
   return K * Math.exp(-r * T) * normCdf(-d2) - S * normCdf(-d1);
 }
 
+// Option gamma (same for calls and puts): rate of change of delta per $1 move in spot. Peaks ATM and
+// as expiry nears. This is the core input to dealer Gamma Exposure (GEX) — how hard market-makers must
+// hedge as price moves. Per share; ×100 for a contract, ×OI for the aggregate at a strike.
+export function bsGamma(S: number, K: number, T: number, sigma: number, r = 0.04): number {
+  if (T <= 0 || sigma <= 0) return 0;
+  const sqrtT = Math.sqrt(T);
+  const d1 = (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * sqrtT);
+  const pdf = 0.3989422804014327 * Math.exp(-d1 * d1 / 2);
+  return pdf / (S * sigma * sqrtT);
+}
+
 // Option delta (signed: calls 0..1, puts -1..0).
 export function bsDelta(type: OptType, S: number, K: number, T: number, sigma: number, r = 0.04): number {
   if (T <= 0) { const itm = type === "call" ? S > K : S < K; return itm ? (type === "call" ? 1 : -1) : 0; }
