@@ -171,19 +171,17 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-// Edge-focused (Jun 26): both engines trade GOLD (the OOS-validated edge) + NQ/ES overbought-shorts.
-// Demo trades full-size; live trades the micros (gold + index micros all fit the 15% cap on $924).
+// Edge-focused: both engines trade the two validated micro edges — gold RSI-bounce + index
+// overbought-short. Demo trades full-size for research; live trades the micros (MGC/MNQ/MES),
+// 1 contract per trade at ~1-2% risk on the ~$5K account.
 const DEMO_CONTRACTS = ["GC", "NQ", "ES"];
-// Live: gold only (MGC micro / GC full-size ≥$25K). Gold is the only OOS-validated futures edge;
-// MNQ/MES lose out-of-sample, so they're excluded from live via the live_futures_symbols whitelist.
-const LIVE_CONTRACTS = ["MGC"];
+// Live: micro gold (MGC) + micro index (MNQ/MES). Two validated edges — gold RSI-bounce and
+// index overbought-short — traded raw with the AI grader OFF.
+const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
 
 const STRATEGIES = [
-  { name: "Gap Fill", priority: 1, confidence: "78%", when: "First 30 min", desc: "Fade small gaps (<10pts) targeting prior day close. 78% fill rate on ES." },
-  { name: "IB Breakout", priority: 2, confidence: "75%+", when: "After 10:30 AM", desc: "Break above/below 60-min Initial Balance with volume + 15m trend alignment." },
-  { name: "Failed IB Breakout", priority: 3, confidence: "73%", when: "After IB break fails", desc: "Price tests IB high/low, returns to range. Fade to IB midpoint." },
-  { name: "Trend Continuation", priority: 4, confidence: "72%", when: "Morning/Afternoon", desc: "Pullback to EMA9 in trending market. Best backtest setup (67% WR)." },
-  { name: "Extreme RSI Bounce", priority: 5, confidence: "70%", when: "RSI <25 or >75", desc: "Exhaustion reversal on declining volume. Any session, any day type." },
+  { name: "Gold RSI-bounce", priority: 1, confidence: "Edge", when: "RSI <25 / overbought", desc: "Buy micro gold (MGC) when oversold (RSI<25); fade when overbought." },
+  { name: "Index overbought-short", priority: 2, confidence: "Edge", when: "RSI ≥ 80", desc: "Short micro Nasdaq/S&P (MNQ/MES) at RSI≥80." },
 ];
 
 const DEMO_RISK_RULES = [
@@ -192,23 +190,19 @@ const DEMO_RISK_RULES = [
   "ALL SESSIONS: 24/5 learning (Sun 6PM–Fri 5PM ET)",
   "$7,500 daily loss limit (15% of $50K)",
   "20 trades/day base, 40 with A+ override",
-  "AI hard gate — only A/A+ setups (60%+ conf)",
-  "Tilt: pause after 2 stops, A+ overrides",
+  "AI grader OFF — raw setups (paper test bed only)",
+  "Tilt: pause after 2 stops",
   "Brain learns from every trade — vault syncs",
   "25% drawdown kill ($12,500) → lockdown",
   "No re-entry on stopped symbols",
 ];
 const LIVE_RISK_RULES = [
-  "15% risk/trade — MGC (gold) only, the sole OOS-validated edge",
-  "Scale out 50% at 1R, trail rest for runners",
-  "TWO WINDOWS: 9:45-11:30 AM + 2:00-3:30 PM",
-  "$150 daily loss limit (15% of $1K)",
-  "Max 3 MGC/trade, 6 trades/day",
-  "AI hard gate — only A/A+ setups (80%+ conf)",
-  "Tilt: pause after 2 stops, halt after 3",
-  "Paper trades outside windows (learning mode)",
-  "25% drawdown kill ($250) → lockdown",
-  "No re-entry on stopped symbols",
+  "1 micro contract per trade (~1–2% risk) — no pyramiding",
+  "Two validated edges only: gold RSI-bounce + index overbought-short",
+  "Broker stop-loss on every trade — defined risk",
+  "8% daily-loss halt — stops trading on a bad day",
+  "25% drawdown kill switch — halts & reassess",
+  "AI grader OFF — trades the raw validated edges",
 ];
 
 // ── Helpers ────────────────────────────────────────────
@@ -462,7 +456,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate {isLiveView ? "micro gold — MGC" : "futures — GC, NQ, ES"}
+            Tradovate {isLiveView ? "micro futures — MGC / MNQ / MES" : "futures — GC, NQ, ES"}
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
@@ -490,7 +484,7 @@ export default function FuturesPage() {
       {/* ── Architecture truth: Databento data · Tradovate execution · environment ── */}
       <div className="flex flex-wrap items-center gap-2 text-[10px] -mt-1">
         <span className={`px-1.5 py-0.5 rounded font-bold border ${isLiveView ? "bg-red-500/15 text-red-400 border-red-500/30" : "bg-amber-500/15 text-amber-400 border-amber-500/30"}`}>
-          {isLiveView ? "LIVE · $1K real money — validating execution, not proven alpha" : "DEMO · RESEARCH LAB — P&L is not proof"}
+          {isLiveView ? "LIVE · ~$5K real money — validating execution, not proven alpha" : "DEMO · RESEARCH LAB — P&L is not proof"}
         </span>
         {modeSwitching && (
           <span className="px-1.5 py-0.5 rounded font-bold border bg-blue-500/15 text-blue-300 border-blue-500/30 inline-flex items-center gap-1">
@@ -668,11 +662,11 @@ export default function FuturesPage() {
           {activeTab === "strategy" && (
             <Card className="border-white/[0.06]">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm">5 Expert Setups — Priority Order</CardTitle>
+                <CardTitle className="text-sm">Two Validated Edges — Priority Order</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
-                  ⚠️ These directional setups are <b>unvalidated / research-only</b> — most were rejected in testing (see EDGE-HIERARCHY). The only validated edge is the <b>spread book</b> (paper-forward, not deployable on the $1K). Demo P&L is not proof.
+                  Live trades <b>two validated micro edges</b> — gold RSI-bounce (MGC) and index overbought-short (MNQ/MES) — 1 contract per trade at ~1–2% risk, broker stop on every trade, AI grader OFF. Demo P&L is research, not proof.
                 </div>
                 <div className="space-y-2">
                   {STRATEGIES.map((s) => (

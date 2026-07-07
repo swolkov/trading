@@ -367,7 +367,6 @@ export default function CommandCenterPage() {
                 {/* Positions breakdown */}
                 <div className="flex items-center gap-4 text-[10px] text-muted-foreground border-t border-zinc-800 pt-3">
                   <span>Equity: {risk.equityPositions}</span>
-                  <span>Options: {risk.optionsPositions}</span>
                   <span>Futures: {risk.futuresPositions}</span>
                   <span>Top: {risk.topConcentration.symbol} ({risk.topConcentration.pct.toFixed(0)}%)</span>
                 </div>

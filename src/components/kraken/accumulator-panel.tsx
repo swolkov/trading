@@ -27,7 +27,7 @@ export function AccumulatorPanel() {
   const [msg, setMsg] = useState<string | null>(null);
   if (!data) return null;
 
-  const perCoin = data.config?.kraken_per_coin_usd || "250";
+  const perCoin = data.config?.kraken_per_coin_usd || "10";
   const coins = data.config?.kraken_coins || "BTC/USD,ETH/USD";
   const pnl = data.totalValue - data.totalInvested;
 
@@ -48,7 +48,7 @@ export function AccumulatorPanel() {
   return (
     <div className="rounded-lg border border-border bg-card p-5 space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="font-semibold text-sm">BTC/ETH Trend-Follower</h2>
+        <h2 className="font-semibold text-sm">BTC/ETH DCA Accumulator</h2>
         <div className="flex items-center gap-1.5">
           {data.connected ? (
             data.enabled ? (
@@ -64,7 +64,7 @@ export function AccumulatorPanel() {
 
       {!data.connected ? (
         <p className="text-[11px] text-muted-foreground/55 leading-relaxed">
-          Funded, built, and ready. Activates once <code className="bg-muted px-1 rounded">KRAKEN_API_KEY</code> / <code className="bg-muted px-1 rounded">KRAKEN_API_SECRET</code> (a fresh trade-only key) are added in the Vercel environment. Holds {coins.replace(/\/USD/g, "")} while above the 50-day trend, sells to cash below it.
+          Funded, built, and ready. Activates once <code className="bg-muted px-1 rounded">KRAKEN_API_KEY</code> / <code className="bg-muted px-1 rounded">KRAKEN_API_SECRET</code> (a fresh trade-only key) are added in the Vercel environment. Buys ${perCoin} of each {coins.replace(/\/USD/g, "")} every day and holds — never sells.
         </p>
       ) : (
         <>
@@ -79,7 +79,7 @@ export function AccumulatorPanel() {
               <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider">Positions</p>
               {data.holdings.map((h) => (
                 <div key={h.coin} className="flex items-center justify-between text-[11px] px-2 py-1 rounded bg-white/[0.02]">
-                  <span className="font-semibold">{h.coin.replace("/USD", "")} <span className={h.aboveTrend ? "text-emerald-400/70" : "text-red-400/70"}>{h.aboveTrend ? "↑ trend" : "↓ trend"}</span></span>
+                  <span className="font-semibold">{h.coin.replace("/USD", "")} <span className="text-emerald-400/70">HODL</span></span>
                   <span className="tabular-nums text-muted-foreground/70">{h.amount.toFixed(6)} @ {fmt(h.price)}</span>
                   <span className="tabular-nums font-medium">{fmt(h.value)}</span>
                 </div>
@@ -87,10 +87,10 @@ export function AccumulatorPanel() {
             </div>
           ) : (
             <div className="text-[11px] text-muted-foreground/55 px-2 py-1.5 rounded bg-white/[0.02]">
-              <span className="font-semibold text-foreground/70">Positions: none — 100% cash.</span> Waiting for a dip in an uptrend; when it buys, BTC/ETH holdings appear right here.
+              <span className="font-semibold text-foreground/70">No holdings yet.</span> It buys ${perCoin} of BTC and ${perCoin} of ETH every day; once the first buy lands, your holdings appear right here.
             </div>
           )}
-          <p className="text-[10px] text-muted-foreground/45">Trades: {data.buyCount} · ${perCoin}/coin · {coins.replace(/\/USD/g, "")} · hold above 50-day, sell below{data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>
+          <p className="text-[10px] text-muted-foreground/45">Buys: {data.buyCount} · ${perCoin}/coin daily · {coins.replace(/\/USD/g, "")} · buy-and-hold, never sells{data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>
 
           {/* Password-gated real-money arm/disarm */}
           <div className="border-t border-border/60 pt-3 mt-1">
@@ -116,7 +116,7 @@ export function AccumulatorPanel() {
               </div>
             ) : (
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — trend-following</span>
+                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — DCA accumulator</span>
                 <div className="flex gap-2">
                   <input
                     type="password"

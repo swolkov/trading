@@ -3,10 +3,9 @@ import { Bitcoin, TrendingUp, ShieldCheck, PlugZap } from "lucide-react";
 import { DipScanner } from "@/components/kraken/dip-scanner";
 import { AccumulatorPanel } from "@/components/kraken/accumulator-panel";
 
-// Kraken — crypto trend-following. NOT day-trading. Crypto day-trading tested at PF 0.73 (loses);
-// the trend-following version is the one edge that survived out-of-sample, so that's what this is.
-// Kraken isn't wired/funded yet, so this page is an honest status + strategy explainer — no fake
-// "live" numbers. It flips to a real dashboard once the account is funded and the API is connected.
+// Kraken — a dollar-cost-averaging accumulator. It buys $10 of BTC and $10 of ETH every day and
+// HOLDS. It never sells. This is not day-trading and not trend-following — it's slow, mechanical
+// long-term accumulation. Funded and live; positions show in the accumulator panel at the top.
 
 export default function KrakenPage() {
   return (
@@ -17,8 +16,8 @@ export default function KrakenPage() {
           <Bitcoin className="w-5 h-5 text-purple-400" />
         </div>
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Kraken — Crypto Trend Following</h1>
-          <p className="text-sm text-muted-foreground">Multi-day trend strategy. Long-only. Not day-trading.</p>
+          <h1 className="text-xl font-bold tracking-tight">Kraken — DCA Accumulator</h1>
+          <p className="text-sm text-muted-foreground">Buys $10 of BTC and $10 of ETH every day and holds. Never sells.</p>
         </div>
       </div>
 
@@ -26,33 +25,34 @@ export default function KrakenPage() {
 
       <DipScanner />
 
-      {/* The edge */}
+      {/* The strategy */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div className="flex items-center gap-2">
           <TrendingUp className="w-4 h-4 text-emerald-400" />
-          <h2 className="font-semibold">The edge: 50-day trend following</h2>
+          <h2 className="font-semibold">The strategy: daily dollar-cost averaging</h2>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Hold BTC and ETH while price is above its 50-day average; sit in cash when it&apos;s below.
-          Simple, slow, and the one crypto approach that beat buy-and-hold on <em>both</em> return and
-          drawdown through the 2022 bear market — because it sidesteps the worst crashes instead of
-          riding them down.
+          Every day it buys a fixed $10 of Bitcoin and $10 of Ethereum, and then it holds — forever.
+          No selling, no timing, no reacting to price. Buying the same dollar amount on a schedule
+          means you automatically buy more coins when prices are low and fewer when they&apos;re high,
+          which smooths out your average entry price over time. It&apos;s the slow, boring,
+          long-term way to build a crypto position without trying to guess the market.
         </p>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-md border border-border bg-background/40 p-3">
-            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">BTC — trend vs buy &amp; hold</div>
-            <div className="text-sm"><span className="text-emerald-400 font-semibold">+21%</span> return · <span className="text-emerald-400 font-semibold">−57%</span> max drawdown</div>
-            <div className="text-[11px] text-muted-foreground/70 mt-0.5">buy &amp; hold: +13% · −77% drawdown</div>
+            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">What it buys</div>
+            <div className="text-sm"><span className="text-emerald-400 font-semibold">$10 BTC</span> + <span className="text-emerald-400 font-semibold">$10 ETH</span> per day</div>
+            <div className="text-[11px] text-muted-foreground/70 mt-0.5">a fixed amount, on a schedule</div>
           </div>
           <div className="rounded-md border border-border bg-background/40 p-3">
-            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">ETH — trend vs buy &amp; hold</div>
-            <div className="text-sm"><span className="text-emerald-400 font-semibold">+22%</span> return · <span className="text-emerald-400 font-semibold">−53%</span> max drawdown</div>
-            <div className="text-[11px] text-muted-foreground/70 mt-0.5">buy &amp; hold: +15% · −79% drawdown</div>
+            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">What it never does</div>
+            <div className="text-sm"><span className="text-red-400 font-semibold">Never sells</span></div>
+            <div className="text-[11px] text-muted-foreground/70 mt-0.5">pure buy-and-hold, no cash-outs</div>
           </div>
         </div>
         <p className="text-[11px] text-muted-foreground/60">
-          Holds last days to weeks — not minutes. The win is smaller drawdowns, not bigger returns.
+          Holds indefinitely — not days, not weeks. The win is discipline and a smoothed cost basis, not timing.
         </p>
       </div>
 
@@ -65,8 +65,9 @@ export default function KrakenPage() {
         <p className="text-sm text-muted-foreground leading-relaxed">
           Because it loses. Crypto day-trading (buy-the-dip / sell-the-rip, intraday) was tested across
           every coin and year and came out at a profit factor of <span className="font-semibold text-red-400">0.73</span> —
-          a reliable money-loser. Trend-following is the version that survived. This page trades the
-          edge that works, not the one that feels exciting.
+          a reliable money-loser. So instead of trying to trade in and out, this account just
+          accumulates and holds. It runs the boring approach that doesn&apos;t bleed to fees and
+          bad timing, not the exciting one that does.
         </p>
       </div>
 
@@ -77,12 +78,11 @@ export default function KrakenPage() {
           <h2 className="font-semibold">Where Kraken positions show</h2>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Right here — in the trend-follower panel at the top of this page. Each broker&apos;s tab shows
+          Right here — in the accumulator panel at the top of this page. Each broker&apos;s tab shows
           its own positions: <Link href="/futures" className="text-purple-300 underline underline-offset-2">Futures</Link> for
           Tradovate, <Link href="/positions" className="text-purple-300 underline underline-offset-2">Positions</Link> for
-          Alpaca (options &amp; long-term), and this tab for Kraken crypto. The agent checks every 30
-          minutes and buys dips only in uptrends, so &ldquo;no positions&rdquo; often just means it&apos;s
-          waiting in cash — that&apos;s the strategy working, not a problem.
+          Alpaca, and this tab for Kraken crypto. The accumulator buys a little every day, so your
+          BTC and ETH holdings grow steadily right here.
         </p>
       </div>
     </div>

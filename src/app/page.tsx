@@ -152,7 +152,6 @@ export default function DashboardPage() {
   // ── Alpaca (stocks & crypto) ──
   const alpacaEquity = account ? parseFloat(account.equity) : 0;
   const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol) && p.asset_class !== "crypto") || [], [positions]);
-  const optionPositions = useMemo(() => positions?.filter((p) => !!parseOptionSymbol(p.symbol)) || [], [positions]);
 
   // ── Risk / Allocation ──
   const marginUtilization = futuresEquity > 0 ? (futuresMargin / futuresEquity) * 100 : 0;
@@ -291,10 +290,10 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-blue-400" />
               <span className="text-xs font-bold">Alpaca</span>
-              <span className="text-[10px] text-muted-foreground/40">Options & Long-term</span>
+              <span className="text-[10px] text-muted-foreground/40">Stocks & Long-term</span>
             </div>
             <div className="flex gap-2">
-              <Link href="/options" className="text-[10px] text-blue-400 hover:underline">Options</Link>
+              <Link href="/positions" className="text-[10px] text-blue-400 hover:underline">Positions</Link>
               <Link href="/long-term" className="text-[10px] text-emerald-400 hover:underline">Long-term</Link>
             </div>
           </div>
@@ -305,7 +304,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <p className="text-[10px] text-muted-foreground/40">Positions</p>
-              <p className="text-sm font-bold tabular-nums">{stockPositions.length + optionPositions.length}</p>
+              <p className="text-sm font-bold tabular-nums">{stockPositions.length}</p>
             </div>
             <div>
               <p className="text-[10px] text-muted-foreground/40">Buying Power</p>
@@ -345,8 +344,8 @@ export default function DashboardPage() {
           <p className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-wider">Futures</p>
           <Link href="/futures" className="text-[10px] text-emerald-400 hover:underline">Open</Link>
         </div>
-        <div className={`grid ${viewMode === "live" ? "grid-cols-2" : "grid-cols-3"} divide-x divide-white/[0.04]`}>
-          {(viewMode === "live" ? ["MES", "MNQ"] : ["ES", "NQ", "GC"]).map((sym) => {
+        <div className="grid grid-cols-3 divide-x divide-white/[0.04]">
+          {(viewMode === "live" ? ["MGC", "MNQ", "MES"] : ["ES", "NQ", "GC"]).map((sym) => {
             const q = futuresQuotes.find((x) => x.symbol === sym);
             if (!q) return (
               <div key={sym} className="px-3 py-2.5 text-center">
@@ -384,7 +383,7 @@ export default function DashboardPage() {
             </div>
             <div className="flex gap-3">
               <Link href="/futures" className="text-[10px] text-amber-400 hover:underline">Futures</Link>
-              <Link href="/options" className="text-[10px] text-blue-400 hover:underline">Options</Link>
+              <Link href="/positions" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
               <Link href="/kraken" className="text-[10px] text-purple-400 hover:underline">Kraken</Link>
             </div>
           </div>
@@ -413,7 +412,7 @@ export default function DashboardPage() {
                   <span className="text-[9px] font-bold text-blue-400 uppercase tracking-wider">Stocks</span>
                   <span className="text-[9px] text-muted-foreground/30">{stockPositions.length}</span>
                   <div className="flex-1 border-t border-blue-500/10" />
-                  <Link href="/options" className="text-[9px] text-blue-400/60 hover:text-blue-400">View all</Link>
+                  <Link href="/positions" className="text-[9px] text-blue-400/60 hover:text-blue-400">View all</Link>
                 </div>
               )}
               {stockPositions.map((pos) => {
@@ -429,44 +428,6 @@ export default function DashboardPage() {
                     <div className="flex items-center gap-3">
                       <PositionWeight value={parseFloat(pos.market_value)} total={combinedEquity} />
                       <span className="text-[11px] text-muted-foreground/50 tabular-nums w-16 text-right">{formatCurrency(pos.current_price)}</span>
-                      <span className={`text-[11px] font-bold tabular-nums w-16 text-right ${pnlColor(pl)}`}>
-                        {pl >= 0 ? "+" : ""}{formatCurrency(pl)}
-                      </span>
-                      <span className={`text-[10px] tabular-nums w-12 text-right ${pnlColor(plPct)}`}>
-                        {plPct >= 0 ? "+" : ""}{plPct.toFixed(1)}%
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-
-              {/* Options positions */}
-              {optionPositions.length > 0 && (
-                <div className="flex items-center gap-2 px-4 py-1.5 bg-purple-500/[0.03]">
-                  <span className="text-[9px] font-bold text-purple-400 uppercase tracking-wider">Options</span>
-                  <span className="text-[9px] text-muted-foreground/30">{optionPositions.length}</span>
-                  <div className="flex-1 border-t border-purple-500/10" />
-                  <Link href="/options" className="text-[9px] text-purple-400/60 hover:text-purple-400">View all</Link>
-                </div>
-              )}
-              {optionPositions.map((pos) => {
-                const opt = parseOptionSymbol(pos.symbol);
-                const pl = parseFloat(pos.unrealized_pl);
-                const plPct = parseFloat(pos.unrealized_plpc) * 100;
-                return (
-                  <div key={pos.symbol} className="flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02] transition-colors">
-                    <div className="flex items-center gap-2.5">
-                      <Link href={`/research/${opt?.underlying || pos.symbol}`} className="font-bold text-sm hover:text-emerald-400 transition-colors w-12">
-                        {opt?.underlying || pos.symbol}
-                      </Link>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                        opt?.type === "CALL" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
-                      }`}>{opt?.type || "OPT"}</span>
-                      <span className="text-[11px] text-muted-foreground/40">${opt?.strike} {opt?.expiry} ({opt?.dte}d)</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <PositionWeight value={parseFloat(pos.market_value)} total={combinedEquity} />
-                      <span className="text-[11px] text-muted-foreground/50 tabular-nums w-16 text-right">${parseFloat(pos.current_price).toFixed(2)}</span>
                       <span className={`text-[11px] font-bold tabular-nums w-16 text-right ${pnlColor(pl)}`}>
                         {pl >= 0 ? "+" : ""}{formatCurrency(pl)}
                       </span>
