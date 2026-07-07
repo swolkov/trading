@@ -66,7 +66,7 @@ export async function GET() {
       symbol,
       amountUsd,
       lastRun,
-      schedule: "Weekly (Mon, market open)",
+      schedule: "Every weekday (market open)",
       holding,
       totalInvested: holding ? holding.costBasis : 0,
       buyCount,
