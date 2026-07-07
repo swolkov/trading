@@ -25,13 +25,12 @@ import {
   Wallet,
   PlugZap,
   Bitcoin,
-  PiggyBank,
   Activity,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Curated 5-section IA around the three live pillars (Futures / Long-term / Kraken). Options retired.
+// Curated IA around the two live pillars (Futures / Kraken). Options + Alpaca long-term retired (moved to a Roth IRA off-platform).
 // Retired paper pages (/day-trade, /stocks, /crypto) + /market + /wheel were deleted.
 const sections = [
   {
@@ -45,7 +44,6 @@ const sections = [
     label: "TRADING",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
-      { href: "/long-term", label: "Long-term", icon: PiggyBank, broker: "Alpaca" },
       { href: "/kraken", label: "Kraken", icon: Bitcoin, broker: "Kraken" },
     ],
   },
