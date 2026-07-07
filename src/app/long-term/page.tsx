@@ -34,7 +34,7 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub?
 // buy steps the line up by its dollar amount. Needs ≥2 buys to draw; otherwise a clean placeholder.
 function InvestedCurve({ buys, amount }: { buys: RecentBuy[]; amount: number }) {
   if (buys.length < 2) {
-    return <div className="text-xs text-muted-foreground/60 py-8 text-center">A cumulative-invested curve appears once at least two weekly buys are on the books — {buys.length} so far.</div>;
+    return <div className="text-xs text-muted-foreground/60 py-8 text-center">A cumulative-invested curve appears once at least two buys are on the books — {buys.length} so far.</div>;
   }
   // oldest → newest, running sum of the per-buy dollar amount
   const ordered = [...buys].reverse();
@@ -110,14 +110,14 @@ export default function LongTermPage() {
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-8 text-center space-y-3">
           <div className="text-sm text-muted-foreground/70">No long-term position yet — DCA hasn&apos;t started.</div>
           <div className="text-xs text-muted-foreground/50 max-w-md mx-auto">
-            Enabling begins automatic weekly buys of {money(amount)} of {symbol} at the Monday open (real money). The position builds slowly and is held indefinitely.
+            Enabling begins automatic buys of {money(amount)} of {symbol} every weekday at the open (real money) until your cash is deployed, then it simply holds. Add funds anytime and it resumes. Held indefinitely.
           </div>
           <button
             onClick={toggle}
             disabled={toggling}
             className="mt-1 text-xs font-semibold px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-400 hover:bg-emerald-500/[0.14] transition-colors disabled:opacity-50"
           >
-            {toggling ? "Saving…" : enabled ? "DCA enabled" : `Enable weekly ${money(amount)} buys`}
+            {toggling ? "Saving…" : enabled ? "DCA enabled" : `Enable daily ${money(amount)} buys`}
           </button>
         </div>
       ) : (
@@ -174,8 +174,8 @@ export default function LongTermPage() {
                 <div className={`text-sm font-semibold ${enabled ? "text-emerald-400" : "text-muted-foreground/60"}`}>{enabled ? "Enabled" : "Disabled"}</div>
                 <div className="text-[11px] text-muted-foreground/60 mt-1">
                   {enabled
-                    ? <>Buying {money(amount)} of {symbol} · {d?.schedule}</>
-                    : <>DCA is off — enable to start weekly {money(amount)} buys of {symbol} (real money).</>}
+                    ? <>Buying {money(amount)} of {symbol} every weekday · {d?.schedule}</>
+                    : <>DCA is off — enable to start daily {money(amount)} buys of {symbol} (real money).</>}
                 </div>
                 {d?.lastRun && <div className="text-[11px] text-muted-foreground/40 mt-0.5">Last run {when(d.lastRun)}</div>}
               </div>
@@ -216,7 +216,7 @@ export default function LongTermPage() {
       )}
 
       <p className="text-[11px] text-muted-foreground/40 leading-relaxed">
-        This is the boring, durable pillar: own the whole market and let the equity risk premium compound. On a ~$500 account the dollar moves are small — that&apos;s expected; the point is the habit and the holding period, not the weekly P&amp;L. Buy-only by design — it never sells.
+        This is the boring, durable pillar: own the whole market and let the equity risk premium compound. On a ~$500 account the dollar moves are small — that&apos;s expected; the point is the habit and the holding period, not the day-to-day P&amp;L. Buy-only by design — it never sells.
       </p>
     </div>
   );
