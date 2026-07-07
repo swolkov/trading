@@ -24,7 +24,6 @@ import {
   Sunrise,
   Wallet,
   PlugZap,
-  CandlestickChart,
   Bitcoin,
   PiggyBank,
   Activity,
@@ -32,7 +31,7 @@ import {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Curated 5-section IA around the four live pillars (Futures / Options / Long-term / Kraken).
+// Curated 5-section IA around the three live pillars (Futures / Long-term / Kraken). Options retired.
 // Retired paper pages (/day-trade, /stocks, /crypto) + /market + /wheel were deleted.
 const sections = [
   {
@@ -46,7 +45,6 @@ const sections = [
     label: "TRADING",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
-      { href: "/options", label: "Options", icon: CandlestickChart, broker: "Alpaca" },
       { href: "/long-term", label: "Long-term", icon: PiggyBank, broker: "Alpaca" },
       { href: "/kraken", label: "Kraken", icon: Bitcoin, broker: "Kraken" },
     ],
