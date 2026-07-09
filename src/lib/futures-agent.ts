@@ -919,7 +919,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   const canScanNewTrades = tradingMode === "paper"
     ? true  // Demo: all sessions (halt already returned above)
     : tradeOvernight
-      ? session !== "halt"                                   // Live + overnight enabled: all sessions except halt
+      ? true                                                 // Live + overnight enabled: all sessions (halt already returned above)
       : (timeQuality.sizeMultiplier > 0 && !isFirstLast15);  // Live default: RTH prime only
   if (!canScanNewTrades) {
     const reason = tradingMode === "paper"
