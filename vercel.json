@@ -5,6 +5,10 @@
       "schedule": "0 13 * * 1-5"
     },
     {
+      "path": "/api/cron/meme-scan",
+      "schedule": "*/10 * * * *"
+    },
+    {
       "path": "/api/cron/crypto-dip",
       "schedule": "*/15 * * * *"
     },
