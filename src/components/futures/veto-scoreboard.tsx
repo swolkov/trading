@@ -5,6 +5,7 @@ import useSWR from "swr";
 interface Board {
   mode: string;
   resolved: number;
+  rawSignals: number;
   open: number;
   wins: number;
   losses: number;
@@ -82,7 +83,7 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
         <div>
           <h3 className="text-sm font-bold">AI-Veto Shadow Scoreboard</h3>
           <p className="text-[10px] text-muted-foreground/50">
-            Every setup the AI blocked, marked to real price. Is the veto helping or hurting? Counterfactual — these never filled.
+            Setups the AI blocked, marked to real price — <span className="text-amber-400/70">hypothetical, never filled</span>. De-clustered to real moves (the engine re-signals every 5 min; you&apos;d take one position per move).
           </p>
         </div>
         <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${v.cls}`}>{v.label}</span>
@@ -95,7 +96,7 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
         <Stat label="Veto saved (+) / cost (−)" value={fmtMoney(-board.netDollars)} cls={-board.netDollars > 0 ? "text-emerald-400" : -board.netDollars < 0 ? "text-red-400" : ""} />
         <Stat label="In R" value={fmtR(-board.netR)} cls={-board.netR > 0 ? "text-emerald-400" : -board.netR < 0 ? "text-red-400" : ""} />
         <Stat label="Would-be WR" value={board.wins + board.losses > 0 ? `${Math.round(board.winRate * 100)}%` : "—"} />
-        <Stat label="Resolved / Open" value={`${board.resolved} / ${board.open}`} />
+        <Stat label="Moves / raw signals" value={`${board.resolved} / ${board.rawSignals}`} />
       </div>
 
       <p className="text-[10px] text-muted-foreground/55 leading-snug">{v.blurb}</p>
@@ -103,7 +104,7 @@ export function VetoScoreboard({ mode }: { mode: "live" | "demo" }) {
       {recent.length > 0 && (
         <div className="pt-1 border-t border-border/50">
           <p className="text-[9px] uppercase tracking-wider text-muted-foreground/45 pb-1">
-            Every blocked setup ({recent.length}), newest first — with the date it fired
+            All raw 5-min signals ({recent.length}) — the headline above counts each move once, not every repeat
           </p>
           <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
             {recent.map((r, i) => {

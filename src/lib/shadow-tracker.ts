@@ -223,45 +223,70 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
 
 export interface ShadowScoreboard {
   mode: string;
-  resolved: number;
+  resolved: number;     // DISTINCT MOVES (de-clustered) — what you could actually trade
+  rawSignals: number;   // raw 5-min signals before de-clustering (for transparency)
   open: number;
   wins: number;
   losses: number;
   winRate: number;      // over resolved with a directional outcome
-  netR: number;         // sum of rMultiple over resolved
-  netDollars: number;   // sum of counterfactual $ P&L over resolved (real sizing)
+  netR: number;         // sum of rMultiple over distinct moves
+  netDollars: number;   // sum of counterfactual $ P&L over distinct moves (real sizing)
   avgR: number;
   // Interpretation for the UI: net-R of the setups the veto BLOCKED.
   // netR < 0 → veto is saving money (good). netR > 0 → veto is costing money.
   verdict: "veto_helping" | "veto_costing" | "inconclusive";
 }
 
-/** Aggregate the counterfactual scoreboard for a mode ("live" | "demo"). */
+const CLUSTER_WINDOW_MS = 30 * 60_000;   // same-direction signals within 30 min = the same move
+
+// De-cluster: the engine re-fires a signal every 5-min bar during a trend, so one market move logs as
+// many "trades" — but you'd only take ONE position per move. Collapse consecutive same-(symbol,direction)
+// signals within the window into a single realistic entry, keeping the FIRST (no cherry-picking a better
+// re-entry). Without this, a single gold run counts 10-12× and wildly inflates the counterfactual.
+function deClusterMoves<T extends { symbol: string; direction: string; createdAt: Date }>(rows: T[]): T[] {
+  const sorted = [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  const kept: T[] = [];
+  const lastTs: Record<string, number> = {};
+  for (const r of sorted) {
+    const key = `${r.symbol}|${r.direction}`;
+    const ts = r.createdAt.getTime();
+    const prev = lastTs[key];
+    lastTs[key] = ts;                                   // advance the chain even for skipped signals
+    if (prev != null && ts - prev < CLUSTER_WINDOW_MS) continue;   // same move → skip the repeat
+    kept.push(r);
+  }
+  return kept;
+}
+
+/** Aggregate the counterfactual scoreboard for a mode ("live" | "demo"), de-clustered to real moves. */
 export async function getShadowScoreboard(mode: string): Promise<ShadowScoreboard> {
   const rows = await prisma.shadowTrade.findMany({ where: { mode } });
-  const resolved = rows.filter((r) => r.status !== "open");
-  const open = rows.length - resolved.length;
-  const netR = resolved.reduce((s, r) => s + (r.rMultiple ?? 0), 0);
-  const netDollars = resolved.reduce((s, r) => s + (r.dollarPnl ?? 0), 0);
-  // Win-rate is measured over DECISIVE exits only (hit target vs hit stop). Time-exits and
-  // expiries still count toward net-R but aren't a clean win/loss, so they're excluded from WR.
-  const wins = resolved.filter((r) => r.exitReason === "target").length;
-  const losses = resolved.filter((r) => r.exitReason === "stop").length;
+  const resolvedRaw = rows.filter((r) => r.status !== "open");
+  const open = rows.length - resolvedRaw.length;
+  const moves = deClusterMoves(resolvedRaw);            // one realistic entry per move
+  const netR = moves.reduce((s, r) => s + (r.rMultiple ?? 0), 0);
+  const netDollars = moves.reduce((s, r) => s + (r.dollarPnl ?? 0), 0);
+  // Win-rate over DECISIVE exits only (hit target vs hit stop); time-exits/expiries excluded from WR.
+  const wins = moves.filter((r) => r.exitReason === "target").length;
+  const losses = moves.filter((r) => r.exitReason === "stop").length;
   const decided = wins + losses;
 
+  // Verdict only on a real sample of distinct MOVES (not raw signals), with a wider neutral band so a
+  // handful of clustered trades can't trip a scary conclusion.
   let verdict: ShadowScoreboard["verdict"] = "inconclusive";
-  if (resolved.length >= 15) verdict = netR < -1 ? "veto_helping" : netR > 1 ? "veto_costing" : "inconclusive";
+  if (moves.length >= 30) verdict = netR < -2 ? "veto_helping" : netR > 2 ? "veto_costing" : "inconclusive";
 
   return {
     mode,
-    resolved: resolved.length,
+    resolved: moves.length,
+    rawSignals: resolvedRaw.length,
     open,
     wins,
     losses,
     winRate: decided > 0 ? wins / decided : 0,
     netR,
     netDollars,
-    avgR: resolved.length > 0 ? netR / resolved.length : 0,
+    avgR: moves.length > 0 ? netR / moves.length : 0,
     verdict,
   };
 }

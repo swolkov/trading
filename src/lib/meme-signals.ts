@@ -18,8 +18,10 @@ export async function checkSafety(mint: string): Promise<Safety> {
     const risks: string[] = Array.isArray(d.risks) ? d.risks.map((x: { name?: string; description?: string }) => x.name || x.description || "").filter(Boolean) : [];
     const lpLocked = Number(d.lpLockedPct) || 0;
     const critical = risks.some((n) => /honeypot|freeze|mint authority enabled|can.?t sell|scam|transfer/i.test(n));
-    const ok = !critical && lpLocked >= 50;                 // require majority LP locked + no critical flag
-    return { ok, scoreNorm: Number(d.score_normalised) || 0, lpLocked, risks, reason: ok ? `LP ${lpLocked.toFixed(0)}% locked, ${risks.length} flags` : `BLOCK: ${critical ? "critical risk" : `LP only ${lpLocked.toFixed(0)}% locked`}` };
+    // LOOSENED (user-authorized): block only critical scam/honeypot flags. Locked-LP is no longer a hard
+    // gate — it's noted as riskier. The buy-time canSell honeypot check remains the hard floor.
+    const ok = !critical;
+    return { ok, scoreNorm: Number(d.score_normalised) || 0, lpLocked, risks, reason: ok ? `LP ${lpLocked.toFixed(0)}% locked${lpLocked < 50 ? " (unlocked — riskier)" : ""}, ${risks.length} flags` : `BLOCK: critical risk (${risks.slice(0, 2).join(", ") || "flagged"})` };
   } catch { return { ok: true, scoreNorm: 0, lpLocked: 0, risks: [], reason: "safety check error — unchecked" }; }
 }
 
