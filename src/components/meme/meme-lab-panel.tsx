@@ -5,6 +5,7 @@ import useSWR from "swr";
 interface Pos {
   pool: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
   lastPnlPct: number; reason: string;
+  conviction?: number; thesis?: string; lpLocked?: number; smartCount?: number;
   exitTs?: string; exitReason?: string; realizedPct?: number; realizedUsd?: number; holdMin?: number;
 }
 interface Stats {
@@ -58,10 +59,17 @@ export function MemeLabPanel() {
         {data.open.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/55">Nothing open — waiting for a candidate that clears the rug/momentum filters.</p>
         ) : data.open.map((p) => (
-          <div key={p.pool} className="flex items-center justify-between text-[11px] px-2 py-1.5 rounded bg-white/[0.02]">
-            <span className="font-semibold truncate max-w-[45%]" title={p.name}>{p.name}</span>
-            <span className="text-muted-foreground/60">{ago(p.entryTs)} held</span>
-            <span className={`tabular-nums font-medium ${p.lastPnlPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>{pct(p.lastPnlPct)}</span>
+          <div key={p.pool} className="px-2 py-1.5 rounded bg-white/[0.02] space-y-0.5">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-semibold truncate max-w-[40%]" title={p.name}>{p.name}</span>
+              <span className="flex items-center gap-1.5">
+                {p.conviction != null && <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300" title="AI conviction">conv {p.conviction}</span>}
+                {!!p.smartCount && <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-amber-500/15 text-amber-300" title="tracked winner wallets holding">{p.smartCount}🐋</span>}
+              </span>
+              <span className="text-muted-foreground/60">{ago(p.entryTs)}</span>
+              <span className={`tabular-nums font-medium ${p.lastPnlPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>{pct(p.lastPnlPct)}</span>
+            </div>
+            {p.thesis && <p className="text-[10px] text-muted-foreground/50 truncate" title={p.thesis}>{p.thesis}</p>}
           </div>
         ))}
       </div>
@@ -73,7 +81,8 @@ export function MemeLabPanel() {
           <p className="text-[11px] text-muted-foreground/55">No closed bets yet.</p>
         ) : data.closed.map((p, i) => (
           <div key={p.pool + i} className="flex items-center justify-between text-[11px] px-2 py-1.5 rounded bg-white/[0.02]">
-            <span className="font-semibold truncate max-w-[38%]" title={p.name}>{p.name}</span>
+            <span className="font-semibold truncate max-w-[32%]" title={p.name}>{p.name}</span>
+            {p.conviction != null && <span className="text-[9px] text-fuchsia-300/70" title="AI conviction at entry">c{p.conviction}</span>}
             <span className="text-muted-foreground/50 text-[10px] uppercase tracking-wider">{p.exitReason}</span>
             <span className="text-muted-foreground/60">{p.holdMin != null ? (p.holdMin < 60 ? `${p.holdMin}m` : `${Math.round(p.holdMin / 60)}h`) : ""}</span>
             <span className={`tabular-nums font-bold ${(p.realizedPct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>{pct(p.realizedPct ?? 0)}</span>

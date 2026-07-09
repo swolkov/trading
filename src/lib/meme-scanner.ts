@@ -6,6 +6,7 @@
 // risking a dollar. Honest expectation: it does NOT (dominated by speed + insiders); the scoreboard
 // proves it with our own forward data. Nothing here touches Kraken — memes live on-chain, not on a CEX.
 import { prisma } from "./db";
+import { checkSafety, checkSmartMoney, scoreConviction } from "./meme-signals";
 
 const GT = "https://api.geckoterminal.com/api/v2/networks/solana";
 const CLOSED_CAP = 300;        // keep the last N closed paper trades
@@ -21,10 +22,12 @@ interface Cfg {
   maxOpen: number;
   minFdvUsd: number;
   maxFdvUsd: number;
+  minConviction: number;       // AI conviction gate (0-100)
+  enrichMax: number;           // cap on how many candidates get the (safety+AI) treatment per run
 }
 
 async function loadCfg(): Promise<Cfg> {
-  const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd"];
+  const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd", "meme_min_conviction", "meme_enrich_max"];
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
   const c: Record<string, string> = {}; for (const r of rows) c[r.key] = r.value;
   return {
@@ -35,12 +38,14 @@ async function loadCfg(): Promise<Cfg> {
     maxOpen: parseInt(c.meme_max_open) || 20,
     minFdvUsd: parseFloat(c.meme_min_fdv_usd) || 10000,
     maxFdvUsd: parseFloat(c.meme_max_fdv_usd) || 10000000,
+    minConviction: parseFloat(c.meme_min_conviction) || 45,
+    enrichMax: parseInt(c.meme_enrich_max) || 8,
   };
 }
 
 // ── normalized candidate ──
 interface Cand {
-  pool: string; name: string; price: number; fdv: number; liq: number;
+  pool: string; mint: string; name: string; price: number; fdv: number; liq: number;
   ageMin: number; volH1: number; m15: number; h1: number; h6: number;
   buysH1: number; sellsH1: number;
 }
@@ -52,8 +57,10 @@ function normalize(p: any, now: number): Cand | null {
   const addr = a.address as string; if (!addr) return null;
   const created = a.pool_created_at ? new Date(a.pool_created_at).getTime() : now;
   const tx1 = a.transactions?.h1 || {};
+  const mint = String(p?.relationships?.base_token?.data?.id || "").replace("solana_", "");
   return {
     pool: addr,
+    mint,
     name: a.name || "?",
     price: num(a.base_token_price_usd),
     fdv: num(a.fdv_usd),
@@ -113,8 +120,9 @@ function passesEntry(c: Cand, cfg: Cfg): string | null {
 }
 
 interface Pos {
-  pool: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
+  pool: string; mint: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
   entryLiq: number; entryFdv: number; reason: string;
+  conviction: number; thesis: string; lpLocked: number; smartCount: number;   // research signals, logged for grading
   peakPrice: number; lastPrice: number; lastPnlPct: number; lastTs: string;
   exitTs?: string; exitPrice?: number; exitReason?: string; realizedPct?: number; realizedUsd?: number; holdMin?: number;
 }
@@ -169,22 +177,31 @@ export async function runMemeScan(): Promise<MemeScanResult> {
   }
   open = stillOpen;
 
-  // 2. new paper entries from fresh candidates
+  // 2. new paper entries — mechanical filter first, then research (safety → smart money → AI) on the
+  //    strongest few, gated on both. Enrichment is capped per run so the cron stays fast + cheap.
   const cands = await fetchCandidates(now);
-  let entered = 0;
+  let entered = 0, enriched = 0;
   const knownPools = new Set([...open.map((p) => p.pool), ...closed.map((p) => p.pool)]);
-  for (const c of cands) {
-    if (open.length >= cfg.maxOpen) break;
-    if (knownPools.has(c.pool)) continue;                 // no re-entry into a pool we've already paper-traded
-    const reason = passesEntry(c, cfg);
-    if (!reason) continue;
+  const shortlist = cands
+    .filter((c) => !knownPools.has(c.pool) && passesEntry(c, cfg))
+    .sort((a, b) => Math.max(b.m15, b.h1) - Math.max(a.m15, a.h1));   // strongest jumps first
+  for (const c of shortlist) {
+    if (open.length >= cfg.maxOpen || enriched >= cfg.enrichMax) break;
+    enriched++;
+    const reason = passesEntry(c, cfg)!;
+    const safety = await checkSafety(c.mint);
+    if (!safety.ok) { details.push(`SKIP ${c.name} — ${safety.reason}`); continue; }
+    const smart = await checkSmartMoney(c.mint);
+    const conv = await scoreConviction(c.name, reason, safety, smart);
+    if (conv.score < cfg.minConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.minConviction}: ${conv.thesis}`); continue; }
     const entryPrice = c.price * (1 + slipFor(c.liq));
     open.push({
-      pool: c.pool, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd: cfg.sizeUsd,
-      entryLiq: c.liq, entryFdv: c.fdv, reason, peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
+      pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd: cfg.sizeUsd,
+      entryLiq: c.liq, entryFdv: c.fdv, reason, conviction: conv.score, thesis: conv.thesis, lpLocked: safety.lpLocked, smartCount: smart.count,
+      peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
     });
     knownPools.add(c.pool); entered++;
-    details.push(`ENTER ${c.name} @ $${entryPrice.toPrecision(3)} — ${reason}`);
+    details.push(`ENTER ${c.name} conv ${conv.score}${smart.count ? ` +${smart.count} smart` : ""} — ${conv.thesis}`);
   }
 
   // 3. persist + stats
@@ -239,7 +256,7 @@ export interface MemeLabStatus {
 }
 export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   const cfg = await loadCfg();
-  const rows = await prisma.agentConfig.findMany({ where: { key: { in: ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open"] } } });
+  const rows = await prisma.agentConfig.findMany({ where: { key: { in: ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_conviction", "meme_smart_wallets"] } } });
   const config: Record<string, string> = {}; for (const r of rows) config[r.key] = r.value;
   const open = await loadJson("meme_paper_open");
   const closed = await loadJson("meme_paper_closed");
