@@ -4,10 +4,12 @@ export const maxDuration = 120;
 
 // Password-gated cash-out: sell every position to SOL and send it all to `destination`.
 // destination = your Kraken SOL DEPOSIT address (Kraken → Deposit → SOL).
+const LIVE_PASSWORD = (process.env.LIVE_TRADING_PASSWORD || "").trim();
+
 export async function POST(request: Request) {
   try {
     const { password, destination } = await request.json();
-    if (!process.env.LIVE_TRADING_PASSWORD || password !== process.env.LIVE_TRADING_PASSWORD) {
+    if (!LIVE_PASSWORD || !password || String(password).trim() !== LIVE_PASSWORD) {
       return Response.json({ error: "Wrong password" }, { status: 401 });
     }
     if (!destination || typeof destination !== "string" || destination.length < 32) {

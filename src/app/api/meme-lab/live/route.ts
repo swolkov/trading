@@ -4,10 +4,12 @@ import { prisma } from "@/lib/db";
 //  action "arm"    → meme_live_enabled=true, meme_live_validate=false  (REAL money)
 //  action "dryrun" → meme_live_enabled=true, meme_live_validate=true   (build+sign, no send)
 //  action "off"    → meme_live_enabled=false                            (paper only)
+const LIVE_PASSWORD = (process.env.LIVE_TRADING_PASSWORD || "").trim();
+
 export async function POST(request: Request) {
   try {
     const { password, action } = await request.json();
-    if (!process.env.LIVE_TRADING_PASSWORD || password !== process.env.LIVE_TRADING_PASSWORD) {
+    if (!LIVE_PASSWORD || !password || String(password).trim() !== LIVE_PASSWORD) {
       return Response.json({ error: "Wrong password" }, { status: 401 });
     }
     const set = async (k: string, v: string) => prisma.agentConfig.upsert({ where: { key: k }, update: { value: v }, create: { key: k, value: v } });
