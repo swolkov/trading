@@ -7,8 +7,15 @@ COPY package.json package-lock.json ./
 COPY prisma ./prisma/
 COPY prisma.config.ts ./
 
-# Install dependencies
-RUN npm ci --ignore-scripts && npx prisma generate
+# Force ws to use its pure-JS path — the native addons bufferutil/utf-8-validate (pulled in transitively
+# by @solana/web3.js for the meme bot) can't compile here (--ignore-scripts, no toolchain) and crash the
+# engine's Tradovate WebSocket on startup. The engine doesn't need them; pure JS = pre-Solana behavior.
+ENV WS_NO_BUFFER_UTIL=1
+ENV WS_NO_UTF_8_VALIDATE=1
+
+# Install dependencies (then delete the uncompiled native addons so ws can't try to load them)
+RUN npm ci --ignore-scripts && npx prisma generate \
+  && rm -rf node_modules/bufferutil node_modules/utf-8-validate
 
 # Copy source
 COPY src ./src/
