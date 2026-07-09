@@ -4,9 +4,10 @@ import useSWR from "swr";
 import { useState } from "react";
 
 interface Pos {
-  pool: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
+  pool: string; mint?: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
   lastPnlPct: number; reason: string;
   conviction?: number; thesis?: string; lpLocked?: number; smartCount?: number;
+  dex?: string; isPumpGraduate?: boolean; buyTx?: string; sellTx?: string;
   exitTs?: string; exitReason?: string; realizedPct?: number; realizedUsd?: number; holdMin?: number;
 }
 interface Stats {
@@ -19,7 +20,7 @@ interface Live {
 }
 interface Status {
   enabled: boolean; config: Record<string, string>; stats: Stats;
-  open: Pos[]; closed: Pos[]; lastRun?: { ts: string; scanned: number; entered: number; exited: number; open: number } | null;
+  open: Pos[]; closed: Pos[]; lastRun?: { ts: string; scanned: number; entered: number; exited: number; open: number; details?: string[] } | null;
   live?: Live;
 }
 
@@ -27,6 +28,10 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 const usd = (n: number) => `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 const pct = (n: number) => `${n >= 0 ? "+" : ""}${(n * 100).toFixed(0)}%`;
 const ago = (iso?: string) => { if (!iso) return ""; const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000); return m < 60 ? `${m}m` : `${Math.round(m / 60)}h`; };
+const solscanTok = (mint?: string) => mint ? `https://solscan.io/token/${mint}` : undefined;
+const solscanTx = (sig?: string) => sig ? `https://solscan.io/tx/${sig}` : undefined;
+// color a raw activity line by its verdict
+const lineClass = (d: string) => /BOUGHT|VALIDATED BUY|WOULD BUY/.test(d) ? "text-emerald-400/90" : /SOLD|EXIT/.test(d) ? "text-blue-300/80" : /FAILED|HALTED/.test(d) ? "text-red-400/80" : "text-muted-foreground/60";
 
 export function MemeLabPanel() {
   const { data, mutate } = useSWR<Status>("/api/meme-lab", fetcher, { refreshInterval: 60000 });
@@ -133,6 +138,20 @@ export function MemeLabPanel() {
         )}
       </div>
 
+      {/* Live activity feed — what the bot just decided and why */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-2">
+        <h3 className="font-semibold text-sm">Live activity <span className="text-[10px] font-normal text-muted-foreground/50">— what it&apos;s doing right now</span></h3>
+        {data.lastRun?.details && data.lastRun.details.length > 0 ? (
+          <div className="space-y-0.5 font-mono">
+            {data.lastRun.details.map((d, i) => (
+              <p key={i} className={`text-[10.5px] leading-snug ${lineClass(d)}`}>{d}</p>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[11px] text-muted-foreground/55">Scanning — no decisions logged in the last run. Skips (rugs / low conviction) and buys will show here.</p>
+        )}
+      </div>
+
       {/* Open live positions */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-2">
         <h3 className="font-semibold text-sm">Open positions ({data.open.length})</h3>
@@ -141,7 +160,10 @@ export function MemeLabPanel() {
         ) : data.open.map((p) => (
           <div key={p.pool} className="px-2 py-1.5 rounded bg-white/[0.02] space-y-0.5">
             <div className="flex items-center justify-between text-[11px]">
-              <span className="font-semibold truncate max-w-[40%]" title={p.name}>{p.name}</span>
+              <span className="font-semibold truncate max-w-[38%] flex items-center gap-1">
+                {p.isPumpGraduate && <span title="pump.fun graduate">🎓</span>}
+                {solscanTok(p.mint) ? <a href={solscanTok(p.mint)} target="_blank" rel="noreferrer" className="hover:underline" title={p.name}>{p.name}</a> : <span title={p.name}>{p.name}</span>}
+              </span>
               <span className="flex items-center gap-1.5">
                 {p.conviction != null && <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300" title="AI conviction">conv {p.conviction}</span>}
                 {!!p.smartCount && <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-amber-500/15 text-amber-300" title="tracked winner wallets holding">{p.smartCount}🐋</span>}
@@ -161,10 +183,13 @@ export function MemeLabPanel() {
           <p className="text-[11px] text-muted-foreground/55">No closed trades yet.</p>
         ) : data.closed.map((p, i) => (
           <div key={p.pool + i} className="flex items-center justify-between text-[11px] px-2 py-1.5 rounded bg-white/[0.02]">
-            <span className="font-semibold truncate max-w-[32%]" title={p.name}>{p.name}</span>
+            <span className="font-semibold truncate max-w-[30%] flex items-center gap-1" title={p.name}>
+              {p.isPumpGraduate && <span title="pump.fun graduate">🎓</span>}
+              {solscanTok(p.mint) ? <a href={solscanTok(p.mint)} target="_blank" rel="noreferrer" className="hover:underline">{p.name}</a> : p.name}
+            </span>
             {p.conviction != null && <span className="text-[9px] text-fuchsia-300/70" title="AI conviction at entry">c{p.conviction}</span>}
             <span className="text-muted-foreground/50 text-[10px] uppercase tracking-wider">{p.exitReason}</span>
-            <span className="text-muted-foreground/60">{p.holdMin != null ? (p.holdMin < 60 ? `${p.holdMin}m` : `${Math.round(p.holdMin / 60)}h`) : ""}</span>
+            {solscanTx(p.sellTx) ? <a href={solscanTx(p.sellTx)} target="_blank" rel="noreferrer" className="text-[9px] text-blue-300/60 hover:underline">tx↗</a> : <span className="text-muted-foreground/60">{p.holdMin != null ? (p.holdMin < 60 ? `${p.holdMin}m` : `${Math.round(p.holdMin / 60)}h`) : ""}</span>}
             <span className={`tabular-nums font-bold ${(p.realizedPct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>{pct(p.realizedPct ?? 0)}</span>
           </div>
         ))}

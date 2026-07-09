@@ -61,7 +61,7 @@ async function loadCfg(): Promise<Cfg> {
 
 // ── normalized candidate ──
 interface Cand {
-  pool: string; mint: string; name: string; price: number; fdv: number; liq: number;
+  pool: string; mint: string; name: string; dex: string; price: number; fdv: number; liq: number;
   ageMin: number; volH1: number; m15: number; h1: number; h6: number;
   buysH1: number; sellsH1: number;
 }
@@ -74,10 +74,12 @@ function normalize(p: any, now: number): Cand | null {
   const created = a.pool_created_at ? new Date(a.pool_created_at).getTime() : now;
   const tx1 = a.transactions?.h1 || {};
   const mint = String(p?.relationships?.base_token?.data?.id || "").replace("solana_", "");
+  const dex = String(p?.relationships?.dex?.data?.id || "");
   return {
     pool: addr,
     mint,
     name: a.name || "?",
+    dex,
     price: num(a.base_token_price_usd),
     fdv: num(a.fdv_usd),
     liq: num(a.reserve_in_usd),
@@ -125,6 +127,7 @@ async function fetchPrices(addrs: string[], now: number): Promise<Record<string,
 
 function passesEntry(c: Cand, cfg: Cfg): string | null {
   if (c.price <= 0) return null;
+  if (c.dex === "pump-fun") return null;                     // still on the bonding curve — rug zone, no locked LP, skip
   if (c.liq < cfg.minLiqUsd) return null;                    // too thin to exit → instant-rug territory
   if (c.volH1 < cfg.minH1VolUsd) return null;                // no real activity
   if (c.ageMin < 5 || c.ageMin > 10080) return null;         // past the first-minutes snipe, younger than 7d
@@ -139,6 +142,7 @@ interface Pos {
   pool: string; mint: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
   entryLiq: number; entryFdv: number; reason: string;
   conviction: number; thesis: string; lpLocked: number; smartCount: number;   // research signals, logged for grading
+  dex?: string; isPumpGraduate?: boolean;                                      // pump.fun graduate signal
   live?: boolean; buyTx?: string; sellTx?: string; solSpentLamports?: number;  // real-money execution
   peakPrice: number; lastPrice: number; lastPnlPct: number; lastTs: string;
   exitTs?: string; exitPrice?: number; exitReason?: string; realizedPct?: number; realizedUsd?: number; holdMin?: number;
@@ -238,25 +242,28 @@ export async function runMemeScan(): Promise<MemeScanResult> {
   const knownPools = new Set([...open.map((p) => p.pool), ...closed.map((p) => p.pool)]);
   const shortlist = cands
     .filter((c) => !knownPools.has(c.pool) && passesEntry(c, cfg))
-    .sort((a, b) => Math.max(b.m15, b.h1) - Math.max(a.m15, a.h1));   // strongest jumps first
+    // pump.fun graduates first (survived the bonding curve), then strongest jumps
+    .sort((a, b) => (Number(b.dex === "pumpswap") - Number(a.dex === "pumpswap")) || (Math.max(b.m15, b.h1) - Math.max(a.m15, a.h1)));
   for (const c of shortlist) {
     if (enriched >= cfg.enrichMax) break;
     enriched++;
-    const reason = passesEntry(c, cfg)!;
+    const isGrad = c.dex === "pumpswap";                     // freshly graduated from pump.fun
+    const reason = passesEntry(c, cfg)! + (isGrad ? " · pump.fun GRADUATE" : ` · ${c.dex}`);
     const safety = await checkSafety(c.mint);
     if (!safety.ok) { details.push(`SKIP ${c.name} — ${safety.reason}`); continue; }
     const smart = await checkSmartMoney(c.mint);
     const conv = await scoreConviction(c.name, reason, safety, smart);
     if (conv.score < cfg.liveMinConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.liveMinConviction}`); continue; }
     // passed every gate → a real BUY candidate
-    if (!liveOn) { details.push(`WOULD BUY ${c.name} conv ${conv.score} — bot off (fund + arm to trade)`); continue; }
+    const gradTag = isGrad ? "🎓 " : "";
+    if (!liveOn) { details.push(`WOULD BUY ${gradTag}${c.name} conv ${conv.score} — bot off (fund + arm to trade)`); continue; }
     if (liveHalted) { details.push(`HALTED (daily loss cap) — skip ${c.name}`); continue; }
     if (liveOpenCount >= cfg.liveMaxOpen) { details.push(`FULL (${cfg.liveMaxOpen} open) — skip ${c.name}`); continue; }
     const tr = await buyToken(c.mint, cfg.liveSizeUsd, cfg.liveValidate);
     if (!tr.ok) { details.push(`BUY FAILED ${c.name}: ${tr.error}`); continue; }
     if (cfg.liveValidate) {   // dry-run — path proven, no spend, no tracked position
-      details.push(`VALIDATED BUY ${c.name} conv ${conv.score} (dry-run, no spend)`);
-      await sendNotification(`🎰 MEME VALIDATED BUY ${c.name} $${cfg.liveSizeUsd} (conv ${conv.score}) — dry-run OK`, "general").catch(() => {});
+      details.push(`VALIDATED BUY ${gradTag}${c.name} conv ${conv.score} (dry-run, no spend)`);
+      await sendNotification(`🎰 MEME VALIDATED BUY ${gradTag}${c.name} $${cfg.liveSizeUsd} (conv ${conv.score}) — dry-run OK`, "general").catch(() => {});
       continue;
     }
     // ARMED real buy → track the real position
@@ -264,6 +271,7 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     open.push({
       pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd: cfg.liveSizeUsd,
       entryLiq: c.liq, entryFdv: c.fdv, reason, conviction: conv.score, thesis: conv.thesis, lpLocked: safety.lpLocked, smartCount: smart.count,
+      dex: c.dex, isPumpGraduate: isGrad,
       live: true, buyTx: tr.sig, solSpentLamports: tr.solSpentLamports,
       peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
     });
