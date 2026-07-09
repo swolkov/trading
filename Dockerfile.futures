@@ -2,9 +2,6 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# cache-bust marker — forces a fresh build past Railway's stale layer cache
-RUN echo "OVERNIGHT_WS_FIX_MARKER_20260709_V4"
-
 # Copy package files
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
