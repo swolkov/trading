@@ -33,6 +33,8 @@ export function MemeLabPanel() {
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [dest, setDest] = useState("");
+  const [showCashout, setShowCashout] = useState(false);
   if (!data) return <div className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground">Loading Meme Lab…</div>;
   const s = data.stats;
   const netColor = s.totalRealizedUsd >= 0 ? "text-emerald-400" : "text-red-400";
@@ -45,6 +47,18 @@ export function MemeLabPanel() {
       const d = await r.json();
       if (!r.ok) setMsg(d.error || "Failed");
       else { setMsg(action === "arm" ? "🟢 ARMED — real money on the next scan" : action === "dryrun" ? "Dry-run on — builds trades but won't send" : "Off — paper only"); setPw(""); mutate(); }
+    } catch (e) { setMsg(String(e)); }
+    setBusy(false);
+  }
+
+  async function cashOut() {
+    if (!confirm("Cash out: sell ALL positions to SOL and send everything to the destination address. Continue?")) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch("/api/meme-lab/cashout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw, destination: dest }) });
+      const d = await r.json();
+      if (!r.ok) setMsg(d.error || "Failed");
+      else { setMsg(`💸 Cashed out — sold ${d.sold}, SOL sent back. Bot turned off.`); setPw(""); setDest(""); mutate(); }
     } catch (e) { setMsg(String(e)); }
     setBusy(false);
   }
@@ -78,6 +92,22 @@ export function MemeLabPanel() {
             <button onClick={() => setLive("off")} disabled={busy || !pw} className="rounded-md bg-white/[0.04] text-muted-foreground border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-white/[0.08] disabled:opacity-40">Off</button>
           </div>
           {msg && <p className="text-[11px] text-muted-foreground">{msg}</p>}
+
+          {/* Cash out */}
+          <div className="border-t border-border/60 pt-2">
+            <button onClick={() => setShowCashout((v) => !v)} className="text-[11px] text-muted-foreground/70 hover:text-foreground underline underline-offset-2">
+              {showCashout ? "Hide cash-out" : "Cash out → send money back to Kraken"}
+            </button>
+            {showCashout && (
+              <div className="mt-2 space-y-2">
+                <p className="text-[10px] text-muted-foreground/60">Sells everything to SOL and sends it to your Kraken SOL <span className="text-foreground/70">deposit</span> address (Kraken → Deposit → SOL). Also turns the bot off.</p>
+                <input value={dest} onChange={(e) => setDest(e.target.value)} placeholder="Kraken SOL deposit address" className="w-full rounded-md bg-background border border-border px-2.5 py-1.5 text-xs" />
+                <button onClick={cashOut} disabled={busy || !pw || !dest} className="w-full rounded-md bg-red-500/15 text-red-300 border border-red-500/30 px-3 py-1.5 text-xs font-semibold hover:bg-red-500/25 disabled:opacity-40">
+                  💸 Cash out everything (needs password above)
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
       {/* Scoreboard — real money */}

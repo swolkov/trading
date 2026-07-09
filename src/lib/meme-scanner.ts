@@ -7,7 +7,7 @@
 // proves it with our own forward data. Nothing here touches Kraken — memes live on-chain, not on a CEX.
 import { prisma } from "./db";
 import { checkSafety, checkSmartMoney, scoreConviction } from "./meme-signals";
-import { walletConfigured, buyToken, sellToken, solPriceUsd, getSolBalance } from "./meme-trader";
+import { walletConfigured, buyToken, sellToken, solPriceUsd, getSolBalance, sweepSolTo } from "./meme-trader";
 import { sendNotification } from "./notifications";
 
 const GT = "https://api.geckoterminal.com/api/v2/networks/solana";
@@ -297,6 +297,31 @@ async function loadJson<T = Pos[]>(key: string): Promise<T> {
 async function saveJson(key: string, value: unknown): Promise<void> {
   const v = JSON.stringify(value);
   await prisma.agentConfig.upsert({ where: { key }, update: { value: v }, create: { key, value: v } }).catch(() => {});
+}
+
+// CASH OUT — sell every open position to SOL, then sweep all SOL to a destination address.
+// Also flips the bot off so it doesn't immediately re-buy. Password-gated at the API layer.
+export async function cashOut(destAddress: string): Promise<{ ok: boolean; sold: number; swept?: string; error?: string; details: string[] }> {
+  const details: string[] = [];
+  if (!walletConfigured()) return { ok: false, sold: 0, error: "wallet not configured", details };
+  await prisma.agentConfig.upsert({ where: { key: "meme_live_enabled" }, update: { value: "false" }, create: { key: "meme_live_enabled", value: "false" } }).catch(() => {});
+  let open: Pos[] = await loadJson("meme_live_open");
+  let closed: Pos[] = await loadJson("meme_live_closed");
+  let sold = 0;
+  for (const pos of open) {
+    const sr = await sellToken(pos.mint, false);
+    pos.exitTs = new Date().toISOString(); pos.exitReason = "cashout"; pos.sellTx = sr.sig;
+    if (sr.ok) sold++; else details.push(`sell failed ${pos.name}: ${sr.error}`);
+    closed.unshift(pos);
+    await sendNotification(`🎰 MEME CASHOUT SELL ${pos.name}${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : ` [${sr.error}]`}`, "general").catch(() => {});
+  }
+  open = [];
+  await saveJson("meme_live_open", open);
+  await saveJson("meme_live_closed", closed.slice(0, CLOSED_CAP));
+  const sweep = await sweepSolTo(destAddress, false);
+  if (!sweep.ok) { details.push(`sweep failed: ${sweep.error}`); return { ok: false, sold, error: sweep.error, details }; }
+  await sendNotification(`🎰 MEME CASHED OUT — sold ${sold}, swept SOL to ${destAddress.slice(0, 6)}… tx ${sweep.sig?.slice(0, 8)}`, "general").catch(() => {});
+  return { ok: true, sold, swept: sweep.sig, details };
 }
 
 // ── status for the Meme Lab page ──

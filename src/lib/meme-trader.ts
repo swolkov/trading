@@ -2,7 +2,7 @@
 // Hard-isolated: signs with MEME_WALLET_SECRET (a dedicated wallet that holds ONLY the risk budget).
 // Every buy is honeypot-checked first (must have a working SELL route back to SOL) so we never buy
 // a token we can't exit. validateOnly mode confirms the whole path (quote + swap build) WITHOUT sending.
-import { Connection, Keypair, VersionedTransaction } from "@solana/web3.js";
+import { Connection, Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 
 const SOL = "So11111111111111111111111111111111111111112";
@@ -87,6 +87,28 @@ export async function buyToken(mint: string, usdAmount: number, validateOnly: bo
   if (!quote) return { ok: false, error: "no buy route" };
   const res = await executeSwap(quote, validateOnly);
   return { ...res, expectedOut: quote.outAmount, solSpentLamports: lamports };
+}
+
+// CASH OUT: send all SOL in the wallet to a destination address (e.g. your Kraken SOL deposit address).
+// The ONLY function that can move funds OUT of the wallet — password-gated at the API layer.
+export async function sweepSolTo(toAddress: string, validateOnly: boolean): Promise<TradeResult> {
+  if (!walletConfigured()) return { ok: false, error: "wallet not configured" };
+  try {
+    const conn = new Connection(rpcUrl(), "confirmed");
+    const kp = loadWallet();
+    const to = new PublicKey(toAddress);                       // throws if the address is malformed
+    const lamports = await conn.getBalance(kp.publicKey);
+    const send = lamports - 10000;                             // leave a little for the network fee
+    if (send <= 0) return { ok: false, error: "nothing to send" };
+    const { blockhash } = await conn.getLatestBlockhash();
+    const tx = new Transaction({ recentBlockhash: blockhash, feePayer: kp.publicKey }).add(
+      SystemProgram.transfer({ fromPubkey: kp.publicKey, toPubkey: to, lamports: send }));
+    tx.sign(kp);
+    if (validateOnly) return { ok: true, validated: true };
+    const sig = await conn.sendRawTransaction(tx.serialize());
+    await conn.confirmTransaction(sig, "confirmed");
+    return { ok: true, sig, expectedOut: String(send) };
+  } catch (e) { return { ok: false, error: String(e).slice(0, 120) }; }
 }
 
 // SELL: dump the full token balance back to SOL.
