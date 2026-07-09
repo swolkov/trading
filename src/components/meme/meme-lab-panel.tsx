@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { useState } from "react";
 
 interface Pos {
   pool: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
@@ -12,9 +13,14 @@ interface Stats {
   closedCount: number; wins: number; winRate: number; totalRealizedUsd: number; totalInvestedUsd: number;
   avgWinPct: number; avgLossPct: number; bestPct: number; worstPct: number; openUnrealizedUsd: number;
 }
+interface Live {
+  enabled: boolean; validate: boolean; sizeUsd: number; maxOpen: number;
+  walletConfigured: boolean; walletAddress: string | null; solBalance: number; capUsd: number;
+}
 interface Status {
   enabled: boolean; config: Record<string, string>; stats: Stats;
   open: Pos[]; closed: Pos[]; lastRun?: { ts: string; scanned: number; entered: number; exited: number; open: number } | null;
+  live?: Live;
 }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
@@ -23,13 +29,57 @@ const pct = (n: number) => `${n >= 0 ? "+" : ""}${(n * 100).toFixed(0)}%`;
 const ago = (iso?: string) => { if (!iso) return ""; const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000); return m < 60 ? `${m}m` : `${Math.round(m / 60)}h`; };
 
 export function MemeLabPanel() {
-  const { data } = useSWR<Status>("/api/meme-lab", fetcher, { refreshInterval: 60000 });
+  const { data, mutate } = useSWR<Status>("/api/meme-lab", fetcher, { refreshInterval: 60000 });
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
   if (!data) return <div className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground">Loading Meme Lab…</div>;
   const s = data.stats;
   const netColor = s.totalRealizedUsd >= 0 ? "text-emerald-400" : "text-red-400";
+  const live = data.live;
+
+  async function setLive(action: "arm" | "dryrun" | "off") {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch("/api/meme-lab/live", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw, action }) });
+      const d = await r.json();
+      if (!r.ok) setMsg(d.error || "Failed");
+      else { setMsg(action === "arm" ? "🟢 ARMED — real money on the next scan" : action === "dryrun" ? "Dry-run on — builds trades but won't send" : "Off — paper only"); setPw(""); mutate(); }
+    } catch (e) { setMsg(String(e)); }
+    setBusy(false);
+  }
 
   return (
     <div className="space-y-4">
+      {/* Live control */}
+      {live && (
+        <div className={`rounded-lg border p-5 space-y-3 ${live.enabled && !live.validate ? "border-emerald-500/30 bg-emerald-500/[0.03]" : "border-border bg-card"}`}>
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-sm">Live Bot <span className="text-[10px] font-normal text-muted-foreground/60">— real money, ${live.capUsd} cap</span></h2>
+            <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${live.enabled && !live.validate ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : live.enabled ? "bg-amber-500/15 text-amber-300 border-amber-500/30" : "bg-muted text-muted-foreground/60 border-border"}`}>
+              {live.enabled && !live.validate ? "LIVE" : live.enabled ? "Dry-run" : "Paper only"}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <div><p className="text-[10px] text-muted-foreground/50">Wallet SOL</p><p className="text-sm font-bold tabular-nums">{live.walletConfigured ? live.solBalance.toFixed(3) : "—"}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">Per trade</p><p className="text-sm font-bold tabular-nums">${live.sizeUsd}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">Max open</p><p className="text-sm font-bold tabular-nums">{live.maxOpen}</p></div>
+          </div>
+          {live.walletAddress && (
+            <div className="text-[10px] text-muted-foreground/60">
+              Fund this wallet with SOL (send from Kraken/Coinbase):
+              <code className="block mt-1 break-all bg-muted/50 px-2 py-1 rounded text-[10px] text-foreground/80">{live.walletAddress}</code>
+            </div>
+          )}
+          <div className="border-t border-border/60 pt-3 flex gap-2 items-center flex-wrap">
+            <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Live-trading password" className="flex-1 min-w-[140px] rounded-md bg-background border border-border px-2.5 py-1.5 text-xs" />
+            <button onClick={() => setLive("dryrun")} disabled={busy || !pw} className="rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/30 px-2.5 py-1.5 text-xs font-semibold hover:bg-amber-500/25 disabled:opacity-40">Dry-run</button>
+            <button onClick={() => setLive("arm")} disabled={busy || !pw} className="rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2.5 py-1.5 text-xs font-semibold hover:bg-emerald-500/25 disabled:opacity-40">Arm live 🎰</button>
+            <button onClick={() => setLive("off")} disabled={busy || !pw} className="rounded-md bg-white/[0.04] text-muted-foreground border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-white/[0.08] disabled:opacity-40">Off</button>
+          </div>
+          {msg && <p className="text-[11px] text-muted-foreground">{msg}</p>}
+        </div>
+      )}
       {/* Scoreboard */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
         <div className="flex items-center justify-between">

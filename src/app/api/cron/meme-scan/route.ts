@@ -1,7 +1,7 @@
 import { runMemeScan } from "@/lib/meme-scanner";
 import { prisma } from "@/lib/db";
 
-export const maxDuration = 60;
+export const maxDuration = 300;   // real Solana swaps can take 10-30s each to confirm — give headroom
 
 // Meme Lab observation cron — scans new/trending Solana pools, paper-trades survivors, manages exits.
 // PAPER ONLY: no exchange, no keys, no real money. Runs every 10 min (memes move fast but a slow

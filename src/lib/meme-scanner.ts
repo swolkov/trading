@@ -7,6 +7,8 @@
 // proves it with our own forward data. Nothing here touches Kraken — memes live on-chain, not on a CEX.
 import { prisma } from "./db";
 import { checkSafety, checkSmartMoney, scoreConviction } from "./meme-signals";
+import { walletConfigured, buyToken, sellToken, solPriceUsd, getSolBalance } from "./meme-trader";
+import { sendNotification } from "./notifications";
 
 const GT = "https://api.geckoterminal.com/api/v2/networks/solana";
 const CLOSED_CAP = 300;        // keep the last N closed paper trades
@@ -24,10 +26,18 @@ interface Cfg {
   maxFdvUsd: number;
   minConviction: number;       // AI conviction gate (0-100)
   enrichMax: number;           // cap on how many candidates get the (safety+AI) treatment per run
+  // ── LIVE (real money) ──
+  liveEnabled: boolean;        // master switch: execute real Solana buys/sells
+  liveValidate: boolean;       // true = build+sign but DON'T send (safe dry run). Arming sets this false.
+  liveSizeUsd: number;         // $ per real buy
+  liveMaxOpen: number;         // max concurrent REAL positions (× size must stay under the wallet cap)
+  liveDailyLossHaltUsd: number;// halt real buys once today's realized live loss exceeds this
+  liveMinConviction: number;   // real money only on higher conviction than paper
 }
 
 async function loadCfg(): Promise<Cfg> {
-  const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd", "meme_min_conviction", "meme_enrich_max"];
+  const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd", "meme_min_conviction", "meme_enrich_max",
+    "meme_live_enabled", "meme_live_validate", "meme_live_size_usd", "meme_live_max_open", "meme_live_daily_loss_halt_usd", "meme_live_min_conviction"];
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
   const c: Record<string, string> = {}; for (const r of rows) c[r.key] = r.value;
   return {
@@ -40,6 +50,12 @@ async function loadCfg(): Promise<Cfg> {
     maxFdvUsd: parseFloat(c.meme_max_fdv_usd) || 10000000,
     minConviction: parseFloat(c.meme_min_conviction) || 45,
     enrichMax: parseInt(c.meme_enrich_max) || 8,
+    liveEnabled: c.meme_live_enabled === "true",    // default OFF — must be explicitly turned on
+    liveValidate: c.meme_live_validate !== "false", // default TRUE — dry run until explicitly armed
+    liveSizeUsd: parseFloat(c.meme_live_size_usd) || 20,
+    liveMaxOpen: parseInt(c.meme_live_max_open) || 4,   // 4 × $20 = $80, under the $100 wallet cap
+    liveDailyLossHaltUsd: parseFloat(c.meme_live_daily_loss_halt_usd) || 40,
+    liveMinConviction: parseFloat(c.meme_live_min_conviction) || 60,
   };
 }
 
@@ -123,6 +139,7 @@ interface Pos {
   pool: string; mint: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
   entryLiq: number; entryFdv: number; reason: string;
   conviction: number; thesis: string; lpLocked: number; smartCount: number;   // research signals, logged for grading
+  live?: boolean; buyTx?: string; sellTx?: string; solSpentLamports?: number;  // real-money execution
   peakPrice: number; lastPrice: number; lastPnlPct: number; lastTs: string;
   exitTs?: string; exitPrice?: number; exitReason?: string; realizedPct?: number; realizedUsd?: number; holdMin?: number;
 }
@@ -155,8 +172,10 @@ export async function runMemeScan(): Promise<MemeScanResult> {
 
   let open: Pos[] = await loadJson("meme_paper_open");
   let closed: Pos[] = await loadJson("meme_paper_closed");
+  const liveOn = cfg.liveEnabled && walletConfigured();
+  const solPx = liveOn ? await solPriceUsd() : 0;
 
-  // 1. manage exits on open paper positions
+  // 1. manage exits on open positions (live ones get a REAL sell)
   const prices = await fetchPrices(open.map((p) => p.pool), now);
   let exited = 0; const stillOpen: Pos[] = [];
   for (const pos of open) {
@@ -171,11 +190,28 @@ export async function runMemeScan(): Promise<MemeScanResult> {
       pos.realizedPct = exitPrice / pos.entryPrice - 1;
       pos.realizedUsd = pos.sizeUsd * pos.realizedPct;
       pos.holdMin = Math.round((now - new Date(pos.entryTs).getTime()) / 60000);
+      // REAL sell for live positions
+      if (pos.live) {
+        const sr = await sellToken(pos.mint, cfg.liveValidate);
+        pos.sellTx = sr.sig;
+        if (!cfg.liveValidate && sr.ok && sr.expectedOut && pos.solSpentLamports && solPx > 0) {
+          const solRecv = Number(sr.expectedOut);
+          pos.realizedUsd = ((solRecv - pos.solSpentLamports) / 1e9) * solPx;   // real SOL delta → $
+          pos.realizedPct = pos.solSpentLamports > 0 ? (solRecv - pos.solSpentLamports) / pos.solSpentLamports : 0;
+        }
+        await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED SELL" : "SOLD"} ${pos.name} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : sr.ok ? "" : ` [${sr.error}]`}`, "general").catch(() => {});
+      }
       closed.unshift(pos); exited++;
-      details.push(`EXIT ${pos.name} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})`);
+      details.push(`EXIT ${pos.name}${pos.live ? " [LIVE]" : ""} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})`);
     } else stillOpen.push(pos);
   }
   open = stillOpen;
+
+  // live guardrails snapshot
+  const todayStr = new Date(now).toISOString().slice(0, 10);
+  const liveLossToday = closed.filter((p) => p.live && (p.exitTs || "").slice(0, 10) === todayStr).reduce((s, p) => s + Math.min(0, p.realizedUsd ?? 0), 0);
+  const liveHalted = liveLossToday <= -cfg.liveDailyLossHaltUsd;
+  let liveOpenCount = open.filter((p) => p.live).length;
 
   // 2. new paper entries — mechanical filter first, then research (safety → smart money → AI) on the
   //    strongest few, gated on both. Enrichment is capped per run so the cron stays fast + cheap.
@@ -195,13 +231,24 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     const conv = await scoreConviction(c.name, reason, safety, smart);
     if (conv.score < cfg.minConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.minConviction}: ${conv.thesis}`); continue; }
     const entryPrice = c.price * (1 + slipFor(c.liq));
+    // REAL buy — only if live on, not halted, room under the concurrent cap, and higher conviction
+    let live = false, buyTx: string | undefined, solSpentLamports: number | undefined, sizeUsd = cfg.sizeUsd;
+    if (liveOn && !liveHalted && liveOpenCount < cfg.liveMaxOpen && conv.score >= cfg.liveMinConviction) {
+      const tr = await buyToken(c.mint, cfg.liveSizeUsd, cfg.liveValidate);
+      if (tr.ok) {
+        live = true; buyTx = tr.sig; solSpentLamports = tr.solSpentLamports; sizeUsd = cfg.liveSizeUsd; liveOpenCount++;
+        details.push(`  ↳ LIVE ${cfg.liveValidate ? "VALIDATED" : "BOUGHT"} $${cfg.liveSizeUsd} ${c.name}${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""}`);
+        await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED BUY" : "BOUGHT"} ${c.name} $${cfg.liveSizeUsd} (conv ${conv.score})${buyTx ? ` tx ${buyTx.slice(0, 8)}` : ""} — ${conv.thesis}`, "general").catch(() => {});
+      } else details.push(`  ↳ live buy blocked: ${tr.error} — paper only`);
+    }
     open.push({
-      pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd: cfg.sizeUsd,
+      pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd,
       entryLiq: c.liq, entryFdv: c.fdv, reason, conviction: conv.score, thesis: conv.thesis, lpLocked: safety.lpLocked, smartCount: smart.count,
+      live, buyTx, solSpentLamports,
       peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
     });
     knownPools.add(c.pool); entered++;
-    details.push(`ENTER ${c.name} conv ${conv.score}${smart.count ? ` +${smart.count} smart` : ""} — ${conv.thesis}`);
+    details.push(`ENTER ${c.name}${live ? " [LIVE]" : ""} conv ${conv.score}${smart.count ? ` +${smart.count} smart` : ""} — ${conv.thesis}`);
   }
 
   // 3. persist + stats
@@ -253,15 +300,23 @@ async function saveJson(key: string, value: unknown): Promise<void> {
 export interface MemeLabStatus {
   enabled: boolean; config: Record<string, string>; stats: MemeStats;
   open: Pos[]; closed: Pos[]; lastRun: unknown;
+  live: { enabled: boolean; validate: boolean; sizeUsd: number; maxOpen: number; walletConfigured: boolean; walletAddress: string | null; solBalance: number; capUsd: number };
 }
 export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   const cfg = await loadCfg();
-  const rows = await prisma.agentConfig.findMany({ where: { key: { in: ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_conviction", "meme_smart_wallets"] } } });
+  const rows = await prisma.agentConfig.findMany({ where: { key: { in: ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_conviction", "meme_smart_wallets", "meme_wallet_pubkey"] } } });
   const config: Record<string, string> = {}; for (const r of rows) config[r.key] = r.value;
   const open = await loadJson("meme_paper_open");
   const closed = await loadJson("meme_paper_closed");
   const stats = await loadJson<MemeStats>("meme_scan_stats").then((s) => (Array.isArray(s) ? computeStats(closed, open) : s)) as MemeStats;
   let lastRun: unknown = null;
   try { const lr = await prisma.agentConfig.findUnique({ where: { key: "meme_scan_last_run" } }); if (lr?.value) lastRun = JSON.parse(lr.value); } catch { /* ignore */ }
-  return { enabled: cfg.enabled, config, stats: stats || computeStats(closed, open), open, closed: closed.slice(0, 40), lastRun };
+  const configured = walletConfigured();
+  const solBalance = configured ? await getSolBalance().catch(() => 0) : 0;
+  const live = {
+    enabled: cfg.liveEnabled, validate: cfg.liveValidate, sizeUsd: cfg.liveSizeUsd, maxOpen: cfg.liveMaxOpen,
+    walletConfigured: configured, walletAddress: config.meme_wallet_pubkey || null, solBalance,
+    capUsd: cfg.liveSizeUsd * cfg.liveMaxOpen,
+  };
+  return { enabled: cfg.enabled, config, stats: stats || computeStats(closed, open), open, closed: closed.slice(0, 40), lastRun, live };
 }
