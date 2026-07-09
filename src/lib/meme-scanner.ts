@@ -162,20 +162,18 @@ function decideExit(pos: Pos, cur: Cand | undefined, now: number): { exit: boole
   return { exit: false, reason: "", price };
 }
 
-export interface MemeScanResult { enabled: boolean; scanned: number; entered: number; exited: number; open: number; details: string[]; }
-
-export async function runMemeScan(): Promise<MemeScanResult> {
+// EXIT MANAGER — shared by the full scan AND the fast 1-minute exit cron. Meme coins move in seconds,
+// so exits must be checked far more often than the 10-min entry scan. Self-contained: loads open
+// positions, sells any that hit a stop/trail/target/rug, persists, returns a summary.
+export async function manageMemeExits(): Promise<{ exited: number; open: number; details: string[] }> {
   const cfg = await loadCfg();
   const details: string[] = [];
-  if (!cfg.enabled) return { enabled: false, scanned: 0, entered: 0, exited: 0, open: 0, details: ["Meme Lab disabled"] };
   const now = Date.now();
-
   let open: Pos[] = await loadJson("meme_live_open");
-  let closed: Pos[] = await loadJson("meme_live_closed");
+  const closed: Pos[] = await loadJson("meme_live_closed");
+  if (open.length === 0) return { exited: 0, open: 0, details };
   const liveOn = cfg.liveEnabled && walletConfigured();
   const solPx = liveOn ? await solPriceUsd() : 0;
-
-  // 1. manage exits on open positions (live ones get a REAL sell)
   const prices = await fetchPrices(open.map((p) => p.pool), now);
   let exited = 0; const stillOpen: Pos[] = [];
   for (const pos of open) {
@@ -190,8 +188,7 @@ export async function runMemeScan(): Promise<MemeScanResult> {
       pos.realizedPct = exitPrice / pos.entryPrice - 1;
       pos.realizedUsd = pos.sizeUsd * pos.realizedPct;
       pos.holdMin = Math.round((now - new Date(pos.entryTs).getTime()) / 60000);
-      // REAL sell for live positions
-      if (pos.live) {
+      if (pos.live) {   // REAL sell
         const sr = await sellToken(pos.mint, cfg.liveValidate);
         pos.sellTx = sr.sig;
         if (!cfg.liveValidate && sr.ok && sr.expectedOut && pos.solSpentLamports && solPx > 0) {
@@ -206,6 +203,27 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     } else stillOpen.push(pos);
   }
   open = stillOpen;
+  await saveJson("meme_live_open", open);
+  await saveJson("meme_live_closed", closed.slice(0, CLOSED_CAP));
+  await saveJson("meme_scan_stats", computeStats(closed, open));
+  return { exited, open: open.length, details };
+}
+
+export interface MemeScanResult { enabled: boolean; scanned: number; entered: number; exited: number; open: number; details: string[]; }
+
+export async function runMemeScan(): Promise<MemeScanResult> {
+  const cfg = await loadCfg();
+  const details: string[] = [];
+  if (!cfg.enabled) return { enabled: false, scanned: 0, entered: 0, exited: 0, open: 0, details: ["Meme Lab disabled"] };
+  const now = Date.now();
+
+  // 1. manage exits first (the same logic the fast 1-minute exit cron runs standalone)
+  const ex = await manageMemeExits();
+  details.push(...ex.details);
+  const exited = ex.exited;
+  let open: Pos[] = await loadJson("meme_live_open");
+  let closed: Pos[] = await loadJson("meme_live_closed");
+  const liveOn = cfg.liveEnabled && walletConfigured();
 
   // live guardrails snapshot
   const todayStr = new Date(now).toISOString().slice(0, 10);
