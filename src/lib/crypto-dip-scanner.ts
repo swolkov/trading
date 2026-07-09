@@ -1,9 +1,11 @@
 // Crypto dip scanner — READ-ONLY detection of oversold / pulled-back coins (XRP, SOL, DOGE, etc.).
 // This is INFORMATION, not a buy signal: a dip detector tells you a coin is down/oversold; it does
 // NOT mean the dip will bounce profitably (rapid dip-buy/sell-bounce loses after fees — tested).
-// Prices from Alpaca's public crypto bars (no key needed); ~identical to Kraken for reference.
-// The future "buy dips & hold" accumulator (needs Kraken funded + key) would consume these signals.
+// Prices come from KRAKEN's own public OHLC feed — the same venue the accumulator trades on, so the
+// 50-day trend signal is a single source of truth. Alpaca's public bars are kept as an automatic
+// fallback so the signal never goes dark if Kraken's feed hiccups. Both are key-free public data.
 import { prisma } from "./db";
+import { getKrakenDailyBars } from "./kraken";
 
 const DEFAULT_WATCHLIST = ["XRP/USD", "SOL/USD", "DOGE/USD", "BTC/USD", "ETH/USD", "AVAX/USD", "LINK/USD"];
 const SCAN_KEY = "crypto_dip_scan";
@@ -11,6 +13,16 @@ const SCAN_KEY = "crypto_dip_scan";
 interface Bar { t: string; o: number; h: number; l: number; c: number; }
 
 async function fetchDaily(symbol: string, days = 70): Promise<Bar[]> {
+  // Primary: Kraken (the venue we trade on) → single source of truth for the trend signal.
+  try {
+    const bars = await getKrakenDailyBars(symbol, days);
+    if (bars.length) return bars;
+  } catch { /* fall through to Alpaca so the signal never goes dark */ }
+  // Fallback: Alpaca's public crypto bars (key-free) if Kraken's feed is momentarily unavailable.
+  return fetchDailyAlpaca(symbol, days);
+}
+
+async function fetchDailyAlpaca(symbol: string, days = 70): Promise<Bar[]> {
   const start = new Date(Date.now() - (days + 5) * 86_400_000).toISOString().split("T")[0];
   const p = new URLSearchParams({ symbols: symbol, timeframe: "1Day", start, limit: "1000" });
   const url = `https://data.alpaca.markets/v1beta3/crypto/us/bars?${p}`;

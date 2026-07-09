@@ -49,6 +49,26 @@ export async function krakenPublic(method: string, params: Record<string, string
   return d.result;
 }
 
+// Daily OHLC bars from Kraken's public feed (no key needed) — the SAME venue we trade on, so the
+// 50-day trend signal is computed from Kraken's own prices, not a second exchange. Kraken returns up
+// to 720 daily candles; we keep the most recent `days`. Row format: [time,o,h,l,c,vwap,vol,count].
+export interface KrakenDailyBar { t: string; o: number; h: number; l: number; c: number; }
+export async function getKrakenDailyBars(symbol: string, days = 70): Promise<KrakenDailyBar[]> {
+  const pair = krakenPair(symbol);
+  const res = await krakenPublic("OHLC", { pair, interval: "1440" });
+  // Result is keyed by Kraken's canonical pair name (e.g. XXBTZUSD); take the first non-"last" entry.
+  const rows = Object.entries(res).find(([k]) => k !== "last")?.[1] as unknown[][] | undefined;
+  if (!rows?.length) throw new Error(`Kraken OHLC empty for ${symbol}`);
+  const bars = rows.map((r) => ({
+    t: new Date(Number(r[0]) * 1000).toISOString(),
+    o: parseFloat(r[1] as string),
+    h: parseFloat(r[2] as string),
+    l: parseFloat(r[3] as string),
+    c: parseFloat(r[4] as string),
+  }));
+  return bars.slice(-days);
+}
+
 // Last traded price for a pair.
 export async function getKrakenPrice(symbol: string): Promise<number> {
   const pair = krakenPair(symbol);
