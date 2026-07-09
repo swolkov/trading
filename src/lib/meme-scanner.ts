@@ -170,8 +170,8 @@ export async function runMemeScan(): Promise<MemeScanResult> {
   if (!cfg.enabled) return { enabled: false, scanned: 0, entered: 0, exited: 0, open: 0, details: ["Meme Lab disabled"] };
   const now = Date.now();
 
-  let open: Pos[] = await loadJson("meme_paper_open");
-  let closed: Pos[] = await loadJson("meme_paper_closed");
+  let open: Pos[] = await loadJson("meme_live_open");
+  let closed: Pos[] = await loadJson("meme_live_closed");
   const liveOn = cfg.liveEnabled && walletConfigured();
   const solPx = liveOn ? await solPriceUsd() : 0;
 
@@ -213,8 +213,8 @@ export async function runMemeScan(): Promise<MemeScanResult> {
   const liveHalted = liveLossToday <= -cfg.liveDailyLossHaltUsd;
   let liveOpenCount = open.filter((p) => p.live).length;
 
-  // 2. new paper entries — mechanical filter first, then research (safety → smart money → AI) on the
-  //    strongest few, gated on both. Enrichment is capped per run so the cron stays fast + cheap.
+  // 2. new entries — LIVE ONLY. Mechanical filter → safety → AI conviction. A position exists ONLY
+  //    when real money actually buys it (armed) — dry-run just proves the path, no tracked position.
   const cands = await fetchCandidates(now);
   let entered = 0, enriched = 0;
   const knownPools = new Set([...open.map((p) => p.pool), ...closed.map((p) => p.pool)]);
@@ -222,39 +222,42 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     .filter((c) => !knownPools.has(c.pool) && passesEntry(c, cfg))
     .sort((a, b) => Math.max(b.m15, b.h1) - Math.max(a.m15, a.h1));   // strongest jumps first
   for (const c of shortlist) {
-    if (open.length >= cfg.maxOpen || enriched >= cfg.enrichMax) break;
+    if (enriched >= cfg.enrichMax) break;
     enriched++;
     const reason = passesEntry(c, cfg)!;
     const safety = await checkSafety(c.mint);
     if (!safety.ok) { details.push(`SKIP ${c.name} — ${safety.reason}`); continue; }
     const smart = await checkSmartMoney(c.mint);
     const conv = await scoreConviction(c.name, reason, safety, smart);
-    if (conv.score < cfg.minConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.minConviction}: ${conv.thesis}`); continue; }
-    const entryPrice = c.price * (1 + slipFor(c.liq));
-    // REAL buy — only if live on, not halted, room under the concurrent cap, and higher conviction
-    let live = false, buyTx: string | undefined, solSpentLamports: number | undefined, sizeUsd = cfg.sizeUsd;
-    if (liveOn && !liveHalted && liveOpenCount < cfg.liveMaxOpen && conv.score >= cfg.liveMinConviction) {
-      const tr = await buyToken(c.mint, cfg.liveSizeUsd, cfg.liveValidate);
-      if (tr.ok) {
-        live = true; buyTx = tr.sig; solSpentLamports = tr.solSpentLamports; sizeUsd = cfg.liveSizeUsd; liveOpenCount++;
-        details.push(`  ↳ LIVE ${cfg.liveValidate ? "VALIDATED" : "BOUGHT"} $${cfg.liveSizeUsd} ${c.name}${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""}`);
-        await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED BUY" : "BOUGHT"} ${c.name} $${cfg.liveSizeUsd} (conv ${conv.score})${buyTx ? ` tx ${buyTx.slice(0, 8)}` : ""} — ${conv.thesis}`, "general").catch(() => {});
-      } else details.push(`  ↳ live buy blocked: ${tr.error} — paper only`);
+    if (conv.score < cfg.liveMinConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.liveMinConviction}`); continue; }
+    // passed every gate → a real BUY candidate
+    if (!liveOn) { details.push(`WOULD BUY ${c.name} conv ${conv.score} — bot off (fund + arm to trade)`); continue; }
+    if (liveHalted) { details.push(`HALTED (daily loss cap) — skip ${c.name}`); continue; }
+    if (liveOpenCount >= cfg.liveMaxOpen) { details.push(`FULL (${cfg.liveMaxOpen} open) — skip ${c.name}`); continue; }
+    const tr = await buyToken(c.mint, cfg.liveSizeUsd, cfg.liveValidate);
+    if (!tr.ok) { details.push(`BUY FAILED ${c.name}: ${tr.error}`); continue; }
+    if (cfg.liveValidate) {   // dry-run — path proven, no spend, no tracked position
+      details.push(`VALIDATED BUY ${c.name} conv ${conv.score} (dry-run, no spend)`);
+      await sendNotification(`🎰 MEME VALIDATED BUY ${c.name} $${cfg.liveSizeUsd} (conv ${conv.score}) — dry-run OK`, "general").catch(() => {});
+      continue;
     }
+    // ARMED real buy → track the real position
+    const entryPrice = c.price * (1 + slipFor(c.liq));
     open.push({
-      pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd,
+      pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd: cfg.liveSizeUsd,
       entryLiq: c.liq, entryFdv: c.fdv, reason, conviction: conv.score, thesis: conv.thesis, lpLocked: safety.lpLocked, smartCount: smart.count,
-      live, buyTx, solSpentLamports,
+      live: true, buyTx: tr.sig, solSpentLamports: tr.solSpentLamports,
       peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
     });
-    knownPools.add(c.pool); entered++;
-    details.push(`ENTER ${c.name}${live ? " [LIVE]" : ""} conv ${conv.score}${smart.count ? ` +${smart.count} smart` : ""} — ${conv.thesis}`);
+    knownPools.add(c.pool); liveOpenCount++; entered++;
+    await sendNotification(`🎰 MEME BOUGHT ${c.name} $${cfg.liveSizeUsd} (conv ${conv.score})${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""} — ${conv.thesis}`, "general").catch(() => {});
+    details.push(`BOUGHT ${c.name} conv ${conv.score}${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""}`);
   }
 
   // 3. persist + stats
   closed = closed.slice(0, CLOSED_CAP);
-  await saveJson("meme_paper_open", open);
-  await saveJson("meme_paper_closed", closed);
+  await saveJson("meme_live_open", open);
+  await saveJson("meme_live_closed", closed);
   const stats = computeStats(closed, open);
   await saveJson("meme_scan_stats", stats);
   await saveJson("meme_scan_last_run", { ts: new Date(now).toISOString(), scanned: cands.length, entered, exited, open: open.length, details: details.slice(0, 10) });
@@ -304,10 +307,10 @@ export interface MemeLabStatus {
 }
 export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   const cfg = await loadCfg();
-  const rows = await prisma.agentConfig.findMany({ where: { key: { in: ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_conviction", "meme_smart_wallets", "meme_wallet_pubkey"] } } });
+  const rows = await prisma.agentConfig.findMany({ where: { key: { in: ["meme_scan_enabled", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_live_min_conviction", "meme_smart_wallets", "meme_wallet_pubkey"] } } });
   const config: Record<string, string> = {}; for (const r of rows) config[r.key] = r.value;
-  const open = await loadJson("meme_paper_open");
-  const closed = await loadJson("meme_paper_closed");
+  const open = await loadJson("meme_live_open");
+  const closed = await loadJson("meme_live_closed");
   const stats = await loadJson<MemeStats>("meme_scan_stats").then((s) => (Array.isArray(s) ? computeStats(closed, open) : s)) as MemeStats;
   let lastRun: unknown = null;
   try { const lr = await prisma.agentConfig.findUnique({ where: { key: "meme_scan_last_run" } }); if (lr?.value) lastRun = JSON.parse(lr.value); } catch { /* ignore */ }

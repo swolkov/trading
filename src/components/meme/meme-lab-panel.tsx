@@ -80,19 +80,19 @@ export function MemeLabPanel() {
           {msg && <p className="text-[11px] text-muted-foreground">{msg}</p>}
         </div>
       )}
-      {/* Scoreboard */}
+      {/* Scoreboard — real money */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-sm">Paper Scoreboard <span className="text-[10px] font-normal text-muted-foreground/60">— hypothetical, zero real money</span></h2>
+          <h2 className="font-semibold text-sm">Live P&amp;L <span className="text-[10px] font-normal text-muted-foreground/60">— real money</span></h2>
           <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${data.enabled ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-muted text-muted-foreground/60 border-border"}`}>
-            {data.enabled ? "Observing" : "Off"}
+            {data.enabled ? "Scanning" : "Off"}
           </span>
         </div>
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 text-center">
-          <div><p className="text-[10px] text-muted-foreground/50">Net (paper)</p><p className={`text-sm font-bold tabular-nums ${netColor}`}>{usd(s.totalRealizedUsd)}</p></div>
-          <div><p className="text-[10px] text-muted-foreground/50">Bets closed</p><p className="text-sm font-bold tabular-nums">{s.closedCount}</p></div>
-          <div><p className="text-[10px] text-muted-foreground/50">Win rate</p><p className="text-sm font-bold tabular-nums">{(s.winRate * 100).toFixed(0)}%</p></div>
-          <div><p className="text-[10px] text-muted-foreground/50">Best / worst</p><p className="text-sm font-bold tabular-nums"><span className="text-emerald-400">{pct(s.bestPct)}</span> / <span className="text-red-400">{pct(s.worstPct)}</span></p></div>
+          <div><p className="text-[10px] text-muted-foreground/50">Net P&amp;L</p><p className={`text-sm font-bold tabular-nums ${netColor}`}>{usd(s.totalRealizedUsd)}</p></div>
+          <div><p className="text-[10px] text-muted-foreground/50">Trades closed</p><p className="text-sm font-bold tabular-nums">{s.closedCount}</p></div>
+          <div><p className="text-[10px] text-muted-foreground/50">Win rate</p><p className="text-sm font-bold tabular-nums">{s.closedCount ? `${(s.winRate * 100).toFixed(0)}%` : "—"}</p></div>
+          <div><p className="text-[10px] text-muted-foreground/50">Best / worst</p><p className="text-sm font-bold tabular-nums">{s.closedCount ? <><span className="text-emerald-400">{pct(s.bestPct)}</span> / <span className="text-red-400">{pct(s.worstPct)}</span></> : "—"}</p></div>
           <div><p className="text-[10px] text-muted-foreground/50">Deployed</p><p className="text-sm font-bold tabular-nums">{usd(s.totalInvestedUsd)}</p></div>
           <div><p className="text-[10px] text-muted-foreground/50">Open (unreal.)</p><p className={`text-sm font-bold tabular-nums ${s.openUnrealizedUsd >= 0 ? "text-emerald-400" : "text-red-400"}`}>{usd(s.openUnrealizedUsd)}</p></div>
         </div>
@@ -103,11 +103,11 @@ export function MemeLabPanel() {
         )}
       </div>
 
-      {/* Open paper positions */}
+      {/* Open live positions */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-2">
-        <h3 className="font-semibold text-sm">Open paper bets ({data.open.length})</h3>
+        <h3 className="font-semibold text-sm">Open positions ({data.open.length})</h3>
         {data.open.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground/55">Nothing open — waiting for a candidate that clears the rug/momentum filters.</p>
+          <p className="text-[11px] text-muted-foreground/55">Nothing open — {live?.enabled && !live?.validate ? "waiting for a coin that clears the rug + conviction gates." : "fund the wallet and arm the bot to start trading."}</p>
         ) : data.open.map((p) => (
           <div key={p.pool} className="px-2 py-1.5 rounded bg-white/[0.02] space-y-0.5">
             <div className="flex items-center justify-between text-[11px]">
@@ -126,9 +126,9 @@ export function MemeLabPanel() {
 
       {/* Recent closed */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-2">
-        <h3 className="font-semibold text-sm">Recent closed bets</h3>
+        <h3 className="font-semibold text-sm">Recent trades</h3>
         {data.closed.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground/55">No closed bets yet.</p>
+          <p className="text-[11px] text-muted-foreground/55">No closed trades yet.</p>
         ) : data.closed.map((p, i) => (
           <div key={p.pool + i} className="flex items-center justify-between text-[11px] px-2 py-1.5 rounded bg-white/[0.02]">
             <span className="font-semibold truncate max-w-[32%]" title={p.name}>{p.name}</span>

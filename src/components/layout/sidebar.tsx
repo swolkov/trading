@@ -58,7 +58,7 @@ const sections = [
     // Experiments — paper-only, clearly separated from the real pillars.
     label: "LAB",
     links: [
-      { href: "/meme-lab", label: "Meme Lab", icon: FlaskConical, badge: "Paper" },
+      { href: "/meme-lab", label: "Meme Lab", icon: FlaskConical, badge: "Live" },
     ],
   },
   {

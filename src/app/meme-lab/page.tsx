@@ -12,8 +12,8 @@ export default function MemeLabPage() {
           <FlaskConical className="w-5 h-5 text-fuchsia-400" />
         </div>
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Meme Lab <span className="text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300/70 align-middle ml-1">Experiment</span></h1>
-          <p className="text-sm text-muted-foreground">Paper-testing whether we can catch meme jumps like Cash Cat. Zero real money.</p>
+          <h1 className="text-xl font-bold tracking-tight">Meme Lab <span className="text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300/70 align-middle ml-1">Live · $100 cap</span></h1>
+          <p className="text-sm text-muted-foreground">An automated bot that hunts Solana meme jumps and trades them with real money — hard-capped at $100.</p>
         </div>
       </div>
 
@@ -27,28 +27,28 @@ export default function MemeLabPage() {
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
           Every 10 minutes it reads brand-new and trending Solana tokens straight from the blockchain,
-          throws out the obvious rugs (too little liquidity, already collapsing, more sellers than
-          buyers), and <span className="text-foreground/80">paper-buys</span> the survivors showing a real move —
-          logging the entry with realistic slippage baked in (memecoins cost ~5% just to get in or out).
-          Each bet is then managed mechanically: take profit on a big run, trail the peak, cut at −40%,
-          bail on a 24-hour timer, and dump instantly if liquidity drains. Every result is tracked above.
+          throws out the obvious rugs (too little liquidity, unlocked liquidity, already collapsing, more
+          sellers than buyers), scores the survivors with an AI conviction check, and — only for the
+          highest-conviction ones — <span className="text-foreground/80">buys them with real money</span> via
+          Jupiter. Before every buy it simulates a sell, so it never touches a coin it can&apos;t exit.
+          Each position is managed mechanically: take profit on a big run, trail the peak, cut at −40%,
+          bail on a 24-hour timer, and dump instantly if liquidity drains. Every fill hits Slack.
         </p>
       </div>
 
-      {/* The honest point */}
+      {/* The honest warning */}
       <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.03] p-5 space-y-2">
         <div className="flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-400" />
-          <h2 className="font-semibold">Why it&apos;s paper — and what we&apos;re actually measuring</h2>
+          <h2 className="font-semibold">The honest risk</h2>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Catching meme jumps is a game dominated by insiders and millisecond-fast bots colocated next to
-          the blockchain — a slow web app buying minutes later is usually their exit liquidity, and ~99%
-          of these tokens go to zero. So instead of betting real money on a hunch, this runs the exact
-          strategy on paper and keeps an honest scoreboard. If — after weeks of real forward data on our
-          own setup — it shows a genuine edge after fees, we&apos;d fund a tiny bucket by hand. If it
-          bleeds (the likely outcome), we&apos;ll have proven it cost-free instead of learning it the
-          expensive way. <span className="text-foreground/70">This is not connected to Kraken or any real account.</span>
+          This is a bet with a negative expected return. Catching meme jumps is dominated by insiders and
+          millisecond-fast bots — a bot buying minutes later is often their exit liquidity, and ~99% of
+          these tokens go to zero. The honest expectation is that this bleeds. What makes it survivable:
+          a <span className="text-foreground/80">hard $100 wallet cap</span> (worst case, that&apos;s the whole loss),
+          a honeypot check before every buy, a daily-loss auto-halt, and a one-click kill switch. It runs
+          on its own isolated wallet — <span className="text-foreground/70">never your Kraken or futures money.</span>
         </p>
       </div>
     </div>
