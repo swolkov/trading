@@ -912,9 +912,15 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   const totalRTHMinutes = (FUTURES_RULES.RTH_END_ET - FUTURES_RULES.RTH_START_ET) * 60; // 390 min
   const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (totalRTHMinutes - FUTURES_RULES.AVOID_LAST_MINUTES));
   const timeQuality = getTimeQuality(session, minutesSinceOpen);
+  // Live overnight toggle: when live_futures_trade_overnight=true, live trades all sessions like the
+  // demo (whose profit comes from overnight index overbought-shorts). Default OFF = RTH prime only.
+  let tradeOvernight = false;
+  try { tradeOvernight = (await prisma.agentConfig.findUnique({ where: { key: "live_futures_trade_overnight" } }))?.value === "true"; } catch { /* default off */ }
   const canScanNewTrades = tradingMode === "paper"
     ? true  // Demo: all sessions (halt already returned above)
-    : (timeQuality.sizeMultiplier > 0 && !isFirstLast15);  // Live: RTH prime only
+    : tradeOvernight
+      ? session !== "halt"                                   // Live + overnight enabled: all sessions except halt
+      : (timeQuality.sizeMultiplier > 0 && !isFirstLast15);  // Live default: RTH prime only
   if (!canScanNewTrades) {
     const reason = tradingMode === "paper"
       ? "market halted"
