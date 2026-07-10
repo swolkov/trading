@@ -1,10 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useAccount } from "@/hooks/use-account";
-import { usePositions } from "@/hooks/use-positions";
 import { formatCurrency, pnlColor } from "@/lib/utils";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { PillarsStrip } from "@/components/dashboard/pillars-strip";
 
@@ -64,19 +62,6 @@ interface FuturesQuote {
   volume: number;
 }
 
-function parseOptionSymbol(symbol: string) {
-  const match = symbol.match(/^([A-Z]+)(\d{6})([CP])(\d+)$/);
-  if (!match) return null;
-  const underlying = match[1];
-  const dateStr = match[2];
-  const type = match[3] === "C" ? "CALL" : "PUT";
-  const strike = parseInt(match[4]) / 1000;
-  const expiry = new Date(`20${dateStr.slice(0, 2)}-${dateStr.slice(2, 4)}-${dateStr.slice(4, 6)}`);
-  const now = new Date();
-  const dte = Math.max(0, Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
-  return { underlying, type, strike, expiry: expiry.toLocaleDateString("en-US", { month: "short", day: "numeric" }), dte };
-}
-
 // ── Position Row Component ─────────────────────────────
 
 function PositionWeight({ value, total }: { value: number; total: number }) {
@@ -94,14 +79,13 @@ function PositionWeight({ value, total }: { value: number; total: number }) {
 // ── Main Page ──────────────────────────────────────────
 
 export default function DashboardPage() {
-  const { data: account, isLoading: accountLoading } = useAccount();
-  const { data: positions, isLoading: positionsLoading } = usePositions();
   const [regime, setRegime] = useState<RegimeData | null>(null);
   const [futures, setFutures] = useState<FuturesData | null>(null);
   const [futuresQuotes, setFuturesQuotes] = useState<FuturesQuote[]>([]);
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 10000 });
   const viewMode = modeData?.modes?.futures || "paper";
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number }>("/api/kraken-agent", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 60000 });
+  const { data: meme } = useSWR<{ live?: { walletUsd?: number; enabled?: boolean; validate?: boolean; solBalance?: number }; open?: unknown[]; stats?: { totalRealizedUsd?: number } }>("/api/meme-lab", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 60000 });
 
   useEffect(() => {
     fetch("/api/regime").then((r) => r.json()).then((d) => { if (!d.error) setRegime(d); }).catch(() => {});
@@ -139,19 +123,16 @@ export default function DashboardPage() {
   const futuresUnrealized = futures?.account?.unrealizedPnl || 0;
   const futuresMargin = futures?.account?.marginUsed || 0;
 
-  // ── Portfolio metrics (futures + Alpaca + Kraken combined — matches the 4-engines strip total) ──
+  // ── Portfolio metrics (futures + Kraken + Meme Lab combined — matches the 3-engines strip total) ──
   const krakenEquity = krk?.connected ? krk.totalValue || 0 : 0;
-  const combinedEquity = futuresEquity + (account ? parseFloat(account.equity) || 0 : 0) + krakenEquity;
+  const memeEquity = meme?.live?.walletUsd || 0;
+  const combinedEquity = futuresEquity + krakenEquity + memeEquity;
   const combinedDailyPnl = futuresDailyPnl;
   const combinedDailyPct = (futuresSOD || futuresBalance) > 0
     ? combinedDailyPnl / (futuresSOD || futuresBalance || 1)
     : 0;
   const combinedUnrealized = futuresUnrealized;
   const totalPositions = futures?.positions?.length || 0;
-
-  // ── Alpaca (stocks & crypto) ──
-  const alpacaEquity = account ? parseFloat(account.equity) : 0;
-  const stockPositions = useMemo(() => positions?.filter((p) => !parseOptionSymbol(p.symbol) && p.asset_class !== "crypto") || [], [positions]);
 
   // ── Risk / Allocation ──
   const marginUtilization = futuresEquity > 0 ? (futuresMargin / futuresEquity) * 100 : 0;
@@ -160,7 +141,7 @@ export default function DashboardPage() {
 
 
   // Loading state
-  const isLoading = accountLoading || positionsLoading;
+  const isLoading = futures === null;
 
   return (
     <div className="space-y-5">
@@ -169,7 +150,7 @@ export default function DashboardPage() {
         <div>
           <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
           <p className="text-[11px] text-muted-foreground/50">
-            Multi-asset portfolio — Tradovate & Alpaca
+            Multi-asset portfolio — Futures · Kraken · Meme Lab
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -284,31 +265,35 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Alpaca */}
-        <div className="rounded-xl border border-blue-500/15 bg-gradient-to-br from-blue-500/[0.04] to-transparent p-4">
+        {/* Meme Lab */}
+        <div className="rounded-xl border border-fuchsia-500/15 bg-gradient-to-br from-fuchsia-500/[0.04] to-transparent p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-blue-400" />
-              <span className="text-xs font-bold">Alpaca</span>
-              <span className="text-[10px] text-muted-foreground/40">Stocks & Long-term</span>
+              <span className="w-2 h-2 rounded-full bg-fuchsia-400" />
+              <span className="text-xs font-bold">Meme Lab</span>
+              <span className="text-[10px] text-muted-foreground/40">Solana memes</span>
+              <span className={`text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                !meme?.live?.enabled ? "bg-muted text-muted-foreground/60 border-transparent"
+                : meme?.live?.validate ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+              }`}>{!meme?.live?.enabled ? "off" : meme?.live?.validate ? "dry-run" : "live"}</span>
             </div>
-            <div className="flex gap-2">
-              <Link href="/positions" className="text-[10px] text-blue-400 hover:underline">Positions</Link>
-              <Link href="/long-term" className="text-[10px] text-emerald-400 hover:underline">Long-term</Link>
-            </div>
+            <Link href="/meme-lab" className="text-[10px] text-fuchsia-400 hover:underline">View</Link>
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <p className="text-[10px] text-muted-foreground/40">Equity</p>
-              <p className="text-sm font-bold tabular-nums">{formatCurrency(alpacaEquity)}</p>
+              <p className="text-[10px] text-muted-foreground/40">Wallet</p>
+              <p className="text-sm font-bold tabular-nums">{formatCurrency(memeEquity)}</p>
             </div>
             <div>
-              <p className="text-[10px] text-muted-foreground/40">Positions</p>
-              <p className="text-sm font-bold tabular-nums">{stockPositions.length}</p>
+              <p className="text-[10px] text-muted-foreground/40">Open</p>
+              <p className="text-sm font-bold tabular-nums">{meme?.open?.length ?? 0}</p>
             </div>
             <div>
-              <p className="text-[10px] text-muted-foreground/40">Buying Power</p>
-              <p className="text-sm font-bold tabular-nums">{account ? formatCurrency(parseFloat(account.buying_power)) : "—"}</p>
+              <p className="text-[10px] text-muted-foreground/40">Realized P&L</p>
+              <p className={`text-sm font-bold tabular-nums ${pnlColor(meme?.stats?.totalRealizedUsd || 0)}`}>
+                {(meme?.stats?.totalRealizedUsd || 0) >= 0 ? "+" : ""}{formatCurrency(meme?.stats?.totalRealizedUsd || 0)}
+              </p>
             </div>
           </div>
         </div>
@@ -383,8 +368,8 @@ export default function DashboardPage() {
             </div>
             <div className="flex gap-3">
               <Link href="/futures" className="text-[10px] text-amber-400 hover:underline">Futures</Link>
-              <Link href="/positions" className="text-[10px] text-blue-400 hover:underline">Stocks</Link>
               <Link href="/kraken" className="text-[10px] text-purple-400 hover:underline">Kraken</Link>
+              <Link href="/meme-lab" className="text-[10px] text-fuchsia-400 hover:underline">Meme Lab</Link>
             </div>
           </div>
 
@@ -406,39 +391,6 @@ export default function DashboardPage() {
             </div>
           ) : totalPositions > 0 ? (
             <div className="divide-y divide-white/[0.04]">
-              {/* Stock positions */}
-              {stockPositions.length > 0 && (
-                <div className="flex items-center gap-2 px-4 py-1.5 bg-blue-500/[0.03]">
-                  <span className="text-[9px] font-bold text-blue-400 uppercase tracking-wider">Stocks</span>
-                  <span className="text-[9px] text-muted-foreground/30">{stockPositions.length}</span>
-                  <div className="flex-1 border-t border-blue-500/10" />
-                  <Link href="/positions" className="text-[9px] text-blue-400/60 hover:text-blue-400">View all</Link>
-                </div>
-              )}
-              {stockPositions.map((pos) => {
-                const pl = parseFloat(pos.unrealized_pl);
-                const plPct = parseFloat(pos.unrealized_plpc) * 100;
-                return (
-                  <div key={pos.symbol} className="flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02] transition-colors">
-                    <div className="flex items-center gap-2.5">
-                      <Link href={`/research/${pos.symbol}`} className="font-bold text-sm hover:text-emerald-400 transition-colors w-12">{pos.symbol}</Link>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] bg-blue-500/15 text-blue-400 font-bold">STK</span>
-                      <span className="text-[11px] text-muted-foreground/40">{pos.qty} sh</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <PositionWeight value={parseFloat(pos.market_value)} total={combinedEquity} />
-                      <span className="text-[11px] text-muted-foreground/50 tabular-nums w-16 text-right">{formatCurrency(pos.current_price)}</span>
-                      <span className={`text-[11px] font-bold tabular-nums w-16 text-right ${pnlColor(pl)}`}>
-                        {pl >= 0 ? "+" : ""}{formatCurrency(pl)}
-                      </span>
-                      <span className={`text-[10px] tabular-nums w-12 text-right ${pnlColor(plPct)}`}>
-                        {plPct >= 0 ? "+" : ""}{plPct.toFixed(1)}%
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-
               {/* Futures positions */}
               {futures?.positions && futures.positions.length > 0 && (
                 <div className="flex items-center gap-2 px-4 py-1.5 bg-amber-500/[0.03]">
@@ -475,7 +427,7 @@ export default function DashboardPage() {
           ) : (
             <div className="px-4 py-10 text-center">
               <p className="text-sm text-muted-foreground/40">No open positions</p>
-              <p className="text-[11px] text-muted-foreground/25 mt-1">Positions from Tradovate and Alpaca will appear here when active</p>
+              <p className="text-[11px] text-muted-foreground/25 mt-1">Positions from Tradovate, Kraken and Meme Lab will appear here when active</p>
             </div>
           )}
         </div>

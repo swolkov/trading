@@ -442,7 +442,7 @@ export async function cashOut(destAddress: string): Promise<{ ok: boolean; sold:
 export interface MemeLabStatus {
   enabled: boolean; config: Record<string, string>; stats: MemeStats;
   open: Pos[]; closed: Pos[]; lastRun: unknown;
-  live: { enabled: boolean; validate: boolean; sizeUsd: number; maxOpen: number; walletConfigured: boolean; walletAddress: string | null; solBalance: number; capUsd: number };
+  live: { enabled: boolean; validate: boolean; sizeUsd: number; maxOpen: number; walletConfigured: boolean; walletAddress: string | null; solBalance: number; solPriceUsd: number; walletUsd: number; capUsd: number };
 }
 export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   const cfg = await loadCfg();
@@ -455,9 +455,11 @@ export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   try { const lr = await prisma.agentConfig.findUnique({ where: { key: "meme_scan_last_run" } }); if (lr?.value) lastRun = JSON.parse(lr.value); } catch { /* ignore */ }
   const configured = walletConfigured();
   const solBalance = configured ? await getSolBalance().catch(() => 0) : 0;
+  const solPx = configured && solBalance > 0 ? await solPriceUsd().catch(() => 0) : 0;
   const live = {
     enabled: cfg.liveEnabled, validate: cfg.liveValidate, sizeUsd: cfg.liveSizeUsd, maxOpen: cfg.liveMaxOpen,
     walletConfigured: configured, walletAddress: config.meme_wallet_pubkey || null, solBalance,
+    solPriceUsd: solPx, walletUsd: solBalance * solPx,
     capUsd: cfg.liveSizeUsd * cfg.liveMaxOpen,
   };
   return { enabled: cfg.enabled, config, stats: stats || computeStats(closed, open), open, closed: closed.slice(0, 40), lastRun, live };
