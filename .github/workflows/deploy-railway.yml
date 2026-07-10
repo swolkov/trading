@@ -8,7 +8,7 @@ on:
       - 'src/lib/tradovate.ts'
       - 'src/lib/fill-reconciliation.ts'
       - 'prisma/**'
-      - 'Dockerfile.futures'
+      - 'Dockerfile.engine'
       - 'package.json'
 
 jobs:
