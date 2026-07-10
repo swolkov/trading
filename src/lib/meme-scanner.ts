@@ -6,7 +6,7 @@
 // risking a dollar. Honest expectation: it does NOT (dominated by speed + insiders); the scoreboard
 // proves it with our own forward data. Nothing here touches Kraken — memes live on-chain, not on a CEX.
 import { prisma } from "./db";
-import { checkSafety, checkSmartMoney, scoreConviction, type SmartMoney } from "./meme-signals";
+import { checkSafety, checkSmartMoney, checkConcentration, scoreConviction, type SmartMoney } from "./meme-signals";
 import { walletConfigured, buyToken, sellToken, solPriceUsd, getSolBalance, sweepSolTo } from "./meme-trader";
 import { sendNotification } from "./notifications";
 
@@ -36,12 +36,14 @@ interface Cfg {
   maxH1Pump: number;           // ANTI-CHASE: skip if already up more than this % on the hour (don't be exit liquidity)
   maxH6Pump: number;           // ANTI-CHASE: skip if already extended this % on 6h
   partialTpPct: number;        // PARTIAL PROFIT: bank half the position at this gain (1.0 = +100% = 2x), ride the rest
+  maxTop5Pct: number;          // ANTI-MANIPULATION: reject if the top-5 non-pool wallets hold >this % of the float
+  minHolders: number;          // ANTI-MANIPULATION: reject coins with fewer than this many holders (too easy to rug)
 }
 
 async function loadCfg(): Promise<Cfg> {
   const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd", "meme_min_conviction", "meme_enrich_max",
     "meme_live_enabled", "meme_live_validate", "meme_live_size_usd", "meme_live_max_open", "meme_live_daily_loss_halt_usd", "meme_live_min_conviction",
-    "meme_max_h1_pump", "meme_max_h6_pump", "meme_partial_tp_pct"];
+    "meme_max_h1_pump", "meme_max_h6_pump", "meme_partial_tp_pct", "meme_max_top5_pct", "meme_min_holders"];
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
   const c: Record<string, string> = {}; for (const r of rows) c[r.key] = r.value;
   return {
@@ -63,6 +65,8 @@ async function loadCfg(): Promise<Cfg> {
     maxH1Pump: parseFloat(c.meme_max_h1_pump) || 60,
     maxH6Pump: parseFloat(c.meme_max_h6_pump) || 120,
     partialTpPct: parseFloat(c.meme_partial_tp_pct) || 1.0,
+    maxTop5Pct: parseFloat(c.meme_max_top5_pct) || 80,   // top-5 non-pool wallets owning >80% of the float = manipulated/rug-prone
+    minHolders: parseInt(c.meme_min_holders) || 15,      // fewer than 15 holders = too thin, too easy to dump
   };
 }
 
@@ -170,6 +174,7 @@ interface Pos {
   pool: string; mint: string; name: string; entryTs: string; entryPrice: number; sizeUsd: number;
   entryLiq: number; entryFdv: number; reason: string;
   conviction: number; thesis: string; lpLocked: number; smartCount: number;   // research signals, logged for grading
+  top5Pct?: number; holders?: number;                                          // anti-manipulation: holder concentration at entry
   dex?: string; isPumpGraduate?: boolean;                                      // pump.fun graduate signal
   live?: boolean; buyTx?: string; sellTx?: string; solSpentLamports?: number;  // real-money execution
   scaledOut?: boolean; remainFrac?: number; realizedUsdPartial?: number; scaleTx?: string; // partial profit-taking state
@@ -326,9 +331,14 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     const reason = passesEntry(c, cfg)! + (isGrad ? " · pump.fun GRADUATE" : ` · ${c.dex}`);
     const safety = await checkSafety(c.mint);
     if (!safety.ok) { details.push(`SKIP ${c.name} — ${safety.reason}`); continue; }
+    // ANTI-MANIPULATION: reject concentrated ownership (few non-pool wallets = engineered pump / rug-prone).
+    const conc = await checkConcentration(c.mint);
+    if (conc.holders >= 3 && (conc.holders < cfg.minHolders || conc.top5Pct > cfg.maxTop5Pct)) {
+      details.push(`SKIP ${c.name} — concentrated (${conc.reason})`); continue;
+    }
     const smart = smartMap.get(c.pool) ?? await checkSmartMoney(c.mint);
     const smartTag = smart.count > 0 ? ` 🐋${smart.count}` : "";
-    const conv = await scoreConviction(c.name, reason + (smart.count > 0 ? ` · ${smart.count} smart wallet(s) holding` : ""), safety, smart);
+    const conv = await scoreConviction(c.name, reason + (smart.count > 0 ? ` · ${smart.count} smart wallet(s) holding` : ""), safety, smart, conc);
     if (conv.score < cfg.liveMinConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.liveMinConviction}`); continue; }
     // passed every gate → a real BUY candidate
     const gradTag = isGrad ? "🎓 " : "";
@@ -347,6 +357,7 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     open.push({
       pool: c.pool, mint: c.mint, name: c.name, entryTs: new Date(now).toISOString(), entryPrice, sizeUsd: cfg.liveSizeUsd,
       entryLiq: c.liq, entryFdv: c.fdv, reason, conviction: conv.score, thesis: conv.thesis, lpLocked: safety.lpLocked, smartCount: smart.count,
+      top5Pct: conc.top5Pct, holders: conc.holders,
       dex: c.dex, isPumpGraduate: isGrad,
       live: true, buyTx: tr.sig, solSpentLamports: tr.solSpentLamports,
       peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),

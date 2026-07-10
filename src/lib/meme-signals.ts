@@ -53,18 +53,52 @@ export async function checkSmartMoney(mint: string): Promise<SmartMoney> {
   } catch { return { active: true, count: 0, hits: [] }; }
 }
 
+// 4. HOLDER CONCENTRATION (Helius, keyed) — anti-manipulation. On-chain studies show ~82% of >100% pumps
+// are manufactured, and the tell is concentrated ownership (a few wallets hold the float, ready to dump on
+// retail). We sum balances per owner, drop the single largest (almost always the AMM pool / bonding-curve
+// vault — a normal huge "holder"), and measure how much of the REMAINING float the next few wallets control.
+// A high number = a handful of non-pool wallets own the coin = exit-liquidity trap. Informational to the
+// grader + a conservative hard-gate on egregious cases. No key = unchecked (holders:0, never gates).
+export interface Concentration { top5Pct: number; top1Pct: number; holders: number; reason: string }
+export async function checkConcentration(mint: string): Promise<Concentration> {
+  const key = process.env.HELIUS_API_KEY;
+  if (!key || !mint) return { top5Pct: 0, top1Pct: 0, holders: 0, reason: "concentration unchecked (no key)" };
+  try {
+    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${key}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "conc", method: "getTokenAccounts", params: { mint, limit: 500, page: 1 } }),
+      signal: AbortSignal.timeout(9000),
+    });
+    if (!r.ok) return { top5Pct: 0, top1Pct: 0, holders: 0, reason: "concentration API error" };
+    const d = await r.json();
+    const byOwner = new Map<string, number>();
+    for (const a of (d?.result?.token_accounts || [])) { const amt = Number(a.amount) || 0; if (amt > 0 && a.owner) byOwner.set(a.owner, (byOwner.get(a.owner) || 0) + amt); }
+    const amounts = [...byOwner.values()].sort((x, y) => y - x);
+    const holders = amounts.length;
+    if (holders < 3) return { top5Pct: 0, top1Pct: 0, holders, reason: `only ${holders} holders — too few to assess` };
+    const total = amounts.reduce((s, x) => s + x, 0) || 1;
+    const top1Pct = (amounts[0] / total) * 100;
+    // exclude the largest holder (LP/pool proxy); measure the next-5 share of the remaining float
+    const rest = amounts.slice(1);
+    const restTotal = rest.reduce((s, x) => s + x, 0) || 1;
+    const top5Pct = (rest.slice(0, 5).reduce((s, x) => s + x, 0) / restTotal) * 100;
+    return { top5Pct, top1Pct, holders, reason: `${holders} holders; top wallet ${top1Pct.toFixed(0)}% (treated as LP); next-5 hold ${top5Pct.toFixed(0)}% of the rest` };
+  } catch { return { top5Pct: 0, top1Pct: 0, holders: 0, reason: "concentration check error" }; }
+}
+
 export interface Conviction { score: number; thesis: string }
-export async function scoreConviction(name: string, metrics: string, safety: Safety, smart: SmartMoney): Promise<Conviction> {
+export async function scoreConviction(name: string, metrics: string, safety: Safety, smart: SmartMoney, conc?: Concentration): Promise<Conviction> {
   if (!process.env.ANTHROPIC_API_KEY) return { score: 50, thesis: "no AI key — neutral" };
   try {
-    const prompt = `You are grading a Solana meme coin as a SHORT-TERM momentum PAPER trade (not an investment). Be skeptical — ~99% of these go to zero, most pumps are bots, and by the time it's visible the early money is often already out.
+    const prompt = `You are grading a Solana meme coin as a SHORT-TERM momentum trade with REAL money. Default hard to SKEPTICISM: on-chain research shows ~82% of tokens that gain >100% are manipulated, ~98% of pump.fun tokens go to zero, and dev-funded snipers routinely buy the first block and dump within 5 minutes — so by the time a move is visible, insider/early money is usually already exiting INTO retail. Your job is to REJECT exit-liquidity traps, not to find hope. When unsure, score LOW.
 Token: ${name}
 Metrics: ${metrics}
 Safety: ${safety.reason}${safety.risks.length ? `; flags: ${safety.risks.slice(0, 5).join(", ")}` : ""}
+Holder concentration: ${conc ? conc.reason : "unchecked"}
 Smart money: ${smart.active ? `${smart.count} tracked winner wallet(s) currently hold it` : "not tracked (no data)"}
-Score conviction that this keeps rising over the next few hours. Low score for bot-only pumps, thin liquidity, already-extended moves, or rug signs.
+Score conviction (0-100) that this KEEPS RISING over the next few hours AND that a buyer now would NOT just be exit liquidity. Score LOW for: concentrated ownership (few non-pool wallets hold most of the float), already-extended moves, thin liquidity, one-sided/bot volume, or any rug/sniper signature. Reserve high scores for broad holder distribution, healthy two-sided volume, and room left to run.
 Return ONLY JSON: {"score": <0-100 integer>, "thesis": "<one short sentence>"}`;
-    const msg = await anthropic.messages.create({ model: "claude-sonnet-4-6", max_tokens: 300, messages: [{ role: "user", content: prompt }] });
+    const msg = await anthropic.messages.create({ model: "claude-opus-4-8", max_tokens: 400, messages: [{ role: "user", content: prompt }] });
     const text = msg.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
     const m = text.match(/\{[\s\S]*\}/);
     const j = m ? JSON.parse(m[0]) : {};
