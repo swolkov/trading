@@ -109,6 +109,11 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 };
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
+// LIVE only: minimum account equity before we let gold (MGC) trade into the evening session. MGC overnight
+// initial margin is ~$1,000-1,150; below this threshold the account can't cover it → stay RTH-only. Once
+// funded past this (e.g. after the $4k ACH → ~$4.8k) evening gold auto-enables. Index never gets the evening
+// (its overnight margin ~$2,657 is too heavy). Auto-reverts to RTH-only if equity ever drops back below.
+const LIVE_EVENING_GOLD_MIN_EQUITY = 3000;
 // Minimum price increment per contract. EVERY price sent to Tradovate (stop, target, trail) MUST be
 // aligned to this or the broker rejects the order as "Illegal Price" — and because /order/placeorder
 // returns an orderId BEFORE the async rejection, the engine would otherwise believe the stop was
@@ -932,13 +937,20 @@ function getSizeMultiplier(sym?: string): number {
 
   if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
-  // LIVE ENGINE: RTH-only (reverted from 24/7 on 2026-05-27 — overnight initial margin for 1 MES (~$2,657,
-  // confirmed real from Tradovate's cashBalance API) EXCEEDS the $1K account → margin deficit / liquidation
-  // risk. Day-trade margin (~$50) only applies during RTH, so the $1K can only safely hold positions intraday.
+  // LIVE ENGINE: RTH-only by default (reverted from 24/7 on 2026-05-27 — overnight initial margin for 1 MES
+  // (~$2,657, confirmed real from Tradovate's cashBalance API) EXCEEDS a ~$1K account → margin deficit /
+  // liquidation risk. Day-trade margin (~$50) only applies during RTH.
+  // EXCEPTION (auto-gated on equity): GOLD (MGC) overnight initial margin is only ~$1,000-1,150. Once equity
+  // clears LIVE_EVENING_GOLD_MIN_EQUITY the account can safely hold one gold micro overnight, so let gold
+  // trade the evening session — where its RSI-bounce edge lives and the demo already trades metals. Index
+  // stays RTH-only always. At sub-threshold equity (e.g. $821 today) this branch is skipped → identical to
+  // the old RTH-only behavior. It flips on by itself the moment the account is funded past the threshold.
   if (IS_LIVE) {
     if (s === "morning" || s === "afternoon") return 1.0;   // RTH prime — full size
     if (s === "midday") return 0.5;                         // lunch — half size
-    return 0;                                               // BLOCK open, close, and all ETH — overnight margin > $1K
+    // Funded-enough GOLD gets the evening session at half size; deep overnight (asia/europe) stays blocked (thin liquidity).
+    if (sym && METALS.has(sym) && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY && s === "eth_evening") return 0.5;
+    return 0;                                               // BLOCK open, close, deep-ETH, index evenings, and gold when underfunded
   }
 
   // DEMO ENGINE: trades 24/7 for maximum learning
