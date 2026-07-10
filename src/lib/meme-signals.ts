@@ -26,26 +26,31 @@ export async function checkSafety(mint: string): Promise<Safety> {
 }
 
 export interface SmartMoney { active: boolean; count: number; hits: string[] }
-async function smartWallets(): Promise<string[]> {
-  try { const r = await prisma.agentConfig.findUnique({ where: { key: "meme_smart_wallets" } }); return (r?.value || "").split(",").map((s) => s.trim()).filter(Boolean); }
-  catch { return []; }
+async function smartWallets(): Promise<Set<string>> {
+  try { const r = await prisma.agentConfig.findUnique({ where: { key: "meme_smart_wallets" } }); return new Set((r?.value || "").split(",").map((s) => s.trim()).filter(Boolean)); }
+  catch { return new Set(); }
 }
-// Proxy signal: do any tracked "smart" wallets currently hold this mint? Needs HELIUS_API_KEY + a curated
-// wallet list. Curating genuinely-skilled wallets is the hard part — seed via meme_smart_wallets config.
+// Proxy signal: do any tracked "smart" wallets hold this mint RIGHT NOW? Cheap + inverted — one Helius
+// getTokenAccounts call per coin (the coin's holder set), intersected with our tracked-wallet set. That's
+// ~1 call/candidate instead of one-per-wallet. Needs HELIUS_API_KEY + a curated meme_smart_wallets list
+// (see scripts/meme-discover-wallets.ts). EXPERIMENTAL signal — logged on every trade so we can measure
+// whether it actually predicts winners before ever letting it relax a gate.
 export async function checkSmartMoney(mint: string): Promise<SmartMoney> {
   const key = process.env.HELIUS_API_KEY;
   const wallets = await smartWallets();
-  if (!key || wallets.length === 0 || !mint) return { active: false, count: 0, hits: [] };
-  const hits: string[] = [];
-  for (const w of wallets.slice(0, 20)) {
-    try {
-      const r = await fetch(`https://api.helius.xyz/v0/addresses/${w}/balances?api-key=${key}`, { signal: AbortSignal.timeout(8000) });
-      if (!r.ok) continue;
-      const d = await r.json();
-      if ((d.tokens || []).some((t: { mint?: string; amount?: number }) => t.mint === mint && (t.amount || 0) > 0)) hits.push(w);
-    } catch { /* skip wallet */ }
-  }
-  return { active: true, count: hits.length, hits };
+  if (!key || wallets.size === 0 || !mint) return { active: false, count: 0, hits: [] };
+  try {
+    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${key}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "sm", method: "getTokenAccounts", params: { mint, limit: 200, page: 1 } }),
+      signal: AbortSignal.timeout(9000),
+    });
+    if (!r.ok) return { active: true, count: 0, hits: [] };
+    const d = await r.json();
+    const owners: string[] = (d?.result?.token_accounts || []).map((a: { owner?: string; amount?: number }) => (a.amount && a.amount > 0 ? a.owner : "")).filter(Boolean);
+    const hits = [...new Set(owners)].filter((o) => wallets.has(o));
+    return { active: true, count: hits.length, hits };
+  } catch { return { active: true, count: 0, hits: [] }; }
 }
 
 export interface Conviction { score: number; thesis: string }

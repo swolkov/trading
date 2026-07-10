@@ -111,12 +111,16 @@ export async function sweepSolTo(toAddress: string, validateOnly: boolean): Prom
   } catch (e) { return { ok: false, error: String(e).slice(0, 120) }; }
 }
 
-// SELL: dump the full token balance back to SOL.
-export async function sellToken(mint: string, validateOnly: boolean): Promise<TradeResult> {
+// SELL: dump `fraction` of the token balance back to SOL (default 1 = the whole position).
+// fraction < 1 powers partial profit-taking (e.g. sell half at +100%, ride the rest).
+export async function sellToken(mint: string, validateOnly: boolean, fraction = 1): Promise<TradeResult> {
   if (!walletConfigured()) return { ok: false, error: "wallet not configured" };
   const bal = await getTokenBalanceRaw(mint);
-  if (BigInt(bal) <= BigInt(0)) return { ok: false, error: "no token balance" };
-  const quote = await jupQuote(mint, SOL, bal, 500);   // wider slippage on exit
+  let raw = BigInt(bal);
+  if (raw <= BigInt(0)) return { ok: false, error: "no token balance" };
+  if (fraction < 1) raw = (raw * BigInt(Math.round(Math.max(0, fraction) * 1000))) / BigInt(1000);
+  if (raw <= BigInt(0)) return { ok: false, error: "fraction rounds to zero" };
+  const quote = await jupQuote(mint, SOL, raw.toString(), 500);   // wider slippage on exit
   if (!quote) return { ok: false, error: "no sell route" };
   const res = await executeSwap(quote, validateOnly);
   return { ...res, expectedOut: quote.outAmount };

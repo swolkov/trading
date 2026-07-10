@@ -6,7 +6,7 @@
 // risking a dollar. Honest expectation: it does NOT (dominated by speed + insiders); the scoreboard
 // proves it with our own forward data. Nothing here touches Kraken — memes live on-chain, not on a CEX.
 import { prisma } from "./db";
-import { checkSafety, checkSmartMoney, scoreConviction } from "./meme-signals";
+import { checkSafety, checkSmartMoney, scoreConviction, type SmartMoney } from "./meme-signals";
 import { walletConfigured, buyToken, sellToken, solPriceUsd, getSolBalance, sweepSolTo } from "./meme-trader";
 import { sendNotification } from "./notifications";
 
@@ -33,11 +33,15 @@ interface Cfg {
   liveMaxOpen: number;         // max concurrent REAL positions (× size must stay under the wallet cap)
   liveDailyLossHaltUsd: number;// halt real buys once today's realized live loss exceeds this
   liveMinConviction: number;   // real money only on higher conviction than paper
+  maxH1Pump: number;           // ANTI-CHASE: skip if already up more than this % on the hour (don't be exit liquidity)
+  maxH6Pump: number;           // ANTI-CHASE: skip if already extended this % on 6h
+  partialTpPct: number;        // PARTIAL PROFIT: bank half the position at this gain (1.0 = +100% = 2x), ride the rest
 }
 
 async function loadCfg(): Promise<Cfg> {
   const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd", "meme_min_conviction", "meme_enrich_max",
-    "meme_live_enabled", "meme_live_validate", "meme_live_size_usd", "meme_live_max_open", "meme_live_daily_loss_halt_usd", "meme_live_min_conviction"];
+    "meme_live_enabled", "meme_live_validate", "meme_live_size_usd", "meme_live_max_open", "meme_live_daily_loss_halt_usd", "meme_live_min_conviction",
+    "meme_max_h1_pump", "meme_max_h6_pump", "meme_partial_tp_pct"];
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
   const c: Record<string, string> = {}; for (const r of rows) c[r.key] = r.value;
   return {
@@ -56,6 +60,9 @@ async function loadCfg(): Promise<Cfg> {
     liveMaxOpen: parseInt(c.meme_live_max_open) || 4,   // 4 × $20 = $80, under the $100 wallet cap
     liveDailyLossHaltUsd: parseFloat(c.meme_live_daily_loss_halt_usd) || 40,
     liveMinConviction: parseFloat(c.meme_live_min_conviction) || 60,
+    maxH1Pump: parseFloat(c.meme_max_h1_pump) || 60,
+    maxH6Pump: parseFloat(c.meme_max_h6_pump) || 120,
+    partialTpPct: parseFloat(c.meme_partial_tp_pct) || 1.0,
   };
 }
 
@@ -125,6 +132,24 @@ async function fetchPrices(addrs: string[], now: number): Promise<Record<string,
   return out;
 }
 
+// buy pressure 0..1 (share of h1 trades that were buys) — accumulation vs distribution
+function buyRatio(c: Cand): number { const t = c.buysH1 + c.sellsH1; return t > 0 ? c.buysH1 / t : 0.5; }
+// acceleration: is the move happening NOW (last 15m) or already spent on the hour? >1 = accelerating.
+function accel(c: Cand): number { const h = Math.abs(c.h1); return h > 1 ? (c.m15 * 4) / h : (c.m15 > 0 ? 2 : 1); }
+
+// ENTRY QUALITY 0..~1.3 — rewards fresh, accelerating, well-bid, liquid moves; punishes already-extended
+// pumps. This replaces the old "biggest %-gain first" ranking, which literally prioritized the most
+// exhausted (and most likely to dump) coins — the core reason the bot kept buying tops.
+function entryScore(c: Cand): number {
+  const bid = buyRatio(c);                                    // 0..1
+  const acc = Math.min(accel(c), 2) / 2;                      // 0..1, capped
+  const liq = Math.min(1, c.liq / 200000);                    // deeper book = safer + real exit
+  const churn = c.liq > 0 ? Math.min(1, c.volH1 / c.liq) : 0; // real turnover vs a dead pool
+  const notExtended = 1 - Math.min(1, Math.max(0, c.h1) / 100); // the higher it's already run, the lower the score
+  const gradBonus = c.dex === "pumpswap" ? 0.15 : 0;          // fresh pump.fun graduate
+  return bid * 0.3 + acc * 0.25 + liq * 0.15 + churn * 0.15 + notExtended * 0.15 + gradBonus;
+}
+
 function passesEntry(c: Cand, cfg: Cfg): string | null {
   if (c.price <= 0) return null;
   if (c.dex === "pump-fun") return null;                     // still on the bonding curve — rug zone, no locked LP, skip
@@ -133,9 +158,12 @@ function passesEntry(c: Cand, cfg: Cfg): string | null {
   if (c.ageMin < 5 || c.ageMin > 10080) return null;         // past the first-minutes snipe, younger than 7d
   if (c.fdv < cfg.minFdvUsd || c.fdv > cfg.maxFdvUsd) return null; // skip dust and already-mooned
   if (c.h6 < -25) return null;                               // already collapsing
+  if (c.h1 > cfg.maxH1Pump) return null;                     // ANTI-CHASE: already ran on the hour — we'd be exit liquidity
+  if (c.h6 > cfg.maxH6Pump) return null;                     // ANTI-CHASE: already extended on 6h — the move is likely spent
   if (c.m15 < 8 && c.h1 < 20) return null;                   // require a real jump on a short window
   if (c.buysH1 <= c.sellsH1) return null;                    // more buyers than sellers
-  return `jump m15 +${c.m15.toFixed(0)}% h1 +${c.h1.toFixed(0)}%, liq $${Math.round(c.liq / 1000)}k, ${c.buysH1}b/${c.sellsH1}s`;
+  const bidPct = Math.round(buyRatio(c) * 100);
+  return `jump m15 +${c.m15.toFixed(0)}% h1 +${c.h1.toFixed(0)}% (${accel(c) > 1.1 ? "accelerating" : "cooling"}), buy-pressure ${bidPct}%, liq $${Math.round(c.liq / 1000)}k, ${c.buysH1}b/${c.sellsH1}s`;
 }
 
 interface Pos {
@@ -144,26 +172,37 @@ interface Pos {
   conviction: number; thesis: string; lpLocked: number; smartCount: number;   // research signals, logged for grading
   dex?: string; isPumpGraduate?: boolean;                                      // pump.fun graduate signal
   live?: boolean; buyTx?: string; sellTx?: string; solSpentLamports?: number;  // real-money execution
+  scaledOut?: boolean; remainFrac?: number; realizedUsdPartial?: number; scaleTx?: string; // partial profit-taking state
   peakPrice: number; lastPrice: number; lastPnlPct: number; lastTs: string;
   exitTs?: string; exitPrice?: number; exitReason?: string; realizedPct?: number; realizedUsd?: number; holdMin?: number;
 }
 
-function decideExit(pos: Pos, cur: Cand | undefined, now: number): { exit: boolean; reason: string; price: number } {
+type ExitAction = "hold" | "scale" | "exit";
+function decideExit(pos: Pos, cur: Cand | undefined, now: number, cfg: Cfg): { action: ExitAction; reason: string; price: number } {
   const ageMin = (now - new Date(pos.entryTs).getTime()) / 60000;
   // pool vanished / unpriceable = treat as a rug exit at a punitive mark
   if (!cur || cur.price <= 0) {
-    if (ageMin > 30) return { exit: true, reason: "rug_gone", price: pos.entryPrice * 0.1 };
-    return { exit: false, reason: "", price: pos.lastPrice };
+    if (ageMin > 30) return { action: "exit", reason: "rug_gone", price: pos.entryPrice * 0.1 };
+    return { action: "hold", reason: "", price: pos.lastPrice };
   }
   const price = cur.price;
   const gain = price / pos.entryPrice - 1;
-  const peakGain = Math.max(pos.peakPrice, price) / pos.entryPrice - 1;
-  if (cur.liq <= pos.entryLiq * 0.5 || price <= pos.entryPrice * 0.15) return { exit: true, reason: "rug_liq", price };
-  if (gain >= 4.0) return { exit: true, reason: "moon_cap", price };                       // bank a +400% moonshot
-  if (peakGain >= 1.0 && price <= Math.max(pos.peakPrice, price) * 0.7) return { exit: true, reason: "trail", price }; // gave back 30% from peak after +100%
-  if (gain <= -0.4) return { exit: true, reason: "stop", price };                           // -40% hard stop
-  if (ageMin >= 1440) return { exit: true, reason: "time", price };                         // 24h time stop
-  return { exit: false, reason: "", price };
+  const peak = Math.max(pos.peakPrice, price);
+  const peakGain = peak / pos.entryPrice - 1;
+  // rug / capitulation always wins
+  if (cur.liq <= pos.entryLiq * 0.5 || price <= pos.entryPrice * 0.15) return { action: "exit", reason: "rug_liq", price };
+  if (gain >= 4.0) return { action: "exit", reason: "moon_cap", price };                    // bank a +400% moonshot
+  if (peakGain >= 1.0 && price <= peak * 0.7) return { action: "exit", reason: "trail", price }; // gave back 30% from peak after +100%
+  // after banking half, the runner is free — protect it at breakeven instead of the -40% stop
+  if (pos.scaledOut) {
+    if (price <= pos.entryPrice) return { action: "exit", reason: "breakeven_after_scale", price };
+  } else {
+    // PARTIAL PROFIT: first time we clear +TP, sell half and ride the rest (locks a win, removes rug risk on the half)
+    if (gain >= cfg.partialTpPct) return { action: "scale", reason: "partial_tp", price };
+    if (gain <= -0.4) return { action: "exit", reason: "stop", price };                     // -40% hard stop (pre-scale only)
+  }
+  if (ageMin >= 1440) return { action: "exit", reason: "time", price };                     // 24h time stop
+  return { action: "hold", reason: "", price };
 }
 
 // EXIT MANAGER — shared by the full scan AND the fast 1-minute exit cron. Meme coins move in seconds,
@@ -183,25 +222,51 @@ export async function manageMemeExits(): Promise<{ exited: number; open: number;
   for (const pos of open) {
     const cur = prices[pos.pool];
     if (cur) { pos.peakPrice = Math.max(pos.peakPrice, cur.price); pos.lastPrice = cur.price; pos.lastPnlPct = cur.price / pos.entryPrice - 1; pos.lastTs = new Date(now).toISOString(); }
-    const d = decideExit(pos, cur, now);
-    if (d.exit) {
+    const remain = pos.remainFrac ?? 1;
+    const d = decideExit(pos, cur, now, cfg);
+
+    if (d.action === "scale") {
+      // PARTIAL PROFIT: sell HALF, bank the win, keep the runner. Removes rug risk on the sold half.
+      const soldFrac = 0.5;
+      const exitPrice = d.price * (1 - slipFor(pos.entryLiq));
+      const gainPct = exitPrice / pos.entryPrice - 1;
+      let bankedUsd = pos.sizeUsd * soldFrac * gainPct;               // paper: profit on the half sold
+      if (pos.live) {
+        const sr = await sellToken(pos.mint, cfg.liveValidate, soldFrac);
+        pos.scaleTx = sr.sig;
+        if (!cfg.liveValidate && sr.ok && sr.expectedOut && pos.solSpentLamports && solPx > 0) {
+          const costHalf = pos.solSpentLamports * soldFrac;
+          bankedUsd = ((Number(sr.expectedOut) - costHalf) / 1e9) * solPx;   // real SOL delta on the half → $
+        }
+        await sendNotification(`🎰 MEME SCALED OUT ½ ${pos.name} +${(gainPct * 100).toFixed(0)}% — riding the rest${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : sr.ok ? "" : ` [${sr.error}]`}`, "general").catch(() => {});
+      }
+      pos.scaledOut = true;
+      pos.remainFrac = remain * soldFrac;                            // remaining fraction of the original position
+      pos.realizedUsdPartial = (pos.realizedUsdPartial ?? 0) + bankedUsd;
+      stillOpen.push(pos);
+      details.push(`SCALE ½ ${pos.name}${pos.live ? " [LIVE]" : ""} +${(gainPct * 100).toFixed(0)}% (banked $${bankedUsd.toFixed(1)}, stop→breakeven)`);
+      continue;
+    }
+
+    if (d.action === "exit") {
       const exitPrice = d.price * (1 - slipFor(pos.entryLiq));
       pos.exitTs = new Date(now).toISOString();
       pos.exitPrice = exitPrice;
       pos.exitReason = d.reason;
-      pos.realizedPct = exitPrice / pos.entryPrice - 1;
-      pos.realizedUsd = pos.sizeUsd * pos.realizedPct;
+      // realized on the REMAINING fraction, then fold in whatever was banked at the partial
+      let runnerUsd = pos.sizeUsd * remain * (exitPrice / pos.entryPrice - 1);
       pos.holdMin = Math.round((now - new Date(pos.entryTs).getTime()) / 60000);
-      if (pos.live) {   // REAL sell
-        const sr = await sellToken(pos.mint, cfg.liveValidate);
+      if (pos.live) {   // REAL sell of the remainder
+        const sr = await sellToken(pos.mint, cfg.liveValidate);       // sells the whole remaining balance
         pos.sellTx = sr.sig;
         if (!cfg.liveValidate && sr.ok && sr.expectedOut && pos.solSpentLamports && solPx > 0) {
-          const solRecv = Number(sr.expectedOut);
-          pos.realizedUsd = ((solRecv - pos.solSpentLamports) / 1e9) * solPx;   // real SOL delta → $
-          pos.realizedPct = pos.solSpentLamports > 0 ? (solRecv - pos.solSpentLamports) / pos.solSpentLamports : 0;
+          const costRemain = pos.solSpentLamports * remain;
+          runnerUsd = ((Number(sr.expectedOut) - costRemain) / 1e9) * solPx;   // real SOL delta on remainder → $
         }
-        await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED SELL" : "SOLD"} ${pos.name} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : sr.ok ? "" : ` [${sr.error}]`}`, "general").catch(() => {});
       }
+      pos.realizedUsd = runnerUsd + (pos.realizedUsdPartial ?? 0);
+      pos.realizedPct = pos.sizeUsd > 0 ? pos.realizedUsd / pos.sizeUsd : 0;   // total return on the ORIGINAL size
+      if (pos.live) await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED SELL" : "SOLD"} ${pos.name} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})${pos.sellTx ? ` tx ${pos.sellTx.slice(0, 8)}` : ""}`, "general").catch(() => {});
       closed.unshift(pos); exited++;
       details.push(`EXIT ${pos.name}${pos.live ? " [LIVE]" : ""} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})`);
     } else stillOpen.push(pos);
@@ -242,17 +307,28 @@ export async function runMemeScan(): Promise<MemeScanResult> {
   const knownPools = new Set([...open.map((p) => p.pool), ...closed.map((p) => p.pool)]);
   const shortlist = cands
     .filter((c) => !knownPools.has(c.pool) && passesEntry(c, cfg))
-    // pump.fun graduates first (survived the bonding curve), then strongest jumps
-    .sort((a, b) => (Number(b.dex === "pumpswap") - Number(a.dex === "pumpswap")) || (Math.max(b.m15, b.h1) - Math.max(a.m15, a.h1)));
-  for (const c of shortlist) {
+    // rank by ENTRY QUALITY (buy pressure + acceleration + liquidity + not-already-extended), best first —
+    // NOT by raw %-gain, which chased the most exhausted coins straight into their dumps
+    .sort((a, b) => entryScore(b) - entryScore(a));
+
+  // SMART-MONEY pre-pass (cheap, cached): check whether tracked winner-wallets hold the strongest candidates,
+  // then float smart-backed coins to the front so they always get full evaluation. Gates stay firm — this
+  // only changes WHICH coins get looked at first. Reused in the loop below so we never double-fetch.
+  const top = shortlist.slice(0, 15);
+  const smartMap = new Map<string, SmartMoney>();
+  await Promise.all(top.map(async (c) => { smartMap.set(c.pool, await checkSmartMoney(c.mint)); }));
+  top.sort((a, b) => ((smartMap.get(b.pool)?.count || 0) - (smartMap.get(a.pool)?.count || 0)) || (entryScore(b) - entryScore(a)));
+
+  for (const c of top) {
     if (enriched >= cfg.enrichMax) break;
     enriched++;
     const isGrad = c.dex === "pumpswap";                     // freshly graduated from pump.fun
     const reason = passesEntry(c, cfg)! + (isGrad ? " · pump.fun GRADUATE" : ` · ${c.dex}`);
     const safety = await checkSafety(c.mint);
     if (!safety.ok) { details.push(`SKIP ${c.name} — ${safety.reason}`); continue; }
-    const smart = await checkSmartMoney(c.mint);
-    const conv = await scoreConviction(c.name, reason, safety, smart);
+    const smart = smartMap.get(c.pool) ?? await checkSmartMoney(c.mint);
+    const smartTag = smart.count > 0 ? ` 🐋${smart.count}` : "";
+    const conv = await scoreConviction(c.name, reason + (smart.count > 0 ? ` · ${smart.count} smart wallet(s) holding` : ""), safety, smart);
     if (conv.score < cfg.liveMinConviction) { details.push(`SKIP ${c.name} — conviction ${conv.score}<${cfg.liveMinConviction}`); continue; }
     // passed every gate → a real BUY candidate
     const gradTag = isGrad ? "🎓 " : "";
@@ -276,8 +352,8 @@ export async function runMemeScan(): Promise<MemeScanResult> {
       peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
     });
     knownPools.add(c.pool); liveOpenCount++; entered++;
-    await sendNotification(`🎰 MEME BOUGHT ${c.name} $${cfg.liveSizeUsd} (conv ${conv.score})${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""} — ${conv.thesis}`, "general").catch(() => {});
-    details.push(`BOUGHT ${c.name} conv ${conv.score}${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""}`);
+    await sendNotification(`🎰 MEME BOUGHT ${c.name}${smartTag} $${cfg.liveSizeUsd} (conv ${conv.score})${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""} — ${conv.thesis}`, "general").catch(() => {});
+    details.push(`BOUGHT ${c.name}${smartTag} conv ${conv.score}${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""}`);
   }
 
   // 3. persist + stats
@@ -311,7 +387,8 @@ function computeStats(closed: Pos[], open: Pos[]): MemeStats {
     avgLossPct: avg(lossPct),
     bestPct: closed.reduce((m, p) => Math.max(m, p.realizedPct ?? -1), -1),
     worstPct: closed.reduce((m, p) => Math.min(m, p.realizedPct ?? 0), 0),
-    openUnrealizedUsd: open.reduce((s, p) => s + p.sizeUsd * p.lastPnlPct, 0),
+    // exposure on what's still held (remaining fraction) + cash already banked at any partial scale-out
+    openUnrealizedUsd: open.reduce((s, p) => s + p.sizeUsd * (p.remainFrac ?? 1) * p.lastPnlPct + (p.realizedUsdPartial ?? 0), 0),
   };
 }
 
