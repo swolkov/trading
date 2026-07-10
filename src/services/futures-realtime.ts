@@ -6,6 +6,7 @@
 // Deploy on Railway — two instances: ENGINE_MODE=demo and ENGINE_MODE=live.
 
 import { prisma } from "../lib/db";
+import { sendNotification } from "../lib/notifications";
 import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, updateBrain, appendLiveFeed } from "../lib/vault";
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
@@ -3929,6 +3930,25 @@ async function updateTradovateEquity() {
       tradovateEquity = cashBalances.totalCashValue;
       updateTradingSymbols();
       log(`[EQUITY] Tradovate account equity: $${tradovateEquity.toLocaleString()}`);
+      // One-time Slack alert when the $4k ACH clears — the live account jumps from sub-$3k to funded.
+      // Fires once (persisted flag), LIVE only. This is also the threshold that arms evening gold.
+      if (IS_LIVE && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY) {
+        try {
+          const flag = await prisma.agentConfig.findUnique({ where: { key: "live_ach_clear_notified" } });
+          if (flag?.value !== "true") {
+            await prisma.agentConfig.upsert({
+              where: { key: "live_ach_clear_notified" },
+              update: { value: "true" },
+              create: { key: "live_ach_clear_notified", value: "true" },
+            });
+            await sendNotification(
+              `💰 Funds cleared — live futures account is now $${Math.round(tradovateEquity).toLocaleString()}. Evening GOLD trading is now ARMED (auto-enabled above $${LIVE_EVENING_GOLD_MIN_EQUITY.toLocaleString()}). Consider resetting the track-record inception date for a clean official start.`,
+              "futures",
+            );
+            log(`[ACH] Balance crossed $${LIVE_EVENING_GOLD_MIN_EQUITY} ($${tradovateEquity.toLocaleString()}) — sent funded alert; evening gold armed`);
+          }
+        } catch { /* best-effort alert */ }
+      }
     }
   } catch {
     // Try alternate endpoint
