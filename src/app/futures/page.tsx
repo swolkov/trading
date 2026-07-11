@@ -130,6 +130,9 @@ interface PositionsData {
   startingCapital?: number;
   viewMode?: string;
   balanceHistory?: { date: string; startBalance: number | null; endBalance: number | null }[];
+  capitalFlows?: { date: string; amount: number; source: string; note?: string }[];
+  netDepositsSinceInception?: number;
+  inception?: string;
   riskMetrics?: { dailyLossLimit: number; maxTradesPerDay: number; riskPerTrade: number; simEquity: number; todayTradeCount: number } | null;
 }
 
@@ -379,9 +382,15 @@ export default function FuturesPage() {
   const tradeCount = closedTrades.length || filteredFills.tradeCount;
   const winCount = closedTrades.length > 0 ? wins.length : filteredFills.wins;
   const lossCount = closedTrades.length > 0 ? losses.length : filteredFills.losses;
-  // Total P&L: balance - starting capital (mode-aware, no exclusions on new account)
+  // Total P&L: balance - starting capital - net deposits/withdrawals since inception.
+  // Subtracting capital flows keeps a funding transfer (e.g. the $4k ACH) from counting as profit.
   const STARTING_CAPITAL = posData?.startingCapital ?? 50_000;
-  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL : null;
+  const netDeposits = posData?.netDepositsSinceInception ?? 0;
+  // Fail CLOSED: if inception is unknown, use a far-future sentinel so no flow is treated as
+  // post-inception (subtracts nothing) rather than subtracting the funding deposit (the -$4k bug).
+  const inceptionDate = posData?.inception || "9999-12-31";
+  const capitalFlows = posData?.capitalFlows ?? [];
+  const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL - netDeposits : null;
   const totalPnl = accountPnl ?? (closedTrades.length > 0 ? closedTrades.reduce((s, t) => s + (t.pnl || 0), 0) : filteredFills.totalPnl);
   const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0;
   const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0;
@@ -442,7 +451,13 @@ export default function FuturesPage() {
     const sorted = [...balanceHistory].sort((a, b) => a.date.localeCompare(b.date));
     const startSnapshot = sorted.find((b) => b.date >= periodKey && b.startBalance != null && b.startBalance >= minSane && b.startBalance <= maxSane);
     if (startSnapshot?.startBalance != null) {
-      return currentBalance - startSnapshot.startBalance;
+      // Strip out any deposits/withdrawals inside the period so the delta reflects trading alone.
+      // Filter to flows AFTER the snapshot's own date (a flow on the snapshot day is already in its
+      // startBalance) AND strictly post-inception (the funded baseline bakes in inception-day funding).
+      const flowsInPeriod = capitalFlows
+        .filter((f) => f.date > startSnapshot.date && f.date > inceptionDate)
+        .reduce((s, f) => s + (f.amount || 0), 0);
+      return currentBalance - startSnapshot.startBalance - flowsInPeriod;
     }
     return accountPnl;
   };

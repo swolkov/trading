@@ -5,6 +5,15 @@ import { getViewMode } from "@/lib/trading-mode";
 
 const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "MBT", "MET", "BFF", "MXR", "MSL", "ES", "NQ", "YM", "RTY", "GC"];
 
+// DEMO/LIVE ISOLATION: the live engine trades only these micros (MGC/MNQ/MES). The cron futures-agent
+// (futures-agent.ts) logs position management with a hardcoded "futures_" prefix regardless of mode, so
+// a live gold trade leaves a "futures_MGC" shadow row that would otherwise bleed into the DEMO view
+// (which filters on the "futures_" prefix). Demo never trades these micros, so excluding them from the
+// demo-view autoTradeLog queries cleanly stops the leak. (Live view filters "live_" and is already clean.)
+// NOTE: revisit if the live account ever scales to full-size (GC/NQ/ES at ~$25K) — then a proper `mode`
+// column on AutoTradeLog is the durable fix, since symbol alone would no longer separate the two.
+const LIVE_ONLY_SYMBOLS = ["FUT:MGC", "FUT:MNQ", "FUT:MES"];
+
 function matchSymbol(contractName: string): string | null {
   for (const sym of KNOWN_SYMBOLS) {
     if (contractName.startsWith(sym)) return sym;
@@ -61,12 +70,16 @@ export async function GET() {
     // This is independent of the agent execution mode (trading_mode_futures).
     const viewMode = await getViewMode("futures");
     const actionPrefix = viewMode === "live" ? "live_" : "futures_";
+    // Demo view: exclude the live-only micro symbols so live gold's "futures_" shadow rows don't leak in.
+    const symbolWhere = viewMode === "live"
+      ? { startsWith: "FUT:" }
+      : { startsWith: "FUT:", notIn: LIVE_ONLY_SYMBOLS };
 
     // Kick off auth + all DB prefetches in parallel — none depend on each other
     const [auth, recentLogs, demoHB, liveHB] = await Promise.all([
       checkTradovateAuth(viewMode),
       prisma.autoTradeLog.findMany({
-        where: { symbol: { startsWith: "FUT:" }, action: { startsWith: actionPrefix } },
+        where: { symbol: symbolWhere, action: { startsWith: actionPrefix } },
         orderBy: { createdAt: "desc" },
       }),
       prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_demo" } }).catch(() => null),
@@ -381,7 +394,7 @@ export async function GET() {
           const [configs, todayTrades] = await Promise.all([
             prisma.agentConfig.findMany({ where: { key: { in: rmKeys } } }),
             prisma.autoTradeLog.count({
-              where: { symbol: { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
+              where: { symbol: isDemoView ? { startsWith: "FUT:", notIn: LIVE_ONLY_SYMBOLS } : { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
             }),
           ]);
           const cfg: Record<string, string> = {};
@@ -473,9 +486,26 @@ export async function GET() {
       safeAccount = { ...accountSummary, netLiq: sod, balance: sod };
     }
 
+    // CAPITAL FLOWS: subtract deposits/withdrawals so a funding transfer never counts as P&L.
+    // Best-effort + hourly-cached — never breaks the response on a detector/auth hiccup.
+    let capitalFlows: { date: string; amount: number; source: string; note?: string }[] = [];
+    let netDepositsSinceInception = 0;
+    let inception = "2026-07-10";
+    try {
+      const { reconcileCapitalFlows, netFlowsAfterInception } = await import("@/lib/capital-flows");
+      const incRow = await prisma.agentConfig.findUnique({ where: { key: "strategy_inception" } });
+      if (incRow?.value) inception = incRow.value;
+      const r = await reconcileCapitalFlows(viewMode, {});
+      capitalFlows = r.flows;
+      netDepositsSinceInception = netFlowsAfterInception(r.flows, inception);
+    } catch { /* leave zeros — P&L simply won't be flow-adjusted this call */ }
+
     return Response.json({
       connected: true,
       viewMode,
+      capitalFlows,
+      netDepositsSinceInception,
+      inception,
       account: safeAccount ? {
         balance: safeAccount.balance,
         netLiq: safeAccount.netLiq,

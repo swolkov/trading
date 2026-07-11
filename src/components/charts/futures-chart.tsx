@@ -105,7 +105,10 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
   const vwapUpperRef = useRef<ISeriesApi<any> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const vwapLowerRef = useRef<ISeriesApi<any> | null>(null);
-  const [activeIdx, setActiveIdx] = useState(0);
+  // Default to 5m (index 2), NOT 1s. 1s/1m are Databento-only with no fallback, so they render
+  // blank whenever Databento historical is empty (weekends, off-hours, cold cache). 5m falls back to
+  // Tradovate→Yahoo and reliably shows the last session — so the chart is never blank by default.
+  const [activeIdx, setActiveIdx] = useState(2);
   const [loading, setLoading] = useState(false);
   const [showEMA, setShowEMA] = useState(true);
   const [showVWAP, setShowVWAP] = useState(true);
