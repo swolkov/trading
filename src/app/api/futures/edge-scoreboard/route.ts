@@ -22,15 +22,19 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
       take: 400,
     });
-    // Dedupe: the engine and the fill reconciler can log the SAME close under different actions
-    // (live_stop_loss vs futures_take_profit) up to ~a minute apart, so exact-timestamp keys miss.
-    // Treat same symbol + same P&L (±$1) within 10 minutes as one trade.
+    // Dedupe the SAME close logged twice: the engine writes a live_* row and the fill reconciler
+    // writes a futures_*/shadow_* row for the same fill, seconds-to-minutes apart. The key guard is
+    // that a true duplicate comes from a DIFFERENT logging source — two real back-to-back stop-outs
+    // share the same source (both live_*) and must NEVER be merged (at 1 micro their P&L can be within
+    // $1 of each other). So: same symbol + P&L within $1 + within 5 min + different source = one trade.
+    const src = (a: string) => (a.startsWith("live_") ? "live" : a.startsWith("shadow_") ? "shadow" : "futures");
     const kept: typeof rawCloses = [];
     const closes = rawCloses.filter((c) => {
       const dup = kept.some((k) =>
         k.symbol === c.symbol &&
+        src(k.action) !== src(c.action) &&
         Math.abs((k.pnl ?? 0) - (c.pnl ?? 0)) <= 1 &&
-        Math.abs(k.createdAt.getTime() - c.createdAt.getTime()) < 10 * 60 * 1000
+        Math.abs(k.createdAt.getTime() - c.createdAt.getTime()) < 5 * 60 * 1000
       );
       if (dup) return false;
       kept.push(c);

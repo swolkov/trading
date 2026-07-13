@@ -1031,6 +1031,18 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   // Full-size ES/NQ/GC with massive position sizing and high trade volume
   const demoMaxContracts = tradingMode === "paper" ? 25 : FUTURES_RULES.MAX_TOTAL_CONTRACTS;
   const demoMaxContractsPerTrade = tradingMode === "paper" ? 20 : FUTURES_RULES.MAX_CONTRACTS_PER_TRADE;
+  // LIVE hard per-trade contract ceiling — the same knob the realtime engine + $5k forward test use
+  // (live_futures_max_contracts=1). The fallback agent sizes off the REAL balance now, and MGC has no
+  // entry in LIVE_MAX_CONTRACTS_PER_SYMBOL, so without this it could size gold at several micros.
+  // Default 1 (fail-safe): if the knob is missing, never exceed one live contract.
+  let liveMaxContractsPerTrade = 1;
+  if (tradingMode === "live") {
+    try {
+      const lc = await prisma.agentConfig.findUnique({ where: { key: "live_futures_max_contracts" } });
+      const v = lc?.value ? parseInt(lc.value, 10) : NaN;
+      liveMaxContractsPerTrade = Number.isFinite(v) && v > 0 ? v : 1;
+    } catch { liveMaxContractsPerTrade = 1; }
+  }
   const demoMaxTrades = tradingMode === "paper" ? 50 : FUTURES_RULES.MAX_TRADES_PER_DAY;
   const demoMaxTradesAplus = tradingMode === "paper" ? 100 : FUTURES_RULES.MAX_TRADES_APLUS_OVERRIDE;
 
@@ -1802,11 +1814,14 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
     // notional, exceeding margin capacity even with risk budget honored). DB override (if set
     // by admin) takes precedence over the code constant.
     if (tradingMode === "live") {
+      // Global live ceiling first (fail-safe 1), then the per-symbol / assignment cap. Whichever is
+      // lowest wins — a strategy assignment can only tighten below the global knob, never exceed it.
       const codeCap = LIVE_MAX_CONTRACTS_PER_SYMBOL[symbol];
       const resolved = await resolveMaxContracts(accountKey, firedStrategyId, codeCap, contracts);
-      if (resolved < contracts) {
-        details.push(`  LIVE CAP: ${symbol} capped at ${resolved} contract(s) (was ${contracts}) — $1K margin safety`);
-        contracts = resolved;
+      const capped = Math.min(contracts, resolved, liveMaxContractsPerTrade);
+      if (capped < contracts) {
+        details.push(`  LIVE CAP: ${symbol} capped at ${capped} contract(s) (was ${contracts}) — max ${liveMaxContractsPerTrade}/trade margin safety`);
+        contracts = capped;
       }
     }
 

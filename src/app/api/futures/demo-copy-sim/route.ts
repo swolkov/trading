@@ -73,7 +73,9 @@ export async function GET() {
     const startCapital = scRow?.value ? parseFloat(scRow.value) : 4821;
 
     // Demo realized trades (full-size). Shadow live-symbol rows were retagged to shadow_*, so
-    // futures_* pnl rows here are genuine demo. Chronological for the equity replay.
+    // futures_* pnl rows here are genuine demo. Chronological for the equity replay. Entries carry
+    // pnl=null (excluded); every row with pnl is a realized cash event — full closes AND scale-outs —
+    // so a scaled trade correctly contributes each partial as its own step in the equity curve.
     const demoRows = await prisma.autoTradeLog.findMany({
       where: { symbol: { startsWith: "FUT:" }, action: { startsWith: "futures_" }, pnl: { not: null } },
       orderBy: { createdAt: "asc" },
