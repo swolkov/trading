@@ -105,7 +105,10 @@ export async function GET(request: Request) {
     // ALWAYS run fill reconciliation for both demo and live
     let demoReconciliation, liveReconciliation;
     try {
-      demoReconciliation = await reconcileFills();
+      // Explicit "paper": a mode-less call resolves to trading_mode_futures (= live since Jul 7),
+      // which made this "demo" pass fetch LIVE fills and backfill them as futures_* rows —
+      // the shadow-duplicate bug that double-counted every live trade.
+      demoReconciliation = await reconcileFills("paper");
       if (demoReconciliation.backfilled > 0 || demoReconciliation.pnlCorrections > 0) {
         console.log(`[cron/futures] Demo reconciliation: ${demoReconciliation.backfilled} backfilled, ${demoReconciliation.pnlCorrections} P&L corrected`);
       }

@@ -204,18 +204,21 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
   // Backfilled rows MUST carry the mode-correct action prefix, or a reconciled LIVE trade gets logged
   // as "futures_*" and shows up in the DEMO account (and vice-versa). The dashboard separates accounts
   // purely by this prefix, so this is the difference between a correct and a misattributed ledger.
-  const actionPrefix = modeOverride === "live" ? "live" : "futures";
+  // Resolve the EFFECTIVE mode: a mode-less call follows trading_mode_futures, so the prefix must too —
+  // otherwise a mode-less call while live writes LIVE fills under the demo "futures_" prefix.
+  const mode: "paper" | "live" = modeOverride ?? await (await import("./trading-mode")).getTradingMode("futures");
+  const actionPrefix = mode === "live" ? "live" : "futures";
 
   try {
     // 1. Check auth
-    const auth = await checkTradovateAuth(modeOverride);
+    const auth = await checkTradovateAuth(mode);
     if (!auth.authenticated) {
       details.push("Tradovate not connected — skipping reconciliation");
       return result;
     }
 
     // 2. Fetch all fills from Tradovate
-    const fills = await getTradovateFills(modeOverride);
+    const fills = await getTradovateFills(mode);
     result.totalFills = fills.length;
     details.push(`Fetched ${fills.length} fills from Tradovate`);
 
@@ -254,7 +257,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     // Resolve unmapped contracts via Tradovate API
     for (const cid of uniqueContractIds) {
       if (!contractMap[cid]) {
-        const resolved = await resolveContractSymbol(cid, modeOverride);
+        const resolved = await resolveContractSymbol(cid, mode);
         contractMap[cid] = resolved || "UNKNOWN";
       }
     }
@@ -271,7 +274,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     // truth for win-rate / per-trade P&L — autoTradeLog is fragmented + only partially reconciled.
     // Best-effort: a persist failure must never break reconciliation. /fill/list is session-scoped, so
     // this accumulates forward from deploy day.
-    const rtMode = modeOverride === "live" ? "live" : "paper";
+    const rtMode = mode === "live" ? "live" : "paper";
     let rtPersisted = 0;
     for (const rt of roundTrips) {
       try {
@@ -429,7 +432,7 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
 
         // Mark the corresponding open StrategyTrade row closed (no-op if it was a legacy trade)
         try {
-          const accountKey = accountKeyForFuturesMode(modeOverride ?? "paper");
+          const accountKey = accountKeyForFuturesMode(mode);
           await closeRegistryTrade({
             accountKey,
             symbol: rt.symbol,

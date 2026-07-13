@@ -136,7 +136,14 @@ export async function reconcileCapitalFlows(mode: TradingMode, opts: { force?: b
       const rz = realized[d] || 0;
       const flow = dBal - rz;
       series.push({ date: d, eod: eod[d], dBal, realized: rz, flow });
-      if (Math.abs(flow) >= NOISE_THRESHOLD) detected.push({ date: d, amount: Math.round(flow), source: "auto" });
+      // The NEWEST snapshot is still revisable: the engine writes eod_d at 3:50 PM ET, then
+      // overwrites it at the next session reset, so an evening trade (e.g. Sunday gold) briefly
+      // shows as a phantom flow (realized P&L with no balance move yet — this recorded a fake
+      // -$58 "withdrawal" on Jul 12). For the newest day only record unmistakable transfers;
+      // smaller residuals resolve themselves once the next snapshot finalizes the day.
+      const isNewestDay = i === dates.length - 1;
+      const threshold = isNewestDay ? 500 : NOISE_THRESHOLD;
+      if (Math.abs(flow) >= threshold) detected.push({ date: d, amount: Math.round(flow), source: "auto" });
     }
   } catch (e) {
     return { flows: stored, detected: [], ran: false, error: e instanceof Error ? e.message : "flow detection failed" };

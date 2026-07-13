@@ -66,7 +66,7 @@ const FUTURES_RULES_DEFAULTS = {
   RTH_END_ET: 16,
   AVOID_FIRST_MINUTES: 15,
   AVOID_LAST_MINUTES: 15,
-  SIMULATED_EQUITY: 1_000,        // $1K live account
+  SIMULATED_EQUITY: 0,            // 0 = size off the real account balance (set >0 only to cap risk-sizing below actual)
 };
 
 // Mutable rules — populated from DB config at runtime, falls back to defaults
@@ -93,7 +93,11 @@ async function loadFuturesConfig() {
       const ruleKey = keyMap[c.key];
       if (ruleKey) {
         const val = parseFloat(c.value);
-        if (!isNaN(val) && val > 0) {
+        // SIMULATED_EQUITY accepts 0 (= use real balance); other rules require a positive value.
+        // The old `val > 0` guard silently ignored simulated_equity=0 and left the stale $1k
+        // default in place, which made todayPnl = $1k − real balance = a huge fake loss that
+        // tripped the drawdown kill switch on every cron run.
+        if (!isNaN(val) && (val > 0 || (ruleKey === "SIMULATED_EQUITY" && val >= 0))) {
           // Percentage fields are stored as whole numbers in UI (e.g. 5 = 5%)
           if (ruleKey.endsWith("_PCT")) {
             (FUTURES_RULES as Record<string, number>)[ruleKey] = val / 100;
@@ -963,11 +967,13 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   // Account state — use simulated equity for risk sizing, actual for monitoring
   let equity = 0;
   let actualEquity = 0;
+  let equityAnomalous = false; // true = balance read failed sanity check; drawdown math is meaningless
   try {
     const summary = await getTradovateAccountSummary();
     actualEquity = summary.netLiq || summary.balance || 0;
     if (actualEquity <= 0 || actualEquity > 10_000_000) {
       actualEquity = 50_000;
+      equityAnomalous = true;
       details.push(`WARNING: Equity anomaly — using $50k actual default`);
     }
     // DEMO: Use actual equity ($50K) for full-size learning. LIVE: Use simulated equity for risk control.
@@ -1051,7 +1057,9 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   const sodKey = tradingMode === "paper" ? "start_of_day_balance" : "live_start_of_day_balance";
   const sodCfg = await prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null);
   const startOfDayBalance = sodCfg?.value ? parseFloat(sodCfg.value) : null;
-  const todayPnl = startOfDayBalance != null ? equity - startOfDayBalance : 0;
+  // Balance delta MUST use the real account balance. Using the risk-sizing `equity` here
+  // (which can be a simulated constant) produced a permanent fake loss and a kill-switch loop.
+  const todayPnl = startOfDayBalance != null ? actualEquity - startOfDayBalance : 0;
 
   // These limits block REAL trades but the agent keeps scanning in paper/learning mode
   // Daily loss limit is absolute — no override
@@ -1073,7 +1081,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     futuresPositions = await getTradovatePositions();
   } catch (err) {
     details.push(`CRITICAL: Failed to fetch positions from Tradovate: ${err}`);
-    try { await sendNotification(`FUTURES AGENT: Cannot fetch positions — ${err}. Position management skipped.`, "futures"); } catch {}
+    try { await sendNotification(`FUTURES AGENT: Cannot fetch positions — ${err}. Position management skipped.`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
     return { trades, managed, details };
   }
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
@@ -1104,7 +1112,15 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   }
 
   // ── AGGREGATE DRAWDOWN CHECK (all positions combined) ──
-  const aggregateUnrealizedPnl = futuresPositions.reduce((sum, pos) => {
+  // Only positions this run is allowed to manage. In registryOnly mode the realtime engine on
+  // Railway owns MGC/MNQ/MES/GC/NQ/ES — the cron must NEVER market-close those (it force-closed
+  // a healthy live gold position on 2026-07-13 doing exactly that).
+  const killablePositions = futuresPositions.filter((pos) => {
+    if (!opts.registryOnly) return true;
+    const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
+    return !!sym && isRegistryOnlySymbol(sym);
+  });
+  const aggregateUnrealizedPnl = killablePositions.reduce((sum, pos) => {
     const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
     const cached = sym ? posBarCache[sym] : null;
     if (!cached || cached.price === 0) return sum;
@@ -1112,15 +1128,25 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     const pnl = (cached.price - pos.netPrice) * Math.abs(pos.netPos) * multiplier * (pos.netPos > 0 ? 1 : -1);
     return sum + pnl;
   }, 0);
-  const aggregateDrawdown = aggregateUnrealizedPnl + todayPnl; // unrealized + realized today
-  if (aggregateDrawdown < -(equity * FUTURES_RULES.MAX_DRAWDOWN_PCT)) {
+  const aggregateDrawdown = aggregateUnrealizedPnl + todayPnl; // unrealized + realized today (real balance delta)
+  // Threshold on the REAL account balance. Fire only when there is actually something to close —
+  // an empty book has nothing to protect, and alerting on it looped a Slack message every cron run.
+  // Skip evaluation on anomalous equity: a bad balance read (API glitch) makes both todayPnl and the
+  // threshold garbage — a $50k substitute on a ~$5k account would silently disable the kill switch.
+  // Positions keep their broker stops; the next clean read re-evaluates.
+  if (equityAnomalous && killablePositions.length > 0) {
+    details.push(`DRAWDOWN CHECK SKIPPED: equity read anomalous — re-evaluating next run`);
+  }
+  if (!equityAnomalous && killablePositions.length > 0 && aggregateDrawdown < -(actualEquity * FUTURES_RULES.MAX_DRAWDOWN_PCT)) {
     details.push(`AGGREGATE DRAWDOWN KILL SWITCH: Combined P&L $${aggregateDrawdown.toFixed(0)} exceeds ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% of equity — CLOSING ALL`);
-    for (const pos of futuresPositions) {
+    let closedCount = 0;
+    for (const pos of killablePositions) {
       const absQty = Math.abs(pos.netPos);
       try {
         await placeMarketOrder({ contractId: pos.contractId, action: pos.netPos > 0 ? "Sell" : "Buy", quantity: absQty });
+        closedCount++;
         await prisma.autoTradeLog.create({ data: {
-          symbol: `FUT:${pos.contractName}`, action: "futures_emergency_close",
+          symbol: `FUT:${pos.contractName}`, action: tradingMode === "live" ? "live_emergency_close" : "futures_emergency_close",
           qty: absQty, price: posBarCache[Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s)) || ""]?.price || 0,
           pnl: null, orderId: null,
           reason: `AGGREGATE DRAWDOWN KILL: Combined P&L $${aggregateDrawdown.toFixed(0)} exceeded ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity limit. Closed all positions.`,
@@ -1128,7 +1154,15 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
       } catch (err) { details.push(`  Emergency close ${pos.contractName} failed: ${err}`); }
     }
     try { for (const o of openOrders) { await cancelOrder(o.id); } } catch {}
-    try { await sendNotification(`🚨 AGGREGATE DRAWDOWN KILL: All futures closed. Combined P&L: $${aggregateDrawdown.toFixed(0)}`, "futures"); } catch {}
+    // Always alert when the kill trips on real positions — ESPECIALLY when closes FAILED
+    // (that's the case a human must see). Repeat alerts while positions remain unprotected are desirable.
+    const failedCount = killablePositions.length - closedCount;
+    try {
+      await sendNotification(
+        `🚨 AGGREGATE DRAWDOWN KILL: Closed ${closedCount}/${killablePositions.length} position(s)${failedCount > 0 ? ` — ${failedCount} FAILED TO CLOSE, CHECK BROKER NOW` : ""}. Combined P&L: $${aggregateDrawdown.toFixed(0)}`,
+        tradingMode === "live" ? "futures" : "futures_demo"
+      );
+    } catch {}
     return { trades, managed, details };
   }
 
@@ -1309,7 +1343,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
               details.push(`    Placed breakeven stop for remaining ${remainingQty}x at $${avgPrice.toFixed(2)}`);
             } catch (stopErr) {
               details.push(`    WARNING: Failed to place breakeven stop for remaining: ${stopErr}`);
-              try { await sendNotification(`Scale-out stop FAILED for ${pos.contractName}. ${remainingQty}x UNPROTECTED.`, "futures"); } catch {}
+              try { await sendNotification(`Scale-out stop FAILED for ${pos.contractName}. ${remainingQty}x UNPROTECTED.`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
             }
             await prisma.autoTradeLog.create({ data: {
               symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out",
@@ -1888,7 +1922,7 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
         for (const w of order.warnings) {
           details.push(`  WARNING: ${w}`);
         }
-        try { await sendNotification(`Bracket warning for ${symbol}: ${order.warnings.join("; ")}`, "futures"); } catch {}
+        try { await sendNotification(`Bracket warning for ${symbol}: ${order.warnings.join("; ")}`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
       }
 
       details.push(`  ORDER PLACED with bracket (stop + target). Order ID: ${order.orderId}`);

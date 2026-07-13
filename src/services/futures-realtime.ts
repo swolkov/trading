@@ -435,6 +435,20 @@ async function cancelAllOrders() {
 // Best-effort notification for critical events (trades, closes, errors)
 async function notify(msg: string, channel: "futures" | "general" = "futures") {
   try {
+    // DEMO engine alerts go to their own webhook and are DROPPED if it isn't configured — demo
+    // 🚨 messages landing in the real-money Slack channel look like emergencies and bury the
+    // alerts that matter. Live routing is unchanged (channel webhook → legacy fallback).
+    if (IS_DEMO) {
+      const demoConfig = await prisma.agentConfig.findUnique({ where: { key: "webhook_futures_demo" } });
+      if (!demoConfig?.value) return;
+      await fetch(demoConfig.value, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: `[FUTURES-${MODE_TAG}] ${msg}` }),
+        signal: AbortSignal.timeout(5000),
+      });
+      return;
+    }
     const keys = { futures: "webhook_futures", general: "webhook_general" } as const;
     let config = await prisma.agentConfig.findUnique({ where: { key: keys[channel] } });
     if (!config?.value) {

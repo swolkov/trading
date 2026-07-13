@@ -22,11 +22,18 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
       take: 400,
     });
-    const seen = new Set<string>();
+    // Dedupe: the engine and the fill reconciler can log the SAME close under different actions
+    // (live_stop_loss vs futures_take_profit) up to ~a minute apart, so exact-timestamp keys miss.
+    // Treat same symbol + same P&L (±$1) within 10 minutes as one trade.
+    const kept: typeof rawCloses = [];
     const closes = rawCloses.filter((c) => {
-      const key = `${c.symbol}|${new Date(c.createdAt).toISOString().slice(0, 19)}|${(c.pnl ?? 0).toFixed(2)}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      const dup = kept.some((k) =>
+        k.symbol === c.symbol &&
+        Math.abs((k.pnl ?? 0) - (c.pnl ?? 0)) <= 1 &&
+        Math.abs(k.createdAt.getTime() - c.createdAt.getTime()) < 10 * 60 * 1000
+      );
+      if (dup) return false;
+      kept.push(c);
       return true;
     });
 

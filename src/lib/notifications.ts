@@ -1,9 +1,10 @@
 import { prisma } from "./db";
 
-export type NotifyChannel = "futures" | "options" | "general";
+export type NotifyChannel = "futures" | "futures_demo" | "options" | "general";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
+  futures_demo: "webhook_futures_demo",
   options: "webhook_options",
   general: "webhook_general",
 };
@@ -14,6 +15,10 @@ async function getWebhook(channel: NotifyChannel): Promise<string | null> {
     where: { key: CHANNEL_KEYS[channel] },
   });
   if (config?.value) return config.value;
+
+  // Demo alerts NEVER fall back to the live webhook — if no demo webhook is configured they are
+  // dropped. Demo 🚨 messages in the real-money channel read as emergencies and train alert fatigue.
+  if (channel === "futures_demo") return null;
 
   const legacy = await prisma.agentConfig.findUnique({
     where: { key: "notification_webhook" },
