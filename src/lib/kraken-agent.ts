@@ -173,7 +173,7 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
 
 async function logTrade(coin: string, action: string, usd: number, price: number, reason: string, txid?: string) {
   // Real-money fill — Spencer gets a Slack alert for every Kraken trade
-  await sendNotification(`🪙 KRAKEN ${action === "kraken_buy" ? "BUY" : "SELL"} ${coin.replace("/USD", "")}: ${reason}`, "general").catch(() => {});
+  await sendNotification(`🪙 KRAKEN ${action === "kraken_buy" ? "BUY" : "SELL"} ${coin.replace("/USD", "")}: ${reason}`, "kraken").catch(() => {});
   await prisma.autoTradeLog.create({
     data: { symbol: `KRK:${coin}`, action, qty: 0, price: usd, reason, aiSignal: action === "kraken_buy" ? "bullish" : "bearish", orderId: txid ?? null },
   }).catch(() => {});

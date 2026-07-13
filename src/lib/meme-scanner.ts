@@ -243,7 +243,7 @@ export async function manageMemeExits(): Promise<{ exited: number; open: number;
           const costHalf = pos.solSpentLamports * soldFrac;
           bankedUsd = ((Number(sr.expectedOut) - costHalf) / 1e9) * solPx;   // real SOL delta on the half → $
         }
-        await sendNotification(`🎰 MEME SCALED OUT ½ ${pos.name} +${(gainPct * 100).toFixed(0)}% — riding the rest${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : sr.ok ? "" : ` [${sr.error}]`}`, "general").catch(() => {});
+        await sendNotification(`🎰 MEME SCALED OUT ½ ${pos.name} +${(gainPct * 100).toFixed(0)}% — riding the rest${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : sr.ok ? "" : ` [${sr.error}]`}`, "meme").catch(() => {});
       }
       pos.scaledOut = true;
       pos.remainFrac = remain * soldFrac;                            // remaining fraction of the original position
@@ -271,7 +271,7 @@ export async function manageMemeExits(): Promise<{ exited: number; open: number;
       }
       pos.realizedUsd = runnerUsd + (pos.realizedUsdPartial ?? 0);
       pos.realizedPct = pos.sizeUsd > 0 ? pos.realizedUsd / pos.sizeUsd : 0;   // total return on the ORIGINAL size
-      if (pos.live) await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED SELL" : "SOLD"} ${pos.name} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})${pos.sellTx ? ` tx ${pos.sellTx.slice(0, 8)}` : ""}`, "general").catch(() => {});
+      if (pos.live) await sendNotification(`🎰 MEME ${cfg.liveValidate ? "VALIDATED SELL" : "SOLD"} ${pos.name} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})${pos.sellTx ? ` tx ${pos.sellTx.slice(0, 8)}` : ""}`, "meme").catch(() => {});
       closed.unshift(pos); exited++;
       details.push(`EXIT ${pos.name}${pos.live ? " [LIVE]" : ""} ${(pos.realizedPct * 100).toFixed(0)}% (${d.reason})`);
     } else stillOpen.push(pos);
@@ -349,7 +349,7 @@ export async function runMemeScan(): Promise<MemeScanResult> {
     if (!tr.ok) { details.push(`BUY FAILED ${c.name}: ${tr.error}`); continue; }
     if (cfg.liveValidate) {   // dry-run — path proven, no spend, no tracked position
       details.push(`VALIDATED BUY ${gradTag}${c.name} conv ${conv.score} (dry-run, no spend)`);
-      await sendNotification(`🎰 MEME VALIDATED BUY ${gradTag}${c.name} $${cfg.liveSizeUsd} (conv ${conv.score}) — dry-run OK`, "general").catch(() => {});
+      await sendNotification(`🎰 MEME VALIDATED BUY ${gradTag}${c.name} $${cfg.liveSizeUsd} (conv ${conv.score}) — dry-run OK`, "meme").catch(() => {});
       continue;
     }
     // ARMED real buy → track the real position
@@ -363,7 +363,7 @@ export async function runMemeScan(): Promise<MemeScanResult> {
       peakPrice: entryPrice, lastPrice: entryPrice, lastPnlPct: 0, lastTs: new Date(now).toISOString(),
     });
     knownPools.add(c.pool); liveOpenCount++; entered++;
-    await sendNotification(`🎰 MEME BOUGHT ${c.name}${smartTag} $${cfg.liveSizeUsd} (conv ${conv.score})${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""} — ${conv.thesis}`, "general").catch(() => {});
+    await sendNotification(`🎰 MEME BOUGHT ${c.name}${smartTag} $${cfg.liveSizeUsd} (conv ${conv.score})${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""} — ${conv.thesis}`, "meme").catch(() => {});
     details.push(`BOUGHT ${c.name}${smartTag} conv ${conv.score}${tr.sig ? ` tx ${tr.sig.slice(0, 8)}` : ""}`);
   }
 
@@ -427,14 +427,14 @@ export async function cashOut(destAddress: string): Promise<{ ok: boolean; sold:
     pos.exitTs = new Date().toISOString(); pos.exitReason = "cashout"; pos.sellTx = sr.sig;
     if (sr.ok) sold++; else details.push(`sell failed ${pos.name}: ${sr.error}`);
     closed.unshift(pos);
-    await sendNotification(`🎰 MEME CASHOUT SELL ${pos.name}${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : ` [${sr.error}]`}`, "general").catch(() => {});
+    await sendNotification(`🎰 MEME CASHOUT SELL ${pos.name}${sr.sig ? ` tx ${sr.sig.slice(0, 8)}` : ` [${sr.error}]`}`, "meme").catch(() => {});
   }
   open = [];
   await saveJson("meme_live_open", open);
   await saveJson("meme_live_closed", closed.slice(0, CLOSED_CAP));
   const sweep = await sweepSolTo(destAddress, false);
   if (!sweep.ok) { details.push(`sweep failed: ${sweep.error}`); return { ok: false, sold, error: sweep.error, details }; }
-  await sendNotification(`🎰 MEME CASHED OUT — sold ${sold}, swept SOL to ${destAddress.slice(0, 6)}… tx ${sweep.sig?.slice(0, 8)}`, "general").catch(() => {});
+  await sendNotification(`🎰 MEME CASHED OUT — sold ${sold}, swept SOL to ${destAddress.slice(0, 6)}… tx ${sweep.sig?.slice(0, 8)}`, "meme").catch(() => {});
   return { ok: true, sold, swept: sweep.sig, details };
 }
 

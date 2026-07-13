@@ -1,11 +1,13 @@
 import { prisma } from "./db";
 
-export type NotifyChannel = "futures" | "futures_demo" | "options" | "general";
+export type NotifyChannel = "futures" | "futures_demo" | "options" | "kraken" | "meme" | "general";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
   futures_demo: "webhook_futures_demo",
   options: "webhook_options",
+  kraken: "webhook_kraken",
+  meme: "webhook_meme",
   general: "webhook_general",
 };
 
@@ -19,6 +21,13 @@ async function getWebhook(channel: NotifyChannel): Promise<string | null> {
   // Demo alerts NEVER fall back to the live webhook — if no demo webhook is configured they are
   // dropped. Demo 🚨 messages in the real-money channel read as emergencies and train alert fatigue.
   if (channel === "futures_demo") return null;
+
+  // Kraken/Meme fall back to #general until their own webhook is configured, so no alert is lost
+  // during setup (their prior behavior was to post to #general directly).
+  if (channel === "kraken" || channel === "meme") {
+    const gen = await prisma.agentConfig.findUnique({ where: { key: "webhook_general" } });
+    if (gen?.value) return gen.value;
+  }
 
   const legacy = await prisma.agentConfig.findUnique({
     where: { key: "notification_webhook" },
