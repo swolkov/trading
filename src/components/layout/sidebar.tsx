@@ -52,6 +52,7 @@ const sections = [
     links: [
       { href: "/performance", label: "Performance", icon: TrendingUp },
       { href: "/backtest", label: "Edge / Backtest", icon: FlaskConical },
+      { href: "/demo-vs-live", label: "Demo vs Live", icon: Layers },
     ],
   },
   {
