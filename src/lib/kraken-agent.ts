@@ -26,6 +26,12 @@ interface KrakenConfig {
 const KEYS = ["kraken_enabled", "kraken_coins", "kraken_per_coin_usd", "kraken_start_capital", "kraken_validate_only", "kraken_mode", "kraken_dca_usd"];
 const MIN_HOLD_USD = 5;    // holdings above this = "in a position" (ignores dust)
 const MIN_ORDER_USD = 10;  // don't place sub-$10 orders
+// Hysteresis band around the 50-day line. The cron runs every 30 min against the live intraday price,
+// so a RAW crossover whipsaws (buy→sell→buy within hours) whenever price hovers at the 50-day SMA —
+// bleeding ~0.5%/round-trip in fees for nothing (observed 5 flip-flops in 4.5h on 2026-07-10). Only
+// flipping state when price is clearly across the line (±1.5%) fixes it. Backtested on BTC+ETH daily:
+// ~40% fewer trades AND higher net return vs a 0% band. In the dead zone, keep the current position.
+const TREND_HYSTERESIS = 0.015; // 1.5%
 
 async function loadConfig(): Promise<KrakenConfig> {
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: KEYS } } });
@@ -118,7 +124,13 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
     const held = bal[krakenBalanceAsset(coin)] ?? 0;
     const heldValue = held * price;
     const isHolding = heldValue >= MIN_HOLD_USD;
-    const up = row.aboveTrend;
+    // Trend state WITH hysteresis (see TREND_HYSTERESIS): when holding, stay in unless price drops
+    // clearly below the 50-day; when flat, only enter when price is clearly above. Kills the intraday
+    // whipsaw churn. Falls back to the raw signal only if the SMA is unavailable.
+    const sma = row.sma50;
+    const up = (sma != null && sma > 0)
+      ? (isHolding ? price >= sma * (1 - TREND_HYSTERESIS) : price > sma * (1 + TREND_HYSTERESIS))
+      : row.aboveTrend;
     const target = cfg.perCoinUsd;                       // target $ allocation per coin while trending up
     const band = Math.max(MIN_ORDER_USD, target * 0.1);  // rebalance band — don't churn on small wiggles
 
