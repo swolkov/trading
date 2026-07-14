@@ -145,7 +145,6 @@ export async function GET(request: Request) {
     const liveStatus = await checkEngine("live");
 
     // Determine if we should run the fallback agent
-    // Live fallback only during RTH (no point running outside market hours)
     const etH = getETHour();
     const isRTH = !isWeekendET() && etH >= 9.5 && etH < 16;
 
@@ -199,9 +198,13 @@ export async function GET(request: Request) {
       }
     }
 
-    if (!liveStatus.alive && isRTH) {
-      console.log(`[cron/futures] Live engine down during RTH — running fallback agent`);
-      // The futures-agent reads trading mode from DB and adapts to demo/live
+    // Run the live fallback whenever the live engine is down — NOT just during RTH. The live account
+    // can hold a gold micro through the evening/overnight session, so if the engine dies then, an open
+    // position would otherwise get NO aggregate-drawdown-kill or stop management from the cron until
+    // 9:30am. runFuturesAgent ALWAYS manages/protects existing positions; new-entry scanning stays
+    // internally session-gated (live only opens during RTH prime), so this can't open off-hours trades.
+    if (!liveStatus.alive) {
+      console.log(`[cron/futures] Live engine down (RTH=${isRTH}) — running fallback agent to protect any open position`);
       if (!fallbackResult) {
         try {
           fallbackResult = await runFuturesAgent();
@@ -211,8 +214,9 @@ export async function GET(request: Request) {
       }
     }
 
-    // Both engines alive — defer
-    if (demoStatus.alive && (liveStatus.alive || !isRTH)) {
+    // Defer only when BOTH engines are alive — if either is down we must run the fallback (above),
+    // at any hour, so a dead engine never leaves an open position unprotected.
+    if (demoStatus.alive && liveStatus.alive) {
       return Response.json({
         status: "deferred",
         demo: demoStatus.reason,

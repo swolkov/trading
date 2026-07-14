@@ -362,8 +362,12 @@ export default function FuturesPage() {
   const allTrades = posData?.activity || [];
   const fillPnl = posData?.fillBasedPnl;
 
-  // DB trades — clean slate, no exclusions on new account
-  const closedTrades = allTrades.filter((t) => t.pnl != null);
+  // LIVE: the official track record starts at inception — exclude pre-inception WARMUP trades so the
+  // count / win-rate / best-worst / P&L-fallback all match the balance-based Total P&L. Without this,
+  // Total P&L flickered to a wrong all-time +$201 (44 warmup trades) whenever the live balance briefly
+  // failed to load. DEMO: show all trades (learning sandbox, no official inception).
+  const inceptionDate = posData?.inception || "9999-12-31";
+  const closedTrades = allTrades.filter((t) => t.pnl != null && (!isLiveView || (t.time ?? "") >= inceptionDate));
   const wins = closedTrades.filter((t) => (t.pnl || 0) > 0);
   const losses = closedTrades.filter((t) => (t.pnl || 0) < 0);
 
@@ -386,9 +390,7 @@ export default function FuturesPage() {
   // Subtracting capital flows keeps a funding transfer (e.g. the $4k ACH) from counting as profit.
   const STARTING_CAPITAL = posData?.startingCapital ?? 50_000;
   const netDeposits = posData?.netDepositsSinceInception ?? 0;
-  // Fail CLOSED: if inception is unknown, use a far-future sentinel so no flow is treated as
-  // post-inception (subtracts nothing) rather than subtracting the funding deposit (the -$4k bug).
-  const inceptionDate = posData?.inception || "9999-12-31";
+  // (inceptionDate defined above — fail-closed sentinel keeps a funding deposit from counting as profit)
   const capitalFlows = posData?.capitalFlows ?? [];
   const accountPnl = posData?.account?.balance ? posData.account.balance - STARTING_CAPITAL - netDeposits : null;
   const totalPnl = accountPnl ?? (closedTrades.length > 0 ? closedTrades.reduce((s, t) => s + (t.pnl || 0), 0) : filteredFills.totalPnl);
