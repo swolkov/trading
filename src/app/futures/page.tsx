@@ -664,7 +664,7 @@ export default function FuturesPage() {
               {isLiveView && <EdgeScoreboard />}
               {isLiveView && <MgcScorecard />}
               <VetoScoreboard mode={isLiveView ? "live" : "demo"} />
-              <EngineActivity />
+              <EngineActivity mode={isLiveView ? "live" : "demo"} />
             </div>
           )}
 

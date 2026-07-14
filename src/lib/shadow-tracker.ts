@@ -53,21 +53,18 @@ interface Resolution {
 // $ per point for each contract, so we can translate R into real dollars.
 const POINT_VALUE: Record<string, number> = { MGC: 10, GC: 100, MNQ: 2, MES: 5, NQ: 20, ES: 50, YM: 5, MYM: 0.5 };
 
-// Per-mode sizing the engine would have used (mirrors futures-realtime.ts risk sizing).
-function modeSizing(mode: string): { riskPct: number; maxContracts: number } {
-  return mode === "live" ? { riskPct: 15, maxContracts: 3 } : { riskPct: 7, maxContracts: 10 };
-}
-
 /**
- * Translate a resolved counterfactual into real dollars using the same risk-based sizing the
- * engine applies: contracts = min(maxContracts, floor(riskTarget / per-contract-stop-risk)).
+ * Translate a resolved counterfactual into real dollars using the SAME sizing the engine would
+ * actually have used: contracts = min(maxContracts, floor(riskTarget / per-contract-stop-risk)).
+ * `sizing` must reflect the live account's real caps (live trades 1 micro — live_futures_max_contracts),
+ * NOT a stale hardcoded value, or the "would have won/lost" numbers come out several times too big.
  */
 export function shadowDollars(
   t: { symbol: string; entry: number; stop: number; rMultiple: number },
-  mode: string,
+  sizing: { riskPct: number; maxContracts: number },
   equity: number,
 ): { contracts: number; dollarPnl: number } {
-  const { riskPct, maxContracts } = modeSizing(mode);
+  const { riskPct, maxContracts } = sizing;
   const pv = POINT_VALUE[t.symbol] ?? 10;
   const perContractRisk = Math.abs(t.entry - t.stop) * pv;
   if (perContractRisk <= 0 || equity <= 0) return { contracts: 1, dollarPnl: 0 };
@@ -155,7 +152,18 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
     const s = await getTradovateAccountSummary("live");
     if (s?.netLiq > 0) liveEquity = s.netLiq;
   } catch { /* keep fallback */ }
+  // Live sizing must mirror the REAL live caps (1 micro), read from DB so it never drifts stale.
+  let liveMaxContracts = 1, liveRiskPct = 6;
+  try {
+    const cfg = await prisma.agentConfig.findMany({ where: { key: { in: ["live_futures_max_contracts", "live_futures_risk_per_trade_pct"] } } });
+    const mc = parseInt(cfg.find((c) => c.key === "live_futures_max_contracts")?.value ?? "");
+    const rp = parseFloat(cfg.find((c) => c.key === "live_futures_risk_per_trade_pct")?.value ?? "");
+    if (Number.isFinite(mc) && mc > 0) liveMaxContracts = mc;
+    if (Number.isFinite(rp) && rp > 0) liveRiskPct = rp;
+  } catch { /* keep defaults (1 micro / 6%) */ }
   const equityFor = (mode: string) => (mode === "live" ? liveEquity : 59_000);
+  const sizingFor = (mode: string) =>
+    mode === "live" ? { riskPct: liveRiskPct, maxContracts: liveMaxContracts } : { riskPct: 7, maxContracts: 10 };
 
   // Group by symbol+mode so we fetch each symbol's bars once.
   const byKey = new Map<string, typeof open>();
@@ -198,7 +206,7 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
       if (!res) continue;
       const { contracts, dollarPnl } = shadowDollars(
         { symbol, entry: t.entry, stop: t.stop, rMultiple: res.rMultiple },
-        mode,
+        sizingFor(mode),
         equityFor(mode),
       );
       await prisma.shadowTrade.update({

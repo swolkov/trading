@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import useSWR from "swr";
 
 interface Decision {
@@ -63,9 +62,10 @@ function timeAgo(ts: string): string {
 }
 
 // What the engine is FINDING, not just what it trades: every graded setup with the AI's verdict.
-export function EngineActivity() {
+// Mode is driven by the account you're viewing (live view → live engine, demo view → demo engine),
+// NOT an independent toggle — so the live account never shows demo activity or vice-versa.
+export function EngineActivity({ mode }: { mode: "live" | "demo" }) {
   const { data } = useSWR<{ demo: Decision[]; live: Decision[] }>("/api/futures/decisions", fetcher, { refreshInterval: 30000 });
-  const [mode, setMode] = useState<"live" | "demo">("live");
   const rows = (data?.[mode] || []).slice(0, 12);
 
   return (
@@ -73,19 +73,11 @@ export function EngineActivity() {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-bold">Engine Activity — setups found &amp; AI verdicts</h3>
-          <p className="text-[10px] text-muted-foreground/50">Every setup the engine graded, including the ones it killed. Updates ~30s.</p>
+          <p className="text-[10px] text-muted-foreground/50">Every setup the {mode} engine graded, including the ones it killed. Updates ~30s.</p>
         </div>
-        <div className="flex rounded-md border border-border overflow-hidden text-[10px] font-bold uppercase tracking-wider">
-          {(["live", "demo"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-2.5 py-1 ${mode === m ? "bg-white/[0.08] text-foreground" : "text-muted-foreground/50 hover:text-muted-foreground"}`}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
+        <span className={`shrink-0 text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded ${mode === "live" ? "text-red-400/80 bg-red-500/[0.08]" : "text-emerald-400/80 bg-emerald-500/[0.08]"}`}>
+          {mode === "live" ? "🔴 Live account" : "🟢 Demo account"}
+        </span>
       </div>
 
       {rows.length === 0 ? (
