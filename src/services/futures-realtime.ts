@@ -3175,6 +3175,10 @@ async function evaluateAndTrade(
     const isValidatedIndexEdge = setupType === "extreme_rsi_bounce" && direction === "short" && rsiVal >= 80;
     if (!isValidatedIndexEdge) {
       log(`  ${sym}: SKIP — index trades only the RSI≥80 overbought-short (got ${setupType}/${direction}/RSI ${rsiVal.toFixed(0)})`);
+      // Record the rejection so index scanning is VISIBLE in Engine Activity + the shadow scoreboard,
+      // symmetric with the gold branch above. Without this, MNQ/MES were being scanned but their
+      // rejected setups were silently dropped — making it look like the engine wasn't watching them.
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `index trades RSI≥80 overbought-short only — skipped ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       return;
     }
   }
