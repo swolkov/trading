@@ -596,7 +596,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
       <div className="flex flex-wrap items-center gap-2 mb-2 text-[10px]">
         {dataInfo.viewMode && (
           <span className={`px-1.5 py-0.5 rounded font-bold tracking-wide ${dataInfo.viewMode === "live" ? "bg-red-500/15 text-red-400 border border-red-500/30" : "bg-amber-500/15 text-amber-400 border border-amber-500/30"}`}>
-            {dataInfo.viewMode === "live" ? "LIVE · $1K (validating)" : "DEMO · research"}
+            {dataInfo.viewMode === "live" ? "LIVE · real money" : "DEMO · research"}
           </span>
         )}
         <span className={`px-1.5 py-0.5 rounded border ${dataInfo.provider === "databento" ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/30" : "bg-white/5 text-muted-foreground border-white/10"}`} title="Databento: chart bars (historical + real-time live tick) AND both engines' market data, via the sidecar. Execution stays on Tradovate.">
