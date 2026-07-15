@@ -56,6 +56,13 @@ const MICRO_SYMBOLS = ["MGC", "MNQ", "MES"];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
+// Equity indices (ES/NQ + micros) are 90%+ correlated — hold at most ONE at a time. The onBarClose guard
+// only catches an index ALREADY held from a prior cycle; when MNQ+MES fire the SAME bar, both pass it
+// before either registers a position (that doubled a −$61 loss to −$122 on 2026-07-15). This synchronous
+// same-cycle reservation closes that race: the first index to commit reserves the slot, the second aborts.
+// Auto-expires — once the fill registers, the open-position check takes over.
+const INDEX_SYMS = new Set(["ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K"]);
+let indexEntryReservedUntil = 0;
 // Live full-size threshold — set so the MNQ→NQ switch is a RAMP, not a cliff (Fable 5 review).
 // At 1% risk a ~30pt NQ stop ($600) needs ~$60k for 1 NQ to equal the ~10 MNQ the account was already
 // trading; below $60k MNQ scales smoothly via risk-based sizing. (Was $25k — a 10× exposure jump.)
@@ -3181,6 +3188,15 @@ async function evaluateAndTrade(
       recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `index trades RSI≥80 overbought-short only — skipped ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       return;
     }
+    // CORRELATION GUARD (same-cycle): reserve the single index slot synchronously so a 2nd correlated
+    // index firing the SAME bar can't double the position. Check-and-set is atomic (no await between),
+    // so whichever index commits first wins and the other aborts — regardless of async interleaving.
+    if ([...positions.keys()].some((s) => INDEX_SYMS.has(s)) || Date.now() < indexEntryReservedUntil) {
+      log(`  ${sym}: SKIP — correlation guard (already holding/entering a correlated equity index)`);
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `correlation guard — one equity-index position at a time`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+      return;
+    }
+    indexEntryReservedUntil = Date.now() + 30_000; // hold the slot ~30s until the fill registers a position
   }
 
   // 2026-05-29: Compute pattern-memory stats BEFORE the AI call so they feed the AI's decision.

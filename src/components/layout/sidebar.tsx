@@ -43,6 +43,7 @@ const sections = [
     label: "TRADING",
     links: [
       { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
+      { href: "/orders", label: "Orders", icon: ClipboardList },
       { href: "/kraken", label: "Kraken", icon: Bitcoin, broker: "Kraken" },
     ],
   },

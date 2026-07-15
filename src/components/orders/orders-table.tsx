@@ -251,7 +251,7 @@ function OrdersTableInner({
       ? futuresData.account.balance - futuresData.startOfDayBalance
       : null;
     const futuresPnl = tradePnl != null ? tradePnl + unrealizedPnl : (balancePnl ?? 0);
-    const futuresMode = futuresData?.viewMode === "live" ? "live $1K" : "demo $50K";
+    const futuresMode = futuresData?.viewMode === "live" ? "live · real money" : "demo";
 
     // Alpaca live account today P&L = equity − last_equity ($500 — options + long-term DCA).
     const alpacaPnl = (alpacaAccount?.equity != null && alpacaAccount?.last_equity != null)
