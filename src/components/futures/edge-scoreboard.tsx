@@ -30,7 +30,7 @@ export function EdgeScoreboard() {
         <div>
           <h3 className="text-sm font-bold">Edge Test Scoreboard <span className="text-[10px] font-normal text-muted-foreground/50">· real money, per edge</span></h3>
           <p className="text-[10px] text-muted-foreground/50">
-            Live P&amp;L of the two edges since the test began. This is the truth — is each edge actually working?
+            Live P&amp;L per edge (split by direction) since the test began. This is the truth — is each edge actually working?
           </p>
         </div>
         <div className="text-right shrink-0">

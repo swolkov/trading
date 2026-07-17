@@ -201,7 +201,7 @@ const DEMO_RISK_RULES = [
 ];
 const LIVE_RISK_RULES = [
   "1 micro contract per trade (~1–2% risk) — no pyramiding",
-  "Two validated edges only: gold RSI-bounce + index overbought-short",
+  "Validated edges only: gold RSI-bounce (long + short) + index overbought-short",
   "Broker stop-loss on every trade — defined risk",
   "8% daily-loss halt — stops trading on a bad day",
   "25% drawdown kill switch — halts & reassess",
@@ -679,11 +679,11 @@ export default function FuturesPage() {
           {activeTab === "strategy" && (
             <Card className="border-white/[0.06]">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Two Validated Edges — Priority Order</CardTitle>
+                <CardTitle className="text-sm">Validated Edges — Priority Order</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
-                  Live trades <b>two validated micro edges</b> — gold RSI-bounce (MGC) and index overbought-short (MNQ/MES) — 1 contract per trade at ~1–2% risk, broker stop on every trade, AI grader OFF. Demo P&L is research, not proof.
+                  Live trades the <b>validated micro edges</b> — gold RSI-bounce (MGC, long + short) and index overbought-short (MNQ/MES) — 1 contract per trade at ~1–2% risk, broker stop on every trade, AI grader OFF. Index trend-long is coded but off pending live validation. Demo P&L is research, not proof.
                 </div>
                 <div className="space-y-2">
                   {STRATEGIES.map((s) => (
