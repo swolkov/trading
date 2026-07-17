@@ -18,10 +18,13 @@ interface Live {
   enabled: boolean; validate: boolean; sizeUsd: number; maxOpen: number;
   walletConfigured: boolean; walletAddress: string | null; solBalance: number; capUsd: number;
 }
+interface Account {
+  fundedUsd: number; valueNowUsd: number; totalPnlUsd: number; openMarketValueUsd: number; valued: boolean;
+}
 interface Status {
   enabled: boolean; config: Record<string, string>; stats: Stats;
   open: Pos[]; closed: Pos[]; lastRun?: { ts: string; scanned: number; entered: number; exited: number; open: number; details?: string[] } | null;
-  live?: Live;
+  live?: Live; account?: Account;
 }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
@@ -44,6 +47,7 @@ export function MemeLabPanel() {
   const s = data.stats;
   const netColor = s.totalRealizedUsd >= 0 ? "text-emerald-400" : "text-red-400";
   const live = data.live;
+  const acct = data.account;
 
   async function setLive(action: "arm" | "dryrun" | "off") {
     setBusy(true); setMsg(null);
@@ -123,17 +127,33 @@ export function MemeLabPanel() {
             {data.enabled ? "Scanning" : "Off"}
           </span>
         </div>
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 text-center">
-          <div><p className="text-[10px] text-muted-foreground/50">Net P&amp;L</p><p className={`text-sm font-bold tabular-nums ${netColor}`}>{usd(s.totalRealizedUsd)}</p></div>
+        {/* Headline: what the wallet is worth right now, and total change vs what was funded */}
+        {acct && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-md bg-white/[0.02] px-3 py-2.5">
+              <p className="text-[10px] text-muted-foreground/50">Value now</p>
+              <p className="text-xl font-bold tabular-nums">{acct.valued ? usd(acct.valueNowUsd) : "—"}</p>
+              <p className="text-[9px] text-muted-foreground/45">idle SOL + open positions, marked to market</p>
+            </div>
+            <div className="rounded-md bg-white/[0.02] px-3 py-2.5">
+              <p className="text-[10px] text-muted-foreground/50">Total P&amp;L <span className="text-muted-foreground/40">vs {usd(acct.fundedUsd)} funded</span></p>
+              <p className={`text-xl font-bold tabular-nums ${acct.totalPnlUsd >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {acct.valued ? <>{usd(acct.totalPnlUsd)} <span className="text-sm">({pct(acct.fundedUsd ? acct.totalPnlUsd / acct.fundedUsd : 0)})</span></> : "—"}
+              </p>
+              <p className="text-[9px] text-muted-foreground/45">realized + unrealized + SOL price drift</p>
+            </div>
+          </div>
+        )}
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 text-center">
+          <div><p className="text-[10px] text-muted-foreground/50">Realized <span className="text-muted-foreground/40">(closed)</span></p><p className={`text-sm font-bold tabular-nums ${netColor}`}>{usd(s.totalRealizedUsd)}</p></div>
+          <div><p className="text-[10px] text-muted-foreground/50">Unrealized <span className="text-muted-foreground/40">(open)</span></p><p className={`text-sm font-bold tabular-nums ${s.openUnrealizedUsd >= 0 ? "text-emerald-400" : "text-red-400"}`}>{usd(s.openUnrealizedUsd)}</p></div>
           <div><p className="text-[10px] text-muted-foreground/50">Trades closed</p><p className="text-sm font-bold tabular-nums">{s.closedCount}</p></div>
           <div><p className="text-[10px] text-muted-foreground/50">Win rate</p><p className="text-sm font-bold tabular-nums">{s.closedCount ? `${(s.winRate * 100).toFixed(0)}%` : "—"}</p></div>
           <div><p className="text-[10px] text-muted-foreground/50">Best / worst</p><p className="text-sm font-bold tabular-nums">{s.closedCount ? <><span className="text-emerald-400">{pct(s.bestPct)}</span> / <span className="text-red-400">{pct(s.worstPct)}</span></> : "—"}</p></div>
-          <div><p className="text-[10px] text-muted-foreground/50">Deployed</p><p className="text-sm font-bold tabular-nums">{usd(s.totalInvestedUsd)}</p></div>
-          <div><p className="text-[10px] text-muted-foreground/50">Open (unreal.)</p><p className={`text-sm font-bold tabular-nums ${s.openUnrealizedUsd >= 0 ? "text-emerald-400" : "text-red-400"}`}>{usd(s.openUnrealizedUsd)}</p></div>
         </div>
         {data.lastRun && (
           <p className="text-[10px] text-muted-foreground/45">
-            Last scan {ago(data.lastRun.ts)} ago · {data.lastRun.scanned} pools looked at · {data.lastRun.entered} entered · {data.lastRun.exited} exited · {data.open.length} open
+            Last scan {ago(data.lastRun.ts)} ago · {data.lastRun.scanned} pools looked at · {data.lastRun.entered} entered · {data.lastRun.exited} exited · {data.open.length} open · {usd(s.totalInvestedUsd)} cycled across {s.closedCount} trades
           </p>
         )}
       </div>

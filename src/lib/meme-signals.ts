@@ -90,13 +90,16 @@ export interface Conviction { score: number; thesis: string }
 export async function scoreConviction(name: string, metrics: string, safety: Safety, smart: SmartMoney, conc?: Concentration): Promise<Conviction> {
   if (!process.env.ANTHROPIC_API_KEY) return { score: 50, thesis: "no AI key — neutral" };
   try {
-    const prompt = `You are grading a Solana meme coin as a SHORT-TERM momentum trade with REAL money. Default hard to SKEPTICISM: on-chain research shows ~82% of tokens that gain >100% are manipulated, ~98% of pump.fun tokens go to zero, and dev-funded snipers routinely buy the first block and dump within 5 minutes — so by the time a move is visible, insider/early money is usually already exiting INTO retail. Your job is to REJECT exit-liquidity traps, not to find hope. When unsure, score LOW.
+    const prompt = `You are grading a Solana meme coin as a SHORT-TERM momentum trade with real money. IMPORTANT: this candidate has ALREADY passed hard automated filters before reaching you — LP-lock/honeypot safety, broad holder distribution (not concentrated), AND a fresh, accelerating, buy-dominated move that is NOT already over-extended (anti-chase caps applied). The generic "most memes rug / go to zero" traps are largely filtered out already. So do NOT reject on blanket priors — your job is to RANK how strong THIS specific momentum setup is, and differentiate the strong ones from the mediocre. Meme trading is asymmetric: small size, occasional big winner, so a good-but-imperfect momentum setup is a BUY, not a pass.
 Token: ${name}
 Metrics: ${metrics}
 Safety: ${safety.reason}${safety.risks.length ? `; flags: ${safety.risks.slice(0, 5).join(", ")}` : ""}
 Holder concentration: ${conc ? conc.reason : "unchecked"}
 Smart money: ${smart.active ? `${smart.count} tracked winner wallet(s) currently hold it` : "not tracked (no data)"}
-Score conviction (0-100) that this KEEPS RISING over the next few hours AND that a buyer now would NOT just be exit liquidity. Score LOW for: concentrated ownership (few non-pool wallets hold most of the float), already-extended moves, thin liquidity, one-sided/bot volume, or any rug/sniper signature. Reserve high scores for broad holder distribution, healthy two-sided volume, and room left to run.
+Score conviction 0-100 on the STRENGTH of this continuation setup (how likely the move keeps running over the next few hours). Use the full range and be decisive — do NOT cluster everything low:
+- 70-90: fresh, accelerating, strongly buy-dominated move, healthy liquidity/turnover, broad holders, clear room to run (higher if smart money holds or it's a clean pump.fun graduate).
+- 45-69: real momentum but mixed (cooling acceleration, thinner liquidity, or moderate extension).
+- 0-40: genuine red flags survived the filters — one-sided/bot volume, near-exhausted move, borderline concentration, or dead turnover.
 Return ONLY JSON: {"score": <0-100 integer>, "thesis": "<one short sentence>"}`;
     const msg = await anthropic.messages.create({ model: "claude-opus-4-8", max_tokens: 400, messages: [{ role: "user", content: prompt }] });
     const text = msg.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");

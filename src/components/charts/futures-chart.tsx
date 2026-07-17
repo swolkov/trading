@@ -111,7 +111,8 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
   const [activeIdx, setActiveIdx] = useState(2);
   const [loading, setLoading] = useState(false);
   const [showEMA, setShowEMA] = useState(true);
-  const [showVWAP, setShowVWAP] = useState(true);
+  const [showVWAP, setShowVWAP] = useState(false);   // clean by default (Robinhood-style) — VWAP + its 2 bands were the biggest line-clutter; toggle on when needed
+  const [showSignals, setShowSignals] = useState(false); // hide the per-decision AI✓/✗/BLK squares by default — they overlap into an unreadable mess; actual trade markers always show
   // Honest data-state — no more silent white chart; surfaces provider/env/freshness truthfully.
   const [dataInfo, setDataInfo] = useState<{ state: "loading" | "ok" | "empty" | "error"; msg?: string; count: number; lastTs: number | null; viewMode: string | null; provider?: string | null }>({ state: "loading", count: 0, lastTs: null, viewMode: null, provider: null });
   const [isLive, setIsLive] = useState(true);
@@ -379,9 +380,10 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
         const firstBarT = candleData[0]?.time as unknown as number;
         const lastBarT = candleData[candleData.length - 1]?.time as unknown as number;
 
-        // Engine decisions (AI confirmed/killed setups) for the chart's mode — shows the thinking, not just the trades
+        // Engine decisions (AI confirmed/killed setups) — OFF by default: dozens per session overlap into an
+        // unreadable pile of squares (the "hard to read" complaint). Behind the Signals toggle for when you want the thinking.
         const chartMode = (viewMode === "live" ? "live" : "demo") as "live" | "demo";
-        const decisions: { ts: string; sym: string; direction: string; verdict: string; confidence: number }[] = decData?.[chartMode] || [];
+        const decisions: { ts: string; sym: string; direction: string; verdict: string; confidence: number }[] = showSignals ? (decData?.[chartMode] || []) : [];
         for (const d of decisions) {
           if (!matchesSymbol(d.sym, symbol) || !d.ts) continue;
           const t = (Math.floor(new Date(d.ts).getTime() / 1000 / barInterval) * barInterval) as Time;
@@ -515,7 +517,7 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
     } finally {
       if (!isRefresh) setLoading(false);
     }
-  }, [symbol, activeIdx, showEMA, showVWAP]);
+  }, [symbol, activeIdx, showEMA, showVWAP, showSignals]);
 
   // Initial load
   useEffect(() => {
@@ -568,6 +570,16 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
             }`}
           >
             VWAP
+          </button>
+          <button
+            onClick={() => setShowSignals(!showSignals)}
+            className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+              showSignals
+                ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Signals
           </button>
           <button
             onClick={() => setIsLive(!isLive)}

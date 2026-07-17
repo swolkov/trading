@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Brain, ArrowRight, Activity, Eye, PowerOff, Info } from "lucide-react";
 import { StrategyRowCompact } from "./strategy-row-compact";
 import { AccountsPanel } from "./accounts-panel";
+import { getEdgePerformance } from "@/lib/edge-performance";
 
 export const dynamic = "force-dynamic";
 
@@ -25,25 +26,25 @@ interface LegacyStrategy {
 
 const LEGACY_STRATEGIES: LegacyStrategy[] = [
   {
-    name: "Equity index 5m intraday (combined setups)",
-    setupTypes: ["RSI bounce", "OR breakout", "IB extension", "Gap fill", "Trend continuation", "VWAP mean-reversion"],
-    symbols: ["ES", "NQ", "MES", "MNQ"],
+    name: "Equity index 5m — GATED to 2 validated edges",
+    setupTypes: ["RSI≥80 overbought SHORT (MNQ/MES)", "Trend-continuation LONG in uptrend, price>200-EMA (MNQ/MES)"],
+    symbols: ["MNQ", "MES"],
     assetClass: "equity_index_futures",
     tier: 2,
     status: "active",
-    description: "Original detectSetup() in futures-realtime.ts tries multiple setup types per 5m bar close. Runs on Railway. PF 0.98 (break-even) on equity indexes.",
-    backtest: { pf: 0.98, trades: 4400, period: "1yr (2025-05 → 2026-05)" },
+    description: "The engine scans ~8 setup types per 5m bar, but the GATE rejects all index setups except two that hold out-of-sample: (1) extreme-RSI overbought SHORT at RSI≥80, and (2) trend-continuation LONG — buy EMA9 pullbacks ONLY when price is above the 200-EMA (confirmed uptrend). The long is validated on a 4.5-yr backtest INCLUDING the 2022 bear (real micro fills): PF 1.22 pooled, positive in BOTH train (1.15) and test (1.31); NQ 1.24 / ES 1.18. The SAME long below the 200-EMA loses (PF 0.55) — the regime filter is the edge. Everything else (gap-fill, OR-breakout, IB-ext, VWAP, index shorts other than the RSI≥80 fade) is GATED OFF. 1 micro, RTH.",
+    backtest: { pf: 1.22, trades: 5077, period: "4.5yr (2022-2026), regime-filtered long" },
     codeFile: "futures-realtime.ts",
   },
   {
-    name: "Gold RSI extreme bounce (5m)",
-    setupTypes: ["RSI extreme bounce"],
-    symbols: ["GC", "MGC"],
+    name: "Gold RSI extreme bounce (5m) — flagship edge",
+    setupTypes: ["extreme_rsi_bounce ONLY (RSI<25 long / RSI>75 short)"],
+    symbols: ["MGC", "GC"],
     assetClass: "metals_futures",
     tier: 2,
     status: "active",
-    description: "Same 5m library, but gold-specific RSI<25/>75 bounce. Tier 2 edge — needs $10K+ to deploy.",
-    backtest: { pf: 1.23, trades: 720, period: "1yr" },
+    description: "Gold is GATED to its single out-of-sample edge: the RSI extreme bounce (both directions). Every other gold setup (trend-continuation, gap-fill, VWAP) is REJECTED — trend-continuation is exactly what bled the live account in early July. 26-yr daily backtest PF 1.58 (positive in every 5-yr block, 2000-2026); live PF ~1.5 over 60d. Evening half-size on MGC once equity ≥ $3k. The most durable edge in the system.",
+    backtest: { pf: 1.24, trades: 720, period: "OOS 2026 / 26yr daily PF 1.58" },
     codeFile: "futures-realtime.ts",
   },
   {
@@ -107,7 +108,8 @@ function tierPill(tier: 1 | 2 | 3) {
   return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border bg-blue-500/15 text-blue-300 border-blue-500/30">T3</span>;
 }
 
-export default function StrategiesAdminPage() {
+export default async function StrategiesAdminPage() {
+  const edgePerf = await getEdgePerformance().catch(() => null);
   const observationByClass = new Map<string, string[]>();
   for (const sym of STRATEGY_REGISTRY_ONLY_SYMBOLS) {
     const hasStrategy = STRATEGIES.some((s) => s.applicableSymbols.includes(sym));
@@ -144,6 +146,37 @@ export default function StrategiesAdminPage() {
           <ArrowRight className="w-3 h-3" />
         </Link>
       </div>
+
+      {/* LIVE per-edge results — what's actually working in real money, since inception */}
+      {edgePerf && (
+        <div className="border border-border rounded-lg bg-muted/10 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs font-bold tracking-tight flex items-center gap-1.5"><Activity className="w-3.5 h-3.5 text-emerald-400" /> Live edge results — real money</div>
+            <div className="text-[10px] text-muted-foreground/60">
+              since {new Date(edgePerf.since).toLocaleDateString()} · total{" "}
+              <span className={edgePerf.totalNet >= 0 ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>{edgePerf.totalNet >= 0 ? "+" : ""}${edgePerf.totalNet.toFixed(0)}</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {edgePerf.edges.map((e) => (
+              <div key={e.key} className="border border-border/60 rounded-md bg-background/40 p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold truncate">{e.name}</div>
+                  <div className={`text-xs font-bold shrink-0 ${e.net > 0 ? "text-emerald-400" : e.net < 0 ? "text-red-400" : "text-muted-foreground"}`}>{e.net >= 0 ? "+" : ""}${e.net.toFixed(0)}</div>
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-1">
+                  {e.trades === 0 ? (
+                    <span className="text-amber-400/80">no live trades yet</span>
+                  ) : (
+                    <>{e.trades} trade{e.trades === 1 ? "" : "s"} · {(e.winRate * 100).toFixed(0)}% win ({e.wins}W/{e.losses}L)</>
+                  )}
+                </div>
+                <div className="text-[9px] text-muted-foreground/50 mt-1 leading-tight">{e.blurb}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Accounts + master mode panel */}
       <AccountsPanel />

@@ -38,12 +38,15 @@ interface Cfg {
   partialTpPct: number;        // PARTIAL PROFIT: bank half the position at this gain (1.0 = +100% = 2x), ride the rest
   maxTop5Pct: number;          // ANTI-MANIPULATION: reject if the top-5 non-pool wallets hold >this % of the float
   minHolders: number;          // ANTI-MANIPULATION: reject coins with fewer than this many holders (too easy to rug)
+  runnerTrailGive: number;     // RUNNER: after the ½-scale, exit the free runner when it gives back to this × its peak (0.5 = gave back 50%)
+  moonCapPct: number;          // RUNNER: bank the whole thing at this gain (9.0 = +900% = 10×) — ceiling for a genuine moonshot
 }
 
 async function loadCfg(): Promise<Cfg> {
   const keys = ["meme_scan_enabled", "meme_paper_size_usd", "meme_min_liq_usd", "meme_min_h1_vol_usd", "meme_max_open", "meme_min_fdv_usd", "meme_max_fdv_usd", "meme_min_conviction", "meme_enrich_max",
     "meme_live_enabled", "meme_live_validate", "meme_live_size_usd", "meme_live_max_open", "meme_live_daily_loss_halt_usd", "meme_live_min_conviction",
-    "meme_max_h1_pump", "meme_max_h6_pump", "meme_partial_tp_pct", "meme_max_top5_pct", "meme_min_holders"];
+    "meme_max_h1_pump", "meme_max_h6_pump", "meme_partial_tp_pct", "meme_max_top5_pct", "meme_min_holders",
+    "meme_runner_trail_give", "meme_moon_cap"];
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
   const c: Record<string, string> = {}; for (const r of rows) c[r.key] = r.value;
   return {
@@ -67,6 +70,8 @@ async function loadCfg(): Promise<Cfg> {
     partialTpPct: parseFloat(c.meme_partial_tp_pct) || 1.0,
     maxTop5Pct: parseFloat(c.meme_max_top5_pct) || 80,   // top-5 non-pool wallets owning >80% of the float = manipulated/rug-prone
     minHolders: parseInt(c.meme_min_holders) || 15,      // fewer than 15 holders = too thin, too easy to dump
+    runnerTrailGive: parseFloat(c.meme_runner_trail_give) || 0.5, // let the post-scale runner keep 50% room off its peak before we bail
+    moonCapPct: parseFloat(c.meme_moon_cap) || 9.0,      // raised from +400% → +900% so real moonshots run further before we cap
   };
 }
 
@@ -194,14 +199,16 @@ function decideExit(pos: Pos, cur: Cand | undefined, now: number, cfg: Cfg): { a
   const gain = price / pos.entryPrice - 1;
   const peak = Math.max(pos.peakPrice, price);
   const peakGain = peak / pos.entryPrice - 1;
-  // rug / capitulation always wins
+  // rug / capitulation always wins — RUG PROTECTION, kept intact
   if (cur.liq <= pos.entryLiq * 0.5 || price <= pos.entryPrice * 0.15) return { action: "exit", reason: "rug_liq", price };
-  if (gain >= 4.0) return { action: "exit", reason: "moon_cap", price };                    // bank a +400% moonshot
-  if (peakGain >= 1.0 && price <= peak * 0.7) return { action: "exit", reason: "trail", price }; // gave back 30% from peak after +100%
-  // after banking half, the runner is free — protect it at breakeven instead of the -40% stop
+  if (gain >= cfg.moonCapPct) return { action: "exit", reason: "moon_cap", price };         // bank a genuine moonshot (default +900% = 10×)
   if (pos.scaledOut) {
-    if (price <= pos.entryPrice) return { action: "exit", reason: "breakeven_after_scale", price };
+    // RUNNER = house money (cost already recovered at the ½-scale). Let confirmed winners RUN:
+    // exit only on a rug (above) or a WIDE give-back from peak — no breakeven floor, no tight 30% trail.
+    // Since we scale at +100%, peak ≥ 2× entry, so peak×0.5 ≥ entry → the runner never exits below breakeven.
+    if (price <= peak * cfg.runnerTrailGive) return { action: "exit", reason: "runner_trail", price };
   } else {
+    if (peakGain >= 1.0 && price <= peak * 0.7) return { action: "exit", reason: "trail", price }; // pre-scale spike protection (rare)
     // PARTIAL PROFIT: first time we clear +TP, sell half and ride the rest (locks a win, removes rug risk on the half)
     if (gain >= cfg.partialTpPct) return { action: "scale", reason: "partial_tp", price };
     if (gain <= -0.4) return { action: "exit", reason: "stop", price };                     // -40% hard stop (pre-scale only)
@@ -443,6 +450,7 @@ export interface MemeLabStatus {
   enabled: boolean; config: Record<string, string>; stats: MemeStats;
   open: Pos[]; closed: Pos[]; lastRun: unknown;
   live: { enabled: boolean; validate: boolean; sizeUsd: number; maxOpen: number; walletConfigured: boolean; walletAddress: string | null; solBalance: number; solPriceUsd: number; walletUsd: number; capUsd: number };
+  account: { fundedUsd: number; valueNowUsd: number; totalPnlUsd: number; openMarketValueUsd: number; valued: boolean };
 }
 export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   const cfg = await loadCfg();
@@ -456,11 +464,22 @@ export async function getMemeLabStatus(): Promise<MemeLabStatus> {
   const configured = walletConfigured();
   const solBalance = configured ? await getSolBalance().catch(() => 0) : 0;
   const solPx = configured && solBalance > 0 ? await solPriceUsd().catch(() => 0) : 0;
+  const walletUsd = solBalance * solPx;
   const live = {
     enabled: cfg.liveEnabled, validate: cfg.liveValidate, sizeUsd: cfg.liveSizeUsd, maxOpen: cfg.liveMaxOpen,
     walletConfigured: configured, walletAddress: config.meme_wallet_pubkey || null, solBalance,
-    solPriceUsd: solPx, walletUsd: solBalance * solPx,
+    solPriceUsd: solPx, walletUsd,
     capUsd: cfg.liveSizeUsd * cfg.liveMaxOpen,
   };
-  return { enabled: cfg.enabled, config, stats: stats || computeStats(closed, open), open, closed: closed.slice(0, 40), lastRun, live };
+  // ── Real-money accounting: what the wallet is actually worth now vs what was funded ──
+  // Current worth of tokens still held (USD cost basis marked to the last polled price).
+  // Banked cash from any partial scale-out is already back in the SOL wallet → counted in walletUsd, not here.
+  const openMarketValueUsd = open.reduce((s, p) => s + p.sizeUsd * (p.remainFrac ?? 1) * (1 + (p.lastPnlPct ?? 0)), 0);
+  const fundedRow = await prisma.agentConfig.findUnique({ where: { key: "meme_funded_usd" } }).catch(() => null);
+  const fundedUsd = fundedRow?.value ? parseFloat(fundedRow.value) : 90;
+  // We can only value the SOL cash if we got a price. If there's idle SOL but no price, don't show a wrong (understated) number.
+  const valued = !(solBalance > 0 && solPx === 0);
+  const valueNowUsd = walletUsd + openMarketValueUsd;
+  const account = { fundedUsd, valueNowUsd, totalPnlUsd: valueNowUsd - fundedUsd, openMarketValueUsd, valued };
+  return { enabled: cfg.enabled, config, stats: stats || computeStats(closed, open), open, closed: closed.slice(0, 40), lastRun, live, account };
 }
