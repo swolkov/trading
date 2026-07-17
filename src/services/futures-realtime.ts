@@ -62,6 +62,10 @@ const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC
 // same-cycle reservation closes that race: the first index to commit reserves the slot, the second aborts.
 // Auto-expires — once the fill registers, the open-position check takes over.
 const INDEX_SYMS = new Set(["ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K"]);
+// Index symbols cleared for the trend-continuation LONG edge. 4.5-yr backtest (2022 bear included) with the
+// 200-EMA regime filter: NQ PF 1.24 / ES PF 1.18, both +both halves. (Without the filter ES failed — the filter,
+// applied in setup detection via price>ema200, is what makes both work.)
+const INDEX_LONG_SYMS = new Set(["NQ", "MNQ", "ES", "MES"]);
 let indexEntryReservedUntil = 0;
 // Live full-size threshold — set so the MNQ→NQ switch is a RAMP, not a cliff (Fable 5 review).
 // At 1% risk a ~30pt NQ stop ($600) needs ~$60k for 1 NQ to equal the ~10 MNQ the account was already
@@ -117,6 +121,16 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 };
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
+// GROWTH RAMP (micro gold only): contract ceiling by account equity so per-trade risk stays ~constant (~1%)
+// as the account grows, instead of being frozen at 1 micro forever. Dormant until $10k — at ~$5k it returns 1,
+// so it does NOT change current behavior. Scoped to MGC ONLY (never applied to full GC). Above ~$60k the
+// MICRO→FULL switch flips MGC→GC, so this only governs the micro range. Sim (Jul 13) showed >1 micro trips the
+// −25% kill-switch on a SMALL account — this ramp respects that by only sizing up once equity can absorb it.
+function goldMicroCap(equity: number): number {
+  if (equity >= 18000) return 3;
+  if (equity >= 10000) return 2;
+  return 1;
+}
 // LIVE only: minimum account equity before we let gold (MGC) trade into the evening session. MGC overnight
 // initial margin is ~$1,000-1,150; below this threshold the account can't cover it → stay RTH-only. Once
 // funded past this (e.g. after the $4k ACH → ~$4.8k) evening gold auto-enables. Index never gets the evening
@@ -802,6 +816,7 @@ let dbnMdLogged = 0;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
 let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
 let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
+let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuation LONG on NQ/ES micros, regime-filtered price>200-EMA (4.5-yr backtest PF 1.22, +both halves). Reversible via DB key index_trend_long_enabled="false".
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
   if (!databentoMdEnabled) return new Map();
@@ -1251,6 +1266,7 @@ async function loadRiskConfig() {
       `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
       `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
+      "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -1282,6 +1298,7 @@ async function loadRiskConfig() {
     // Set live_futures_ai_grader="false" in DB to disable; default true preserves the original
     // real-money safety. Demo uses futures_ai_grader.
     aiVetoEnabled = cfg[`${kp}_ai_grader`] !== "false";
+    indexTrendLongEnabled = cfg["index_trend_long_enabled"] !== "false"; // global (both modes); default on, flip to "false" to disable instantly
     updateTradingSymbols();
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
   } catch (err) {
@@ -1722,6 +1739,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   if (pos.quantity <= 0) {
     log(`${sym}: checkPositions found qty=${pos.quantity} — stale position object, purging`);
     positions.delete(sym);
+    syncMissCount.delete(sym); // clear reconcile miss-counter when a position leaves the book
     recentlyClosedAt.set(sym, Date.now());
     return;
   }
@@ -2058,6 +2076,14 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
 // Lock to prevent concurrent close attempts on the same symbol
 const closingLocks = new Map<string, boolean>();
 
+// Continuous position reconciliation (the fix for the Jul 17 orphaned-bracket cascade):
+// syncMissCount = consecutive syncs where a tracked position was absent from /position/list. We require
+// 2 misses before reconcile-closing, so a single transient/empty broker read can't false-close a REAL
+// position and cancel its stop. lastSyncTs throttles the periodic sweep so it runs ~once/cycle, not per-symbol.
+const syncMissCount = new Map<string, number>();
+let lastSyncTs = 0;
+let syncInFlight = false; // re-entrancy guard: never run two reconciles at once (concurrent runs could double-cancel a real stop)
+
 // Track recently closed symbols so syncPositions doesn't re-adopt settlement-lag residuals.
 // Root cause of the phantom -$24k emergency: scale-out stop + breakeven close both fired as BUY
 // orders within the same second, creating a net-LONG residual on Tradovate's paper account.
@@ -2238,6 +2264,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     // Vault journal + pattern memory logged by deferredPnlCheck() with REAL fill P&L
 
     positions.delete(sym);
+    syncMissCount.delete(sym); // clear reconcile miss-counter when a position leaves the book
     recentlyClosedAt.set(sym, Date.now()); // guard against syncPositions re-adopting settlement lag
 
     await savePositions();
@@ -2506,6 +2533,15 @@ function scoreSetup(factors: {
 
 async function onBarClose(sym: string, bar: Bar) {
   if (!SYMBOLS.includes(sym)) return;   // PHASE 0: only evaluate/trade whitelisted symbols (e.g. MES-only live)
+
+  // CONTINUOUS RECONCILIATION (Jul 17 fix): reconcile tracked positions against the broker every ~cycle
+  // (throttled), not just at startup. This is what prevents an orphaned bracket leg from filling hours after
+  // its partner closed the position — syncPositions detects the close within a bar and cancels the orphan.
+  if (positions.size > 0 && Date.now() - lastSyncTs > 25_000) {
+    lastSyncTs = Date.now();
+    await syncPositions().catch((e) => log(`[RECONCILE] periodic syncPositions failed: ${e}`));
+  }
+
   const b = barBuilders.get(sym);
   if (!b || b.bars5m.length < 25) return;
 
@@ -2589,6 +2625,14 @@ async function onBarClose(sym: string, bar: Bar) {
   const slow = ema(closes, 21);
   const fastEMA = fast[fast.length - 1];
   const slowEMA = slow[slow.length - 1];
+  // 200-EMA = higher-timeframe TREND REGIME. The index trend-continuation LONG only holds when price is
+  // ABOVE it (confirmed uptrend). 4.5-yr backtest incl. the 2022 bear: filtered long PF 1.22 (+both halves,
+  // NQ 1.24 / ES 1.18); the SAME long BELOW the 200-EMA loses (PF 0.55 OOS). The filter IS the edge.
+  const ema200arr = closes.length >= 200 ? ema(closes, 200) : [];
+  // Fallback to Infinity (NOT slowEMA) when <200 bars: the trend-long uses `price > ema200`, so Infinity
+  // BLOCKS the long during warmup (~first 2.5 sessions after a restart) rather than letting an un-validated
+  // long through — the backtest that validated it always had a real 200-EMA. Only the long reads ema200.
+  const ema200 = ema200arr.length ? ema200arr[ema200arr.length - 1] : Infinity;
   const vwapData = b.sessionBars.length >= 3 ? calcVwap(b.sessionBars) : calcVwap(bars.slice(-78));
 
   // Volume analysis
@@ -2845,7 +2889,8 @@ async function onBarClose(sym: string, bar: Bar) {
   if (TREND_CONTINUATION_ENABLED && (dayType === "trend" || Math.abs(fastEMA - slowEMA) / price > 0.001) &&
       (session === "morning" || session === "afternoon")) {
     const nearEMA = Math.abs(price - fastEMA) / price < 0.003;
-    const isLong = nearEMA && fastEMA > slowEMA && price > slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
+    // LONG also requires price ABOVE the 200-EMA (uptrend regime) — the validated "be smart about WHEN" filter.
+    const isLong = nearEMA && fastEMA > slowEMA && price > slowEMA && price > ema200 && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
     const isShort = nearEMA && fastEMA < slowEMA && price < slowEMA && currentRSI > 35 && currentRSI < 65 && volTrend !== "surge";
 
     if (isLong || isShort) {
@@ -3179,13 +3224,22 @@ async function evaluateAndTrade(
       return;
     }
   } else {
-    const isValidatedIndexEdge = setupType === "extreme_rsi_bounce" && direction === "short" && rsiVal >= 80;
+    // INDEX validated edges (data-driven, only what holds OUT-OF-SAMPLE):
+    //  (1) extreme_rsi_bounce SHORT at RSI≥80 — the overbought fade (original OOS edge, PF 1.4-1.8).
+    //  (2) trend_continuation LONG on NQ/ES micros — buy EMA9 pullbacks ONLY in a confirmed uptrend (price >
+    //      200-EMA, enforced in setup detection). Validated on a 4.5-yr Databento backtest incl. the 2022 BEAR
+    //      (88k 5-min bars/symbol, real micro fills + commission): filtered long PF 1.22 pooled, positive in
+    //      BOTH train (1.15) AND test (1.31) halves; NQ 1.24 / ES 1.18. The SAME long BELOW the 200-EMA loses
+    //      (PF 0.55 OOS) — the regime filter IS the edge. Reversible via index_trend_long_enabled="false"; auto-prune + stops backstop it.
+    const isOverboughtShort = setupType === "extreme_rsi_bounce" && direction === "short" && rsiVal >= 80;
+    const isTrendLong = indexTrendLongEnabled && setupType === "trend_continuation" && direction === "long" && INDEX_LONG_SYMS.has(sym);
+    const isValidatedIndexEdge = isOverboughtShort || isTrendLong;
     if (!isValidatedIndexEdge) {
-      log(`  ${sym}: SKIP — index trades only the RSI≥80 overbought-short (got ${setupType}/${direction}/RSI ${rsiVal.toFixed(0)})`);
+      log(`  ${sym}: SKIP — index trades only RSI≥80 overbought-short + NQ trend-long (got ${setupType}/${direction}/RSI ${rsiVal.toFixed(0)})`);
       // Record the rejection so index scanning is VISIBLE in Engine Activity + the shadow scoreboard,
       // symmetric with the gold branch above. Without this, MNQ/MES were being scanned but their
       // rejected setups were silently dropped — making it look like the engine wasn't watching them.
-      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `index trades RSI≥80 overbought-short only — skipped ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `index trades RSI≥80 overbought-short + NQ trend-long only — skipped ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       return;
     }
     // CORRELATION GUARD (same-cycle): reserve the single index slot synchronously so a 2nd correlated
@@ -3385,7 +3439,10 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     }
   }
 
-  let qty = Math.min(riskConfig.maxContractsPerTrade, Math.floor(maxRisk / riskPer));
+  // Gold micro grows with the account (ramp) so risk stays ~1%/trade instead of frozen at 1 micro; index +
+  // full contracts keep the configured cap. At current ~$5k equity goldMicroCap()=1 → no change to today.
+  const perTradeCap = sym === "MGC" ? goldMicroCap(equity) : riskConfig.maxContractsPerTrade;
+  let qty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
   if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
   // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
@@ -3554,17 +3611,31 @@ async function writeHeartbeat() {
 // ── Position Sync ───────────────────────────────────────
 
 async function syncPositions() {
+  if (syncInFlight) return; // another reconcile is mid-flight — don't overlap (would double-cancel/double-log)
+  syncInFlight = true;
   try {
     const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number; timestamp: string }[];
 
     // Step 1: Remove engine positions that no longer exist on Tradovate
     for (const [sym, pos] of [...positions]) {
-      if (!tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
+      if (tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
+        syncMissCount.delete(sym); // confirmed still open on the broker → reset the miss counter
+        continue;
+      }
+      {
+        // Position NOT found on the broker — either a REAL close (its bracket filled) or a transient/empty read.
         // Skip if closePosition is already handling this symbol
         if (closingLocks.get(sym)) {
           log(`SYNC: ${sym} — close already in progress, skipping`);
           continue;
         }
+        // GUARD (never assume): require 2 CONSECUTIVE "missing" reads before we reconcile-close and cancel
+        // orders. A single transient/empty /position/list read must NOT false-close a real, open position
+        // and rip out its protective stop. A genuine close stays missing and reconciles on the next cycle.
+        const misses = (syncMissCount.get(sym) || 0) + 1;
+        syncMissCount.set(sym, misses);
+        if (misses < 2) { log(`SYNC: ${sym} absent from broker (miss ${misses}/2) — deferring reconcile one cycle`); continue; }
+        syncMissCount.delete(sym);
         const mult = CONTRACT_MULTIPLIERS[sym] || 5;
 
         // Cancel any orphaned working orders for this contract
@@ -3671,6 +3742,7 @@ async function syncPositions() {
         }
 
         positions.delete(sym);
+    syncMissCount.delete(sym); // clear reconcile miss-counter when a position leaves the book
         await savePositions();
       }
     }
@@ -3806,6 +3878,7 @@ async function syncPositions() {
 
     await savePositions();
   } catch (err) { log(`[SYNC] Position sync failed: ${err}`); }
+  finally { syncInFlight = false; }
 }
 
 // ── Pre-load Historical Bars (so we can trade immediately) ──
