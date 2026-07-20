@@ -28,14 +28,14 @@ export function EdgeScoreboard() {
     <div className="rounded-xl border border-border bg-card p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-bold">Edge Test Scoreboard <span className="text-[10px] font-normal text-muted-foreground/50">· real money, per edge</span></h3>
+          <h3 className="text-sm font-bold">Edge Test Scoreboard <span className="text-[10px] font-normal text-muted-foreground/50">· which edge works</span></h3>
           <p className="text-[10px] text-muted-foreground/50">
-            Live P&amp;L per edge (split by direction) since the test began. This is the truth — is each edge actually working?
+            Per-edge P&amp;L (split by direction) on clean trades — is each edge actually working? Excludes the Jul 16–17 tracking incident; your <strong>account balance</strong> is the authoritative total P&amp;L.
           </p>
         </div>
         <div className="text-right shrink-0">
           <p className={`text-lg font-black tabular-nums ${col(data.totalNet)}`}>{money(data.totalNet)}</p>
-          <p className="text-[8px] uppercase tracking-wider text-muted-foreground/45">{data.totalTrades} trades total</p>
+          <p className="text-[8px] uppercase tracking-wider text-muted-foreground/45">per-edge sum · {data.totalTrades} trades</p>
         </div>
       </div>
 

@@ -26,11 +26,17 @@ export async function getEdgePerformance(): Promise<{ since: string; edges: Edge
   const sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
   const since = sinceRow?.value ? new Date(sinceRow.value) : new Date(0);
 
-  const rows = await prisma.autoTradeLog.findMany({
+  // Jul 16-17 INCIDENT WINDOW — an orphaned-bracket bug tangled the trade rows here (a mis-logged
+  // accidental long), so they can't be cleanly attributed to any edge. Their net P&L is still in the
+  // ACCOUNT balance (the one authoritative total); they're just excluded from per-edge "what works".
+  // All legit trades before and after are kept, and no real position spanned this window.
+  const INCIDENT_START = Date.parse("2026-07-16T22:00:00Z");
+  const INCIDENT_END = Date.parse("2026-07-17T06:00:00Z");
+  const rows = (await prisma.autoTradeLog.findMany({
     where: { symbol: { in: ["FUT:MGC", "FUT:MNQ", "FUT:MES"] }, action: { startsWith: "live_" }, createdAt: { gte: since } },
     orderBy: { createdAt: "asc" },
     take: 1000,
-  });
+  })).filter((r) => { const t = r.createdAt.getTime(); return t < INCIDENT_START || t >= INCIDENT_END; });
 
   // Pair entries → exits per symbol so each realized P&L carries the direction it was taken in.
   const openDir: Record<string, "long" | "short" | null> = {};

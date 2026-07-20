@@ -151,10 +151,11 @@ export default async function StrategiesAdminPage() {
       {edgePerf && (
         <div className="border border-border rounded-lg bg-muted/10 p-3">
           <div className="flex items-center justify-between mb-2">
-            <div className="text-xs font-bold tracking-tight flex items-center gap-1.5"><Activity className="w-3.5 h-3.5 text-emerald-400" /> Live edge results — real money</div>
+            <div className="text-xs font-bold tracking-tight flex items-center gap-1.5"><Activity className="w-3.5 h-3.5 text-emerald-400" /> Which edge works — real money</div>
             <div className="text-[10px] text-muted-foreground/60">
-              since {new Date(edgePerf.since).toLocaleDateString()} · total{" "}
+              per-edge sum{" "}
               <span className={edgePerf.totalNet >= 0 ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>{edgePerf.totalNet >= 0 ? "+" : ""}${edgePerf.totalNet.toFixed(0)}</span>
+              <span className="ml-1 text-muted-foreground/40">· account balance = true total</span>
             </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
