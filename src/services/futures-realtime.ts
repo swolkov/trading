@@ -3616,6 +3616,38 @@ async function syncPositions() {
   try {
     const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number; timestamp: string }[];
 
+    // Step 0 — SOFTWARE OCO (one-cancels-the-other): the instant one bracket leg fills, cancel its
+    // sibling, so a leftover resting order can NEVER later re-open a naked position (the Jul 16-17
+    // incident). We key off the tracked order IDs — a broker "Filled" status is authoritative (unlike
+    // a transient empty /position/list read), so this fires the SAME tick with no miss-guard needed,
+    // closing the ~25-50s window the position-based sweep (Step 1) leaves open. We deliberately do NOT
+    // use Tradovate's native OSO bracket: our own code documents it as unreliable, and a hard exchange
+    // link fights the in-place stop trailing/breakeven logic (which moves the stop while the trade is
+    // live). This only ever CANCELS a sibling once its partner is confirmed FILLED — never touches a
+    // pair that's still both working — and degrades safely to Step 1 if the order list is unavailable.
+    let orderList: { id: number; contractId: number; ordStatus: string }[] = [];
+    try { orderList = await apiFetch("/order/list") as typeof orderList; } catch {}
+    if (orderList.length > 0) {
+      // status lookup is contractId-scoped: a stale/reused order id must never act on another contract's order.
+      const statusOf = (id: number | null, contractId: number) => (id == null ? null : orderList.find(o => o.id === id && o.contractId === contractId)?.ordStatus ?? null);
+      // ONLY a true "Filled" confirms the leg executed and the position closed. "Completed"/"Cancelled"
+      // are terminal states a MODIFIED stop (trailing/breakeven cancel-replace) also passes through, so
+      // treating them as a fill would wrongly kill the sibling of a still-open position → naked risk.
+      const isFilled = (id: number | null, contractId: number) => statusOf(id, contractId) === "Filled";
+      const isResting = (id: number | null, contractId: number) => { const s = statusOf(id, contractId); return s === "Working" || s === "Accepted"; };
+      for (const [sym, pos] of positions) {
+        if (closingLocks.get(sym)) continue; // a close is already tearing this position down
+        if (stopMoveLocks.get(sym)) continue; // a trail/breakeven modify is mid-flight — its stop id may be transiently terminal
+        if (isFilled(pos.stopOrderId, pos.contractId) && isResting(pos.targetOrderId, pos.contractId)) {
+          try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); log(`OCO: ${sym} stop filled → cancelled orphan target #${pos.targetOrderId}`); } catch (e) { log(`OCO: ${sym} failed to cancel orphan target #${pos.targetOrderId}: ${e}`); }
+          pos.targetOrderId = null;
+        } else if (isFilled(pos.targetOrderId, pos.contractId) && isResting(pos.stopOrderId, pos.contractId)) {
+          try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); log(`OCO: ${sym} target filled → cancelled orphan stop #${pos.stopOrderId}`); } catch (e) { log(`OCO: ${sym} failed to cancel orphan stop #${pos.stopOrderId}: ${e}`); }
+          pos.stopOrderId = null;
+        }
+      }
+    }
+
     // Step 1: Remove engine positions that no longer exist on Tradovate
     for (const [sym, pos] of [...positions]) {
       if (tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0)) {
