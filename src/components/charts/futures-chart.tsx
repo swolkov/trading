@@ -524,10 +524,11 @@ export function FuturesChart({ symbol, height = 500 }: FuturesChartProps) {
     loadBars(false);
   }, [loadBars]);
 
-  // Auto-refresh: poll for new bars every 15s when live
+  // Auto-refresh: poll every 5s when live so the price follows the real-time Databento tick closely
+  // (each poll re-appends the sidecar's live mid; closed bars stay 120s-cached, so this is cheap).
   useEffect(() => {
     if (!isLive) return;
-    const interval = setInterval(() => loadBars(true), 15000);
+    const interval = setInterval(() => loadBars(true), 5000);
     return () => clearInterval(interval);
   }, [isLive, loadBars]);
 

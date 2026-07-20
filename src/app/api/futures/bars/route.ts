@@ -108,8 +108,10 @@ export async function GET(request: Request) {
           openingRangeHigh: orHigh,
           openingRangeLow: orLow,
         },
-        // Honest meta so the UI can tell the truth (provider/env/freshness). Databento not yet wired into
-        // this path — bars still come from Tradovate→Yahoo (see DATABENTO-MIGRATION.md, Phase 1).
+        // Honest meta (provider/env/freshness). Databento IS the primary source here: 1s/1m are
+        // Databento-only; 5m/15m/1h fall back to Tradovate→Yahoo only when Databento returns empty
+        // (weekends/off-hours). The latest bar is extended with the sidecar's real-time live tick
+        // (appendLiveTick) — the SAME feed both engines trade on.
         meta: { viewMode, provider, count: bars.length, lastBarTs: bars.length && typeof bars[bars.length - 1].t === "number" ? (bars[bars.length - 1].t as number) : null },
       });
     }
