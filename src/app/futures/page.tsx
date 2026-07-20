@@ -8,8 +8,6 @@ import { Button } from "@/components/ui/button";
 import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
 import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
-import { VetoScoreboard } from "@/components/futures/veto-scoreboard";
-import { MgcScorecard } from "@/components/futures/mgc-scorecard";
 import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -193,7 +191,7 @@ const DEMO_RISK_RULES = [
   "ALL SESSIONS: 24/5 learning (Sun 6PM–Fri 5PM ET)",
   "$7,500 daily loss limit (15% of $50K)",
   "20 trades/day base, 40 with A+ override",
-  "AI grader OFF — raw setups (paper test bed only)",
+  "Deterministic edge gate — only validated setups trade (paper test bed)",
   "Tilt: pause after 2 stops",
   "Brain learns from every trade — vault syncs",
   "25% drawdown kill ($12,500) → lockdown",
@@ -205,7 +203,7 @@ const LIVE_RISK_RULES = [
   "Broker stop-loss on every trade — defined risk",
   "8% daily-loss halt — stops trading on a bad day",
   "25% drawdown kill switch — halts & reassess",
-  "AI grader OFF — trades the raw validated edges",
+  "Deterministic edge gate — only validated setups trade (no per-trade AI veto)",
 ];
 
 // ── Helpers ────────────────────────────────────────────
@@ -664,8 +662,6 @@ export default function FuturesPage() {
                 </CardContent>
               </Card>
               {isLiveView && <EdgeScoreboard />}
-              {isLiveView && <MgcScorecard />}
-              <VetoScoreboard mode={isLiveView ? "live" : "demo"} />
               <EngineActivity mode={isLiveView ? "live" : "demo"} />
             </div>
           )}
@@ -683,7 +679,7 @@ export default function FuturesPage() {
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
-                  Live trades the <b>validated micro edges</b> — gold RSI-bounce (MGC, long + short) and index overbought-short (MNQ/MES) — 1 contract per trade at ~1–2% risk, broker stop on every trade, AI grader OFF. Index trend-long is coded but off pending live validation. Demo P&L is research, not proof.
+                  Live trades the <b>validated micro edges</b> — gold RSI-bounce (MGC, long + short) and index overbought-short (MNQ/MES) — 1 contract per trade at ~1–2% risk, broker stop on every trade. Index trend-long is coded but off pending live validation. Demo P&L is research, not proof.
                 </div>
                 <div className="space-y-2">
                   {STRATEGIES.map((s) => (
