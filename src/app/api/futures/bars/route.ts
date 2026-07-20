@@ -68,7 +68,10 @@ export async function GET(request: Request) {
       const range = interval === "1h" ? "5d" : "1d";
       // PRIMARY: Databento. 1s/1m are Databento-only; 5m/15m/1h fall back to Tradovate→Yahoo if empty.
       let provider = "databento";
-      let bars = await cachedBars(`dbn|${symbol}|${interval}|${range}`, 120, () => getDatabentoIntradayBars(symbol, interval as "1s" | "1m" | "5m" | "15m" | "1h", range as "1d" | "5d"));
+      // Fast intervals need a SHORT cache so recent 1s/1m bars stay fresh (else the chart shows gaps
+      // between the cached history and the live-tick bar). 5m+ can cache longer — closed bars don't change.
+      const cacheTtl = interval === "1s" ? 8 : interval === "1m" ? 30 : 120;
+      let bars = await cachedBars(`dbn|${symbol}|${interval}|${range}`, cacheTtl, () => getDatabentoIntradayBars(symbol, interval as "1s" | "1m" | "5m" | "15m" | "1h", range as "1d" | "5d"));
       if ((!bars || bars.length === 0) && (interval === "5m" || interval === "15m" || interval === "1h")) {
         provider = "tradovate-yahoo";
         bars = await getFuturesIntradayBars(symbol, interval, range as "1d" | "5d", viewMode);
