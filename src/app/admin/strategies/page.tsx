@@ -5,7 +5,10 @@ import Link from "next/link";
 import { Brain, ArrowRight, Activity, Eye, PowerOff, Info } from "lucide-react";
 import { StrategyRowCompact } from "./strategy-row-compact";
 import { AccountsPanel } from "./accounts-panel";
-import { getEdgePerformance } from "@/lib/edge-performance";
+import { getEdgePerformance, getRealtimeEdgePerformance, type RealtimeEdgePerf } from "@/lib/edge-performance";
+import { REALTIME_EDGES, isEdgeEnabled } from "@/lib/realtime-edges";
+import { prisma } from "@/lib/db";
+import { EdgeControlBoard, type EdgeVM } from "./edge-control-board";
 
 export const dynamic = "force-dynamic";
 
@@ -110,6 +113,26 @@ function tierPill(tier: 1 | 2 | 3) {
 
 export default async function StrategiesAdminPage() {
   const edgePerf = await getEdgePerformance().catch(() => null);
+
+  // Realtime-engine edge control board: current per-engine switch state + demo/live results per edge.
+  const [flagRows, livePerf, demoPerf] = await Promise.all([
+    prisma.agentConfig.findMany({ where: { key: { startsWith: "edge_" } } }).catch(() => [] as { key: string; value: string }[]),
+    getRealtimeEdgePerformance("live").catch(() => ({}) as Record<string, RealtimeEdgePerf>),
+    getRealtimeEdgePerformance("demo").catch(() => ({}) as Record<string, RealtimeEdgePerf>),
+  ]);
+  const flagCfg: Record<string, string | undefined> = {};
+  for (const r of flagRows) flagCfg[r.key] = r.value;
+  const edgeControlVMs: EdgeVM[] = REALTIME_EDGES.map((e) => ({
+    key: e.key,
+    name: e.name,
+    blurb: e.blurb,
+    evidence: e.evidence,
+    symbolClass: e.symbolClass,
+    demoEnabled: isEdgeEnabled(e.key, "demo", flagCfg),
+    liveEnabled: isEdgeEnabled(e.key, "live", flagCfg),
+    demoPerf: demoPerf[e.key] ?? null,
+    livePerf: livePerf[e.key] ?? null,
+  }));
   const observationByClass = new Map<string, string[]>();
   for (const sym of STRATEGY_REGISTRY_ONLY_SYMBOLS) {
     const hasStrategy = STRATEGIES.some((s) => s.applicableSymbols.includes(sym));
@@ -178,6 +201,9 @@ export default async function StrategiesAdminPage() {
           </div>
         </div>
       )}
+
+      {/* Realtime-engine edge switches — the demo→live promotion control board */}
+      <EdgeControlBoard edges={edgeControlVMs} />
 
       {/* Accounts + master mode panel */}
       <AccountsPanel />

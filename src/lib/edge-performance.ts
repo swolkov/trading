@@ -76,3 +76,69 @@ export async function getEdgePerformance(): Promise<{ since: string; edges: Edge
 
   return { since: since.toISOString(), totalNet: edges.reduce((s, e) => s + e.net, 0), totalTrades: edges.reduce((s, e) => s + e.trades, 0), edges };
 }
+
+// Per-REGISTRY-EDGE realized performance for a given engine (demo or live), keyed by the
+// realtime-edges.ts keys so the strategy control board can show each edge's demo vs live results
+// side by side. Live reads live_* rows on the micros (MGC/MNQ/MES); demo reads futures_* rows on the
+// full-size contracts (GC/NQ/ES). Same entry→exit pairing (attaches direction, sidesteps double-logs).
+export interface RealtimeEdgePerf {
+  key: string;
+  net: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  lastTs: string | null;
+}
+
+export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise<Record<string, RealtimeEdgePerf>> {
+  const prefix = mode === "live" ? "live" : "futures";
+  const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
+  const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const allSyms = [...goldSyms, ...indexSyms];
+
+  const sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
+  const since = sinceRow?.value ? new Date(sinceRow.value) : new Date(0);
+  const dir = (action: string): "long" | "short" | null =>
+    action === `${prefix}_long` ? "long" : action === `${prefix}_short` ? "short" : null;
+
+  const rows = await prisma.autoTradeLog.findMany({
+    where: { symbol: { in: allSyms }, action: { startsWith: `${prefix}_` }, createdAt: { gte: since } },
+    orderBy: { createdAt: "asc" },
+    take: 2000,
+  });
+
+  const openDir: Record<string, "long" | "short" | null> = {};
+  type Close = { ts: Date; sym: string; dir: "long" | "short"; pnl: number };
+  const closes: Close[] = [];
+  for (const r of rows) {
+    const d = dir(r.action);
+    if (d) { openDir[r.symbol] = d; continue; }
+    if (r.pnl == null) continue;
+    const od = openDir[r.symbol];
+    if (!od) continue;
+    closes.push({ ts: r.createdAt, sym: r.symbol, dir: od, pnl: r.pnl });
+    openDir[r.symbol] = null;
+  }
+
+  const isGold = (s: string) => goldSyms.includes(s);
+  const isIndex = (s: string) => indexSyms.includes(s);
+  const bucket = (c: Close): string | null =>
+    isGold(c.sym) ? "gold_rsi_bounce"
+    : isIndex(c.sym) && c.dir === "short" ? "index_overbought_short"
+    : isIndex(c.sym) && c.dir === "long" ? "index_trend_long"
+    : null;
+
+  const out: Record<string, RealtimeEdgePerf> = {};
+  const ensure = (k: string) => (out[k] ??= { key: k, net: 0, trades: 0, wins: 0, losses: 0, winRate: 0, lastTs: null });
+  for (const c of closes) {
+    const k = bucket(c);
+    if (!k) continue;
+    const e = ensure(k);
+    e.net += c.pnl; e.trades++;
+    if (c.pnl > 0) e.wins++; else if (c.pnl < 0) e.losses++;
+    e.lastTs = c.ts.toISOString();
+  }
+  for (const k of Object.keys(out)) out[k].winRate = out[k].trades ? out[k].wins / out[k].trades : 0;
+  return out;
+}

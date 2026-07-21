@@ -11,6 +11,7 @@ import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, 
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 import { getPlanContextForGrading } from "../lib/advisor";
+import { matchEdge, isEdgeEnabled, allEdgeFlagKeys } from "../lib/realtime-edges";
 
 
 // ── Config ──────────────────────────────────────────────
@@ -817,6 +818,9 @@ let databentoMdEnabled = false;   // flipped via DB config (no engine restart ne
 let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
 let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
 let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuation LONG on NQ/ES micros, regime-filtered price>200-EMA (4.5-yr backtest PF 1.22, +both halves). Reversible via DB key index_trend_long_enabled="false".
+// Per-edge on/off switches for THIS engine (demo/live), loaded from DB each config cycle. Absent flag →
+// registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
+let edgeFlags: Record<string, string | undefined> = {};
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
   if (!databentoMdEnabled) return new Map();
@@ -1267,6 +1271,7 @@ async function loadRiskConfig() {
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
       `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
       "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
+      ...allEdgeFlagKeys(),         // per-edge, per-engine on/off switches (edge_<key>_<demo|live>) — the strategy control board writes these
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
@@ -1298,7 +1303,16 @@ async function loadRiskConfig() {
     // Set live_futures_ai_grader="false" in DB to disable; default true preserves the original
     // real-money safety. Demo uses futures_ai_grader.
     aiVetoEnabled = cfg[`${kp}_ai_grader`] !== "false";
-    indexTrendLongEnabled = cfg["index_trend_long_enabled"] !== "false"; // global (both modes); default on, flip to "false" to disable instantly
+    indexTrendLongEnabled = cfg["index_trend_long_enabled"] !== "false"; // legacy global off-switch (kept as a backstop; see edge switches below)
+    // Per-edge switches for the registry gate. Copy the queried flags into edgeFlags. Back-compat: if
+    // the legacy index_trend_long_enabled="false" is set but no new switch exists, honour the legacy OFF
+    // so the trend-long edge can't silently turn back on for this engine.
+    edgeFlags = {};
+    for (const k of allEdgeFlagKeys()) edgeFlags[k] = cfg[k];
+    if (cfg["index_trend_long_enabled"] === "false") {
+      const md = IS_LIVE ? "live" : "demo";
+      if (edgeFlags[`edge_index_trend_long_${md}`] === undefined) edgeFlags[`edge_index_trend_long_${md}`] = "false";
+    }
     updateTradingSymbols();
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
   } catch (err) {
@@ -3207,41 +3221,25 @@ async function evaluateAndTrade(
     }
   } catch { /* pattern memory is optional — fail open on read errors */ }
 
-  // EDGE FOCUS (Jun 26): only trade what holds OUT-OF-SAMPLE (12k-trade walk-forward backtest).
-  // GOLD (METALS) RSI-bounce is the durable edge → trade it fully. INDEX (NQ/ES/MNQ/MES) only has OOS
-  // edge on the overbought-short fade (RSI≥80 short, PF 1.4-1.8 OOS); index longs + all other index
-  // setups LOSE out-of-sample. So on index symbols take ONLY the extreme-RSI-bounce SHORT at RSI≥80 and
-  // skip everything else — that's "only stop the losers" grounded in data, not a filter that can't exist.
-  // The auto-prune gate above + pattern memory keep learning ON TOP of this baseline.
-  if (METALS.has(sym)) {
-    // GOLD: only the validated RSI-bounce edge (backtest PF 1.24 OOS / live PF 1.52 over 60d). EVERY other
-    // gold setup (trend_continuation, vwap_bounce, gap_fill, …) loses out-of-sample — trend_continuation is
-    // exactly what bled the live account ~−$242 since Jul 3 (e.g. the −$122 pullback long on Jul 7). Restrict
-    // gold to the one edge that actually holds. (Previously gold "traded fully" — the source of the losses.)
-    if (setupType !== "extreme_rsi_bounce") {
-      log(`  ${sym}: SKIP — gold trades ONLY the RSI-bounce edge (got ${setupType})`);
-      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `gold trades RSI-bounce edge only — skipped ${setupType}`, ...shadowGeometry(direction, price, stopDist, targetDist) });
-      return;
-    }
-  } else {
-    // INDEX validated edges (data-driven, only what holds OUT-OF-SAMPLE):
-    //  (1) extreme_rsi_bounce SHORT at RSI≥80 — the overbought fade (original OOS edge, PF 1.4-1.8).
-    //  (2) trend_continuation LONG on NQ/ES micros — buy EMA9 pullbacks ONLY in a confirmed uptrend (price >
-    //      200-EMA, enforced in setup detection). Validated on a 4.5-yr Databento backtest incl. the 2022 BEAR
-    //      (88k 5-min bars/symbol, real micro fills + commission): filtered long PF 1.22 pooled, positive in
-    //      BOTH train (1.15) AND test (1.31) halves; NQ 1.24 / ES 1.18. The SAME long BELOW the 200-EMA loses
-    //      (PF 0.55 OOS) — the regime filter IS the edge. Reversible via index_trend_long_enabled="false"; auto-prune + stops backstop it.
-    const isOverboughtShort = setupType === "extreme_rsi_bounce" && direction === "short" && rsiVal >= 80;
-    const isTrendLong = indexTrendLongEnabled && setupType === "trend_continuation" && direction === "long" && INDEX_LONG_SYMS.has(sym);
-    const isValidatedIndexEdge = isOverboughtShort || isTrendLong;
-    if (!isValidatedIndexEdge) {
-      log(`  ${sym}: SKIP — index trades only RSI≥80 overbought-short + NQ trend-long (got ${setupType}/${direction}/RSI ${rsiVal.toFixed(0)})`);
-      // Record the rejection so index scanning is VISIBLE in Engine Activity + the shadow scoreboard,
-      // symmetric with the gold branch above. Without this, MNQ/MES were being scanned but their
-      // rejected setups were silently dropped — making it look like the engine wasn't watching them.
-      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `index trades RSI≥80 overbought-short + NQ trend-long only — skipped ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
-      return;
-    }
+  // EDGE GATE (registry-driven, per-engine switch). The set of tradable edges lives in
+  // ../lib/realtime-edges.ts; each edge has an independent on/off switch for demo and live. Only
+  // an edge that BOTH matches this setup AND is switched ON for this engine may trade. This
+  // reproduces the previous hardcoded allow-list exactly when no switch is set (current edges
+  // default ON for both engines), and lets a NEW edge run on demo while staying OFF on live until
+  // it's deliberately promoted. Default-DENY: a setup matching no registered edge is skipped, and
+  // the AI grader + auto-prune + stops keep learning/backstopping ON TOP of this baseline.
+  const matchedEdge = matchEdge({ sym, setupType, direction: direction as "long" | "short", rsi: rsiVal });
+  if (!matchedEdge) {
+    log(`  ${sym}: SKIP — no registered edge for ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`);
+    recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `no registered edge for ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+    return;
+  }
+  if (!isEdgeEnabled(matchedEdge.key, ENGINE_MODE, edgeFlags)) {
+    log(`  ${sym}: SKIP — edge "${matchedEdge.name}" is switched OFF for ${MODE_TAG}`);
+    recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `edge "${matchedEdge.name}" disabled for ${ENGINE_MODE}`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+    return;
+  }
+  if (matchedEdge.symbolClass === "index") {
     // CORRELATION GUARD (same-cycle): reserve the single index slot synchronously so a 2nd correlated
     // index firing the SAME bar can't double the position. Check-and-set is atomic (no await between),
     // so whichever index commits first wins and the other aborts — regardless of async interleaving.
