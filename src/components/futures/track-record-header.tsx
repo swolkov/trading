@@ -4,7 +4,7 @@ import useSWR from "swr";
 
 interface Edge { name: string; net: number; trades: number; wins: number; losses: number; winRate: number }
 interface Board { since: string; totalNet: number; totalTrades: number; edges: Edge[] }
-interface Acct { account?: { netLiq?: number } }
+interface LiveFuturesPnl { ok: boolean; netPnl: number; currentBalance: number; roundTrips: number; winRate: number }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toFixed(0)}`;
@@ -14,14 +14,15 @@ const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toFixed(0)}`
 // to investors. Honest by construction — the live numbers are whatever they actually are.
 export function TrackRecordHeader() {
   const { data: board } = useSWR<Board>("/api/futures/edge-scoreboard", fetcher, { refreshInterval: 30000 });
-  const { data: pos } = useSWR<Acct>("/api/futures/positions?mode=live", fetcher, { refreshInterval: 30000 });
+  // Balance-based live P&L (broker delta) — the single source of truth for BOTH the headline P&L and the
+  // live-capital figure, not the per-edge trade sum on the scoreboard. Trade count + win rate come from
+  // paired round-trips. One source = the header can't disagree with itself or the rest of the app.
+  const { data: lfp } = useSWR<LiveFuturesPnl>("/api/futures/live-pnl", fetcher, { refreshInterval: 30000 });
 
   const inception = board?.since ? new Date(board.since) : null;
-  const capital = pos?.account?.netLiq ?? null;
-  const net = board?.totalNet ?? 0;
-  const resolved = (board?.edges || []).reduce((s, e) => s + e.wins + e.losses, 0);
-  const wins = (board?.edges || []).reduce((s, e) => s + e.wins, 0);
-  const winRate = resolved > 0 ? Math.round((wins / resolved) * 100) : null;
+  const capital = lfp?.ok ? lfp.currentBalance : null;
+  const net = lfp?.ok ? lfp.netPnl : null;
+  const winRate = lfp?.ok && lfp.roundTrips > 0 ? Math.round(lfp.winRate * 100) : null;
 
   return (
     <div className="rounded-xl border border-border bg-gradient-to-b from-white/[0.03] to-transparent p-5 space-y-4">
@@ -38,8 +39,8 @@ export function TrackRecordHeader() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat label="Inception" value={inception ? inception.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "—"} />
           <Stat label="Live capital" value={capital != null ? `$${Math.round(capital).toLocaleString()}` : "—"} />
-          <Stat label="Net P&L (live)" value={board ? money(net) : "—"} cls={net > 0 ? "text-emerald-400" : net < 0 ? "text-red-400" : ""} />
-          <Stat label="Trades · win rate" value={board ? `${board.totalTrades} · ${winRate != null ? winRate + "%" : "—"}` : "—"} />
+          <Stat label="Net P&L (live)" value={net != null ? money(net) : "—"} cls={net != null && net > 0 ? "text-emerald-400" : net != null && net < 0 ? "text-red-400" : ""} />
+          <Stat label="Trades · win rate" value={lfp?.ok ? `${lfp.roundTrips} · ${winRate != null ? winRate + "%" : "—"}` : "—"} />
         </div>
       </div>
 

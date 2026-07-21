@@ -13,7 +13,7 @@ function Badge({ text, tone }: { text: string; tone: "live" | "off" | "warn" }) 
   return <span className={`text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${cls}`}>{text}</span>;
 }
 
-// Command-center strip: the 3 live engines at a glance + a true portfolio total across accounts.
+// Command-center strip: the 2 engines at a glance + a true portfolio total across accounts.
 export function PillarsStrip() {
   const { data: fut } = useSWR("/api/futures/positions", fetcher, { refreshInterval: 30000 });
   const { data: krk } = useSWR("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
@@ -25,8 +25,11 @@ export function PillarsStrip() {
   const krkOn = krk?.enabled && krk?.connected;
   const krkValidate = krk?.validateOnly;
 
+  // Derive the futures mode label from the view the positions API is reporting (don't hardcode "live").
+  const futLive = fut?.viewMode === "live";
+
   const cards = [
-    { name: "Futures", href: "/futures", broker: "Tradovate gold", value: fmt(futVal), badge: <Badge text="live" tone="live" />, sub: `${fut?.positions?.length ?? 0} open` },
+    { name: "Futures", href: "/futures", broker: "Tradovate micros", value: fmt(futVal), badge: <Badge text={futLive ? "live" : "demo"} tone={futLive ? "live" : "off"} />, sub: `${fut?.positions?.length ?? 0} open` },
     { name: "Kraken", href: "/kraken", broker: "BTC/ETH trend", value: fmt(krkVal), badge: <Badge text={!krk?.connected ? "n/c" : krkValidate ? "validate" : krkOn ? "live" : "off"} tone={!krk?.connected ? "off" : krkValidate ? "warn" : krkOn ? "live" : "off"} />, sub: krk?.holdings?.length ? `${krk.holdings.length} held` : "flat" },
   ];
 

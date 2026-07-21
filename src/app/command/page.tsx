@@ -783,6 +783,9 @@ export default function CommandCenterPage() {
         <Card className="border-zinc-800">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-bold">P&L Attribution</CardTitle>
+            <p className="text-[9px] text-muted-foreground/50" title="Sum of strategy trade-log rows across demo+live — a relative comparison of where signal came from, NOT the real account balance. For real money see the dashboard / Orders / Track Record.">
+              Relative strategy signal — not account P&L
+            </p>
           </CardHeader>
           <CardContent className="space-y-3">
             {data?.pnlAttribution ? (
@@ -855,6 +858,9 @@ export default function CommandCenterPage() {
                 {runningAgent === "wf" ? "..." : "Analyze"}
               </Button>
             </div>
+            <p className="text-[9px] text-muted-foreground/50" title="Recent P&L here is a sum of strategy trade-log rows (demo+live) — a relative health signal, NOT the real account balance. For real money see the dashboard / Orders / Track Record.">
+              Recent P&L = relative strategy signal — not account P&L
+            </p>
           </CardHeader>
           <CardContent className="space-y-3">
             {data?.walkForward ? (

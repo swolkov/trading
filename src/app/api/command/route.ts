@@ -1,4 +1,9 @@
 import { prisma } from "@/lib/db";
+import { getViewMode } from "@/lib/trading-mode";
+
+// View-aware (emits only the active engine's heartbeat) + reads live DB state every call — must never
+// be statically cached, or a demo→live toggle could keep showing the wrong engine.
+export const dynamic = "force-dynamic";
 
 // ============ COMMAND CENTER API ============
 // Aggregates all meta-agent data into a single response for the Command Center UI.
@@ -10,6 +15,10 @@ export async function GET() {
     const configs = await prisma.agentConfig.findMany();
     const configMap: Record<string, string> = {};
     for (const c of configs) configMap[c.key] = c.value;
+
+    // Engine health is view-aware: only surface the futures engine matching the active view
+    // (live view → live engine, demo view → demo engine). Shared infra crons stay in both views.
+    const futuresView = await getViewMode("futures").catch(() => "demo");
 
     // Recent agent runs (last 24h) for all meta-agents
     const recentRuns = await prisma.agentRun.findMany({
@@ -55,11 +64,12 @@ export async function GET() {
       preferredStrategies: parseJSON("regime_preferred_strategies") || [],
       avoidStrategies: parseJSON("regime_avoid_strategies") || [],
 
-      // Agent heartbeats
+      // Agent heartbeats — engine heartbeat is view-scoped (only the active view's engine); crons are shared.
       heartbeats: {
         watchdog: configMap.watchdog_last_run || null,
-        futuresEngineDemo: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat_demo || "{}").timestamp || null; } catch { return null; } })(),
-        futuresEngineLive: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat_live || "{}").timestamp || null; } catch { return null; } })(),
+        ...(futuresView === "live"
+          ? { futuresEngineLive: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat_live || "{}").timestamp || null; } catch { return null; } })() }
+          : { futuresEngineDemo: (() => { try { return JSON.parse(configMap.futures_engine_heartbeat_demo || "{}").timestamp || null; } catch { return null; } })() }),
         futuresCron: configMap.futures_cron_last_run || null,
         tradeCron: configMap.trade_last_run || null,
         monitorCron: configMap.monitor_last_run || null,

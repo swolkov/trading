@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { getLiveFuturesPnl } from "@/lib/live-pnl";
 
 // Unified lifetime order/trade log across ALL live systems — Futures (demo + live) and Kraken.
 // One place to see everything, categorized. Read-only. Retired Alpaca + Meme Lab are intentionally excluded.
@@ -17,13 +18,15 @@ interface UnifiedOrder {
 
 export async function GET() {
   try {
-    const [futRows, krkRows] = await Promise.all([
+    const [futRows, krkRows, liveFuturesPnl] = await Promise.all([
       // Futures — both modes (live_ = live, futures_ = demo). shadow_ rows are retagged duplicates → excluded.
       prisma.autoTradeLog.findMany({
         where: { symbol: { startsWith: "FUT:" }, OR: [{ action: { startsWith: "live_" } }, { action: { startsWith: "futures_" } }] },
         orderBy: { createdAt: "desc" }, take: 800,
       }),
       prisma.autoTradeLog.findMany({ where: { symbol: { startsWith: "KRK:" } }, orderBy: { createdAt: "desc" }, take: 300 }),
+      // Balance-based live-futures P&L (single source of truth — NOT a sum of the row log above).
+      getLiveFuturesPnl().catch(() => null),
     ]);
 
     const futures: UnifiedOrder[] = futRows
@@ -58,6 +61,8 @@ export async function GET() {
     const sum = (arr: UnifiedOrder[]) => arr.reduce((s, o) => s + (o.pnl ?? 0), 0);
     return Response.json({
       orders,
+      // Balance-based live-futures P&L (broker delta, incident excluded). Callers should show "—" when ok===false.
+      liveFuturesPnl,
       summary: {
         total: orders.length,
         futures: { count: futures.length, pnl: sum(futures) },
