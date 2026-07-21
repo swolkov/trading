@@ -1,12 +1,20 @@
 import { prisma } from "./db";
-import { getAccount, getPositions, getOptionsSnapshots, type Position } from "./alpaca";
 import { sendNotification } from "./notifications";
 import { getHistoricalBars } from "./yahoo";
 
 // ============ PORTFOLIO RISK AGENT ============
-// Unified cross-asset risk view across Alpaca (equities/options) + Tradovate (futures).
+// Cross-asset risk view for Tradovate (futures). Equities/options legs are
+// retired (brokerage integration removed) — those position sets are always empty.
 // Monitors: sector concentration, Greeks exposure, VaR, drawdown, correlation.
 // Fires alerts when risk limits are breached.
+
+// Minimal position shape retained after the equities brokerage was removed.
+interface Position {
+  symbol: string;
+  qty: string;
+  market_value: string;
+  asset_class?: string;
+}
 
 export interface PortfolioGreeks {
   totalDelta: number;
@@ -100,47 +108,24 @@ export async function runPortfolioRiskCheck(): Promise<PortfolioRiskSnapshot> {
   const startTime = Date.now();
   const alerts: RiskAlert[] = [];
 
-  // === FETCH ALL DATA IN PARALLEL ===
-  const [account, positions, spyBars] = await Promise.all([
-    getAccount(),
-    getPositions(),
-    getHistoricalBars("SPY", 60).catch(() => []),
-  ]);
+  // === FETCH DATA ===
+  // Equities brokerage removed — no account/equity/options positions remain.
+  // Risk is derived from Tradovate futures + SPY reference bars only.
+  const spyBars = await getHistoricalBars("SPY", 60).catch(() => []);
+  const positions: Position[] = [];
 
-  const equity = parseFloat(account.equity);
-  const cash = parseFloat(account.cash);
-  const lastEquity = parseFloat(account.last_equity);
-  const dayPnl = equity - lastEquity;
-  const dayPnlPct = lastEquity > 0 ? (dayPnl / lastEquity) * 100 : 0;
-  const cashPct = equity > 0 ? (cash / equity) * 100 : 0;
+  const equity = 0;
+  const cash = 0;
+  const dayPnl = 0;
+  const dayPnlPct = 0;
+  const cashPct = 0;
 
   // === CLASSIFY POSITIONS ===
   const equityPositions = positions.filter((p) => p.symbol.length <= 10 && p.asset_class === "us_equity");
   const optionsPositions = positions.filter((p) => p.symbol.length > 10);
 
-  // === FETCH OPTIONS GREEKS ===
-  let greeks: PortfolioGreeks = { totalDelta: 0, totalGamma: 0, totalTheta: 0, totalVega: 0, betaWeightedDelta: 0 };
-
-  if (optionsPositions.length > 0) {
-    try {
-      const optSymbols = optionsPositions.map((p) => p.symbol);
-      const snapshots = await getOptionsSnapshots(optSymbols);
-
-      for (const pos of optionsPositions) {
-        const snap = snapshots[pos.symbol];
-        if (!snap?.greeks) continue;
-        const qty = parseInt(pos.qty);
-        const multiplier = 100; // options multiplier
-
-        greeks.totalDelta += (snap.greeks.delta || 0) * qty * multiplier;
-        greeks.totalGamma += (snap.greeks.gamma || 0) * qty * multiplier;
-        greeks.totalTheta += (snap.greeks.theta || 0) * qty * multiplier;
-        greeks.totalVega += (snap.greeks.vega || 0) * qty * multiplier;
-      }
-    } catch {
-      // Options greeks unavailable — continue with zeros
-    }
-  }
+  // === GREEKS (futures-derived only) ===
+  const greeks: PortfolioGreeks = { totalDelta: 0, totalGamma: 0, totalTheta: 0, totalVega: 0, betaWeightedDelta: 0 };
 
   // Add equity position deltas (delta = 1 per share)
   for (const pos of equityPositions) {

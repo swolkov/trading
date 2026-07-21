@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Esbueno Trades — Multi-Asset Trading Dashboard",
-  description: "Unified multi-asset dashboard — Alpaca stocks/options + Tradovate futures with AI-powered trading agents",
+  description: "Unified multi-asset dashboard — Tradovate futures + Kraken with AI-powered trading agents",
 };
 
 export default function RootLayout({

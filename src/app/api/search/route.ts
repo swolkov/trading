@@ -1,14 +1,14 @@
-import { searchAssets } from "@/lib/alpaca";
-
+// Symbol search — the equities brokerage asset directory was removed.
+// Returns the typed query as a single uppercased candidate so the autocomplete
+// box (research/backtest/AI/watchlist pages) keeps working without a live feed.
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const q = searchParams.get("q") || "";
+    const q = (searchParams.get("q") || "").trim().toUpperCase();
     if (q.length < 1) {
       return Response.json([]);
     }
-    const assets = await searchAssets(q);
-    return Response.json(assets);
+    return Response.json([{ symbol: q, name: q }]);
   } catch (error) {
     console.error("[/api/search]", error);
     return Response.json(

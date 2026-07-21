@@ -60,36 +60,6 @@ const LEGACY_STRATEGIES: LegacyStrategy[] = [
     codeFile: "scripts/spread-track.ts",
     capitalRequirement: "$100K+",
   },
-  {
-    name: "Stocks swing (Alpaca daily)",
-    setupTypes: ["AI grader signal", "Watchlist screen", "Earnings/catalyst"],
-    symbols: ["watchlist"],
-    assetClass: "stocks",
-    tier: 3,
-    status: "untested",
-    description: "Daily swing trades from /watchlist + /research scoring. 30-day paper test at $1K. No edge yet — sample too small.",
-    codeFile: "auto-trader.ts",
-  },
-  {
-    name: "Crypto spot 24/7 (Alpaca)",
-    setupTypes: ["Long-only mean reversion", "Watchlist signals"],
-    symbols: ["BTCUSD", "ETHUSD"],
-    assetClass: "crypto_spot",
-    tier: 3,
-    status: "untested",
-    description: "24/7 spot via Alpaca. No margin, no expiry. Fractional sizing. Observation-only — no validated strategy yet.",
-    codeFile: "auto-trader.ts",
-  },
-  {
-    name: "Wheel (covered calls + cash-secured puts)",
-    setupTypes: ["CSP entry", "Assignment → CC roll"],
-    symbols: ["disabled"],
-    assetClass: "options",
-    tier: 3,
-    status: "disabled",
-    description: "Wheel strategy. DISABLED per project memory. Re-enable only after account scales.",
-    codeFile: "wheel/page.tsx",
-  },
 ];
 
 function statusPill(s: StatusTag) {

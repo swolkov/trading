@@ -1,4 +1,3 @@
-import { getTopMovers, getMostActives, getNews } from "@/lib/alpaca";
 import { getHistoricalBars } from "@/lib/yahoo";
 import { generateMacroBriefing } from "@/lib/macro-briefing";
 import { detectMarketRegime } from "@/lib/market-regime";
@@ -77,27 +76,9 @@ ${briefing.tradingRules.map((r: string) => `- ${r}`).join("\n")}
       details.push("MACRO: Unable to generate");
     }
 
-    // 3. Overnight news for focus symbols
-    let newsHighlights: string[] = [];
-    try {
-      const focusConfig = await prisma.agentConfig.findUnique({ where: { key: "focus_symbols" } });
-      const focusSymbols = focusConfig?.value?.split(",").map((s) => s.trim()).filter(Boolean) || [];
-
-      if (focusSymbols.length > 0) {
-        const news = await getNews(focusSymbols.slice(0, 10), 10);
-        const overnight = news.filter((n) => {
-          const newsTime = new Date(n.created_at);
-          const hoursSince = (Date.now() - newsTime.getTime()) / (1000 * 60 * 60);
-          return hoursSince <= 16; // last 16 hours (since previous close)
-        });
-
-        for (const n of overnight.slice(0, 5)) {
-          const headline = `${n.symbols?.join(", ") || "?"}: ${n.headline}`;
-          newsHighlights.push(headline);
-          details.push(`NEWS: ${headline}`);
-        }
-      }
-    } catch { /* ignore */ }
+    // 3. Overnight news for focus symbols — news feed retired with the equities
+    // brokerage. Briefing now relies on regime + macro + futures-gap context.
+    const newsHighlights: string[] = [];
 
     // 4. Sector scan
     let sectorInsights: string[] = [];

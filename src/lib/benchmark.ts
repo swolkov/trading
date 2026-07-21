@@ -1,5 +1,4 @@
 import { prisma } from "./db";
-import { getPortfolioHistory } from "./alpaca";
 import { getHistoricalBars } from "./yahoo";
 
 // ============ BENCHMARK TRACKING ============
@@ -83,8 +82,8 @@ function calcBeta(portfolioReturns: number[], benchmarkReturns: number[]): numbe
 export async function generateBenchmarkReport(
   period: "1W" | "1M" | "3M" | "6M" | "1Y" = "1M"
 ): Promise<BenchmarkComparison> {
-  // Fetch portfolio equity history
-  const portfolioHistory = await getPortfolioHistory(period, "1D");
+  // Equities brokerage removed — no portfolio equity history to compare.
+  const portfolioHistory: { equity: number[]; timestamp: number[] } = { equity: [], timestamp: [] };
 
   // Fetch SPY bars for same period
   const barCount = period === "1W" ? 7 : period === "1M" ? 30 : period === "3M" ? 90 : period === "6M" ? 180 : 365;

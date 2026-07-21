@@ -1,11 +1,10 @@
 import { prisma } from "./db";
 
-export type NotifyChannel = "futures" | "futures_demo" | "options" | "kraken" | "general";
+export type NotifyChannel = "futures" | "futures_demo" | "kraken" | "general";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
   futures_demo: "webhook_futures_demo",
-  options: "webhook_options",
   kraken: "webhook_kraken",
   general: "webhook_general",
 };

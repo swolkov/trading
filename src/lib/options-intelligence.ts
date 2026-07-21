@@ -1,7 +1,18 @@
 import { getHistoricalBars } from "./yahoo";
-import { getOptionsChain, getOptionsSnapshots, type OptionsContract } from "./alpaca";
 
 // ============ IV RANK & VOLATILITY ANALYSIS ============
+// NOTE: the options-chain/snapshot brokerage feed was removed. Live IV, unusual
+// activity and expected-move calculations that need an options chain now return
+// no data; HV-based analysis (from Yahoo price history) still works.
+
+// Minimal contract shape retained after the options brokerage feed was removed.
+interface OptionsContract {
+  symbol: string;
+  strike_price: string;
+  expiration_date: string;
+  type: "call" | "put";
+  open_interest?: string;
+}
 
 export interface VolatilityAnalysis {
   symbol: string;
@@ -32,34 +43,9 @@ export async function analyzeVolatility(symbol: string): Promise<VolatilityAnaly
   const hv20 = calcHV(closes, 20);
   const hv60 = calcHV(closes, 60);
 
-  // Calculate IV Rank: get current IV from options, compare to HV range over last year
-  // We approximate IV rank by comparing current ATM option IV to historical volatility range
-  let currentIV: number | null = null;
-  try {
-    const contracts = await getOptionsChain(symbol, undefined, "call");
-    const currentPrice = closes[closes.length - 1];
-
-    // Find ATM contracts expiring in 2-4 weeks
-    const now = new Date();
-    const atmContracts = contracts.filter((c) => {
-      const strike = parseFloat(c.strike_price);
-      const expDate = new Date(c.expiration_date);
-      const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-      return Math.abs(strike - currentPrice) / currentPrice < 0.03 && dte >= 14 && dte <= 30;
-    });
-
-    if (atmContracts.length > 0) {
-      const snapshots = await getOptionsSnapshots(atmContracts.slice(0, 3).map((c) => c.symbol));
-      const ivValues = Object.values(snapshots)
-        .filter((s) => s.impliedVolatility && s.impliedVolatility > 0)
-        .map((s) => s.impliedVolatility as number);
-      if (ivValues.length > 0) {
-        currentIV = ivValues.reduce((a, b) => a + b, 0) / ivValues.length;
-      }
-    }
-  } catch {
-    // IV not available
-  }
+  // Live IV requires the options-chain feed (removed) — fall back to HV-based
+  // IV-rank approximation only.
+  const currentIV: number | null = null;
 
   // Calculate IV Rank approximation
   // Use HV range as proxy for IV range (not perfect, but useful)
@@ -117,87 +103,10 @@ export interface UnusualActivity {
   strength: "normal" | "unusual" | "very_unusual" | "sweep";
 }
 
-export async function scanUnusualActivity(symbols: string[]): Promise<UnusualActivity[]> {
-  const results: UnusualActivity[] = [];
-  const now = new Date();
-
-  for (const symbol of symbols.slice(0, 10)) { // limit to prevent rate limiting
-    try {
-      const contracts = await getOptionsChain(symbol);
-
-      // Filter to contracts with decent liquidity (14-45 DTE)
-      const relevant = contracts.filter((c) => {
-        const expDate = new Date(c.expiration_date);
-        const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-        return dte >= 7 && dte <= 45;
-      });
-
-      if (relevant.length === 0) continue;
-
-      // Get snapshots for volume data
-      const batchSize = 30;
-      for (let i = 0; i < relevant.length; i += batchSize) {
-        const batch = relevant.slice(i, i + batchSize);
-        try {
-          const snapshots = await getOptionsSnapshots(batch.map((c) => c.symbol));
-
-          for (const contract of batch) {
-            const snap = snapshots[contract.symbol];
-            if (!snap) continue;
-
-            // Get actual volume from dailyBar (preferred), or estimate from trade data
-            let volume = 0;
-            if (snap.dailyBar?.v) {
-              volume = snap.dailyBar.v;
-            } else if (snap.latestTrade?.s) {
-              // latestTrade.s = size of last trade in contracts
-              // Without daily volume, use trade size * multiplier as rough estimate
-              volume = snap.latestTrade.s * 10; // conservative estimate
-            }
-
-            const oi = parseInt(contract.open_interest || "0");
-            const premium = snap.latestQuote
-              ? (snap.latestQuote.ap + snap.latestQuote.bp) / 2
-              : snap.latestTrade?.p || 0;
-
-            if (premium > 0.5 && (oi > 50 || volume > 0)) {
-              const strike = parseFloat(contract.strike_price);
-              const expDate = new Date(contract.expiration_date);
-              const dte = Math.floor((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-              const volumeOiRatio = oi > 0 ? volume / oi : volume > 0 ? 5 : 0; // no OI + volume = new position = very unusual
-
-              // Only flag if there's meaningful activity
-              if (premium * 100 > 50 && (volume > 0 || oi > 500)) {
-                results.push({
-                  symbol,
-                  contractSymbol: contract.symbol,
-                  type: contract.type,
-                  strike,
-                  expiry: contract.expiration_date,
-                  dte,
-                  volume,
-                  openInterest: oi,
-                  volumeOiRatio,
-                  premium,
-                  totalPremium: volume > 0 ? volume * premium * 100 : premium * 100,
-                  signal: contract.type === "call" ? "bullish" : "bearish",
-                  strength: volumeOiRatio > 3 ? "sweep" : volumeOiRatio > 2 ? "very_unusual" : volumeOiRatio > 1 ? "unusual" : "normal",
-                });
-              }
-            }
-          }
-        } catch {
-          // batch failed, continue
-        }
-      }
-    } catch {
-      // symbol failed, continue
-    }
-  }
-
-  // Sort by total premium (biggest bets first)
-  results.sort((a, b) => b.totalPremium - a.totalPremium);
-  return results.slice(0, 20);
+export async function scanUnusualActivity(_symbols: string[]): Promise<UnusualActivity[]> {
+  // Requires an options-chain/snapshot feed (removed with the equities brokerage).
+  void _symbols;
+  return [];
 }
 
 // ============ EXPECTED MOVE CALCULATOR ============
@@ -213,66 +122,12 @@ export interface ExpectedMove {
 }
 
 export async function calculateExpectedMove(
-  symbol: string,
-  daysOut: number = 7
+  _symbol: string,
+  _daysOut: number = 7
 ): Promise<ExpectedMove | null> {
-  try {
-    const bars = await getHistoricalBars(symbol, 30);
-    if (bars.length === 0) return null;
-    const currentPrice = bars[bars.length - 1].c;
-
-    // Find ATM straddle (call + put at closest strike)
-    const contracts = await getOptionsChain(symbol);
-    const now = new Date();
-    const targetExpiry = new Date(now.getTime() + daysOut * 24 * 60 * 60 * 1000);
-
-    // Find contracts near target expiry and ATM
-    const nearExpiry = contracts.filter((c) => {
-      const expDate = new Date(c.expiration_date);
-      const daysDiff = Math.abs((expDate.getTime() - targetExpiry.getTime()) / (1000 * 60 * 60 * 24));
-      const strikeDiff = Math.abs(parseFloat(c.strike_price) - currentPrice) / currentPrice;
-      return daysDiff <= 3 && strikeDiff < 0.02;
-    });
-
-    const atmCall = nearExpiry.find((c) => c.type === "call");
-    const atmPut = nearExpiry.find((c) => c.type === "put");
-
-    if (!atmCall && !atmPut) return null;
-
-    // Get prices
-    const contractSymbols = [atmCall?.symbol, atmPut?.symbol].filter(Boolean) as string[];
-    const snapshots = await getOptionsSnapshots(contractSymbols);
-
-    let callPrice = 0;
-    let putPrice = 0;
-    if (atmCall && snapshots[atmCall.symbol]?.latestQuote) {
-      const q = snapshots[atmCall.symbol].latestQuote;
-      callPrice = (q.ap + q.bp) / 2;
-    }
-    if (atmPut && snapshots[atmPut.symbol]?.latestQuote) {
-      const q = snapshots[atmPut.symbol].latestQuote;
-      putPrice = (q.ap + q.bp) / 2;
-    }
-
-    const straddle = callPrice + putPrice;
-    const expectedMovePct = straddle / currentPrice;
-
-    const dte = atmCall
-      ? Math.floor((new Date(atmCall.expiration_date).getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
-      : daysOut;
-
-    return {
-      symbol,
-      currentPrice,
-      expectedMovePct,
-      expectedMoveUp: currentPrice * (1 + expectedMovePct),
-      expectedMoveDown: currentPrice * (1 - expectedMovePct),
-      straddle,
-      daysToExpiry: dte,
-    };
-  } catch {
-    return null;
-  }
+  // Requires an ATM straddle from the options-chain feed (removed).
+  void _symbol; void _daysOut;
+  return null;
 }
 
 // ============ OPTIMAL STRIKE SELECTOR BY TIMEFRAME ============

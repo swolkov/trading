@@ -9,7 +9,7 @@ import { Activity, AlertTriangle, Pause, ShieldCheck, ShieldOff, Skull, Wifi, Wi
 interface AccountInfo {
   key: string;
   label: string;
-  broker: "Tradovate" | "Alpaca";
+  broker: "Tradovate";
   balance: number | null;
   balanceSource: "broker_live" | "daily_cache" | "unavailable";
   unrealizedPnl: number;
@@ -244,7 +244,6 @@ export function AccountsPanel() {
         // Each broker = its own walled-off account/money. Honest edge note per broker.
         const BROKERS: { key: string; title: string; note: string }[] = [
           { key: "Tradovate", title: "Tradovate · Futures", note: "Gold (MGC/GC) — the one edge that survived every test (thin, real)" },
-          { key: "Alpaca", title: "Alpaca · Options & Long-term", note: "Long-term S&P / quality stocks = genuinely sound · options = skill-building" },
         ];
         return (
           <div className="space-y-3">
@@ -268,7 +267,7 @@ export function AccountsPanel() {
                 <span className="text-[10px] text-muted-foreground/55">day-trade — not wired up yet (backtested no edge; build when ready)</span>
               </div>
               <Card className="border-dashed border-border/50">
-                <CardContent className="py-3 text-[11px] text-muted-foreground/45">Coming soon — Kraken crypto integration isn&apos;t built. Separate account, won&apos;t touch futures or Alpaca.</CardContent>
+                <CardContent className="py-3 text-[11px] text-muted-foreground/45">Coming soon — Kraken crypto integration isn&apos;t built here. Separate account, won&apos;t touch futures.</CardContent>
               </Card>
             </div>
           </div>

@@ -1,7 +1,18 @@
 import { prisma } from "./db";
-import { getAccount, getPositions, getMarketClock } from "./alpaca";
 import { sendNotification } from "./notifications";
 import { emitEventSafe } from "./event-bus";
+
+// Self-contained US equity market-hours check (replaces the removed brokerage clock).
+// Approximate: Mon–Fri 9:30–16:00 ET, ignores holidays. Used only to skip
+// market-hours-only heartbeat checks — a false positive just adds a benign check.
+function isUsMarketOpen(): boolean {
+  const now = new Date();
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+  const minutes = et.getHours() * 60 + et.getMinutes();
+  return minutes >= 570 && minutes < 960; // 9:30 → 16:00 ET
+}
 
 // ============ SYSTEM HEALTH WATCHDOG ============
 // Monitors infrastructure health so we never lose money to failures.
@@ -26,9 +37,6 @@ interface WatchdogResult {
 
 // Expected intervals for each cron (in minutes)
 const CRON_EXPECTATIONS: Record<string, { maxStaleMinutes: number; description: string }> = {
-  // Equities crons run during market hours only
-  trade_last_run: { maxStaleMinutes: 40, description: "Auto-trader (runs every 20-30min during market hours)" },
-  monitor_last_run: { maxStaleMinutes: 15, description: "Position monitor (every 5min during market hours)" },
   // 4380 min (~73h) tolerates a Fri→Mon weekend gap — these run only on trading days, so a Friday
   // run is the last until Monday. A 25h limit false-alarmed all weekend + every Monday morning.
   premarket_last_run: { maxStaleMinutes: 4380, description: "Pre-market research (once daily at 9AM ET, trading days)" },
@@ -54,40 +62,6 @@ export async function runWatchdog(): Promise<WatchdogResult> {
     checks.push({ name: "Database", status: "critical", message: `Connection failed: ${err}` });
   }
 
-  // === CHECK 2: Alpaca API connectivity ===
-  try {
-    const account = await getAccount();
-    const equity = parseFloat(account.equity);
-    const lastEquity = parseFloat(account.last_equity);
-    const dayChange = ((equity - lastEquity) / lastEquity) * 100;
-
-    checks.push({
-      name: "Alpaca API",
-      status: "ok",
-      message: `Connected — Equity: $${equity.toFixed(0)} (${dayChange >= 0 ? "+" : ""}${dayChange.toFixed(2)}% today)`,
-    });
-
-    // Alert on large drawdowns
-    if (dayChange < -3) {
-      criticals++;
-      checks.push({
-        name: "Alpaca Drawdown",
-        status: "critical",
-        message: `DOWN ${dayChange.toFixed(2)}% TODAY ($${(equity - lastEquity).toFixed(0)}) — exceeds 3% daily limit`,
-      });
-    } else if (dayChange < -1.5) {
-      warnings++;
-      checks.push({
-        name: "Alpaca Drawdown",
-        status: "warning",
-        message: `Down ${dayChange.toFixed(2)}% today ($${(equity - lastEquity).toFixed(0)})`,
-      });
-    }
-  } catch (err) {
-    criticals++;
-    checks.push({ name: "Alpaca API", status: "critical", message: `Connection failed: ${err}` });
-  }
-
   // === CHECK 3: Tradovate API connectivity ===
   try {
     const { checkTradovateAuth } = await import("./tradovate");
@@ -100,8 +74,7 @@ export async function runWatchdog(): Promise<WatchdogResult> {
   }
 
   // === CHECK 4: Cron heartbeat checks ===
-  const clock = await getMarketClock().catch(() => null);
-  const isMarketOpen = clock?.is_open ?? false;
+  const isMarketOpen = isUsMarketOpen();
 
   const configs = await prisma.agentConfig.findMany().catch(() => []);
   const configMap: Record<string, string> = {};
@@ -179,44 +152,6 @@ export async function runWatchdog(): Promise<WatchdogResult> {
     }
   }
 
-  // === CHECK 5: Position reconciliation (Alpaca) ===
-  try {
-    const positions = await getPositions();
-    const recentTrades = await prisma.autoTradeLog.findMany({
-      where: { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    });
-
-    // Check for phantom positions — positions we hold but never logged buying
-    const loggedSymbols = new Set(
-      recentTrades.filter((t) => t.action === "buy" || t.action === "buy_call" || t.action === "buy_put").map((t) => t.symbol)
-    );
-    const untracked = positions.filter((p) => {
-      // Only flag if we have no record of this position at all
-      const base = p.symbol.replace(/\d.*$/, "");
-      return !loggedSymbols.has(p.symbol) && !loggedSymbols.has(base);
-    });
-
-    if (untracked.length > 3) {
-      warnings++;
-      checks.push({
-        name: "Position Reconciliation",
-        status: "warning",
-        message: `${untracked.length} positions have no matching trade log entry (may be manual or pre-existing)`,
-      });
-    } else {
-      checks.push({
-        name: "Position Reconciliation",
-        status: "ok",
-        message: `${positions.length} positions tracked, ${recentTrades.length} trades logged in 24h`,
-      });
-    }
-  } catch (err) {
-    warnings++;
-    checks.push({ name: "Position Reconciliation", status: "warning", message: `Check failed: ${err}` });
-  }
-
   // === CHECK 6: Recent agent errors ===
   try {
     const recentRuns = await prisma.agentRun.findMany({
@@ -258,7 +193,7 @@ export async function runWatchdog(): Promise<WatchdogResult> {
   }
 
   // === CHECK 7: Disk / environment sanity ===
-  const requiredEnvVars = ["ALPACA_API_KEY", "ALPACA_API_SECRET", "ANTHROPIC_API_KEY", "DATABASE_URL"];
+  const requiredEnvVars = ["ANTHROPIC_API_KEY", "DATABASE_URL"];
   const missingVars = requiredEnvVars.filter((v) => !process.env[v]);
   if (missingVars.length > 0) {
     criticals++;

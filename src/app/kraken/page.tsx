@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { Bitcoin, TrendingUp, ShieldCheck, PlugZap } from "lucide-react";
-import { DipScanner } from "@/components/kraken/dip-scanner";
 import { AccumulatorPanel } from "@/components/kraken/accumulator-panel";
 
 // Kraken — a dollar-cost-averaging accumulator. It buys $10 of BTC and $10 of ETH every day and
@@ -22,8 +21,6 @@ export default function KrakenPage() {
       </div>
 
       <AccumulatorPanel />
-
-      <DipScanner />
 
       {/* The strategy */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
@@ -80,8 +77,7 @@ export default function KrakenPage() {
         <p className="text-sm text-muted-foreground leading-relaxed">
           Right here — in the accumulator panel at the top of this page. Each broker&apos;s tab shows
           its own positions: <Link href="/futures" className="text-purple-300 underline underline-offset-2">Futures</Link> for
-          Tradovate, <Link href="/positions" className="text-purple-300 underline underline-offset-2">Positions</Link> for
-          Alpaca, and this tab for Kraken crypto. The accumulator buys a little every day, so your
+          Tradovate, and this tab for Kraken crypto. The accumulator buys a little every day, so your
           BTC and ETH holdings grow steadily right here.
         </p>
       </div>

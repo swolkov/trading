@@ -1,11 +1,26 @@
 import { prisma } from "./db";
-import { getQuote, getOrders, getAccountActivities, type Quote, type Order } from "./alpaca";
 import { sendNotification } from "./notifications";
 
 // ============ EXECUTION QUALITY AGENT ============
 // Measures and tracks how well we execute trades.
 // Top shops measure: expected vs actual fill, spread impact, slippage.
 // "You can't improve what you don't measure."
+// NOTE: the equities brokerage (order/quote feed) was removed. runExecutionReview
+// now has no fills to analyze and returns an empty report; getExecutionAdvice
+// remains a pure helper for any future order router.
+
+// Minimal shapes retained after the equities brokerage was removed.
+interface Quote { bp: number; ap: number }
+interface Order {
+  id: string;
+  symbol: string;
+  side: string;
+  type: string;
+  status: string;
+  filled_avg_price: string | null;
+  filled_qty: string;
+  filled_at: string | null;
+}
 
 export interface ExecutionMetrics {
   symbol: string;
@@ -73,14 +88,12 @@ export async function analyzeExecution(
   const fillPrice = parseFloat(order.filled_avg_price);
   const symbol = order.symbol;
 
-  // Get current/recent quote if not provided
-  let quote = quoteAtFill;
+  // Get current/recent quote if not provided.
+  // Quote feed removed with the equities brokerage — without a supplied quote we
+  // can't analyze the fill.
+  const quote = quoteAtFill;
   if (!quote) {
-    try {
-      quote = await getQuote(symbol.length > 10 ? symbol.replace(/\d.*$/, "") : symbol);
-    } catch {
-      return null; // Can't analyze without quote data
-    }
+    return null; // Can't analyze without quote data
   }
 
   const bid = quote.bp;
@@ -129,13 +142,9 @@ export async function runExecutionReview(): Promise<ExecutionReport> {
   const recommendations: string[] = [];
 
   try {
-    // Get recent filled orders (last 24 hours)
-    const orders = await getOrders("closed");
-    const recentFills = orders.filter((o) => {
-      if (o.status !== "filled" || !o.filled_at) return false;
-      const fillAge = Date.now() - new Date(o.filled_at).getTime();
-      return fillAge < 24 * 60 * 60 * 1000;
-    });
+    // Recent filled orders (last 24 hours). Order feed removed with the equities
+    // brokerage — no fills to analyze.
+    const recentFills: Order[] = [];
 
     // Analyze each fill
     for (const order of recentFills.slice(0, 30)) {

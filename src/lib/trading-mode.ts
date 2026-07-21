@@ -44,41 +44,6 @@ export async function getViewMode(type: TradeType): Promise<TradingMode> {
   }
 }
 
-// Get Alpaca credentials based on mode.
-// modeOverride: pass getViewMode("stocks") result for dashboard display,
-// or leave undefined for agent execution (reads trading_mode from DB).
-export async function getAlpacaConfig(type: TradeType = "stocks", modeOverride?: TradingMode): Promise<{
-  baseUrl: string;
-  apiKey: string;
-  apiSecret: string;
-  isLive: boolean;
-}> {
-  const mode = modeOverride ?? await getTradingMode(type);
-
-  if (mode === "live" && process.env.ALPACA_LIVE_API_KEY && process.env.ALPACA_LIVE_API_SECRET) {
-    return {
-      baseUrl: "https://api.alpaca.markets",
-      apiKey: process.env.ALPACA_LIVE_API_KEY,
-      apiSecret: process.env.ALPACA_LIVE_API_SECRET,
-      isLive: true,
-    };
-  }
-
-  // NEVER silently downgrade an explicit live request to the paper account —
-  // a missing/rotated live key would otherwise leak retired paper data into
-  // live dashboards (or worse, route a live-intended order to paper).
-  if (mode === "live") {
-    throw new Error("Alpaca LIVE credentials missing (ALPACA_LIVE_API_KEY/SECRET) — refusing paper fallback");
-  }
-
-  return {
-    baseUrl: process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets",
-    apiKey: process.env.ALPACA_API_KEY || "",
-    apiSecret: process.env.ALPACA_API_SECRET || "",
-    isLive: false,
-  };
-}
-
 // Get IBKR config based on current mode
 export async function getIBKRConfig(): Promise<{
   baseUrl: string;

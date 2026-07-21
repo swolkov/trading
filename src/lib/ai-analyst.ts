@@ -1,6 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations, getIncomeStatements, getOwnershipBreakdown, getCashFlowStatements, getNetInsiderActivity } from "./yahoo";
-import { getSnapshot, getNews, getBars } from "./alpaca";
+import { getCompanyProfile, getKeyStats, getEarnings, getAnalystRecommendations, getIncomeStatements, getOwnershipBreakdown, getCashFlowStatements, getNetInsiderActivity, getHistoricalBars } from "./yahoo";
 import { getInsiderTransactions, getSocialSentiment, getUpgradesDowngrades, getEarningsCalendar, getCompanyPeers, getRecommendationTrends, getCongressionalTrading, getEconomicCalendar, getInsiderSentiment, getSupportResistance, getEpsEstimates, getRevenueEstimates, getPriceTargetConsensus } from "./finnhub";
 import { analyzeVolatility } from "./options-intelligence";
 import { generateLearningInsights } from "./learning-engine";
@@ -8,6 +7,9 @@ import { getMarketKnowledgeBase } from "./market-knowledge";
 import { runAdversarialAnalysis } from "./adversarial-analysis";
 import { getCrossAssetSignals } from "./cross-asset";
 import { getTradeLessons } from "./trade-reviewer";
+
+// News feed retired with the equities brokerage — headlines are no longer fetched.
+interface NewsArticle { headline: string; source: string; created_at: string }
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({
@@ -52,8 +54,8 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     getKeyStats(symbol).catch(() => null),
     getEarnings(symbol).catch(() => null),
     getAnalystRecommendations(symbol).catch(() => []),
-    getNews([symbol], 5).catch(() => []),
-    getBars(symbol, "1Day", undefined, undefined).catch(() => []),
+    Promise.resolve([] as NewsArticle[]), // news feed retired with equities brokerage
+    getHistoricalBars(symbol, 120).catch(() => []),
     getInsiderTransactions(symbol).catch(() => []),
     getSocialSentiment(symbol).catch(() => null),
     getUpgradesDowngrades(symbol).catch(() => []),
@@ -74,17 +76,10 @@ export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
     getPriceTargetConsensus(symbol).catch(() => null),
   ] as const);
 
-  let snapshot = null;
-  try {
-    snapshot = await getSnapshot(symbol);
-  } catch {
-    // snapshot may not be available
-  }
-
-  const currentPrice = snapshot?.latestTrade?.p || snapshot?.latestQuote?.ap || 0;
-
-  // Calculate technical indicators from bars
+  // Real-time snapshot feed retired with the equities brokerage — use the most
+  // recent daily close as the current price.
   const closePrices = bars.map((b) => b.c);
+  const currentPrice = closePrices.length > 0 ? closePrices[closePrices.length - 1] : 0;
   const sma20 = closePrices.length >= 20
     ? closePrices.slice(-20).reduce((a, b) => a + b, 0) / 20
     : null;
@@ -291,7 +286,7 @@ function buildAnalysisPrompt(data: {
   stats: Awaited<ReturnType<typeof getKeyStats>>;
   earnings: Awaited<ReturnType<typeof getEarnings>>;
   analysts: Awaited<ReturnType<typeof getAnalystRecommendations>>;
-  news: Awaited<ReturnType<typeof getNews>>;
+  news: NewsArticle[];
   currentPrice: number;
   technicals: {
     sma20: number | null;
@@ -768,24 +763,22 @@ async function getScreenerSymbols(screenerId: string, count: number = 3): Promis
   }
 }
 
-// Scan market for opportunities
+// Scan market for opportunities.
+// Movers now come from the Yahoo screener (equities brokerage feed retired).
 export async function scanMarket(): Promise<AnalysisResult[]> {
-  // Import here to avoid circular deps
-  const { getTopMovers, getMostActives } = await import("./alpaca");
-
   const [gainers, losers, active, mostShorted, undervalued] = await Promise.all([
-    getTopMovers("gainers"),
-    getTopMovers("losers"),
-    getMostActives(),
+    getScreenerSymbols("day_gainers", 3).catch(() => []),
+    getScreenerSymbols("day_losers", 2).catch(() => []),
+    getScreenerSymbols("most_actives", 3).catch(() => []),
     getScreenerSymbols("most_shorted_stocks", 2).catch(() => []),
     getScreenerSymbols("undervalued_growth_stocks", 2).catch(() => []),
   ]);
 
   // Pick top candidates from multiple sources
   const candidates = new Set<string>();
-  gainers.slice(0, 3).forEach((m) => candidates.add(m.symbol));
-  losers.slice(0, 2).forEach((m) => candidates.add(m.symbol));
-  active.slice(0, 3).forEach((m) => candidates.add(m.symbol));
+  gainers.forEach((s) => candidates.add(s));
+  losers.forEach((s) => candidates.add(s));
+  active.forEach((s) => candidates.add(s));
   mostShorted.forEach((s) => candidates.add(s)); // short squeeze candidates
   undervalued.forEach((s) => candidates.add(s)); // value plays
 

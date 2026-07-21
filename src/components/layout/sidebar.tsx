@@ -30,8 +30,8 @@ import {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Curated IA around the two live pillars (Futures / Kraken). Options + Alpaca long-term retired (moved to a Roth IRA off-platform).
-// Retired paper pages (/day-trade, /stocks, /crypto) + /market + /wheel were deleted.
+// Curated IA around the two live pillars (Futures / Kraken). The Alpaca equities/options
+// brokerage integration was removed end-to-end (owner uses Fidelity off-platform).
 const sections = [
   {
     label: "OVERVIEW",
@@ -153,7 +153,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
         <p className="text-[9px] text-muted-foreground/30 tracking-wider uppercase text-center">
-          Tradovate · Alpaca · Claude AI
+          Tradovate · Kraken · Claude AI
         </p>
       </div>
     </>

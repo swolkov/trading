@@ -76,40 +76,6 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Crypto",
-    modeKey: "crypto_enabled",
-    modeLabelMap: { disabled: "Disabled", paper: "Paper — 24/7", live: "Live — 24/7" } as Record<string, string>,
-    icon: "C",
-    color: "from-purple-500 to-violet-500",
-    fields: [
-      { key: "crypto_enabled", label: "Crypto Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
-      { key: "crypto_risk_per_trade_pct", label: "Risk Per Trade % (live only)", type: "number" as const },
-      { key: "crypto_daily_loss_limit_pct", label: "Daily Loss Limit % (both modes)", type: "number" as const },
-      { key: "crypto_max_positions", label: "Max Positions (live only)", type: "number" as const },
-      { key: "crypto_max_trades_per_day", label: "Max Trades / Day (live only)", type: "number" as const },
-      { key: "crypto_confidence_threshold", label: "Confidence Threshold (live only)", type: "number" as const },
-      { key: "crypto_simulated_equity", label: "Live Simulated Equity ($)", type: "number" as const },
-      { key: "crypto_focus_symbols", label: "Focus Symbols", type: "text" as const, placeholder: "BTC/USD,ETH/USD,SOL/USD" },
-    ],
-  },
-  {
-    label: "Stocks",
-    modeKey: "stocks_enabled",
-    modeLabelMap: { disabled: "Disabled", paper: "Paper — RTH Swing", live: "Live — RTH Swing" } as Record<string, string>,
-    icon: "S",
-    color: "from-blue-500 to-indigo-500",
-    fields: [
-      { key: "stocks_enabled", label: "Stocks Trading", type: "select" as const, options: ["disabled", "paper", "live"] },
-      { key: "stocks_risk_per_trade_pct", label: "Risk Per Trade % (live only)", type: "number" as const },
-      { key: "stocks_daily_loss_limit_pct", label: "Daily Loss Limit % (both modes)", type: "number" as const },
-      { key: "stocks_max_positions", label: "Max Positions (live only)", type: "number" as const },
-      { key: "stocks_max_trades_per_day", label: "Max Trades / Day (live only)", type: "number" as const },
-      { key: "stocks_confidence_threshold", label: "Confidence Threshold (live only)", type: "number" as const },
-      { key: "stocks_simulated_equity", label: "Live Simulated Equity ($)", type: "number" as const },
-      { key: "stocks_focus_symbols", label: "Focus Watchlist", type: "text" as const, placeholder: "NVDA,AAPL,TSLA,META,AMZN" },
-    ],
-  },
-  {
     label: "Live Mirror (RTH Only)",
     icon: "L",
     color: "from-red-500 to-rose-500",
@@ -229,24 +195,6 @@ export default function AgentHubPage() {
       canRun: true,
     },
     {
-      id: "dca",
-      name: "Long-term DCA",
-      desc: "Weekly buy & hold — SPY on Alpaca live (off until enabled)",
-      schedule: "Mon, market open",
-      endpoint: "/api/cron/dca",
-      canRun: true,
-      status: "active",
-    },
-    {
-      id: "options",
-      name: "Options Agent",
-      desc: "7-14 DTE debit spreads — Finnhub research + IV gate + AI veto (Alpaca live $500)",
-      schedule: "Twice/hr (RTH)",
-      endpoint: "/api/cron/options",
-      canRun: true,
-      status: "active",
-    },
-    {
       id: "premarket",
       name: "Pre-Market Briefing",
       desc: "Market regime, VIX, macro outlook, vault brain update",
@@ -346,13 +294,6 @@ export default function AgentHubPage() {
               {saving ? "Saving..." : "Save Changes"}
             </Button>
           )}
-          <Button
-            onClick={() => runAgent("/api/cron/trade", "trading")}
-            disabled={runningAgent !== null}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
-          >
-            {runningAgent === "trading" ? "Running..." : "Run Trading Agent"}
-          </Button>
         </div>
       </div>
       {saveMessage && (

@@ -1,5 +1,4 @@
 import { prisma } from "./db";
-import { getNews, getPositions } from "./alpaca";
 import { sendNotification } from "./notifications";
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -121,16 +120,14 @@ function getThirdFriday(year: number, month: number): string {
   return d.toISOString().split("T")[0];
 }
 
-// Get earnings dates for our positions using Finnhub
+// Get earnings dates for our positions using Finnhub.
+// Equities brokerage removed — no equity positions to check, so this returns
+// no earnings events (futures/gold have no single-name earnings risk).
 async function getEarningsDates(): Promise<MarketEvent[]> {
   const events: MarketEvent[] = [];
 
   try {
-    const positions = await getPositions();
-    const symbols = [...new Set(positions.map((p) => {
-      const match = p.symbol.match(/^([A-Z]+)/);
-      return match ? match[1] : p.symbol;
-    }))];
+    const symbols: string[] = [];
 
     // Check Finnhub for each symbol's earnings
     for (const symbol of symbols.slice(0, 10)) { // limit to avoid rate limits
@@ -172,12 +169,14 @@ async function getEarningsDates(): Promise<MarketEvent[]> {
   return events;
 }
 
-// Classify breaking news using LLM
+// Classify breaking news using LLM.
+// News feed removed with the equities brokerage — no headlines to classify.
 async function classifyBreakingNews(limit: number = 10): Promise<NewsClassification[]> {
   const results: NewsClassification[] = [];
 
   try {
-    const news = await getNews(undefined, limit);
+    const news: { headline: string; symbols: string[]; created_at: string }[] = [];
+    void limit;
     if (news.length === 0) return results;
 
     // Only classify headlines from last 2 hours
@@ -339,7 +338,7 @@ export async function runEventCatalystCheck(): Promise<EventCalendarResult> {
   if (positionEarnings.length > 0) {
     await sendNotification(
       `🎯 EARNINGS FOR YOUR POSITIONS:\n${positionEarnings.map((e) => `• ${e.name} on ${e.date}${e.time ? ` (${e.time})` : ""}`).join("\n")}\n\nConsider closing or hedging before earnings.`,
-      "options"
+      "general"
     );
   }
 

@@ -8,12 +8,14 @@ import { getTradovateAccountSummary, checkTradovateAuth } from "@/lib/tradovate"
  *  - Risk utilization (% of daily loss limit consumed)
  *  - 30-day daily P&L history (for sparklines)
  *  - 3-layer mode state (view / trading / per-strategy assignment)
+ *
+ * Futures (Tradovate) only — the Alpaca equities/options brokerage was removed.
  */
 
 interface AccountInfo {
   key: string;
   label: string;
-  broker: "Tradovate" | "Alpaca";
+  broker: "Tradovate";
   // Capital state
   balance: number | null;
   balanceSource: "broker_live" | "daily_cache" | "unavailable";
@@ -45,7 +47,6 @@ async function getMode(key: string, defaultVal: "paper" | "live" | "disabled" = 
 }
 
 async function getBalanceHistory(prefix: string, days: number): Promise<{ date: string; balance: number }[]> {
-  const today = new Date();
   const out: { date: string; balance: number }[] = [];
   // Query all balance keys (efficient: indexed prefix scan)
   const all = await prisma.agentConfig.findMany({
@@ -96,7 +97,6 @@ export async function GET() {
   try {
     const [
       futuresView, futuresTrading,
-      stocksView, stocksTrading,
       demoLossLimit, liveLossLimit,
       demoHistory, liveHistory,
       demoToday, liveToday,
@@ -104,8 +104,6 @@ export async function GET() {
     ] = await Promise.all([
       getMode("view_mode_futures"),
       getMode("trading_mode_futures"),
-      getMode("view_mode_stocks"),
-      getMode("trading_mode_stocks"),
       getConfig("futures_daily_loss_limit_pct", "8"),
       getConfig("live_futures_daily_loss_limit_pct", "8"),
       getBalanceHistory("daily_balance_", 30),
@@ -120,17 +118,6 @@ export async function GET() {
     const livePnlSpark = computeDailyPnl(liveHistory);
     const demoDailyLimitPct = parseFloat(demoLossLimit) || 8;
     const liveDailyLimitPct = parseFloat(liveLossLimit) || 8;
-
-    // Alpaca LIVE account ($500) — options + long-term S&P live here (real money, manual).
-    // Today P&L from Alpaca's own equity vs last_equity (true balance delta). Skipped if live keys absent.
-    let alpacaLive: { balance: number; todayPnl: number } | null = null;
-    try {
-      const { getAccount } = await import("@/lib/alpaca");
-      const a = await getAccount("live");
-      const eq = parseFloat(a.portfolio_value || a.equity);
-      const last = parseFloat(a.last_equity);
-      if (isFinite(eq)) alpacaLive = { balance: eq, todayPnl: isFinite(last) ? eq - last : 0 };
-    } catch { /* live Alpaca keys absent in this env → skip */ }
 
     // Demo balance: prefer broker live, fall back to last cached
     const demoBalance = demoBrokerLive?.balance ?? demoHistory[demoHistory.length - 1]?.balance ?? null;
@@ -196,25 +183,6 @@ export async function GET() {
         tradingMode: futuresTrading,
         liveTradingActivated: futuresTrading === "live",
         pnlSparkline: livePnlSpark,
-      },
-      {
-        // Alpaca = one account, $500 real. Will run OPTIONS (credit spreads) + LONG-TERM S&P/stocks,
-        // both manual. Crypto moved off Alpaca → Kraken. Balance is the real broker value.
-        key: "alpaca-live",
-        label: "Options + Long-term S&P",
-        broker: "Alpaca",
-        balance: alpacaLive?.balance ?? null,
-        balanceSource: alpacaLive ? "broker_live" : "unavailable",
-        unrealizedPnl: 0,
-        todayPnl: alpacaLive?.todayPnl ?? 0,
-        todayTrades: 0,
-        dailyLossLimitPct: 0,          // manual — no auto loss-limit / risk bar
-        riskUsedPct: 0,
-        drawdownPct: 0,
-        viewMode: stocksView === "live" ? "live" : "paper",
-        tradingMode: stocksTrading,    // 'live' once you're trading the real account
-        liveTradingActivated: false,   // manual, no auto-engine — not an automated live bot
-        pnlSparkline: [],
       },
     ];
 

@@ -1,11 +1,19 @@
 import { prisma } from "./db";
-import { getPositions, getOptionsSnapshots, type Position } from "./alpaca";
-import { getAccount } from "./alpaca";
 
 // ============ SCENARIO / STRESS TESTING ============
 // Models portfolio impact of tail events.
 // "What happens if SPY drops 5%?" — every institutional desk runs these.
 // Without this, you can't prepare for the inevitable.
+// NOTE: the equities/options brokerage was removed — position sets are empty,
+// so scenarios currently report zero impact until a positions source is wired.
+
+// Minimal position shape retained after the equities brokerage was removed.
+interface Position {
+  symbol: string;
+  qty: string;
+  market_value: string;
+  current_price: string;
+}
 
 export interface ScenarioResult {
   name: string;
@@ -147,31 +155,10 @@ function estimatePositionImpact(
 }
 
 export async function runStressTest(): Promise<StressTestResult> {
-  const [account, positions] = await Promise.all([
-    getAccount(),
-    getPositions(),
-  ]);
-
-  const equity = parseFloat(account.equity);
-
-  // Fetch options Greeks for option positions
-  const optPositions = positions.filter((p) => p.symbol.length > 10);
-  let greeksMap: Record<string, { delta: number; gamma: number; vega: number }> = {};
-
-  if (optPositions.length > 0) {
-    try {
-      const snapshots = await getOptionsSnapshots(optPositions.map((p) => p.symbol));
-      for (const [sym, snap] of Object.entries(snapshots)) {
-        if (snap.greeks) {
-          greeksMap[sym] = {
-            delta: snap.greeks.delta || 0,
-            gamma: snap.greeks.gamma || 0,
-            vega: snap.greeks.vega || 0,
-          };
-        }
-      }
-    } catch { /* continue without Greeks */ }
-  }
+  // Equities/options brokerage removed — no live positions to stress.
+  const positions: Position[] = [];
+  const equity = 0;
+  const greeksMap: Record<string, { delta: number; gamma: number; vega: number }> = {};
 
   const scenarios: ScenarioResult[] = [];
 

@@ -106,14 +106,15 @@ export default function ResearchPage({
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([
-      fetch(`/api/research/${symbol}`).then((r) => r.json()),
-      fetch(`/api/news?symbols=${symbol}&limit=10`).then((r) => r.json()),
-    ]).then(([researchData, newsData]) => {
-      setData(researchData);
-      setNews(Array.isArray(newsData) ? newsData : []);
-      setLoading(false);
-    });
+    // News feed retired with the equities brokerage — research relies on
+    // fundamentals/technicals from /api/research only.
+    fetch(`/api/research/${symbol}`)
+      .then((r) => r.json())
+      .then((researchData) => {
+        setData(researchData);
+        setNews([]);
+        setLoading(false);
+      });
   }, [symbol]);
 
   if (loading) {

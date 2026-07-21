@@ -1,7 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getCrossAssetSignals } from "./cross-asset";
 import { detectMarketRegime } from "./market-regime";
-import { getNews } from "./alpaca";
 import { prisma } from "./db";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" });
@@ -26,11 +25,13 @@ export async function generateMacroBriefing(): Promise<MacroBriefing> {
     return JSON.parse(cachedBriefing.text);
   }
 
-  const [regime, crossAsset, marketNews] = await Promise.all([
+  const [regime, crossAsset] = await Promise.all([
     detectMarketRegime().catch(() => null),
     getCrossAssetSignals().catch(() => null),
-    getNews(["SPY", "QQQ"], 10).catch(() => []),
   ]);
+  // Market news feed removed with the equities brokerage — briefing relies on
+  // regime + cross-asset signals only.
+  const marketNews: { headline: string }[] = [];
 
   // Recent performance — CLEAN, MODE-SEPARATED. Bug fixed 2026-06-15: this previously summed
   // autoTradeLog.pnl across BOTH demo and live (no filter). Demo's $59K-account 7%-risk swings

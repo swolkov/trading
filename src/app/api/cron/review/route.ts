@@ -1,4 +1,3 @@
-import { getPositions, getAccount, getBars } from "@/lib/alpaca";
 import { getTradovateAccountSummary, getTradovatePositions, TRADOVATE_CONTRACTS } from "@/lib/tradovate";
 import { getFuturesIntradayBars } from "@/lib/futures-data";
 import { generateLearningInsights } from "@/lib/learning-engine";
@@ -67,24 +66,7 @@ export async function GET(request: Request) {
       portfolioSummary = "FUTURES (Tradovate): Could not fetch";
     }
 
-    // Alpaca (stocks/options)
-    try {
-      const alpAccount = await getAccount();
-      const alpPositions = await getPositions();
-      const alpEquity = parseFloat(alpAccount.equity);
-      const alpDailyChange = alpEquity - parseFloat(alpAccount.last_equity);
-      const alpDailyPct = (alpDailyChange / parseFloat(alpAccount.last_equity)) * 100;
-      const alpWinners = alpPositions.filter((p) => parseFloat(p.unrealized_pl) > 0).length;
-      const alpLosers = alpPositions.filter((p) => parseFloat(p.unrealized_pl) < 0).length;
-      const alpUnrealized = alpPositions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0);
-
-      portfolioSummary += `\nSTOCKS/OPTIONS (Alpaca): $${alpEquity.toLocaleString("en-US", { maximumFractionDigits: 0 })} (${alpDailyChange >= 0 ? "+" : ""}$${alpDailyChange.toFixed(0)}, ${alpDailyPct >= 0 ? "+" : ""}${alpDailyPct.toFixed(2)}%)`;
-      if (alpPositions.length > 0) {
-        portfolioSummary += `\n  Positions: ${alpPositions.length} (${alpWinners}W/${alpLosers}L), Unrealized: ${alpUnrealized >= 0 ? "+" : ""}$${alpUnrealized.toFixed(0)}`;
-      }
-    } catch {
-      portfolioSummary += "\nSTOCKS/OPTIONS (Alpaca): Could not fetch";
-    }
+    // Equities/options brokerage removed — futures (Tradovate) is the only book.
 
     // 4. Score paper trades — check if hypothetical entries would have won or lost
     // This is the learning engine: the agent logs setups it WOULD have taken (during lunch,
@@ -96,7 +78,8 @@ export async function GET(request: Request) {
         let paperWins = 0, paperLosses = 0, paperOpen = 0;
         const paperDetails: string[] = [];
 
-        // Fetch bars cache (futures use getFuturesIntradayBars, stocks use Alpaca getBars)
+        // Fetch bars cache. Only futures paper trades are scored now — the stock
+        // bars source (equities brokerage) was removed.
         const symbolBarsCache: Record<string, { t: number; o: number; h: number; l: number; c: number; v: number }[]> = {};
 
         for (const pt of paperTrades) {
@@ -114,20 +97,11 @@ export async function GET(request: Request) {
           const stopPrice = parseFloat(stopMatch[1].replace(",", ""));
           const targetPrice = parseFloat(targetMatch[1].replace(",", ""));
 
-          // Get bars (cache per symbol — different source for futures vs stocks)
+          // Get bars — futures only (stock bars source removed).
+          if (!isFutures) continue;
           if (!symbolBarsCache[symbol]) {
             try {
-              if (isFutures) {
-                symbolBarsCache[symbol] = await getFuturesIntradayBars(symbol, "5m", "1d");
-              } else {
-                // Stock bars from Alpaca — get today's 5-min bars
-                const todayStr = new Date().toISOString().slice(0, 10);
-                const stockBars = await getBars(symbol, "5Min", `${todayStr}T00:00:00Z`);
-                symbolBarsCache[symbol] = stockBars.map((b) => ({
-                  t: new Date(b.t).getTime() / 1000,
-                  o: b.o, h: b.h, l: b.l, c: b.c, v: b.v,
-                }));
-              }
+              symbolBarsCache[symbol] = await getFuturesIntradayBars(symbol, "5m", "1d");
             } catch {
               continue;
             }

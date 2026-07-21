@@ -6,41 +6,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { computeFuturesStats } from "./lib/compute-stats";
 import { TrackRecordHeader } from "@/components/futures/track-record-header";
 
-interface TradeAnalysis {
-  stats: {
-    totalTrades: number;
-    openTrades: number;
-    winners: number;
-    losers: number;
-    winRate: number;
-    totalPnl: number;
-    grossProfit: number;
-    grossLoss: number;
-    avgWin: number;
-    avgLoss: number;
-    profitFactor: number;
-    avgHoldDays: number;
-  };
-  trades: {
-    symbol: string;
-    underlying: string;
-    type: string;
-    openSide: string;
-    openDate: string;
-    openPrice: number;
-    openQty: number;
-    closeDate: string | null;
-    closePrice: number | null;
-    pnl: number | null;
-    pnlPct: number | null;
-    holdDays: number | null;
-    status: string;
-  }[];
-  dailyPnl: { date: string; pnl: number }[];
-  weeklyPnl: { week: string; pnl: number }[];
-  monthlyPnl: { month: string; pnl: number }[];
-}
-
 function pnl(val: number) {
   return val > 0 ? "text-emerald-400" : val < 0 ? "text-red-400" : "text-muted-foreground";
 }
@@ -78,22 +43,22 @@ interface FuturesPerfData {
 const swrFetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export default function PerformancePage() {
-  const [data, setData] = useState<TradeAnalysis | null>(null);
   const [futures, setFutures] = useState<FuturesPerfData | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", swrFetcher, { refreshInterval: 10000 });
   const futuresViewMode = modeData?.modes?.futures || "paper";
-
-  useEffect(() => {
-    fetch("/api/trades/analysis").then((r) => r.json()).then(setData).catch(console.error);
-  }, []);
 
   // Re-fetch futures data when view mode changes (LIVE ↔ DEMO)
   useEffect(() => {
     setFutures(null);
-    fetch("/api/futures/positions").then((r) => r.json()).then((d) => { if (!d.error) setFutures(d); }).catch(() => {});
+    fetch("/api/futures/positions")
+      .then((r) => r.json())
+      .then((d) => { if (!d.error) setFutures(d); })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, [futuresViewMode]);
 
-  if (!data) return (
+  if (!loaded) return (
     <div className="space-y-5 animate-fade-up">
       <div>
         <div className="skeleton h-6 w-48 rounded mb-2" />
