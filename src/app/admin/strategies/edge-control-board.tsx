@@ -2,25 +2,7 @@
 
 import { useState } from "react";
 import { Activity, ShieldCheck, FlaskConical } from "lucide-react";
-
-export interface EdgePerfVM {
-  net: number;
-  trades: number;
-  wins: number;
-  losses: number;
-  winRate: number;
-}
-export interface EdgeVM {
-  key: string;
-  name: string;
-  blurb: string;
-  evidence: string;
-  symbolClass: "metals" | "index";
-  demoEnabled: boolean;
-  liveEnabled: boolean;
-  demoPerf: EdgePerfVM | null;
-  livePerf: EdgePerfVM | null;
-}
+import type { EdgeSwitchVM as EdgeVM, EdgePerfLite as EdgePerfVM } from "@/lib/realtime-edges";
 
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toFixed(0)}`;
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");

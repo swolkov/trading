@@ -9,6 +9,7 @@ import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } fr
 import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
 import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
+import { EdgeSwitchList } from "./edge-switch-list";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -180,10 +181,8 @@ const DEMO_CONTRACTS = ["GC", "NQ", "ES"];
 // index overbought-short — traded raw with the AI grader OFF.
 const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
 
-const STRATEGIES = [
-  { name: "Gold RSI-bounce", priority: 1, confidence: "Edge", when: "RSI <25 / overbought", desc: "Buy micro gold (MGC) when oversold (RSI<25); fade when overbought." },
-  { name: "Index overbought-short", priority: 2, confidence: "Edge", when: "RSI ≥ 80", desc: "Short micro Nasdaq/S&P (MNQ/MES) at RSI≥80." },
-];
+// The validated-edges list is now data-driven (see EdgeSwitchList / realtime-edges registry) so the
+// Strategy tab shows every registered edge with live demo/live switch state — no static copy to drift.
 
 const DEMO_RISK_RULES = [
   "7% risk/trade — GC (gold) + NQ/ES overbought-shorts",
@@ -679,23 +678,9 @@ export default function FuturesPage() {
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
-                  Live trades the <b>validated micro edges</b> — gold RSI-bounce (MGC, long + short) and index overbought-short (MNQ/MES) — 1 contract per trade at ~1–2% risk, broker stop on every trade. Index trend-long is coded but off pending live validation. Demo P&L is research, not proof.
+                  Each edge has its own <b>Demo</b> and <b>Live</b> switch — Demo tests it in real-time, Live trades it with real money (1 contract, ~1–2% risk, broker stop on every trade). Demo P&L is research, not proof.
                 </div>
-                <div className="space-y-2">
-                  {STRATEGIES.map((s) => (
-                    <div key={s.priority} className="flex items-start gap-3 bg-white/[0.02] border border-white/[0.04] rounded-lg p-3">
-                      <span className="text-[10px] bg-blue-500/15 text-blue-400 px-1.5 py-0.5 rounded font-bold shrink-0">#{s.priority}</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-bold">{s.name}</span>
-                          <span className="text-[10px] text-emerald-400 font-bold">{s.confidence}</span>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground/60 mt-0.5">{s.desc}</p>
-                        <span className="text-[9px] text-muted-foreground/40">{s.when}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <EdgeSwitchList />
                 <div className="mt-4 pt-3 border-t border-white/[0.06]">
                   <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-2 font-bold">Risk Rules</p>
                   <div className="grid grid-cols-2 gap-1.5">

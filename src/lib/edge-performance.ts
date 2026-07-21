@@ -1,4 +1,5 @@
 import { prisma } from "./db";
+import { REALTIME_EDGES, isEdgeEnabled, type EdgeSwitchVM } from "./realtime-edges";
 
 // LIVE per-edge performance for the futures admin — "what's actually working" in real money.
 // Splits realized live futures closes into the 3 gated edges the engine trades, with a DIRECTION
@@ -102,11 +103,15 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
   const dir = (action: string): "long" | "short" | null =>
     action === `${prefix}_long` ? "long" : action === `${prefix}_short` ? "short" : null;
 
-  const rows = await prisma.autoTradeLog.findMany({
+  // Exclude the Jul 16-17 orphaned-bracket incident window (same as getEdgePerformance) so the
+  // per-edge numbers reconcile with the scoreboard; those tangled rows are still in the account total.
+  const INCIDENT_START = Date.parse("2026-07-16T22:00:00Z");
+  const INCIDENT_END = Date.parse("2026-07-17T06:00:00Z");
+  const rows = (await prisma.autoTradeLog.findMany({
     where: { symbol: { in: allSyms }, action: { startsWith: `${prefix}_` }, createdAt: { gte: since } },
     orderBy: { createdAt: "asc" },
     take: 2000,
-  });
+  })).filter((r) => { const t = r.createdAt.getTime(); return t < INCIDENT_START || t >= INCIDENT_END; });
 
   const openDir: Record<string, "long" | "short" | null> = {};
   type Close = { ts: Date; sym: string; dir: "long" | "short"; pnl: number };
@@ -141,4 +146,31 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
   }
   for (const k of Object.keys(out)) out[k].winRate = out[k].trades ? out[k].wins / out[k].trades : 0;
   return out;
+}
+
+// Single source of truth for the edge control surfaces: each registered edge with its current
+// demo/live switch state + demo/live realized results. Used by BOTH the admin control board and the
+// Futures-page inline switch list so they can never show different states. Order = registry order
+// (priority #1..N). Best-effort: a DB hiccup on any part degrades to defaults / empty perf, never throws.
+export async function getEdgeSwitchboard(): Promise<EdgeSwitchVM[]> {
+  const [flagRows, livePerf, demoPerf] = await Promise.all([
+    prisma.agentConfig.findMany({ where: { key: { startsWith: "edge_" } } }).catch(() => [] as { key: string; value: string }[]),
+    getRealtimeEdgePerformance("live").catch(() => ({}) as Record<string, RealtimeEdgePerf>),
+    getRealtimeEdgePerformance("demo").catch(() => ({}) as Record<string, RealtimeEdgePerf>),
+  ]);
+  const cfg: Record<string, string | undefined> = {};
+  for (const r of flagRows) cfg[r.key] = r.value;
+  const lite = (p?: RealtimeEdgePerf) =>
+    p ? { net: p.net, trades: p.trades, wins: p.wins, losses: p.losses, winRate: p.winRate } : null;
+  return REALTIME_EDGES.map((e) => ({
+    key: e.key,
+    name: e.name,
+    blurb: e.blurb,
+    evidence: e.evidence,
+    symbolClass: e.symbolClass,
+    demoEnabled: isEdgeEnabled(e.key, "demo", cfg),
+    liveEnabled: isEdgeEnabled(e.key, "live", cfg),
+    demoPerf: lite(demoPerf[e.key]),
+    livePerf: lite(livePerf[e.key]),
+  }));
 }

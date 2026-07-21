@@ -122,3 +122,24 @@ export function isEdgeEnabled(edgeKey: string, mode: EngineMode, cfg: Record<str
   if (v === "false") return false;
   return mode === "live" ? def.defaultLive : def.defaultDemo;
 }
+
+// ---- View-models shared by the admin control board AND the Futures-page inline switch list, so the
+// two control surfaces can never drift. Built server-side by getEdgeSwitchboard() (edge-performance.ts).
+export interface EdgePerfLite {
+  net: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+}
+export interface EdgeSwitchVM {
+  key: string;
+  name: string;
+  blurb: string;
+  evidence: string;
+  symbolClass: EdgeSymbolClass;
+  demoEnabled: boolean;
+  liveEnabled: boolean;
+  demoPerf: EdgePerfLite | null;
+  livePerf: EdgePerfLite | null;
+}
