@@ -17,33 +17,26 @@ function Badge({ text, tone }: { text: string; tone: "live" | "off" | "warn" }) 
 export function PillarsStrip() {
   const { data: fut } = useSWR("/api/futures/positions", fetcher, { refreshInterval: 30000 });
   const { data: krk } = useSWR("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
-  const { data: meme } = useSWR("/api/meme-lab", fetcher, { refreshInterval: 60000 });
 
   const futVal = fut?.account?.netLiq ?? null;
   const krkVal = krk?.connected ? krk?.totalValue ?? null : null;
-  const memeVal = meme?.live?.walletUsd ?? null;
-  const total = (futVal || 0) + (krkVal || 0) + (memeVal || 0);
+  const total = (futVal || 0) + (krkVal || 0);
 
   const krkOn = krk?.enabled && krk?.connected;
   const krkValidate = krk?.validateOnly;
-  // meme lab: live (armed) / dry (validate) / off
-  const memeLive = meme?.live?.enabled;
-  const memeValidate = meme?.live?.validate;
-  const memeOpen = meme?.open?.length ?? 0;
 
   const cards = [
     { name: "Futures", href: "/futures", broker: "Tradovate gold", value: fmt(futVal), badge: <Badge text="live" tone="live" />, sub: `${fut?.positions?.length ?? 0} open` },
     { name: "Kraken", href: "/kraken", broker: "BTC/ETH trend", value: fmt(krkVal), badge: <Badge text={!krk?.connected ? "n/c" : krkValidate ? "validate" : krkOn ? "live" : "off"} tone={!krk?.connected ? "off" : krkValidate ? "warn" : krkOn ? "live" : "off"} />, sub: krk?.holdings?.length ? `${krk.holdings.length} held` : "flat" },
-    { name: "Meme Lab", href: "/meme-lab", broker: "Solana memes", value: fmt(memeVal), badge: <Badge text={!memeLive ? "off" : memeValidate ? "dry-run" : "live"} tone={!memeLive ? "off" : memeValidate ? "warn" : "live"} />, sub: memeOpen ? `${memeOpen} open` : "flat" },
   ];
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-semibold text-muted-foreground/70">The 3 Engines</p>
+        <p className="text-xs font-semibold text-muted-foreground/70">The 2 Engines</p>
         <p className="text-xs text-muted-foreground/50">Total across all accounts: <span className="font-bold text-foreground tabular-nums">{fmt(total)}</span></p>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {cards.map((c) => (
           <Link key={c.name} href={c.href} className="rounded-xl border border-border bg-card p-3 hover:border-border/80 transition-colors">
             <div className="flex items-center justify-between mb-1">

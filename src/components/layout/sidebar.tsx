@@ -57,13 +57,6 @@ const sections = [
     ],
   },
   {
-    // Experiments — paper-only, clearly separated from the real pillars.
-    label: "LAB",
-    links: [
-      { href: "/meme-lab", label: "Meme Lab", icon: FlaskConical, badge: "Live" },
-    ],
-  },
-  {
     label: "SYSTEM",
     links: [
       { href: "/command", label: "System Health", icon: Activity },
@@ -139,11 +132,6 @@ export function Sidebar() {
                   >
                     <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : "text-muted-foreground/50")} />
                     <span className="flex-1">{link.label}</span>
-                    {"badge" in link && link.badge && (
-                      <span className="text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded text-fuchsia-400/50 bg-fuchsia-500/[0.08]">
-                        {link.badge}
-                      </span>
-                    )}
                     {"broker" in link && link.broker && (
                       <span className={cn(
                         "text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",

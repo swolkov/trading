@@ -85,7 +85,6 @@ export default function DashboardPage() {
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 10000 });
   const viewMode = modeData?.modes?.futures || "paper";
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number }>("/api/kraken-agent", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 60000 });
-  const { data: meme } = useSWR<{ live?: { walletUsd?: number; enabled?: boolean; validate?: boolean; solBalance?: number }; open?: unknown[]; stats?: { totalRealizedUsd?: number } }>("/api/meme-lab", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 60000 });
 
   useEffect(() => {
     fetch("/api/regime").then((r) => r.json()).then((d) => { if (!d.error) setRegime(d); }).catch(() => {});
@@ -123,10 +122,9 @@ export default function DashboardPage() {
   const futuresUnrealized = futures?.account?.unrealizedPnl || 0;
   const futuresMargin = futures?.account?.marginUsed || 0;
 
-  // ── Portfolio metrics (futures + Kraken + Meme Lab combined — matches the 3-engines strip total) ──
+  // ── Portfolio metrics (futures + Kraken combined — matches the 2-engines strip total) ──
   const krakenEquity = krk?.connected ? krk.totalValue || 0 : 0;
-  const memeEquity = meme?.live?.walletUsd || 0;
-  const combinedEquity = futuresEquity + krakenEquity + memeEquity;
+  const combinedEquity = futuresEquity + krakenEquity;
   const combinedDailyPnl = futuresDailyPnl;
   const combinedDailyPct = (futuresSOD || futuresBalance) > 0
     ? combinedDailyPnl / (futuresSOD || futuresBalance || 1)
@@ -150,7 +148,7 @@ export default function DashboardPage() {
         <div>
           <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
           <p className="text-[11px] text-muted-foreground/50">
-            Multi-asset portfolio — Futures · Kraken · Meme Lab
+            Multi-asset portfolio — Futures · Kraken
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -264,39 +262,6 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
-
-        {/* Meme Lab */}
-        <div className="rounded-xl border border-fuchsia-500/15 bg-gradient-to-br from-fuchsia-500/[0.04] to-transparent p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-fuchsia-400" />
-              <span className="text-xs font-bold">Meme Lab</span>
-              <span className="text-[10px] text-muted-foreground/40">Solana memes</span>
-              <span className={`text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                !meme?.live?.enabled ? "bg-muted text-muted-foreground/60 border-transparent"
-                : meme?.live?.validate ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
-                : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-              }`}>{!meme?.live?.enabled ? "off" : meme?.live?.validate ? "dry-run" : "live"}</span>
-            </div>
-            <Link href="/meme-lab" className="text-[10px] text-fuchsia-400 hover:underline">View</Link>
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Wallet</p>
-              <p className="text-sm font-bold tabular-nums">{formatCurrency(memeEquity)}</p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Open</p>
-              <p className="text-sm font-bold tabular-nums">{meme?.open?.length ?? 0}</p>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-foreground/40">Realized P&L</p>
-              <p className={`text-sm font-bold tabular-nums ${pnlColor(meme?.stats?.totalRealizedUsd || 0)}`}>
-                {(meme?.stats?.totalRealizedUsd || 0) >= 0 ? "+" : ""}{formatCurrency(meme?.stats?.totalRealizedUsd || 0)}
-              </p>
-            </div>
-          </div>
-        </div>
       </div>
 
 
@@ -369,7 +334,6 @@ export default function DashboardPage() {
             <div className="flex gap-3">
               <Link href="/futures" className="text-[10px] text-amber-400 hover:underline">Futures</Link>
               <Link href="/kraken" className="text-[10px] text-purple-400 hover:underline">Kraken</Link>
-              <Link href="/meme-lab" className="text-[10px] text-fuchsia-400 hover:underline">Meme Lab</Link>
             </div>
           </div>
 
@@ -427,7 +391,7 @@ export default function DashboardPage() {
           ) : (
             <div className="px-4 py-10 text-center">
               <p className="text-sm text-muted-foreground/40">No open positions</p>
-              <p className="text-[11px] text-muted-foreground/25 mt-1">Positions from Tradovate, Kraken and Meme Lab will appear here when active</p>
+              <p className="text-[11px] text-muted-foreground/25 mt-1">Positions from Tradovate and Kraken will appear here when active</p>
             </div>
           )}
         </div>

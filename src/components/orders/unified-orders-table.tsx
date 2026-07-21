@@ -4,7 +4,7 @@ import { useState } from "react";
 import useSWR from "swr";
 
 interface Order {
-  category: "futures" | "kraken" | "meme";
+  category: "futures" | "kraken";
   mode: "live" | "demo";
   symbol: string;
   action: string;
@@ -22,7 +22,6 @@ const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" 
 const CAT_STYLE: Record<Order["category"], string> = {
   futures: "text-amber-400/80 bg-amber-500/[0.08]",
   kraken: "text-purple-400/80 bg-purple-500/[0.08]",
-  meme: "text-fuchsia-400/80 bg-fuchsia-500/[0.08]",
 };
 
 export function UnifiedOrdersTable() {
@@ -34,8 +33,8 @@ export function UnifiedOrdersTable() {
 
   if (!data?.orders || !modeData) return <div className="text-sm text-muted-foreground/60 py-6">Loading orders…</div>;
 
-  // VIEW SPLIT: live view shows real-money books (live futures + Kraken + Meme); demo view shows demo
-  // futures only. Kraken and Meme are real accounts with no demo equivalent, so they never show in demo.
+  // VIEW SPLIT: live view shows real-money books (live futures + Kraken); demo view shows demo
+  // futures only. Kraken is a real account with no demo equivalent, so it never shows in demo.
   const viewOrders = data.orders.filter((o) =>
     isLive ? (o.category !== "futures" || o.mode === "live") : (o.category === "futures" && o.mode === "demo"),
   );
@@ -59,12 +58,11 @@ export function UnifiedOrdersTable() {
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         {isLive ? (
           <>
             <Stat label="Futures (live) realized" value={money(bookPnl("futures"))} cls={col(bookPnl("futures"))} sub={`${bookCount("futures")} trades`} />
             <Stat label="Kraken" value={`${bookCount("kraken")} trades`} sub="accumulator" />
-            <Stat label="Meme realized" value={money(bookPnl("meme"))} cls={col(bookPnl("meme"))} sub={`${bookCount("meme")} trades`} />
           </>
         ) : (
           <Stat label="Futures (demo) realized" value={money(bookPnl("futures"))} cls={col(bookPnl("futures"))} sub={`${bookCount("futures")} trades`} />
@@ -110,7 +108,7 @@ export function UnifiedOrdersTable() {
                     </td>
                     <td className="px-2 py-1.5 font-semibold">{o.symbol}</td>
                     <td className="px-2 py-1.5 text-muted-foreground/70 capitalize" title={o.reason ?? undefined}>
-                      {o.action}{o.reason && o.category === "meme" ? ` (${o.reason})` : ""}
+                      {o.action}
                     </td>
                     <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">
                       {o.size != null ? (o.category === "futures" ? `${o.size}x` : `$${o.size}`) : "—"}
@@ -127,8 +125,8 @@ export function UnifiedOrdersTable() {
       )}
       <p className="text-[10px] text-muted-foreground/40">
         {isLive
-          ? "Live real-money order log — live futures + Kraken + Meme Lab. Realized = sum of logged trade P&L (differs from the balance-based account total on the dashboard). Kraken P&L is account-level, not per-trade."
-          : "Demo futures order log (fake money). Kraken and Meme are real-money accounts and only appear in the live view."}
+          ? "Live real-money order log — live futures + Kraken. Realized = sum of logged trade P&L (differs from the balance-based account total on the dashboard). Kraken P&L is account-level, not per-trade."
+          : "Demo futures order log (fake money). Kraken is a real-money account and only appears in the live view."}
       </p>
     </div>
   );

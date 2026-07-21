@@ -73,9 +73,8 @@ export function TopBar() {
   // Check if live trading is active for visual styling
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
   const isAnyLive = Object.values(modeData?.modes || {}).some((m) => m === "live");
-  // All-accounts equity: Kraken + Meme Lab join futures below (matches the dashboard total). Alpaca retired.
+  // All-accounts equity: Kraken joins futures below (matches the dashboard total). Alpaca + Meme Lab retired.
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
-  const { data: meme } = useSWR<{ live?: { walletUsd?: number } }>("/api/meme-lab", fetcher, { refreshInterval: 60000 });
 
   if (futuresLoading) {
     return (
@@ -102,10 +101,9 @@ export function TopBar() {
     ? tradePnl + unrealizedPnl
     : (balanceDelta ?? 0);
   const hasFutures = futuresData?.connected && futuresData.account;
-  // True total across live accounts (futures + Kraken + Meme Lab wallet). Alpaca retired (funds withdrawn).
+  // True total across live accounts (futures + Kraken). Alpaca + Meme Lab retired (funds withdrawn).
   const krakenEquity = krk?.connected ? krk.totalValue || 0 : 0;
-  const memeEquity = meme?.live?.walletUsd || 0;
-  const equity = futuresEquity + krakenEquity + memeEquity;
+  const equity = futuresEquity + krakenEquity;
   const dailyPnl = futuresDailyPnl;
   const dailyPct = equity - dailyPnl > 0 ? dailyPnl / (equity - dailyPnl) : 0;
 
