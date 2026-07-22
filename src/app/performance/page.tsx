@@ -42,11 +42,32 @@ interface FuturesPerfData {
 
 const swrFetcher = (url: string) => fetch(url).then((r) => r.json());
 
+interface LiveStats {
+  ok: boolean;
+  netPnl: number;
+  currentBalance: number;
+  startingCapital: number;
+  roundTrips: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  best: { pnl: number; sym: string } | null;
+  worst: { pnl: number; sym: string } | null;
+}
+
 export default function PerformancePage() {
   const [futures, setFutures] = useState<FuturesPerfData | null>(null);
   const [loaded, setLoaded] = useState(false);
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", swrFetcher, { refreshInterval: 10000 });
   const futuresViewMode = modeData?.modes?.futures || "paper";
+  // Authoritative live-futures stats — the single source of truth for the LIVE headline P&L +
+  // win rate + best/worst (broker balance delta + clean incident-excluded round-trips). Only used
+  // when the futures view is live; demo keeps its balance-history math.
+  const { data: liveStats } = useSWR<LiveStats>(
+    futuresViewMode === "live" ? "/api/futures/live-pnl" : null,
+    swrFetcher,
+    { refreshInterval: 30000 },
+  );
 
   // Re-fetch futures data when view mode changes (LIVE ↔ DEMO)
   useEffect(() => {
@@ -227,7 +248,12 @@ export default function PerformancePage() {
 
         // Compute all stats
         const stats = computeFuturesStats(effectiveRoundTrips, dayMap, weekMap, STARTING_CAPITAL);
-        const totalPnl = accountPnl ?? stats.totalPnl;
+        // LIVE headline = authoritative broker balance delta (net of deposits since inception), NOT
+        // balance − startingCapital (which would count a funding transfer as profit). Falls back to
+        // the legacy figure only while the authoritative object is loading / broker unreachable.
+        const isLive = futuresViewMode === "live";
+        const liveOk = isLive && liveStats?.ok;
+        const totalPnl = liveOk ? liveStats!.netPnl : (accountPnl ?? stats.totalPnl);
 
         if (!futures) {
           return (
@@ -372,7 +398,7 @@ export default function PerformancePage() {
                     </div>
                     <div>
                       <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">Total P&L</p>
-                      <p className={`text-xl font-bold mt-1 ${pnl(futures.account.balance - (futures.startingCapital ?? 50_000))}`}>{fmt(Math.round(futures.account.balance - (futures.startingCapital ?? 50_000)))}</p>
+                      <p className={`text-xl font-bold mt-1 ${pnl(totalPnl)}`}>{fmt(Math.round(totalPnl))}</p>
                     </div>
                   </div>
                 </CardContent>

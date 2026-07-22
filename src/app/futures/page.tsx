@@ -135,6 +135,29 @@ interface PositionsData {
   riskMetrics?: { dailyLossLimit: number; maxTradesPerDay: number; riskPerTrade: number; simEquity: number; todayTradeCount: number } | null;
 }
 
+// Mirror of the authoritative LiveFuturesStats shape returned by GET /api/futures/live-pnl
+// (src/lib/live-pnl.ts). netPnl = broker balance delta; all trade stats come from the same clean
+// incident-excluded round-trip set.
+interface LiveFuturesStats {
+  ok: boolean;
+  netPnl: number;
+  currentBalance: number;
+  startingCapital: number;
+  netDeposits: number;
+  roundTrips: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  realizedSum: number;
+  avgWin: number;
+  avgLoss: number;
+  best: { pnl: number; sym: string } | null;
+  worst: { pnl: number; sym: string } | null;
+  last24h: number;
+  last7d: number;
+  last30d: number;
+}
+
 interface BacktestSetup {
   setup: string;
   trades: number;
@@ -241,6 +264,11 @@ export default function FuturesPage() {
   // Subscribe to the global mode SWR cache so this page reacts instantly when the top-bar toggles
   // demo↔live (instead of waiting up to 10s for the positions poll to carry the new mode).
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", modeFetcher, { refreshInterval: 30000 });
+  // Authoritative live-futures stats (same source as the Track Record header). `netPnl` is the
+  // broker balance delta; every trade stat is from ONE clean incident-excluded round-trip set, so
+  // best/worst/win-rate can never disagree with each other or with the rest of the app. The LIVE
+  // Performance panel is driven ENTIRELY from this — no session-fill / DB-sum mixing.
+  const { data: liveStats } = useSWR<LiveFuturesStats>("/api/futures/live-pnl", modeFetcher, { refreshInterval: 30000 });
   const swrLiveView = modeData?.modes?.futures === "live";
   // isLiveView prefers the SWR signal (authoritative + instant) and falls back to posData while
   // SWR is loading. This eliminates the stale-view-mode window during a toggle.
@@ -462,6 +490,11 @@ export default function FuturesPage() {
   };
   const adjustedWeeklyPnl = computePeriodPnlFromBalance(weekStart) ?? (accountPnl ?? 0);
   const adjustedMonthlyPnl = computePeriodPnlFromBalance(monthStart) ?? (accountPnl ?? 0);
+
+  // In LIVE view, the Performance panel is driven ENTIRELY by the authoritative /api/futures/live-pnl
+  // object (broker-balance total + clean incident-excluded round-trips). We only fall through to the
+  // legacy fill/DB-based panel for DEMO (no official inception, research sandbox).
+  const useLiveStats = isLiveView && !!liveStats;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -1346,9 +1379,17 @@ export default function FuturesPage() {
                     </div>
                     <div className="text-right">
                       <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
-                      <p className={`text-lg font-bold tabular-nums ${pnlColor(totalPnl)}`}>
-                        {totalPnl >= 0 ? "+" : ""}${totalPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </p>
+                      {(() => {
+                        // LIVE: authoritative broker-balance delta (same source as the Performance panel
+                        // + Track Record header). DEMO: legacy balance-fallback total.
+                        const acctPnl = useLiveStats ? (liveStats!.ok ? liveStats!.netPnl : null) : totalPnl;
+                        if (acctPnl == null) return <p className="text-lg font-bold tabular-nums text-muted-foreground/40">—</p>;
+                        return (
+                          <p className={`text-lg font-bold tabular-nums ${pnlColor(acctPnl)}`}>
+                            {acctPnl >= 0 ? "+" : ""}${acctPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </p>
+                        );
+                      })()}
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-[10px]">
@@ -1550,99 +1591,195 @@ export default function FuturesPage() {
             <CardHeader className="pb-2">
               <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Performance</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
-              {/* Total P&L — from reconciled DB trades */}
-              <div>
-                <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
-                <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
-                  {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </p>
-                <p className="text-[9px] text-muted-foreground/30">{tradeCount} trades</p>
-              </div>
-              {/* Fills + Win Rate */}
-              <div className="grid grid-cols-2 gap-3">
+            {useLiveStats ? (
+              /* ── LIVE: single authoritative source (/api/futures/live-pnl). Total = broker balance
+                    delta; every trade stat from the same clean incident-excluded round-trip set. ── */
+              <CardContent className="space-y-3">
+                {/* Total P&L — broker balance delta (the account truth). "—" if broker unreachable. */}
                 <div>
-                  <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
-                  <p className="text-lg font-bold">
-                    {tradeCount > 0 ? `${((winCount / tradeCount) * 100).toFixed(0)}%` : "—"}
-                  </p>
-                  <p className="text-[9px] text-muted-foreground/30">{winCount}W / {lossCount}L</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-muted-foreground/40">Fills</p>
-                  <p className="text-lg font-bold">{(posData?.fillCount ?? 0) > 0 ? posData!.fillCount : closedTrades.length}</p>
+                  <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
+                  {liveStats!.ok ? (
+                    <p className={`text-2xl font-bold tabular-nums ${pnlColor(liveStats!.netPnl)}`}>
+                      {liveStats!.netPnl >= 0 ? "+" : "-"}${Math.abs(liveStats!.netPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  ) : (
+                    <p className="text-2xl font-bold tabular-nums text-muted-foreground/40">—</p>
+                  )}
                   <p className="text-[9px] text-muted-foreground/30">
-                    {(posData?.fillCount ?? 0) > 0 ? "from Tradovate" : "DB logged"}
+                    {liveStats!.roundTrips} trades · broker balance
+                    {liveStats!.realizedSum !== 0 && (
+                      <span className="ml-1">
+                        · realized {liveStats!.realizedSum >= 0 ? "+" : "-"}${Math.abs(liveStats!.realizedSum).toFixed(0)}
+                      </span>
+                    )}
                   </p>
                 </div>
-              </div>
-              {/* Avg Win / Avg Loss */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <p className="text-[10px] text-muted-foreground/40">Avg Win</p>
-                  <p className="text-sm font-bold text-emerald-400 tabular-nums">
-                    {wins.length > 0 ? `+$${avgWin.toFixed(0)}` : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-muted-foreground/40">Avg Loss</p>
-                  <p className="text-sm font-bold text-red-400 tabular-nums">
-                    {losses.length > 0 ? `-$${Math.abs(avgLoss).toFixed(0)}` : "—"}
-                  </p>
-                </div>
-              </div>
-              {/* Best / Worst */}
-              {bestTrade && (
+                {/* Win Rate + W/L */}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <p className="text-[10px] text-muted-foreground/40">Best Trade</p>
-                    <p className="text-[11px] font-bold text-emerald-400 tabular-nums">+${(bestTrade.pnl || 0).toFixed(0)}</p>
-                    <p className="text-[9px] text-muted-foreground/30">{bestTrade.symbol}</p>
+                    <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
+                    <p className="text-lg font-bold">
+                      {liveStats!.roundTrips > 0 ? `${(liveStats!.winRate * 100).toFixed(0)}%` : "—"}
+                    </p>
+                    <p className="text-[9px] text-muted-foreground/30">{liveStats!.wins}W / {liveStats!.losses}L</p>
                   </div>
-                  {worstTrade && (
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Round Trips</p>
+                    <p className="text-lg font-bold">{liveStats!.roundTrips}</p>
+                    <p className="text-[9px] text-muted-foreground/30">paired closes</p>
+                  </div>
+                </div>
+                {/* Avg Win / Avg Loss */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Avg Win</p>
+                    <p className="text-sm font-bold text-emerald-400 tabular-nums">
+                      {liveStats!.wins > 0 ? `+$${liveStats!.avgWin.toFixed(0)}` : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Avg Loss</p>
+                    <p className="text-sm font-bold text-red-400 tabular-nums">
+                      {liveStats!.losses > 0 ? `-$${Math.abs(liveStats!.avgLoss).toFixed(0)}` : "—"}
+                    </p>
+                  </div>
+                </div>
+                {/* Best / Worst — distinct, from the clean round-trip set */}
+                {(liveStats!.best || liveStats!.worst) && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Best Trade</p>
+                      {liveStats!.best ? (
+                        <>
+                          <p className={`text-[11px] font-bold tabular-nums ${pnlColor(liveStats!.best.pnl)}`}>
+                            {liveStats!.best.pnl >= 0 ? "+" : "-"}${Math.abs(liveStats!.best.pnl).toFixed(0)}
+                          </p>
+                          <p className="text-[9px] text-muted-foreground/30">{liveStats!.best.sym}</p>
+                        </>
+                      ) : <p className="text-[11px] text-muted-foreground/40">—</p>}
+                    </div>
                     <div>
                       <p className="text-[10px] text-muted-foreground/40">Worst Trade</p>
-                      <p className={`text-[11px] font-bold tabular-nums ${(worstTrade.pnl || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {(worstTrade.pnl || 0) >= 0 ? "+" : "-"}${Math.abs(worstTrade.pnl || 0).toFixed(0)}
-                      </p>
-                      <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol}</p>
+                      {liveStats!.worst ? (
+                        <>
+                          <p className={`text-[11px] font-bold tabular-nums ${pnlColor(liveStats!.worst.pnl)}`}>
+                            {liveStats!.worst.pnl >= 0 ? "+" : "-"}${Math.abs(liveStats!.worst.pnl).toFixed(0)}
+                          </p>
+                          <p className="text-[9px] text-muted-foreground/30">{liveStats!.worst.sym}</p>
+                        </>
+                      ) : <p className="text-[11px] text-muted-foreground/40">—</p>}
                     </div>
-                  )}
+                  </div>
+                )}
+                {/* 24h / 7d / 30d — realized sums over the same clean round-trip set */}
+                <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                  {([["24h", liveStats!.last24h], ["7d", liveStats!.last7d], ["30d", liveStats!.last30d]] as const).map(([label, val]) => (
+                    <div key={label} className="flex justify-between items-center">
+                      <span className="text-[10px] text-muted-foreground/40">{label}</span>
+                      <span className={`text-sm font-bold tabular-nums ${pnlColor(val)}`}>
+                        {val >= 0 ? "+" : "-"}${Math.abs(val).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  ))}
+                  <p className="text-[8px] text-muted-foreground/25 pt-0.5">realized round-trip P&L per window</p>
                 </div>
-              )}
-              {/* Today / Weekly / Monthly — Tradovate realized for today */}
-              <div className="pt-2 border-t border-white/[0.06] space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-muted-foreground/40">Today</span>
-                  <div className="text-right">
-                    <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
-                      {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">
-                      {dailyTrades} trades
-                    </span>
+              </CardContent>
+            ) : (
+              /* ── DEMO: research sandbox — legacy fill/DB-based summary (not real money). ── */
+              <CardContent className="space-y-3">
+                {/* Total P&L */}
+                <div>
+                  <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
+                  <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
+                    {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                  <p className="text-[9px] text-muted-foreground/30">{tradeCount} trades · demo (research, not real money)</p>
+                </div>
+                {/* Fills + Win Rate */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
+                    <p className="text-lg font-bold">
+                      {tradeCount > 0 ? `${((winCount / tradeCount) * 100).toFixed(0)}%` : "—"}
+                    </p>
+                    <p className="text-[9px] text-muted-foreground/30">{winCount}W / {lossCount}L</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Fills</p>
+                    <p className="text-lg font-bold">{(posData?.fillCount ?? 0) > 0 ? posData!.fillCount : closedTrades.length}</p>
+                    <p className="text-[9px] text-muted-foreground/30">
+                      {(posData?.fillCount ?? 0) > 0 ? "from Tradovate" : "DB logged"}
+                    </p>
                   </div>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-muted-foreground/40">This Week</span>
-                  <div className="text-right">
-                    <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedWeeklyPnl)}`}>
-                      {adjustedWeeklyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedWeeklyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} logged</span>
+                {/* Avg Win / Avg Loss */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Avg Win</p>
+                    <p className="text-sm font-bold text-emerald-400 tabular-nums">
+                      {wins.length > 0 ? `+$${avgWin.toFixed(0)}` : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground/40">Avg Loss</p>
+                    <p className="text-sm font-bold text-red-400 tabular-nums">
+                      {losses.length > 0 ? `-$${Math.abs(avgLoss).toFixed(0)}` : "—"}
+                    </p>
                   </div>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-muted-foreground/40">This Month</span>
-                  <div className="text-right">
-                    <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedMonthlyPnl)}`}>
-                      {adjustedMonthlyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedMonthlyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                    <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} logged</span>
+                {/* Best / Worst */}
+                {bestTrade && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-[10px] text-muted-foreground/40">Best Trade</p>
+                      <p className="text-[11px] font-bold text-emerald-400 tabular-nums">+${(bestTrade.pnl || 0).toFixed(0)}</p>
+                      <p className="text-[9px] text-muted-foreground/30">{bestTrade.symbol}</p>
+                    </div>
+                    {worstTrade && (
+                      <div>
+                        <p className="text-[10px] text-muted-foreground/40">Worst Trade</p>
+                        <p className={`text-[11px] font-bold tabular-nums ${(worstTrade.pnl || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {(worstTrade.pnl || 0) >= 0 ? "+" : "-"}${Math.abs(worstTrade.pnl || 0).toFixed(0)}
+                        </p>
+                        <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Today / Weekly / Monthly */}
+                <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-muted-foreground/40">Today</span>
+                    <div className="text-right">
+                      <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
+                        {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground/30 ml-1.5">
+                        {dailyTrades} trades
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-muted-foreground/40">This Week</span>
+                    <div className="text-right">
+                      <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedWeeklyPnl)}`}>
+                        {adjustedWeeklyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedWeeklyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} logged</span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-muted-foreground/40">This Month</span>
+                    <div className="text-right">
+                      <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedMonthlyPnl)}`}>
+                        {adjustedMonthlyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedMonthlyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} logged</span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </CardContent>
+              </CardContent>
+            )}
           </Card>
 
           {/* ── AGENT ACTIVITY FEED ── */}

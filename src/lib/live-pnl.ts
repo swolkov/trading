@@ -1,7 +1,7 @@
 import { prisma } from "./db";
 import { getTradovateAccountSummary } from "./tradovate";
 import { reconcileCapitalFlows, netFlowsAfterInception } from "./capital-flows";
-import { getRealtimeEdgePerformance } from "./edge-performance";
+import { getRealtimeEdgePerformance, getFuturesCloses } from "./edge-performance";
 
 /**
  * SINGLE SOURCE OF TRUTH for live-futures P&L.
@@ -69,5 +69,69 @@ export async function getLiveFuturesPnl(): Promise<LiveFuturesPnl> {
     roundTrips,
     wins,
     winRate: roundTrips ? wins / roundTrips : 0,
+  };
+}
+
+// Full live-futures performance-panel stats — the ONE authoritative source for the Futures page's
+// Performance card. `netPnl` is the balance-based account truth; EVERY trade statistic (count, win
+// rate, avg win/loss, best/worst, recent-window sums) is derived from the SAME clean round-trip set
+// (getFuturesCloses, incident-excluded), so best/worst can't disagree with the counts and the panel
+// can't show a total that reconciles to nothing.
+export interface LiveFuturesStats {
+  ok: boolean;
+  netPnl: number;          // ACCOUNT total (broker balance delta) — the authoritative headline
+  currentBalance: number;
+  startingCapital: number;
+  netDeposits: number;
+  roundTrips: number;      // clean paired closes (incident excluded), NOT log rows
+  wins: number;
+  losses: number;
+  winRate: number;
+  realizedSum: number;     // sum of clean closes — the trade-sum; differs from netPnl by fees + incident
+  avgWin: number;
+  avgLoss: number;
+  best: { pnl: number; sym: string } | null;
+  worst: { pnl: number; sym: string } | null;
+  last24h: number;
+  last7d: number;
+  last30d: number;
+}
+
+export async function getLiveFuturesStats(): Promise<LiveFuturesStats> {
+  const [base, closes] = await Promise.all([
+    getLiveFuturesPnl(),
+    getFuturesCloses("live").catch(() => [] as Awaited<ReturnType<typeof getFuturesCloses>>),
+  ]);
+  const wins = closes.filter((c) => c.pnl > 0);
+  const losses = closes.filter((c) => c.pnl < 0);
+  const avgWin = wins.length ? wins.reduce((s, c) => s + c.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((s, c) => s + c.pnl, 0) / losses.length : 0;
+  let best: { pnl: number; sym: string } | null = null;
+  let worst: { pnl: number; sym: string } | null = null;
+  for (const c of closes) {
+    const sym = c.sym.replace("FUT:", "");
+    if (!best || c.pnl > best.pnl) best = { pnl: c.pnl, sym };
+    if (!worst || c.pnl < worst.pnl) worst = { pnl: c.pnl, sym };
+  }
+  const now = Date.now(), DAY = 86_400_000;
+  const sumSince = (ms: number) => closes.filter((c) => c.ts.getTime() >= ms).reduce((s, c) => s + c.pnl, 0);
+  return {
+    ok: base.ok,
+    netPnl: base.netPnl,
+    currentBalance: base.currentBalance,
+    startingCapital: base.startingCapital,
+    netDeposits: base.netDeposits,
+    roundTrips: closes.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: closes.length ? wins.length / closes.length : 0,
+    realizedSum: closes.reduce((s, c) => s + c.pnl, 0),
+    avgWin,
+    avgLoss,
+    best,
+    worst,
+    last24h: sumSince(now - DAY),
+    last7d: sumSince(now - 7 * DAY),
+    last30d: sumSince(now - 30 * DAY),
   };
 }

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { getLiveFuturesPnl } from "@/lib/live-pnl";
 
 // ── DEMO-COPY SIMULATOR ───────────────────────────────────────────────────────
 // Answers one question with real data: "If live had just copied demo's trades, would we
@@ -109,15 +110,14 @@ export async function GET() {
     //   and it STILL blows through the kill switch.
     const copyMatched = simulate(trades, startCapital, (t) => t.demoPnl / RATIO_TO_MICRO(t.sym));
 
-    // Live ACTUAL (edge-gated) realized P&L since inception — the disciplined path.
+    // Live ACTUAL (edge-gated) — the disciplined path. This is REAL MONEY, so the dollar figure
+    // must be the authoritative broker-balance delta (not a sum of autoTradeLog rows, which
+    // double-log and carry the Jul 16-17 incident phantom). Trade count = clean paired round-trips.
     const inceptionRow = await prisma.agentConfig.findUnique({ where: { key: "strategy_inception" } });
     const inception = inceptionRow?.value ? new Date(inceptionRow.value) : new Date("2026-07-10");
-    const liveRows = await prisma.autoTradeLog.findMany({
-      where: { symbol: { startsWith: "FUT:" }, action: { startsWith: "live_" }, pnl: { not: null }, createdAt: { gte: inception } },
-      select: { pnl: true },
-    });
-    const liveActualPnl = liveRows.reduce((s, r) => s + (r.pnl ?? 0), 0);
-    const liveActualTrades = liveRows.filter((r) => (r.pnl ?? 0) !== 0).length;
+    const live = await getLiveFuturesPnl();
+    const liveActualPnl = live.ok ? live.netPnl : null;
+    const liveActualTrades = live.roundTrips;
 
     return Response.json({
       startCapital,
@@ -135,7 +135,7 @@ export async function GET() {
       },
       copyMicro,
       copyMatched,
-      liveActual: { netPnl: Math.round(liveActualPnl * 100) / 100, trades: liveActualTrades, sinceDate: inception.toISOString().slice(0, 10) },
+      liveActual: { netPnl: liveActualPnl != null ? Math.round(liveActualPnl * 100) / 100 : null, trades: liveActualTrades, sinceDate: inception.toISOString().slice(0, 10) },
       generatedAt: new Date().toISOString(),
     });
   } catch (error) {

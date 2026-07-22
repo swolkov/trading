@@ -92,19 +92,21 @@ export interface RealtimeEdgePerf {
   lastTs: string | null;
 }
 
-export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise<Record<string, RealtimeEdgePerf>> {
+export interface FuturesClose { ts: Date; sym: string; dir: "long" | "short"; pnl: number }
+
+// Paired entry→exit closes for an engine (live/demo), Jul 16-17 incident window excluded. THE shared
+// basis for per-edge perf AND the account-stats panel, so trade count / best / worst / win-rate can
+// never diverge between surfaces (that divergence was the "best = worst = +$86" bug — best/worst were
+// read from session-scoped Tradovate fills while the counts came from the DB).
+export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesClose[]> {
   const prefix = mode === "live" ? "live" : "futures";
   const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
   const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
   const allSyms = [...goldSyms, ...indexSyms];
-
   const sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
   const since = sinceRow?.value ? new Date(sinceRow.value) : new Date(0);
   const dir = (action: string): "long" | "short" | null =>
     action === `${prefix}_long` ? "long" : action === `${prefix}_short` ? "short" : null;
-
-  // Exclude the Jul 16-17 orphaned-bracket incident window (same as getEdgePerformance) so the
-  // per-edge numbers reconcile with the scoreboard; those tangled rows are still in the account total.
   const INCIDENT_START = Date.parse("2026-07-16T22:00:00Z");
   const INCIDENT_END = Date.parse("2026-07-17T06:00:00Z");
   const rows = (await prisma.autoTradeLog.findMany({
@@ -114,8 +116,7 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
   })).filter((r) => { const t = r.createdAt.getTime(); return t < INCIDENT_START || t >= INCIDENT_END; });
 
   const openDir: Record<string, "long" | "short" | null> = {};
-  type Close = { ts: Date; sym: string; dir: "long" | "short"; pnl: number };
-  const closes: Close[] = [];
+  const closes: FuturesClose[] = [];
   for (const r of rows) {
     const d = dir(r.action);
     if (d) { openDir[r.symbol] = d; continue; }
@@ -125,10 +126,17 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
     closes.push({ ts: r.createdAt, sym: r.symbol, dir: od, pnl: r.pnl });
     openDir[r.symbol] = null;
   }
+  return closes;
+}
+
+export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise<Record<string, RealtimeEdgePerf>> {
+  const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
+  const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const closes = await getFuturesCloses(mode);
 
   const isGold = (s: string) => goldSyms.includes(s);
   const isIndex = (s: string) => indexSyms.includes(s);
-  const bucket = (c: Close): string | null =>
+  const bucket = (c: FuturesClose): string | null =>
     isGold(c.sym) ? "gold_rsi_bounce"
     : isIndex(c.sym) && c.dir === "short" ? "index_overbought_short"
     : isIndex(c.sym) && c.dir === "long" ? "index_trend_long"

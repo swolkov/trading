@@ -5,22 +5,26 @@ export const revalidate = 60;
 
 export const metadata = {
   title: "Proof — Live engine performance",
-  description: "Real-time, verifiable performance of the $1K live futures engine, measured by actual broker account balance.",
+  description: "Real-time, verifiable performance of the live futures engine, measured by actual broker account balance.",
 };
 
 interface Stats {
   account?: string;
+  ok?: boolean;
   startCapital?: number;
   pnlSource?: string;
-  netPnl?: number;
-  returnPct?: number;
-  latestBalance?: number;
+  netPnl?: number | null;
+  returnPct?: number | null;
+  latestBalance?: number | null;
   firstBalance?: number;
   maxDrawdown?: number;
   totalTrades?: number;
   winCount?: number;
   lossCount?: number;
   winRate?: number | null;
+  best?: { pnl: number; sym: string } | null;
+  worst?: { pnl: number; sym: string } | null;
+  realizedSum?: number;
   activeDays?: number;
   daysUp?: number;
   daysDown?: number;
@@ -44,7 +48,7 @@ async function getStats(): Promise<Stats | null> {
   } catch { return null; }
 }
 
-function fmtMoney(n: number | undefined): string {
+function fmtMoney(n: number | undefined | null): string {
   if (n === undefined || n === null || !isFinite(n)) return "—";
   const s = Math.abs(Math.round(n)).toLocaleString();
   return (n < 0 ? "−$" : "$") + s;
@@ -80,14 +84,15 @@ export default async function ProofPage() {
       <div className="max-w-5xl mx-auto px-6 py-12">
         {/* Hero */}
         <div className="mb-10">
-          <div className="text-xs uppercase tracking-widest text-emerald-400 font-mono mb-2">Live proof · $1K real money</div>
+          <div className="text-xs uppercase tracking-widest text-emerald-400 font-mono mb-2">Live proof · real money</div>
           <h1 className="text-4xl font-light leading-tight mb-3">
-            Live futures engine — <span className="text-emerald-400">$1,000 real account</span>
+            Live futures engine — <span className="text-emerald-400">real broker account</span>
           </h1>
           <p className="text-slate-400 max-w-3xl">
             Net P&amp;L on this page is measured the only honest way: the change in the engine&apos;s actual
-            broker account balance (end-of-day equity straight from Tradovate). No trade-log sums, no
-            backtest, no demo account mixed in — this is the live $1K account only. Reproducible from
+            broker account balance (net liquidation straight from Tradovate, minus any deposits since
+            inception). No trade-log sums, no backtest, no demo account mixed in — this is the live
+            account only. Reproducible from
             <code className="text-emerald-400 mx-1">/api/fund/stats</code>.
           </p>
         </div>
@@ -209,23 +214,24 @@ export default async function ProofPage() {
                     trade log, which over-counts.
                   </li>
                   <li>
-                    <span className="text-emerald-400 font-mono">Win rate</span> is a simple count of winning
-                    vs losing closes on the live engine (MGC gold). It says nothing about edge on its own.
+                    <span className="text-emerald-400 font-mono">Win rate</span> is a count of winning vs losing
+                    paired round-trips on the live engine (MGC / MNQ / MES), with the Jul 16-17 incident window
+                    excluded. It says nothing about edge on its own.
                   </li>
                   <li>
                     <span className="text-amber-400 font-mono">Sample size</span> is tiny (~1 month). A handful
                     of trades cannot distinguish skill from luck. Do not read this as a validated edge.
                   </li>
                   <li>
-                    The demo / $50K paper account is deliberately excluded. This page is the $1K live account
-                    and nothing else.
+                    The demo / paper account is deliberately excluded. This page is the live account and
+                    nothing else.
                   </li>
                 </ul>
               </CardContent>
             </Card>
 
             <div className="text-xs text-slate-600 font-mono text-center">
-              Live $1K account · {stats.windowStart} → {stats.windowEnd} · P&amp;L = broker balance delta ·
+              Live account · {stats.windowStart} → {stats.windowEnd} · P&amp;L = broker balance delta ·
               Generated {stats.generatedAt.slice(0, 19).replace("T", " ")} UTC
             </div>
           </>

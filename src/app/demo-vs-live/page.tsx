@@ -20,7 +20,7 @@ interface Data {
   };
   copyMicro: Sim;
   copyMatched: Sim;
-  liveActual: { netPnl: number; trades: number; sinceDate: string };
+  liveActual: { netPnl: number | null; trades: number; sinceDate: string };
   generatedAt: string;
 }
 
@@ -144,9 +144,14 @@ export default function DemoVsLivePage() {
             <h2 className="text-sm font-bold">3 · Live actual <span className="text-[10px] font-normal text-muted-foreground/50">· edge-gated, real money</span></h2>
             <p className="text-[11px] text-muted-foreground/60 mt-0.5">
               {liveActual.trades} trade{liveActual.trades === 1 ? "" : "s"} since {liveActual.sinceDate} — only the setups with a proven or forward-testing edge. Small, but real and alive.
+              <span className="text-muted-foreground/40"> · broker balance delta</span>
             </p>
           </div>
-          <p className={`text-2xl font-black tabular-nums ${col(liveActual.netPnl)}`}>{money(liveActual.netPnl)}</p>
+          {liveActual.netPnl != null ? (
+            <p className={`text-2xl font-black tabular-nums ${col(liveActual.netPnl)}`}>{money(liveActual.netPnl)}</p>
+          ) : (
+            <p className="text-2xl font-black tabular-nums text-muted-foreground/40">—</p>
+          )}
         </div>
       </div>
 
