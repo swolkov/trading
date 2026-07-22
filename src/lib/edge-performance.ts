@@ -23,41 +23,55 @@ export interface EdgeStat {
 const dirOf = (action: string): "long" | "short" | null =>
   action === "live_long" ? "long" : action === "live_short" ? "short" : null;
 
-export async function getEdgePerformance(): Promise<{ since: string; edges: EdgeStat[]; totalNet: number; totalTrades: number }> {
-  const sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
+export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promise<{ since: string; edges: EdgeStat[]; totalNet: number; totalTrades: number }> {
+  // Mode-aware so the SAME scoreboard works for the demo shadow-test. Live = MGC/MNQ/MES micros +
+  // live_ prefix + edge_scoreboard_since; demo = GC/NQ/ES full-size + futures_ prefix +
+  // demo_scoreboard_since (independent inception, so demo can be reset without touching live).
+  const prefix = mode === "live" ? "live" : "futures";
+  const goldSym = mode === "live" ? "FUT:MGC" : "FUT:GC";
+  const idxSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const dispGold = mode === "live" ? "MGC" : "GC";
+  const dispIdx = mode === "live" ? "MNQ/MES" : "NQ/ES";
+
+  const sinceKey = mode === "demo" ? "demo_scoreboard_since" : "edge_scoreboard_since";
+  let sinceRow = await prisma.agentConfig.findUnique({ where: { key: sinceKey } });
+  if (!sinceRow && mode === "demo") sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
   const since = sinceRow?.value ? new Date(sinceRow.value) : new Date(0);
 
-  // Jul 16-17 INCIDENT WINDOW — an orphaned-bracket bug tangled the trade rows here (a mis-logged
-  // accidental long), so they can't be cleanly attributed to any edge. Their net P&L is still in the
-  // ACCOUNT balance (the one authoritative total); they're just excluded from per-edge "what works".
-  // All legit trades before and after are kept, and no real position spanned this window.
+  // Jul 16-17 INCIDENT WINDOW — an orphaned-bracket bug tangled the (live) trade rows here. Their net
+  // P&L is still in the ACCOUNT balance (the authoritative total); just excluded from per-edge "what
+  // works". Harmless no-op for demo (demo_scoreboard_since starts after it).
   const INCIDENT_START = Date.parse("2026-07-16T22:00:00Z");
   const INCIDENT_END = Date.parse("2026-07-17T06:00:00Z");
   const rows = (await prisma.autoTradeLog.findMany({
-    where: { symbol: { in: ["FUT:MGC", "FUT:MNQ", "FUT:MES"] }, action: { startsWith: "live_" }, createdAt: { gte: since } },
+    where: { symbol: { in: [goldSym, ...idxSyms] }, action: { startsWith: `${prefix}_` }, createdAt: { gte: since } },
     orderBy: { createdAt: "asc" },
     take: 1000,
   })).filter((r) => { const t = r.createdAt.getTime(); return t < INCIDENT_START || t >= INCIDENT_END; });
+
+  const dirFor = (action: string): "long" | "short" | null =>
+    action === `${prefix}_long` ? "long" : action === `${prefix}_short` ? "short" : null;
 
   // Pair entries → exits per symbol so each realized P&L carries the direction it was taken in.
   const openDir: Record<string, "long" | "short" | null> = {};
   type Close = { ts: Date; sym: string; dir: "long" | "short"; exit: string; pnl: number };
   const closes: Close[] = [];
   for (const r of rows) {
-    const d = dirOf(r.action);
+    const d = dirFor(r.action);
     if (d) { openDir[r.symbol] = d; continue; }   // entry — remember the direction we opened in
     if (r.pnl == null) continue;                  // not a realized close
     const dir = openDir[r.symbol];
     if (!dir) continue;                           // exit with no matching in-window entry — skip
-    closes.push({ ts: r.createdAt, sym: r.symbol, dir, exit: r.action.replace(/^live_/, ""), pnl: r.pnl });
+    closes.push({ ts: r.createdAt, sym: r.symbol, dir, exit: r.action.replace(new RegExp(`^${prefix}_`), ""), pnl: r.pnl });
     openDir[r.symbol] = null;
   }
 
+  const isIdx = (s: string) => idxSyms.includes(s);
   const DEFS = [
-    { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: "MGC — buy RSI<25 oversold bounce (long side of the flagship edge).", match: (c: Close) => c.sym === "FUT:MGC" && c.dir === "long" },
-    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: "MGC — short RSI>75 overbought fade (short side of the flagship edge).", match: (c: Close) => c.sym === "FUT:MGC" && c.dir === "short" },
-    { key: "index_short", name: "Index overbought-short", blurb: "MNQ/MES — short at RSI≥80. The overbought fade.", match: (c: Close) => (c.sym === "FUT:MNQ" || c.sym === "FUT:MES") && c.dir === "short" },
-    { key: "index_long", name: "Index trend-long (NEW)", blurb: "MNQ/MES — buy EMA9 pullbacks ONLY in a confirmed uptrend (price>200-EMA). Validated across the 2022 bear (PF 1.22, +both halves). Awaiting first live fills.", match: (c: Close) => (c.sym === "FUT:MNQ" || c.sym === "FUT:MES") && c.dir === "long" },
+    { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" },
+    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — short RSI>75 overbought fade (short side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
+    { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
+    { key: "index_long", name: "Index trend-long (NEW)", blurb: `${dispIdx} — buy EMA9 pullbacks ONLY in a confirmed uptrend (price>200-EMA). Validated across the 2022 bear (PF 1.22, +both halves).`, match: (c: Close) => isIdx(c.sym) && c.dir === "long" },
   ];
 
   const edges: EdgeStat[] = DEFS.map((e) => {

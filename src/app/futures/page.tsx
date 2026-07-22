@@ -683,7 +683,7 @@ export default function FuturesPage() {
                   <FuturesChart symbol={selectedContract} height={560} />
                 </CardContent>
               </Card>
-              {isLiveView && <EdgeScoreboard />}
+              <EdgeScoreboard mode={isLiveView ? "live" : "demo"} />
               <EngineActivity mode={isLiveView ? "live" : "demo"} />
             </div>
           )}

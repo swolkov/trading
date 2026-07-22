@@ -6,9 +6,10 @@ import { getEdgePerformance } from "@/lib/edge-performance";
 // oversold-LONG vs overbought-SHORT; index is split short vs long. Both pages now agree.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    return Response.json(await getEdgePerformance());
+    const mode = new URL(request.url).searchParams.get("mode") === "demo" ? "demo" : "live";
+    return Response.json(await getEdgePerformance(mode));
   } catch (error) {
     console.error("[/api/futures/edge-scoreboard]", error);
     return Response.json({ error: String(error) }, { status: 500 });

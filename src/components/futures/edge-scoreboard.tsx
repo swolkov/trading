@@ -19,18 +19,22 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toFixed(0)}`;
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 
-// Two-edge live scoreboard — watch the $5k test prove or disprove itself, per edge, on REAL P&L.
-export function EdgeScoreboard() {
-  const { data } = useSWR<Board>("/api/futures/edge-scoreboard", fetcher, { refreshInterval: 30000 });
+// Per-edge scoreboard — watch each edge prove or disprove itself on REAL P&L. Works for BOTH the live
+// account and the demo shadow-test (mode prop); demo reads its own reset-today window.
+export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
+  const { data } = useSWR<Board>(`/api/futures/edge-scoreboard${mode === "demo" ? "?mode=demo" : ""}`, fetcher, { refreshInterval: 30000 });
   if (!data?.edges) return null;
+  const isDemo = mode === "demo";
 
   return (
-    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+    <div className={`rounded-xl border p-4 space-y-3 ${isDemo ? "border-amber-500/25 bg-amber-500/[0.02]" : "border-border bg-card"}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-bold">Edge Test Scoreboard <span className="text-[10px] font-normal text-muted-foreground/50">· which edge works</span></h3>
+          <h3 className="text-sm font-bold">Edge Test Scoreboard <span className="text-[10px] font-normal text-muted-foreground/50">· {isDemo ? "DEMO shadow — paper" : "which edge works · live"}</span></h3>
           <p className="text-[10px] text-muted-foreground/50">
-            Per-edge P&amp;L (split by direction) on clean trades — is each edge actually working? Excludes the Jul 16–17 tracking incident; your <strong>account balance</strong> is the authoritative total P&amp;L.
+            {isDemo
+              ? <>Per-edge P&amp;L on the <strong>demo shadow-test</strong> (1-contract, reset today) — same edges as live, on paper. Research, not proof.</>
+              : <>Per-edge P&amp;L (split by direction) on clean trades — is each edge actually working? Excludes the Jul 16–17 tracking incident; your <strong>account balance</strong> is the authoritative total P&amp;L.</>}
           </p>
         </div>
         <div className="text-right shrink-0">

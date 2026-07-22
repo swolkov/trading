@@ -9,7 +9,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "Incorrect password" }, { status: 403 });
   }
 
-  const a = await prisma.autoTradeLog.deleteMany({});
+  // SAFETY: never delete LIVE real-money trades — that would wipe the authoritative track record.
+  // This reset only clears demo/paper + non-live rows. (Was an unfiltered deleteMany — a footgun.)
+  const a = await prisma.autoTradeLog.deleteMany({ where: { NOT: { action: { startsWith: "live_" } } } });
   const b = await prisma.agentRun.deleteMany({});
   const c = await prisma.researchReport.deleteMany({});
   const d = await prisma.tradeIdea.deleteMany({});
