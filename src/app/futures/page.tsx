@@ -264,12 +264,19 @@ export default function FuturesPage() {
   // Subscribe to the global mode SWR cache so this page reacts instantly when the top-bar toggles
   // demo↔live (instead of waiting up to 10s for the positions poll to carry the new mode).
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", modeFetcher, { refreshInterval: 30000 });
-  // Authoritative live-futures stats (same source as the Track Record header). `netPnl` is the
+  // Which view is active drives the mode-aware stats fetch below. Default to live while modeData is
+  // still loading so we never briefly fetch the wrong mode and flash mismatched numbers.
+  const swrLiveView = modeData ? modeData.modes?.futures === "live" : true;
+  // Authoritative futures stats for the ACTIVE view (same source + shape as the Track Record header):
+  // live reads /api/futures/live-pnl, demo reads /api/futures/live-pnl?mode=demo. `netPnl` is the
   // broker balance delta; every trade stat is from ONE clean incident-excluded round-trip set, so
-  // best/worst/win-rate can never disagree with each other or with the rest of the app. The LIVE
-  // Performance panel is driven ENTIRELY from this — no session-fill / DB-sum mixing.
-  const { data: liveStats } = useSWR<LiveFuturesStats>("/api/futures/live-pnl", modeFetcher, { refreshInterval: 30000 });
-  const swrLiveView = modeData?.modes?.futures === "live";
+  // best/worst/win-rate can never disagree with each other or with the rest of the app. The
+  // Performance panel is driven ENTIRELY from this for BOTH views — no session-fill / DB-sum mixing.
+  const { data: liveStats } = useSWR<LiveFuturesStats>(
+    swrLiveView ? "/api/futures/live-pnl" : "/api/futures/live-pnl?mode=demo",
+    modeFetcher,
+    { refreshInterval: 30000 },
+  );
   // isLiveView prefers the SWR signal (authoritative + instant) and falls back to posData while
   // SWR is loading. This eliminates the stale-view-mode window during a toggle.
   const isLiveView = modeData ? swrLiveView : posData?.viewMode === "live";
@@ -421,19 +428,8 @@ export default function FuturesPage() {
   const totalPnl = accountPnl ?? (closedTrades.length > 0 ? closedTrades.reduce((s, t) => s + (t.pnl || 0), 0) : filteredFills.totalPnl);
   const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl || 0), 0) / wins.length : 0;
   const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl || 0), 0) / losses.length : 0;
-  // Best/worst from fill-based round trips (accurate) with DB fallback
-  const bestRoundTrip = filteredFills.roundTrips.length > 0
-    ? filteredFills.roundTrips.reduce((best, rt) => rt.pnl > best.pnl ? rt : best, filteredFills.roundTrips[0])
-    : null;
-  const worstRoundTrip = filteredFills.roundTrips.length > 0
-    ? filteredFills.roundTrips.reduce((worst, rt) => rt.pnl < worst.pnl ? rt : worst, filteredFills.roundTrips[0])
-    : null;
-  const bestTrade = bestRoundTrip
-    ? { pnl: bestRoundTrip.pnl, symbol: `FUT:${bestRoundTrip.symbol}` }
-    : closedTrades.reduce((best, t) => (t.pnl || 0) > (best?.pnl || -Infinity) ? t : best, closedTrades[0]);
-  const worstTrade = worstRoundTrip
-    ? { pnl: worstRoundTrip.pnl, symbol: `FUT:${worstRoundTrip.symbol}` }
-    : closedTrades.reduce((worst, t) => (t.pnl || 0) < (worst?.pnl || Infinity) ? t : worst, closedTrades[0]);
+  // Best/worst now come from the authoritative /api/futures/live-pnl stats (liveStats.best/worst) for
+  // BOTH views, so no fill/DB best-worst derivation is needed here anymore.
 
   // ── P&L Calculations — ALL from Tradovate balance, NEVER from DB trade sums ──
   // DB trade P&L values are unreliable (logged $4,575 losses vs actual $2,210).
@@ -446,11 +442,6 @@ export default function FuturesPage() {
   weekStartDate.setUTCDate(weekStartDate.getUTCDate() - weekStartDate.getUTCDay());
   const weekStart = weekStartDate;
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-
-  // Trade counts (just for display — these come from DB and are approximate)
-  const dailyTrades = closedTrades.filter((t) => t.time >= todayStart.toISOString()).length;
-  const weeklyTrades = closedTrades.filter((t) => t.time >= weekStart.toISOString()).length;
-  const monthlyTrades = closedTrades.filter((t) => t.time >= monthStart.toISOString()).length;
 
   // Daily P&L: prefer actual trade fill sums (reliable), fallback to balance delta
   const currentBalance = posData?.account?.balance;
@@ -488,13 +479,12 @@ export default function FuturesPage() {
     }
     return accountPnl;
   };
-  const adjustedWeeklyPnl = computePeriodPnlFromBalance(weekStart) ?? (accountPnl ?? 0);
-  const adjustedMonthlyPnl = computePeriodPnlFromBalance(monthStart) ?? (accountPnl ?? 0);
 
-  // In LIVE view, the Performance panel is driven ENTIRELY by the authoritative /api/futures/live-pnl
-  // object (broker-balance total + clean incident-excluded round-trips). We only fall through to the
-  // legacy fill/DB-based panel for DEMO (no official inception, research sandbox).
-  const useLiveStats = isLiveView && !!liveStats;
+  // The Performance panel is driven ENTIRELY by the authoritative /api/futures/live-pnl object for
+  // BOTH views (broker-balance total + clean incident-excluded round-trips from getFuturesStats(mode)).
+  // Demo was reset to a fresh forward-test today, so its authoritative stats are the same shape as
+  // live and directly comparable — no more legacy fill/DB-sum fallback for the headline numbers.
+  const useAuthStats = !!liveStats;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -1380,9 +1370,9 @@ export default function FuturesPage() {
                     <div className="text-right">
                       <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
                       {(() => {
-                        // LIVE: authoritative broker-balance delta (same source as the Performance panel
-                        // + Track Record header). DEMO: legacy balance-fallback total.
-                        const acctPnl = useLiveStats ? (liveStats!.ok ? liveStats!.netPnl : null) : totalPnl;
+                        // Authoritative broker-balance delta for the active view (same source as the
+                        // Performance panel + Track Record header); "—" if the broker was unreachable.
+                        const acctPnl = useAuthStats ? (liveStats!.ok ? liveStats!.netPnl : null) : totalPnl;
                         if (acctPnl == null) return <p className="text-lg font-bold tabular-nums text-muted-foreground/40">—</p>;
                         return (
                           <p className={`text-lg font-bold tabular-nums ${pnlColor(acctPnl)}`}>
@@ -1591,10 +1581,15 @@ export default function FuturesPage() {
             <CardHeader className="pb-2">
               <CardTitle className="text-[11px] text-muted-foreground/40 uppercase tracking-wider font-bold">Performance</CardTitle>
             </CardHeader>
-            {useLiveStats ? (
-              /* ── LIVE: single authoritative source (/api/futures/live-pnl). Total = broker balance
-                    delta; every trade stat from the same clean incident-excluded round-trip set. ── */
+            {useAuthStats ? (
+              /* ── Single authoritative source for BOTH views (/api/futures/live-pnl?mode=…).
+                    Total = broker balance delta; every trade stat from the same clean
+                    incident-excluded round-trip set. LIVE = ~$5K real money, DEMO = ~$75K paper. ── */
               <CardContent className="space-y-3">
+                {/* View label — real money (live) vs paper research (demo) */}
+                <div className={`text-[10px] font-bold px-2 py-1 rounded border ${isLiveView ? "bg-red-500/15 text-red-400 border-red-500/30" : "bg-amber-500/15 text-amber-400 border-amber-500/30"}`}>
+                  {isLiveView ? "LIVE · real money" : "DEMO · paper (research, not real money)"}
+                </div>
                 {/* Total P&L — broker balance delta (the account truth). "—" if broker unreachable. */}
                 <div>
                   <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
@@ -1607,6 +1602,7 @@ export default function FuturesPage() {
                   )}
                   <p className="text-[9px] text-muted-foreground/30">
                     {liveStats!.roundTrips} trades · broker balance
+                    {isLiveView ? "" : " · reset today — fresh forward-test"}
                     {liveStats!.realizedSum !== 0 && (
                       <span className="ml-1">
                         · realized {liveStats!.realizedSum >= 0 ? "+" : "-"}${Math.abs(liveStats!.realizedSum).toFixed(0)}
@@ -1685,99 +1681,9 @@ export default function FuturesPage() {
                 </div>
               </CardContent>
             ) : (
-              /* ── DEMO: research sandbox — legacy fill/DB-based summary (not real money). ── */
-              <CardContent className="space-y-3">
-                {/* Total P&L */}
-                <div>
-                  <p className="text-[10px] text-muted-foreground/40">Total P&L</p>
-                  <p className={`text-2xl font-bold tabular-nums ${pnlColor(totalPnl)}`}>
-                    {totalPnl >= 0 ? "+" : "-"}${Math.abs(totalPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </p>
-                  <p className="text-[9px] text-muted-foreground/30">{tradeCount} trades · demo (research, not real money)</p>
-                </div>
-                {/* Fills + Win Rate */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <p className="text-[10px] text-muted-foreground/40">Win Rate</p>
-                    <p className="text-lg font-bold">
-                      {tradeCount > 0 ? `${((winCount / tradeCount) * 100).toFixed(0)}%` : "—"}
-                    </p>
-                    <p className="text-[9px] text-muted-foreground/30">{winCount}W / {lossCount}L</p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-muted-foreground/40">Fills</p>
-                    <p className="text-lg font-bold">{(posData?.fillCount ?? 0) > 0 ? posData!.fillCount : closedTrades.length}</p>
-                    <p className="text-[9px] text-muted-foreground/30">
-                      {(posData?.fillCount ?? 0) > 0 ? "from Tradovate" : "DB logged"}
-                    </p>
-                  </div>
-                </div>
-                {/* Avg Win / Avg Loss */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <p className="text-[10px] text-muted-foreground/40">Avg Win</p>
-                    <p className="text-sm font-bold text-emerald-400 tabular-nums">
-                      {wins.length > 0 ? `+$${avgWin.toFixed(0)}` : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-muted-foreground/40">Avg Loss</p>
-                    <p className="text-sm font-bold text-red-400 tabular-nums">
-                      {losses.length > 0 ? `-$${Math.abs(avgLoss).toFixed(0)}` : "—"}
-                    </p>
-                  </div>
-                </div>
-                {/* Best / Worst */}
-                {bestTrade && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <p className="text-[10px] text-muted-foreground/40">Best Trade</p>
-                      <p className="text-[11px] font-bold text-emerald-400 tabular-nums">+${(bestTrade.pnl || 0).toFixed(0)}</p>
-                      <p className="text-[9px] text-muted-foreground/30">{bestTrade.symbol}</p>
-                    </div>
-                    {worstTrade && (
-                      <div>
-                        <p className="text-[10px] text-muted-foreground/40">Worst Trade</p>
-                        <p className={`text-[11px] font-bold tabular-nums ${(worstTrade.pnl || 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          {(worstTrade.pnl || 0) >= 0 ? "+" : "-"}${Math.abs(worstTrade.pnl || 0).toFixed(0)}
-                        </p>
-                        <p className="text-[9px] text-muted-foreground/30">{worstTrade.symbol}</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {/* Today / Weekly / Monthly */}
-                <div className="pt-2 border-t border-white/[0.06] space-y-2">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground/40">Today</span>
-                    <div className="text-right">
-                      <span className={`text-sm font-bold tabular-nums ${pnlColor(dailyPnl)}`}>
-                        {dailyPnl >= 0 ? "+" : "-"}${Math.abs(dailyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                      <span className="text-[9px] text-muted-foreground/30 ml-1.5">
-                        {dailyTrades} trades
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground/40">This Week</span>
-                    <div className="text-right">
-                      <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedWeeklyPnl)}`}>
-                        {adjustedWeeklyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedWeeklyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                      <span className="text-[9px] text-muted-foreground/30 ml-1.5">{weeklyTrades} logged</span>
-                    </div>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground/40">This Month</span>
-                    <div className="text-right">
-                      <span className={`text-sm font-bold tabular-nums ${pnlColor(adjustedMonthlyPnl)}`}>
-                        {adjustedMonthlyPnl >= 0 ? "+" : "-"}${Math.abs(adjustedMonthlyPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                      <span className="text-[9px] text-muted-foreground/30 ml-1.5">{monthlyTrades} logged</span>
-                    </div>
-                  </div>
-                </div>
+              /* ── Loading — authoritative stats not yet fetched for this view. ── */
+              <CardContent>
+                <p className="text-[11px] text-muted-foreground/40 animate-pulse py-4 text-center">Loading performance…</p>
               </CardContent>
             )}
           </Card>

@@ -29,17 +29,22 @@ export interface LiveFuturesPnl {
   winRate: number;
 }
 
-export async function getLiveFuturesPnl(): Promise<LiveFuturesPnl> {
-  // Starting capital (re-baselined on each real deposit).
-  const scRow = await prisma.agentConfig.findUnique({ where: { key: "starting_capital_live" } }).catch(() => null);
-  const startingCapital = scRow?.value ? parseFloat(scRow.value) : 4821;
+// Balance-based P&L for either engine. Demo mirrors live's tracking exactly (own starting capital,
+// own inception, own broker account) so the demo forward-test is measured the same honest way.
+// NOTE the broker-mode mapping: the demo Tradovate account is TradingMode "paper" (there is no
+// "demo"); our own live/demo convention only drives the trade-log symbol set + prefix.
+export async function getFuturesPnl(mode: "live" | "demo" = "live"): Promise<LiveFuturesPnl> {
+  const brokerMode = mode === "live" ? "live" : "paper";
+  const scKey = mode === "live" ? "starting_capital_live" : "starting_capital_demo";
+  const scRow = await prisma.agentConfig.findUnique({ where: { key: scKey } }).catch(() => null);
+  const startingCapital = scRow?.value ? parseFloat(scRow.value) : (mode === "live" ? 4821 : 50000);
 
-  // Broker balance (netLiq) — authoritative. Guard the known "account resolution crossed to demo"
-  // leak (a live netLiq wildly above the live capital) the same way the positions route does.
+  // Broker balance (netLiq) — authoritative. Guard the known "account resolution crossed accounts"
+  // leak (a netLiq wildly above this account's capital) the same way the positions route does.
   let currentBalance = startingCapital;
   let ok = false;
   try {
-    const s = await getTradovateAccountSummary("live");
+    const s = await getTradovateAccountSummary(brokerMode);
     const nl = s.netLiq || s.balance || 0;
     if (nl > 0 && nl < startingCapital * 20) { currentBalance = nl; ok = true; }
   } catch { /* broker unreachable — ok stays false */ }
@@ -47,16 +52,17 @@ export async function getLiveFuturesPnl(): Promise<LiveFuturesPnl> {
   // Net deposits/withdrawals since inception, so a funding transfer never reads as profit.
   let netDeposits = 0;
   try {
-    const incRow = await prisma.agentConfig.findUnique({ where: { key: "strategy_inception" } });
-    const inception = incRow?.value || "2026-07-10";
-    const r = await reconcileCapitalFlows("live", {});
+    const incKey = mode === "live" ? "strategy_inception" : "demo_scoreboard_since";
+    const incRow = await prisma.agentConfig.findUnique({ where: { key: incKey } });
+    const inception = incRow?.value || (mode === "live" ? "2026-07-10" : "2026-07-22");
+    const r = await reconcileCapitalFlows(brokerMode, {});
     netDeposits = netFlowsAfterInception(r.flows, inception);
   } catch { /* leave 0 — not flow-adjusted this call */ }
 
   // Round-trips + win rate from paired closes (incident already excluded in the edge perf).
   let roundTrips = 0, wins = 0;
   try {
-    const perf = await getRealtimeEdgePerformance("live");
+    const perf = await getRealtimeEdgePerformance(mode);
     for (const k of Object.keys(perf)) { roundTrips += perf[k].trades; wins += perf[k].wins; }
   } catch { /* leave zeros */ }
 
@@ -71,6 +77,9 @@ export async function getLiveFuturesPnl(): Promise<LiveFuturesPnl> {
     winRate: roundTrips ? wins / roundTrips : 0,
   };
 }
+
+// Back-compat wrapper — live is the default everywhere it was called before.
+export function getLiveFuturesPnl(): Promise<LiveFuturesPnl> { return getFuturesPnl("live"); }
 
 // Full live-futures performance-panel stats — the ONE authoritative source for the Futures page's
 // Performance card. `netPnl` is the balance-based account truth; EVERY trade statistic (count, win
@@ -97,10 +106,10 @@ export interface LiveFuturesStats {
   last30d: number;
 }
 
-export async function getLiveFuturesStats(): Promise<LiveFuturesStats> {
+export async function getFuturesStats(mode: "live" | "demo" = "live"): Promise<LiveFuturesStats> {
   const [base, closes] = await Promise.all([
-    getLiveFuturesPnl(),
-    getFuturesCloses("live").catch(() => [] as Awaited<ReturnType<typeof getFuturesCloses>>),
+    getFuturesPnl(mode),
+    getFuturesCloses(mode).catch(() => [] as Awaited<ReturnType<typeof getFuturesCloses>>),
   ]);
   const wins = closes.filter((c) => c.pnl > 0);
   const losses = closes.filter((c) => c.pnl < 0);
@@ -135,3 +144,6 @@ export async function getLiveFuturesStats(): Promise<LiveFuturesStats> {
     last30d: sumSince(now - 30 * DAY),
   };
 }
+
+// Back-compat wrapper — live is the default everywhere it was called before.
+export function getLiveFuturesStats(): Promise<LiveFuturesStats> { return getFuturesStats("live"); }

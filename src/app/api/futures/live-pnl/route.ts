@@ -1,4 +1,4 @@
-import { getLiveFuturesStats } from "@/lib/live-pnl";
+import { getFuturesStats } from "@/lib/live-pnl";
 
 // The single source of truth for real-money live-futures P&L + performance stats. `netPnl` is the
 // broker balance delta (netLiq − startingCapital − netDeposits); every trade stat (count, win rate,
@@ -9,9 +9,10 @@ import { getLiveFuturesStats } from "@/lib/live-pnl";
 // (Superset of the old shape, so existing readers of netPnl/roundTrips/winRate still work.)
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const stats = await getLiveFuturesStats();
+    const mode = new URL(request.url).searchParams.get("mode") === "demo" ? "demo" : "live";
+    const stats = await getFuturesStats(mode);
     return Response.json(stats);
   } catch (error) {
     return Response.json({ ok: false, error: String(error) }, { status: 500 });

@@ -103,7 +103,11 @@ export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesCl
   const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
   const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
   const allSyms = [...goldSyms, ...indexSyms];
-  const sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
+  // Live and demo have INDEPENDENT inception dates so demo can be reset for a fresh forward-test without
+  // touching live's track record. Demo reads demo_scoreboard_since (falls back to the shared key if unset).
+  const sinceKey = mode === "demo" ? "demo_scoreboard_since" : "edge_scoreboard_since";
+  let sinceRow = await prisma.agentConfig.findUnique({ where: { key: sinceKey } });
+  if (!sinceRow && mode === "demo") sinceRow = await prisma.agentConfig.findUnique({ where: { key: "edge_scoreboard_since" } });
   const since = sinceRow?.value ? new Date(sinceRow.value) : new Date(0);
   const dir = (action: string): "long" | "short" | null =>
     action === `${prefix}_long` ? "long" : action === `${prefix}_short` ? "short" : null;
