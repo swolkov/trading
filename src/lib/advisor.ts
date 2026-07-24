@@ -12,20 +12,20 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" })
 
 // ─── Model Configuration (DB-overridable) ─────────────────────────────────────
 
-// Fable 5 confirmed: model ID "claude-fable-5", $10 input / $50 output per MTok
-// Uses adaptive thinking (NOT the old enabled+budget_tokens style)
-const DEFAULT_ADVISOR_MODEL = "claude-fable-5";
-const DEFAULT_WORKER_MODEL = "claude-sonnet-4-6";
+// Primary reasoning = Opus 5 (top-tier); balanced worker = Sonnet 5. Both use adaptive thinking and are
+// verified live against the API. Fable 5 is reserved for the adversarial red-team (different family →
+// independent perspective); Haiku 4.5 stays on the fast/high-frequency paths.
+const DEFAULT_ADVISOR_MODEL = "claude-opus-5";
+const DEFAULT_WORKER_MODEL = "claude-sonnet-5";
 
 // RESILIENCE: if the primary advisor model becomes unavailable (deprecated, pulled, region-blocked,
 // overloaded), fall through this chain so strategic grading keeps its full capability instead of
 // silently dropping to "no advisor." Most → least preferred. DB-overridable via advisor_fallback_models.
-const DEFAULT_ADVISOR_FALLBACKS = ["claude-opus-4-8", "claude-sonnet-4-6"];
+const DEFAULT_ADVISOR_FALLBACKS = ["claude-opus-4-8", "claude-sonnet-5"];
 
-// Models that require adaptive thinking (reject type: "enabled" + budget_tokens).
-// Sonnet 4.6 is included so it works as a fallback advisor — its legacy budget_tokens (8000) would
-// otherwise equal escalation's max_tokens (8000) and 400 (budget must be < max_tokens).
-const ADAPTIVE_THINKING_MODELS = new Set(["claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"]);
+// Models that require adaptive thinking (reject type: "enabled" + budget_tokens). All 5-series models
+// (Opus 5, Sonnet 5, Fable 5, Mythos 5) use adaptive; the 4.x here are kept as functional fallbacks.
+const ADAPTIVE_THINKING_MODELS = new Set(["claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"]);
 
 /** Get the correct thinking config for a given model */
 function getThinkingConfig(model: string): { type: "adaptive" } | { type: "enabled"; budget_tokens: number } {

@@ -1665,7 +1665,7 @@ ${tradingMode === "paper" ? 'A+ = textbook, high conviction. A = solid edge, cle
 Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "reasoning": "one sentence"}`;
 
       const response = await anthropic.messages.create({
-        model: "claude-opus-4-8",
+        model: "claude-opus-5",
         max_tokens: 8000,
         thinking: { type: "adaptive" },
         messages: [{ role: "user", content: aiPrompt }],

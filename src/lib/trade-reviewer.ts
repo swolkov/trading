@@ -38,7 +38,7 @@ export async function reviewClosedTrades(): Promise<string[]> {
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-fable-5",
+      model: "claude-opus-5",
       max_tokens: 12000,
       thinking: { type: "adaptive" },
       messages: [{

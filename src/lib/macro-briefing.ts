@@ -98,7 +98,7 @@ The tradingRules should be SPECIFIC: e.g. "Sell premium on tech names — IV ele
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-fable-5",
+      model: "claude-opus-5",
       max_tokens: 12000,
       thinking: { type: "adaptive" },
       messages: [{ role: "user", content: prompt }],

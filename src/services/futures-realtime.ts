@@ -2422,7 +2422,7 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
     // verdict is still produced; only if EVERY model fails does it return aiDown (LIVE pauses, demo keeps
     // trading). Tried fresh every call → auto-recovers the instant a model responds.
     const graderChain: { model: string; advisor: boolean; timeoutMs: number }[] =
-      [{ model: "claude-opus-4-8", advisor: false, timeoutMs: 60000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }];
+      [{ model: "claude-opus-5", advisor: false, timeoutMs: 60000 }, { model: "claude-haiku-4-5", advisor: false, timeoutMs: 30000 }];
 
     let anyUnavailable = false;
     let lastDetail = "";
@@ -2441,7 +2441,7 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
           body: JSON.stringify({
             model: att.model,
             max_tokens: 1024,                // room for advisor flow text
-            ...(att.advisor ? { tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-4-8" }] } : {}),
+            ...(att.advisor ? { tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-5" }] } : {}),
             messages: [{ role: "user", content: prompt }],
           }),
           // Opus-direct grading is a single short call (~10-40s); 60s gives headroom. Haiku 30s.
