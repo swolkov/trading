@@ -23,10 +23,15 @@ const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" 
 // account and the demo shadow-test (mode prop); demo reads its own reset-today window.
 export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
   const { data } = useSWR<Board>(`/api/futures/edge-scoreboard${mode === "demo" ? "?mode=demo" : ""}`, fetcher, { refreshInterval: 30000 });
-  if (!data?.edges) return null;
+  if (!data?.edges) return (
+    <div className="space-y-3">
+      <SwingSection />
+    </div>
+  );
   const isDemo = mode === "demo";
 
   return (
+    <div className="space-y-3">
     <div className={`rounded-xl border p-4 space-y-3 ${isDemo ? "border-amber-500/25 bg-amber-500/[0.02]" : "border-border bg-card"}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -76,6 +81,102 @@ export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
           );
         })}
       </div>
+    </div>
+
+      <SwingSection />
+    </div>
+  );
+}
+
+// ── Daily Index Mean-Reversion — NEW experimental paper forward-test ──
+
+interface SwingClosed { symbol: string; entryPrice: number; exitPrice: number; entryDate: string; exitDate: string; pnl: number; reason: string }
+interface SwingOpen { symbol: string; entryPrice: number; entryDate: string; stop: number }
+interface SwingWatch { symbol: string; rsi: number | null; entryTrigger: number; inPosition: boolean }
+interface SwingPerf {
+  net: number; trades: number; wins: number; losses: number; winRate: number;
+  recent: SwingClosed[]; open: SwingOpen[]; watching: SwingWatch[];
+}
+
+const reasonLabel = (r: string) => (r === "rsi_exit" ? "RSI≥50" : r === "stop" ? "stop" : r === "time_stop" ? "30d time" : r);
+
+function SwingSection() {
+  const { data } = useSWR<SwingPerf>("/api/futures/swing-scoreboard", fetcher, { refreshInterval: 60000 });
+  if (!data || typeof data.net !== "number") return null;
+  const resolved = data.wins + data.losses;
+
+  return (
+    <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/[0.03] p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-bold text-indigo-300">
+            Daily Index Mean-Reversion — swing <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-400/80 align-middle">NEW</span>
+          </h3>
+          <p className="text-[10px] text-muted-foreground/50">
+            Daily RSI&lt;30 dip-buy on ES/NQ (1-micro paper, 200-SMA trend filter). Fires ~5–10×/yr on oversold dips; paper forward-test.
+          </p>
+        </div>
+        <div className="text-right shrink-0">
+          <p className={`text-lg font-black tabular-nums ${col(data.net)}`}>{money(data.net)}</p>
+          <p className="text-[8px] uppercase tracking-wider text-muted-foreground/45">
+            {data.trades} trades · {resolved > 0 ? `${Math.round(data.winRate * 100)}% win` : "—"}
+          </p>
+        </div>
+      </div>
+
+      {/* Watching line per symbol */}
+      <div className="grid grid-cols-2 gap-2">
+        {data.watching.map((w) => (
+          <div key={w.symbol} className="rounded-lg border border-indigo-500/20 bg-white/[0.02] p-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold">{w.symbol}</span>
+              {w.inPosition ? (
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-400">in position</span>
+              ) : (
+                <span className={`text-[10px] tabular-nums ${w.rsi != null && w.rsi < w.entryTrigger ? "text-emerald-400" : "text-muted-foreground/60"}`}>
+                  {w.rsi != null ? `RSI ${w.rsi.toFixed(0)}` : "—"} <span className="text-muted-foreground/40">/ &lt;{w.entryTrigger}</span>
+                </span>
+              )}
+            </div>
+            {!w.inPosition && (
+              <p className="text-[9px] text-muted-foreground/40 mt-0.5">
+                {w.rsi != null && w.rsi < w.entryTrigger ? "oversold — trigger armed" : "watching for dip"}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Open positions */}
+      {data.open.length > 0 && (
+        <div className="space-y-1 pt-1 border-t border-indigo-500/20">
+          <p className="text-[9px] uppercase tracking-wider text-indigo-400/70">Open paper positions</p>
+          {data.open.map((o, i) => (
+            <div key={i} className="flex items-center justify-between text-[10px]">
+              <span className="text-muted-foreground/60 tabular-nums">
+                {o.symbol} · entry {o.entryPrice.toFixed(2)} · {new Date(o.entryDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+              </span>
+              <span className="text-muted-foreground/45 tabular-nums">stop {o.stop.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Recent closed */}
+      {data.recent.length > 0 ? (
+        <div className="space-y-0.5 pt-1 border-t border-indigo-500/20">
+          {data.recent.slice(0, 8).map((r, i) => (
+            <div key={i} className="flex items-center justify-between text-[10px]">
+              <span className="text-muted-foreground/50 tabular-nums">
+                {new Date(r.exitDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · {r.symbol} · {reasonLabel(r.reason)}
+              </span>
+              <span className={`font-semibold tabular-nums ${col(r.pnl)}`}>{money(r.pnl)}</span>
+            </div>
+          ))}
+        </div>
+      ) : data.open.length === 0 ? (
+        <p className="text-[10px] text-muted-foreground/40 pt-1 border-t border-indigo-500/20">No trades yet — waiting for a daily RSI&lt;30 dip.</p>
+      ) : null}
     </div>
   );
 }
