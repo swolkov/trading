@@ -14,6 +14,22 @@ function isUsMarketOpen(): boolean {
   return minutes >= 570 && minutes < 960; // 9:30 → 16:00 ET
 }
 
+// CME futures session: Sunday 18:00 ET → Friday 17:00 ET, with a daily 17:00–18:00 ET break.
+// Used ONLY to silence the futures fallback cron's staleness check across the weekend gap — that
+// cron is scheduled Sun–Fri, so every Saturday it was reported "STALE" and fired a critical alert
+// for a system that was behaving exactly as designed. Alert fatigue is how a real outage gets
+// missed. The Railway engine heartbeats are deliberately NOT skipped here: they run 24/7, so a
+// genuine engine failure still alarms at any hour, weekend included.
+function isFuturesMarketOpen(): boolean {
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const day = et.getDay();
+  const hour = et.getHours() + et.getMinutes() / 60;
+  if (day === 6) return false;               // Saturday — closed all day
+  if (day === 5 && hour >= 17) return false; // Friday after the 5pm close
+  if (day === 0 && hour < 18) return false;  // Sunday before the 6pm reopen
+  return !(hour >= 17 && hour < 18);         // daily maintenance break
+}
+
 // ============ SYSTEM HEALTH WATCHDOG ============
 // Monitors infrastructure health so we never lose money to failures.
 // Checks: cron heartbeats, API connectivity, DB health, position reconciliation.
@@ -90,6 +106,18 @@ export async function runWatchdog(): Promise<WatchdogResult> {
         name: `Cron: ${expectation.description}`,
         status: "ok",
         message: "Skipped — market closed",
+        lastSeen: lastRun || "never",
+      });
+      continue;
+    }
+
+    // The futures fallback cron is scheduled Sun–Fri only; it is legitimately silent through the
+    // weekend gap. Engine heartbeats fall through to the normal check below.
+    if (key === "futures_cron_last_run" && !isFuturesMarketOpen()) {
+      checks.push({
+        name: `Cron: ${expectation.description}`,
+        status: "ok",
+        message: "Skipped — futures market closed",
         lastSeen: lastRun || "never",
       });
       continue;

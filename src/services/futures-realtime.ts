@@ -3228,7 +3228,7 @@ async function evaluateAndTrade(
   // default ON for both engines), and lets a NEW edge run on demo while staying OFF on live until
   // it's deliberately promoted. Default-DENY: a setup matching no registered edge is skipped, and
   // the AI grader + auto-prune + stops keep learning/backstopping ON TOP of this baseline.
-  const matchedEdge = matchEdge({ sym, setupType, direction: direction as "long" | "short", rsi: rsiVal });
+  const matchedEdge = matchEdge({ sym, setupType, direction: direction as "long" | "short", rsi: rsiVal, session });
   if (!matchedEdge) {
     log(`  ${sym}: SKIP — no registered edge for ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`);
     recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `no registered edge for ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });

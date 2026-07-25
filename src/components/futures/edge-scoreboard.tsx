@@ -91,14 +91,15 @@ export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
 // ── Daily Index Mean-Reversion — NEW experimental paper forward-test ──
 
 interface SwingClosed { symbol: string; entryPrice: number; exitPrice: number; entryDate: string; exitDate: string; pnl: number; reason: string }
-interface SwingOpen { symbol: string; entryPrice: number; entryDate: string; stop: number }
-interface SwingWatch { symbol: string; rsi: number | null; entryTrigger: number; inPosition: boolean }
+interface SwingOpen { symbol: string; entryPrice: number; entryDate: string; stop: number; riskUsd?: number }
+interface SwingWatch { symbol: string; micro?: string; rsi: number | null; entryTrigger: number; inPosition: boolean; riskUsd?: number | null; dataOk?: boolean }
 interface SwingPerf {
   net: number; trades: number; wins: number; losses: number; winRate: number;
   recent: SwingClosed[]; open: SwingOpen[]; watching: SwingWatch[];
 }
 
-const reasonLabel = (r: string) => (r === "rsi_exit" ? "RSI≥50" : r === "stop" ? "stop" : r === "time_stop" ? "30d time" : r);
+const reasonLabel = (r: string) =>
+  r === "rsi_exit" ? "RSI≥50" : r === "stop" ? "stop" : r === "stop_gap" ? "stop (gap)" : r === "time_stop" ? "30d time" : r;
 
 function SwingSection() {
   const { data } = useSWR<SwingPerf>("/api/futures/swing-scoreboard", fetcher, { refreshInterval: 60000 });
@@ -113,7 +114,11 @@ function SwingSection() {
             Daily Index Mean-Reversion — swing <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-400/80 align-middle">NEW</span>
           </h3>
           <p className="text-[10px] text-muted-foreground/50">
-            Daily RSI&lt;30 dip-buy on ES/NQ (1-micro paper, 200-SMA trend filter). Fires ~5–10×/yr on oversold dips; paper forward-test.
+            Daily RSI&lt;30 dip-buy on ES/NQ/YM (1-micro paper, 200-SMA trend filter). Fires ~6–10×/yr on oversold dips; paper forward-test.
+          </p>
+          <p className="text-[9px] text-muted-foreground/40">
+            Validated on two data vendors: ES PF 3.14/2.47 · NQ 2.22 · YM 1.79 — positive in every 5-yr block, 2000–2026.
+            Russell and gold failed the same test and are excluded.
           </p>
         </div>
         <div className="text-right shrink-0">
@@ -125,11 +130,14 @@ function SwingSection() {
       </div>
 
       {/* Watching line per symbol */}
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         {data.watching.map((w) => (
           <div key={w.symbol} className="rounded-lg border border-indigo-500/20 bg-white/[0.02] p-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold">{w.symbol}</span>
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-xs font-bold">
+                {w.symbol}
+                {w.micro && <span className="text-[8px] font-medium text-muted-foreground/40 ml-1">{w.micro}</span>}
+              </span>
               {w.inPosition ? (
                 <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-400">in position</span>
               ) : (
@@ -138,11 +146,15 @@ function SwingSection() {
                 </span>
               )}
             </div>
-            {!w.inPosition && (
+            {w.dataOk === false ? (
+              // A short data feed silently disables a symbol — say so instead of showing "watching".
+              <p className="text-[9px] text-amber-400/80 mt-0.5">data feed short — not evaluated</p>
+            ) : !w.inPosition ? (
               <p className="text-[9px] text-muted-foreground/40 mt-0.5">
                 {w.rsi != null && w.rsi < w.entryTrigger ? "oversold — trigger armed" : "watching for dip"}
+                {w.riskUsd ? <span className="text-muted-foreground/30"> · ~${w.riskUsd} risk</span> : null}
               </p>
-            )}
+            ) : null}
           </div>
         ))}
       </div>
@@ -156,7 +168,10 @@ function SwingSection() {
               <span className="text-muted-foreground/60 tabular-nums">
                 {o.symbol} · entry {o.entryPrice.toFixed(2)} · {new Date(o.entryDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
               </span>
-              <span className="text-muted-foreground/45 tabular-nums">stop {o.stop.toFixed(2)}</span>
+              <span className="text-muted-foreground/45 tabular-nums">
+                stop {o.stop.toFixed(2)}
+                {o.riskUsd ? <span className="text-muted-foreground/30"> · ${o.riskUsd} risk</span> : null}
+              </span>
             </div>
           ))}
         </div>

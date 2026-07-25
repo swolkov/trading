@@ -31,6 +31,10 @@ export interface EdgeMatchCtx {
   setupType: string;
   direction: "long" | "short";
   rsi: number;
+  /** Engine session name ("morning" | "midday" | "afternoon" | "eth_evening" | ...). Lets an edge be
+   *  scoped to the hours it actually works in. Optional so any caller that predates this still
+   *  compiles — an edge that reads it treats "unknown" as allowed. */
+  session?: string;
 }
 
 export interface RealtimeEdge {
@@ -58,16 +62,31 @@ export function edgeSymbolClass(sym: string): EdgeSymbolClass {
  * EXACTLY, so switching the gate over to this registry is behaviour-preserving by default.
  */
 export const REALTIME_EDGES: RealtimeEdge[] = [
+  // The gold RSI-bounce used to be ONE edge covering both directions. Split 2026-07-25 because the
+  // two sides behave completely differently intraday, and only one switch could express that.
   {
-    key: "gold_rsi_bounce",
-    name: "Gold RSI-bounce",
-    blurb: "MGC/GC — buy deep-oversold / sell deep-overbought RSI extremes (both directions).",
+    key: "gold_long",
+    name: "Gold RSI — oversold LONG",
+    blurb: "MGC/GC — buy deep-oversold RSI extremes (RSI<25).",
     symbolClass: "metals",
     evidence:
-      "Flagship edge. Durable across a 26-yr daily gold test (oversold PF 1.58, positive in every 5-yr block, 2000–2026); live PF ~1.5 over 60d. Every other gold setup loses OOS and is gated off.",
+      "LOSES intraday: engine-exact 3-yr test with full trade management gives PF 0.71 — negative in BOTH halves (0.67 train / 0.72 test) over 572 trades. NOTE this is the opposite of the DAILY gold picture (26-yr daily oversold-long PF 1.58); the daily edge does not transfer to 5-min bars. Switched OFF on live 2026-07-25, left ON for demo to keep collecting evidence.",
     defaultDemo: true,
     defaultLive: true,
-    matches: (m) => edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce",
+    matches: (m) =>
+      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long",
+  },
+  {
+    key: "gold_short",
+    name: "Gold RSI — overbought SHORT",
+    blurb: "MGC/GC — fade deep-overbought RSI extremes (RSI>75).",
+    symbolClass: "metals",
+    evidence:
+      "The better half of the gold edge: PF 1.15 over 660 trades (3-yr, full management), though the train half is 0.73 so it is regime-dependent rather than durable. Live: +$55 over 4 trades.",
+    defaultDemo: true,
+    defaultLive: true,
+    matches: (m) =>
+      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short",
   },
   {
     key: "index_overbought_short",
@@ -83,15 +102,31 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
   },
   {
     key: "index_trend_long",
-    name: "Index trend-long",
-    blurb: "MNQ/MES — buy EMA9 pullbacks ONLY in a confirmed uptrend (price > 200-EMA).",
+    name: "Index trend-long — morning",
+    blurb: "MNQ/MES — buy EMA9 pullbacks in a confirmed uptrend (price > 200-EMA), morning only.",
     symbolClass: "index",
     evidence:
       "4.5-yr Databento backtest incl. the 2022 bear: filtered long PF 1.22 pooled, positive in BOTH train (1.15) and test (1.31); NQ 1.24 / ES 1.18. The SAME long below the 200-EMA loses (PF 0.55) — the regime filter is the edge.",
     defaultDemo: true,
     defaultLive: true,
     matches: (m) =>
-      INDEX_LONG_SYMS.has(m.sym) && m.setupType === "trend_continuation" && m.direction === "long",
+      INDEX_LONG_SYMS.has(m.sym) && m.setupType === "trend_continuation" && m.direction === "long" &&
+      m.session !== "afternoon",
+  },
+  // Split out 2026-07-25. The setup itself only fires in "morning" or "afternoon", and the two are
+  // not the same trade: the afternoon half loses in BOTH halves on BOTH symbols.
+  {
+    key: "index_trend_long_pm",
+    name: "Index trend-long — afternoon",
+    blurb: "MNQ/MES — the same EMA9-pullback long, but taken after 14:00 ET.",
+    symbolClass: "index",
+    evidence:
+      "The losing half of the trend-long edge. Engine-exact 3-yr test with full management: ES PF 0.63 (0.64 train / 0.61 test), NQ PF 0.69 (0.71 / 0.67) — negative in both halves on both symbols across 1,608 trades, while the MORNING half is 0.80 (ES) and 1.02 (NQ). Same instrument, same setup, same model: the hours are the difference.",
+    defaultDemo: true,
+    defaultLive: true,
+    matches: (m) =>
+      INDEX_LONG_SYMS.has(m.sym) && m.setupType === "trend_continuation" && m.direction === "long" &&
+      m.session === "afternoon",
   },
 ];
 
