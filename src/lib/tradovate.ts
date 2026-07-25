@@ -301,13 +301,58 @@ export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: strin
   MSL: { name: "Micro Solana", exchange: "CME", multiplier: 25, tickSize: 0.01 },
 };
 
+/**
+ * Month codes whose liquidity is real, for symbols the exchange lists in thin months too.
+ * Gold trades Feb/Apr/Jun/Aug/Oct/Dec (G/J/M/Q/V/Z); Jan, Mar, May, Jul, Sep and Nov are listed
+ * but barely traded. Confirmed empirically: MGC — which CME only lists in the liquid months —
+ * offers exactly Q6, V6, Z6, G7, J7, M7…, while GC offers N6, Q6, U6, V6, X6, Z6…
+ * Symbols absent from this map keep the previous behaviour (take the nearest expiry), which is
+ * correct for the index contracts since only quarterlies (H/M/U/Z) are listed at all.
+ */
+const ACTIVE_MONTH_CODES: Record<string, Set<string>> = {
+  GC: new Set(["G", "J", "M", "Q", "V", "Z"]),
+};
+
+/** "GCQ6" -> "Q". Returns "" when the name doesn't start with the root, so the filter can't crash. */
+function monthCodeOf(symbol: string, contractName: string): string {
+  if (!contractName?.startsWith(symbol)) return "";
+  return contractName.slice(symbol.length, symbol.length + 1);
+}
+
+/**
+ * READ-ONLY diagnostic: the raw candidate list /contract/suggest returns for a symbol, in the order
+ * it returns them. findContract() takes [0] blindly, so when the wrong month sits first the engine
+ * silently trades a dead contract — which is what happened to demo gold after the late-May roll
+ * (GC resolved to GCN6, a thin July month, while MGC correctly resolved to MGCQ6 for August).
+ * Exists so that failure mode can be SEEN rather than guessed at. Changes no behaviour.
+ */
+export async function listContractSuggestions(symbol: string, modeOverride?: TradingMode): Promise<{ id: number; name: string; tickSize: number }[]> {
+  try {
+    const rows = await tvFetch(`/contract/suggest?t=${symbol}&l=10`, undefined, modeOverride) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
+    return Array.isArray(rows) ? rows.map((r) => ({ id: r.id, name: r.name, tickSize: r.providerTickSize || r.tickSize })) : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function findContract(symbol: string, modeOverride?: TradingMode): Promise<{ id: number; name: string; tickSize: number } | null> {
   try {
     // Tradovate contract names include month code: MESM5, MNQM5, etc.
     // Find the front-month contract
     const contracts = await tvFetch(`/contract/suggest?t=${symbol}&l=5`, undefined, modeOverride) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
     if (contracts.length > 0) {
-      return { id: contracts[0].id, name: contracts[0].name, tickSize: contracts[0].providerTickSize || contracts[0].tickSize };
+      // /contract/suggest returns months CHRONOLOGICALLY, and [0] is the nearest expiry — which is
+      // only the right answer when the exchange lists nothing but liquid months. It is NOT right
+      // for full-size gold: CME lists GC in every month, so [0] was GCN6 (July, a thin month days
+      // from expiry) while the actively-traded contract was GCQ6. The micro MGC is only LISTED in
+      // the liquid months, which is exactly why MGC resolved correctly and GC did not — and why
+      // demo gold silently stopped trading after the late-May roll (last fill 2026-05-22).
+      // Where a symbol has thin listed months, restrict to the ones liquidity actually uses.
+      const active = ACTIVE_MONTH_CODES[symbol];
+      const pick = active
+        ? contracts.find((c) => active.has(monthCodeOf(symbol, c.name))) ?? contracts[0]
+        : contracts[0];
+      return { id: pick.id, name: pick.name, tickSize: pick.providerTickSize || pick.tickSize };
     }
 
     // Fallback: search by name
