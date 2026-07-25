@@ -45,7 +45,8 @@ const SPEC: Record<string, { ptVal: number; tick: number; label: string }> = {
   YM: { ptVal: 0.5, tick: 1, label: "YM → MYM ($0.50/pt)" },
 };
 const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
-const BREAKEVEN_R = 0.6, TRAIL_R = 1.1, STALE_MIN = 30;
+const BREAKEVEN_R = 0.6, TRAIL_R = 1.1;
+const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
 const TRAIL_ATR_MULT = 0.9 * 1.5;   // index
 const PROFIT_LOCK_FRAC = 0.65, BUFFER = 200;
 

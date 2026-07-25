@@ -1552,9 +1552,17 @@ function checkPositions(sym: string, price: number, reliable = true) {
     return;
   }
 
-  // TIME-BASED EXIT: Close stale trades that haven't moved 1R in 30 minutes
-  // Saves $40-80 per dead trade instead of waiting for full stop loss
-  const STALE_TRADE_MINUTES = 30;
+  // TIME-BASED EXIT: close a trade that still hasn't reached 1R, and never reached breakeven.
+  // Was 30 minutes, never tested despite closing ~HALF of all gold trades (615 of 1,232 for -$4,620).
+  // Swept 2026-07-25 at 20/30/45/60/none on gold and 30/45/60 on the index. 45 beats 30 on ALL
+  // THREE instruments and gets worse on none:
+  //     gold  PF 0.92 -> 0.98 (train 0.70 -> 0.80, test 1.04 -> 1.08)
+  //     ES    PF 0.74 -> 0.77 (train 0.71 flat,    test 0.77 -> 0.85)
+  //     NQ    PF 0.90 -> 0.91 (train 0.86 -> 0.88, test 0.94 -> 0.96)
+  // 20 minutes is clearly worse (gold 0.85), 60 is a wash with 45. Risk per trade is UNCHANGED —
+  // the hard stop still governs the loss; this only stops cutting slow trades quite so early.
+  // Revert = put 30 back.
+  const STALE_TRADE_MINUTES = 45;
   const minutesInTrade = (Date.now() - pos.entryTime) / 60_000;
   if (minutesInTrade >= STALE_TRADE_MINUTES && diff < stopDist && !pos.reachedBreakeven && !pos.scaledOut) {
     log(`${sym}: TIME EXIT — ${minutesInTrade.toFixed(0)} min, hasn't reached 1R ($${pnlDollars.toFixed(0)}). Closing to preserve capital.`);
