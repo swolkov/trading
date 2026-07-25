@@ -3467,7 +3467,14 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // earned rather than because someone raised a flag after a good week. Full-size contracts keep the
   // configured cap. At today's ~$5.2k equity microContractCap() = 1 for all three, so this is
   // behaviour-identical to the previous line until the account reaches $10,000.
-  const perTradeCap = MICRO_SYMBOLS.includes(sym) ? microContractCap(equity) : riskConfig.maxContractsPerTrade;
+  // For micros the ladder is a FLOOR that grows with equity, and the configured cap is a manual
+  // override that can raise it — whichever is higher wins. So `${mode}_futures_max_contracts` is a
+  // live control again (set to 2 on 2026-07-25 by explicit decision), while the ladder still steps
+  // the account up on its own at $10k / $18k without anyone touching a flag. Full-size symbols
+  // continue to use the configured cap alone.
+  const perTradeCap = MICRO_SYMBOLS.includes(sym)
+    ? Math.max(riskConfig.maxContractsPerTrade, microContractCap(equity))
+    : riskConfig.maxContractsPerTrade;
   let qty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
   if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
   // Hard ceiling: never risk more than 15% of equity on a single entry
