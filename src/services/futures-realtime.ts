@@ -127,7 +127,24 @@ const METALS = new Set(["MGC", "GC"]);
 // so it does NOT change current behavior. Scoped to MGC ONLY (never applied to full GC). Above ~$60k the
 // MICRO→FULL switch flips MGC→GC, so this only governs the micro range. Sim (Jul 13) showed >1 micro trips the
 // −25% kill-switch on a SMALL account — this ramp respects that by only sizing up once equity can absorb it.
-function goldMicroCap(equity: number): number {
+/**
+ * Contract ladder for MICRO contracts (MGC/MNQ/MES) — size scales with the ACCOUNT, never with a
+ * trade count or a flag flipped mid-streak.
+ *
+ * Calibrated off the live book's own realised losses (33 losing closes: avg $63.57, median $55,
+ * worst $147). The safety measure that matters is "how many average losers does the 25% kill switch
+ * absorb", which today is ~21 at one micro:
+ *     2 micros (~$127 avg loss) needs ~$10.7k for the same margin  -> threshold $10,000
+ *     3 micros (~$191 avg loss) at $18,000 absorbs ~24 losers      -> threshold $18,000  (safer still)
+ * Below $10k this returns 1, so at today's $5,214 it changes NOTHING — it only ever engages once the
+ * account has genuinely earned the size.
+ *
+ * MICRO ONLY, deliberately: demo trades FULL-SIZE GC/NQ/ES on ~$75k, and a micro-calibrated ladder
+ * there would hand it 3 full contracts (~30x its current exposure) and destroy demo as a shadow of
+ * live. Full-size symbols keep the configured cap; once live crosses FULL_SIZE_EQUITY_THRESHOLD it
+ * moves to full-size contracts and this ladder correctly stops applying.
+ */
+function microContractCap(equity: number): number {
   if (equity >= 18000) return 3;
   if (equity >= 10000) return 2;
   return 1;
@@ -3437,9 +3454,12 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     }
   }
 
-  // Gold micro grows with the account (ramp) so risk stays ~1%/trade instead of frozen at 1 micro; index +
-  // full contracts keep the configured cap. At current ~$5k equity goldMicroCap()=1 → no change to today.
-  const perTradeCap = sym === "MGC" ? goldMicroCap(equity) : riskConfig.maxContractsPerTrade;
+  // EVERY micro (MGC/MNQ/MES) now grows with the account, not just gold — so risk stays ~1%/trade
+  // instead of being frozen at 1 micro forever, and the step-up happens because the equity was
+  // earned rather than because someone raised a flag after a good week. Full-size contracts keep the
+  // configured cap. At today's ~$5.2k equity microContractCap() = 1 for all three, so this is
+  // behaviour-identical to the previous line until the account reaches $10,000.
+  const perTradeCap = MICRO_SYMBOLS.includes(sym) ? microContractCap(equity) : riskConfig.maxContractsPerTrade;
   let qty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
   if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
   // Hard ceiling: never risk more than 15% of equity on a single entry
