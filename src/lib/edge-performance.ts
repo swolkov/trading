@@ -154,8 +154,15 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
 
   const isGold = (s: string) => goldSyms.includes(s);
   const isIndex = (s: string) => indexSyms.includes(s);
+  // Keys MUST match src/lib/realtime-edges.ts, or the control board silently shows no results for an
+  // edge. Gold was split by direction on 2026-07-25 (gold_rsi_bounce -> gold_long + gold_short); this
+  // bucket still said "gold_rsi_bounce", so every gold trade landed on a key no registered edge has
+  // and the board showed gold as having never traded.
+  // KNOWN GAP: index_trend_long was also split by session (morning vs index_trend_long_pm), but a
+  // FuturesClose carries no entry session, so index longs all bucket to the morning edge. Live no
+  // longer takes afternoon longs, so this self-corrects going forward; demo afternoons stay merged.
   const bucket = (c: FuturesClose): string | null =>
-    isGold(c.sym) ? "gold_rsi_bounce"
+    isGold(c.sym) ? (c.dir === "long" ? "gold_long" : "gold_short")
     : isIndex(c.sym) && c.dir === "short" ? "index_overbought_short"
     : isIndex(c.sym) && c.dir === "long" ? "index_trend_long"
     : null;
