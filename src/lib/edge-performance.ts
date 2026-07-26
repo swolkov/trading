@@ -18,6 +18,11 @@ export interface EdgeStat {
   net: number;
   lastTs: string | null;
   recent: { ts: string; sym: string; dir: "long" | "short"; exit: string; pnl: number }[];
+  /** Is this edge currently switched ON for this engine? The scoreboard shows HISTORICAL results, so
+   *  without this a card for a disabled edge reads as though it is still trading. */
+  enabled: boolean;
+  /** Set when an edge is only partly on (e.g. trend-long runs mornings but not afternoons). */
+  statusNote?: string;
 }
 
 const dirOf = (action: string): "long" | "short" | null =>
@@ -71,8 +76,33 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" },
     { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — short RSI>75 overbought fade (short side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
     { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
-    { key: "index_long", name: "Index trend-long (NEW)", blurb: `${dispIdx} — buy EMA9 pullbacks ONLY in a confirmed uptrend (price>200-EMA). Validated across the 2022 bear (PF 1.22, +both halves).`, match: (c: Close) => isIdx(c.sym) && c.dir === "long" },
+    // Blurb corrected 2026-07-25: it previously claimed "PF 1.22, +both halves" from a backtest whose
+    // script no longer exists. An engine-exact rebuild with full trade management could not reproduce
+    // that — it measured ES 0.74 / NQ 0.90, negative in BOTH halves over 3 years. What IS robust is
+    // the time-of-day split: mornings beat afternoons in 51 of 57 tests across 19 instruments.
+    { key: "index_long", name: "Index trend-long", blurb: `${dispIdx} — buy EMA9 pullbacks in a confirmed uptrend (price>200-EMA), MORNINGS only. 3-yr rebuild: morning ES 0.80 / NQ 1.02 vs afternoon 0.63 / 0.69, so the afternoon half is switched off.`, match: (c: Close) => isIdx(c.sym) && c.dir === "long" },
   ];
+
+  // Which registry edges back each scoreboard card, so a disabled edge can be labelled as such.
+  const REGISTRY_FOR: Record<string, string[]> = {
+    gold_long: ["gold_long"],
+    gold_short: ["gold_short"],
+    index_short: ["index_overbought_short"],
+    index_long: ["index_trend_long", "index_trend_long_pm"],
+  };
+  const flagRows = await prisma.agentConfig
+    .findMany({ where: { key: { startsWith: "edge_" } } })
+    .catch(() => [] as { key: string; value: string }[]);
+  const flags: Record<string, string | undefined> = {};
+  for (const r of flagRows) flags[r.key] = r.value;
+  const statusOf = (scoreboardKey: string) => {
+    const keys = REGISTRY_FOR[scoreboardKey] ?? [];
+    const on = keys.filter((k) => isEdgeEnabled(k, mode === "demo" ? "demo" : "live", flags));
+    if (!keys.length) return { enabled: true, statusNote: undefined };
+    if (on.length === keys.length) return { enabled: true, statusNote: undefined };
+    if (on.length === 0) return { enabled: false, statusNote: undefined };
+    return { enabled: true, statusNote: "mornings only — afternoon half switched off" };
+  };
 
   const edges: EdgeStat[] = DEFS.map((e) => {
     const t = closes.filter(e.match);
@@ -86,6 +116,7 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
       net,
       lastTs: t.length ? t[t.length - 1].ts.toISOString() : null,
       recent: [...t].reverse().slice(0, 8).map((c) => ({ ts: c.ts.toISOString(), sym: c.sym.replace("FUT:", ""), dir: c.dir, exit: c.exit, pnl: c.pnl })),
+      ...statusOf(e.key),
     };
   });
 

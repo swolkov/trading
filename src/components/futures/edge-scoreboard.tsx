@@ -12,6 +12,10 @@ interface Edge {
   losses: number;
   winRate: number;
   recent: Recent[];
+  /** false = switched off for this engine. Optional so an older cached payload still renders. */
+  enabled?: boolean;
+  /** e.g. "mornings only — afternoon half switched off" */
+  statusNote?: string;
 }
 interface Board { since: string; totalNet: number; totalTrades: number; edges: Edge[] }
 
@@ -52,11 +56,23 @@ export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
         {data.edges.map((e) => {
           const resolved = e.wins + e.losses;
           return (
-            <div key={e.name} className="rounded-lg border border-border/50 bg-white/[0.02] p-3 space-y-2">
+            // A disabled edge still shows its historical P&L, so it MUST be labelled — otherwise the
+            // card reads as though the edge is still trading.
+            <div key={e.name} className={`rounded-lg border p-3 space-y-2 ${e.enabled === false ? "border-border/30 bg-white/[0.01] opacity-60" : "border-border/50 bg-white/[0.02]"}`}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-bold">{e.name}</span>
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  {e.name}
+                  {e.enabled === false && (
+                    <span className="text-[8px] font-bold uppercase tracking-wider text-rose-400 border border-rose-400/40 rounded px-1 py-px">off</span>
+                  )}
+                  {e.enabled !== false && e.statusNote && (
+                    <span className="text-[8px] font-bold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded px-1 py-px">partial</span>
+                  )}
+                </span>
                 <span className={`text-base font-black tabular-nums ${col(e.net)}`}>{money(e.net)}</span>
               </div>
+              {e.statusNote && <p className="text-[9px] text-amber-400/70 leading-snug">{e.statusNote}</p>}
+              {e.enabled === false && <p className="text-[9px] text-rose-400/70 leading-snug">Switched off for {isDemo ? "demo" : "live"} — shown for the record. Still running on the other engine.</p>}
               <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60">
                 <span>{e.trades} trades</span>
                 <span>{resolved > 0 ? `${Math.round(e.winRate * 100)}% win` : "—"}</span>
