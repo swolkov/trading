@@ -123,11 +123,21 @@ function SwingSection() {
   const resolved = data.wins + data.losses;
 
   return (
-    <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/[0.03] p-4 space-y-3">
+    // Visually detached from the live cards above with a divider + heavier border, so a paper
+    // forward-test can never be read as part of the live book.
+    <div className="rounded-xl border-2 border-dashed border-indigo-500/40 bg-indigo-500/[0.04] p-4 space-y-3 mt-4 relative">
+      <div className="absolute -top-2 left-4 px-2 bg-background text-[8px] font-bold uppercase tracking-widest text-indigo-400/70">
+        separate system · paper
+      </div>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-bold text-indigo-300">
-            Daily Index Mean-Reversion — swing <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-400/80 align-middle">NEW</span>
+          <h3 className="text-sm font-bold text-indigo-300 flex items-center gap-1.5">
+            Daily Index Mean-Reversion — swing
+            {/* Unmissable: this panel sits under the LIVE scoreboard and places no broker orders at
+                all. The word "paper" in the description below was too easy to miss. */}
+            <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-200 bg-indigo-500/30 border border-indigo-400/50 rounded px-1.5 py-px">
+              paper · not your live account
+            </span>
           </h3>
           <p className="text-[10px] text-muted-foreground/50">
             Daily RSI&lt;30 dip-buy on ES/NQ/YM (1-micro paper, 200-SMA trend filter). Fires ~6–10×/yr on oversold dips; paper forward-test.

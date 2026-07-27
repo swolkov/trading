@@ -120,9 +120,25 @@ export function TopBar() {
 
         {/* Desktop: Futures metrics */}
         <div className="hidden md:flex items-center gap-5">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Equity</span>
+          {/* Labelled "Total" whenever Kraken is included, because sitting next to the Tradovate
+              badge an "Equity" figure reads as the futures balance — and it isn't. Position sizing
+              runs off the BROKER futures balance, never this number, so an ambiguous label here
+              could only ever mislead a human. Hover shows the split. */}
+          <div
+            className="flex items-center gap-1.5"
+            title={krakenEquity > 0
+              ? `Futures (Tradovate) ${formatCurrency(futuresEquity)} + Kraken ${formatCurrency(krakenEquity)}`
+              : `Futures (Tradovate) ${formatCurrency(futuresEquity)}`}
+          >
+            <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">
+              {krakenEquity > 0 ? "Total" : "Equity"}
+            </span>
             <span className="text-[13px] font-bold tabular-nums">{formatCurrency(equity)}</span>
+            {krakenEquity > 0 && (
+              <span className="text-[9px] text-muted-foreground/40 tabular-nums hidden lg:inline">
+                ({formatCurrency(futuresEquity)} fut)
+              </span>
+            )}
           </div>
 
           <div className="w-px h-4 bg-border" />
