@@ -3,6 +3,7 @@
 // Paper: demo.tradovateapi.com | Live: live.tradovateapi.com
 
 import { getTradingMode, type TradingMode } from "./trading-mode";
+import { pickActiveContract } from "./contract-months";
 
 // Auth credentials from env vars
 const TRADOVATE_USERNAME = process.env.TRADOVATE_USERNAME || "";
@@ -302,24 +303,6 @@ export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: strin
 };
 
 /**
- * Month codes whose liquidity is real, for symbols the exchange lists in thin months too.
- * Gold trades Feb/Apr/Jun/Aug/Oct/Dec (G/J/M/Q/V/Z); Jan, Mar, May, Jul, Sep and Nov are listed
- * but barely traded. Confirmed empirically: MGC — which CME only lists in the liquid months —
- * offers exactly Q6, V6, Z6, G7, J7, M7…, while GC offers N6, Q6, U6, V6, X6, Z6…
- * Symbols absent from this map keep the previous behaviour (take the nearest expiry), which is
- * correct for the index contracts since only quarterlies (H/M/U/Z) are listed at all.
- */
-const ACTIVE_MONTH_CODES: Record<string, Set<string>> = {
-  GC: new Set(["G", "J", "M", "Q", "V", "Z"]),
-};
-
-/** "GCQ6" -> "Q". Returns "" when the name doesn't start with the root, so the filter can't crash. */
-function monthCodeOf(symbol: string, contractName: string): string {
-  if (!contractName?.startsWith(symbol)) return "";
-  return contractName.slice(symbol.length, symbol.length + 1);
-}
-
-/**
  * READ-ONLY diagnostic: the raw candidate list /contract/suggest returns for a symbol, in the order
  * it returns them. findContract() takes [0] blindly, so when the wrong month sits first the engine
  * silently trades a dead contract — which is what happened to demo gold after the late-May roll
@@ -348,10 +331,7 @@ export async function findContract(symbol: string, modeOverride?: TradingMode): 
       // the liquid months, which is exactly why MGC resolved correctly and GC did not — and why
       // demo gold silently stopped trading after the late-May roll (last fill 2026-05-22).
       // Where a symbol has thin listed months, restrict to the ones liquidity actually uses.
-      const active = ACTIVE_MONTH_CODES[symbol];
-      const pick = active
-        ? contracts.find((c) => active.has(monthCodeOf(symbol, c.name))) ?? contracts[0]
-        : contracts[0];
+      const pick = pickActiveContract(symbol, contracts) ?? contracts[0];
       return { id: pick.id, name: pick.name, tickSize: pick.providerTickSize || pick.tickSize };
     }
 

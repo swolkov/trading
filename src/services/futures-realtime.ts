@@ -12,6 +12,7 @@ import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, i
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 import { getPlanContextForGrading } from "../lib/advisor";
 import { matchEdge, isEdgeEnabled, allEdgeFlagKeys } from "../lib/realtime-edges";
+import { pickActiveContract } from "../lib/contract-months";
 
 
 // ── Config ──────────────────────────────────────────────
@@ -615,9 +616,15 @@ async function resolveContracts() {
   for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS, "YM"]) {
     try {
       const results = await apiFetch(`/contract/suggest?t=${sym}&l=5`) as { id: number; name: string; tickSize: number; providerTickSize: number }[];
-      if (results.length > 0) {
-        contracts.set(sym, { id: results[0].id, name: results[0].name, tickSize: results[0].providerTickSize || results[0].tickSize, symbol: sym });
-        log(`Resolved ${sym} → ${results[0].name} (ID: ${results[0].id})`);
+      // /contract/suggest is ordered by expiry, so results[0] is the NEAREST month — wrong for any
+      // symbol the exchange also lists in thin months. Full-size gold listed GCN6 (July, days from
+      // expiry) ahead of the actively traded GCQ6, which is why demo gold silently stopped trading
+      // after the late-May roll. pickActiveContract restricts to months liquidity actually uses;
+      // symbols without a restriction (every micro + the index quarterlies) are unaffected.
+      const picked = pickActiveContract(sym, results);
+      if (picked) {
+        contracts.set(sym, { id: picked.id, name: picked.name, tickSize: picked.providerTickSize || picked.tickSize, symbol: sym });
+        log(`Resolved ${sym} → ${picked.name} (ID: ${picked.id})`);
       }
     } catch (err) { log(`Failed to resolve ${sym}: ${err}`); }
   }
