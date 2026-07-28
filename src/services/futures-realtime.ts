@@ -1025,7 +1025,23 @@ function getSizeMultiplier(sym?: string): number {
     // "good" (+0) to "prime" (+5) in scoreSetup. Evening gold setups therefore clear the 75 gate more
     // easily and will fire more often. Evening gold backtests PF 1.05 (train 0.67 / test 1.18) — real but
     // regime-dependent — so watch the frequency. Revert = put 0.5 back.
-    if (sym && METALS.has(sym) && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY && s === "eth_evening") return 1.0;
+    // 2026-07-28: eth_europe (03:00-09:00 ET) added alongside the evening. It is gold's BEST session by
+    // some distance and the only one that was still blocked:
+    //     eth_europe  n=622  PF 1.13  (train 0.83 / test 1.36)   <- largest sample of any gold session
+    //     morning     n=212  PF 1.07  · afternoon n=210 PF 0.98 · eth_evening n=541 PF 0.94
+    //     eth_asia    n=551  PF 0.74  <- correctly stays blocked
+    // London hours are gold's most liquid stretch outside NY, so "thin liquidity" was the wrong reason
+    // to exclude it. Honest caveat: the train half is 0.83, so this is regime-dependent, not proven —
+    // but that is also true of the evening (0.62) and afternoon (0.81) that already trade.
+    // WHY IT IS SAFE: MGC initial margin $2,242.90 (verified) against $5,250 equity; the stop rests AT
+    // THE EXCHANGE so it fills unattended; the 45-min stale exit cuts dead trades; the 15:50 ET EOD
+    // flatten guarantees nothing carries overnight; and the daily-loss and kill switches are unchanged.
+    // INDEX IS NEVER ADDED HERE — MNQ initial margin is $4,171, i.e. 79% of the account for one contract.
+    // Side effect as with the evening: sizeMult 1.0 makes these sessions "prime" (+5 confluence). If that
+    // proves too loose, raise the score threshold rather than dropping the multiplier — a fractional
+    // multiplier silently becomes a total block once one contract's risk exceeds the reduced budget.
+    if (sym && METALS.has(sym) && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY &&
+        (s === "eth_evening" || s === "eth_europe")) return 1.0;
     return 0;                                               // BLOCK open, close, deep-ETH, index evenings, and gold when underfunded
   }
 
