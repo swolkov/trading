@@ -1025,14 +1025,21 @@ function getSizeMultiplier(sym?: string): number {
     // "good" (+0) to "prime" (+5) in scoreSetup. Evening gold setups therefore clear the 75 gate more
     // easily and will fire more often. Evening gold backtests PF 1.05 (train 0.67 / test 1.18) — real but
     // regime-dependent — so watch the frequency. Revert = put 0.5 back.
-    // 2026-07-28: eth_europe (03:00-09:00 ET) added alongside the evening. It is gold's BEST session by
-    // some distance and the only one that was still blocked:
-    //     eth_europe  n=622  PF 1.13  (train 0.83 / test 1.36)   <- largest sample of any gold session
-    //     morning     n=212  PF 1.07  · afternoon n=210 PF 0.98 · eth_evening n=541 PF 0.94
-    //     eth_asia    n=551  PF 0.74  <- correctly stays blocked
-    // London hours are gold's most liquid stretch outside NY, so "thin liquidity" was the wrong reason
-    // to exclude it. Honest caveat: the train half is 0.83, so this is regime-dependent, not proven —
-    // but that is also true of the evening (0.62) and afternoon (0.81) that already trade.
+    // 2026-07-28 (morning): eth_europe (03:00-09:00 ET) added alongside the evening on a session-level
+    // PF of 1.13 — "gold's best session".
+    // 2026-07-28 (same day, CORRECTED): that 1.13 was a SESSION-LEVEL number pooling both directions,
+    // and it is carried ENTIRELY by the longs, which are switched off on live. Splitting it:
+    //     eth_europe LONG   n=310  PF 1.37  (train 1.19 / test 1.51)  <- both halves, best gold cell
+    //     eth_europe SHORT  n=289  PF 0.96  (train 0.58 / test 1.24)  <- a loser, and the ONLY side
+    //                                                                    live could actually have taken
+    // So opening Europe made the live book strictly worse. The fix is at the EDGE layer, not here:
+    // gold_short is now scoped to the morning (the one gold cell that survives both halves, PF 1.72)
+    // and gold_short_offpeak is live-disabled. That leaves this branch UNREACHABLE for live gold —
+    // both gold_long and gold_short_offpeak are off, so a Europe/evening setup matches a disabled edge
+    // and default-denies before size is ever consulted.
+    // It is left in place deliberately: demo runs every half and needs the multiplier to shadow these
+    // hours, and if eth_europe LONG earns promotion off demo evidence this is the sizing it needs.
+    // LESSON: never justify a session from a pooled PF when only one direction is enabled.
     // WHY IT IS SAFE: MGC initial margin $2,242.90 (verified) against $5,250 equity; the stop rests AT
     // THE EXCHANGE so it fills unattended; the 45-min stale exit cuts dead trades; the 15:50 ET EOD
     // flatten guarantees nothing carries overnight; and the daily-loss and kill switches are unchanged.

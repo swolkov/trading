@@ -103,11 +103,17 @@ function sessionName(hour: number, dow: number): string {
   if (hour >= 3 && hour < 9) return "eth_europe";
   return "pre_market";
 }
-/** getSizeMultiplier for LIVE gold (equity >= $3,000). 0 = the engine cannot trade that session. */
+/** getSizeMultiplier for LIVE gold (equity >= $3,000). 0 = the engine cannot trade that session.
+ *  G_DEPLOYED=1 mirrors the CURRENT deployed engine (2026-07-28): eth_evening AND eth_europe both
+ *  return 1.0, which makes them "prime" (+5 confluence) — so MORE marginal setups clear the >=75
+ *  gate than the old 0.5/"good" model let through. Sizing is not cosmetic here; it changes which
+ *  trades exist at all, so the backtest must match what is actually running. */
+const DEPLOYED = process.env.G_DEPLOYED === "1";
 function goldSizeMult(session: string): number {
   if (session === "morning" || session === "afternoon") return 1.0;
   if (session === "midday") return 0.5;
-  if (session === "eth_evening") return 0.5;
+  if (session === "eth_evening") return DEPLOYED ? 1.0 : 0.5;
+  if (DEPLOYED && session === "eth_europe") return 1.0;
   if (ALL_SESSIONS && session !== "halt") return 0.5; // hypothetical: enable the blocked sessions
   return 0;
 }
@@ -353,7 +359,7 @@ for (const d of ["long", "short"] as const) {
     (tr && te && tr.avg > 0 && te.avg > 0 ? "  <<< BOTH HALVES" : ""));
 }
 console.log("\n  SESSION x DIRECTION");
-for (const s of ["morning", "midday", "afternoon", "eth_evening"]) {
+for (const s of ["morning", "midday", "afternoon", "eth_evening", "eth_europe", "eth_asia"]) {
   for (const d of ["long", "short"] as const) {
     const sub = all.filter(t => t.session === s && t.dir === d);
     if (sub.length < 20) { console.log(`  ${(s + " " + d).padEnd(26)} n=${sub.length} — too few to judge`); continue; }

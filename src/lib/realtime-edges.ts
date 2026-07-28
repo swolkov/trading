@@ -53,6 +53,14 @@ export interface RealtimeEdge {
 const METALS = new Set(["MGC", "GC"]);
 const INDEX_LONG_SYMS = new Set(["NQ", "MNQ", "ES", "MES"]);
 
+/** The engine's RTH morning block (09:45–12:00 ET). Gold's only both-halves-positive short cell.
+ *  An ABSENT session counts as morning so a caller that predates session-scoping still matches the
+ *  enabled edge rather than silently falling through to default-deny. */
+const isMorning = (s?: string) => !s || s === "morning";
+/** Mirror of isMorning — every KNOWN non-morning session. Kept as the explicit complement so the
+ *  two halves of a split can never both match (matchEdge takes the first hit) nor both miss. */
+const isOffPeak = (s?: string) => !!s && s !== "morning";
+
 export function edgeSymbolClass(sym: string): EdgeSymbolClass {
   return METALS.has(sym) ? "metals" : "index";
 }
@@ -82,11 +90,27 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     blurb: "MGC/GC — fade deep-overbought RSI extremes (RSI>75).",
     symbolClass: "metals",
     evidence:
-      "The better half of the gold edge: PF 1.15 over 660 trades (3-yr, full management), though the train half is 0.73 so it is regime-dependent rather than durable. Live: +$55 over 4 trades.",
+      "MORNING ONLY (09:45–12:00 ET) as of 2026-07-28. Engine-exact 3-yr test, all 12 gold session×direction cells: the morning short is one of only TWO that survive both halves — PF 1.72 (1.10 train / 2.46 test) over 117 trades. Every other gold short session fails its train half: afternoon 1.92 (0.86), eth_evening 1.15 (0.76), midday 1.03 (0.74), eth_europe 0.96 (0.58). Live corroborates: gold is −$92 over 10 trades while the morning book is +$329.",
     defaultDemo: true,
     defaultLive: true,
     matches: (m) =>
-      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short",
+      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
+      isMorning(m.session),
+  },
+  // Split out 2026-07-28, same reasoning as the index morning/afternoon split: the off-peak gold
+  // shorts are a different trade from the morning one, and only a separate switch can express that.
+  {
+    key: "gold_short_offpeak",
+    name: "Gold RSI — overbought SHORT (off-peak)",
+    blurb: "MGC/GC — the same RSI>75 fade, but taken outside 09:45–12:00 ET.",
+    symbolClass: "metals",
+    evidence:
+      "The losing hours of the gold short. Engine-exact 3-yr, full management: afternoon PF 1.92 but train 0.86, eth_evening 1.15 (train 0.76), midday 1.03 (train 0.74), eth_europe 0.96 (train 0.58), eth_asia 0.87 (train 0.56) — not one passes both halves. Live: the evening book is −$28 over 7 trades and the afternoon −$83 over 7. Switched OFF for live 2026-07-28, left ON for demo to keep collecting evidence.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) =>
+      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
+      isOffPeak(m.session),
   },
   {
     key: "index_overbought_short",
@@ -94,11 +118,27 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     blurb: "MNQ/MES — short when RSI ≥ 80 (the overbought fade).",
     symbolClass: "index",
     evidence:
-      "The original OOS index edge: RSI≥80 short, PF 1.4–1.8 out-of-sample (12k-trade walk-forward). Index longs and every other index setup lose OOS.",
+      "The original OOS index edge: RSI≥80 short, PF 1.4–1.8 out-of-sample (12k-trade walk-forward). Index longs and every other index setup lose OOS. AFTERNOON EXCLUDED 2026-07-28 (see index_overbought_short_pm). Re-enabled on live 2026-07-28 after the shadow tracker showed it going 4W/1L +$824 while switched off.",
     defaultDemo: true,
     defaultLive: true,
     matches: (m) =>
-      edgeSymbolClass(m.sym) === "index" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" && m.rsi >= 80,
+      edgeSymbolClass(m.sym) === "index" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" && m.rsi >= 80 &&
+      m.session !== "afternoon",
+  },
+  // Split out 2026-07-28. This was the LAST way an index trade could still open in the afternoon
+  // once index_trend_long_pm was switched off — and the afternoon is the worst cell of the three.
+  {
+    key: "index_overbought_short_pm",
+    name: "Index overbought-short — afternoon",
+    blurb: "MNQ/MES — the same RSI≥80 short, but taken after 14:00 ET.",
+    symbolClass: "index",
+    evidence:
+      "The worst session for this edge on BOTH symbols. Engine-exact 3-yr with full management: ES afternoon PF 0.46 (0.30 train / 0.67 test) vs morning 0.57 and midday 0.83; NQ afternoon 0.71 (0.72 / 0.70) vs morning 0.81 and midday 1.01. Consistent with the broader finding that mornings beat afternoons in 51 of 57 tests across 19 instruments, and with the live book (afternoon −$83 over 7 trades).",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) =>
+      edgeSymbolClass(m.sym) === "index" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" && m.rsi >= 80 &&
+      m.session === "afternoon",
   },
   {
     key: "index_trend_long",

@@ -74,8 +74,8 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
   const isIdx = (s: string) => idxSyms.includes(s);
   const DEFS = [
     { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" },
-    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — short RSI>75 overbought fade (short side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
-    { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
+    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — short RSI>75 overbought fade, MORNINGS only. 3-yr rebuild: morning PF 1.72 (both halves) vs afternoon 1.92/train 0.86, evening 1.15/train 0.76, Europe 0.96/train 0.58 — so every off-peak hour is switched off.`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
+    { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade, afternoon excluded: ES 0.46 / NQ 0.71 after 14:00 ET, the worst cell on both symbols.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
     // Blurb corrected 2026-07-25: it previously claimed "PF 1.22, +both halves" from a backtest whose
     // script no longer exists. An engine-exact rebuild with full trade management could not reproduce
     // that — it measured ES 0.74 / NQ 0.90, negative in BOTH halves over 3 years. What IS robust is
@@ -86,8 +86,8 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
   // Which registry edges back each scoreboard card, so a disabled edge can be labelled as such.
   const REGISTRY_FOR: Record<string, string[]> = {
     gold_long: ["gold_long"],
-    gold_short: ["gold_short"],
-    index_short: ["index_overbought_short"],
+    gold_short: ["gold_short", "gold_short_offpeak"],
+    index_short: ["index_overbought_short", "index_overbought_short_pm"],
     index_long: ["index_trend_long", "index_trend_long_pm"],
   };
   const flagRows = await prisma.agentConfig
@@ -101,7 +101,14 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     if (!keys.length) return { enabled: true, statusNote: undefined };
     if (on.length === keys.length) return { enabled: true, statusNote: undefined };
     if (on.length === 0) return { enabled: false, statusNote: undefined };
-    return { enabled: true, statusNote: "mornings only — afternoon half switched off" };
+    // Partly on: say WHICH half is live, per card — a generic note would misdescribe gold, whose
+    // disabled half is every off-peak hour, not just the afternoon.
+    const PARTIAL_NOTE: Record<string, string> = {
+      gold_short: "mornings only (09:45–12:00 ET) — midday, afternoon, evening and Europe switched off",
+      index_short: "afternoon half switched off — mornings and midday only",
+      index_long: "mornings only — afternoon half switched off",
+    };
+    return { enabled: true, statusNote: PARTIAL_NOTE[scoreboardKey] ?? "partly switched off" };
   };
 
   const edges: EdgeStat[] = DEFS.map((e) => {
@@ -189,9 +196,12 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
   // edge. Gold was split by direction on 2026-07-25 (gold_rsi_bounce -> gold_long + gold_short); this
   // bucket still said "gold_rsi_bounce", so every gold trade landed on a key no registered edge has
   // and the board showed gold as having never traded.
-  // KNOWN GAP: index_trend_long was also split by session (morning vs index_trend_long_pm), but a
-  // FuturesClose carries no entry session, so index longs all bucket to the morning edge. Live no
-  // longer takes afternoon longs, so this self-corrects going forward; demo afternoons stay merged.
+  // KNOWN GAP: three edges are now split by SESSION (index_trend_long/_pm, index_overbought_short/_pm
+  // and gold_short/_offpeak), but a FuturesClose carries no entry session, so each pair's trades all
+  // bucket to the morning key. Live no longer takes any of the off-peak halves, so this self-corrects
+  // going forward and only back-dated rows are merged; demo, which runs every half, stays merged.
+  // Closing it properly needs an entry-session column on the close record — not worth a migration
+  // while the off-peak halves are live-disabled.
   const bucket = (c: FuturesClose): string | null =>
     isGold(c.sym) ? (c.dir === "long" ? "gold_long" : "gold_short")
     : isIndex(c.sym) && c.dir === "short" ? "index_overbought_short"
