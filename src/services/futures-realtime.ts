@@ -1013,8 +1013,19 @@ function getSizeMultiplier(sym?: string): number {
   if (IS_LIVE) {
     if (s === "morning" || s === "afternoon") return 1.0;   // RTH prime — full size
     if (s === "midday") return 0.5;                         // lunch — half size
-    // Funded-enough GOLD gets the evening session at half size; deep overnight (asia/europe) stays blocked (thin liquidity).
-    if (sym && METALS.has(sym) && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY && s === "eth_evening") return 0.5;
+    // Funded-enough GOLD gets the evening session; deep overnight (asia/europe) stays blocked (thin liquidity).
+    // 2026-07-28: was 0.5, which had become a BLOCK rather than a reduction. "Half size" is meaningless
+    // once the position is already the smallest contract that exists — you get 1 micro or 0, never half.
+    // At gold ATR 8.2 one MGC risks ~$122 while a half-size budget is 3% x $5,250 x 0.5 = $78, so the
+    // engine computed qty 0 and skipped EVERY evening setup. The evening is where all six live gold
+    // trades came from. At 1.0 the same trade risks $122 = 2.3% of equity — identical to what a morning
+    // trade already risks — and MGC initial margin (VERIFIED $2,242.90 from Tradovate today, not the
+    // ~$1,000-1,150 this comment used to claim) fits comfortably in a $5,250 account.
+    // SIDE EFFECT, deliberate: sessionQuality is derived from this multiplier, so the evening moves from
+    // "good" (+0) to "prime" (+5) in scoreSetup. Evening gold setups therefore clear the 75 gate more
+    // easily and will fire more often. Evening gold backtests PF 1.05 (train 0.67 / test 1.18) — real but
+    // regime-dependent — so watch the frequency. Revert = put 0.5 back.
+    if (sym && METALS.has(sym) && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY && s === "eth_evening") return 1.0;
     return 0;                                               // BLOCK open, close, deep-ETH, index evenings, and gold when underfunded
   }
 
