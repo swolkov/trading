@@ -1049,7 +1049,15 @@ function getSizeMultiplier(sym?: string): number {
   if (sym && METALS.has(sym)) {
     const etH = getETHour();
     if (etH >= 8.33 && etH < 13.5) return 1.0;  // COMEX prime
-    return 0.5; // Off-COMEX — still trade, smaller size for learning
+    // 2026-07-28: off-COMEX was 0.5 and, exactly like the live evening rule, had become a BLOCK rather
+    // than a reduction. Demo trades FULL-SIZE GC: one contract risks gold-ATR 8.2 x 1.5 x $100 = $1,230,
+    // while a half-size budget is 3% x $76,249 x 0.5 = $1,144. floor(1144/1230) = 0, so demo skipped
+    // EVERY off-COMEX gold setup. "Half size" cannot work when the position is already one contract.
+    // This matters now: live opened eth_evening and eth_europe for gold on 2026-07-28, and demo is
+    // supposed to be the shadow that accumulates evidence on exactly those hours for free. At 0.5 it
+    // could not shadow them at all. At 1.0 demo risks $1,230 = 1.6% of its equity — LESS, in percentage
+    // terms, than live risks on the same setup (2.3%), so the shadow stays the conservative one.
+    return 1.0;
   }
 
   // Equities
