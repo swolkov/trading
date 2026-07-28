@@ -11,7 +11,7 @@ import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, 
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 import { getPlanContextForGrading } from "../lib/advisor";
-import { matchEdge, isEdgeEnabled, allEdgeFlagKeys } from "../lib/realtime-edges";
+import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, REALTIME_EDGES } from "../lib/realtime-edges";
 import { pickActiveContract } from "../lib/contract-months";
 
 
@@ -1381,6 +1381,15 @@ async function loadRiskConfig() {
     }
     updateTradingSymbols();
     log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
+    // DEPLOY VERIFICATION — prints which edges THIS BINARY contains and how each resolves for this
+    // engine. Added 2026-07-28 after a stale deploy went unnoticed for a full session: `railway
+    // redeploy` (without --from-source) REBUILDS THE PREVIOUS COMMIT, so the container image carries a
+    // fresh timestamp while the code inside is old. Timestamps therefore cannot distinguish builds, and
+    // the only other signal was waiting for a setup to fire. The edge COUNT is the tell — a build
+    // predating a registry change lists fewer keys — so a stale engine is now visible in one log line
+    // instead of being discovered by an unintended live trade.
+    log(`[EDGES] ${REALTIME_EDGES.length} registered for ${IS_LIVE ? "LIVE" : "DEMO"} | ` +
+      REALTIME_EDGES.map((e) => `${e.key}=${isEdgeEnabled(e.key, ENGINE_MODE, edgeFlags) ? "ON" : "off"}`).join(" "));
   } catch (err) {
     riskConfig = defaults;
     log(`[CONFIG] Failed to load from DB, using defaults: ${err}`);
