@@ -23,6 +23,9 @@ export interface EdgeStat {
   enabled: boolean;
   /** Set when an edge is only partly on (e.g. trend-long runs mornings but not afternoons). */
   statusNote?: string;
+  /** Badge text for a partly-on edge, phrased as what IS running. A generic amber "PARTIAL" was read
+   *  as "this edge is off" — the opposite of the truth, since the enabled half is the profitable one. */
+  statusLabel?: string;
 }
 
 const dirOf = (action: string): "long" | "short" | null =>
@@ -103,12 +106,25 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     if (on.length === 0) return { enabled: false, statusNote: undefined };
     // Partly on: say WHICH half is live, per card — a generic note would misdescribe gold, whose
     // disabled half is every off-peak hour, not just the afternoon.
-    const PARTIAL_NOTE: Record<string, string> = {
-      gold_short: "mornings only (09:45–12:00 ET) — midday, afternoon, evening and Europe switched off",
-      index_short: "afternoon half switched off — mornings and midday only",
-      index_long: "mornings only — afternoon half switched off",
+    // Both label and note lead with what IS RUNNING. Phrasing this as "partial / switched off" made
+    // the board read as though the edge were dead when in fact its PROFITABLE half is armed — the
+    // index trend-long card showed +$388 next to an amber "off" and was misread exactly that way.
+    const PARTIAL: Record<string, { label: string; note: string }> = {
+      gold_short: {
+        label: "mornings on",
+        note: "Running mornings 09:45–12:00 ET. Midday, afternoon, evening and Europe are switched off.",
+      },
+      index_short: {
+        label: "mornings + midday on",
+        note: "Running mornings and midday. The afternoon half is switched off.",
+      },
+      index_long: {
+        label: "mornings on",
+        note: "Running mornings 09:45–12:00 ET. The afternoon half is switched off.",
+      },
     };
-    return { enabled: true, statusNote: PARTIAL_NOTE[scoreboardKey] ?? "partly switched off" };
+    const p = PARTIAL[scoreboardKey];
+    return { enabled: true, statusLabel: p?.label ?? "partly on", statusNote: p?.note ?? "Partly switched off." };
   };
 
   const edges: EdgeStat[] = DEFS.map((e) => {

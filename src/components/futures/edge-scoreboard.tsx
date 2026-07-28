@@ -14,8 +14,10 @@ interface Edge {
   recent: Recent[];
   /** false = switched off for this engine. Optional so an older cached payload still renders. */
   enabled?: boolean;
-  /** e.g. "mornings only — afternoon half switched off" */
+  /** e.g. "Running mornings 09:45–12:00 ET. The afternoon half is switched off." */
   statusNote?: string;
+  /** Badge text for a partly-on edge, phrased as what IS running (e.g. "mornings on"). */
+  statusLabel?: string;
 }
 interface Board { since: string; totalNet: number; totalTrades: number; edges: Edge[] }
 
@@ -65,13 +67,18 @@ export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
                   {e.enabled === false && (
                     <span className="text-[8px] font-bold uppercase tracking-wider text-rose-400 border border-rose-400/40 rounded px-1 py-px">off</span>
                   )}
+                  {/* GREEN, and it names the half that IS trading. An amber "PARTIAL" next to a
+                      +$388 card was read as "this edge is off" — the opposite of what it meant. */}
                   {e.enabled !== false && e.statusNote && (
-                    <span className="text-[8px] font-bold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded px-1 py-px">partial</span>
+                    <span className="text-[8px] font-bold uppercase tracking-wider text-emerald-400 border border-emerald-400/40 rounded px-1 py-px">
+                      {e.statusLabel ?? "partly on"}
+                    </span>
                   )}
                 </span>
                 <span className={`text-base font-black tabular-nums ${col(e.net)}`}>{money(e.net)}</span>
               </div>
-              {e.statusNote && <p className="text-[9px] text-amber-400/70 leading-snug">{e.statusNote}</p>}
+              {/* Muted, not amber: this is a statement of scope, not a warning. */}
+              {e.statusNote && <p className="text-[9px] text-muted-foreground/60 leading-snug">{e.statusNote}</p>}
               {e.enabled === false && <p className="text-[9px] text-rose-400/70 leading-snug">Switched off for {isDemo ? "demo" : "live"} — shown for the record. Still running on the other engine.</p>}
               <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60">
                 <span>{e.trades} trades</span>
