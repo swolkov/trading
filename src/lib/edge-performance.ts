@@ -26,6 +26,10 @@ export interface EdgeStat {
   /** Badge text for a partly-on edge, phrased as what IS running. A generic amber "PARTIAL" was read
    *  as "this edge is off" — the opposite of the truth, since the enabled half is the profitable one. */
   statusLabel?: string;
+  /** Every registry edge behind this card and whether it is live on THIS engine. A card aggregates a
+   *  whole direction (a FuturesClose carries no entry session, so P&L cannot be split further), which
+   *  hid the fact that one card can front two or more independently-switched session edges. */
+  parts?: { key: string; label: string; enabled: boolean }[];
 }
 
 const dirOf = (action: string): "long" | "short" | null =>
@@ -98,6 +102,24 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     .catch(() => [] as { key: string; value: string }[]);
   const flags: Record<string, string | undefined> = {};
   for (const r of flagRows) flags[r.key] = r.value;
+  // Human window per registry edge, so the card can list every switch behind it. Keyed by registry
+  // key; anything unmapped falls back to the registry name.
+  const WINDOW_LABEL: Record<string, string> = {
+    gold_long_europe: "London 03:00–09:00 ET",
+    gold_long: "all other hours",
+    gold_short: "morning 09:45–12:00 ET",
+    gold_short_offpeak: "all other hours",
+    index_overbought_short: "morning + midday",
+    index_overbought_short_pm: "afternoon 14:00+",
+    index_trend_long: "morning 09:45–12:00 ET",
+    index_trend_long_pm: "afternoon 14:00+",
+  };
+  const partsOf = (scoreboardKey: string) =>
+    (REGISTRY_FOR[scoreboardKey] ?? []).map((k) => ({
+      key: k,
+      label: WINDOW_LABEL[k] ?? REALTIME_EDGES.find((e) => e.key === k)?.name ?? k,
+      enabled: isEdgeEnabled(k, mode === "demo" ? "demo" : "live", flags),
+    }));
   const statusOf = (scoreboardKey: string) => {
     const keys = REGISTRY_FOR[scoreboardKey] ?? [];
     const on = keys.filter((k) => isEdgeEnabled(k, mode === "demo" ? "demo" : "live", flags));
@@ -144,6 +166,7 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
       lastTs: t.length ? t[t.length - 1].ts.toISOString() : null,
       recent: [...t].reverse().slice(0, 8).map((c) => ({ ts: c.ts.toISOString(), sym: c.sym.replace("FUT:", ""), dir: c.dir, exit: c.exit, pnl: c.pnl })),
       ...statusOf(e.key),
+      parts: partsOf(e.key),
     };
   });
 

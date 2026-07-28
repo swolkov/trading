@@ -18,6 +18,8 @@ interface Edge {
   statusNote?: string;
   /** Badge text for a partly-on edge, phrased as what IS running (e.g. "mornings on"). */
   statusLabel?: string;
+  /** Every registry edge behind this card + whether it runs on this engine. */
+  parts?: { key: string; label: string; enabled: boolean }[];
 }
 interface Board { since: string; totalNet: number; totalTrades: number; edges: Edge[] }
 
@@ -79,6 +81,25 @@ export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
               </div>
               {/* Muted, not amber: this is a statement of scope, not a warning. */}
               {e.statusNote && <p className="text-[9px] text-muted-foreground/60 leading-snug">{e.statusNote}</p>}
+              {/* Every switch behind this card. A card aggregates a whole direction, so without this
+                  the two (or more) independently-switched session edges under it are invisible. */}
+              {e.parts && e.parts.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {e.parts.map((p) => (
+                    <span
+                      key={p.key}
+                      title={p.key}
+                      className={`text-[8px] rounded px-1 py-px border ${
+                        p.enabled
+                          ? "text-emerald-400/90 border-emerald-400/30 bg-emerald-400/[0.06]"
+                          : "text-muted-foreground/40 border-border/40 line-through"
+                      }`}
+                    >
+                      {p.enabled ? "✓" : "✗"} {p.label}
+                    </span>
+                  ))}
+                </div>
+              )}
               {e.enabled === false && <p className="text-[9px] text-rose-400/70 leading-snug">Switched off for {isDemo ? "demo" : "live"} — shown for the record. Still running on the other engine.</p>}
               <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60">
                 <span>{e.trades} trades</span>
