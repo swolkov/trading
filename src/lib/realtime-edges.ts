@@ -31,9 +31,10 @@ export interface EdgeMatchCtx {
   setupType: string;
   direction: "long" | "short";
   rsi: number;
-  /** Engine session name ("morning" | "midday" | "afternoon" | "eth_evening" | ...). Lets an edge be
-   *  scoped to the hours it actually works in. Optional so any caller that predates this still
-   *  compiles — an edge that reads it treats "unknown" as allowed. */
+  /** Engine session name ("morning" | "midday" | "afternoon" | "eth_evening" | "eth_europe" | ...).
+   *  Lets an edge be scoped to the hours it actually works in. Optional only so a caller predating
+   *  session-scoping still compiles — but an omitted session is treated as NOT the good session, so
+   *  it routes to the live-disabled half and is DENIED. Never rely on omitting it. */
   session?: string;
 }
 
@@ -53,13 +54,23 @@ export interface RealtimeEdge {
 const METALS = new Set(["MGC", "GC"]);
 const INDEX_LONG_SYMS = new Set(["NQ", "MNQ", "ES", "MES"]);
 
-/** The engine's RTH morning block (09:45–12:00 ET). Gold's only both-halves-positive short cell.
- *  An ABSENT session counts as morning so a caller that predates session-scoping still matches the
- *  enabled edge rather than silently falling through to default-deny. */
-const isMorning = (s?: string) => !s || s === "morning";
-/** Mirror of isMorning — every KNOWN non-morning session. Kept as the explicit complement so the
- *  two halves of a split can never both match (matchEdge takes the first hit) nor both miss. */
-const isOffPeak = (s?: string) => !!s && s !== "morning";
+/**
+ * SESSION-SCOPED EDGES — read this before adding one.
+ *
+ * A session-split edge is a PAIR: the good hours and the rest. Each half is `session === X` and
+ * `session !== X`, which makes them mutually exclusive (matchEdge takes the first hit, so an overlap
+ * would silently pick one) and exhaustive (no setup can fall through both).
+ *
+ * FAIL-SAFE DIRECTION: an ABSENT/unknown session resolves to `!== X`, i.e. the OFF-PEAK half, which
+ * is the live-DISABLED one. So a caller that forgets to pass a session gets DENIED, never a live
+ * trade. The earlier version treated a missing session as the *enabled* half — the wrong way round,
+ * and the same shape of mistake that let a stale build trade an evening gold short on 2026-07-28.
+ */
+/** 09:45–12:00 ET. Gold's only both-halves-positive SHORT cell (PF 1.72). */
+const GOLD_SHORT_SESSION = "morning";
+/** 03:00–09:00 ET, London. Gold's only both-halves-positive LONG cell (PF 1.37, n=310 — the largest
+ *  passing sample of any gold cell). London is gold's most liquid stretch outside NY. */
+const GOLD_LONG_SESSION = "eth_europe";
 
 export function edgeSymbolClass(sym: string): EdgeSymbolClass {
   return METALS.has(sym) ? "metals" : "index";
@@ -72,17 +83,36 @@ export function edgeSymbolClass(sym: string): EdgeSymbolClass {
 export const REALTIME_EDGES: RealtimeEdge[] = [
   // The gold RSI-bounce used to be ONE edge covering both directions. Split 2026-07-25 because the
   // two sides behave completely differently intraday, and only one switch could express that.
+  // Split 2026-07-28. Gold long was one edge across all hours and measured PF 0.71 — but that pooled
+  // number hid the fact that ONE session carries a real edge and the rest drag it under. A NEW key is
+  // used for the good half deliberately: `edge_gold_long_live` is already "false" in the DB, so
+  // reusing it would have kept London switched off, while `gold_long_europe` has no stale flag and
+  // resolves from its registry default.
   {
-    key: "gold_long",
-    name: "Gold RSI — oversold LONG",
-    blurb: "MGC/GC — buy deep-oversold RSI extremes (RSI<25).",
+    key: "gold_long_europe",
+    name: "Gold RSI — oversold LONG (London)",
+    blurb: "MGC/GC — buy deep-oversold RSI extremes (RSI<25) during London hours, 03:00–09:00 ET.",
     symbolClass: "metals",
     evidence:
-      "LOSES intraday: engine-exact 3-yr test with full trade management gives PF 0.71 — negative in BOTH halves (0.67 train / 0.72 test) over 572 trades. NOTE this is the opposite of the DAILY gold picture (26-yr daily oversold-long PF 1.58); the daily edge does not transfer to 5-min bars. Switched OFF on live 2026-07-25, left ON for demo to keep collecting evidence.",
+      "The BEST cell in the entire 12-cell gold grid and one of only two that survive both halves: PF 1.37 over 310 trades (train 1.19 / test 1.51) — the largest passing sample of any gold cell, and steadier across halves than the morning short (1.10/2.46) that already trades live. London is gold's most liquid stretch outside NY. NOTE the pooled gold-long number (PF 0.71) is dragged down entirely by the other sessions — see gold_long.",
     defaultDemo: true,
     defaultLive: true,
     matches: (m) =>
-      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long",
+      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long" &&
+      m.session === GOLD_LONG_SESSION,
+  },
+  {
+    key: "gold_long",
+    name: "Gold RSI — oversold LONG (outside London)",
+    blurb: "MGC/GC — the same RSI<25 oversold buy, taken outside 03:00–09:00 ET.",
+    symbolClass: "metals",
+    evidence:
+      "The losing hours of the gold long, and where the pooled PF 0.71 (0.67 train / 0.72 test, 572 trades) actually comes from. Engine-exact 3-yr by session: morning 0.53 — the single worst of all 12 gold cells — midday 0.73, afternoon 0.73, eth_evening 0.83, eth_asia 0.87. Not one is positive. Switched OFF on live 2026-07-25, left ON for demo. NOTE the 26-yr DAILY gold oversold-long (PF 1.58) does not transfer here: it was the no-stop variant, and it fails once a stop is attached.",
+    defaultDemo: true,
+    defaultLive: true,
+    matches: (m) =>
+      edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long" &&
+      m.session !== GOLD_LONG_SESSION,
   },
   {
     key: "gold_short",
@@ -95,7 +125,7 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     defaultLive: true,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
-      isMorning(m.session),
+      m.session === GOLD_SHORT_SESSION,
   },
   // Split out 2026-07-28, same reasoning as the index morning/afternoon split: the off-peak gold
   // shorts are a different trade from the morning one, and only a separate switch can express that.
@@ -110,7 +140,7 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
-      isOffPeak(m.session),
+      m.session !== GOLD_SHORT_SESSION,
   },
   {
     key: "index_overbought_short",

@@ -88,7 +88,7 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
 
   // Which registry edges back each scoreboard card, so a disabled edge can be labelled as such.
   const REGISTRY_FOR: Record<string, string[]> = {
-    gold_long: ["gold_long"],
+    gold_long: ["gold_long_europe", "gold_long"],
     gold_short: ["gold_short", "gold_short_offpeak"],
     index_short: ["index_overbought_short", "index_overbought_short_pm"],
     index_long: ["index_trend_long", "index_trend_long_pm"],
@@ -110,6 +110,10 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     // the board read as though the edge were dead when in fact its PROFITABLE half is armed — the
     // index trend-long card showed +$388 next to an amber "off" and was misread exactly that way.
     const PARTIAL: Record<string, { label: string; note: string }> = {
+      gold_long: {
+        label: "london hours on",
+        note: "Running London hours 03:00–09:00 ET, gold's best long window (PF 1.37 over 310 trades, positive in both halves). Every other hour is switched off — the US morning is gold long's worst cell at PF 0.53.",
+      },
       gold_short: {
         label: "mornings on",
         note: "Running mornings 09:45–12:00 ET. Midday, afternoon, evening and Europe are switched off.",
