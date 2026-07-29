@@ -4149,7 +4149,35 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
     }
   }
 
-  // Fallback: Yahoo Finance
+  // Fallback 1: DATABENTO HISTORICAL — the contract we actually trade, and already paid for.
+  // Added 2026-07-29. Tradovate MD is not subscribed on this account, so preload ALWAYS fell straight
+  // through to Yahoo — and Yahoo prices a DIFFERENT CONTRACT MONTH. On this restart it seeded gold at
+  // "Last: $4068.40 | PDH:$4095.70 PDL:$4011.10" while Databento had gold at 4008.50: the whole
+  // 549-bar buffer was ~60 points off, which is why the current price sat BELOW its own previous-day
+  // low. Every indicator built on that buffer — ATR, VWAP, prev-day levels, opening range — was wrong,
+  // and ATR drives stop distance and therefore position size.
+  // DBN_MAP sends MGC→GC.v.0 / MNQ→NQ.v.0 / MES→ES.v.0 (continuous front-month), i.e. the same series
+  // the live sidecar quotes, so preloaded bars and live ticks finally agree on one contract.
+  // Fail-safe: returns [] without an API key or on any error, so the Yahoo path below still exists.
+  if (bars.length === 0) {
+    try {
+      const { getDatabentoIntradayBars } = await import("../lib/databento");
+      const dbnBars = await getDatabentoIntradayBars(sym, "5m", "5d");
+      if (dbnBars.length > 0) {
+        // NOTE: parseOhlcv in lib/databento.ts already emits `t` in SECONDS (it divides by 1000), which
+        // is the same unit the Tradovate/Yahoo preload paths use here. Do NOT divide again.
+        bars = dbnBars.map((b) => ({ t: b.t, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
+        log(`  ${sym}: preloaded ${bars.length} bars from DATABENTO (correct contract)`);
+      }
+    } catch (err) {
+      log(`  ${sym}: Databento preload failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Fallback 2: Yahoo Finance — LAST RESORT. Prices a different contract month (measured 2026-07-29:
+  // Yahoo GC=F 4071.00 vs Databento GC 4008.50), so bars built from it are ~60 points off on gold.
+  // Kept only so the engine still has *some* history if both real sources are down; onPrice's
+  // source-mixing guard and the no-new-entries-on-fallback rule contain the damage.
   if (bars.length === 0) {
     try {
       const yahooSym = YAHOO_MAP[sym];
