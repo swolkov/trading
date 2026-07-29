@@ -146,10 +146,46 @@ function microContractCap(equity: number): number {
   if (equity >= 10000) return 2;
   return 1;
 }
-// LIVE only: minimum account equity before we let gold (MGC) trade into the evening session. MGC overnight
-// initial margin is ~$1,000-1,150; below this threshold the account can't cover it → stay RTH-only. Once
-// funded past this (e.g. after the $4k ACH → ~$4.8k) evening gold auto-enables. Index never gets the evening
-// (its overnight margin ~$2,657 is too heavy). Auto-reverts to RTH-only if equity ever drops back below.
+
+// ── OVERNIGHT MARGIN GOVERNOR (2026-07-29) ───────────────────────────────────────────────────────
+// Sessions the exchange treats as RTH, where it charges DAY-TRADE margin (~$50-100/micro). Anything
+// else charges INITIAL margin, which is 20-40x higher — that is the whole reason overnight size must
+// be governed separately. Module-scope so the entry sizer and the pyramid add cannot drift apart
+// (they previously used different caps: per-trade 2 vs maxTotalContracts 8).
+const RTH_SESSIONS = new Set(["open", "morning", "midday", "afternoon", "close"]);
+/** Hard contract ceiling for a single overnight micro entry, independent of margin. */
+const OVERNIGHT_MICRO_CAP = 2;
+/** Overnight INITIAL margin per MICRO contract, in dollars. VERIFIED from Tradovate 2026-07-28:
+ *  MGC $2,242.90. Index micros are never traded overnight today (getSizeMultiplier returns 0 for
+ *  non-metals outside RTH), but they are listed so a future session change cannot get a free pass.
+ *  A hardcoded margin number HAS already gone stale here once — a comment claimed MGC was
+ *  ~$1,000-1,150 when the real figure was $2,242.90 — so updateTradovateEquity() now self-audits
+ *  this table against what the broker actually charges and logs loudly on drift. */
+const OVERNIGHT_INITIAL_MARGIN: Record<string, number> = {
+  MGC: 2242.90, MNQ: 4171, MES: 2657, MYM: 1000, M2K: 1000,
+};
+/** Ceiling on the share of equity that overnight INITIAL margin may consume.
+ *  This is the point of the whole governor: the limit tracks EQUITY instead of being a blind
+ *  contract count that only happens to fit the balance it was written for. On ~$5,227:
+ *      1x MGC = $2,242.90  = 43%  → allowed
+ *      2x MGC = $4,485.80  = 86%  → allowed (deliberately inside the cap)
+ *      3x MGC = $6,728.70  = 129% → impossible, and now refused BEFORE the order is sent
+ *  A drawdown therefore reduces size on its own: below ~$4,984 the 2nd contract stops fitting. */
+const OVERNIGHT_MARGIN_UTILISATION_CAP = 0.90;
+/** Largest quantity of `sym` whose overnight INITIAL margin fits inside the utilisation cap.
+ *  Returns 0 when the requirement is unknown — refusing to trade beats guessing a margin figure,
+ *  which is exactly how the 2026-06-30 naked-stop incident started ("the broker will just reject
+ *  it" is not a safety mechanism). */
+function overnightMarginCap(sym: string, equity: number): number {
+  const perContract = OVERNIGHT_INITIAL_MARGIN[sym];
+  if (!perContract || perContract <= 0 || equity <= 0) return 0;
+  return Math.floor((equity * OVERNIGHT_MARGIN_UTILISATION_CAP) / perContract);
+}
+
+// LIVE only: minimum account equity before we let gold (MGC) trade into the evening session. Below
+// this the account cannot cover MGC's overnight initial margin at all → stay RTH-only. Once funded
+// past it, evening gold auto-enables. Index never gets the evening (its overnight margin is far
+// heavier — see OVERNIGHT_INITIAL_MARGIN). Auto-reverts if equity ever drops back below.
 const LIVE_EVENING_GOLD_MIN_EQUITY = 3000;
 // Minimum price increment per contract. EVERY price sent to Tradovate (stop, target, trail) MUST be
 // aligned to this or the broker rejects the order as "Illegal Price" — and because /order/placeorder
@@ -1118,15 +1154,23 @@ function getSizeMultiplier(sym?: string): number {
     //                                                                    live could actually have taken
     // So opening Europe made the live book strictly worse. The fix is at the EDGE layer, not here:
     // gold_short is now scoped to the morning (the one gold cell that survives both halves, PF 1.72)
-    // and gold_short_offpeak is live-disabled. That leaves this branch UNREACHABLE for live gold —
-    // both gold_long and gold_short_offpeak are off, so a Europe/evening setup matches a disabled edge
-    // and default-denies before size is ever consulted.
-    // It is left in place deliberately: demo runs every half and needs the multiplier to shadow these
-    // hours, and if eth_europe LONG earns promotion off demo evidence this is the sizing it needs.
+    // and gold_short_offpeak is live-disabled.
     // LESSON: never justify a session from a pooled PF when only one direction is enabled.
-    // WHY IT IS SAFE: MGC initial margin $2,242.90 (verified) against $5,250 equity; the stop rests AT
-    // THE EXCHANGE so it fills unattended; the 45-min stale exit cuts dead trades; the 15:50 ET EOD
-    // flatten guarantees nothing carries overnight; and the daily-loss and kill switches are unchanged.
+    //
+    // ⚠️ CORRECTED 2026-07-29 — this comment used to end "that leaves this branch UNREACHABLE for
+    // live gold". THAT IS NO LONGER TRUE. a288af2 added `gold_long_europe`, which is ON for live, so
+    // this branch IS reached: live trades gold LONG in London (03:00-09:00 ET) at sizeMult 1.0.
+    // Anyone reading the old text would conclude live cannot trade Europe gold. It can.
+    //
+    // WHY IT IS SAFE: the stop rests AT THE EXCHANGE so it fills unattended; the 45-min stale exit
+    // cuts dead trades; the 15:50 ET EOD flatten means a London position never carries through the
+    // 17:00-18:00 break; the daily-loss and kill switches are unchanged; and SIZE is now governed by
+    // the OVERNIGHT MARGIN GOVERNOR (see OVERNIGHT_INITIAL_MARGIN) rather than a bare contract count,
+    // so the position can never exceed what the account can actually margin. On ~$5,227 that is 2 MGC
+    // ($4,486 initial, 86% of equity) with the stop binding at ~$150 — the risk controls bind roughly
+    // 7x sooner than the margin controls. Do NOT re-derive safety from a hardcoded margin figure:
+    // this file already carried a stale one (~$1,000-1,150 for MGC vs a real $2,242.90), which is why
+    // updateTradovateEquity() now self-audits the table against the broker and alerts on drift.
     // INDEX IS NEVER ADDED HERE — MNQ initial margin is $4,171, i.e. 79% of the account for one contract.
     // Side effect as with the evening: sizeMult 1.0 makes these sessions "prime" (+5 confluence). If that
     // proves too loose, raise the score threshold rather than dropping the multiplier — a fractional
@@ -1787,7 +1831,17 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // Only pyramid if: breakeven reached, haven't already pyramided, equity allows it
   if (ALLOW_PYRAMID && pos.reachedBreakeven && diff >= stopDist * 1.2 && diff < stopDist * 2 && !pos.pyramided) {
     const addQty = Math.max(1, Math.floor(pos.quantity * 0.5)); // Add 50% of original size
-    const maxTotalContracts = riskConfig.maxTotalContracts; // BUGFIX: enforce the CONFIGURED cap (was equity/500 → 118 on $59k, letting pyramids balloon to 30+ contracts past the 8/10 limit)
+    let maxTotalContracts = riskConfig.maxTotalContracts; // BUGFIX: enforce the CONFIGURED cap (was equity/500 → 118 on $59k, letting pyramids balloon to 30+ contracts past the 8/10 limit)
+    // OVERNIGHT GOVERNOR ON ADDS (2026-07-29). This path checked ONLY maxTotalContracts (8 on live),
+    // so it walked straight past the per-entry overnight cap of 2: a pyramid on 2 MGC would have
+    // taken a 3rd contract at $2,242.90 initial margin — 129% of a $5,227 account — on margin that
+    // does not exist. ALLOW_PYRAMID is false on live today, so this is defence-in-depth against the
+    // env flag being flipped, but an entry cap that an ADD can ignore is not a cap.
+    const addSession = getSessionName();
+    if (MICRO_SYMBOLS.includes(sym) && !RTH_SESSIONS.has(addSession)) {
+      const overnightCap = Math.min(OVERNIGHT_MICRO_CAP, overnightMarginCap(sym, tradovateEquity));
+      if (overnightCap < maxTotalContracts) maxTotalContracts = overnightCap;
+    }
     if (pos.quantity + addQty <= maxTotalContracts) {
       log(`${sym}: PYRAMID +${addQty}x @ $${price.toFixed(2)} (1.2R, original at breakeven). Total: ${pos.quantity + addQty}x`);
       // Place add order — stop for NEW contracts at breakeven (same as original)
@@ -3671,20 +3725,40 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   let perTradeCap = MICRO_SYMBOLS.includes(sym)
     ? Math.max(riskConfig.maxContractsPerTrade, microContractCap(equity))
     : riskConfig.maxContractsPerTrade;
-  // OVERNIGHT MARGIN CLAMP (2026-07-28). Raising the per-trade cap to 4 only works during RTH, where
-  // the exchange charges DAY-TRADE margin (~$50-100/contract). Outside RTH it charges INITIAL margin:
-  // MGC is $2,242.90/contract (verified from Tradovate), so on a $5,227 account 2 contracts is already
-  // 86% of equity and 3 is flatly impossible. The London gold long (03:00-09:00 ET) is an overnight
-  // session, so it must stay at 2 however high the configured cap goes.
-  // FAIL-SAFE: an ABSENT session clamps too. setupContext is optional on this function, and a missing
-  // one must never quietly authorise a size the account cannot margin — see the 2026-06-30 naked-stop
+  // ── OVERNIGHT MARGIN GOVERNOR ────────────────────────────────────────────────────────────────
+  // The per-trade cap of 4 only works during RTH, where the exchange charges DAY-TRADE margin
+  // (~$50-100/micro). Outside RTH it charges INITIAL margin — MGC $2,242.90 — so on a ~$5,227
+  // account 2 contracts is 86% of equity and 3 is flatly impossible. The London gold long
+  // (03:00-09:00 ET, gold_long_europe=ON on live) is an overnight session, so it is governed here.
+  //
+  // WHY THIS IS NOW A MARGIN CHECK AND NOT JUST A CONTRACT COUNT (2026-07-29): risk-based sizing
+  // targets 3% of equity and never looks at margin at all, so a contract count is the only thing
+  // standing between it and an order the account cannot margin. A fixed count also silently stops
+  // being true when equity moves — and it nearly bit today: correcting the inflated ATR tightened
+  // gold's stop from 15.7 to 7.5 points, which takes the SAME $150 of risk from 1 contract to 2 and
+  // doubles initial margin from 43% to 86% of equity. Same risk, double the margin. Gating on
+  // equity-relative margin means a drawdown reduces size by itself instead of relying on a number
+  // that was only ever correct for one balance.
+  //
+  // FAIL-SAFE: an ABSENT session clamps too. setupContext is optional here, and a missing session
+  // must never quietly authorise a size the account cannot margin — see the 2026-06-30 naked-stop
   // incident for why "the broker will just reject it" is not a safety mechanism.
-  const RTH_SESSIONS = new Set(["open", "morning", "midday", "afternoon", "close"]);
-  const OVERNIGHT_MICRO_CAP = 2;
   const execSession = setupContext?.session;
-  if (MICRO_SYMBOLS.includes(sym) && (!execSession || !RTH_SESSIONS.has(execSession)) && perTradeCap > OVERNIGHT_MICRO_CAP) {
-    log(`${sym}: OVERNIGHT CAP — session ${execSession ?? "unknown"} uses initial margin, capping ${perTradeCap} → ${OVERNIGHT_MICRO_CAP} contracts`);
-    perTradeCap = OVERNIGHT_MICRO_CAP;
+  const isOvernightEntry = MICRO_SYMBOLS.includes(sym) && (!execSession || !RTH_SESSIONS.has(execSession));
+  if (isOvernightEntry) {
+    const marginCap = overnightMarginCap(sym, equity);
+    const overnightCap = Math.min(OVERNIGHT_MICRO_CAP, marginCap);
+    if (overnightCap < 1) {
+      const per = OVERNIGHT_INITIAL_MARGIN[sym];
+      log(`${sym}: SKIP — overnight (session ${execSession ?? "unknown"}), and equity $${equity.toFixed(0)} cannot margin even 1 contract at ${per ? `$${per.toFixed(0)} initial` : "an UNKNOWN initial margin"} (cap ${(OVERNIGHT_MARGIN_UTILISATION_CAP * 100).toFixed(0)}% of equity)`);
+      return;
+    }
+    if (overnightCap < perTradeCap) {
+      const per = OVERNIGHT_INITIAL_MARGIN[sym] ?? 0;
+      const use = per * overnightCap;
+      log(`${sym}: OVERNIGHT CAP — session ${execSession ?? "unknown"} uses initial margin, capping ${perTradeCap} → ${overnightCap} contract(s) (${overnightCap}x $${per.toFixed(0)} = $${use.toFixed(0)}, ${((use / equity) * 100).toFixed(0)}% of $${equity.toFixed(0)} equity; ceiling ${(OVERNIGHT_MARGIN_UTILISATION_CAP * 100).toFixed(0)}%)`);
+      perTradeCap = overnightCap;
+    }
   }
   let qty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
   if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
@@ -4317,6 +4391,7 @@ async function preloadBars() {
 // account balance upward; not trading for one minute costs nothing, mis-sizing 10x does not.
 let tradovateEquity = 0;
 let startOfDayBalance = 0; // Set at session reset, used for daily loss limit
+let marginDriftAlerted = false; // OVERNIGHT_INITIAL_MARGIN self-audit — alert once, not every cycle
 
 async function updateTradovateEquity() {
   try {
@@ -4325,6 +4400,29 @@ async function updateTradovateEquity() {
       tradovateEquity = cashBalances.totalCashValue;
       updateTradingSymbols();
       log(`[EQUITY] Tradovate account equity: $${tradovateEquity.toLocaleString()}`);
+
+      // SELF-AUDIT the overnight margin table against what the broker ACTUALLY charges. That table
+      // now gates overnight size, and a hardcoded margin figure has already gone stale here once —
+      // a comment claimed MGC was ~$1,000-1,150 when the real requirement was $2,242.90, i.e. we
+      // would have authorised roughly double what the account could margin. Only the UNDER-estimate
+      // direction is flagged: during RTH the exchange charges day-trade margin, so the broker
+      // legitimately reports far LESS than this table, and warning on that would be pure noise.
+      const brokerIM = Number(cashBalances.initialMargin ?? 0);
+      if (brokerIM > 0 && positions.size > 0) {
+        let expected = 0;
+        let known = true;
+        for (const [s, p] of positions) {
+          const per = OVERNIGHT_INITIAL_MARGIN[s];
+          if (!per) { known = false; break; }
+          expected += per * p.quantity;
+        }
+        if (known && expected > 0 && brokerIM > expected * 1.2 && !marginDriftAlerted) {
+          marginDriftAlerted = true;   // once per process — an alert that repeats every 5 min gets ignored
+          const detail = [...positions.entries()].map(([s, p]) => `${p.quantity}x ${s}`).join(" + ");
+          log(`⚠️ MARGIN TABLE STALE — broker charges $${brokerIM.toFixed(0)} initial for ${detail}, OVERNIGHT_INITIAL_MARGIN expects only $${expected.toFixed(0)}. Overnight sizing is UNDER-estimating margin; update the table.`);
+          notify(`⚠️ Overnight margin table is under-estimating: broker $${brokerIM.toFixed(0)} vs assumed $${expected.toFixed(0)} for ${detail}. Overnight size may exceed what the account can margin.`, "general");
+        }
+      }
       // One-time Slack alert when the $4k ACH clears — the live account jumps from sub-$3k to funded.
       // Fires once (persisted flag), LIVE only. This is also the threshold that arms evening gold.
       if (IS_LIVE && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY) {
