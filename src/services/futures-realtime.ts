@@ -4267,7 +4267,7 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
 }
 
 async function preloadBars() {
-  log("Pre-loading historical bars (Tradovate primary, Yahoo fallback)...");
+  log("Pre-loading historical bars (Databento primary → Tradovate; no Yahoo substitute)...");
 
   // Preload for ALL symbols (both full-size and micro) — 20s cap per symbol prevents startup hang
   for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS, "YM"]) {
@@ -4820,7 +4820,7 @@ async function main() {
   log("╔══════════════════════════════════════════════╗");
   log(`║  ESBUENO FUTURES — ${MODE_TAG} ENGINE ${"".padEnd(16 - MODE_TAG.length)}║`);
   log("╚══════════════════════════════════════════════╝");
-  log(`Mode: ${IS_LIVE ? "LIVE — real money, RTH prime only" : "DEMO 24/7 learning"} | Data: Tradovate WS → Yahoo fallback (5s) | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
+  log(`Mode: ${IS_LIVE ? "LIVE — real money, RTH prime only" : "DEMO 24/7 learning"} | Data: Databento live_quotes → Tradovate (5s), NO Yahoo price fallback | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
 
   // Validate all required env vars BEFORE doing anything else
   validateEnvironment();
