@@ -153,6 +153,10 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     const volTrend = volRatio > 2 ? "surge" : volRatio < 0.6 ? "dry" : volRatio < 0.8 ? "declining" : "normal";
     const sessScore = sizeMult >= 1 ? 5 : sizeMult >= 0.5 ? 0 : -10;
     const t15 = trend15(buf);
+    // Hoisted 2026-07-29 so SETUP 0 can use it too (was computed inside SETUP 2 only). Needed to test
+    // whether the overbought SHORT is really a downtrend trade rather than a mean-reversion fade —
+    // the demo scoreboard's 7-trade winning streak exited 6/7 on trail_stop, i.e. price kept falling.
+    const ema200 = closes.length >= 200 ? emaLast(closes, 200) : Infinity;
 
     let edge = "", dir: "long" | "short" = "long", stopDist = 0, targetDist = 0;
 
@@ -167,13 +171,18 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       if (Math.max(0, Math.min(100, sc)) >= 75 && !isOversold && rsi >= 80) {
         edge = "index_overbought_short"; dir = "short";
         stopDist = adjustedATR * 1.5; targetDist = currentATR * 3.5;
+        // REGIME SPLIT (2026-07-29). Disjoint, same pattern as index_trend_short_below200:
+        //   _below200 = price BELOW the 200-EMA → shorting WITH the trend (a momentum short)
+        //   the base row = price ABOVE it       → the true counter-trend overbought fade
+        // Tests the hypothesis behind demo's 7-trade streak: those wins came in a hard down-market,
+        // so if the edge is real it should live entirely in the below-200 bucket.
+        if (price < ema200) edge = "index_overbought_short_below200";
       } else continue; // an extreme-RSI bar that fails the gate is consumed by the engine either way
     }
 
     // SETUP 2 — trend continuation (long only per the registry)
     if (!edge && (session === "morning" || session === "afternoon")) {
       const fastEMA = emaLast(closes, 9), slowEMA = emaLast(closes, 21);
-      const ema200 = closes.length >= 200 ? emaLast(closes, 200) : Infinity;
       const first = orN.get(bar.day) ? orH.get(bar.day)! - orL.get(bar.day)! : 0;
       const pd = prevDay.get(bar.day);
       const pdH = pd != null ? dayHi.get(pd)! : 0, pdL = pd != null ? dayLo.get(pd)! : 0;
@@ -289,7 +298,13 @@ for (const sym of syms) {
   // matches. "_below200" is the subset that ALSO passed a symmetric 200-EMA filter, so the two rows
   // together answer "does the short work, and does the regime filter help it?"
   const SHORTS = ["index_trend_short", "index_trend_short_below200"];
-  for (const e of ["index_trend_long", "index_overbought_short", ...SHORTS, "ALL_TREND_SHORT"]) {
+  const OBS = ["index_overbought_short", "index_overbought_short_below200"];
+  for (const e of ["index_trend_long", ...OBS, "ALL_OBS", ...SHORTS, "ALL_TREND_SHORT"]) {
+    if (e === "ALL_OBS") {
+      const both = all.filter(t => OBS.includes(t.edge));
+      if (both.length) console.log(`  ${"obs (both)".padEnd(13)} ` + f(stats(both)).padEnd(56) + half(both));
+      continue;
+    }
     if (e === "ALL_TREND_SHORT") {
       const both = all.filter(t => SHORTS.includes(t.edge));
       if (both.length) console.log(`  ${"trend_short (both)".padEnd(13)} ` + f(stats(both)).padEnd(56) + half(both));
