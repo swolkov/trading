@@ -96,13 +96,9 @@ function updateTradingSymbols() {
   }
 }
 
-// Yahoo fallback symbol mapping (used only if Tradovate MD fails)
-const YAHOO_MAP: Record<string, string> = {
-  ES: "ES=F", NQ: "NQ=F", GC: "GC=F", YM: "YM=F",
-  MES: "ES=F", MNQ: "NQ=F", MGC: "GC=F", MYM: "YM=F",
-  MBT: "BTC=F",
-};
-// Lazy-load Yahoo only when needed (fallback path)
+// Lazy-load Yahoo. Its ONLY remaining job in this engine is ^VIX / ^VIX3M — CBOE indices with no
+// GLBX equivalent, and not contract-specific, so the wrong-month problem cannot apply to them.
+// All PRICE data is Databento (live_quotes) → Tradovate. See fetchDatabentoQuotes / pollPrices.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _yfEngine: { quote: (symbols: string[] | string) => Promise<any>; chart: (symbol: string, opts: Record<string, unknown>) => Promise<any> } | null = null;
 function getYfEngine() {
@@ -702,50 +698,69 @@ let tickCount = 0;
 let lastResetDate = "";
 let lastEODDate = "";
 
-/** When a REAL-TIME (exchange) quote last arrived per symbol — see the source-mixing guard below. */
+/** Exchange timestamp of the last real quote per symbol (Databento's own ts when we have it, else
+ *  arrival time). Drives both the feed-gap detector and the entry-freshness gate. */
 const lastReliableAt = new Map<string, number>();
-/** Whether the previous accepted tick was real-time, so a source flip can restart the bar. */
-const lastTickReliable = new Map<string, boolean>();
-/** How long a real-time feed stays "alive" before a lagging fallback quote is allowed in. Databento
- *  polls every ~5s, so 2 minutes of silence is a genuine outage rather than a single missed poll. */
-const FALLBACK_HOLDOFF_MS = 120_000;
-/** Is this symbol currently priced by a real-time feed (vs a lagging, different-contract fallback)? */
+/** Clean 5-min bars still required before this symbol may open new risk. Set when a genuine feed
+ *  discontinuity lands in the buffer; decremented on each clean bar close. */
+const quarantineBars = new Map<string, number>();
+/** Since when a symbol has had no usable quote at all (telemetry only). */
+const unpricedSince = new Map<string, number>();
+
+/** A silence longer than this means we lost the feed rather than missed a poll (Databento polls ~5s). */
+const MD_GAP_MS = 90_000;
+/** Bars needed to fully rebuild a 14-period indicator, so a discontinuity can't drive ATR/RSI. */
+const INDICATOR_WARMUP_BARS = 15;
+/** How old the underlying quote may be to open NEW risk. Deliberately much tighter than DBN_STALE_MS
+ *  (90s, which governs BAR building): a slightly-stale quote is fine for drawing a bar but must never
+ *  price a live order or the stop that hangs off it. */
+const ENTRY_MAX_QUOTE_AGE_MS = 30_000;
+
+/** Is this symbol's price fresh enough to open new risk on? */
 function isRealtimePriced(sym: string): boolean {
-  return Date.now() - (lastReliableAt.get(sym) ?? 0) < FALLBACK_HOLDOFF_MS;
+  return Date.now() - (lastReliableAt.get(sym) ?? 0) < ENTRY_MAX_QUOTE_AGE_MS;
+}
+/** Is every open position's symbol fresh enough to trust an aggregate P&L calculation? */
+function allPositionsFreshlyPriced(): boolean {
+  for (const sym of positions.keys()) if (!isRealtimePriced(sym)) return false;
+  return true;
 }
 
-// `reliable` = price came from a real-time exchange feed (Databento/Tradovate).
-// Yahoo fallback quotes lag 15-60s and flap overnight — they must NOT drive the
-// software emergency close (the broker bracket stop is the real, on-exchange protection).
-function onPrice(sym: string, price: number, volume: number, reliable = true) {
+// Every caller now passes a price from the CONTRACT WE TRADE (Databento live_quotes → Tradovate);
+// the Yahoo path that fed a different contract month was removed 2026-07-29. `reliable` is kept as
+// defence-in-depth so that if a future fallback is ever added, it still cannot drive the software
+// emergency close — but nothing sets it false today. `quoteTs` is the quote's own exchange timestamp
+// where the source provides one, so entry-freshness measures the PRICE's age, not our poll's.
+function onPrice(sym: string, price: number, volume: number, reliable = true, quoteTs?: number) {
   const b = barBuilders.get(sym);
   if (!b || price <= 0) return;
 
-  // ── SOURCE-MIXING GUARD (2026-07-29) ────────────────────────────────────────────────────────
-  // Yahoo's GC=F / NQ=F / ES=F are DIFFERENT CONTRACT MONTHS from the Databento/Tradovate feed.
-  // Measured 2026-07-29 11:56 ET:  Yahoo GC=F 4071.00 vs Databento GC 4008.50 — a 62.5-point basis
-  // (NQ 82 pts, ES 10.9 pts). The fallback chain picks a source PER POLL (~5s), so a single 5-min
-  // bar could take its high from one contract and its low from the other. That is exactly what
-  // happened: MGC ATR read 63.86 against an actual 11-point morning range, MNQ 53.54, MES 8.28 —
-  // each ATR converged on its own source gap, not on real volatility.
-  // WHY IT MATTERS: inflated ATR widens the stop, which shrinks size or skips the setup entirely
-  // (gold was silently untradeable all morning), and a stop priced off the wrong contract would be
-  // ~63 points misplaced on a real order.
-  // FIX: while a real-time feed is still serving this symbol, a lagging fallback quote is DROPPED
-  // rather than blended into the same bar.
-  if (reliable) {
-    lastReliableAt.set(sym, Date.now());
-  } else if (Date.now() - (lastReliableAt.get(sym) ?? 0) < FALLBACK_HOLDOFF_MS) {
-    return;
+  // ── FEED-GAP QUARANTINE (2026-07-29) ────────────────────────────────────────────────────────
+  // Every price reaching this function is now on the CONTRACT WE TRADE (Yahoo was removed from the
+  // price path — see pollPrices). What remains is DISCONTINUITY: if the feed goes silent and comes
+  // back at a different level, the buffer straddles a step that is not a real 5-minute move.
+  //
+  // This is what the previous guard got wrong. It stopped a single BAR from spanning two sources,
+  // but ATR's true range is max(h-l, |h - prevClose|, |l - prevClose|) — it spans BARS by design.
+  // Restarting the bar at the new level therefore GUARANTEED a clean step straight into ATR, and a
+  // 14-period ATR carries it for ~70 minutes. Measured 2026-07-29: gold's real 5-min ATR was 3.34
+  // while the engine read 8.75-12.68 and RSI sat at 94-98 for over 20 minutes, emitting an
+  // 83%-confidence OR BREAKOUT LONG on a price that did not exist.
+  //
+  // So: never edit history to hide a step. Detect it, let the bars tell the truth, and refuse to
+  // open NEW RISK until enough clean bars have rebuilt the indicators.
+  const gapMs = Date.now() - (lastReliableAt.get(sym) ?? 0);
+  const prevClose = b.currentBar?.c ?? b.bars5m[b.bars5m.length - 1]?.c;
+  if (gapMs > MD_GAP_MS && prevClose && prevClose > 0) {
+    const jump = Math.abs(price - prevClose);
+    const ref = atr(b.bars5m) || prevClose * 0.002;   // fall back to ~20bps when there is no ATR yet
+    if (jump > ref * 2) {
+      quarantineBars.set(sym, INDICATOR_WARMUP_BARS);
+      log(`  ${sym}: FEED GAP ${(gapMs / 1000).toFixed(0)}s then a $${jump.toFixed(2)} step (>2x ATR ${ref.toFixed(2)}) — holding entries for ${INDICATOR_WARMUP_BARS} clean bars so the step can't drive ATR/RSI`);
+    }
   }
-  // On a GENUINE failover the two sources sit at different price levels, so never let one bar span
-  // both — restart the in-progress bar at the new source's price instead of stretching it.
-  const prevReliable = lastTickReliable.get(sym);
-  if (prevReliable !== undefined && prevReliable !== reliable && b.currentBar) {
-    log(`  ${sym}: MD SOURCE ${prevReliable ? "realtime→fallback" : "fallback→realtime"} — restarting bar at $${price.toFixed(2)} (was $${b.currentBar.c.toFixed(2)}, gap ${Math.abs(price - b.currentBar.c).toFixed(2)}) so it can't span two contracts`);
-    b.currentBar = { t: b.currentBar.t, o: price, h: price, l: price, c: price, v: 0 };
-  }
-  lastTickReliable.set(sym, reliable);
+  lastReliableAt.set(sym, quoteTs && quoteTs > 0 ? quoteTs : Date.now());
+  unpricedSince.delete(sym);
 
   tickCount++;
   b.lastPrice = price;
@@ -766,6 +781,14 @@ function onPrice(sym: string, price: number, volume: number, reliable = true) {
       if (b.barCount <= 12) {  // Initial Balance is first 60 min (institutional standard)
         b.openingRangeHigh = Math.max(b.openingRangeHigh, completed.h);
         b.openingRangeLow = b.openingRangeLow === 0 ? completed.l : Math.min(b.openingRangeLow, completed.l);
+      }
+
+      // A bar built entirely from clean, same-contract ticks pays down any quarantine. Once the
+      // count reaches zero the 14-period indicators no longer see the discontinuity at all.
+      const qLeft = quarantineBars.get(sym) ?? 0;
+      if (qLeft > 0) {
+        quarantineBars.set(sym, qLeft - 1);
+        if (qLeft - 1 === 0) log(`  ${sym}: indicators rebuilt on clean data — entries re-enabled`);
       }
 
       // ── BAR CLOSE → SETUP DETECTION ──
@@ -854,28 +877,17 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
   return null;
 }
 
-async function fetchYahooQuotes(): Promise<Map<string, { price: number; volume: number }>> {
-  const result = new Map<string, { price: number; volume: number }>();
-  try {
-    const yahooSymbols = SYMBOLS.map(s => YAHOO_MAP[s]);
-    const quotes = await getYfEngine().quote(yahooSymbols);
-    const arr = Array.isArray(quotes) ? quotes : [quotes];
-    for (const sym of SYMBOLS) {
-      const yahooSym = YAHOO_MAP[sym];
-      const q = (arr as Record<string, unknown>[]).find(item => item?.symbol === yahooSym);
-      if (q?.regularMarketPrice) {
-        result.set(sym, { price: q.regularMarketPrice as number, volume: (q.regularMarketVolume || 0) as number });
-      }
-    }
-  } catch (err) {
-    log(`[YAHOO-FALLBACK] Failed: ${err instanceof Error ? err.message : err}`);
-  }
-  return result;
-}
+// fetchYahooQuotes() was DELETED on 2026-07-29 along with YAHOO_MAP. It quoted a different contract
+// month at a price frozen at the 17:00 ET close, and every indicator built on it was wrong. There is
+// deliberately no price fallback now: an unpriced symbol freezes and trades nothing. If you are here
+// to re-add a fallback, it must be the SAME CONTRACT the broker fills — Yahoo's continuous `=F`
+// symbols are not, and no staleness tuning can make them so.
 
 // Phase 4: read the Databento sidecar's real-time L1 from live_quotes. OFF by default (set
 // DATABENTO_MD_ENABLED=true per engine to activate). FAIL-SAFE: any error/staleness → empty → existing MD chain.
 let dbnMdLogged = 0;
+let lastUnpricedLogAt = 0;        // throttles the UNPRICED log to once a minute
+let lastAggSkipLogAt = 0;         // throttles the aggregate-drawdown-skipped log to once a minute
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
 let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
 let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
@@ -884,35 +896,28 @@ let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuatio
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
 let edgeFlags: Record<string, string | undefined> = {};
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
-/** How old a Databento live_quotes row may be and still be used. See the note in fetchDatabentoQuotes:
- *  gold ticks sparsely, so a 30s cutoff was discarding paid data and dropping gold to a
- *  different-contract fallback. 90s stays well inside a 5-minute bar. */
+/** How old a Databento live_quotes row may be and still DRAW A BAR. Gold ticks sparsely (ES/NQ update
+ *  every ~1s, GC ages to 8-18s in quiet stretches), so a 30s cutoff was discarding paid data we pay
+ *  for. 90s stays well inside a 5-minute bar.
+ *  NOTE: this governs BARS ONLY. Opening new risk uses ENTRY_MAX_QUOTE_AGE_MS (30s) against the row's
+ *  own exchange timestamp — the two used to be conflated, which let a 90s-old quote price a live
+ *  order and the stop hanging off it. */
 const DBN_STALE_MS = 90_000;
-async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
+async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number; ts: number }>> {
   if (!databentoMdEnabled) return new Map();
   try {
     const rows = await prisma.$queryRawUnsafe<{ symbol: string; mid: number; vol: number; ts: bigint | number }[]>(
       "SELECT symbol, mid, vol, ts FROM live_quotes",
     );
-    const out = new Map<string, { mid: number; vol: number }>();
+    const out = new Map<string, { mid: number; vol: number; ts: number }>();
     const now = Date.now();
     for (const r of rows) {
       const ts = Number(r.ts), mid = Number(r.mid), cum = Number(r.vol) || 0;
-      // STALENESS WINDOW — was 30s, raised to 90s on 2026-07-29.
-      // GOLD TICKS FAR MORE SPARSELY THAN THE INDICES. Measured over a minute: ES and NQ update every
-      // ~1s, but GC ages to 8s, 18s and beyond in quiet stretches. At a 30s cutoff those perfectly
-      // good paid Databento quotes were being DISCARDED, which dropped gold through to the Yahoo
-      // fallback — and Yahoo prices a DIFFERENT CONTRACT MONTH (62.5 pts away on gold), which is what
-      // corrupted every ATR. Databento was never down; we were rejecting data we pay for.
-      // 90s is still well inside a 5-minute bar, and a slightly-old quote on the RIGHT contract beats
-      // a fresh quote on the WRONG one by two orders of magnitude: gold drifts ~1-2 pts in 90s versus
-      // a 62.5-pt contract basis. The realtime/fallback distinction for the emergency cut-out is
-      // tracked separately via onPrice's `reliable` flag, so widening this does not weaken that.
       if (mid > 0 && now - ts < DBN_STALE_MS) {
         const last = lastCumVol.get(r.symbol) ?? cum;
         const delta = cum >= last ? cum - last : cum;   // reset-safe (sidecar restart drops the cumulative count)
         lastCumVol.set(r.symbol, cum);
-        out.set(r.symbol, { mid, vol: Math.max(1, delta) });   // FRESH (<30s) quote + REAL traded volume since last poll
+        out.set(r.symbol, { mid, vol: Math.max(1, delta), ts });   // usable quote + traded volume since last poll
       }
     }
     if (out.size !== dbnMdLogged) { log(`[MD] Databento primary: ${out.size} fresh symbols from live_quotes`); dbnMdLogged = out.size; }
@@ -935,15 +940,16 @@ async function pollPrices() {
 
   try {
     let received = 0;
-    // PRIMARY (Phase 4): real-time L1 from the Databento sidecar's live_quotes. Fresh quotes used directly;
-    // anything missing/stale falls through to the existing Tradovate→Yahoo chain UNCHANGED (fail-safe).
+    // PRIMARY: real-time L1 from the Databento sidecar's live_quotes — the contract we actually trade.
+    // Anything it misses falls through to Tradovate (also the right contract). Nothing falls to Yahoo.
     const served = new Set<string>();
     const dbn = await fetchDatabentoQuotes();
     for (const sym of SYMBOLS) {
       const q = dbn.get(sym) ?? dbn.get(FULL_EQUIVALENT[sym] || "") ?? dbn.get(MICRO_EQUIVALENT[sym] || "");
-      if (q && q.mid > 0) { onPrice(sym, q.mid, q.vol); received++; served.add(sym); }
+      // Pass the sidecar's own exchange timestamp so entry-freshness measures the QUOTE's age, not
+      // the age of our poll — a 90s-old row must not read as a fresh price to trade on.
+      if (q && q.mid > 0) { onPrice(sym, q.mid, q.vol, true, q.ts); received++; served.add(sym); }
     }
-    if (served.size > 0) lastMdSource = "databento";
     const querySymbols = SYMBOLS.filter(s => !served.has(s));
 
     // Tradovate md/getChart (parallel) — only for symbols Databento didn't serve
@@ -954,7 +960,7 @@ async function pollPrices() {
       })
     );
 
-    const needYahoo: string[] = [];
+    const needMicro: string[] = [];
 
     for (const r of tradovateResults) {
       if (r.status === "fulfilled" && r.value) {
@@ -962,50 +968,68 @@ async function pollPrices() {
         received++;
       } else {
         const sym = querySymbols[tradovateResults.indexOf(r)];
-        needYahoo.push(sym);
+        needMicro.push(sym);
       }
     }
 
-    // Fallback 1: Try micro equivalent via Tradovate (same price, demo has micro data subs)
-    const stillNeedYahoo: string[] = [];
-    if (needYahoo.length > 0) {
-      for (const sym of needYahoo) {
+    // Fallback: the micro/full sibling via Tradovate. Same underlying, same contract month, so this
+    // is a legitimate substitute — unlike Yahoo, which is a different month entirely.
+    const unpriced: string[] = [];
+    if (needMicro.length > 0) {
+      for (const sym of needMicro) {
         const microSym = MICRO_EQUIVALENT[sym];
         if (microSym) {
           try {
             const microQuote = await fetchTradovateQuote(microSym);
             if (microQuote) {
-              onPrice(sym, microQuote.price, microQuote.volume); // Map micro price to full-size symbol
+              onPrice(sym, microQuote.price, microQuote.volume); // sibling contract — same price
               received++;
               continue;
             }
-          } catch { /* fall through to Yahoo */ }
+          } catch { /* no sibling quote either → symbol goes unpriced */ }
         }
-        stillNeedYahoo.push(sym);
+        unpriced.push(sym);
       }
     }
 
-    // Fallback 2: Yahoo for anything still missing
-    if (stillNeedYahoo.length > 0) {
-      const yahooQuotes = await fetchYahooQuotes();
-      for (const sym of stillNeedYahoo) {
-        const yq = yahooQuotes.get(sym);
-        if (yq) {
-          onPrice(sym, yq.price, yq.volume, false); // Yahoo fallback → unreliable: bars OK, but won't trip the emergency cut-out
-          received++;
-        }
-      }
-      if (yahooQuotes.size > 0) {
-        log(`[MD] Tradovate missed ${stillNeedYahoo.join(",")}, Yahoo fallback served ${yahooQuotes.size}`);
-        if (served.size === 0) lastMdSource = "yahoo"; // only label yahoo if Databento served nothing
+    // ── NO YAHOO IN THE PRICE PATH (2026-07-29) ──────────────────────────────────────────────
+    // Yahoo's GC=F / NQ=F / ES=F are DIFFERENT CONTRACT MONTHS from the contracts this engine
+    // trades, AND their quotes FREEZE at the 17:00 ET RTH close. Verified 2026-07-29 21:5x UTC:
+    //     Yahoo GC=F 4126.00  ("Gold Aug 26", GCZ26.CMX, market time 16:59:59 ET)
+    //     Databento GC 4063.00 (live, 1.7s old)          → a 63.00-point basis on a STALE price
+    // NQ=F (27259.25) and ES=F (7335.25) matched the corrupted engine prices exactly too.
+    //
+    // The trigger was never a Databento outage — the sidecar measured 0 failures in 20 polls with
+    // all 7 symbols 1-2s fresh. It is the DAILY CME MAINTENANCE BREAK (17:00-18:00 ET): nothing
+    // trades, the live_quotes rows age past DBN_STALE_MS, and the engine concluded "feed down" and
+    // substituted a different instrument. That happens on schedule every day, in the hour right
+    // before gold's evening session opens. No staleness window can cover a 60-minute halt.
+    //
+    // A symbol with no Databento/Tradovate quote is now simply UNPRICED: its bars freeze, its
+    // indicators hold their last real values, and it opens no new risk. A frozen bar is honest; a
+    // wrong-contract bar is poison that corrupts ATR, RSI, VWAP, the opening range, the stop
+    // distance AND the aggregate drawdown kill. Yahoo keeps exactly one job — ^VIX, a CBOE index
+    // with no GLBX equivalent, which is not contract-specific.
+    if (unpriced.length > 0) {
+      const now = Date.now();
+      for (const sym of unpriced) if (!unpricedSince.has(sym)) unpricedSince.set(sym, now);
+      if (now - lastUnpricedLogAt > 60_000) {
+        lastUnpricedLogAt = now;
+        const detail = unpriced.map(s => `${s} ${((now - (unpricedSince.get(s) ?? now)) / 1000).toFixed(0)}s`).join(", ");
+        log(`[MD] UNPRICED — bars frozen, no new entries: ${detail} (Databento + Tradovate both missing; Yahoo is NOT used for prices)`);
       }
     }
+    if (served.size > 0) lastMdSource = "databento";
+    else if (received === 0) lastMdSource = "none";
 
-    // Track failures
-    if (received === 0) {
+    // Track failures. A SCHEDULED halt (the daily 17:00-18:00 ET CME break) legitimately has no
+    // ticks — that is market structure, not a feed failure, so it must neither count toward the
+    // circuit breaker nor spam the log every 5 seconds.
+    const scheduledHalt = getSessionName() === "halt";
+    if (received === 0 && !scheduledHalt) {
       mdConsecutiveFailures++;
       log(`[MD] Zero quotes received (${mdConsecutiveFailures}/${MD_MAX_FAILURES})`);
-    } else if (mdConsecutiveFailures > 0) {
+    } else if (received > 0 && mdConsecutiveFailures > 0) {
       log(`[MD] Recovered after ${mdConsecutiveFailures} failures — ${received} quotes received`);
       mdConsecutiveFailures = 0;
     }
@@ -1606,8 +1630,27 @@ function checkPositions(sym: string, price: number, reliable = true) {
     return;
   }
 
-  // AGGREGATE DRAWDOWN CHECK: close ALL positions if total drawdown exceeds 15% of equity
+  // AGGREGATE DRAWDOWN CHECK: close ALL positions if total drawdown exceeds 15% of equity.
+  //
+  // FAIL CLOSED (2026-07-29). This reads OTHER symbols' last bar close, so it was the one path that
+  // could still act on a price the feed gate had already rejected for the ticking symbol. With the
+  // 63-point wrong-contract basis that was live until today, a single poisoned gold bar produced
+  // 63 x $10 x 4 contracts = $2,520 of PHANTOM loss against a trip threshold of 15% x $5,227 = $784
+  // — enough to market-close every position for no reason. Two contracts alone crossed it.
+  //
+  // A kill switch must never fire on data it cannot vouch for. If ANY open position's symbol lacks a
+  // fresh quote, skip the check entirely rather than guess: each position still has its on-exchange
+  // broker bracket, and the hard-loss backstop below covers a genuine stop failure. Not acting on
+  // unknown data is strictly safer than acting on wrong data.
+  // Only the AGGREGATE check is gated — this symbol just ticked, so its own profit-lock, time exit
+  // and hard-loss backstop below must keep running normally.
   const MAX_DRAWDOWN_PCT = 0.15;
+  const aggregateTrustworthy = allPositionsFreshlyPriced();
+  if (!aggregateTrustworthy && Date.now() - lastAggSkipLogAt > 60_000) {
+    lastAggSkipLogAt = Date.now();
+    const stale = [...positions.keys()].filter(s => !isRealtimePriced(s)).join(",");
+    log(`  aggregate drawdown check SKIPPED — no fresh quote for ${stale} (per-position broker brackets still in force)`);
+  }
   const aggregateUnrealized = [...positions.entries()].reduce((sum, [s, p]) => {
     const m = CONTRACT_MULTIPLIERS[s] || 5;
     const lastPrice = s === sym ? price : (barBuilders.get(s)?.currentBar?.c || p.entryPrice);
@@ -1615,7 +1658,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
     return sum + d * m * p.quantity;
   }, 0);
   const totalDrawdown = aggregateUnrealized + dailyPnl;
-  if (tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * MAX_DRAWDOWN_PCT)) {
+  if (aggregateTrustworthy && tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * MAX_DRAWDOWN_PCT)) {
     log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${(MAX_DRAWDOWN_PCT * 100)}% of equity $${tradovateEquity.toFixed(0)} — CLOSING ALL`);
     notify(`🚨 AGGREGATE DRAWDOWN KILL: ~$${totalDrawdown.toFixed(0)} (est) — closing all positions; actual fill P&L posts per-position as it reconciles.`, "general");
     for (const [s, p] of positions) {
@@ -3356,13 +3399,25 @@ async function evaluateAndTrade(
     }
   } catch { /* pattern memory is optional — fail open on read errors */ }
 
-  // NO NEW ENTRIES ON FALLBACK-PRICED DATA (2026-07-29). Yahoo quotes a different contract month —
-  // 62.5 points away on gold — so an entry priced off it would send a broker stop ~63 points from
-  // where it belongs (on a short, ~2.5x the intended risk). Bars and position MANAGEMENT still use
-  // the fallback (going blind on an open position is worse, and the broker bracket is the real
-  // protection), but opening NEW risk on a price we cannot trust is never worth it.
+  // ── DATA-INTEGRITY GATE (2026-07-29) ──────────────────────────────────────────────────────────
+  // Two separate failure modes, both of which produced live signals off prices that did not exist.
+  //
+  // 1. STALE PRICE. An entry priced off an old quote puts the broker stop in the wrong place, and the
+  //    stop is what defines the risk. Checked against the QUOTE's own exchange timestamp (30s), not
+  //    the age of our poll — DBN_STALE_MS (90s) governs bars only.
+  // 2. POISONED INDICATORS. This is the one the earlier fix missed. A 14-period ATR spans ~70 minutes,
+  //    so a feed discontinuity keeps distorting ATR/RSI/VWAP/OR long after the feed is healthy again.
+  //    On 2026-07-29 gold's real 5-min ATR was 3.34 while the engine read 8.75-12.68 with RSI pinned
+  //    at 94-98 for 20+ minutes; the recovery step then inverts it into a fake OVERSOLD reading, which
+  //    is a false LONG on the exact side (gold_long_europe) that is switched ON for live.
   if (!isRealtimePriced(sym)) {
-    log(`  ${sym}: SKIP — no real-time quote (fallback feed prices a different contract; not opening new risk on it)`);
+    const age = ((Date.now() - (lastReliableAt.get(sym) ?? 0)) / 1000).toFixed(0);
+    log(`  ${sym}: SKIP — quote is ${age}s old (need <${ENTRY_MAX_QUOTE_AGE_MS / 1000}s to price a live stop)`);
+    return;
+  }
+  const barsQuarantined = quarantineBars.get(sym) ?? 0;
+  if (barsQuarantined > 0) {
+    log(`  ${sym}: SKIP — indicators still carry a feed discontinuity, ${barsQuarantined} clean bar(s) to go`);
     return;
   }
 
@@ -4174,37 +4229,13 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
     }
   }
 
-  // Fallback 2: Yahoo Finance — LAST RESORT. Prices a different contract month (measured 2026-07-29:
-  // Yahoo GC=F 4071.00 vs Databento GC 4008.50), so bars built from it are ~60 points off on gold.
-  // Kept only so the engine still has *some* history if both real sources are down; onPrice's
-  // source-mixing guard and the no-new-entries-on-fallback rule contain the damage.
+  // NO YAHOO PRELOAD (2026-07-29). This used to fill the buffer with up to 200 bars of a DIFFERENT
+  // CONTRACT MONTH on every restart — the worst version of the bug, because it hit before the first
+  // tick and poisoned ATR/RSI/VWAP/opening-range from bar zero. Starting with NO history is strictly
+  // better: atr() returns 0 below 15 bars and onBarClose bails on `rawATR <= 0`, so the engine simply
+  // waits, warms up on real ticks, and trades once it genuinely knows the instrument.
   if (bars.length === 0) {
-    try {
-      const yahooSym = YAHOO_MAP[sym];
-      if (yahooSym) {
-        const result = await getYfEngine().chart(yahooSym, {
-          period1: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
-          period2: new Date(),
-          interval: "5m",
-        });
-        if (result?.quotes) {
-          bars = result.quotes
-            .filter((q: Record<string, number | null>) => q.close != null && q.close > 0)
-            .map((q: Record<string, number | Date | null>) => ({
-              t: q.date ? Math.floor(new Date(String(q.date)).getTime() / 1000) : 0,
-              o: Number(q.open) || 0, h: Number(q.high) || 0, l: Number(q.low) || 0,
-              c: Number(q.close) || 0, v: Number(q.volume) || 0,
-            }));
-          if (bars.length > 0) log(`  ${sym}: Tradovate unavailable, loaded ${bars.length} bars from Yahoo`);
-        }
-      }
-    } catch (err) {
-      log(`  ${sym}: Yahoo fallback also failed: ${err instanceof Error ? err.message : err}`);
-    }
-  }
-
-  if (bars.length === 0) {
-    log(`  ${sym}: No historical data available — will build bars from live polls`);
+    log(`  ${sym}: no Databento/Tradovate history — starting cold, will warm up on live ticks (no Yahoo substitute)`);
     return;
   }
 
@@ -4965,11 +4996,21 @@ async function main() {
   safeInterval(() => {
     const session = getSessionName();
     const vix = getVIXMultiplier();
-    const mdStatus = mdCircuitOpen ? "CIRCUIT_OPEN" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : "ok";
+    // MD status must not read "ok" while a symbol is unpriced — it did exactly that for the 20+
+    // minutes gold was being quoted off the wrong contract, which is how this went unnoticed.
+    const unpricedNow = SYMBOLS.filter(s => !isRealtimePriced(s));
+    const mdStatus = mdCircuitOpen ? "CIRCUIT_OPEN"
+      : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})`
+      : unpricedNow.length > 0 ? `UNPRICED:${unpricedNow.join("/")}`
+      : "ok";
     const tiltStatus = tiltPauseUntil === Infinity ? "SESSION_DONE" : Date.now() < tiltPauseUntil ? `PAUSED(${consecutiveStops} stops)` : "ok";
     const prices = SYMBOLS.map(s => {
       const b = barBuilders.get(s);
-      return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b`;
+      // Flag the two states that must never be mistaken for a tradable price: no fresh quote (!) and
+      // indicators still carrying a feed discontinuity (q<n>).
+      const q = quarantineBars.get(s) ?? 0;
+      const mark = `${!isRealtimePriced(s) ? "!" : ""}${q > 0 ? `q${q}` : ""}`;
+      return `${s}:$${b?.lastPrice?.toFixed(2) || "—"}/${b?.bars5m.length || 0}b${mark}`;
     }).join(" ");
     const macroStatus = macroBlockReason || "clear";
     log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size}/${riskConfig.maxConcurrentPositions} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/${riskConfig.maxTradesPerDay} | MD:${mdStatus} | Tilt:${tiltStatus} | ${prices}`);
