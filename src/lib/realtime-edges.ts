@@ -153,9 +153,11 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     blurb: "MNQ/MES — short when RSI ≥ 80 (the overbought fade).",
     symbolClass: "index",
     evidence:
-      "The original OOS index edge: RSI≥80 short, PF 1.4–1.8 out-of-sample (12k-trade walk-forward). Index longs and every other index setup lose OOS. AFTERNOON EXCLUDED 2026-07-28 (see index_overbought_short_pm). Re-enabled on live 2026-07-28 after the shadow tracker showed it going 4W/1L +$824 while switched off.",
+      "⛔ LIVE-OFF AND IT SHOULD STAY OFF — re-verified 2026-07-29. Engine-exact 3-yr (index-edge-validation.ts, 24h rolling 200-bar buffer, full management, the registry gate modelled exactly) says this edge LOSES IN EVERY SESSION ON BOTH SYMBOLS: ES overall PF 0.58 n=183 net -$1,291 (train 0.45 / test 0.73) — morning 0.61, midday 0.63, afternoon 0.50; NQ overall PF 0.82 n=172 net -$889 (train 0.71 / test 0.97) — morning 0.75, midday 0.97, afternoon 0.74. Combined -$2,180 over 355 trades. ⚠️ THIS TEXT USED TO CLAIM 'PF 1.4-1.8 out-of-sample (12k-trade walk-forward)' AND 'Re-enabled on live 2026-07-28 after the shadow tracker showed 4W/1L +$824'. Both misled a 2026-07-29 audit into recommending it be switched back ON. The 1.4-1.8 predates the engine-exact harness (idealised fills, not the engine's real 1.5-ATR stop / 3.5-ATR target management); the shadow +$824 was n=5, which is noise (see the scoreboard rule: t>2 or it is luck); and the 're-enable' never took effect because edge_index_overbought_short_live=false already existed in the DB — correctly, as it turns out. Do NOT re-enable without fresh engine-exact evidence that beats these numbers.",
     defaultDemo: true,
-    defaultLive: true,
+    // Was TRUE, held off only by a DB flag. Given the numbers above, the default must not be the
+    // thing standing between a PF 0.58 edge and real money — same fix as gold_long / index_trend_long_pm.
+    defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "index" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" && m.rsi >= 80 &&
       m.session !== "afternoon",
