@@ -192,6 +192,26 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
             stopDist = adjustedATR * 1.5; targetDist = adjustedATR * 4.0;
           }
         }
+        // SHORT side — added 2026-07-29. The engine ALREADY generates these (futures-realtime.ts
+        // isShort) and they are the only thing that fires on a down-trending morning, but no
+        // registered edge matches trend_continuation/short so every one is default-denied. On
+        // 2026-07-29 that meant ZERO live trades while the engine printed 9 short signals at 85-95%
+        // confidence. Mirrors the engine exactly, including its ASYMMETRY: the long requires
+        // price > 200-EMA, the short has NO 200-EMA filter.
+        else if (nearEMA && fastEMA < slowEMA && price < slowEMA && rsi > 35 && rsi < 65 && volTrend !== "surge") {
+          let sc = 72;
+          if (volTrend === "declining") sc += 5; else if (volTrend === "dry") sc -= 5;
+          sc += t15 === "down" ? 10 : -10;
+          if (price < vwap) sc += 3;
+          sc += sessScore;
+          if (Math.max(0, Math.min(100, sc)) >= 75) {
+            edge = "index_trend_short"; dir = "short";
+            stopDist = adjustedATR * 1.5; targetDist = adjustedATR * 4.0;
+            // Flag whether the SYMMETRIC 200-EMA filter would also have passed, so the report can
+            // test "shorts only below the 200-EMA" without a second run.
+            if (price < ema200) edge = "index_trend_short_below200";
+          }
+        }
       }
     }
     if (!edge) continue;
@@ -265,7 +285,16 @@ for (const sym of syms) {
   console.log(`  ${SPEC[sym].label}   ${days[0]} → ${days[days.length - 1]}`);
   console.log("═".repeat(120));
   console.log("  ALL           " + f(stats(all)).padEnd(56) + half(all));
-  for (const e of ["index_trend_long", "index_overbought_short"]) {
+  // index_trend_short* added 2026-07-29: the short side the engine already generates but no edge
+  // matches. "_below200" is the subset that ALSO passed a symmetric 200-EMA filter, so the two rows
+  // together answer "does the short work, and does the regime filter help it?"
+  const SHORTS = ["index_trend_short", "index_trend_short_below200"];
+  for (const e of ["index_trend_long", "index_overbought_short", ...SHORTS, "ALL_TREND_SHORT"]) {
+    if (e === "ALL_TREND_SHORT") {
+      const both = all.filter(t => SHORTS.includes(t.edge));
+      if (both.length) console.log(`  ${"trend_short (both)".padEnd(13)} ` + f(stats(both)).padEnd(56) + half(both));
+      continue;
+    }
     const sub = all.filter(t => t.edge === e);
     if (!sub.length) { console.log(`  ${e.padEnd(24)} n=0`); continue; }
     console.log(`  ${e.padEnd(13)} ` + f(stats(sub)).padEnd(56) + half(sub));
