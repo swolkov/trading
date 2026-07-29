@@ -1706,7 +1706,10 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // fills at 1×) in normal operation — it ONLY catches genuine stop failures. The 5%-equity fallback
   // covers the post-breakeven case where the stop sits at entry and intended risk is ~0.
   const intendedRisk = Math.abs(pos.entryPrice - pos.stopLoss) * mult * pos.quantity;
-  const hardLossCap = intendedRisk > 0 ? intendedRisk * 2 : (tradovateEquity > 0 ? tradovateEquity * 0.05 : Infinity);
+  // Last fallback is an absolute $500, not Infinity: this branch only runs post-breakeven (stop at
+  // entry, intended risk ~0), where a $500 loss already means something is wrong. Infinity would
+  // silently disable the backstop for the ~60s after a restart while equity is still loading.
+  const hardLossCap = intendedRisk > 0 ? intendedRisk * 2 : (tradovateEquity > 0 ? tradovateEquity * 0.05 : 500);
   if (pnlDollars <= -hardLossCap) {
     log(`🚨 ${sym}: HARD LOSS BACKSTOP — loss $${pnlDollars.toFixed(0)} exceeds cap $${hardLossCap.toFixed(0)} (broker stop failed). Force-closing.`);
     notify(`🚨 ${sym} hard backstop fired — broker stop failed, cut at ~$${pnlDollars.toFixed(0)} (est); actual fill P&L posts on reconcile.`, "general");
@@ -1949,7 +1952,10 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // IMPORTANT: Require 2 consecutive ticks (10s) past the limit before closing.
   // A mark price can briefly show a loss that does not exist on the exchange.
   // The broker bracket stop order handles the REAL stop — this is a last-resort safety net.
-  const perPositionLimit = Math.min(750, tradovateEquity * 0.10);
+  // Equity 0 means "not yet fetched", NOT "no money". Math.min(750, 0) would be a $0 limit, which
+  // makes ANY unrealized loss trip the emergency close — so fall back to the $750 ceiling until the
+  // real balance lands (2026-07-29, when the optimistic $50,000 default was removed).
+  const perPositionLimit = tradovateEquity > 0 ? Math.min(750, tradovateEquity * 0.10) : 750;
   if (pnlDollars < -perPositionLimit) {
     if (!pos.emergencyWarningTick) {
       pos.emergencyWarningTick = Date.now();
@@ -3429,6 +3435,12 @@ async function evaluateAndTrade(
     log(`  ${sym}: SKIP — indicators still carry a feed discontinuity, ${barsQuarantined} clean bar(s) to go`);
     return;
   }
+  // 3. UNKNOWN ACCOUNT BALANCE. Every risk limit is a multiple of equity, so sizing anything before
+  //    the real balance has landed is guesswork. Explicit rather than relying on maxRisk falling to 0.
+  if (riskConfig.simulatedEquity <= 0 && tradovateEquity <= 0) {
+    log(`  ${sym}: SKIP — account equity not yet known (waiting on the balance fetch; sizing would be a guess)`);
+    return;
+  }
 
   // EDGE GATE (registry-driven, per-engine switch). The set of tradable edges lives in
   // ../lib/realtime-edges.ts; each edge has an independent on/off switch for demo and live. Only
@@ -4295,7 +4307,15 @@ async function preloadBars() {
 
 // ── VIX Check (adjust risk based on volatility) ──
 
-let tradovateEquity = 50000; // Will be fetched from Tradovate on startup
+// 0 = NOT YET KNOWN, and that is deliberate (2026-07-29). This used to default to an optimistic
+// $50,000, which the real balance only replaced ~60s after startup. Every risk limit is a multiple of
+// this number, so during that window they were all ~10x too loose on the live account: risk/trade
+// $1,500 instead of $157 (3% of $50k vs 3% of $5,227), aggregate drawdown kill $7,500 instead of
+// $784, hard-loss backstop $2,500 instead of $261 — and because preload supplies 830 bars, ATR is
+// live immediately, so a setup really could fire inside that minute. At 0 the sizing maths makes
+// maxRisk 0, so the adaptive-stop path SKIPs the trade until the true balance lands. Never guess an
+// account balance upward; not trading for one minute costs nothing, mis-sizing 10x does not.
+let tradovateEquity = 0;
 let startOfDayBalance = 0; // Set at session reset, used for daily loss limit
 
 async function updateTradovateEquity() {
