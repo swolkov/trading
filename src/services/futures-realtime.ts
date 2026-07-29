@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ============ REAL-TIME FUTURES TRADING ENGINE ============
 // Persistent process — streams real-time prices via Tradovate WebSocket,
-// falls back to Yahoo Finance polling if WebSocket unavailable.
+// falls back to Databento live_quotes polling if the WebSocket is unavailable.
 // Builds bars, detects setups on bar close, executes via Tradovate.
 // Deploy on Railway — two instances: ENGINE_MODE=demo and ENGINE_MODE=live.
 
@@ -27,7 +27,7 @@ const ENGINE_MODE = (process.env.ENGINE_MODE || "demo") as "demo" | "live";
 const IS_DEMO = ENGINE_MODE === "demo";
 const IS_LIVE = ENGINE_MODE === "live";
 const ORDER_API = IS_LIVE ? LIVE_API : DEMO_API;
-const POLL_INTERVAL_MS = 5000; // Yahoo fallback polls every 5s (Yahoo updates every ~15s)
+const POLL_INTERVAL_MS = 5000; // Databento live_quotes poll cadence (sidecar writes ~1s)
 
 // WebSocket state — when connected, polling pauses
 let wsConnected = false;
@@ -749,14 +749,22 @@ function onPrice(sym: string, price: number, volume: number, reliable = true, qu
   //
   // So: never edit history to hide a step. Detect it, let the bars tell the truth, and refuse to
   // open NEW RISK until enough clean bars have rebuilt the indicators.
-  const gapMs = Date.now() - (lastReliableAt.get(sym) ?? 0);
-  const prevClose = b.currentBar?.c ?? b.bars5m[b.bars5m.length - 1]?.c;
-  if (gapMs > MD_GAP_MS && prevClose && prevClose > 0) {
-    const jump = Math.abs(price - prevClose);
-    const ref = atr(b.bars5m) || prevClose * 0.002;   // fall back to ~20bps when there is no ATR yet
-    if (jump > ref * 2) {
-      quarantineBars.set(sym, INDICATOR_WARMUP_BARS);
-      log(`  ${sym}: FEED GAP ${(gapMs / 1000).toFixed(0)}s then a $${jump.toFixed(2)} step (>2x ATR ${ref.toFixed(2)}) — holding entries for ${INDICATOR_WARMUP_BARS} clean bars so the step can't drive ATR/RSI`);
+  // Only a MID-SESSION discontinuity is a problem. On the FIRST live tick after startup there is no
+  // prior tick to compare against, and the preload→live seam is a benign, expected artifact: the
+  // buffer is 100% clean Databento history and the market genuinely moved while we were offline
+  // (measured on the 2026-07-29 deploy: a $23.45 seam on gold). Quarantining that would block every
+  // symbol for 75 minutes after every restart, which is a real trading cost for no safety gain.
+  const lastAt = lastReliableAt.get(sym);
+  if (lastAt !== undefined) {
+    const gapMs = Date.now() - lastAt;
+    const prevClose = b.currentBar?.c ?? b.bars5m[b.bars5m.length - 1]?.c;
+    if (gapMs > MD_GAP_MS && prevClose && prevClose > 0) {
+      const jump = Math.abs(price - prevClose);
+      const ref = atr(b.bars5m) || prevClose * 0.002;   // fall back to ~20bps when there is no ATR yet
+      if (jump > ref * 2) {
+        quarantineBars.set(sym, INDICATOR_WARMUP_BARS);
+        log(`  ${sym}: FEED GAP ${(gapMs / 1000).toFixed(0)}s then a $${jump.toFixed(2)} step (>2x ATR ${ref.toFixed(2)}) — holding entries for ${INDICATOR_WARMUP_BARS} clean bars so the step can't drive ATR/RSI`);
+      }
     }
   }
   lastReliableAt.set(sym, quoteTs && quoteTs > 0 ? quoteTs : Date.now());
@@ -1619,12 +1627,13 @@ function checkPositions(sym: string, price: number, reliable = true) {
   const pos = positions.get(sym);
   if (!pos) return;
 
-  // FEED GATE: when the price is from the Yahoo fallback (real-time feed down, e.g. right after a
-  // deploy restart), pause ALL software position-management. Yahoo quotes lag 15-60s and flap
-  // overnight — acting on them caused a phantom emergency close (a +$1,700 winner round-tripped to
-  // a -$900 cut on noisy quotes). The broker's on-exchange bracket (stop + target, placed at entry)
-  // is the real protection and fires on true exchange prices regardless. Management resumes the
-  // instant real-time data returns. Bars/setup-detection already updated upstream in onPrice().
+  // FEED GATE (defence-in-depth). Nothing sets `reliable` false today — the Yahoo path that used to
+  // was removed 2026-07-29, and an unpriced symbol now produces NO ticks at all, so this function
+  // simply isn't called rather than being called with a bad price. Kept because acting on an
+  // untrustworthy quote once cost a phantom emergency close (a +$1,700 winner round-tripped to a
+  // -$900 cut on noisy quotes): if a fallback is ever re-added, software position-management must
+  // stay paused for it. The broker's on-exchange bracket (stop + target, placed at entry) is the
+  // real protection and fires on true exchange prices regardless.
   if (!reliable) {
     if (pos.emergencyWarningTick) pos.emergencyWarningTick = 0; // drop any stale warning
     return;
@@ -1938,24 +1947,24 @@ function checkPositions(sym: string, price: number, reliable = true) {
 
   // Per-position emergency: cap single-position loss at 10% of equity or $750, whichever is lower
   // IMPORTANT: Require 2 consecutive ticks (10s) past the limit before closing.
-  // Yahoo prices lag 15-60s and can show phantom losses that don't exist on the exchange.
+  // A mark price can briefly show a loss that does not exist on the exchange.
   // The broker bracket stop order handles the REAL stop — this is a last-resort safety net.
   const perPositionLimit = Math.min(750, tradovateEquity * 0.10);
   if (pnlDollars < -perPositionLimit) {
     if (!pos.emergencyWarningTick) {
       pos.emergencyWarningTick = Date.now();
-      log(`${sym}: WARNING — Yahoo shows $${pnlDollars.toFixed(0)} past limit $${perPositionLimit.toFixed(0)}. Confirming on next tick (Yahoo can lag)...`);
+      log(`${sym}: WARNING — est P&L $${pnlDollars.toFixed(0)} past limit $${perPositionLimit.toFixed(0)}. Confirming on next tick...`);
       return; // Wait for confirmation on next tick
     }
     // Confirmed: still past limit after at least one more tick
     const confirmAge = Date.now() - pos.emergencyWarningTick;
-    if (confirmAge < 8_000) return; // Need at least 8s of confirmation (Yahoo updates every ~15s so this ensures a fresh quote)
+    if (confirmAge < 8_000) return; // Need at least 8s of confirmation so this is not one odd tick
     log(`${sym}: EMERGENCY CLOSE CONFIRMED — $${pnlDollars.toFixed(0)} past limit $${perPositionLimit.toFixed(0)} for ${(confirmAge / 1000).toFixed(0)}s`);
     closePosition(sym, price, "emergency"); return;
   } else {
     // Price recovered — clear warning
     if (pos.emergencyWarningTick) {
-      log(`${sym}: Emergency warning cleared — Yahoo P&L $${pnlDollars.toFixed(0)} back within limit`);
+      log(`${sym}: Emergency warning cleared — est P&L $${pnlDollars.toFixed(0)} back within limit`);
       pos.emergencyWarningTick = 0;
     }
   }
@@ -2404,7 +2413,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     } else {
       consecutiveStops = 0;
     }
-    log(`CLOSED ${sym}: ${reason} | Est P&L: $${estimatedPnl.toFixed(0)} (Yahoo) | Daily: $${dailyPnl.toFixed(0)} | Fill P&L pending...`);
+    log(`CLOSED ${sym}: ${reason} | Est P&L: $${estimatedPnl.toFixed(0)} (mark) | Daily: $${dailyPnl.toFixed(0)} | Fill P&L pending...`);
     // Do NOT broadcast the Yahoo estimate (it can be wildly wrong on fast/emergency closes — e.g. a
     // phantom -$17,200 vs a real -$9,325). Announce the close; deferredPnlCheck() posts the ACTUAL fill P&L.
     feedLog("exit", `**${MODE_TAG} CLOSED ${sym}** ${reason} — confirming actual fill, P&L posting…`);
@@ -4900,7 +4909,7 @@ async function main() {
   // Engine mode set by ENGINE_MODE env var. Demo: 24/7 learning. Live: RTH prime only.
 
   // Start Tradovate WebSocket for real-time MD (requires CME data subscription)
-  // Falls back to Yahoo polling if WebSocket fails — zero risk
+  // Falls back to Databento live_quotes polling if WebSocket fails — same contract either way
   try {
     const wsSymbols = [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]
       .map(sym => contracts.get(sym)?.name)
@@ -4914,7 +4923,7 @@ async function main() {
         onQuote: (quote: QuoteUpdate) => {
           if (!wsConnected) {
             wsConnected = true;
-            log("[WS-MD] First quote received — real-time streaming confirmed, Yahoo polling paused");
+            log("[WS-MD] First quote received — real-time streaming confirmed, Databento polling paused");
           }
           onPrice(quote.symbol, quote.price, quote.volume);
           tickCount++;
@@ -4926,12 +4935,12 @@ async function main() {
         },
         onDisconnect: () => {
           wsConnected = false;
-          log("[WS-MD] Disconnected — Yahoo polling resumed");
+          log("[WS-MD] Disconnected — Databento polling resumed");
         },
         onError: (err) => {
           wsConnected = false;
           if (err.includes("inaccessible") || err.includes("UnknownSymbol")) {
-            log("[WS-MD] CME market data not accessible via API — using Yahoo fallback. Contact Tradovate support.");
+            log("[WS-MD] CME market data not accessible via API — Databento live_quotes is the real-time source. Contact Tradovate support.");
           } else {
             log("[WS-MD] Error: " + err);
           }
@@ -4940,13 +4949,13 @@ async function main() {
         },
       });
       tradovateWS.connect();
-      log("[WS-MD] WebSocket connecting... (Yahoo polling active as fallback)");
+      log("[WS-MD] WebSocket connecting... (Databento polling active meanwhile)");
     }
   } catch (err) {
-    log(`[WS-MD] Failed to start WebSocket: ${err} — Yahoo polling active`);
+    log(`[WS-MD] Failed to start WebSocket: ${err} — Databento polling active`);
   }
 
-  // Start Yahoo polling as fallback (pauses automatically when WebSocket is active)
+  // Start Databento/Tradovate polling (pauses automatically when the WebSocket is active)
   pollIntervalRef = safeInterval(pollPrices, POLL_INTERVAL_MS, "pollPrices");
   safeInterval(checkSessionReset, 60_000, "checkSessionReset");
   safeInterval(syncPositions, 30_000, "syncPositions");
