@@ -109,7 +109,12 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     evidence:
       "The losing hours of the gold long, and where the pooled PF 0.71 (0.67 train / 0.72 test, 572 trades) actually comes from. Engine-exact 3-yr by session: morning 0.53 — the single worst of all 12 gold cells — midday 0.73, afternoon 0.73, eth_evening 0.83, eth_asia 0.87. Not one is positive. Switched OFF on live 2026-07-25, left ON for demo. NOTE the 26-yr DAILY gold oversold-long (PF 1.58) does not transfer here: it was the no-stop variant, and it fails once a stop is attached.",
     defaultDemo: true,
-    defaultLive: true,
+    // defaultLive was TRUE until 2026-07-29 — a losing half defaulting ON for real money, held off
+    // only by `edge_gold_long_live=false` in the DB. That made a single DB row load-bearing safety:
+    // delete or reset it and live immediately trades the worst cell in the gold grid (PF 0.53). The
+    // registry's own rule is that anything unproven on live defaults OFF, so the default now matches
+    // the evidence and the DB flag is merely redundant. No behaviour change today.
+    defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long" &&
       m.session !== GOLD_LONG_SESSION,
@@ -193,7 +198,11 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     evidence:
       "The losing half of the trend-long edge. Engine-exact 3-yr test with full management: ES PF 0.63 (0.64 train / 0.61 test), NQ PF 0.69 (0.71 / 0.67) — negative in both halves on both symbols across 1,608 trades, while the MORNING half is 0.80 (ES) and 1.02 (NQ). Same instrument, same setup, same model: the hours are the difference.",
     defaultDemo: true,
-    defaultLive: true,
+    // defaultLive was TRUE until 2026-07-29 — same latent trap as gold_long: negative in BOTH halves
+    // on BOTH symbols across 1,608 trades, yet defaulting ON for real money and held off only by
+    // `edge_index_trend_long_pm_live=false` in the DB. Default now matches the evidence, so the DB
+    // flag is redundant rather than load-bearing. No behaviour change today.
+    defaultLive: false,
     matches: (m) =>
       INDEX_LONG_SYMS.has(m.sym) && m.setupType === "trend_continuation" && m.direction === "long" &&
       m.session === "afternoon",
