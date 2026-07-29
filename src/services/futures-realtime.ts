@@ -3530,9 +3530,24 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // live control again (set to 2 on 2026-07-25 by explicit decision), while the ladder still steps
   // the account up on its own at $10k / $18k without anyone touching a flag. Full-size symbols
   // continue to use the configured cap alone.
-  const perTradeCap = MICRO_SYMBOLS.includes(sym)
+  let perTradeCap = MICRO_SYMBOLS.includes(sym)
     ? Math.max(riskConfig.maxContractsPerTrade, microContractCap(equity))
     : riskConfig.maxContractsPerTrade;
+  // OVERNIGHT MARGIN CLAMP (2026-07-28). Raising the per-trade cap to 4 only works during RTH, where
+  // the exchange charges DAY-TRADE margin (~$50-100/contract). Outside RTH it charges INITIAL margin:
+  // MGC is $2,242.90/contract (verified from Tradovate), so on a $5,227 account 2 contracts is already
+  // 86% of equity and 3 is flatly impossible. The London gold long (03:00-09:00 ET) is an overnight
+  // session, so it must stay at 2 however high the configured cap goes.
+  // FAIL-SAFE: an ABSENT session clamps too. setupContext is optional on this function, and a missing
+  // one must never quietly authorise a size the account cannot margin — see the 2026-06-30 naked-stop
+  // incident for why "the broker will just reject it" is not a safety mechanism.
+  const RTH_SESSIONS = new Set(["open", "morning", "midday", "afternoon", "close"]);
+  const OVERNIGHT_MICRO_CAP = 2;
+  const execSession = setupContext?.session;
+  if (MICRO_SYMBOLS.includes(sym) && (!execSession || !RTH_SESSIONS.has(execSession)) && perTradeCap > OVERNIGHT_MICRO_CAP) {
+    log(`${sym}: OVERNIGHT CAP — session ${execSession ?? "unknown"} uses initial margin, capping ${perTradeCap} → ${OVERNIGHT_MICRO_CAP} contracts`);
+    perTradeCap = OVERNIGHT_MICRO_CAP;
+  }
   let qty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
   if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
   // Hard ceiling: never risk more than 15% of equity on a single entry
