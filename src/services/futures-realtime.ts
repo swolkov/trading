@@ -702,12 +702,50 @@ let tickCount = 0;
 let lastResetDate = "";
 let lastEODDate = "";
 
+/** When a REAL-TIME (exchange) quote last arrived per symbol — see the source-mixing guard below. */
+const lastReliableAt = new Map<string, number>();
+/** Whether the previous accepted tick was real-time, so a source flip can restart the bar. */
+const lastTickReliable = new Map<string, boolean>();
+/** How long a real-time feed stays "alive" before a lagging fallback quote is allowed in. Databento
+ *  polls every ~5s, so 2 minutes of silence is a genuine outage rather than a single missed poll. */
+const FALLBACK_HOLDOFF_MS = 120_000;
+/** Is this symbol currently priced by a real-time feed (vs a lagging, different-contract fallback)? */
+function isRealtimePriced(sym: string): boolean {
+  return Date.now() - (lastReliableAt.get(sym) ?? 0) < FALLBACK_HOLDOFF_MS;
+}
+
 // `reliable` = price came from a real-time exchange feed (Databento/Tradovate).
 // Yahoo fallback quotes lag 15-60s and flap overnight — they must NOT drive the
 // software emergency close (the broker bracket stop is the real, on-exchange protection).
 function onPrice(sym: string, price: number, volume: number, reliable = true) {
   const b = barBuilders.get(sym);
   if (!b || price <= 0) return;
+
+  // ── SOURCE-MIXING GUARD (2026-07-29) ────────────────────────────────────────────────────────
+  // Yahoo's GC=F / NQ=F / ES=F are DIFFERENT CONTRACT MONTHS from the Databento/Tradovate feed.
+  // Measured 2026-07-29 11:56 ET:  Yahoo GC=F 4071.00 vs Databento GC 4008.50 — a 62.5-point basis
+  // (NQ 82 pts, ES 10.9 pts). The fallback chain picks a source PER POLL (~5s), so a single 5-min
+  // bar could take its high from one contract and its low from the other. That is exactly what
+  // happened: MGC ATR read 63.86 against an actual 11-point morning range, MNQ 53.54, MES 8.28 —
+  // each ATR converged on its own source gap, not on real volatility.
+  // WHY IT MATTERS: inflated ATR widens the stop, which shrinks size or skips the setup entirely
+  // (gold was silently untradeable all morning), and a stop priced off the wrong contract would be
+  // ~63 points misplaced on a real order.
+  // FIX: while a real-time feed is still serving this symbol, a lagging fallback quote is DROPPED
+  // rather than blended into the same bar.
+  if (reliable) {
+    lastReliableAt.set(sym, Date.now());
+  } else if (Date.now() - (lastReliableAt.get(sym) ?? 0) < FALLBACK_HOLDOFF_MS) {
+    return;
+  }
+  // On a GENUINE failover the two sources sit at different price levels, so never let one bar span
+  // both — restart the in-progress bar at the new source's price instead of stretching it.
+  const prevReliable = lastTickReliable.get(sym);
+  if (prevReliable !== undefined && prevReliable !== reliable && b.currentBar) {
+    log(`  ${sym}: MD SOURCE ${prevReliable ? "realtime→fallback" : "fallback→realtime"} — restarting bar at $${price.toFixed(2)} (was $${b.currentBar.c.toFixed(2)}, gap ${Math.abs(price - b.currentBar.c).toFixed(2)}) so it can't span two contracts`);
+    b.currentBar = { t: b.currentBar.t, o: price, h: price, l: price, c: price, v: 0 };
+  }
+  lastTickReliable.set(sym, reliable);
 
   tickCount++;
   b.lastPrice = price;
@@ -3303,6 +3341,16 @@ async function evaluateAndTrade(
       return;
     }
   } catch { /* pattern memory is optional — fail open on read errors */ }
+
+  // NO NEW ENTRIES ON FALLBACK-PRICED DATA (2026-07-29). Yahoo quotes a different contract month —
+  // 62.5 points away on gold — so an entry priced off it would send a broker stop ~63 points from
+  // where it belongs (on a short, ~2.5x the intended risk). Bars and position MANAGEMENT still use
+  // the fallback (going blind on an open position is worse, and the broker bracket is the real
+  // protection), but opening NEW risk on a price we cannot trust is never worth it.
+  if (!isRealtimePriced(sym)) {
+    log(`  ${sym}: SKIP — no real-time quote (fallback feed prices a different contract; not opening new risk on it)`);
+    return;
+  }
 
   // EDGE GATE (registry-driven, per-engine switch). The set of tradable edges lives in
   // ../lib/realtime-edges.ts; each edge has an independent on/off switch for demo and live. Only
