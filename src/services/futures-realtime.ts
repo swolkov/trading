@@ -884,6 +884,10 @@ let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuatio
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
 let edgeFlags: Record<string, string | undefined> = {};
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
+/** How old a Databento live_quotes row may be and still be used. See the note in fetchDatabentoQuotes:
+ *  gold ticks sparsely, so a 30s cutoff was discarding paid data and dropping gold to a
+ *  different-contract fallback. 90s stays well inside a 5-minute bar. */
+const DBN_STALE_MS = 90_000;
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number }>> {
   if (!databentoMdEnabled) return new Map();
   try {
@@ -894,7 +898,17 @@ async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: n
     const now = Date.now();
     for (const r of rows) {
       const ts = Number(r.ts), mid = Number(r.mid), cum = Number(r.vol) || 0;
-      if (mid > 0 && now - ts < 30_000) {
+      // STALENESS WINDOW — was 30s, raised to 90s on 2026-07-29.
+      // GOLD TICKS FAR MORE SPARSELY THAN THE INDICES. Measured over a minute: ES and NQ update every
+      // ~1s, but GC ages to 8s, 18s and beyond in quiet stretches. At a 30s cutoff those perfectly
+      // good paid Databento quotes were being DISCARDED, which dropped gold through to the Yahoo
+      // fallback — and Yahoo prices a DIFFERENT CONTRACT MONTH (62.5 pts away on gold), which is what
+      // corrupted every ATR. Databento was never down; we were rejecting data we pay for.
+      // 90s is still well inside a 5-minute bar, and a slightly-old quote on the RIGHT contract beats
+      // a fresh quote on the WRONG one by two orders of magnitude: gold drifts ~1-2 pts in 90s versus
+      // a 62.5-pt contract basis. The realtime/fallback distinction for the emergency cut-out is
+      // tracked separately via onPrice's `reliable` flag, so widening this does not weaken that.
+      if (mid > 0 && now - ts < DBN_STALE_MS) {
         const last = lastCumVol.get(r.symbol) ?? cum;
         const delta = cum >= last ? cum - last : cum;   // reset-safe (sidecar restart drops the cumulative count)
         lastCumVol.set(r.symbol, cum);
