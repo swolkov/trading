@@ -1413,6 +1413,16 @@ interface RiskConfig {
   dailyLossLimitPct: number;
   maxDrawdownPct: number;
   maxConcurrentPositions: number;
+  // ⚠️ INERT FOR THIS ENGINE — verified 2026-07-29. These are loaded from the DB (and are editable on
+  // /agents, which makes them LOOK like live controls) but NOTHING in setup detection reads them.
+  // Every stop/target is hardcoded per setup instead: extreme_rsi_bounce uses stop = adjustedATR x 1.5
+  // and target = currentATR x 3.5 → R:R 2.33, and the other setups compute their own inline.
+  // The DB currently holds 1.4 / 5.0 for live, i.e. someone tuned these expecting an effect and got
+  // none. DO NOT "fix" this by wiring them in: every edge's evidence — the 3-yr engine-exact
+  // validations behind gold_short PF 1.72, gold_long_europe PF 1.37, index_trend_long, and the
+  // index_overbought_short rejection — was measured at 1.5 stop / 3.5 target. Wiring 1.4/5.0 in would
+  // change R:R from 2.33 to 3.57 and silently invalidate all of it. The hardcoded values ARE the
+  // validated ones; the config fields are what is wrong, and the fix belongs in the UI.
   atrStopMultiplier: number;
   atrTargetMultiplier: number;
   simulatedEquity: number;       // Size trades as if this is account equity (0 = use actual)
