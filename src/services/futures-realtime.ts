@@ -3633,8 +3633,23 @@ async function evaluateAndTrade(
     }
   } catch { /* pattern memory is optional */ }
 
-  // Get AI confirmation (now with pattern stats baked into the prompt)
-  const ai = await getAIConfirmation({
+  // ── LATENCY: DO NOT CALL THE GRADER WHEN IT IS SWITCHED OFF (2026-07-30) ────────────────────
+  // getAIConfirmation is an Anthropic API round trip, and it sat on the critical path BETWEEN the
+  // signal price and the order. Measured on live today: bar closed 15:05:00 with MNQ at 28094.13,
+  // the order submitted at 15:05:10 and filled at 28111.75 — 17.63 points, $35, i.e. 23% of that
+  // trade's entire $154 risk budget, burned waiting. And with live_futures_ai_grader=false the
+  // verdict is DISCARDED anyway ("AI WOULD REJECT ... TAKING ANYWAY [grader off]").
+  //
+  // So we were paying real slippage for an answer we had already decided to ignore. When the veto
+  // is off the call is skipped entirely: confidence 0 means the score-boost block below is skipped
+  // (finalScore stays technicalScore, still far above the 55 live floor), and aiDown is undefined
+  // so an unreachable grader no longer blocks a trade it was not going to influence — it is
+  // incoherent to ignore the verdict but honour its absence.
+  //
+  // Flipping the grader back ON restores the call, the veto, and the confidence boost together.
+  const ai = !aiVetoEnabled
+    ? { agree: true, confidence: 0, reasoning: "grader off — not called, kept off the order path" }
+    : await getAIConfirmation({
     sym, direction, reasoning, price,
     rsi: rsiVal, atr: atrVal, vwap: vwapVal,
     dayType, session, trend15, prevDayHigh, prevDayLow,
@@ -3847,8 +3862,10 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
   // Snap to the contract tick — un-rounded prices are rejected by the broker as "Illegal Price",
   // which would leave the just-filled entry running with no protection.
-  const stopPrice = roundToTick(sym, direction === "long" ? price - stopDist : price + stopDist);
-  const targetPrice = roundToTick(sym, direction === "long" ? price + targetDist : price - targetDist);
+  // Provisional, anchored to the SIGNAL price. Both are RE-ANCHORED to the actual fill below once it
+  // is known — see the note there. Kept here so the pre-fill logging still has sane numbers.
+  let stopPrice = roundToTick(sym, direction === "long" ? price - stopDist : price + stopDist);
+  let targetPrice = roundToTick(sym, direction === "long" ? price + targetDist : price - targetDist);
   const side = direction === "long" ? "Buy" : "Sell";
   const closeSide = direction === "long" ? "Sell" : "Buy";
 
@@ -3881,6 +3898,19 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     const fillConfirmed = fillResult.status === "filled";
     const entryPrice = fillConfirmed ? fillResult.price : price; // real fill price when known
     const fillQty = fillConfirmed ? fillResult.qty : qty;        // size protective orders to ACTUAL fill, never larger
+
+    // ── RE-ANCHOR THE BRACKET TO THE ACTUAL FILL (2026-07-30) ────────────────────────────────
+    // The stop was priced off the SIGNAL price, which is computed before the order exists. Any
+    // slippage therefore landed on top of the intended risk instead of being absorbed by it: today's
+    // MNQ filled 17.63 points above signal, so a 77.1-point stop became ~95 points of real exposure
+    // — $189 against a $154 budget, 23% over, silently. Risk is defined as distance from where we
+    // ACTUALLY got in, so anchor both legs there. Point distance (and therefore R:R) is unchanged;
+    // only the absolute levels shift with the fill. Falls back to the signal anchor when the fill
+    // price is unconfirmed, which is the old behaviour.
+    if (fillConfirmed && entryPrice > 0) {
+      stopPrice = roundToTick(sym, direction === "long" ? entryPrice - stopDist : entryPrice + stopDist);
+      targetPrice = roundToTick(sym, direction === "long" ? entryPrice + targetDist : entryPrice - targetDist);
+    }
     // EXECUTION TELEMETRY (Phase 0) — fire-and-forget; isolated so it can never affect the order
     void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: entryPrice, qty: fillQty, latencyMs: Date.now() - submitTs, status: fillResult.status });
 
