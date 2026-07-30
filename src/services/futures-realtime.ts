@@ -4003,6 +4003,15 @@ async function writeHeartbeat() {
       update: { value: payload },
       create: { key: HEARTBEAT_KEY, value: payload },
     });
+    // Persist the tilt/trade-count circuit breaker so a deploy cannot silently re-arm an engine that
+    // stopped itself. Written every heartbeat (cheap upsert) rather than only on change, so it can
+    // never be missed. Restored on startup — see the [STARTUP] Tilt state block.
+    await prisma.agentConfig.upsert({
+      where: { key: `futures_tilt_state_${ENGINE_MODE}` },
+      update: { value: JSON.stringify({ date: getETDateString(), consecutiveStops, pauseUntil: tiltPauseUntil === Infinity ? "Infinity" : tiltPauseUntil, trades: dailyTradeCount }) },
+      create: { key: `futures_tilt_state_${ENGINE_MODE}`, value: JSON.stringify({ date: getETDateString(), consecutiveStops, pauseUntil: tiltPauseUntil === Infinity ? "Infinity" : tiltPauseUntil, trades: dailyTradeCount }) },
+    }).catch(() => {});
+
     // Also persist position state (trailing stops, breakeven flags) every heartbeat
     if (positions.size > 0) await savePositions();
   } catch { /* best-effort */ }
@@ -5098,6 +5107,27 @@ async function main() {
     if (startupETH >= 9.483) lastResetDate = getETDateString();
     if (startupETH >= 15.833) lastEODDate = getETDateString();
     log(`[STARTUP] Loss-limit baseline restored: SOD $${startOfDayBalance.toFixed(2)}, intraday P&L $${dailyPnl.toFixed(2)}`);
+
+    // RESTORE THE TILT PAUSE TOO (2026-07-30). dailyPnl survived a restart but the tilt state did
+    // NOT — consecutiveStops and tiltPauseUntil are plain module vars, so every deploy silently
+    // re-armed an engine that had deliberately stopped itself. Observed live today: after two −1R
+    // stops the engine set Tilt:PAUSED(2 stops), a deploy reset it to Tilt:ok, and it took two more
+    // trades inside the same session. A circuit breaker a routine deploy can clear is not a circuit
+    // breaker. dailyTradeCount is restored for the same reason — it gates maxTradesPerDay.
+    const tiltRaw = await prisma.agentConfig.findUnique({ where: { key: `futures_tilt_state_${ENGINE_MODE}` } });
+    if (tiltRaw?.value) {
+      const t = JSON.parse(tiltRaw.value) as { date?: string; consecutiveStops?: number; pauseUntil?: number | string; trades?: number };
+      if (t.date === getETDateString()) {   // only same-session state; a new day resets legitimately
+        consecutiveStops = t.consecutiveStops ?? 0;
+        // SESSION_DONE is stored as the STRING "Infinity" — JSON.stringify turns real Infinity into
+        // null, which would silently downgrade a rest-of-session halt into no pause at all.
+        tiltPauseUntil = t.pauseUntil === "Infinity" ? Infinity : (typeof t.pauseUntil === "number" ? t.pauseUntil : 0);
+        dailyTradeCount = t.trades ?? 0;
+        const left = tiltPauseUntil === Infinity ? "rest of session"
+          : tiltPauseUntil > Date.now() ? `${Math.ceil((tiltPauseUntil - Date.now()) / 60_000)} min` : "expired";
+        log(`[STARTUP] Tilt state restored: ${consecutiveStops} consecutive stops, pause ${left}, ${dailyTradeCount} trades today`);
+      }
+    }
   } catch {}
   await updateVIX();
   log(`VIX: ${currentVIX.toFixed(1)}`);
