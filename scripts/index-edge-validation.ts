@@ -29,6 +29,18 @@
  *   are not modelled here, so treat absolute counts and totals as an upper bound on activity.
  *   Relative comparisons (session vs session, direction vs direction) are unaffected.
  *
+ *
+ * ⚠️ READ BEFORE QUOTING THIS HARNESS AGAINST LIVE (added 2026-07-30, after it misled me).
+ * On 2026-07-30 I applied the measured MNQ slippage (median 7.13 pt) uniformly to every entry here,
+ * got PF 0.72 for index_trend_long, and told Spencer the live edge was a loser. THAT CONCLUSION WAS
+ * WRONG. The live account's broker-reconciled record at the time was 43 round-trips, +$174.75, 56%
+ * win — POSITIVE. The harness disagreed with reality, so the harness was what was wrong.
+ * WHY: see the KNOWN LIMITATION above — this fires ~3x more often than production because it does
+ * not model the confidence>=75 gate, the AI grader, pattern memory, or the correlation guard. It
+ * therefore trades a MUCH WORSE population than the engine actually takes, and loading full slippage
+ * onto that inflated population compounds the error.
+ * USE THIS FOR RELATIVE COMPARISONS ONLY (session vs session, direction vs direction, slippage
+ * sensitivity). Do NOT use its absolute PF to judge a live edge that has its own forward record.
  * Usage: TL_DATA_DIR=data/live-window npx tsx scripts/index-edge-validation.ts ES
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
