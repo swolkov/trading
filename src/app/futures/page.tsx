@@ -10,6 +10,7 @@ import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
 import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
 import { EdgeSwitchList } from "./edge-switch-list";
+import TodaysPlan from "./todays-plan";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -695,6 +696,12 @@ export default function FuturesPage() {
 
           {/* Strategy tab */}
           {activeTab === "strategy" && (
+            <>
+            {/* What the LIVE engine intends today, and at what size — engine's own numbers. */}
+            <div className="mb-4">
+              <TodaysPlan mode="live" />
+            </div>
+
             <Card className="border-white/[0.06]">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm">Validated Edges — Priority Order</CardTitle>
@@ -716,6 +723,7 @@ export default function FuturesPage() {
                 </div>
               </CardContent>
             </Card>
+            </>
           )}
 
           {/* Backtest tab */}

@@ -734,6 +734,44 @@ let tickCount = 0;
 let lastResetDate = "";
 let lastEODDate = "";
 
+/** What the engine currently sees per symbol, published on the heartbeat for the admin "today's plan"
+ *  panel. Telemetry ONLY — never read by a trading decision. The web app must render these numbers
+ *  rather than recompute them, so there is exactly one copy of the maths. */
+interface PlanSnapshot {
+  price: number; atr: number; rsi: number;
+  ema9DistPct: number | null; above200: boolean | null;
+  trend15: string; dayType: string; bars: number;
+  plannedQty: number; quoteAgeSec: number; quarantine: number; at: number;
+}
+const planSnapshots = new Map<string, PlanSnapshot>();
+
+/** MIRRORS the sizing block in evaluateAndTrade — see the warning comment there. Answers "if a setup
+ *  fired on this bar, how many contracts would it take?" so the admin panel can show intent without a
+ *  second implementation of the maths living in the web app. */
+function plannedQtyFor(sym: string, adjustedATR: number, session: string, sizeMult: number): number {
+  const equity = riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity;
+  if (equity <= 0 || adjustedATR <= 0 || sizeMult <= 0) return 0;
+  const maxRisk = equity * (riskConfig.riskPerTradePct / 100) * sizeMult;
+  const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+  let stopDist = adjustedATR * 1.5;                       // the hardcoded stop every live edge uses
+  let riskPer = stopDist * mult;
+  if (riskPer > maxRisk) {                                // adaptive tighten, then floor at 0.75x ATR
+    const affordable = maxRisk / mult;
+    if (affordable < adjustedATR * 0.75) return 0;
+    stopDist = affordable; riskPer = stopDist * mult;
+  }
+  let cap = MICRO_SYMBOLS.includes(sym)
+    ? Math.max(riskConfig.maxContractsPerTrade, microContractCap(equity))
+    : riskConfig.maxContractsPerTrade;
+  if (MICRO_SYMBOLS.includes(sym) && !RTH_SESSIONS.has(session)) {
+    cap = Math.min(cap, OVERNIGHT_MICRO_CAP, overnightMarginCap(sym, equity));
+  }
+  if (cap < 1) return 0;
+  const qty = Math.min(cap, Math.floor(maxRisk / riskPer));
+  if (qty < 1) return 0;
+  return riskPer * qty > equity * 0.15 ? Math.max(1, Math.floor((equity * 0.15) / riskPer)) : qty;
+}
+
 /** Exchange timestamp of the last real quote per symbol (Databento's own ts when we have it, else
  *  arrival time). Drives both the feed-gap detector and the entry-freshness gate. */
 const lastReliableAt = new Map<string, number>();
@@ -2932,6 +2970,24 @@ async function onBarClose(sym: string, bar: Bar) {
   const sessionQuality = sizeMult >= 1 ? "prime" : sizeMult >= 0.5 ? "good" : "avoid";
 
   log(`${sym}: $${price.toFixed(2)} | ATR:${currentATR.toFixed(2)} | RSI:${currentRSI.toFixed(0)} | 15m:${tf15.trend} | ${dayType} | ${session} | ${vix.label}`);
+
+  // ── PLAN SNAPSHOT (2026-07-29) ───────────────────────────────────────────────────────────────
+  // Publish what THIS engine currently sees, so the admin panel can show "what will it do today"
+  // without recomputing anything. The panel must never re-derive ATR/RSI/size in the web app: a
+  // second copy of this maths would drift from the engine and quietly start lying, which is the
+  // exact failure this codebase keeps hitting. Engine computes, panel renders. Telemetry only —
+  // nothing here feeds a trading decision.
+  planSnapshots.set(sym, {
+    price, atr: currentATR, rsi: currentRSI,
+    ema9DistPct: fastEMA > 0 ? Math.abs(price - fastEMA) / price * 100 : null,
+    above200: Number.isFinite(ema200) ? price > ema200 : null,
+    trend15: tf15.trend, dayType, bars: b.bars5m.length,
+    // Size the engine WOULD take if a setup fired on this bar, using the same inputs the sizer uses.
+    plannedQty: plannedQtyFor(sym, adjustedATR, session, effectiveSizeMult),
+    quoteAgeSec: Math.round((Date.now() - (lastReliableAt.get(sym) ?? 0)) / 1000),
+    quarantine: quarantineBars.get(sym) ?? 0,
+    at: Date.now(),
+  });
   feedLog("scan", `**${sym}** $${price.toFixed(2)} | RSI ${currentRSI.toFixed(0)} | ${tf15.trend} | ${dayType} | ${session}`);
 
   // ── REGISTRY STRATEGIES (Tier 1/2 validated edges from /lib/strategies) ──
@@ -3722,6 +3778,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     }
   }
 
+  // ⚠️ IF YOU CHANGE THE SIZING BELOW, UPDATE plannedQtyFor() TOO — it mirrors this block to tell the
+  // admin panel what size the engine intends, and a silent divergence there means the panel lies.
   // EVERY micro (MGC/MNQ/MES) now grows with the account, not just gold — so risk stays ~1%/trade
   // instead of being frozen at 1 micro forever, and the step-up happens because the equity was
   // earned rather than because someone raised a flag after a good week. Full-size contracts keep the
@@ -3925,6 +3983,14 @@ async function writeHeartbeat() {
       dailyTrades: dailyTradeCount,
       session: getSessionName(),
       mdHealth: wsConnected ? "websocket" : mdCircuitOpen ? "circuit_open" : mdConsecutiveFailures > 0 ? `degraded(${mdConsecutiveFailures})` : lastMdSource,
+      // "Today's plan" telemetry — what the engine sees and what size it intends per symbol, so the
+      // admin panel renders the ENGINE's numbers instead of recomputing them in the web app.
+      equity: Math.round(tradovateEquity),
+      riskPerTrade: Math.round(tradovateEquity * (riskConfig.riskPerTradePct / 100)),
+      dailyLossLimit: Math.round(tradovateEquity * (riskConfig.dailyLossLimitPct / 100)),
+      maxTradesPerDay: riskConfig.maxTradesPerDay,
+      maxContractsPerTrade: riskConfig.maxContractsPerTrade,
+      symbols: Object.fromEntries([...planSnapshots.entries()]),
     });
     await prisma.agentConfig.upsert({
       where: { key: HEARTBEAT_KEY },
