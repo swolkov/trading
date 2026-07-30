@@ -138,7 +138,15 @@ export default function TodaysPlan({ mode = "live" }: { mode?: "live" | "demo" }
             <tbody>
               {symbols.length === 0 && (
                 <tr><td colSpan={6} className="py-3 text-xs text-muted-foreground">
-                  Waiting for the engine to publish its first snapshot (one 5-minute bar).
+                  {/* An empty snapshot is USUALLY deliberate, not a fault: the engine returns early
+                      — before indicators are computed — whenever the session is gated (no armed
+                      edge, or a vault anti-pattern like "midday 27% win rate"). Saying "waiting for
+                      data" there would be a lie; say which it is. */}
+                  {schedule.find((w) => w.session === nowSession)?.tradable === false
+                    ? <>Engine is <strong>deliberately idle</strong> — no edge armed in the <strong>{nowSession}</strong> session,
+                       or the session is blocked by a vault anti-pattern. Indicators aren&apos;t computed
+                       while gated, so there is nothing to show until the next armed window.</>
+                    : <>Waiting for the engine to publish its first snapshot (one 5-minute bar).</>}
                 </td></tr>
               )}
               {symbols.map((s) => {
