@@ -3876,8 +3876,37 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   log(`${"=".repeat(50)}\n`);
 
   try {
-    const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-    const acct = accounts.find(a => a.id === accountId) || accounts[0];
+    // Account identity is fixed for the process and already resolved at auth. Fetching /account/list
+    // before every entry added a full broker round trip to the decision→order path, which is paid in
+    // slippage on a market order. Fall back to the fetch only if auth never populated it.
+    let acct: { id: number; name: string };
+    if (accountId && accountName) {
+      acct = { id: accountId, name: accountName };
+    } else {
+      const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+      acct = accounts.find(a => a.id === accountId) || accounts[0];
+    }
+
+    // ── MAX-CHASE GUARD (2026-07-30) ─────────────────────────────────────────────────────────
+    // Slippage is not symmetric noise — it has a tail. Across 60 live fills MNQ's median was 7.13
+    // points but the worst were 42.1 and 54.4, and it is that tail that drags the mean to 11.74 and
+    // the edge from PF ~1.0 to 0.72. Those extremes happen when price has ALREADY run away between
+    // the signal and the submission; we then chase it with a market order and buy the top of the move.
+    //
+    // So: re-read the freshest tick (Databento, via the bar builder — no extra round trip) and if the
+    // market has already moved MORE THAN 10% OF THE STOP DISTANCE against us, don't chase. 10% of the
+    // stop is 10% of the trade's risk, which is the most execution should ever be allowed to cost.
+    // A skipped trade is free; a chased one pays the whole tail. Favourable moves are never blocked.
+    const freshPrice = barBuilders.get(sym)?.lastPrice ?? 0;
+    if (freshPrice > 0 && stopDist > 0) {
+      const adverse = direction === "long" ? freshPrice - price : price - freshPrice;
+      const maxChase = stopDist * 0.10;
+      if (adverse > maxChase) {
+        log(`  ${sym}: SKIP — price already ran ${adverse.toFixed(2)} pts against us since the signal (max chase ${maxChase.toFixed(2)} = 10% of the ${stopDist.toFixed(1)}-pt stop). Not buying the move.`);
+        feedLog("skip", `${sym} ${direction} skipped — ran ${adverse.toFixed(1)} pts before entry (chase guard)`);
+        return;
+      }
+    }
 
     const submitTs = Date.now();
     const entry = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
