@@ -226,7 +226,13 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     if (!edge) continue;
 
     const short = dir === "short";
-    const entry = short ? price - S.tick : price + S.tick;
+    // ENTRY SLIPPAGE (2026-07-30). Was ONE TICK (0.25 pt) — a fiction. Measured from 60 live fills
+    // in execution_quality: MNQ averages 11.74 pts (max 54.38), MES 0.89, MGC 0.50. On MNQ that is
+    // ~$23 against a ~$154 risk budget, i.e. ~15% of the trade's risk gone before it starts, and the
+    // backtest was assuming 1/47th of it. G_SLIP overrides; default is the measured live figure.
+    const SLIP = process.env.G_SLIP !== undefined ? parseFloat(process.env.G_SLIP)
+      : (sym === "NQ" ? 11.74 : sym === "ES" ? 0.89 : S.tick);
+    const entry = short ? price - SLIP : price + SLIP;
     const hardStop = short ? price + stopDist : price - stopDist;
     const target = short ? price - targetDist : price + targetDist;
     const riskDollars = stopDist * S.ptVal;
