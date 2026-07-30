@@ -697,9 +697,10 @@ export default function FuturesPage() {
           {/* Strategy tab */}
           {activeTab === "strategy" && (
             <>
-            {/* What the LIVE engine intends today, and at what size — engine's own numbers. */}
+            {/* What the engine intends today, and at what size — the engine's own numbers.
+                Follows the page's live/demo toggle, same as the scoreboard above. */}
             <div className="mb-4">
-              <TodaysPlan mode="live" />
+              <TodaysPlan mode={isLiveView ? "live" : "demo"} />
             </div>
 
             <Card className="border-white/[0.06]">

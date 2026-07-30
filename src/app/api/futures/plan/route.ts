@@ -80,12 +80,22 @@ export async function GET(req: Request) {
       return { ...w, edges: live, metalMult, indexMult, tradable: live.length > 0 };
     });
 
+    // Which symbol CLASSES actually have an armed edge in the session running right now. Without
+    // this the panel would print a tradable size for a session that has no edge armed at all —
+    // technically the size it *would* use, but read as "ready to go". Both must be true to trade.
+    const currentWindow = schedule.find((w) => w.session === hb?.session) ?? null;
+    const armedNow = {
+      metals: !!currentWindow?.edges.some((e) => e.key.startsWith("gold")),
+      index: !!currentWindow?.edges.some((e) => !e.key.startsWith("gold")),
+    };
+
     // Per-symbol state straight from the engine — no recomputation here.
     const syms = (hb?.symbols ?? {}) as Record<string, Record<string, number | string | boolean | null>>;
     const symbols = Object.entries(syms).map(([sym, s]) => ({
       sym,
       ...s,
       snapshotAgeSec: typeof s.at === "number" ? Math.round((Date.now() - s.at) / 1000) : null,
+      edgeArmedNow: sym.includes("GC") ? armedNow.metals : armedNow.index,
     }));
 
     return Response.json({
@@ -99,6 +109,7 @@ export async function GET(req: Request) {
             maxTradesPerDay: hb.maxTradesPerDay ?? null, maxContractsPerTrade: hb.maxContractsPerTrade ?? null }
         : null,
       schedule,
+      armedNow,
       symbols,
       edges: REALTIME_EDGES.map((e) => ({
         key: e.key, name: e.name, blurb: e.blurb,

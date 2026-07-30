@@ -2977,17 +2977,23 @@ async function onBarClose(sym: string, bar: Bar) {
   // second copy of this maths would drift from the engine and quietly start lying, which is the
   // exact failure this codebase keeps hitting. Engine computes, panel renders. Telemetry only —
   // nothing here feeds a trading decision.
-  planSnapshots.set(sym, {
-    price, atr: currentATR, rsi: currentRSI,
-    ema9DistPct: fastEMA > 0 ? Math.abs(price - fastEMA) / price * 100 : null,
-    above200: Number.isFinite(ema200) ? price > ema200 : null,
-    trend15: tf15.trend, dayType, bars: b.bars5m.length,
-    // Size the engine WOULD take if a setup fired on this bar, using the same inputs the sizer uses.
-    plannedQty: plannedQtyFor(sym, adjustedATR, session, effectiveSizeMult),
-    quoteAgeSec: Math.round((Date.now() - (lastReliableAt.get(sym) ?? 0)) / 1000),
-    quarantine: quarantineBars.get(sym) ?? 0,
-    at: Date.now(),
-  });
+  // TRY/CATCH IS LOAD-BEARING: this block sits UPSTREAM of setup detection in onBarClose, and
+  // onBarClose is called un-awaited from onPrice. A throw here would abort the rest of the function
+  // — i.e. silently skip every setup on this bar — and surface only as one [FATAL] line from the
+  // global unhandledRejection handler. Telemetry must never be able to stop the engine trading.
+  try {
+    planSnapshots.set(sym, {
+      price, atr: currentATR, rsi: currentRSI,
+      ema9DistPct: fastEMA > 0 ? Math.abs(price - fastEMA) / price * 100 : null,
+      above200: Number.isFinite(ema200) ? price > ema200 : null,
+      trend15: tf15.trend, dayType, bars: b.bars5m.length,
+      // Size the engine WOULD take if a setup fired on this bar, using the same inputs the sizer uses.
+      plannedQty: plannedQtyFor(sym, adjustedATR, session, effectiveSizeMult),
+      quoteAgeSec: Math.round((Date.now() - (lastReliableAt.get(sym) ?? 0)) / 1000),
+      quarantine: quarantineBars.get(sym) ?? 0,
+      at: Date.now(),
+    });
+  } catch { /* telemetry only — never let it touch the trading path */ }
   feedLog("scan", `**${sym}** $${price.toFixed(2)} | RSI ${currentRSI.toFixed(0)} | ${tf15.trend} | ${dayType} | ${session}`);
 
   // ── REGISTRY STRATEGIES (Tier 1/2 validated edges from /lib/strategies) ──

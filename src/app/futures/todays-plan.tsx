@@ -17,7 +17,7 @@ interface SymState {
   ema9DistPct?: number | null; above200?: boolean | null;
   trend15?: string; dayType?: string; bars?: number;
   plannedQty?: number; quoteAgeSec?: number; quarantine?: number;
-  snapshotAgeSec?: number | null;
+  snapshotAgeSec?: number | null; edgeArmedNow?: boolean;
 }
 interface PlanResp {
   engine: { alive: boolean; ageSec: number; session: string; mdHealth: string; positions: number; dailyTrades: number; dailyPnl: number } | null;
@@ -29,10 +29,14 @@ interface PlanResp {
 
 /** Why is this symbol not able to open a trade right now? First blocking reason wins. */
 function blockReason(s: SymState, session: string): { text: string; tone: "block" | "wait" | "ok" } {
+  if (session === "halt") return { text: "market closed", tone: "wait" };
+  // Checked FIRST: a size can be computable while no edge is armed for this symbol in this session,
+  // and reading that as "ready to trade" would be wrong. Both must hold.
+  if (s.edgeArmedNow === false) return { text: "no edge armed this session — sits out", tone: "wait" };
+  if ((s.snapshotAgeSec ?? 0) > 600) return { text: `stale reading (${Math.round((s.snapshotAgeSec ?? 0) / 60)}m old — no bar closed)`, tone: "block" };
   if ((s.quoteAgeSec ?? 0) > 30) return { text: `no fresh quote (${s.quoteAgeSec}s old)`, tone: "block" };
   if ((s.quarantine ?? 0) > 0) return { text: `feed gap — ${s.quarantine} clean bars to go`, tone: "block" };
   if ((s.plannedQty ?? 0) < 1) return { text: "too volatile to size — stop wider than the risk budget", tone: "block" };
-  if (session === "halt") return { text: "market closed", tone: "wait" };
   const rsi = s.rsi ?? 50;
   if (s.sym === "MGC") {
     if (rsi <= 75 && rsi >= 25) return { text: `RSI ${rsi.toFixed(0)} — needs >75 or <25`, tone: "wait" };
@@ -148,7 +152,10 @@ export default function TodaysPlan({ mode = "live" }: { mode?: "live" | "demo" }
                     <td className="py-2 pr-3 tabular-nums">{s.rsi?.toFixed(0) ?? "—"}</td>
                     <td className="py-2 pr-3 text-center">
                       <span className={`rounded px-2 py-0.5 font-semibold tabular-nums ${
-                        (s.plannedQty ?? 0) > 0 ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-muted text-muted-foreground"}`}>
+                        (s.plannedQty ?? 0) > 0 && s.edgeArmedNow !== false
+                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                          : "bg-muted text-muted-foreground"}`}
+                        title={s.edgeArmedNow === false ? "No edge armed this session — this size is what it WOULD use, not what it will do" : undefined}>
                         {s.plannedQty ?? 0}×
                       </span>
                     </td>
