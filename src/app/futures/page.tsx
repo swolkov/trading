@@ -11,6 +11,7 @@ import { EngineActivity } from "@/components/futures/engine-activity";
 import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
 import { EdgeSwitchList } from "./edge-switch-list";
 import TodaysPlan from "./todays-plan";
+import EdgeTruth from "./edge-truth";
 
 const modeFetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -701,6 +702,11 @@ export default function FuturesPage() {
                 Follows the page's live/demo toggle, same as the scoreboard above. */}
             <div className="mb-4">
               <TodaysPlan mode={isLiveView ? "live" : "demo"} />
+            </div>
+
+            {/* Which edge is actually earning, from the broker-reconciled ledger — and is it proven? */}
+            <div className="mb-4">
+              <EdgeTruth />
             </div>
 
             <Card className="border-white/[0.06]">

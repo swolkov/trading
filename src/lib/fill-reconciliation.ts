@@ -278,14 +278,36 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
     let rtPersisted = 0;
     for (const rt of roundTrips) {
       try {
+        // ATTRIBUTION (2026-08-02): populate setupType + rMultiple, which the schema always promised
+        // ("enriched later from the matching entry log") but nothing ever wrote — leaving the clean
+        // ledger unable to say WHICH edge earned a dollar, and forcing every scoreboard back onto the
+        // fragmented autoTradeLog. Best-effort and conservative: it returns nulls rather than guess,
+        // because a wrong attribution would credit an edge with another edge's P&L and we would end
+        // up scaling the wrong one.
+        let attr: { setupType: string | null; rMultiple: number | null } = { setupType: null, rMultiple: null };
+        try {
+          const { attributeRoundTrip } = await import("./roundtrip-attribution");
+          attr = await attributeRoundTrip({
+            mode: rtMode, symbol: rt.symbol, direction: rt.direction, contracts: rt.qty,
+            entryPrice: rt.entryPrice, entryTime: new Date(rt.entryTime), pnl: rt.pnl,
+          });
+        } catch { /* attribution is additive — never block the ledger write */ }
+
         await prisma.roundTrip.upsert({
           where: { mode_entryFillId_exitFillId: { mode: rtMode, entryFillId: String(rt.entryFill.id), exitFillId: String(rt.exitFill.id) } },
-          update: { pnl: rt.pnl, exitPrice: rt.exitPrice, contracts: rt.qty },
+          // Only overwrite attribution when we actually resolved it, so a later re-reconcile can
+          // never blank a value that an earlier pass got right.
+          update: {
+            pnl: rt.pnl, exitPrice: rt.exitPrice, contracts: rt.qty,
+            ...(attr.setupType ? { setupType: attr.setupType } : {}),
+            ...(attr.rMultiple != null ? { rMultiple: attr.rMultiple } : {}),
+          },
           create: {
             mode: rtMode, symbol: rt.symbol, direction: rt.direction, contracts: rt.qty,
             entryPrice: rt.entryPrice, exitPrice: rt.exitPrice, pnl: rt.pnl,
             entryFillId: String(rt.entryFill.id), exitFillId: String(rt.exitFill.id),
             entryTime: new Date(rt.entryTime), exitTime: new Date(rt.exitTime),
+            setupType: attr.setupType, rMultiple: attr.rMultiple,
           },
         });
         rtPersisted++;
