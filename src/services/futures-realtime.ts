@@ -971,6 +971,17 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
 let dbnMdLogged = 0;
 let lastUnpricedLogAt = 0;        // throttles the UNPRICED log to once a minute
 let lastAggSkipLogAt = 0;         // throttles the aggregate-drawdown-skipped log to once a minute
+// Market-data blackout alarms. Databento is the ONLY price source since Yahoo was removed, and a
+// sidecar that serves nothing without throwing produces no alert anywhere else — see pollPrices.
+let mdBlackoutSince = 0;
+let mdBlackoutAlerted = false;
+const symBlackoutAlerted = new Set<string>();
+/** Minutes of ZERO quotes across all symbols before shouting. Long enough to ride out a redeploy of
+ *  the sidecar, short enough to catch a dead feed inside one trading session. */
+const MD_BLACKOUT_ALERT_MIN = 3;
+/** Minutes a SINGLE symbol may stay unpriced before shouting. Gold ticks sparsely, so this is
+ *  deliberately looser than the all-symbol alarm to avoid crying wolf on a quiet metal. */
+const MD_SYMBOL_BLACKOUT_ALERT_MIN = 15;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
 let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
 let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
@@ -1115,6 +1126,45 @@ async function pollPrices() {
     } else if (received > 0 && mdConsecutiveFailures > 0) {
       log(`[MD] Recovered after ${mdConsecutiveFailures} failures — ${received} quotes received`);
       mdConsecutiveFailures = 0;
+    }
+
+    // ── BLACKOUT ALERT (2026-08-02) ──────────────────────────────────────────────────────────
+    // Removing Yahoo from the price path made Databento a SINGLE POINT OF FAILURE, and the only
+    // existing alert lives in this function's catch block — i.e. it fires when a poll THROWS. A
+    // sidecar that is alive but serving nothing (or rows that all age out) throws nothing: quotes
+    // simply stop, bars freeze, no entries open, and the engine goes quiet with a Railway log line
+    // nobody is watching. Before Yahoo was removed that failure was masked by the fallback; now it
+    // is silent, so it needs its own alarm. Fires ONCE per outage, recovers loudly.
+    if (received === 0 && !scheduledHalt) {
+      if (!mdBlackoutSince) mdBlackoutSince = Date.now();
+      const outMin = (Date.now() - mdBlackoutSince) / 60_000;
+      if (!mdBlackoutAlerted && outMin >= MD_BLACKOUT_ALERT_MIN) {
+        mdBlackoutAlerted = true;
+        const msg = `🚨 ${MODE_TAG} MARKET DATA BLACKOUT — no quotes for ${outMin.toFixed(0)} min during ${getSessionName()}. Databento is the ONLY price source, so the engine is NOT opening trades until it returns. Open positions stay protected by their broker brackets.`;
+        log(msg); notify(msg, "general");
+      }
+    } else if (received > 0) {
+      if (mdBlackoutAlerted) {
+        const msg = `✅ ${MODE_TAG} market data recovered after ${((Date.now() - mdBlackoutSince) / 60_000).toFixed(0)} min — trading resumes.`;
+        log(msg); notify(msg, "general");
+      }
+      mdBlackoutSince = 0; mdBlackoutAlerted = false;
+    }
+
+    // PER-SYMBOL blackout. The total-blackout check above misses the case that actually bites: ES/NQ
+    // healthy while GOLD alone goes dark, which silently removes the London long and the morning
+    // short — two of live's three edges — while everything looks fine.
+    if (!scheduledHalt) {
+      const now2 = Date.now();
+      for (const [sym, since] of unpricedSince) {
+        const mins = (now2 - since) / 60_000;
+        if (mins >= MD_SYMBOL_BLACKOUT_ALERT_MIN && !symBlackoutAlerted.has(sym)) {
+          symBlackoutAlerted.add(sym);
+          const msg = `⚠️ ${MODE_TAG} ${sym} has had NO usable quote for ${mins.toFixed(0)} min (${getSessionName()}). Any edge on ${sym} cannot trade until it returns.`;
+          log(msg); notify(msg, "general");
+        }
+      }
+      for (const sym of [...symBlackoutAlerted]) if (!unpricedSince.has(sym)) symBlackoutAlerted.delete(sym);
     }
   } catch (err) {
     mdConsecutiveFailures++;
