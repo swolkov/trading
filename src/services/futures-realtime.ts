@@ -1240,13 +1240,28 @@ function getSizeMultiplier(sym?: string): number {
   return 0.5; // ETH (Asia + Europe overnight) — active 24/7 research, meaningful size
 }
 
+/** ET hour at which the trading day rolls over: P&L, trade count, tilt and the loss-limit baseline.
+ *
+ *  WAS 9:29 AM (9.483), WHICH SAT ON THE WRONG SIDE OF EVERY LIVE SESSION (fixed 2026-08-02).
+ *  Live trades London gold 03:00-09:00 and the index/gold morning 09:45-12:00 — so between midnight
+ *  and 9:29 the engine still carried YESTERDAY's dailyPnl, and the execution gate reads
+ *      dailyPnl >= -startOfDayBalance * dailyLossLimitPct/100
+ *  which means an 8% losing day SILENTLY DISABLED the next morning's London session, hours before the
+ *  reset that would have cleared it. It also booked every London fill's P&L to the previous day.
+ *
+ *  02:00 ET sits before the first session live can trade and after the CME 17:00-18:00 break, so a
+ *  whole trading morning now falls inside one accounting day with a fresh budget. Deliberately NOT
+ *  midnight: Asia (22:00-03:00) straddles it, and rolling mid-session would split one session's P&L
+ *  across two days. */
+const SESSION_RESET_ET_HOUR = 2.0;
+
 function checkSessionReset() {
   const now = new Date();
   const todayET = getETDateString();
   const etH = getETHour();
 
-  // Session reset at 9:29 AM ET — once per day (DST-aware, date-flag ensures no misses)
-  if (lastResetDate !== todayET && etH >= 9.483) { // 9:29 AM ET
+  // Session reset once per day (DST-aware, date-flag ensures no misses)
+  if (lastResetDate !== todayET && etH >= SESSION_RESET_ET_HOUR) {
     lastResetDate = todayET;
     for (const [sym, b] of barBuilders) {
       if (b.sessionBars.length > 0) {
@@ -5161,9 +5176,12 @@ async function main() {
     // Prevent checkSessionReset() from re-firing and overwriting the restored SOD.
     // Without this, lastResetDate is "" on restart → session reset fires on next tick →
     // overwrites SOD with current equity → Today P&L loses pre-restart trades.
-    // Only set if past the threshold — before 9:29 AM, we WANT the session reset to fire.
+    // Only set if past the threshold — before the roll hour, we WANT the session reset to fire.
+    // MUST use the same constant as checkSessionReset(): if these two ever disagree, a restart in the
+    // gap either re-fires the reset mid-session (wiping the SOD baseline and losing the day's P&L) or
+    // suppresses a reset that was still owed. They are one decision, so they read one number.
     const startupETH = getETHour();
-    if (startupETH >= 9.483) lastResetDate = getETDateString();
+    if (startupETH >= SESSION_RESET_ET_HOUR) lastResetDate = getETDateString();
     if (startupETH >= 15.833) lastEODDate = getETDateString();
     log(`[STARTUP] Loss-limit baseline restored: SOD $${startOfDayBalance.toFixed(2)}, intraday P&L $${dailyPnl.toFixed(2)}`);
 
