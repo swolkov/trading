@@ -12,6 +12,7 @@ import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, i
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 import { getPlanContextForGrading } from "../lib/advisor";
 import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, REALTIME_EDGES } from "../lib/realtime-edges";
+import { VAULT_SESSION_RULES } from "../lib/vault-session-gates";
 import { pickActiveContract } from "../lib/contract-months";
 
 
@@ -2889,18 +2890,12 @@ async function onBarClose(sym: string, bar: Bar) {
   if (vaultLessonsCache?.antiPatterns) {
     const ap = vaultLessonsCache.antiPatterns.toLowerCase();
 
-    // Map synthesis agent time buckets to engine session names.
-    // Synthesis buckets are now ET-aware (fixed June 2026):
-    //   first_30_min = 9:30-10:00 AM ET (open), last_30_min = 3:30-4:00 PM ET (real RTH close),
-    //   after_hours = 4:00 PM+ (ETH sessions: eth_evening, eth_asia, eth_europe, pre_market).
-    const sessionAntiPatterns: { pattern: string; sessions: string[]; label: string }[] = [
-      { pattern: "first_30_min", sessions: ["open", "morning"], label: "first 30 min" },
-      { pattern: "mid_morning", sessions: ["morning"], label: "mid-morning" },
-      { pattern: "midday", sessions: ["midday"], label: "midday/lunch" },
-      { pattern: "afternoon", sessions: ["afternoon"], label: "afternoon" },
-      { pattern: "last_30_min", sessions: ["close"], label: "last 30 min" },
-      { pattern: "after_hours", sessions: ["eth_evening", "eth_asia", "eth_europe", "pre_market"], label: "after hours / ETH" },
-    ];
+    // Bucket→session map now lives in lib/vault-session-gates.ts so the ADMIN can display exactly the
+    // gate the engine enforces. These anti-patterns are written automatically by the synthesis agent,
+    // so a future run could emit e.g. "mid_morning ... 22% win rate" and silently shut off live's
+    // primary window with no alert — a second copy of this table in the web app would eventually
+    // describe a gate that is not the one running. One table, both readers.
+    const sessionAntiPatterns = VAULT_SESSION_RULES;
 
     for (const rule of sessionAntiPatterns) {
       if (!ap.includes(rule.pattern)) continue;

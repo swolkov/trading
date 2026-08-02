@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { REALTIME_EDGES, isEdgeEnabled, type EngineMode } from "@/lib/realtime-edges";
+import { activeVaultGates } from "@/lib/vault-session-gates";
 
 /**
  * "Today's plan" read model for the Futures admin — answers *what will the engine actually do
@@ -98,8 +99,20 @@ export async function GET(req: Request) {
       edgeArmedNow: sym.includes("GC") ? armedNow.metals : armedNow.index,
     }));
 
+    // VAULT SESSION GATES — the synthesis agent can block a whole session automatically (currently
+    // midday at 27% win rate). Surfaced because it is otherwise INVISIBLE: the engine returns from
+    // onBarClose before indicators are computed, so a blocked session looks identical to a quiet one.
+    // If a future synthesis run ever emits mid_morning or first_30_min under 30%, it would shut off
+    // live's primary window and this is the only place that would say so.
+    let vaultGates: { session: string; label: string; winRate: number; effect: string }[] = [];
+    try {
+      const doc = await prisma.vaultDocument.findFirst({ where: { path: { contains: "anti-patterns" } } });
+      if (doc?.content) vaultGates = activeVaultGates(doc.content);
+    } catch { /* vault is advisory — never break the panel */ }
+
     return Response.json({
       mode,
+      vaultGates,
       engine: hb
         ? { alive: hbAgeSec !== null && hbAgeSec < 180, ageSec: hbAgeSec, session: hb.session, mdHealth: hb.mdHealth,
             positions: hb.positions, dailyTrades: hb.dailyTrades, dailyPnl: hb.dailyPnl }

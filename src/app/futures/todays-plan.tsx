@@ -25,6 +25,7 @@ interface PlanResp {
   schedule: { session: string; label: string; from: string; to: string; edges: { key: string; name: string }[]; tradable: boolean }[];
   symbols: SymState[];
   edges: { key: string; name: string; blurb: string; enabled: boolean }[];
+  vaultGates?: { session: string; label: string; winRate: number; effect: string }[];
 }
 
 /** Why is this symbol not able to open a trade right now? First blocking reason wins. */
@@ -89,6 +90,28 @@ export default function TodaysPlan({ mode = "live" }: { mode?: "live" | "demo" }
           </div>
         ))}
       </div>
+
+      {/* Vault session gates — automatic, written by the synthesis agent, and otherwise invisible:
+          a blocked session looks exactly like a quiet one because the engine returns before
+          indicators are computed. If one of these ever covers "morning", live stops trading. */}
+      {(data.vaultGates?.length ?? 0) > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400">
+            Vault session gates (automatic)
+          </div>
+          <div className="mt-1 space-y-0.5">
+            {data.vaultGates!.map((g, i) => (
+              <div key={i} className="text-xs text-muted-foreground">
+                <strong className="text-foreground">{g.session}</strong> — {g.effect === "block" ? "BLOCKED" : "half size"}:
+                {" "}{g.label} measured {g.winRate}% win rate
+                {["morning", "eth_europe"].includes(g.session) && (
+                  <span className="ml-1 font-semibold text-red-600"> ← this is a LIVE trading window</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* When it can trade */}
       <div>
