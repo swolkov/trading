@@ -1437,6 +1437,23 @@ function checkSessionReset() {
               log(`[EOD] Updated vault: ${today} SOD=$${sodBalance.toFixed(0)} EOD=$${Math.round(eodBalance)} P&L=${dayPnl >= 0 ? "+" : ""}$${dayPnl}`);
             }
           }
+          // ── END-OF-DAY DIGEST (2026-08-03) ────────────────────────────────────────────────
+          // Slack reported every individual event but never said what the DAY did, so the only way
+          // to know was to reassemble a stream of fragments or open the dashboard. Headline is
+          // BALANCE DELTA, never a sum of trade rows — summed rows have been wrong in this system
+          // before (double-logged, partially reconciled) and the balance is what the broker actually
+          // did. Isolated so a formatting or query error can never disturb the EOD flatten.
+          try {
+            const { buildDailyDigest } = await import("../lib/daily-digest");
+            const digest = await buildDailyDigest({
+              mode: IS_LIVE ? "live" : "demo",
+              balanceDelta, endBalance: eodBalance, engineDailyPnl: dailyPnl,
+              tradesToday: dailyTradeCount,
+              dailyLossLimit: tradovateEquity > 0 ? tradovateEquity * (riskConfig.dailyLossLimitPct / 100) : null,
+            });
+            log(digest);
+            await notify(digest, "futures");
+          } catch (err) { log(`[EOD] digest failed (non-fatal): ${err}`); }
         } catch { /* vault/reconciliation optional */ }
       } catch {}
     })();
