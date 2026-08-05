@@ -209,6 +209,35 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
       INDEX_LONG_SYMS.has(m.sym) && m.setupType === "trend_continuation" && m.direction === "long" &&
       m.session === "afternoon",
   },
+  // ── PROMOTED TO DEMO 2026-08-05 — evidence-gathering, NOT a validated edge ──────────────────
+  // The shadow tracker flagged this as the strongest unexplained signal in 2,036 declined setups,
+  // and it is the only one where the two engines AGREE independently on the same instrument and
+  // side: MES live n=23 +$3,766 t 3.01, ES demo n=23 +$96,180 t 2.97, with the long side carrying
+  // it on both (live t 1.69 / demo t 3.20) and the SHORT side flat-to-negative on both. Gold is
+  // NEGATIVE on live (-$1,008 over 87), so this is scoped to the index only.
+  //
+  // WHY IT IS NOT LIVE. Those numbers are COUNTERFACTUAL — no fills, zero slippage, and simplified
+  // management (no breakeven, no 1.1R trail). The engine-exact harness cannot arbitrate yet either:
+  // corrected, it returns PF 1.33 but on n=26 in three years against ~23 on MES in a month, a ~33x
+  // frequency gap that says the model does not reproduce the engine. Two untrustworthy sources do
+  // not make a trustworthy answer.
+  //
+  // Demo settles all three objections at once and at zero risk: real fills (slippage), real
+  // management (the full ladder), and real frequency. That is faster and more conclusive than
+  // fixing the harness. Promote to live ONLY on demo evidence that survives both halves — this is
+  // the 5th promising signal to reach this stage and four of the previous four died here.
+  {
+    key: "index_or_breakout_long",
+    name: "Index opening-range breakout — LONG (demo trial)",
+    blurb: "MNQ/MES — buy the break above the RTH opening range on >1.5x volume, morning only.",
+    symbolClass: "index",
+    evidence:
+      "NOT VALIDATED — on demo to gather real fills. Shadow (counterfactual, no slippage): MES live n=23 +$3,766 t 3.01; ES demo n=23 +$96,180 t 2.97; long side carries it on both engines, short side flat-to-negative, gold negative on live. Engine-exact harness gives PF 1.33 (n=26, train 0.94 / test 2.38) — fails the train half AND fires 33x less often than live, so it cannot arbitrate. 98% of these signals clear the R:R>=2 gate (median 4.89), so unlike gap_fill the shadow figure is not an R:R artifact. Demo answers slippage, management and frequency at once.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) =>
+      INDEX_LONG_SYMS.has(m.sym) && m.setupType === "or_breakout" && m.direction === "long",
+  },
 ];
 
 /** Find the registered edge an evaluated setup belongs to, or null (→ default-deny / skip). */
