@@ -203,7 +203,53 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
         stopDist = adjustedATR * 1.5; targetDist = currentATR * 3.5;
         if (price > ema200) edge = "index_oversold_long_above200";   // dip-buy in an uptrend vs falling knife
       }
-      else continue; // an extreme-RSI bar that fails the gate is consumed by the engine either way
+      // FALL THROUGH — do NOT consume the bar (corrected 2026-08-05). This previously did
+      // `else continue`, on the belief that "an extreme-RSI bar that fails the gate is consumed by
+      // the engine either way". IT IS NOT. futures-realtime.ts returns from the extreme-RSI block
+      // ONLY when the setup actually fires (score >= 75); a sub-75 score, or a volume surge, falls
+      // through to gap_fill / or_breakout / trend_continuation. Breakouts characteristically carry
+      // elevated RSI — a live OR BREAKOUT was observed at RSI 79 — so the old behaviour starved
+      // every later setup of precisely the bars they live on, and understated their frequency by
+      // roughly 50x on or_breakout. This biased EVERY result this harness produced for a setup
+      // evaluated after SETUP 0, including index_trend_long.
+    }
+
+    // SETUP 1b — OPENING-RANGE BREAKOUT (added 2026-08-05). Engine order: this is evaluated BEFORE
+    // trend_continuation and `return`s on a >=75 score, so it must sit here to consume the same bars
+    // the engine consumes. Modelled exactly: dayType trend, OR complete, orSize > 0.3*ATR, price
+    // beyond the OR edge on >1.5x volume, scoreSetup base 65, stop = max(orSize*0.5, adjustedATR),
+    // target = orSize*2.5.
+    //
+    // NO LOOK-AHEAD: orH/orL are precomputed over the first 12 RTH bars (09:30-10:30), so they are
+    // only legitimate from 10:30 onward. The engine enforces this via orBarCount>=12; here it is the
+    // explicit hour>=10.5 guard. Reading the OR before it closes would invent a profitable edge.
+    if (!edge && bar.hour >= 10.5 && session === "morning") {
+      const orHi = orH.get(bar.day), orLo = orL.get(bar.day);
+      const orSize = (orHi != null && orLo != null) ? orHi - orLo : 0;
+      const pdH2 = prevDay.get(bar.day) != null ? dayHi.get(prevDay.get(bar.day)!) ?? 0 : 0;
+      const pdL2 = prevDay.get(bar.day) != null ? dayLo.get(prevDay.get(bar.day)!) ?? 0 : 0;
+      const outside = (pdH2 > 0 && price > pdH2) || (pdL2 > 0 && price < pdL2);
+      const dayTypeORB = outside || orSize > currentATR * 0.5 ? "trend" : "range";
+      if (dayTypeORB === "trend" && orSize > currentATR * 0.3 && orHi != null && orLo != null) {
+        const isLongB = price > orHi && volRatio > 1.5;
+        const isShortB = price < orLo && volRatio > 1.5;
+        if (isLongB || isShortB) {
+          let sc = 65;
+          if (volTrend === "surge" && volRatio > 2) sc += 8;
+          else if (volTrend === "declining") sc += 5;
+          else if (volTrend === "dry") sc -= 5;
+          sc += (isLongB ? t15 === "up" : t15 === "down") ? 10 : -10;
+          const vw = vwapDay === bar.day && cumV > 0 ? cumPV / cumV : price;
+          if (isLongB ? price > vw : price < vw) sc += 3;
+          sc += sessScore;
+          if (Math.max(0, Math.min(100, sc)) >= 75) {
+            edge = isLongB ? "or_breakout_long" : "or_breakout_short";
+            dir = isLongB ? "long" : "short";
+            stopDist = Math.max(orSize * 0.5, adjustedATR);
+            targetDist = orSize * 2.5;
+          }
+        }
+      }
     }
 
     // SETUP 2 — trend continuation (long only per the registry)
@@ -332,7 +378,8 @@ for (const sym of syms) {
   const SHORTS = ["index_trend_short", "index_trend_short_below200"];
   const OBS = ["index_overbought_short", "index_overbought_short_below200"];
   const OSL = ["index_oversold_long", "index_oversold_long_above200"];
-  for (const e of ["index_trend_long", ...OBS, "ALL_OBS", ...OSL, "ALL_OSL", ...SHORTS, "ALL_TREND_SHORT"]) {
+  const ORB = ["or_breakout_long", "or_breakout_short"];
+  for (const e of ["index_trend_long", ...ORB, ...OBS, "ALL_OBS", ...OSL, "ALL_OSL", ...SHORTS, "ALL_TREND_SHORT"]) {
     if (e === "ALL_OSL") {
       const both = all.filter(t => OSL.includes(t.edge));
       if (both.length) console.log(`  ${"oversold-long (both)".padEnd(13)} ` + f(stats(both)).padEnd(56) + half(both));
