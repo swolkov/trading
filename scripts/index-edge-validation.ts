@@ -189,7 +189,21 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
         // Tests the hypothesis behind demo's 7-trade streak: those wins came in a hard down-market,
         // so if the edge is real it should live entirely in the below-200 bucket.
         if (price < ema200) edge = "index_overbought_short_below200";
-      } else continue; // an extreme-RSI bar that fails the gate is consumed by the engine either way
+      }
+      // INDEX RSI-OVERSOLD LONG (added 2026-08-05). Matches NO registered edge, so live never takes
+      // it — and because this harness used to `continue` past every oversold bar, it had never been
+      // BACKTESTED either. The live shadow tracker flagged it: 55 declined index RSI longs worth
+      // +$1,947 counterfactual, t 2.32 on the long side. Unlike gap_fill (whose shadow number was an
+      // artifact of R:R geometry — only 6.8-28.2% of its signals ever clear the 2.0 gate) this
+      // setup's R:R is 3.5/1.5 = 2.33 BY CONSTRUCTION, so it always clears and the shadow number is
+      // not inflated by that mechanism. That makes it the one lead worth an engine-exact test.
+      // Modelled with the engine's own geometry and the same >=75 score gate; mirror of the short.
+      else if (Math.max(0, Math.min(100, sc)) >= 75 && isOversold && rsi <= 20) {
+        edge = "index_oversold_long"; dir = "long";
+        stopDist = adjustedATR * 1.5; targetDist = currentATR * 3.5;
+        if (price > ema200) edge = "index_oversold_long_above200";   // dip-buy in an uptrend vs falling knife
+      }
+      else continue; // an extreme-RSI bar that fails the gate is consumed by the engine either way
     }
 
     // SETUP 2 — trend continuation (long only per the registry)
@@ -317,7 +331,13 @@ for (const sym of syms) {
   // together answer "does the short work, and does the regime filter help it?"
   const SHORTS = ["index_trend_short", "index_trend_short_below200"];
   const OBS = ["index_overbought_short", "index_overbought_short_below200"];
-  for (const e of ["index_trend_long", ...OBS, "ALL_OBS", ...SHORTS, "ALL_TREND_SHORT"]) {
+  const OSL = ["index_oversold_long", "index_oversold_long_above200"];
+  for (const e of ["index_trend_long", ...OBS, "ALL_OBS", ...OSL, "ALL_OSL", ...SHORTS, "ALL_TREND_SHORT"]) {
+    if (e === "ALL_OSL") {
+      const both = all.filter(t => OSL.includes(t.edge));
+      if (both.length) console.log(`  ${"oversold-long (both)".padEnd(13)} ` + f(stats(both)).padEnd(56) + half(both));
+      continue;
+    }
     if (e === "ALL_OBS") {
       const both = all.filter(t => OBS.includes(t.edge));
       if (both.length) console.log(`  ${"obs (both)".padEnd(13)} ` + f(stats(both)).padEnd(56) + half(both));
