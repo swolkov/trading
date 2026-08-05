@@ -96,6 +96,17 @@ export default function EdgeTruth() {
           From the broker-reconciled ledger, not the trade log. <strong>Read the t-stat, not the P&amp;L</strong> —
           under 2 it cannot be distinguished from luck, however good the dollars look.
         </p>
+        {/* These two panels legitimately disagree and a reader cannot tell which to believe unless we
+            say so. The scoreboard above counts only trades it can attribute to a registered edge, from
+            autoTradeLog (fragmented, historically double-logged). This counts EVERY closed position
+            from broker fills, including ones whose edge could not be identified. Same page, different
+            questions — so name the difference rather than let it read as a contradiction. */}
+        <p className="mt-1 text-[11px] text-muted-foreground/80">
+          Totals here will differ from the Edge Scoreboard above: that one counts only trades it can
+          attribute to a registered edge (from the trade log), while this counts <em>every</em> closed
+          position from broker fills — including any whose edge could not be identified. When they
+          disagree, <strong>this is the authoritative one</strong>; it is sourced from actual fills.
+        </p>
       </div>
 
       <EdgeTable title="Live · real money" data={data.live} />
