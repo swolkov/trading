@@ -719,13 +719,16 @@ const barBuilders: Map<string, {
   openingRangeHigh: number;
   openingRangeLow: number;
   barCount: number;
+  /** Bars counted INSIDE the RTH opening hour — drives the opening range. Separate from barCount,
+   *  which counts from the accounting-day reset and no longer starts at the RTH open. */
+  orBarCount: number;
 }> = new Map();
 
 function initBarBuilder(sym: string) {
   barBuilders.set(sym, {
     currentBar: null, bars5m: [], sessionBars: [], lastPrice: 0, lastVolume: 0,
     prevDayHigh: 0, prevDayLow: 0, prevDayClose: 0,
-    openingRangeHigh: 0, openingRangeLow: 0, barCount: 0,
+    openingRangeHigh: 0, openingRangeLow: 0, barCount: 0, orBarCount: 0,
   });
 }
 
@@ -861,7 +864,16 @@ function onPrice(sym: string, price: number, volume: number, reliable = true, qu
       if (b.sessionBars.length > MAX_SESSION_BARS) b.sessionBars.shift();
       b.barCount++;
 
-      if (b.barCount <= 12) {  // Initial Balance is first 60 min (institutional standard)
+      // OPENING RANGE = the first 60 min of RTH (institutional standard), gated on the CLOCK.
+      // It used to key off barCount<=12, i.e. the first 12 bars after the accounting-day reset. That
+      // was equivalent while the reset sat at 9:29 AM, but the reset moved to 02:00 ET on 2026-08-02
+      // (so a losing day could not disable the next morning's London window) — which silently
+      // redefined the "opening range" as 02:00-03:00 ET, the London hour. That is not just wrong for
+      // or_breakout/failed_ib/ib_extension; orSize also feeds dayType, and dayType gates
+      // trend_continuation, which is live's main edge. Clock-gating restores the intended meaning
+      // and makes it independent of when the accounting day rolls.
+      if (getETHour() >= 9.5 && b.orBarCount < 12) {
+        b.orBarCount++;
         b.openingRangeHigh = Math.max(b.openingRangeHigh, completed.h);
         b.openingRangeLow = b.openingRangeLow === 0 ? completed.l : Math.min(b.openingRangeLow, completed.l);
       }
@@ -1320,7 +1332,7 @@ function checkSessionReset() {
         b.prevDayLow = Math.min(...b.sessionBars.map(x => x.l));
         b.prevDayClose = b.sessionBars[b.sessionBars.length - 1].c;
       }
-      b.sessionBars = []; b.openingRangeHigh = 0; b.openingRangeLow = 0; b.barCount = 0;
+      b.sessionBars = []; b.openingRangeHigh = 0; b.openingRangeLow = 0; b.barCount = 0; b.orBarCount = 0;
       log(`Session reset ${sym} — PDH:${b.prevDayHigh.toFixed(2)} PDL:${b.prevDayLow.toFixed(2)}`);
     }
     dailyTradeCount = 0; dailyPnl = 0; stoppedSymbols.clear(); consecutiveStops = 0; tiltPauseUntil = 0;
@@ -3187,7 +3199,7 @@ async function onBarClose(sym: string, bar: Bar) {
 
   // SETUP 1: Opening Range (IB) Breakout (trend days, morning/COMEX open, after IB complete)
   const isMorningSession = session === "morning" || (METALS.has(sym) && sizeMult >= 0.7);
-  if (dayType === "trend" && isMorningSession && b.barCount >= 12 && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
+  if (dayType === "trend" && isMorningSession && b.orBarCount >= 12 && b.openingRangeHigh > 0 && orSize > currentATR * 0.3) {
     const isLong = price > b.openingRangeHigh && volRatio > 1.5;
     const isShort = price < b.openingRangeLow && volRatio > 1.5;
 
@@ -3216,7 +3228,7 @@ async function onBarClose(sym: string, bar: Bar) {
   }
 
   // SETUP: FAILED IB BREAKOUT (fade the failure — high edge reversal)
-  if (b.barCount >= 13 && b.openingRangeHigh > 0 && (session === "morning" || session === "midday" || session === "afternoon")) {
+  if (b.orBarCount >= 12 && b.openingRangeHigh > 0 && (session === "morning" || session === "midday" || session === "afternoon")) {
     // Check if we recently tested above IB high or below IB low (within last 6 bars)
     const recentBars = bars.slice(-6);
     const testedHigh = recentBars.some(x => x.h > b.openingRangeHigh);
@@ -3255,7 +3267,7 @@ async function onBarClose(sym: string, bar: Bar) {
 
   // SETUP: IB EXTENSION (after first hour, price breaks IB range → target 1.5x extension)
   // Statistical tendency: 80%+ chance of reaching 1.5x IB extension on trend days
-  if (b.barCount >= 12 && b.barCount <= 36 && b.openingRangeHigh > 0 && orSize > currentATR * 0.4 &&
+  if (b.orBarCount >= 12 && b.barCount <= 36 && b.openingRangeHigh > 0 && orSize > currentATR * 0.4 &&
       (session === "morning" || session === "midday")) {
     const ext15 = orSize * 1.5; // 1.5x extension target
     const breakAbove = price > b.openingRangeHigh && price < b.openingRangeHigh + ext15;
@@ -3451,7 +3463,7 @@ async function onBarClose(sym: string, bar: Bar) {
 
   // SETUP 5: Range Bounce — mean reversion at prev day high/low or session extremes
   // Works in CHOPPY/RANGE markets where price oscillates between levels
-  if (dayType === "range" && b.barCount >= 12 && b.prevDayHigh > 0 && b.prevDayLow > 0) {
+  if (dayType === "range" && b.orBarCount >= 12 && b.prevDayHigh > 0 && b.prevDayLow > 0) {
     const distToPDH = Math.abs(price - b.prevDayHigh);
     const distToPDL = Math.abs(price - b.prevDayLow);
     const levelTolerance = currentATR * 0.5;
