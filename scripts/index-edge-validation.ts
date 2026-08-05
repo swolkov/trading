@@ -57,10 +57,15 @@ const SPEC: Record<string, { ptVal: number; tick: number; label: string }> = {
   YM: { ptVal: 0.5, tick: 1, label: "YM → MYM ($0.50/pt)" },
 };
 const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
-const BREAKEVEN_R = 0.6, TRAIL_R = 1.1;
+// Exit-management parameters. Overridable so they can be SWEPT — live is capturing avg win 0.59R
+// against a 2.33R target (96% of winners never reach 1R) while losses run to -0.93R, which forces a
+// 61% breakeven win rate. The exits, not the entries, are the binding constraint on expectancy.
+const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.6;
+const TRAIL_R = parseFloat(process.env.G_TRAIL_R || "") || 1.1;
 const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
-const TRAIL_ATR_MULT = 0.9 * 1.5;   // index
-const PROFIT_LOCK_FRAC = 0.65, BUFFER = 200;
+const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 0.9) * 1.5;   // index
+const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
+const BUFFER = 200;
 
 const etFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 const offCache = new Map<number, number>();

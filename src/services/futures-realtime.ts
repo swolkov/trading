@@ -2060,7 +2060,15 @@ function checkPositions(sym: string, price: number, reliable = true) {
     if (currentATRVal > 0) {
       // Tightened: gold was 1.5 (→ 2.25× ATR ≈ 12+ pts behind) which let a +$170 gain trail out at +$25.
       // Now gold trails ~1.5× ATR, index ~1.35× ATR.
-      const atrMult = METALS.has(sym) ? 1.0 : 0.9;
+      // Index trail widened 0.9 -> 1.4 on 2026-08-05. The trail sat at 0.9*1.5 = 1.35x ATR against a
+      // 1.5x ATR stop — i.e. 90% of the stop distance — so a trade that reached the 1.1R trigger was
+      // stopped out by a 0.9R pullback. Live proved it: avg WIN 0.59R against a 2.33R target, 96% of
+      // winners never reaching 1R, while losses ran to -0.93R. That turns a designed 2.33:1 into an
+      // actual 0.63:1 and forces a 61% breakeven win rate.
+      // METALS DELIBERATELY UNCHANGED: the same widening was tested on gold and made it WORSE —
+      // morning short PF 1.67 -> 1.47 (net $1,361 -> $957). Gold's edge depends on banking quickly;
+      // the index's depends on letting winners run. One global number cannot serve both.
+      const atrMult = METALS.has(sym) ? 1.0 : 1.4;
       let rawTrail = pos.direction === "long" ? price - currentATRVal * atrMult * 1.5 : price + currentATRVal * atrMult * 1.5;
 
       // PROFIT-LOCK RATCHET: once the trade has been up ≥1.0R, never give back more than ~35% of the
@@ -2068,7 +2076,10 @@ function checkPositions(sym: string, price: number, reliable = true) {
       // actually get protected — the trailing stop alone can't bank profit on a 1-contract account.
       const peak = pos.peakDiff ?? diff;
       if (peak >= stopDist * 1.0) {
-        const lockDist = peak * 0.65; // protect 65% of the peak favorable move
+        // Give back more of the peak on the INDEX so a runner is not ratcheted shut at ~0.7R; gold
+        // keeps 0.65 because banking early is what makes its morning short work (see atrMult above).
+        const lockFrac = METALS.has(sym) ? 0.65 : 0.45;
+        const lockDist = peak * lockFrac; // protect this share of the peak favorable move
         const lockStop = pos.direction === "long" ? pos.entryPrice + lockDist : pos.entryPrice - lockDist;
         rawTrail = pos.direction === "long" ? Math.max(rawTrail, lockStop) : Math.min(rawTrail, lockStop);
       }

@@ -62,8 +62,8 @@ const ATR_SCALE_METALS = 1.5;
 const VIX_STOP_MULT = 1.0;
 const BREAKEVEN_R = 0.6, TRAIL_R = 1.1;
 const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
-const TRAIL_ATR_MULT = 1.0 * 1.5;   // metals
-const PROFIT_LOCK_FRAC = 0.65;
+const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 1.0) * 1.5;   // metals
+const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
 const BUFFER = 200;                  // engine's bars5m cap
 
 const etFmt = new Intl.DateTimeFormat("en-US", {
