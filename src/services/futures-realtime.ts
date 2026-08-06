@@ -1478,6 +1478,14 @@ interface Position {
   symbol: string; contractId: number; direction: "long" | "short";
   quantity: number; entryPrice: number; stopLoss: number; target: number;
   trailStop: number | null; reachedBreakeven: boolean;
+  // ORIGINAL stop, captured at entry and NEVER mutated. `stopLoss` above moves — to breakeven at
+  // 0.6R, then up the profit-lock ratchet — so by the time a winner closes it sits at or near the
+  // exit. Risk is defined by the stop the trade was SIZED against, so every R-multiple must divide
+  // by this, not by whatever the stop had become. Using the moved stop silently recorded 41 of 48
+  // winning trend_continuation trades as EXACTLY 0.00R (breakeven moves the stop to entryPrice, so
+  // |entry - stop| = 0 and the divide-by-zero guard returned 0), which taught pattern memory that
+  // both profitable setups were losers. See the 2026-08-06 fix in deferredPnlCheck().
+  entryStopLoss: number;
   peakDiff?: number; // high-water-mark: best favorable excursion (points) — drives the profit-lock ratchet
   stopOrderId: number | null; targetOrderId: number | null;
   entryTime: number;
@@ -1791,6 +1799,7 @@ async function loadPositions() {
         stopOrderId: null,
         targetOrderId: null,
         entryTime: new Date(tp.timestamp).getTime(),
+        entryStopLoss: stopLoss,
         scaledOut: false, originalQty: qty, consecutiveStops: 0,
         pyramided: false,
         entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
@@ -2330,6 +2339,7 @@ interface CloseMeta {
   entryTrend15m: string;
   entryDayType: string;
   entrySetupType: string;
+  entryStopLoss: number;   // ORIGINAL stop — the R denominator. Never the moved stop.
 }
 
 // Auto-clean phantom close-rows: a close attempt that never reconciled to a real fill (double-close /
@@ -2358,7 +2368,7 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
   const storeOutcomePattern = async (outcome: "win" | "loss", pnlRVal: number) => {
     try {
       const { storePattern } = await import("../lib/pattern-memory");
-      const sd = Math.abs(meta.entryPrice - meta.stopLoss);
+      const sd = Math.abs(meta.entryPrice - (meta.entryStopLoss || meta.stopLoss));
       await storePattern({
         regime: cachedRegime,
         session: meta.entrySession,
@@ -2412,7 +2422,7 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         // trade. Without this, unmatched-fill trades (disproportionately wins closed via fuzzy paths)
         // were dropped, biasing pattern memory toward losses. The reconciliation cron corrects $ P&L
         // later; this only feeds the win/loss + R signal the AI grader learns from.
-        const sd = Math.abs(meta.entryPrice - meta.stopLoss);
+        const sd = Math.abs(meta.entryPrice - (meta.entryStopLoss || meta.stopLoss));
         const estDiff = meta.mult > 0 && meta.quantity > 0 ? meta.estimatedPnl / (meta.mult * meta.quantity) : 0;
         const estR = sd > 0 ? estDiff / sd : 0;
         await storeOutcomePattern(meta.estimatedPnl >= 0 ? "win" : "loss", estR);
@@ -2426,7 +2436,9 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
     const fillPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
     const diff = meta.direction === "long" ? fillPrice - meta.entryPrice : meta.entryPrice - fillPrice;
     const realPnl = diff * meta.mult * meta.quantity;
-    const stopDist = Math.abs(meta.entryPrice - meta.stopLoss);
+    // Divide by the ORIGINAL stop, not meta.stopLoss — that one has been ratcheted to (or past)
+    // the exit on every winner, which recorded them all as 0.00R. See Position.entryStopLoss.
+    const stopDist = Math.abs(meta.entryPrice - (meta.entryStopLoss || meta.stopLoss));
     const pnlR = stopDist > 0 ? diff / stopDist : 0;
 
     log(`[DEFERRED] ${meta.sym}: Fill price $${fillPrice.toFixed(2)} | Real P&L: $${realPnl.toFixed(2)} | R: ${pnlR.toFixed(1)} (was est $${meta.estimatedPnl.toFixed(0)})`);
@@ -2683,6 +2695,8 @@ async function closePosition(sym: string, price: number, reason: string) {
       entryTrend15m: pos.entryTrend15m || "flat",
       entryDayType: pos.entryDayType || "unknown",
       entrySetupType: pos.entrySetupType || "unknown",
+      // Fall back to the live stop only for positions predating this field (restored from JSON).
+      entryStopLoss: pos.entryStopLoss || pos.stopLoss,
     };
     // First check after 15s, retry at 60s if no fill yet
     setTimeout(() => deferredPnlCheck(closeMeta, 1), 15_000);
@@ -4113,6 +4127,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       entryPrice, stopLoss: stopPrice, target: targetPrice,
       trailStop: null, reachedBreakeven: false,
       stopOrderId, targetOrderId, entryTime: Date.now(),
+      entryStopLoss: stopPrice,
       scaledOut: false, originalQty: fillQty, consecutiveStops: 0,
       pyramided: false,
       entryRsi: setupContext?.rsi ?? 50,
@@ -4448,6 +4463,7 @@ async function syncPositions() {
         stopOrderId: null,
         targetOrderId: null,
         entryTime: Date.now(),
+        entryStopLoss: stopLoss,
         pyramided: false,
         entryRsi: 50, entryVwap: 0, entryTrend15m: "flat", entryDayType: "unknown", entrySession: getSessionName(),
         entrySetupType: "unknown",
