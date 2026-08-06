@@ -1890,7 +1890,23 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // PROFIT-LOCK LADDER (in R = multiples of stop distance). Pulled EARLY so a trade that goes our
   // way doesn't round-trip back to a full stop — the old ladder only armed at 1R (≈15% of a $1k
   // account), so almost nothing was ever protected before it reversed. Lock capital fast, then bank.
-  const BREAKEVEN_R = 0.6;  // move broker stop to entry once up 0.6R — winner can no longer become a loser
+  // Move the broker stop to entry once up this many R — a winner can no longer become a loser.
+  //
+  // 0.6 -> 0.8 (2026-08-06), on CONVERGENT evidence from two independent methods:
+  //   scripts/index-edge-validation.ts, NQ index_trend_long morning, at live's REAL geometry
+  //     (stop 1.4x ATR / target 5.0x — see that file; it had been hardcoding 1.5/4.0):
+  //       BE 0.4 PF 1.05 ($1,209) | 0.6 PF 1.08 ($2,300) | 0.8 PF 1.14 ($3,884, halves 1.14/1.14)
+  //   scripts/live-exit-forensics.ts, replaying 44 REAL broker fills (live+demo):
+  //       BE 0.6 +0.395R/trade 64% win  ->  BE 0.8 +0.412R/trade 70% win  (best of 17 variants)
+  // Both agree, and the mechanism is the same in each: arming breakeven at 0.6R scratches trades
+  // that were still working. Win rate rises because fewer winners get flattened, not because more
+  // trades win. RISK IS UNCHANGED -- this only delays when the stop moves UP to entry; the original
+  // bracket stop governs the loss until then.
+  //
+  // ⚠️ My earlier "0.6 is optimal" was measured at the harness's WRONG hardcoded geometry and never
+  // tested 0.8 on real fills. Re-verify against live-exit-forensics.ts before moving this again.
+  // Revert = put 0.6 back.
+  const BREAKEVEN_R = 0.8;
   const SCALE_R = 1.0;      // take 50% off once up 1R (only possible at ≥2 contracts / larger accounts)
   const TRAIL_R = 1.1;      // start trailing just ABOVE the scale level — banks the move on a 1-contract
                             // position, and the offset stops scale-out + trail racing the broker stop on one tick

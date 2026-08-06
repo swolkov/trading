@@ -59,23 +59,23 @@ const SPEC: Record<string, { ptVal: number; tick: number; label: string }> = {
 const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
 // Exit-management parameters, overridable so they can be SWEPT.
 //
-// WHAT THE SWEEP ESTABLISHED (2026-08-06) — do not re-derive this the hard way:
-//   1. THE TARGET NEVER FIRES. G_TGT 3.5 / 3.0 / 2.5 ATR all return the IDENTICAL net ($2,846) —
-//      the trail or the profit-lock always exits first. Live agrees: 23 winners, 0 ever reached
-//      2.33R, best 1.92R. So "avg win vs the 2.33R target" is a MEANINGLESS comparison, and any
-//      avg-win goal derived from that target (e.g. "should reach 0.8R") is unfounded. Deleted.
-//   2. THE LOCK IS THE BINDING PARAMETER, NOT THE TRAIL. At G_TRAIL_ATR 1.4 the trail is 2.1x ATR,
-//      wider than the entire 1.5x ATR stop, so it sits below entry until a trade peaks past ~1.4R
-//      and rarely binds. Lock 0.45 vs 0.65 swings net $2,846 vs $1,065; trail 1.4 vs 0.9 at a fixed
-//      lock swings only $2,846 vs $2,087.
-//   3. 0.45 IS CHOSEN FOR STABILITY, NOT JUST NET. Locks of 0.20/0.30 score a similar PF but their
-//      halves disagree (1.02/1.17, 1.06/1.15) = fitted to one period. 0.45 gives 1.11/1.10.
+// ⚠️ 2026-08-06 — I briefly declared this script BROKEN because G_STOP=1.5 and 1.4 produced
+// byte-identical output. THAT WAS MY BUG, NOT THE SCRIPT'S. I had only wired STOP_ATR_MULT /
+// TARGET_ATR_MULT into the extreme-RSI setups (index_overbought_short, index_oversold_long) and
+// NOT into index_trend_long / index_trend_short, whose stops were hardcoded further down. The knob
+// genuinely did nothing to the row I was reading. All four sites are wired now — verify any new
+// parameter reaches EVERY setup that the row you are grepping actually uses.
 //
-// The real benchmark is EXPECTANCY, and live is not underperforming this harness — it reaches the
-// same place by a different route. Live: 66% win, 0.58R avg win, -0.93R avg loss = +0.067R. This
-// harness: 38% win, ~1.67R avg win, same avg loss = +0.058R. Live's confidence>=75 gate, grader and
-// pattern memory select a narrower population that wins often and small; the harness takes everything
-// and wins rarely and big. Same edge, same expectancy, different point on the curve.
+// GEOMETRY NOW MATCHES LIVE: stop 1.4x ATR, target 5.0x ATR (live_futures_atr_stop_multiplier /
+// _atr_target_multiplier, verified from AgentConfig). This script previously hardcoded 1.5 / 4.0
+// for the trend setups, so every pre-2026-08-06 number it produced described a configuration the
+// account was NOT trading.
+//
+// STILL TRUE, and the reason its ABSOLUTE numbers must not be quoted against live: it fires ~3x
+// more often than production (no confidence>=75 engine gate, no grader, no pattern memory, no
+// correlation guard), so it trades a much worse population. Use it for RELATIVE comparisons.
+// For anything exit-related prefer scripts/live-exit-forensics.ts, which replays REAL broker fills.
+//
 const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.6;
 const TRAIL_R = parseFloat(process.env.G_TRAIL_R || "") || 1.1;
 const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
@@ -299,7 +299,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
           sc += sessScore;
           if (Math.max(0, Math.min(100, sc)) >= 75) {
             edge = "index_trend_long"; dir = "long";
-            stopDist = adjustedATR * 1.5; targetDist = adjustedATR * 4.0;
+            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
           }
         }
         // SHORT side — added 2026-07-29. The engine ALREADY generates these (futures-realtime.ts
@@ -316,7 +316,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
           sc += sessScore;
           if (Math.max(0, Math.min(100, sc)) >= 75) {
             edge = "index_trend_short"; dir = "short";
-            stopDist = adjustedATR * 1.5; targetDist = adjustedATR * 4.0;
+            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
             // Flag whether the SYMMETRIC 200-EMA filter would also have passed, so the report can
             // test "shorts only below the 200-EMA" without a second run.
             if (price < ema200) edge = "index_trend_short_below200";
