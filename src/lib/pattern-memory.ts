@@ -30,9 +30,27 @@ export interface SetupVector {
   dollarTrend: "rising" | "falling" | "flat";
   bondTrend: "rising" | "falling" | "flat";
 
+  // WHICH ENGINE PRODUCED THIS (2026-08-06). Demo and live share ONE pattern_memory key, and before
+  // this field they were blended: 101 demo vectors (NQ/ES, full-size) were mixed with 55 live ones
+  // (MNQ/MES/MGC, micros), so the live engine was predicting off demo's outcomes and vice versa.
+  // That is why memory reported a 52% win rate for trend_continuation where live's own ledger showed
+  // 66%. Absent (legacy) records are classified by instrument: micros -> live, full-size -> demo.
+  mode?: "live" | "demo";
+
   // Outcome (filled after trade completes)
   outcome?: "win" | "loss";
   pnlR?: number; // P&L in R-multiples
+}
+
+/** Legacy vectors predate `mode`. Live trades micros only; demo trades full-size. */
+const MICRO = /^M(NQ|ES|GC|YM|BT|ET)$/;
+export function vectorMode(v: { mode?: string; instrument?: string }): "live" | "demo" {
+  if (v.mode === "live" || v.mode === "demo") return v.mode;
+  return MICRO.test(String(v.instrument || "")) ? "live" : "demo";
+}
+/** The engine sets ENGINE_MODE; anything not explicitly demo is treated as live. */
+export function currentMode(): "live" | "demo" {
+  return process.env.ENGINE_MODE === "demo" ? "demo" : "live";
 }
 
 // Store a completed trade's setup for future pattern matching
@@ -41,7 +59,7 @@ export async function storePattern(vector: SetupVector): Promise<void> {
     await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } }); // existence check
     const existing = await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } });
     const patterns: SetupVector[] = existing?.value ? JSON.parse(existing.value) : [];
-    patterns.push(vector);
+    patterns.push({ ...vector, mode: vector.mode ?? currentMode() });
     // Keep last 1000 patterns (rolling window)
     const trimmed = patterns.slice(-1000);
     await prisma.agentConfig.upsert({
@@ -59,7 +77,11 @@ export async function correctPattern(
   direction: "long" | "short",
   oldOutcome: "win" | "loss",
   newOutcome: "win" | "loss",
-  newPnlR: number,
+  // null = correct the win/loss classification but LEAVE pnlR ALONE. Callers that cannot establish
+  // the trade's true risk must pass null rather than invent a denominator: the previous caller
+  // divided by |exitPrice - entryPrice|, which is the exit distance, so it returned exactly +/-1.0R
+  // by construction for every corrected trade regardless of what was actually risked.
+  newPnlR: number | null,
 ): Promise<boolean> {
   try {
     const existing = await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } });
@@ -71,7 +93,8 @@ export async function correctPattern(
     let matchIdx = -1;
     for (let i = patterns.length - 1; i >= 0; i--) {
       const p = patterns[i];
-      if (p.instrument === instrument && p.direction === direction && p.outcome === oldOutcome) {
+      if (p.instrument === instrument && p.direction === direction && p.outcome === oldOutcome
+          && vectorMode(p) === currentMode()) {
         matchIdx = i;
         break;
       }
@@ -80,7 +103,7 @@ export async function correctPattern(
     if (matchIdx === -1) return false;
 
     patterns[matchIdx].outcome = newOutcome;
-    patterns[matchIdx].pnlR = newPnlR;
+    if (newPnlR !== null && Number.isFinite(newPnlR)) patterns[matchIdx].pnlR = newPnlR;
 
     await prisma.agentConfig.upsert({
       where: { key: "pattern_memory" },
@@ -105,7 +128,9 @@ export async function predictOutcome(current: Omit<SetupVector, "outcome" | "pnl
     const stored = await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } });
     if (!stored?.value) return { matchCount: 0, winRate: 0.5, avgPnlR: 0, score: 50, topMatches: [] };
 
-    const patterns: SetupVector[] = JSON.parse(stored.value).filter((p: SetupVector) => p.outcome);
+    const mode = currentMode();
+    const patterns: SetupVector[] = JSON.parse(stored.value)
+      .filter((p: SetupVector) => p.outcome && vectorMode(p) === mode);
 
     if (patterns.length < 10) return { matchCount: patterns.length, winRate: 0.5, avgPnlR: 0, score: 50, topMatches: [] };
 
@@ -158,8 +183,10 @@ export async function getSetupTypeHealth(setupType: string, lookback = 30): Prom
     const stored = await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } });
     if (!stored?.value) return { matchCount: 0, winRate: 0.5, avgR: 0, expectancy: 0, recentTrend: "stable", shouldDisable: false };
 
+    // Mode-scoped: never let demo's outcomes retire or endorse a LIVE setup, or vice versa.
+    const mode = currentMode();
     const all: SetupVector[] = JSON.parse(stored.value)
-      .filter((p: SetupVector) => p.outcome && p.setupType === setupType);
+      .filter((p: SetupVector) => p.outcome && p.setupType === setupType && vectorMode(p) === mode);
     if (all.length < lookback) {
       // Not enough data to make a disable decision — keep firing.
       const wr = all.length > 0 ? all.filter((p) => p.outcome === "win").length / all.length : 0.5;

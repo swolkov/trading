@@ -385,8 +385,14 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
                 const { correctPattern } = await import("./pattern-memory");
                 const sym = matchingExit.symbol.replace("FUT:", "");
                 const direction = matchingExit.action.includes("long") || matchingExit.action.includes("buy") ? "long" : "short";
-                const stopDist = rt.entryPrice > 0 ? Math.abs(rt.exitPrice - rt.entryPrice) : 1;
-                await correctPattern(sym, direction as "long" | "short", oldOutcome as "win" | "loss", newOutcome, fillPnl / (stopDist * (TRADOVATE_CONTRACTS[sym]?.multiplier || 5)));
+                // R needs the trade's RISK. |exitPrice - entryPrice| is the exit distance, so the
+                // old expression reduced to exactly +/-1.0R for every trade. The entry log records
+                // the real figure as "Risk: $N"; if it is not parseable we pass null and correct
+                // only the win/loss flag rather than write a fabricated R.
+                const riskMatch = /Risk:\s*\$([\d,.]+)/.exec(matchingExit.reason || "");
+                const riskDollars = riskMatch ? parseFloat(riskMatch[1].replace(/,/g, "")) : NaN;
+                const correctedR = Number.isFinite(riskDollars) && riskDollars > 0 ? fillPnl / riskDollars : null;
+                await correctPattern(sym, direction as "long" | "short", oldOutcome as "win" | "loss", newOutcome, correctedR);
                 details.push(`  → Pattern corrected: ${oldOutcome} → ${newOutcome}`);
               } catch { /* pattern correction optional */ }
             }
