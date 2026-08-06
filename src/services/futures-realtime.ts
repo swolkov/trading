@@ -1914,7 +1914,20 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // 20 minutes is clearly worse (gold 0.85), 60 is a wash with 45. Risk per trade is UNCHANGED —
   // the hard stop still governs the loss; this only stops cutting slow trades quite so early.
   // Revert = put 30 back.
-  const STALE_TRADE_MINUTES = 45;
+  //
+  // 2026-08-06: 45 -> 90, on REAL FILLS this time. The sweep above came from
+  // scripts/index-edge-validation.ts, which was found on 2026-08-06 to be INSENSITIVE TO STOP WIDTH
+  // (G_STOP 1.5 vs 1.4 returns byte-identical output; 1.2 moves net by 0.6%) — stopDist is not
+  // reaching its exit path, so its absolute numbers are not trustworthy. Re-derived instead with
+  // scripts/live-exit-forensics.ts, which replays ACTUAL broker fills from RoundTrip over real
+  // 1-minute bars and has no entry model at all, across 44 live+demo round-trips:
+  //     20m 0.341R | 30m 0.360R | 45m 0.368R | 60m 0.381R | 90m 0.395R | none 0.416R
+  // Strictly monotonic over six settings on both engines = a real effect, not a fitted peak. 90 is
+  // chosen over removing the rule entirely so a genuinely dead trade still gets closed rather than
+  // held to the session boundary. Worth ~+0.027R (~$4/trade at $153 risk) — small, but free.
+  // RISK PER TRADE IS UNCHANGED: the broker bracket stop still governs the loss. This only stops
+  // cutting slow-but-alive trades early. Revert = put 45 back.
+  const STALE_TRADE_MINUTES = 90;
   const minutesInTrade = (Date.now() - pos.entryTime) / 60_000;
   if (minutesInTrade >= STALE_TRADE_MINUTES && diff < stopDist && !pos.reachedBreakeven && !pos.scaledOut) {
     log(`${sym}: TIME EXIT — ${minutesInTrade.toFixed(0)} min, hasn't reached 1R ($${pnlDollars.toFixed(0)}). Closing to preserve capital.`);

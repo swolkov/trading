@@ -57,14 +57,38 @@ const SPEC: Record<string, { ptVal: number; tick: number; label: string }> = {
   YM: { ptVal: 0.5, tick: 1, label: "YM → MYM ($0.50/pt)" },
 };
 const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
-// Exit-management parameters. Overridable so they can be SWEPT — live is capturing avg win 0.59R
-// against a 2.33R target (96% of winners never reach 1R) while losses run to -0.93R, which forces a
-// 61% breakeven win rate. The exits, not the entries, are the binding constraint on expectancy.
+// Exit-management parameters, overridable so they can be SWEPT.
+//
+// WHAT THE SWEEP ESTABLISHED (2026-08-06) — do not re-derive this the hard way:
+//   1. THE TARGET NEVER FIRES. G_TGT 3.5 / 3.0 / 2.5 ATR all return the IDENTICAL net ($2,846) —
+//      the trail or the profit-lock always exits first. Live agrees: 23 winners, 0 ever reached
+//      2.33R, best 1.92R. So "avg win vs the 2.33R target" is a MEANINGLESS comparison, and any
+//      avg-win goal derived from that target (e.g. "should reach 0.8R") is unfounded. Deleted.
+//   2. THE LOCK IS THE BINDING PARAMETER, NOT THE TRAIL. At G_TRAIL_ATR 1.4 the trail is 2.1x ATR,
+//      wider than the entire 1.5x ATR stop, so it sits below entry until a trade peaks past ~1.4R
+//      and rarely binds. Lock 0.45 vs 0.65 swings net $2,846 vs $1,065; trail 1.4 vs 0.9 at a fixed
+//      lock swings only $2,846 vs $2,087.
+//   3. 0.45 IS CHOSEN FOR STABILITY, NOT JUST NET. Locks of 0.20/0.30 score a similar PF but their
+//      halves disagree (1.02/1.17, 1.06/1.15) = fitted to one period. 0.45 gives 1.11/1.10.
+//
+// The real benchmark is EXPECTANCY, and live is not underperforming this harness — it reaches the
+// same place by a different route. Live: 66% win, 0.58R avg win, -0.93R avg loss = +0.067R. This
+// harness: 38% win, ~1.67R avg win, same avg loss = +0.058R. Live's confidence>=75 gate, grader and
+// pattern memory select a narrower population that wins often and small; the harness takes everything
+// and wins rarely and big. Same edge, same expectancy, different point on the curve.
 const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.6;
 const TRAIL_R = parseFloat(process.env.G_TRAIL_R || "") || 1.1;
 const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
 const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 0.9) * 1.5;   // index
 const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
+// Index target, in ATR. Default 3.5 ATR against a 1.5 ATR stop = 2.33R. Sweepable because live has
+// now produced 23 winners and NOT ONE reached 2.33R (best 1.92R) — a target the fills never touch
+// converts every winner into a lock-out, so it has to be tested rather than assumed.
+const TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 5.0;
+// Stop width in ATR. MUST MATCH LIVE: live_futures_atr_stop_multiplier = 1.4 (NOT 1.5). Verified
+// against AgentConfig 2026-08-06 — every sweep before that date modelled 1.5/3.5 while live ran
+// 1.4/5.0, so their absolute numbers describe a config the account was not trading.
+const STOP_ATR_MULT = parseFloat(process.env.G_STOP || "") || 1.4;
 const BUFFER = 200;
 
 const etFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -187,7 +211,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       // registry: index only permits the SHORT side, and only at RSI >= 80
       if (Math.max(0, Math.min(100, sc)) >= 75 && !isOversold && rsi >= 80) {
         edge = "index_overbought_short"; dir = "short";
-        stopDist = adjustedATR * 1.5; targetDist = currentATR * 3.5;
+        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = currentATR * TARGET_ATR_MULT;
         // REGIME SPLIT (2026-07-29). Disjoint, same pattern as index_trend_short_below200:
         //   _below200 = price BELOW the 200-EMA → shorting WITH the trend (a momentum short)
         //   the base row = price ABOVE it       → the true counter-trend overbought fade
@@ -205,7 +229,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       // Modelled with the engine's own geometry and the same >=75 score gate; mirror of the short.
       else if (Math.max(0, Math.min(100, sc)) >= 75 && isOversold && rsi <= 20) {
         edge = "index_oversold_long"; dir = "long";
-        stopDist = adjustedATR * 1.5; targetDist = currentATR * 3.5;
+        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = currentATR * TARGET_ATR_MULT;
         if (price > ema200) edge = "index_oversold_long_above200";   // dip-buy in an uptrend vs falling knife
       }
       // FALL THROUGH — do NOT consume the bar (corrected 2026-08-05). This previously did
@@ -345,6 +369,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     if (!exited) break;
     const pnl = (short ? entry - exited.px : exited.px - entry) * S.ptVal - COMMISSION;
     trades.push({ dayISO: bar.dayISO, session, edge, pnl, r: pnl / riskDollars, exit: exited.why });
+    if (process.env.EXITMIX) { (globalThis as any).__mix ??= {}; const M=(globalThis as any).__mix; M[exited.why] ??= {n:0,net:0}; M[exited.why].n++; M[exited.why].net+=pnl; }
     const exitT = m1[Math.min(exited.k, m1.length - 1)].t;
     while (i + 1 < m5.length && m5[i + 1].t <= exitT) i++;
   }
@@ -411,3 +436,4 @@ for (const sym of syms) {
   }
   if (SINCE) console.log(`  SINCE ${SINCE}: ` + f(stats(all.filter(t => t.dayISO >= SINCE))));
 }
+if (process.env.EXITMIX) { const M=(globalThis as any).__mix||{}; console.log("\n  HARNESS EXIT MIX:"); for (const [k,v] of Object.entries(M).sort((a:any,b:any)=>b[1].n-a[1].n)) console.log(`    ${k.padEnd(15)} ${String((v as any).n).padStart(5)}  net $${(v as any).net.toFixed(0)}`); }
