@@ -2185,7 +2185,20 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // Equity 0 means "not yet fetched", NOT "no money". Math.min(750, 0) would be a $0 limit, which
   // makes ANY unrealized loss trip the emergency close — so fall back to the $750 ceiling until the
   // real balance lands (2026-07-29, when the optimistic $50,000 default was removed).
-  const perPositionLimit = tradovateEquity > 0 ? Math.min(750, tradovateEquity * 0.10) : 750;
+  // 2026-08-06: FLOORED AT 2x THE TRADE'S OWN RISK. The flat $750 ceiling was written for a small
+  // live account and silently became a HAIR TRIGGER on demo, where 3% of $80,160 is ~$2,405 of
+  // intended risk per trade — so the "last-resort safety net" fired at 0.31x the risk the trade was
+  // deliberately sized to take, cutting positions BEFORE their own broker stop could work. It fired
+  // 9 times between Jul 30 and Aug 6, every one at -$735 to -$930, which corrupts demo as the signal
+  // live is promoted from. A backstop must sit BEYOND the stop it is backing up, never inside it.
+  //   live  (risk $256):  max(2x256=512, min(750, 10% of $5,114 = 511))  = $512  — unchanged in practice
+  //   demo  (risk $2,405): max(2x2405=4810, min(750, $8,016))            = $4,810 — now a real backstop
+  // Still equity-relative on the upper side, so a drawdown tightens it automatically.
+  const perTradeRisk = tradovateEquity > 0 ? tradovateEquity * (riskConfig.riskPerTradePct / 100) : 0;
+  const perPositionLimit = Math.max(
+    perTradeRisk * 2,
+    tradovateEquity > 0 ? Math.min(750, tradovateEquity * 0.10) : 750,
+  );
   if (pnlDollars < -perPositionLimit) {
     if (!pos.emergencyWarningTick) {
       pos.emergencyWarningTick = Date.now();
