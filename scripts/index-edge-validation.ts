@@ -297,7 +297,12 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
           sc += t15 === "up" ? 10 : -10;
           if (price > vwap) sc += 3;
           sc += sessScore;
-          if (Math.max(0, Math.min(100, sc)) >= 75) {
+          // G_VWAP entry-location filter (2026-08-07): losers die in minutes with peaks of 0.2-0.6R —
+          // wrong from the entry bar. Tests whether REQUIRING price above (or below) VWAP at entry
+          // filters those. "above" = classic trend confirmation; "below" = buy-value-in-uptrend.
+          const vwapOK = process.env.G_VWAP === "above" ? price > vwap
+                       : process.env.G_VWAP === "below" ? price <= vwap : true;
+          if (Math.max(0, Math.min(100, sc)) >= 75 && vwapOK) {
             edge = "index_trend_long"; dir = "long";
             stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
           }
@@ -333,12 +338,24 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     // backtest was assuming 1/47th of it. G_SLIP overrides; default is the measured live figure.
     const SLIP = process.env.G_SLIP !== undefined ? parseFloat(process.env.G_SLIP)
       : (sym === "NQ" ? 11.74 : sym === "ES" ? 0.89 : S.tick);
-    const entry = short ? price - SLIP : price + SLIP;
-    const hardStop = short ? price + stopDist : price - stopDist;
-    const target = short ? price - targetDist : price + targetDist;
-    const riskDollars = stopDist * S.ptVal;
-    const entryTime = bar.t + 300000;
+    // ENTRY DELAY (G_DELAY, minutes; 0 = engine's current behaviour). Live+demo hold-time data shows
+    // trades that die inside 10 minutes carry essentially ALL the losses (paper < 10 min: -$14,530
+    // over 37 trades, vs +$12,348 for 10-30 min; live < 10 min -$217 vs +$355 for 60-90 min), and
+    // paper's losers have a MEDIAN hold of 4 minutes at a full -1.0R. That is price moving 1.4x ATR
+    // against the position within minutes of entry — an ENTRY-TIMING failure, not an exit one. This
+    // models waiting N minutes after the signal and entering at the market price THEN, so stop and
+    // target re-anchor to the delayed fill rather than the stale signal price.
+    const ENTRY_DELAY_MIN = parseFloat(process.env.G_DELAY || "") || 0;
+    const entryTime = bar.t + 300000 + ENTRY_DELAY_MIN * 60000;
     while (m1Cursor < m1.length && m1[m1Cursor].t < entryTime) m1Cursor++;
+    if (m1Cursor >= m1.length) break;
+    // Re-anchor to the actual price at the delayed entry. With no delay this is the signal price,
+    // so G_DELAY=0 reproduces the original behaviour exactly.
+    const refPrice = ENTRY_DELAY_MIN > 0 ? m1[m1Cursor].c : price;
+    const entry = short ? refPrice - SLIP : refPrice + SLIP;
+    const hardStop = short ? refPrice + stopDist : refPrice - stopDist;
+    const target = short ? refPrice - targetDist : refPrice + targetDist;
+    const riskDollars = stopDist * S.ptVal;
 
     let peak = 0, reachedBE = false, trail: number | null = null, atrNow = currentATR;
     let exited: { px: number; why: string; k: number } | null = null;
