@@ -32,14 +32,19 @@ function ShadowTag({ shadow }: { shadow: NonNullable<Decision["shadow"]> }) {
   if (shadow.status === "open" || shadow.dollarPnl == null) {
     return <span className="shrink-0 text-[9px] font-semibold text-muted-foreground/40 tabular-nums" title="Marking to market — resolves within a few bars">tracking…</span>;
   }
+  // ⚠️ SIGN CONVENTION (2026-08-10): this tag displays the NEGATION of ShadowTrade.dollarPnl —
+  // "what blocking did for you" — while the DB and every report store the raw counterfactual
+  // ("what the trade would have made"). The bare ± number was misread twice in one day, once by
+  // Spencer and once by the assistant auditing it, in OPPOSITE directions. So the tag now says it
+  // in words: "saved" = dodged a loser (good block), "missed" = the veto cost a winner.
   const vetoVal = -shadow.dollarPnl; // what the veto saved (+) or cost (−) you
   const good = vetoVal >= 0;
   return (
     <span
       className={`shrink-0 text-[10px] font-bold tabular-nums ${good ? "text-emerald-400" : "text-red-400"}`}
-      title={good ? `Good block — the veto saved you ${fmtMoney(vetoVal)}` : `Missed winner — the veto cost you ${fmtMoney(vetoVal)}`}
+      title={good ? `Good block — the veto saved you ${fmtMoney(vetoVal)}` : `Missed winner — the veto cost you ${fmtMoney(Math.abs(vetoVal))}`}
     >
-      {fmtMoney(vetoVal)}
+      {good ? `saved ${fmtMoney(vetoVal)}` : `missed ${fmtMoney(Math.abs(vetoVal))}`}
     </span>
   );
 }
