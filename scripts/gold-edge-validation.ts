@@ -182,7 +182,7 @@ function trend15(buf: Bar[]): "up" | "down" | "flat" {
   return a > b ? "up" : a < b ? "down" : "flat";
 }
 
-interface T { dayISO: string; session: string; dir: "long" | "short"; pnl: number; r: number; exit: string; }
+interface T { dayISO: string; session: string; dir: "long" | "short"; pnl: number; r: number; exit: string; hour: number; }
 
 function backtest(m1: Bar[], m5: Bar[]): T[] {
   const trades: T[] = [];
@@ -302,7 +302,7 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
     if (!exited) break;
 
     const pnl = (short ? entry - exited.px : exited.px - entry) * PT_VAL - COMMISSION;
-    trades.push({ dayISO: bar.dayISO, session, dir, pnl, r: pnl / riskDollars, exit: exited.why });
+    trades.push({ dayISO: bar.dayISO, session, dir, pnl, r: pnl / riskDollars, exit: exited.why, hour: bar.hour });
 
     const exitT = m1[Math.min(exited.k, m1.length - 1)].t;
     while (i + 1 < m5.length && m5[i + 1].t <= exitT) i++;
@@ -322,6 +322,7 @@ const f = (s: ReturnType<typeof stats>) =>
 
 const { m1, m5 } = load(`${DATA_DIR}/GC_1m.csv`);
 const all = backtest(m1, m5);
+(globalThis as any).__allTrades = all;
 const days = [...new Set(all.map(t => t.dayISO))].sort();
 const cut = days[Math.floor(days.length * 0.6)];
 const W = 116;
@@ -372,3 +373,24 @@ for (const s of ["morning", "midday", "afternoon", "eth_evening", "eth_europe", 
 const byExit: Record<string, { n: number; net: number }> = {};
 for (const t of all) { byExit[t.exit] ??= { n: 0, net: 0 }; byExit[t.exit].n++; byExit[t.exit].net += t.pnl; }
 console.log("\n  exits: " + Object.entries(byExit).sort((a, b) => b[1].n - a[1].n).map(([k, v]) => `${k} ${v.n} ($${v.net.toFixed(0)})`).join(" | "));
+
+// ── G_HOURLY=1: the 8:30 landmine check (2026-08-10). CPI/NFP release at 8:30 ET sits INSIDE the
+// London gold window (03:00-09:00). Buckets London LONGS by entry half-hour; then splits the
+// 08:00-09:00 entries into NFP days (first Friday of month — computable offline) vs all others.
+// CPI dates are not derivable offline, so the 8:30 bucket's all-days row is the primary evidence.
+if (process.env.G_HOURLY === "1") {
+  const lon = (globalThis as any).__allTrades?.filter((t: T) => t.dir === "long" && t.hour >= 3 && t.hour < 9) ?? [];
+  console.log(`\nLONDON GOLD LONGS BY ENTRY HALF-HOUR (n=${lon.length})`);
+  const pfOf = (a: T[]) => { const g = a.filter(t => t.pnl > 0).reduce((x, t) => x + t.pnl, 0), l = Math.abs(a.filter(t => t.pnl <= 0).reduce((x, t) => x + t.pnl, 0)); return l > 0 ? g / l : Infinity; };
+  for (let h = 3; h < 9; h += 0.5) {
+    const b = lon.filter((t: T) => t.hour >= h && t.hour < h + 0.5);
+    if (b.length < 3) continue;
+    const net = b.reduce((x: number, t: T) => x + t.pnl, 0);
+    const win = b.filter((t: T) => t.pnl > 0).length / b.length;
+    console.log(`  ${String(h).padStart(4)}-${h + 0.5}  n=${String(b.length).padStart(3)}  win ${(win * 100).toFixed(0).padStart(3)}%  PF ${pfOf(b).toFixed(2).padStart(5)}  net $${net.toFixed(0).padStart(6)}${h === 8 || h === 8.5 ? "  <- release window" : ""}`);
+  }
+  const isNFP = (iso: string) => { const d = new Date(iso + "T12:00:00Z"); return d.getUTCDay() === 5 && d.getUTCDate() <= 7; };
+  const late = lon.filter((t: T) => t.hour >= 8);
+  const nfp = late.filter((t: T) => isNFP(t.dayISO)), other = late.filter((t: T) => !isNFP(t.dayISO));
+  console.log(`  08:00-09:00 split — NFP days: n=${nfp.length} net $${nfp.reduce((x: number, t: T) => x + t.pnl, 0).toFixed(0)}  |  non-NFP: n=${other.length} net $${other.reduce((x: number, t: T) => x + t.pnl, 0).toFixed(0)}`);
+}

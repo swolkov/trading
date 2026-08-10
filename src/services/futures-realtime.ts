@@ -120,6 +120,9 @@ const CONTRACT_MULTIPLIERS: Record<string, number> = {
 };
 // Symbols that are metals (different session timing + strategy)
 const METALS = new Set(["MGC", "GC"]);
+// 8:30 ET macro-release blackout dates (CPI etc), loaded from `macro_blackout_dates` config by
+// loadRiskConfig. NFP days are computed (first Friday), so only irregular dates live here.
+let macroBlackoutDates = new Set<string>();
 // GROWTH RAMP (micro gold only): contract ceiling by account equity so per-trade risk stays ~constant (~1%)
 // as the account grows, instead of being frozen at 1 micro forever. Dormant until $10k — at ~$5k it returns 1,
 // so it does NOT change current behavior. Scoped to MGC ONLY (never applied to full GC). Above ~$60k the
@@ -1617,10 +1620,12 @@ async function loadRiskConfig() {
       `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
       "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
       ...allEdgeFlagKeys(),         // per-edge, per-engine on/off switches (edge_<key>_<demo|live>) — the strategy control board writes these
+      "macro_blackout_dates",       // comma-separated YYYY-MM-DD (CPI etc, 8:30 ET releases) — maintained in config, no deploy to update
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
     for (const c of configs) cfg[c.key] = c.value;
+    macroBlackoutDates = new Set((cfg["macro_blackout_dates"] || "").split(",").map(x => x.trim()).filter(Boolean));
 
     const dbTradesPerDay = parseInt(cfg[`${kp}_max_trades_per_day`]) || defaults.maxTradesPerDay;
     const dbDailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || defaults.dailyLossLimitPct;
@@ -3741,6 +3746,27 @@ async function evaluateAndTrade(
     log(`  ${sym}: SKIP — edge "${matchedEdge.name}" is switched OFF for ${MODE_TAG}`);
     recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `edge "${matchedEdge.name}" disabled for ${ENGINE_MODE}`, ...shadowGeometry(direction, price, stopDist, targetDist) });
     return;
+  }
+  // ── MACRO-RELEASE BLACKOUT (2026-08-10), metals only, 08:15–08:45 ET, on release days only.
+  // Measured first (scripts/gold-edge-validation.ts G_HOURLY=1, 320 London longs / 3yr): the 8-9am
+  // buckets are PROFITABLE on ordinary days (PF 1.31/1.18, +$309) — so NO broad blackout; the
+  // release volatility ordinarily FEEDS an RSI-reversal edge. But NFP mornings went 0-for-3
+  // (−$235), and the real justification is mechanism, not n=3: an 8:30 print can gap gold THROUGH
+  // a stop in one second — the one loss an ATR stop cannot bound. Cost of the guard: ~1 skipped
+  // trade/month. NFP = first Friday (computed); CPI and other irregular 8:30 releases come from
+  // the `macro_blackout_dates` config key so the calendar updates without a deploy.
+  if (METALS.has(sym)) {
+    const etH = getETHour();
+    if (etH >= 8.25 && etH < 8.75) {
+      const etDate = getETDateString();
+      const dayOfMonth = parseInt(etDate.slice(8), 10);
+      const isNFP = getETDayOfWeek() === 5 && dayOfMonth <= 7;
+      if (isNFP || macroBlackoutDates.has(etDate)) {
+        log(`  ${sym}: SKIP — macro-release blackout (${isNFP ? "NFP" : "release day"} 08:15–08:45 ET)`);
+        recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `macro-release blackout — ${isNFP ? "NFP morning" : "8:30 release day"}, gap-through-stop risk`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+        return;
+      }
+    }
   }
   if (matchedEdge.symbolClass === "index") {
     // CORRELATION GUARD (same-cycle): reserve the single index slot synchronously so a 2nd correlated
