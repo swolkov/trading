@@ -238,6 +238,19 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     matches: (m) =>
       INDEX_LONG_SYMS.has(m.sym) && m.setupType === "or_breakout" && m.direction === "long",
   },
+  {
+    key: "index_overbought_short_75to80",
+    name: "Index overbought-short — RSI 75-80 band (demo trial)",
+    blurb: "MNQ/MES — fade RSI 75-80 overbought (below the >=80 gate the base edge requires).",
+    symbolClass: "index",
+    evidence:
+      "NOT VALIDATED — demo trial armed 2026-08-10 by the promotion radar's FIRST scan: blocked index extreme_rsi_bounce/short (which is exactly the 75-80 band, since >=80 already trades) is t=3.96 over 69 resolved shadow counterfactuals on demo (+$161,929 at demo sizing, no slippage). The base >=80 edge is separately +$7,588 over 30 REAL demo fills, so the family works; the question this trial answers with real fills is whether the softer band survives slippage and management. Live stays OFF until the standard bar (t>2 on real fills + review).",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) =>
+      INDEX_LONG_SYMS.has(m.sym) && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
+      m.rsi >= 75 && m.rsi < 80,
+  },
 ];
 
 /** Find the registered edge an evaluated setup belongs to, or null (→ default-deny / skip). */

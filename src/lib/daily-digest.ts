@@ -78,6 +78,35 @@ export async function buildDailyDigest(i: DigestInput): Promise<string> {
     }
   } catch { /* veto line is additive — never break the digest */ }
 
+  // PROMOTION RADAR (2026-08-10). The shadow ledger can quietly accumulate proof that a BLOCKED
+  // category is systematically profitable — and until now nothing raised an alarm; finding it
+  // required someone to go looking (or_breakout was found that way, by hand). This scans every
+  // blocked setup/direction nightly and flags any with n>=50 resolved counterfactuals, positive
+  // net, and t>=2 — the same statistical bar edges must clear everywhere else in the system.
+  // ALERT-ONLY by design: shadow counterfactuals carry NO slippage or fees and overstate reality
+  // (the gap_fill lesson), so a human decision + demo trial still stands between an alert and a
+  // live switch. This automates the NOTICING, not the promoting.
+  try {
+    const resolved = await prisma.shadowTrade.findMany({
+      where: { mode: i.mode === "live" ? "live" : "demo", dollarPnl: { not: null } },
+      select: { setupType: true, direction: true, dollarPnl: true, symbol: true },
+    });
+    // Split gold from index — pooling them once buried a real signal inside a known-dead one.
+    const cats: Record<string, number[]> = {};
+    for (const v of resolved) {
+      const cls = /GC/.test(v.symbol ?? "") ? "gold" : "index";
+      (cats[`${cls} ${v.setupType ?? "?"}/${v.direction}`] ??= []).push(v.dollarPnl!);
+    }
+    for (const [cat, vals] of Object.entries(cats)) {
+      if (vals.length < 50) continue;
+      const mean = vals.reduce((s, x) => s + x, 0) / vals.length;
+      if (mean <= 0) continue;
+      const sd = Math.sqrt(vals.reduce((s, x) => s + (x - mean) ** 2, 0) / (vals.length - 1));
+      const t = sd > 0 ? mean / (sd / Math.sqrt(vals.length)) : 0;
+      if (t >= 2) L.push(`🚨 PROMOTION RADAR: blocked ${cat} is t=${t.toFixed(2)} over ${vals.length} resolved shadows (+$${(mean * vals.length).toFixed(0)} counterfactual) — review for a demo trial`);
+    }
+  } catch { /* radar is additive — never break the digest */ }
+
   if (i.dailyLossLimit && i.balanceDelta != null && i.balanceDelta < 0) {
     L.push(`loss budget used: $${Math.abs(i.balanceDelta).toFixed(0)} of $${i.dailyLossLimit.toFixed(0)}`);
   }
