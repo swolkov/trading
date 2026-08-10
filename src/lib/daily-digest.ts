@@ -62,6 +62,22 @@ export async function buildDailyDigest(i: DigestInput): Promise<string> {
     }
   }
 
+  // VETO SCOREBOARD (2026-08-10). Raw ShadowTrade.dollarPnl = what the DECLINED trade would have
+  // made; negative = dodged loser = the gate saved money. Reported in WORDS because the bare sign
+  // was misread twice in one day (see engine-activity.tsx ShadowTag — the UI shows the negation).
+  try {
+    const vetoes = await prisma.shadowTrade.findMany({
+      where: { mode: i.mode === "live" ? "live" : "demo", resolvedAt: { gte: start }, dollarPnl: { not: null } },
+      select: { dollarPnl: true },
+    });
+    if (vetoes.length > 0) {
+      const saved = vetoes.filter(v => v.dollarPnl! < 0).reduce((s, v) => s - v.dollarPnl!, 0);
+      const missed = vetoes.filter(v => v.dollarPnl! > 0).reduce((s, v) => s + v.dollarPnl!, 0);
+      const net = saved - missed;
+      L.push(`vetoes: saved $${saved.toFixed(0)} · missed $${missed.toFixed(0)} → gate ${net >= 0 ? "earned" : "cost"} $${Math.abs(net).toFixed(0)} today (${vetoes.length} blocks)`);
+    }
+  } catch { /* veto line is additive — never break the digest */ }
+
   if (i.dailyLossLimit && i.balanceDelta != null && i.balanceDelta < 0) {
     L.push(`loss budget used: $${Math.abs(i.balanceDelta).toFixed(0)} of $${i.dailyLossLimit.toFixed(0)}`);
   }
