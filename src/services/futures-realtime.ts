@@ -2970,6 +2970,24 @@ Respond ONLY with JSON: {"agree":true/false,"confidence":75,"reasoning":"one sen
 
 // ── Confidence Scoring ──────────────────────────────────
 
+
+/** Vault anti-pattern gate, extracted from onBarClose so blocks are RECORDED (2026-08-11). Returns
+ *  the block reason or null. Same thresholds: session <30% WR blocks, instrument <25% blocks. */
+function vaultBlockReason(sym: string, session: string): string | null {
+  if (!vaultLessonsCache?.antiPatterns) return null;
+  const ap = vaultLessonsCache.antiPatterns.toLowerCase();
+  for (const rule of VAULT_SESSION_RULES) {
+    if (!ap.includes(rule.pattern)) continue;
+    if (!rule.sessions.includes(session)) continue;
+    const wrMatch = ap.match(new RegExp(`${rule.pattern}[^\\n]*?(\\d+)%\\s*win\\s*rate`));
+    const winRate = wrMatch ? parseInt(wrMatch[1]) : null;
+    if (winRate !== null && winRate < 30) return `vault anti-pattern: ${rule.label} has ${winRate}% win rate`;
+  }
+  const instMatch = ap.match(new RegExp(`${sym.toLowerCase()}[^\\n]*?(\\d+)%\\s*win\\s*rate`));
+  if (instMatch && parseInt(instMatch[1]) < 25) return `vault anti-pattern: ${sym} has ${instMatch[1]}% win rate`;
+  return null;
+}
+
 function scoreSetup(factors: {
   baseConfidence: number;
   volTrend: string;
@@ -3037,42 +3055,13 @@ async function onBarClose(sym: string, bar: Bar) {
   }
 
   // VAULT LESSONS GATE: check anti-patterns before trading
-  // Cache refreshes hourly in the background, check is synchronous
-  if (vaultLessonsCache?.antiPatterns) {
-    const ap = vaultLessonsCache.antiPatterns.toLowerCase();
-
-    // Bucket→session map now lives in lib/vault-session-gates.ts so the ADMIN can display exactly the
-    // gate the engine enforces. These anti-patterns are written automatically by the synthesis agent,
-    // so a future run could emit e.g. "mid_morning ... 22% win rate" and silently shut off live's
-    // primary window with no alert — a second copy of this table in the web app would eventually
-    // describe a gate that is not the one running. One table, both readers.
-    const sessionAntiPatterns = VAULT_SESSION_RULES;
-
-    for (const rule of sessionAntiPatterns) {
-      if (!ap.includes(rule.pattern)) continue;
-      if (!rule.sessions.includes(session)) continue;
-
-      // Extract the win rate from the anti-pattern text (e.g. "29% win rate" or "0% win rate")
-      const wrMatch = ap.match(new RegExp(`${rule.pattern}[^\\n]*?(\\d+)%\\s*win\\s*rate`));
-      const winRate = wrMatch ? parseInt(wrMatch[1]) : null;
-
-      // Block if win rate < 30%, reduce size if < 40%
-      if (winRate !== null && winRate < 30) {
-        log(`${sym}: VAULT BLOCK — anti-pattern: ${rule.label} has ${winRate}% win rate`);
-        return;
-      }
-    }
-
-    // Check instrument-specific anti-patterns (e.g. "MGC has only 15% win rate")
-    const instMatch = ap.match(new RegExp(`${sym.toLowerCase()}[^\\n]*?(\\d+)%\\s*win\\s*rate`));
-    if (instMatch) {
-      const instWR = parseInt(instMatch[1]);
-      if (instWR < 25) {
-        log(`${sym}: VAULT BLOCK — anti-pattern: ${sym} has ${instWR}% win rate over many trades`);
-        return;
-      }
-    }
-  }
+  // VAULT GATE MOVED (2026-08-11): it used to fire HERE, before setup detection — a blind early
+  // return that produced NO decision record and NO shadow row. That made it the only gate in the
+  // system whose cost is unmeasured, on the least-trusted data source (vault-era stats the clean
+  // ledger cannot verify: zero midday round-trips exist BECAUSE the gate blocks them — frozen,
+  // self-preserving evidence). Behavior is unchanged, but the check now runs in the entry path via
+  // vaultBlockReason(), where the blocked SETUP exists and is recorded + shadow-tracked — so the
+  // promotion radar can finally catch a wrong vault block. See vaultBlockReason().
 
   // MACRO EVENT GATE: reduce/block trading around CPI, FOMC, jobs reports
   const macro = getMacroMultiplier();
@@ -3766,6 +3755,16 @@ async function evaluateAndTrade(
         recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `macro-release blackout — ${isNFP ? "NFP morning" : "8:30 release day"}, gap-through-stop risk`, ...shadowGeometry(direction, price, stopDist, targetDist) });
         return;
       }
+    }
+  }
+  // VAULT GATE (moved here 2026-08-11 — see onBarClose). Same blocks, now measured: every vault
+  // block produces a decision row + shadow counterfactual, so the nightly radar watches it too.
+  {
+    const vb = vaultBlockReason(sym, session);
+    if (vb) {
+      log(`  ${sym}: VAULT BLOCK — ${vb}`);
+      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: vb, ...shadowGeometry(direction, price, stopDist, targetDist) });
+      return;
     }
   }
   if (matchedEdge.symbolClass === "index") {
