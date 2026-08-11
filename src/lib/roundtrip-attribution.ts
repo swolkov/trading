@@ -74,10 +74,15 @@ export async function attributeRoundTrip(rt: {
   const from = new Date(rt.entryTime.getTime() - 6 * 60_000);
   const to = new Date(rt.entryTime.getTime() + 6 * 60_000);
 
+  // 2026-08-11 FIX: `endsWith: rt.symbol` COLLIDED across contract sizes — "ES" matched "FUT:MES",
+  // so a demo ES round-trip could adopt a LIVE MES micro's entry row (identical prices, so the
+  // price-proximity tiebreak cannot discriminate) and inherit its tiny "Risk: $N". Verified case:
+  // a clean −1.0R ES loss ($777 risked) labeled −4.9R from an MES row's $158. Exact symbol +
+  // mode-exact action now; a missing match stays preferable to a wrong one.
   const candidates = await prisma.autoTradeLog.findMany({
     where: {
-      symbol: { endsWith: rt.symbol },        // stored as "FUT:MNQ"
-      action: { contains: `_${side}` },       // live_long / futures_short
+      symbol: `FUT:${rt.symbol}`,                                        // exact — no suffix collisions
+      action: `${rt.mode === "live" ? "live" : "futures"}_${side}`,      // mode-exact entry action
       createdAt: { gte: from, lte: to },
     },
     orderBy: { createdAt: "asc" },

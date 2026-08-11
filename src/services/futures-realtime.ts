@@ -2417,8 +2417,7 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
         trend15m: (meta.entryTrend15m || "flat") as "up" | "down" | "flat",
         trendDaily: (meta.entryDayType || "").includes("trend") ? (meta.direction === "long" ? "up" as const : "down" as const) : "flat" as const,
         riskReward: sd > 0 ? Math.abs(meta.target - meta.entryPrice) / sd : 2,
-        dollarTrend: "flat" as const,
-        bondTrend: "flat" as const,
+        dollarTrend, bondTrend,
         outcome,
         pnlR: pnlRVal,
       });
@@ -3793,7 +3792,7 @@ async function evaluateAndTrade(
       trend15m: trend15 as "up" | "down" | "flat",
       trendDaily: dayType.includes("trend") ? (direction === "long" ? "up" : "down") : "flat",
       riskReward: targetDist / stopDist,
-      dollarTrend: "flat", bondTrend: "flat",
+      dollarTrend, bondTrend,
     });
     patternStats = { matchCount: pred.matchCount, winRate: pred.winRate, avgR: pred.avgPnlR };
     log(`  [PATTERN] ${pred.matchCount} matches, ${(pred.winRate * 100).toFixed(0)}% historical WR`);
@@ -4789,17 +4788,37 @@ async function updateTradovateEquity() {
 let currentVIX = 20;
 let vix3m = 20;
 let vixTermStructure: "contango" | "backwardation" | "flat" = "contango";
+// Cross-asset context for PATTERN MEMORY only (2026-08-11). SetupVector always had dollarTrend /
+// bondTrend fields, but every vector was stamped "flat" — two dead inputs the learner could never
+// use. Sourced from Yahoo alongside VIX (indicative indices, NEVER on the price/order path; same
+// rule as ^VIX). Trend = last vs a ~6h-old anchor, "flat" inside ±0.15% — coarse on purpose.
+let dollarTrend: "rising" | "falling" | "flat" = "flat";
+let bondTrend: "rising" | "falling" | "flat" = "flat";
+let dxyAnchor = 0, dxyAnchorAt = 0, tnxAnchor = 0, tnxAnchorAt = 0;
 
 async function updateVIX() {
   try {
     const yfTimeout = <T>(p: Promise<T>): Promise<T | null> =>
       Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), 10_000))]);
-    const [vixQ, vix3mQ] = await Promise.all([
+    const [vixQ, vix3mQ, dxyQ, tnxQ] = await Promise.all([
       yfTimeout(getYfEngine().quote("^VIX")).catch(() => null),
       yfTimeout(getYfEngine().quote("^VIX3M")).catch(() => null),
+      yfTimeout(getYfEngine().quote("DX-Y.NYB")).catch(() => null),   // dollar index — context only
+      yfTimeout(getYfEngine().quote("^TNX")).catch(() => null),       // 10Y yield — context only
     ]);
     if (vixQ?.regularMarketPrice) currentVIX = vixQ.regularMarketPrice;
     if (vix3mQ?.regularMarketPrice) vix3m = vix3mQ.regularMarketPrice;
+    const trendOf = (px: number | undefined, anchor: number, anchorAt: number): ["rising"|"falling"|"flat", number, number] => {
+      if (!px || px <= 0) return ["flat", anchor, anchorAt];
+      if (!anchor || Date.now() - anchorAt > 6 * 3600_000) return ["flat", px, Date.now()];   // (re)anchor
+      const chg = (px - anchor) / anchor;
+      return [chg > 0.0015 ? "rising" : chg < -0.0015 ? "falling" : "flat", anchor, anchorAt];
+    };
+    [dollarTrend, dxyAnchor, dxyAnchorAt] = trendOf(dxyQ?.regularMarketPrice, dxyAnchor, dxyAnchorAt);
+    // NOTE: bondTrend tracks the YIELD direction (^TNX rising = bond PRICES falling). The vector
+    // field is named bondTrend but stamped with yield direction — documented so nobody "fixes" it
+    // silently; what matters for pattern matching is only that it is CONSISTENT.
+    [bondTrend, tnxAnchor, tnxAnchorAt] = trendOf(tnxQ?.regularMarketPrice, tnxAnchor, tnxAnchorAt);
 
     // Term structure: VIX < VIX3M = contango (normal), VIX > VIX3M = backwardation (fear)
     const ratio = currentVIX / (vix3m || currentVIX);
