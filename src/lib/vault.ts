@@ -782,6 +782,15 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
   // never the account-wide trade count. Bands match Agent-Config/synthesis-agent.md.
   const confidenceFor = (n: number) => (n >= 50 ? "HIGH" : n >= 20 ? "MEDIUM" : "LOW");
 
+  // AutoTradeLog has NO mode column, so every stat below pools demo AND live trades —
+  // including edges since retired or benched. These lines are injected verbatim into the
+  // live entry grader's prompt (getVaultContextForAI → futures-agent), where a bare
+  // directive like "avoid MES" would override the edge registry's own live evidence
+  // (found 2026-08-15: the pooled book said "MES loses" while live's validated
+  // index_overbought_short trades MES). Instrument and time-of-day findings therefore
+  // carry this scope note so the grader treats them as context, never as a veto.
+  const MIXED_BOOK_NOTE =
+    "[Pooled demo+live stat across all edges incl. retired ones — context only; live entry permission comes from the validated edge registry, never from this line.]";
   const expOf = (g: { pnl: number; trades: number }) => (g.trades > 0 ? g.pnl / g.trades : 0);
   const pfOf = (g: { gp: number; gl: number }) => (g.gl > 0 ? g.gp / g.gl : g.gp > 0 ? Infinity : 0);
   const fmtPf = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : "∞");
@@ -814,7 +823,7 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
     const e = expOf(data);
     if (e < 0) {
       antiPatterns.push({
-        text: `Trading during ${bucket} has negative expectancy (${fmtMoney(e)}/trade, PF ${fmtPf(pfOf(data))} over ${data.trades} trades, ${wrOf(data)}) — avoid or reduce size.`,
+        text: `Trading during ${bucket} shows negative expectancy (${fmtMoney(e)}/trade, PF ${fmtPf(pfOf(data))} over ${data.trades} trades, ${wrOf(data)}). ${MIXED_BOOK_NOTE}`,
         sample: data.trades,
       });
       antiPatternsFound++;
@@ -860,8 +869,8 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
   profitableInstruments.forEach(([inst, s], i) => {
     lessons.push({
       text: i === 0
-        ? `${inst} is your strongest futures instrument by profit factor (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR) — favor it.`
-        : `${inst} is also net profitable (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades) — tradeable, but ranks below ${profitableInstruments[0][0]}.`,
+        ? `${inst} is the strongest futures instrument by profit factor (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR). ${MIXED_BOOK_NOTE}`
+        : `${inst} is also net profitable (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades), ranking below ${profitableInstruments[0][0]}. ${MIXED_BOOK_NOTE}`,
       sample: s.trades,
     });
     lessonsExtracted++;
@@ -870,7 +879,7 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
   for (const [inst, s] of rankedInstruments) {
     if (s.avgPnl < 0) {
       antiPatterns.push({
-        text: `${inst} loses money (${fmtMoney(s.avgPnl)}/trade, PF ${fmtPf(s.profitFactor)} over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR) — reduce size or avoid.`,
+        text: `${inst} is net negative in the pooled book (${fmtMoney(s.avgPnl)}/trade, PF ${fmtPf(s.profitFactor)} over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR). ${MIXED_BOOK_NOTE}`,
         sample: s.trades,
       });
       antiPatternsFound++;
