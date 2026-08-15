@@ -511,13 +511,22 @@ export async function runSynthesis(): Promise<SynthesisResult> {
   const stockTrades = allTrades.filter((t) => !t.symbol.startsWith("FUT:") && !t.action.includes("call") && !t.action.includes("put"));
 
   function calcStats(trades: typeof allTrades) {
-    if (trades.length === 0) return { trades: 0, winRate: 0, avgPnl: 0, totalPnl: 0 };
+    if (trades.length === 0) return { trades: 0, winRate: 0, avgPnl: 0, totalPnl: 0, profitFactor: 0 };
     const w = trades.filter((t) => (t.pnl || 0) > 0);
+    const grossWin = w.reduce((s, t) => s + (t.pnl || 0), 0);
+    const grossLose = Math.abs(trades.filter((t) => (t.pnl || 0) <= 0).reduce((s, t) => s + (t.pnl || 0), 0));
+    const total = trades.reduce((s, t) => s + (t.pnl || 0), 0);
     return {
       trades: trades.length,
       winRate: w.length / trades.length,
-      avgPnl: trades.reduce((s, t) => s + (t.pnl || 0), 0) / trades.length,
-      totalPnl: trades.reduce((s, t) => s + (t.pnl || 0), 0),
+      // avgPnl IS expectancy — average P&L per trade. This, not win rate, decides
+      // whether an edge makes money. AutoTradeLog carries no rMultiple, so dollars
+      // are the best available proxy; only compare it within one instrument.
+      avgPnl: total / trades.length,
+      totalPnl: total,
+      // Profit factor = gross profit / gross loss. A ratio, so it is size-agnostic
+      // and IS safe to compare across instruments. >1 means the edge pays.
+      profitFactor: grossLose > 0 ? grossWin / grossLose : grossWin > 0 ? Infinity : 0,
     };
   }
 
@@ -564,7 +573,9 @@ export async function runSynthesis(): Promise<SynthesisResult> {
     minute: "2-digit",
     hour12: false,
   });
-  const hourBuckets: Record<string, { trades: number; wins: number }> = {};
+  // pnl/gp/gl are tracked alongside wins so lessons can be judged on expectancy and
+  // profit factor rather than win rate (see the lesson-extraction block below).
+  const hourBuckets: Record<string, { trades: number; wins: number; pnl: number; gp: number; gl: number }> = {};
   for (const t of allTrades) {
     const parts = etFormatter.formatToParts(t.createdAt);
     const etH = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0")
@@ -576,19 +587,25 @@ export async function runSynthesis(): Promise<SynthesisResult> {
     else if (etH >= 14 && etH < 15.5) bucket = "afternoon";    // 2:00 PM - 3:30 PM ET
     else if (etH >= 15.5 && etH < 16) bucket = "last_30_min";  // 3:30-4:00 PM ET (real last 30 min of RTH)
     else bucket = "after_hours";                                // 4:00 PM+ and pre-market (ETH session)
-    if (!hourBuckets[bucket]) hourBuckets[bucket] = { trades: 0, wins: 0 };
+    if (!hourBuckets[bucket]) hourBuckets[bucket] = { trades: 0, wins: 0, pnl: 0, gp: 0, gl: 0 };
+    const hp = t.pnl || 0;
     hourBuckets[bucket].trades++;
-    if ((t.pnl || 0) > 0) hourBuckets[bucket].wins++;
+    hourBuckets[bucket].pnl += hp;
+    if (hp > 0) { hourBuckets[bucket].wins++; hourBuckets[bucket].gp += hp; }
+    else hourBuckets[bucket].gl += Math.abs(hp);
   }
 
   // Score-based analysis
   const scoredTrades = allTrades.filter((t) => t.aiScore != null);
-  const scoreGroups: Record<string, { trades: number; wins: number }> = {};
+  const scoreGroups: Record<string, { trades: number; wins: number; pnl: number; gp: number; gl: number }> = {};
   for (const t of scoredTrades) {
     const bucket = t.aiScore! >= 80 ? "5" : t.aiScore! >= 70 ? "4" : t.aiScore! >= 60 ? "3" : t.aiScore! >= 50 ? "2" : "1";
-    if (!scoreGroups[bucket]) scoreGroups[bucket] = { trades: 0, wins: 0 };
+    if (!scoreGroups[bucket]) scoreGroups[bucket] = { trades: 0, wins: 0, pnl: 0, gp: 0, gl: 0 };
+    const sp = t.pnl || 0;
     scoreGroups[bucket].trades++;
-    if ((t.pnl || 0) > 0) scoreGroups[bucket].wins++;
+    scoreGroups[bucket].pnl += sp;
+    if (sp > 0) { scoreGroups[bucket].wins++; scoreGroups[bucket].gp += sp; }
+    else scoreGroups[bucket].gl += Math.abs(sp);
   }
 
   // Build equity curve from daily-balances.md (preserves history)
@@ -739,57 +756,124 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
   await vaultWrite("Performance/statistics.md", statsContent, "synthesis-agent");
 
   // Extract lessons from patterns
+  //
+  // EVERY trigger below judges on EXPECTANCY (avg P&L per trade) and PROFIT FACTOR —
+  // never on win rate. Rules/risk-management.md and the /checkpoint rule are explicit:
+  // "Judge on EXPECTANCY (avg R), never win rate — a 60% win rate loses money at bad
+  // payoff." Win rate still appears inside lesson TEXT as context, but it must never
+  // be what decides that a lesson fires. Before 2026-08-15 every trigger here was a
+  // win-rate threshold, which taught the agents to favour instruments that lose money.
   let lessonsExtracted = 0;
   let antiPatternsFound = 0;
-  const lessons: string[] = [];
-  const antiPatterns: string[] = [];
+  // Each insight carries the sample IT was derived from, so confidence can be stamped
+  // honestly. Previously confidence came from the account-wide trade count, so a
+  // lesson drawn from 35 trades was published as "HIGH (307 trade sample)".
+  type Insight = { text: string; sample: number };
+  const lessons: Insight[] = [];
+  const antiPatterns: Insight[] = [];
 
-  // Lesson: Score threshold analysis
+  // Minimum sample before ANY conclusion — matches the stated rule in
+  // Agent-Config/synthesis-agent.md ("Minimum sample size for any conclusion: 20").
+  // The old thresholds of 5 and 10 let a short streak mint a HIGH-confidence lesson.
+  const MIN_SAMPLE = 20;
+  // Profit factor needs headroom above break-even before we tell an agent to size up.
+  const PF_EDGE = 1.3;
+  // Confidence is a function of the sample the lesson was actually drawn from —
+  // never the account-wide trade count. Bands match Agent-Config/synthesis-agent.md.
+  const confidenceFor = (n: number) => (n >= 50 ? "HIGH" : n >= 20 ? "MEDIUM" : "LOW");
+
+  const expOf = (g: { pnl: number; trades: number }) => (g.trades > 0 ? g.pnl / g.trades : 0);
+  const pfOf = (g: { gp: number; gl: number }) => (g.gl > 0 ? g.gp / g.gl : g.gp > 0 ? Infinity : 0);
+  const fmtPf = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : "∞");
+  const fmtMoney = (v: number) => `${v < 0 ? "-" : "+"}$${Math.abs(v).toFixed(2)}`;
+  const wrOf = (g: { wins: number; trades: number }) => `${((g.wins / g.trades) * 100).toFixed(0)}% WR`;
+
+  // Lesson: Conviction-score buckets — does a higher AI score actually pay?
   for (const [bucket, data] of Object.entries(scoreGroups)) {
-    if (data.trades >= 5) {
-      const wr = data.wins / data.trades;
-      if (wr < 0.35) {
-        antiPatterns.push(`Low conviction trades (score bucket ${bucket}) have only ${(wr * 100).toFixed(0)}% win rate over ${data.trades} trades — skip these.`);
-        antiPatternsFound++;
-      }
-      if (wr > 0.65) {
-        lessons.push(`High conviction trades (score bucket ${bucket}) have ${(wr * 100).toFixed(0)}% win rate over ${data.trades} trades — size up on these.`);
-        lessonsExtracted++;
-      }
+    if (data.trades < MIN_SAMPLE) continue;
+    const e = expOf(data);
+    const p = pfOf(data);
+    if (e < 0) {
+      antiPatterns.push({
+        text: `Conviction bucket ${bucket} loses money: ${fmtMoney(e)}/trade expectancy, PF ${fmtPf(p)} over ${data.trades} trades (${wrOf(data)}) — skip these.`,
+        sample: data.trades,
+      });
+      antiPatternsFound++;
+    } else if (e > 0 && p > PF_EDGE) {
+      lessons.push({
+        text: `Conviction bucket ${bucket} pays: ${fmtMoney(e)}/trade expectancy, PF ${fmtPf(p)} over ${data.trades} trades (${wrOf(data)}) — size up on these.`,
+        sample: data.trades,
+      });
+      lessonsExtracted++;
     }
   }
 
   // Lesson: Time of day analysis
   for (const [bucket, data] of Object.entries(hourBuckets)) {
-    if (data.trades >= 5) {
-      const wr = data.wins / data.trades;
-      if (wr < 0.3) {
-        antiPatterns.push(`Trading during ${bucket} has only ${(wr * 100).toFixed(0)}% win rate — avoid or reduce size.`);
-        antiPatternsFound++;
-      }
+    if (data.trades < MIN_SAMPLE) continue;
+    const e = expOf(data);
+    if (e < 0) {
+      antiPatterns.push({
+        text: `Trading during ${bucket} has negative expectancy (${fmtMoney(e)}/trade, PF ${fmtPf(pfOf(data))} over ${data.trades} trades, ${wrOf(data)}) — avoid or reduce size.`,
+        sample: data.trades,
+      });
+      antiPatternsFound++;
     }
   }
 
   // Lesson: Strategy performance
-  if (futuresStats.trades >= 10 && futuresStats.winRate < 0.4) {
-    lessons.push(`Futures strategy underperforming (${(futuresStats.winRate * 100).toFixed(0)}% WR) — review setup criteria.`);
+  if (futuresStats.trades >= MIN_SAMPLE && futuresStats.avgPnl < 0) {
+    lessons.push({
+      text: `Futures strategy is net negative (${fmtMoney(futuresStats.avgPnl)}/trade, PF ${fmtPf(futuresStats.profitFactor)} over ${futuresStats.trades} trades) — review setup criteria.`,
+      sample: futuresStats.trades,
+    });
     lessonsExtracted++;
   }
-  if (optionsStats.trades >= 10 && optionsStats.winRate > 0.6) {
-    lessons.push(`Options strategy performing well (${(optionsStats.winRate * 100).toFixed(0)}% WR) — consider increasing allocation.`);
+  if (optionsStats.trades >= MIN_SAMPLE && optionsStats.avgPnl > 0 && optionsStats.profitFactor > PF_EDGE) {
+    lessons.push({
+      text: `Options strategy is paying (${fmtMoney(optionsStats.avgPnl)}/trade, PF ${fmtPf(optionsStats.profitFactor)} over ${optionsStats.trades} trades) — consider increasing allocation.`,
+      sample: optionsStats.trades,
+    });
     lessonsExtracted++;
   }
 
   // Lesson: Per-instrument insights
-  for (const [inst, stats] of Object.entries(instrumentStats)) {
-    if (stats.trades >= 10) {
-      if (stats.winRate > 0.5) {
-        lessons.push(`${inst} is your best futures instrument (${(stats.winRate * 100).toFixed(0)}% WR over ${stats.trades} trades) — favor it.`);
-        lessonsExtracted++;
-      } else if (stats.winRate < 0.25) {
-        antiPatterns.push(`${inst} has only ${(stats.winRate * 100).toFixed(0)}% win rate over ${stats.trades} trades — reduce size or avoid.`);
-        antiPatternsFound++;
-      }
+  //
+  // Ranked by profit factor — a ratio, so cross-instrument comparison is valid where
+  // dollar expectancy is not (MES and MGC move different dollars per tick). Exactly
+  // ONE instrument is named strongest. The previous version emitted "X is your best
+  // futures instrument" for EVERY instrument over 50% win rate, which on 2026-08-14
+  // published MES and MNQ as simultaneously "best" — two HIGH-confidence lessons that
+  // contradicted each other, both scored on the metric the risk rules forbid.
+  // Subtraction would yield NaN if two instruments both had zero losing trades
+  // (Infinity - Infinity), leaving "strongest" up to sort implementation order.
+  // Compare, don't subtract; break ties on the larger sample.
+  const rankedInstruments = Object.entries(instrumentStats)
+    .filter(([, s]) => s.trades >= MIN_SAMPLE)
+    .sort((a, b) =>
+      b[1].profitFactor !== a[1].profitFactor
+        ? (b[1].profitFactor > a[1].profitFactor ? 1 : -1)
+        : b[1].trades - a[1].trades,
+    );
+
+  const profitableInstruments = rankedInstruments.filter(([, s]) => s.avgPnl > 0 && s.profitFactor > 1);
+  profitableInstruments.forEach(([inst, s], i) => {
+    lessons.push({
+      text: i === 0
+        ? `${inst} is your strongest futures instrument by profit factor (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR) — favor it.`
+        : `${inst} is also net profitable (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades) — tradeable, but ranks below ${profitableInstruments[0][0]}.`,
+      sample: s.trades,
+    });
+    lessonsExtracted++;
+  });
+
+  for (const [inst, s] of rankedInstruments) {
+    if (s.avgPnl < 0) {
+      antiPatterns.push({
+        text: `${inst} loses money (${fmtMoney(s.avgPnl)}/trade, PF ${fmtPf(s.profitFactor)} over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR) — reduce size or avoid.`,
+        sample: s.trades,
+      });
+      antiPatternsFound++;
     }
   }
 
@@ -819,9 +903,9 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
 ${synthHeader}
 > Auto-generated from ${totalTrades} trades (excl. May 13). Updated ${today}.
 
-${lessons.length > 0 ? lessons.map((l, i) => `- **DATA-L${i + 1}**: ${l}`).join("\n") : "_No new data-driven lessons._"}
+${lessons.length > 0 ? lessons.map((l, i) => `- **DATA-L${i + 1}** (${confidenceFor(l.sample)}, ${l.sample} trades): ${l.text}`).join("\n") : "_No new data-driven lessons._"}
 
-${antiPatterns.length > 0 ? antiPatterns.map((ap, i) => `- **DATA-AP${i + 1}**: ${ap}`).join("\n") : "_No new data-driven anti-patterns._"}
+${antiPatterns.length > 0 ? antiPatterns.map((ap, i) => `- **DATA-AP${i + 1}** (${confidenceFor(ap.sample)}, ${ap.sample} trades): ${ap.text}`).join("\n") : "_No new data-driven anti-patterns._"}
 `;
       await vaultWrite("Lessons/active-lessons.md", manualPart + synthSection, "synthesis-agent");
     } else {
@@ -839,11 +923,11 @@ total_lessons: ${lessonsExtracted + antiPatternsFound}
 
 ## Lessons (Ranked by Impact)
 
-${lessons.length > 0 ? lessons.map((l, i) => `### L${String(i + 1).padStart(3, "0")} — ${l.split(" — ")[0] || "Pattern"}\n- **LESSON**: ${l}\n- **Confidence**: ${totalTrades >= 50 ? "HIGH" : totalTrades >= 20 ? "MEDIUM" : "LOW"} (${totalTrades} trade sample)\n- **Date Added**: ${today}\n`).join("\n") : "_Insufficient data for lessons. Need more trades._\n"}
+${lessons.length > 0 ? lessons.map((l, i) => `### L${String(i + 1).padStart(3, "0")} — ${l.text.split(" — ")[0] || "Pattern"}\n- **LESSON**: ${l.text}\n- **Confidence**: ${confidenceFor(l.sample)} (${l.sample} trade sample)\n- **Date Added**: ${today}\n`).join("\n") : "_Insufficient data for lessons. Need more trades._\n"}
 
 ## Anti-Patterns (Avoid These)
 
-${antiPatterns.length > 0 ? antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}\n- **PATTERN**: ${ap}\n- **Confidence**: ${totalTrades >= 50 ? "HIGH" : totalTrades >= 20 ? "MEDIUM" : "LOW"}\n- **Date Added**: ${today}\n`).join("\n") : "_No anti-patterns identified yet._\n"}
+${antiPatterns.length > 0 ? antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}\n- **PATTERN**: ${ap.text}\n- **Confidence**: ${confidenceFor(ap.sample)} (${ap.sample} trade sample)\n- **Date Added**: ${today}\n`).join("\n") : "_No anti-patterns identified yet._\n"}
 `;
       await vaultWrite("Lessons/active-lessons.md", lessonsContent, "synthesis-agent");
     }
@@ -868,7 +952,7 @@ ${antiPatterns.length > 0 ? antiPatterns.map((ap, i) => `### AP${String(i + 1).p
 ${synthAPHeader}
 > Auto-detected from ${totalTrades} trades (excl. May 13). Updated ${today}.
 
-${antiPatterns.map((ap, i) => `- **DATA-AP${i + 1}**: ${ap}`).join("\n")}
+${antiPatterns.map((ap, i) => `- **DATA-AP${i + 1}** (${confidenceFor(ap.sample)}, ${ap.sample} trades): ${ap.text}`).join("\n")}
 `;
         await vaultWrite("Rules/anti-patterns.md", manualAPPart + synthAPSection, "synthesis-agent");
       } else {
@@ -884,9 +968,9 @@ total_patterns: ${antiPatternsFound}
 > Agents MUST check this before entry. These are proven losing setups.
 
 ${antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}
-- **Pattern**: ${ap}
-- **Why it fails**: Statistically confirmed losing pattern from ${totalTrades} trades
-- **Confidence**: ${totalTrades >= 50 ? "HIGH" : totalTrades >= 20 ? "MEDIUM" : "LOW"}
+- **Pattern**: ${ap.text}
+- **Why it fails**: Negative expectancy over ${ap.sample} trades — not a win-rate dip
+- **Confidence**: ${confidenceFor(ap.sample)} (${ap.sample} trade sample)
 - **Date Added**: ${today}
 `).join("\n")}
 `;
@@ -904,12 +988,12 @@ ${antiPatterns.map((ap, i) => `### AP${String(i + 1).padStart(3, "0")}
         .map(([inst, s]) => `| ${inst} | ${s.trades} | ${(s.winRate * 100).toFixed(1)}% | ${s.avgPnl.toFixed(2)} | ${s.totalPnl.toFixed(2)} |`)
         .join("\n");
       const futuresLessons = [...lessons, ...antiPatterns].filter((l) =>
-        l.toLowerCase().includes("futures") || Object.keys(instrumentStats).some((inst) => l.includes(inst)),
+        l.text.toLowerCase().includes("futures") || Object.keys(instrumentStats).some((inst) => l.text.includes(inst)),
       );
 
       let updated = futuresStrategy;
       const lessonsText = futuresLessons.length > 0
-        ? futuresLessons.map((l, i) => `${i + 1}. ${l}`).join("\n") + `\n\n_Last updated: ${today}_`
+        ? futuresLessons.map((l, i) => `${i + 1}. ${l.text} _(${confidenceFor(l.sample)}, ${l.sample} trades)_`).join("\n") + `\n\n_Last updated: ${today}_`
         : `_No instrument-specific lessons yet (need more data)._`;
       updated = updated.replace(
         /## Lessons Learned\n[\s\S]*?(?=\n## |$)/,
