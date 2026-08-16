@@ -187,22 +187,35 @@ function overnightMarginCap(sym: string, equity: number): number {
 }
 
 // ── THE EXECUTION-COST CEILING ───────────────────────────────────────────────────────────────────
-/** The most that getting IN is ever allowed to cost, as a fraction of the trade's own risk.
- *
- *  This is one principle with two enforcement points, which used to be a single unstated number
- *  buried in the max-chase guard:
- *    1. CHASE GUARD  — if price has already run more than this against us since the signal, skip.
- *    2. ENTRY LIMIT  — cap the fill itself at signal ± this, so the fill can't cost more either.
- *  The guard alone only stops us from CHASING a move; it does nothing about what the market gives
- *  us on a market order once we submit. Both are needed to actually bound entry cost.
- *
- *  Why it is worth bounding at all (measured on live, 60 MNQ fills, commit 6f21711): MNQ slipped a
- *  MEDIAN of 7.13 points, and the same NQ morning edge run engine-exact by entry slippage goes
- *      7.13 pt → PF 0.72 (-$9,704)   3.00 → 0.91   2.00 → 0.97   1.00 → PF 1.01 (+$308)
- *  i.e. the edge crosses from losing to profitable somewhere between 1 and 2 points of entry cost.
- *  Slippage is not a rounding error on this book, it is the difference between the sign of the P&L.
- *  MES (0.89) and MGC (0.50) barely slip; this is an index-micro problem above all. */
+/** CHASE GUARD ceiling: how far price may already have run against us since the signal before we
+ *  refuse to chase, as a fraction of the trade's own risk. Coarse by design — it exists to kill the
+ *  slippage TAIL (MNQ's worst fills were 42.1 and 54.4 points), not to price the entry. */
 const EXEC_COST_CAP_FRACTION = 0.10;
+
+/** ENTRY LIMIT ceiling: how far through the signal a marketable-limit entry may fill, in TICKS.
+ *
+ *  This is deliberately NOT a fraction of the stop, and the arithmetic is why. Measured on live
+ *  (60 MNQ fills, commit 6f21711) MNQ's stop that day was 77.1 points and its MEDIAN slip 7.13 —
+ *  so a 10%-of-stop cap trips at 7.71 points and the median slip sails straight through it. The
+ *  cap would have looked prudent and bound almost nothing.
+ *
+ *  What the edge can actually afford, from the engine-exact NQ morning run by entry slippage:
+ *      7.13 pt → PF 0.72 (-$9,704)   3.00 → 0.91   2.00 → 0.97   1.00 → PF 1.01 (+$308)
+ *  Positive below ~1.5 points — which is 1.9% of that stop, not 10%. But 2%-of-stop applied to GOLD
+ *  (stop ~12.3 pt) is 0.25 pt, under MGC's own 0.50 median, so it would reject half of gold's
+ *  entries. No single fraction-of-stop serves both instruments.
+ *
+ *  TICKS do, because tick size already scales with each contract's notional:
+ *      MNQ  6 x 0.25 = 1.50 pt = $3.00   (median slip 7.13 — binds hard, which is the point)
+ *      MES  6 x 0.25 = 1.50 pt = $7.50   (median slip 0.89 — passes comfortably)
+ *      MGC  6 x 0.10 = 0.60 pt = $6.00   (median slip 0.50 — passes comfortably)
+ *  One number that lands on the economic threshold for the instrument that bleeds and stays out of
+ *  the way of the two that don't. Tunable per engine via `<live_futures|futures>_entry_limit_ticks`.
+ *
+ *  Still bounded by EXEC_COST_CAP_FRACTION of the stop as a secondary ceiling, so an unusually tight
+ *  stop can never pay a disproportionate share of its own risk just to get filled. */
+const ENTRY_LIMIT_TICKS_DEFAULT = 6;
+let entryLimitTicks = ENTRY_LIMIT_TICKS_DEFAULT;
 
 // LIVE only: minimum account equity before we let gold (MGC) trade into the evening session. Below
 // this the account cannot cover MGC's overnight initial margin at all → stay RTH-only. Once funded
@@ -1651,6 +1664,7 @@ async function loadRiskConfig() {
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
       `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
       `${kp}_entry_limit`,          // marketable-limit entries (slippage cap) — demo on, live off by default
+      `${kp}_entry_limit_ticks`,    // how far through the signal a limit entry may fill (default 6 ticks)
       "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
       ...allEdgeFlagKeys(),         // per-edge, per-engine on/off switches (edge_<key>_<demo|live>) — the strategy control board writes these
       "macro_blackout_dates",       // comma-separated YYYY-MM-DD (CPI etc, 8:30 ET releases) — maintained in config, no deploy to update
@@ -1688,6 +1702,9 @@ async function loadRiskConfig() {
     aiVetoEnabled = cfg[`${kp}_ai_grader`] !== "false";
     // Absent key → mode default (demo true / live false), so this only turns on where it is asked for.
     entryLimitEnabled = cfg[`${kp}_entry_limit`] !== undefined ? cfg[`${kp}_entry_limit`] === "true" : IS_DEMO;
+    // Guarded: a 0/NaN cap would price every entry AT the signal and miss essentially everything.
+    const ticksCfg = parseFloat(cfg[`${kp}_entry_limit_ticks`]);
+    entryLimitTicks = Number.isFinite(ticksCfg) && ticksCfg >= 1 ? ticksCfg : ENTRY_LIMIT_TICKS_DEFAULT;
     indexTrendLongEnabled = cfg["index_trend_long_enabled"] !== "false"; // legacy global off-switch (kept as a backstop; see edge switches below)
     // Per-edge switches for the registry gate. Copy the queried flags into edgeFlags. Back-compat: if
     // the legacy index_trend_long_enabled="false" is set but no new switch exists, honour the legacy OFF
@@ -1699,7 +1716,7 @@ async function loadRiskConfig() {
       if (edgeFlags[`edge_index_trend_long_${md}`] === undefined) edgeFlags[`edge_index_trend_long_${md}`] = "false";
     }
     updateTradingSymbols();
-    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${(EXEC_COST_CAP_FRACTION * 100).toFixed(0)}% of stop)` : "MARKET"} | grader=${aiVetoEnabled ? "ON" : "off"}`);
+    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${entryLimitTicks} ticks)` : "MARKET"} | grader=${aiVetoEnabled ? "ON" : "off"}`);
     // DEPLOY VERIFICATION — prints which edges THIS BINARY contains and how each resolves for this
     // engine. Added 2026-07-28 after a stale deploy went unnoticed for a full session: `railway
     // redeploy` (without --from-source) REBUILDS THE PREVIOUS COMMIT, so the container image carries a
@@ -2850,8 +2867,12 @@ GOLD-SPECIFIC RULES:
 
     // 2026-05-29: Data-driven grader. Live no longer reflexively conservative;
     // empirical historical performance from pattern memory carries the decision.
+    // The account size is READ, never hardcoded. This string said "the LIVE $1K account" for five
+    // weeks after the account was funded to ~$4,821 — so on every grade the model was reasoning about
+    // risk, sizing and survivability against an account 4.7x smaller than the real one, which biases
+    // it toward reflexive caution on exactly the trades this context was added to stop it fearing.
     const liveContext = IS_LIVE
-      ? `\nThis is the LIVE $1K account. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
+      ? `\nThis is the LIVE account, currently $${Math.round((riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity) || 0).toLocaleString()}, risking ${riskConfig.riskPerTradePct}% per trade. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
       : "";
 
     // Pattern-memory empirical evidence block — 2026-06-03: thresholds raised because 10 trades
@@ -4123,11 +4144,11 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // stop is 10% of the trade's risk, which is the most execution should ever be allowed to cost.
     // A skipped trade is free; a chased one pays the whole tail. Favourable moves are never blocked.
     const freshPrice = barBuilders.get(sym)?.lastPrice ?? 0;
-    const maxExecCost = stopDist * EXEC_COST_CAP_FRACTION;
+    const maxChase = stopDist * EXEC_COST_CAP_FRACTION;
     if (freshPrice > 0 && stopDist > 0) {
       const adverse = direction === "long" ? freshPrice - price : price - freshPrice;
-      if (adverse > maxExecCost) {
-        log(`  ${sym}: SKIP — price already ran ${adverse.toFixed(2)} pts against us since the signal (max chase ${maxExecCost.toFixed(2)} = ${(EXEC_COST_CAP_FRACTION * 100).toFixed(0)}% of the ${stopDist.toFixed(1)}-pt stop). Not buying the move.`);
+      if (adverse > maxChase) {
+        log(`  ${sym}: SKIP — price already ran ${adverse.toFixed(2)} pts against us since the signal (max chase ${maxChase.toFixed(2)} = ${(EXEC_COST_CAP_FRACTION * 100).toFixed(0)}% of the ${stopDist.toFixed(1)}-pt stop). Not buying the move.`);
         feedLog("skip", `${sym} ${direction} skipped — ran ${adverse.toFixed(1)} pts before entry (chase guard)`);
         return;
       }
@@ -4153,9 +4174,12 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     const useLimit = entryLimitEnabled && stopDist > 0;
     const limitAnchor = freshPrice > 0 ? freshPrice : price;
     const tick = TICK_SIZES[sym] || contracts.get(sym)?.tickSize || 0.25;
+    // Ticks first (what the EDGE can afford), then the fraction-of-stop as a secondary ceiling (what
+    // the TRADE can afford). The tighter of the two wins — see ENTRY_LIMIT_TICKS_DEFAULT.
+    const entryCap = Math.min(entryLimitTicks * tick, maxChase);
     // Round the cap OUTWARD (up for a buy, down for a sell) so tick-snapping can only ever loosen the
     // limit by <1 tick, never tighten it into a non-marketable price and manufacture a miss.
-    const rawLimit = side === "Buy" ? limitAnchor + maxExecCost : limitAnchor - maxExecCost;
+    const rawLimit = side === "Buy" ? limitAnchor + entryCap : limitAnchor - entryCap;
     const limitPrice = side === "Buy"
       ? Number((Math.ceil(rawLimit / tick) * tick).toFixed((String(tick).split(".")[1] || "").length))
       : Number((Math.floor(rawLimit / tick) * tick).toFixed((String(tick).split(".")[1] || "").length));
@@ -4172,7 +4196,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
             orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
           }
     )}) as { orderId: number };
-    if (useLimit) log(`  ENTRY as marketable LIMIT ${limitPrice} (signal ${price.toFixed(2)}, cap ${maxExecCost.toFixed(2)} pts = ${(EXEC_COST_CAP_FRACTION * 100).toFixed(0)}% of stop), IOC`);
+    if (useLimit) log(`  ENTRY as marketable LIMIT ${limitPrice} (signal ${price.toFixed(2)}, cap ${entryCap.toFixed(2)} pts = ${(entryCap / tick).toFixed(0)} ticks / $${(entryCap * (CONTRACT_MULTIPLIERS[sym] || 5)).toFixed(2)} per contract), IOC`);
 
     // Confirm the entry filled BEFORE resting protective orders or tracking a position.
     // Only skip on a positively-confirmed rejection (no fill); unknown → fall back to
@@ -4183,8 +4207,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       // designed outcome (a skipped trade is free), so it is logged and counted, never alerted on —
       // paging on a normal no-fill would train the alert to be ignored.
       if (useLimit && fillResult.reason === "Canceled") {
-        log(`  ${sym}: NO FILL — nothing available inside the ${maxExecCost.toFixed(2)}-pt entry cap (limit ${limitPrice}). Skipped, no position, no cost.`);
-        feedLog("skip", `${sym} ${direction} no fill — market outside the ${maxExecCost.toFixed(1)}-pt entry cap`);
+        log(`  ${sym}: NO FILL — nothing available inside the ${entryCap.toFixed(2)}-pt entry cap (limit ${limitPrice}). Skipped, no position, no cost.`);
+        feedLog("skip", `${sym} ${direction} no fill — market outside the ${entryCap.toFixed(1)}-pt entry cap`);
         // Recorded so the miss RATE is measurable — that is the whole cost side of this change.
         // fill = intended (slippage 0, not a fake price) and qty = 0, so a miss can never distort a
         // slippage average; `status='no_fill_cap'` + `qty=0` is what identifies these rows.
