@@ -865,8 +865,15 @@ ${equityCurveLines.length > 0 ? equityCurveLines.join("\n") : `${today},${balanc
         : b[1].trades - a[1].trades,
     );
 
+  // The #1 ranking is always worth stating (it is a fact about the book), but the
+  // "also profitable" tail must clear PF >= 1.2 — flagged 2026-08-15: PF 1.03 over
+  // 42 trades is $36 total, statistically zero, and publishing it as a lesson is
+  // the same noise-dressed-as-signal failure this rewrite removed. Break-even plus
+  // rounding error is not a lesson.
+  const PF_MENTION = 1.2;
   const profitableInstruments = rankedInstruments.filter(([, s]) => s.avgPnl > 0 && s.profitFactor > 1);
   profitableInstruments.forEach(([inst, s], i) => {
+    if (i > 0 && s.profitFactor < PF_MENTION) return;
     lessons.push({
       text: i === 0
         ? `${inst} is the strongest futures instrument by profit factor (PF ${fmtPf(s.profitFactor)}, ${fmtMoney(s.avgPnl)}/trade over ${s.trades} trades, ${(s.winRate * 100).toFixed(0)}% WR). ${MIXED_BOOK_NOTE}`
