@@ -2,6 +2,10 @@ import { checkTradovateAuth, getTradovatePositions, getTradovateAccountSummary, 
 import { getFuturesQuotes } from "@/lib/futures-data";
 import { prisma } from "@/lib/db";
 import { getViewMode } from "@/lib/trading-mode";
+// ONE baseline resolver for every P&L surface. This route used to carry its own `1025` fallback while
+// live-pnl.ts carried `4821`, so the same account read $3,796 apart across two pages whenever the
+// config row was missing. See the note in live-pnl.ts for the account's actual funding history.
+import { getStartingCapital } from "@/lib/live-pnl";
 
 const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "MBT", "MET", "BFF", "MXR", "MSL", "ES", "NQ", "YM", "RTY", "GC"];
 
@@ -134,13 +138,12 @@ export async function GET() {
     if (!auth.authenticated) {
       // Still return viewMode and balance data even when Tradovate auth fails
       // This prevents the dashboard from flickering to demo view during rate limits
-      const scKey = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
       const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
-      const [scCfg, sodCfg] = await Promise.all([
-        prisma.agentConfig.findUnique({ where: { key: scKey } }).catch(() => null),
+      const [sc, sodCfg] = await Promise.all([
+        getStartingCapital(viewMode === "live" ? "live" : "demo"),
         prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null),
       ]);
-      const startingCapital = scCfg?.value ? parseFloat(scCfg.value) : (viewMode === "live" ? 1025 : 50000);
+      const startingCapital = sc.value;
       const startOfDayBalance = sodCfg?.value ? parseFloat(sodCfg.value) : null;
 
       return Response.json({
@@ -381,11 +384,10 @@ export async function GET() {
     const kp = isDemoView ? "futures" : "live_futures";
     const todayET = new Date().toISOString().slice(0, 10);
     const todayStart = new Date(todayET + "T00:00:00-04:00");
-    const scKey = viewMode === "live" ? "starting_capital_live" : "starting_capital_demo";
     const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
     const modeActionPrefix = isDemoView ? "futures_" : "live_";
 
-    const [riskMetrics, startingCapital, startOfDayBalance, balanceHistory] = await Promise.all([
+    const [riskMetrics, startingCapitalRes, startOfDayBalance, balanceHistory] = await Promise.all([
 
       // riskMetrics: dashboard risk gauge (mode-aware)
       (async () => {
@@ -410,13 +412,9 @@ export async function GET() {
         } catch { return null; }
       })(),
 
-      // startingCapital: SC for total P&L calculation
-      (async () => {
-        try {
-          const cfg = await prisma.agentConfig.findUnique({ where: { key: scKey } });
-          return cfg?.value ? parseFloat(cfg.value) : (viewMode === "live" ? 1025 : 50000);
-        } catch { return viewMode === "live" ? 1025 : 50000; }
-      })(),
+      // startingCapital: SC for total P&L calculation — same resolver as live-pnl.ts, so this route
+      // and the Orders/Track-Record headers can no longer disagree about the account's baseline.
+      getStartingCapital(viewMode === "live" ? "live" : "demo"),
 
       // startOfDayBalance: for today P&L = balance - SOD
       (async () => {
@@ -475,12 +473,25 @@ export async function GET() {
       })(),
     ]);
 
+    const startingCapital = startingCapitalRes.value;
+
     // LEAK GUARD: the live account is a micro account (switches to full-size only at $25K by design),
     // so a live netLiq wildly above the live starting capital means the account resolution crossed to
     // the demo account on a cold call. Suppress the false balance and fall back to the engine-tracked
-    // start-of-day value rather than flash a $64K demo figure on the real $1K live view.
+    // start-of-day value rather than flash a $64K demo figure on the real live view.
+    //
+    // The x20 ratio was written when live's baseline was ~$1,025, i.e. a $20,500 trip point that sat
+    // safely below the ~$50-64K demo account. Against the post-funding $4,821 baseline the SAME ratio
+    // trips at $96,420 — above the demo account, so the guard would silently stop catching the exact
+    // leak it exists for. A ratio anchored to a baseline that moved 4.7x cannot carry this alone.
+    //
+    // So the demo baseline is now a second, direct trip: the failure mode IS "we are looking at the
+    // demo account", and the demo account's own starting capital is the sharpest test for that. It
+    // needs no re-tuning when either account is refunded.
+    const demoBaseline = (await getStartingCapital("demo")).value;
+    const looksLikeDemoAccount = accountSummary != null && accountSummary.netLiq >= demoBaseline * 0.8;
     let safeAccount = accountSummary;
-    if (viewMode === "live" && accountSummary && accountSummary.netLiq > (startingCapital || 1025) * 20) {
+    if (viewMode === "live" && accountSummary && (accountSummary.netLiq > startingCapital * 20 || looksLikeDemoAccount)) {
       console.warn(`[/api/futures/positions] LIVE balance leak suppressed: netLiq ${accountSummary.netLiq} >> live cap; falling back to SOD ${startOfDayBalance}`);
       const sod = startOfDayBalance || accountSummary.balance || 0;
       safeAccount = { ...accountSummary, netLiq: sod, balance: sod };
@@ -529,6 +540,9 @@ export async function GET() {
       engineStatus,
       todayTradesPnl: null, // Force balance delta path on frontend (DB sums are double-logged)
       startingCapital,
+      // false = the baseline is a fallback, not this account's real funded capital, so every P&L
+      // derived from it is a guess. Surfaced so the UI can show "—" instead of a confident wrong number.
+      startingCapitalConfigured: startingCapitalRes.configured,
       startOfDayBalance,
       balanceHistory,
     });

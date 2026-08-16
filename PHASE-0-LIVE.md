@@ -1,8 +1,36 @@
-# Phase 0 — Live Micro Deployment ($1K real money)
+# Phase 0 — Live Micro Deployment (~$4.8K real money)
 
-*Last updated 2026-05-25. This is the live execution-proving layer (System 2). It is NOT the
-get-rich engine and NOT the spread edge. Primary objective: **SURVIVE.** Secondary: collect real
+*Plan written 2026-05-25 against a $1K account. Capital section corrected 2026-08-16 — the account
+was funded and this document went stale, which is worse than useless: it was read as current and the
+"$1K" figure propagated into analysis. This is the live execution-proving layer (System 2). It is NOT
+the get-rich engine and NOT the spread edge. Primary objective: **SURVIVE.** Secondary: collect real
 execution data.*
+
+> ## Capital history — read this before quoting any account figure
+>
+> | When | Equity | Source |
+> |---|---|---|
+> | 2026-05-25 | ~$1,025 | this plan, as originally written |
+> | 2026-05-27 | **$821** | `futures-realtime.ts` — *"At sub-threshold equity (e.g. $821 today)"* |
+> | **2026-07-11** | **+$4,000 ACH deposit** | `capital-flows.ts` — the deposit that dated this doc |
+> | 2026-07-10 | rebaselined to **~$4,821** | `starting_capital_live`, `strategy_inception` |
+> | 2026-07-28 | ~$5,250 | `futures-realtime.ts` evening-gold sizing note |
+> | 2026-08-16 | **$4,500** | operator |
+>
+> **The live account is not a $1K account and has not been since July 11.** Quote P&L only as
+> `netLiq − starting_capital_live − netDeposits` (`src/lib/live-pnl.ts`) — never balance minus a
+> remembered number, and never a sum of trade rows.
+>
+> ### What the funding silently changed, with no decision attached
+> Three parts of the risk envelope are derived from equity, so the deposit re-armed them by itself:
+> 1. **Position size scaled ~4.7x.** Risk is a percentage (`live_futures_risk_per_trade_pct`), so at
+>    5% the budget went from ~$51/trade to ~$241/trade — same setups, no new evidence.
+> 2. **Evening gold auto-enabled.** `LIVE_EVENING_GOLD_MIN_EQUITY = 3000`; crossing it opened a
+>    session that had never traded live, and on 2026-07-28 its size multiplier was raised 0.5 → 1.0
+>    because at 0.5 the engine computed qty 0 and skipped every evening setup. **§10 below says no
+>    overnight.** That conflict is unresolved and belongs to the operator, not to the code.
+> 3. **Overnight margin utilisation is capped at 90% of equity** — one MGC ties up $2,242.90, half
+>    the account. A gap against that is a margin event, not a stop-out.
 
 > **What tomorrow IS:** live execution validation, infra reliability, broker/API integration,
 > slippage/latency reality, order handling, operational + emotional discipline, real data.
@@ -43,6 +71,33 @@ to Phase 0 only after they trade cleanly on demo.
 budget; no micro fits). Phase 0 *accepts* this because the objective is validation, not edge-harvesting,
 and total exposure is bounded hard by the daily ($80) and weekly ($160) dollar caps + low trade count.
 This is a deliberate, bounded departure from the 1% professional ceiling, not a reversal of it.
+
+> **⚠️ That justification expired with the funding.** The 3–8% figure was forced by a $1K account:
+> one micro was the smallest position that existed, so the risk *was* the minimum. On ~$4,821 at 5%
+> the budget is ~$241 and 1% (~$48) now fits a micro comfortably — the constraint that made
+> oversizing unavoidable is gone, but the 5% setting stayed. **5% is now a choice, not a floor.**
+>
+> ### Plan vs. what live actually runs — verified against the code 2026-08-16
+>
+> | Rule as written above | What the engine does now |
+> |---|---|
+> | Max 1 position | `maxConcurrentPositions: 2` |
+> | Max 1 contract, no pyramiding | `maxContractsPerTrade: 3`, total 4; pyramid add exists |
+> | Max 3 trades/day | `maxTradesPerDay: 6` |
+> | Conviction gate stays ON (§4) | AI grader **off** on live (`live_futures_ai_grader=false`) |
+> | No overnight (§10) | evening gold enabled above $3K equity |
+>
+> Each gap may be individually defensible; none of them is *documented* as a decision. Either bring
+> the config back to this plan or amend this plan — but the gap itself must not persist silently,
+> because this table is what "not following the strategy" actually looks like when written down.
+>
+> **The conviction gate is the load-bearing one.** §4 says *"No validated directional edge exists yet.
+> So: highest-conviction setups only… the conviction gate + the edge-filter veto list stay on."* With
+> the grader off, `finalScore` collapses to `technicalScore`, which the engine's own comment notes is
+> *"still far above the 55 live floor"* — so the confidence threshold no longer rejects anything. Live
+> selectivity today is exactly one thing: **did a registered edge fire.** That is defensible only for
+> as long as the edge registry is kept honest, which makes `defaultLive` in `realtime-edges.ts` the
+> single most safety-critical line in the system.
 
 ## 4. Trade selection
 No validated directional edge exists yet. So: **highest-conviction setups only**, RTH liquid hours,

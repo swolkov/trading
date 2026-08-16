@@ -183,9 +183,19 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     blurb: "MNQ/MES — buy EMA9 pullbacks in a confirmed uptrend (price > 200-EMA), morning only.",
     symbolClass: "index",
     evidence:
-      "4.5-yr Databento backtest incl. the 2022 bear: filtered long PF 1.22 pooled, positive in BOTH train (1.15) and test (1.31); NQ 1.24 / ES 1.18. The SAME long below the 200-EMA loses (PF 0.55) — the regime filter is the edge.",
+      "4.5-yr Databento backtest incl. the 2022 bear: filtered long PF 1.22 pooled, positive in BOTH train (1.15) and test (1.31); NQ 1.24 / ES 1.18. The SAME long below the 200-EMA loses (PF 0.55) — the regime filter is the edge. DEMOTED FROM LIVE 2026-08-10 on realized expectancy (see below); the backtest figures above are why it stays on demo, not a licence for live.",
     defaultDemo: true,
-    defaultLive: true,
+    // DEMOTED FROM LIVE 2026-08-10 (the "trend off, risk down" decision). Until now that demotion
+    // lived ONLY in `edge_index_trend_long_live=false` in the DB, while the registry still defaulted
+    // the edge ON for real money — so losing the config row would silently re-arm a demoted edge on
+    // the live account. That is the exact latent trap d8d57de fixed for gold_long and
+    // index_trend_long_pm on 2026-07-29; this is the third instance of it.
+    //
+    // The new book (post 2026-08-10 19:45Z) is gold_long_europe + gold_short + index_overbought_short
+    // — this edge is deliberately not in it. Default now matches the decision, so the DB flag is
+    // redundant rather than load-bearing. Re-promotion goes through /promote-edge (demo rolling-20
+    // expectancy > 0), not by editing this line.
+    defaultLive: false,
     matches: (m) =>
       INDEX_LONG_SYMS.has(m.sym) && m.setupType === "trend_continuation" && m.direction === "long" &&
       m.session !== "afternoon",
