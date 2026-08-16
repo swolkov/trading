@@ -1037,6 +1037,10 @@ let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS o
 // before real money adopts it. That is the same demo-first bar /promote-edge sets for edges, applied
 // to execution. Override per engine with `<live_futures|futures>_entry_limit` = "true"/"false".
 let entryLimitEnabled = IS_DEMO;
+// Live-only empirical entry floor: block at a genuine 25-trade sample of sub-25% win rate. Reads
+// pattern memory locally — no API call, no latency — so it is ON by default independently of the
+// grader. See the long note at its call site for why the two were untangled.
+let patternFloorEnabled = true;
 let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuation LONG on NQ/ES micros, regime-filtered price>200-EMA (4.5-yr backtest PF 1.22, +both halves). Reversible via DB key index_trend_long_enabled="false".
 // Per-edge on/off switches for THIS engine (demo/live), loaded from DB each config cycle. Absent flag →
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
@@ -1665,6 +1669,7 @@ async function loadRiskConfig() {
       `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
       `${kp}_entry_limit`,          // marketable-limit entries (slippage cap) — demo on, live off by default
       `${kp}_entry_limit_ticks`,    // how far through the signal a limit entry may fill (default 6 ticks)
+      `${kp}_pattern_floor`,        // live empirical entry floor (own switch — no longer tied to the grader)
       "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
       ...allEdgeFlagKeys(),         // per-edge, per-engine on/off switches (edge_<key>_<demo|live>) — the strategy control board writes these
       "macro_blackout_dates",       // comma-separated YYYY-MM-DD (CPI etc, 8:30 ET releases) — maintained in config, no deploy to update
@@ -1705,6 +1710,7 @@ async function loadRiskConfig() {
     // Guarded: a 0/NaN cap would price every entry AT the signal and miss essentially everything.
     const ticksCfg = parseFloat(cfg[`${kp}_entry_limit_ticks`]);
     entryLimitTicks = Number.isFinite(ticksCfg) && ticksCfg >= 1 ? ticksCfg : ENTRY_LIMIT_TICKS_DEFAULT;
+    patternFloorEnabled = cfg[`${kp}_pattern_floor`] !== "false";   // opt-OUT, not opt-in — it is free
     indexTrendLongEnabled = cfg["index_trend_long_enabled"] !== "false"; // legacy global off-switch (kept as a backstop; see edge switches below)
     // Per-edge switches for the registry gate. Copy the queried flags into edgeFlags. Back-compat: if
     // the legacy index_trend_long_enabled="false" is set but no new switch exists, honour the legacy OFF
@@ -1716,7 +1722,7 @@ async function loadRiskConfig() {
       if (edgeFlags[`edge_index_trend_long_${md}`] === undefined) edgeFlags[`edge_index_trend_long_${md}`] = "false";
     }
     updateTradingSymbols();
-    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${entryLimitTicks} ticks)` : "MARKET"} | grader=${aiVetoEnabled ? "ON" : "off"}`);
+    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${entryLimitTicks} ticks)` : "MARKET"} | grader=${aiVetoEnabled ? "ON" : "off"}${IS_LIVE ? ` | patternFloor=${patternFloorEnabled ? "ON" : "off"}` : ""}`);
     // DEPLOY VERIFICATION — prints which edges THIS BINARY contains and how each resolves for this
     // engine. Added 2026-07-28 after a stale deploy went unnoticed for a full session: `railway
     // redeploy` (without --from-source) REBUILDS THE PREVIOUS COMMIT, so the container image carries a
@@ -3867,11 +3873,30 @@ async function evaluateAndTrade(
     // killing every fire on the first bad week. Auto-prune (30-match window) handles persistent
     // underperformers; this early hard-block only fires if we have a genuine 25-trade sample
     // of statistical losing.
-    // Gated on aiVetoEnabled: this floor reads the SAME pattern-memory WR the AI grader uses, so when
-    // the grader is switched OFF (live_futures_ai_grader=false) the floor comes off too — otherwise the
-    // engine still blocks on the very data we chose to disregard (it was killing +2R winners). One switch
-    // controls all pattern-memory vetoing. Flip the grader back on to restore both.
-    if (IS_LIVE && aiVetoEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
+    // ── DECOUPLED FROM THE GRADER (2026-08-16) ────────────────────────────────────────────────
+    // This floor used to ride on aiVetoEnabled, on the reasoning that it reads the same
+    // pattern-memory WR the grader reads, so disregarding the grader meant disregarding the data.
+    // That was correct WHEN IT WAS WRITTEN and is not correct now, for two reasons:
+    //
+    // 1. THE DATA WAS BROKEN THEN AND IS REPAIRED NOW. When the switches were tied together, pattern
+    //    memory stored every breakeven-reaching winner as 0.00R (4f02521) and pooled demo vectors
+    //    into live (0941127) — it reported the account's two money-makers as losers. Blocking on
+    //    that was indeed "killing +2R winners". Both defects are fixed and the vectors repaired.
+    // 2. THE TWO VETOES HAVE NOTHING IN COMMON EXCEPT THEIR INPUT. The grader is an Anthropic round
+    //    trip on the critical path — measured at ~9s, i.e. ~7 points of MNQ, against an edge that is
+    //    only profitable below ~1.5. This floor is a local DB read: it costs nothing and delays
+    //    nothing. Tying a free filter's on/off to an expensive one's meant that switching the grader
+    //    off for LATENCY reasons silently removed live's only empirical entry filter as well.
+    //
+    // So they get their own switches. This is what PHASE-0-LIVE.md §4 requires live to have and
+    // currently does not: an actual selection filter, at zero execution cost.
+    //
+    // HONEST RESIDUAL (from 0941127, not papered over): memory still holds ~13 more
+    // trend_continuation records than the RoundTrip ledger and reads a lower win rate. The gate is
+    // deliberately extreme — sub-25% WR on a 25+ sample — so an imperfectly reconciled book still
+    // clears it easily, and the cost of a false block is a skipped trade, which is free. Asymmetric
+    // in favour of being on. Disable with `<live_futures|futures>_pattern_floor=false`.
+    if (IS_LIVE && patternFloorEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
       log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
       recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} blocked by pattern memory (${(pred.winRate * 100).toFixed(0)}% WR)`);
