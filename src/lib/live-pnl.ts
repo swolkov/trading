@@ -18,6 +18,33 @@ import { getRealtimeEdgePerformance, getFuturesCloses } from "./edge-performance
  * The dollar figure is balance-based; the trade COUNT + win rate come from paired round-trips
  * (entries→exits, incident window already excluded in getRealtimeEdgePerformance).
  */
+// ── STARTING-CAPITAL BASELINE ────────────────────────────────────────────────────────────────────
+// Every P&L number on every page is `balance − thisNumber − deposits`, so if two code paths disagree
+// about it they report different P&L for the same account at the same moment. They DID: this module
+// fell back to 4821 while /api/futures/positions fell back to 1025 — a $3,796 spread, i.e. the live
+// account reading as +$3,475 on one page and −$321 on another whenever the config row was missing.
+//
+// The account's real history is why both numbers existed and why neither is a safe guess: it opened
+// near $1,025, traded down to ~$821 by late May, took a $4,000 ACH on 2026-07-11, and was rebaselined
+// to ~$4,821 with `strategy_inception = 2026-07-10`. The 1025 fallback is simply pre-funding, left
+// behind. A baseline that moved by 4.7x is exactly the kind of number that must never be guessed.
+//
+// So: ONE resolver, and it reports whether the value is real. Callers that show money must degrade to
+// "—" when `configured` is false rather than render a number that is off by the size of the account.
+export const STARTING_CAPITAL_KEY = { live: "starting_capital_live", demo: "starting_capital_demo" } as const;
+/** Last-resort display baselines. Only ever used to keep a layout from breaking — never to state P&L,
+ *  because `configured: false` is what callers must branch on. */
+const STARTING_CAPITAL_FALLBACK = { live: 4821, demo: 50000 } as const;
+
+export async function getStartingCapital(mode: "live" | "demo" = "live"): Promise<{ value: number; configured: boolean }> {
+  try {
+    const row = await prisma.agentConfig.findUnique({ where: { key: STARTING_CAPITAL_KEY[mode] } });
+    const parsed = row?.value != null ? parseFloat(row.value) : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) return { value: parsed, configured: true };
+  } catch { /* fall through to the unconfigured answer */ }
+  return { value: STARTING_CAPITAL_FALLBACK[mode], configured: false };
+}
+
 export interface LiveFuturesPnl {
   ok: boolean;              // false if the broker balance was unreachable — callers should show "—", not a guess
   netPnl: number;          // authoritative: netLiq − startingCapital − netDeposits
@@ -35,18 +62,20 @@ export interface LiveFuturesPnl {
 // "demo"); our own live/demo convention only drives the trade-log symbol set + prefix.
 export async function getFuturesPnl(mode: "live" | "demo" = "live"): Promise<LiveFuturesPnl> {
   const brokerMode = mode === "live" ? "live" : "paper";
-  const scKey = mode === "live" ? "starting_capital_live" : "starting_capital_demo";
-  const scRow = await prisma.agentConfig.findUnique({ where: { key: scKey } }).catch(() => null);
-  const startingCapital = scRow?.value ? parseFloat(scRow.value) : (mode === "live" ? 4821 : 50000);
+  const { value: startingCapital, configured } = await getStartingCapital(mode);
 
   // Broker balance (netLiq) — authoritative. Guard the known "account resolution crossed accounts"
   // leak (a netLiq wildly above this account's capital) the same way the positions route does.
   let currentBalance = startingCapital;
-  let ok = false;
+  // An unconfigured baseline can never produce a trustworthy P&L — netPnl would be the account's
+  // distance from a guess. Start not-ok so callers render "—"; a reachable broker cannot rescue it.
+  let ok = configured;
   try {
     const s = await getTradovateAccountSummary(brokerMode);
     const nl = s.netLiq || s.balance || 0;
-    if (nl > 0 && nl < startingCapital * 20) { currentBalance = nl; ok = true; }
+    // `configured` still gates ok: a live balance against a guessed baseline is a confident wrong
+    // number, which is worse than "—". Both must hold.
+    if (nl > 0 && nl < startingCapital * 20) { currentBalance = nl; ok = configured; }
   } catch { /* broker unreachable — ok stays false */ }
 
   // Net deposits/withdrawals since inception, so a funding transfer never reads as profit.

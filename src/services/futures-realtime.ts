@@ -186,6 +186,37 @@ function overnightMarginCap(sym: string, equity: number): number {
   return Math.floor((equity * OVERNIGHT_MARGIN_UTILISATION_CAP) / perContract);
 }
 
+// ── THE EXECUTION-COST CEILING ───────────────────────────────────────────────────────────────────
+/** CHASE GUARD ceiling: how far price may already have run against us since the signal before we
+ *  refuse to chase, as a fraction of the trade's own risk. Coarse by design — it exists to kill the
+ *  slippage TAIL (MNQ's worst fills were 42.1 and 54.4 points), not to price the entry. */
+const EXEC_COST_CAP_FRACTION = 0.10;
+
+/** ENTRY LIMIT ceiling: how far through the signal a marketable-limit entry may fill, in TICKS.
+ *
+ *  This is deliberately NOT a fraction of the stop, and the arithmetic is why. Measured on live
+ *  (60 MNQ fills, commit 6f21711) MNQ's stop that day was 77.1 points and its MEDIAN slip 7.13 —
+ *  so a 10%-of-stop cap trips at 7.71 points and the median slip sails straight through it. The
+ *  cap would have looked prudent and bound almost nothing.
+ *
+ *  What the edge can actually afford, from the engine-exact NQ morning run by entry slippage:
+ *      7.13 pt → PF 0.72 (-$9,704)   3.00 → 0.91   2.00 → 0.97   1.00 → PF 1.01 (+$308)
+ *  Positive below ~1.5 points — which is 1.9% of that stop, not 10%. But 2%-of-stop applied to GOLD
+ *  (stop ~12.3 pt) is 0.25 pt, under MGC's own 0.50 median, so it would reject half of gold's
+ *  entries. No single fraction-of-stop serves both instruments.
+ *
+ *  TICKS do, because tick size already scales with each contract's notional:
+ *      MNQ  6 x 0.25 = 1.50 pt = $3.00   (median slip 7.13 — binds hard, which is the point)
+ *      MES  6 x 0.25 = 1.50 pt = $7.50   (median slip 0.89 — passes comfortably)
+ *      MGC  6 x 0.10 = 0.60 pt = $6.00   (median slip 0.50 — passes comfortably)
+ *  One number that lands on the economic threshold for the instrument that bleeds and stays out of
+ *  the way of the two that don't. Tunable per engine via `<live_futures|futures>_entry_limit_ticks`.
+ *
+ *  Still bounded by EXEC_COST_CAP_FRACTION of the stop as a secondary ceiling, so an unusually tight
+ *  stop can never pay a disproportionate share of its own risk just to get filled. */
+const ENTRY_LIMIT_TICKS_DEFAULT = 6;
+let entryLimitTicks = ENTRY_LIMIT_TICKS_DEFAULT;
+
 // LIVE only: minimum account equity before we let gold (MGC) trade into the evening session. Below
 // this the account cannot cover MGC's overnight initial margin at all → stay RTH-only. Once funded
 // past it, evening gold auto-enables. Index never gets the evening (its overnight margin is far
@@ -1000,6 +1031,16 @@ const MD_SYMBOL_BLACKOUT_ALERT_MIN = 15;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
 let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
 let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
+// Marketable-LIMIT entries instead of market orders, capped at EXEC_COST_CAP_FRACTION of the stop.
+// Defaults: DEMO on, LIVE off. Deliberately asymmetric — this changes which trades get filled at all
+// (a miss is a skipped trade, not a worse fill), so demo measures the fill-rate cost on real fills
+// before real money adopts it. That is the same demo-first bar /promote-edge sets for edges, applied
+// to execution. Override per engine with `<live_futures|futures>_entry_limit` = "true"/"false".
+let entryLimitEnabled = IS_DEMO;
+// Live-only empirical entry floor: block at a genuine 25-trade sample of sub-25% win rate. Reads
+// pattern memory locally — no API call, no latency — so it is ON by default independently of the
+// grader. See the long note at its call site for why the two were untangled.
+let patternFloorEnabled = true;
 let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuation LONG on NQ/ES micros, regime-filtered price>200-EMA (4.5-yr backtest PF 1.22, +both halves). Reversible via DB key index_trend_long_enabled="false".
 // Per-edge on/off switches for THIS engine (demo/live), loaded from DB each config cycle. Absent flag →
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
@@ -1590,14 +1631,22 @@ const DEMO_DEFAULTS: RiskConfig = {
   simulatedEquity: 0,            // Use actual $50K demo equity (not simulated)
 };
 
-// Live defaults — $1K REAL money. At 1% ($10) NO micro fits (smallest stop ~$55+) → live correctly
-// STOPS trading: $1K is too small to trade futures at professional risk. That halt IS the right
-// outcome (live has no proven edge). Trade live only once funded to ~$10k+. Tunable via live_futures_* keys.
+// Live defaults — REAL money. These are the FALLBACKS ONLY; the live engine runs on live_futures_*
+// DB config, which currently overrides riskPerTradePct to 5. Read the DB (or the heartbeat), never
+// this block, when you need to know what live is actually risking.
+//
+// HISTORY, because this comment was stale for five weeks and the "$1K" in it propagated into
+// analysis as if it were current: the account opened ~$1,025, and at 1% ($10) no micro fit (smallest
+// stop ~$55+), so live correctly STOPPED trading — that halt was the right outcome for an account
+// too small to trade futures at professional risk with no proven edge. It was then funded +$4,000
+// on 2026-07-11 and rebaselined to ~$4,821 (`starting_capital_live`, `strategy_inception`
+// 2026-07-10). At that size 1% (~$48) DOES fit a micro, so the old "1% is impossible here" argument
+// no longer holds and the 5% override is now a choice rather than a floor. See PHASE-0-LIVE.md.
 const LIVE_DEFAULTS: RiskConfig = {
   maxContractsPerTrade: 3,
   maxTotalContracts: 4,
   maxTradesPerDay: 6,
-  riskPerTradePct: 1,            // 1% (~$10 on $1K) — pro standard; no micro fits → live pauses (correct)
+  riskPerTradePct: 1,            // 1% — pro standard. FALLBACK ONLY: live_futures_risk_per_trade_pct is 5.
   dailyLossLimitPct: 3,          // 3% daily loss → full stop
   maxDrawdownPct: 15,            // 15% drawdown → kill switch
   maxConcurrentPositions: 2,     // tight on a small real account
@@ -1618,6 +1667,9 @@ async function loadRiskConfig() {
       `${kp}_risk_per_trade_pct`, `${kp}_daily_loss_limit_pct`, `${kp}_max_drawdown_pct`,
       `${kp}_atr_stop_multiplier`, `${kp}_atr_target_multiplier`, `${kp}_max_positions`, "max_positions",
       `${kp}_simulated_equity`, `${kp}_symbols`, `${kp}_databento_md`, `${kp}_ai_grader`,
+      `${kp}_entry_limit`,          // marketable-limit entries (slippage cap) — demo on, live off by default
+      `${kp}_entry_limit_ticks`,    // how far through the signal a limit entry may fill (default 6 ticks)
+      `${kp}_pattern_floor`,        // live empirical entry floor (own switch — no longer tied to the grader)
       "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
       ...allEdgeFlagKeys(),         // per-edge, per-engine on/off switches (edge_<key>_<demo|live>) — the strategy control board writes these
       "macro_blackout_dates",       // comma-separated YYYY-MM-DD (CPI etc, 8:30 ET releases) — maintained in config, no deploy to update
@@ -1653,6 +1705,12 @@ async function loadRiskConfig() {
     // Set live_futures_ai_grader="false" in DB to disable; default true preserves the original
     // real-money safety. Demo uses futures_ai_grader.
     aiVetoEnabled = cfg[`${kp}_ai_grader`] !== "false";
+    // Absent key → mode default (demo true / live false), so this only turns on where it is asked for.
+    entryLimitEnabled = cfg[`${kp}_entry_limit`] !== undefined ? cfg[`${kp}_entry_limit`] === "true" : IS_DEMO;
+    // Guarded: a 0/NaN cap would price every entry AT the signal and miss essentially everything.
+    const ticksCfg = parseFloat(cfg[`${kp}_entry_limit_ticks`]);
+    entryLimitTicks = Number.isFinite(ticksCfg) && ticksCfg >= 1 ? ticksCfg : ENTRY_LIMIT_TICKS_DEFAULT;
+    patternFloorEnabled = cfg[`${kp}_pattern_floor`] !== "false";   // opt-OUT, not opt-in — it is free
     indexTrendLongEnabled = cfg["index_trend_long_enabled"] !== "false"; // legacy global off-switch (kept as a backstop; see edge switches below)
     // Per-edge switches for the registry gate. Copy the queried flags into edgeFlags. Back-compat: if
     // the legacy index_trend_long_enabled="false" is set but no new switch exists, honour the legacy OFF
@@ -1664,7 +1722,7 @@ async function loadRiskConfig() {
       if (edgeFlags[`edge_index_trend_long_${md}`] === undefined) edgeFlags[`edge_index_trend_long_${md}`] = "false";
     }
     updateTradingSymbols();
-    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""}`);
+    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${entryLimitTicks} ticks)` : "MARKET"} | grader=${aiVetoEnabled ? "ON" : "off"}${IS_LIVE ? ` | patternFloor=${patternFloorEnabled ? "ON" : "off"}` : ""}`);
     // DEPLOY VERIFICATION — prints which edges THIS BINARY contains and how each resolves for this
     // engine. Added 2026-07-28 after a stale deploy went unnoticed for a full session: `railway
     // redeploy` (without --from-source) REBUILDS THE PREVIOUS COMMIT, so the container image carries a
@@ -2815,8 +2873,12 @@ GOLD-SPECIFIC RULES:
 
     // 2026-05-29: Data-driven grader. Live no longer reflexively conservative;
     // empirical historical performance from pattern memory carries the decision.
+    // The account size is READ, never hardcoded. This string said "the LIVE $1K account" for five
+    // weeks after the account was funded to ~$4,821 — so on every grade the model was reasoning about
+    // risk, sizing and survivability against an account 4.7x smaller than the real one, which biases
+    // it toward reflexive caution on exactly the trades this context was added to stop it fearing.
     const liveContext = IS_LIVE
-      ? `\nThis is the LIVE $1K account. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
+      ? `\nThis is the LIVE account, currently $${Math.round((riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity) || 0).toLocaleString()}, risking ${riskConfig.riskPerTradePct}% per trade. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
       : "";
 
     // Pattern-memory empirical evidence block — 2026-06-03: thresholds raised because 10 trades
@@ -3653,7 +3715,17 @@ async function verifyOrderFill(orderId: number, requestedQty: number): Promise<
         lastVwap = q > 0 ? mine.reduce((s, f) => s + f.price * f.qty, 0) / q : mine[0].price;
         lastFilledQty = q;
         if (q >= requestedQty) return { status: "filled", price: lastVwap, qty: q }; // fully filled
-        // partial — keep polling briefly to let the remainder fill
+        // PARTIAL. Normally we keep polling to let the remainder fill — but if the order is already
+        // in a terminal state the remainder is never coming, and every extra poll is ~900ms holding
+        // a REAL position with no protective stop behind it. Return what we actually hold instead;
+        // the caller sizes the stop/target to this qty. Matters most for IOC entries, which cancel
+        // their unfilled remainder by design, but a terminal status is conclusive for any order type.
+        try {
+          const ord = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
+          if (ord?.ordStatus === "Canceled" || ord?.ordStatus === "Rejected" || ord?.ordStatus === "Expired" || ord?.ordStatus === "Filled") {
+            return { status: "filled", price: lastVwap, qty: q };
+          }
+        } catch { /* status unknown — fall through and keep polling, the old behaviour */ }
       } else {
         const ord = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
         if (ord?.ordStatus === "Rejected" || ord?.ordStatus === "Canceled" || ord?.ordStatus === "Expired") {
@@ -3801,11 +3873,30 @@ async function evaluateAndTrade(
     // killing every fire on the first bad week. Auto-prune (30-match window) handles persistent
     // underperformers; this early hard-block only fires if we have a genuine 25-trade sample
     // of statistical losing.
-    // Gated on aiVetoEnabled: this floor reads the SAME pattern-memory WR the AI grader uses, so when
-    // the grader is switched OFF (live_futures_ai_grader=false) the floor comes off too — otherwise the
-    // engine still blocks on the very data we chose to disregard (it was killing +2R winners). One switch
-    // controls all pattern-memory vetoing. Flip the grader back on to restore both.
-    if (IS_LIVE && aiVetoEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
+    // ── DECOUPLED FROM THE GRADER (2026-08-16) ────────────────────────────────────────────────
+    // This floor used to ride on aiVetoEnabled, on the reasoning that it reads the same
+    // pattern-memory WR the grader reads, so disregarding the grader meant disregarding the data.
+    // That was correct WHEN IT WAS WRITTEN and is not correct now, for two reasons:
+    //
+    // 1. THE DATA WAS BROKEN THEN AND IS REPAIRED NOW. When the switches were tied together, pattern
+    //    memory stored every breakeven-reaching winner as 0.00R (4f02521) and pooled demo vectors
+    //    into live (0941127) — it reported the account's two money-makers as losers. Blocking on
+    //    that was indeed "killing +2R winners". Both defects are fixed and the vectors repaired.
+    // 2. THE TWO VETOES HAVE NOTHING IN COMMON EXCEPT THEIR INPUT. The grader is an Anthropic round
+    //    trip on the critical path — measured at ~9s, i.e. ~7 points of MNQ, against an edge that is
+    //    only profitable below ~1.5. This floor is a local DB read: it costs nothing and delays
+    //    nothing. Tying a free filter's on/off to an expensive one's meant that switching the grader
+    //    off for LATENCY reasons silently removed live's only empirical entry filter as well.
+    //
+    // So they get their own switches. This is what PHASE-0-LIVE.md §4 requires live to have and
+    // currently does not: an actual selection filter, at zero execution cost.
+    //
+    // HONEST RESIDUAL (from 0941127, not papered over): memory still holds ~13 more
+    // trend_continuation records than the RoundTrip ledger and reads a lower win rate. The gate is
+    // deliberately extreme — sub-25% WR on a 25+ sample — so an imperfectly reconciled book still
+    // clears it easily, and the cost of a false block is a skipped trade, which is free. Asymmetric
+    // in favour of being on. Disable with `<live_futures|futures>_pattern_floor=false`.
+    if (IS_LIVE && patternFloorEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
       log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
       recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} blocked by pattern memory (${(pred.winRate * 100).toFixed(0)}% WR)`);
@@ -4078,27 +4169,77 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // stop is 10% of the trade's risk, which is the most execution should ever be allowed to cost.
     // A skipped trade is free; a chased one pays the whole tail. Favourable moves are never blocked.
     const freshPrice = barBuilders.get(sym)?.lastPrice ?? 0;
+    const maxChase = stopDist * EXEC_COST_CAP_FRACTION;
     if (freshPrice > 0 && stopDist > 0) {
       const adverse = direction === "long" ? freshPrice - price : price - freshPrice;
-      const maxChase = stopDist * 0.10;
       if (adverse > maxChase) {
-        log(`  ${sym}: SKIP — price already ran ${adverse.toFixed(2)} pts against us since the signal (max chase ${maxChase.toFixed(2)} = 10% of the ${stopDist.toFixed(1)}-pt stop). Not buying the move.`);
+        log(`  ${sym}: SKIP — price already ran ${adverse.toFixed(2)} pts against us since the signal (max chase ${maxChase.toFixed(2)} = ${(EXEC_COST_CAP_FRACTION * 100).toFixed(0)}% of the ${stopDist.toFixed(1)}-pt stop). Not buying the move.`);
         feedLog("skip", `${sym} ${direction} skipped — ran ${adverse.toFixed(1)} pts before entry (chase guard)`);
         return;
       }
     }
 
+    // ── ENTRY ORDER: MARKETABLE LIMIT vs MARKET ──────────────────────────────────────────────
+    // The chase guard above only refuses to chase a move that ALREADY happened. It cannot bound what
+    // the market hands us once a MARKET order is submitted — and that unbounded part is where the
+    // median 7.13-pt MNQ slippage lives, i.e. the difference between PF 0.72 and PF 1.01.
+    //
+    // A marketable limit caps it: priced EXEC_COST_CAP_FRACTION of the stop through the signal, so it
+    // still crosses the spread and fills immediately in normal conditions, but can never fill worse
+    // than the ceiling. IOC (not Day) so an unfilled order CANCELS instead of resting — a stale limit
+    // sitting on the book would fill minutes later on a signal that has expired, which is a worse
+    // failure than not trading. verifyOrderFill already maps Canceled → "rejected", and already sizes
+    // protective orders to the ACTUAL (possibly partial) fill, so both outcomes are handled.
+    //
+    // THE TRADE-OFF, stated honestly: this converts some fills into no-trades. On a real move the
+    // book can be through the cap before we arrive and we simply miss the entry. That is a genuine
+    // cost — it is not free, it is cheaper — and whether it nets positive depends on whether the
+    // trades we miss were better or worse than average. Only real fills answer that, which is why
+    // this is DEMO-ON / LIVE-OFF until demo has the sample.
+    const useLimit = entryLimitEnabled && stopDist > 0;
+    const limitAnchor = freshPrice > 0 ? freshPrice : price;
+    const tick = TICK_SIZES[sym] || contracts.get(sym)?.tickSize || 0.25;
+    // Ticks first (what the EDGE can afford), then the fraction-of-stop as a secondary ceiling (what
+    // the TRADE can afford). The tighter of the two wins — see ENTRY_LIMIT_TICKS_DEFAULT.
+    const entryCap = Math.min(entryLimitTicks * tick, maxChase);
+    // Round the cap OUTWARD (up for a buy, down for a sell) so tick-snapping can only ever loosen the
+    // limit by <1 tick, never tighten it into a non-marketable price and manufacture a miss.
+    const rawLimit = side === "Buy" ? limitAnchor + entryCap : limitAnchor - entryCap;
+    const limitPrice = side === "Buy"
+      ? Number((Math.ceil(rawLimit / tick) * tick).toFixed((String(tick).split(".")[1] || "").length))
+      : Number((Math.floor(rawLimit / tick) * tick).toFixed((String(tick).split(".")[1] || "").length));
+
     const submitTs = Date.now();
-    const entry = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-      accountSpec: acct.name, accountId, action: side, symbol: contract.id,
-      orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-    })}) as { orderId: number };
+    const entry = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify(
+      useLimit
+        ? {
+            accountSpec: acct.name, accountId, action: side, symbol: contract.id,
+            orderQty: qty, orderType: "Limit", price: limitPrice, timeInForce: "IOC", isAutomated: true,
+          }
+        : {
+            accountSpec: acct.name, accountId, action: side, symbol: contract.id,
+            orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+          }
+    )}) as { orderId: number };
+    if (useLimit) log(`  ENTRY as marketable LIMIT ${limitPrice} (signal ${price.toFixed(2)}, cap ${entryCap.toFixed(2)} pts = ${(entryCap / tick).toFixed(0)} ticks / $${(entryCap * (CONTRACT_MULTIPLIERS[sym] || 5)).toFixed(2)} per contract), IOC`);
 
     // Confirm the entry filled BEFORE resting protective orders or tracking a position.
     // Only skip on a positively-confirmed rejection (no fill); unknown → fall back to
     // current behavior (track at estimated price) so we never abandon a real fill.
     const fillResult = await verifyOrderFill(entry.orderId, qty);
     if (fillResult.status === "rejected") {
+      // An IOC that found no liquidity inside the cap is a MISS, not a broker rejection. It is the
+      // designed outcome (a skipped trade is free), so it is logged and counted, never alerted on —
+      // paging on a normal no-fill would train the alert to be ignored.
+      if (useLimit && fillResult.reason === "Canceled") {
+        log(`  ${sym}: NO FILL — nothing available inside the ${entryCap.toFixed(2)}-pt entry cap (limit ${limitPrice}). Skipped, no position, no cost.`);
+        feedLog("skip", `${sym} ${direction} no fill — market outside the ${entryCap.toFixed(1)}-pt entry cap`);
+        // Recorded so the miss RATE is measurable — that is the whole cost side of this change.
+        // fill = intended (slippage 0, not a fake price) and qty = 0, so a miss can never distort a
+        // slippage average; `status='no_fill_cap'` + `qty=0` is what identifies these rows.
+        void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: price, qty: 0, latencyMs: Date.now() - submitTs, status: "no_fill_cap" });
+        return;
+      }
       log(`  ORDER REJECTED (${fillResult.reason}) — no fill, NOT opening ${sym} position (no orphan orders)`);
       notify(`⚠️ ${MODE_TAG} ${sym} entry REJECTED (${fillResult.reason}) — no position opened`);
       feedLog("skip", `${sym} ${direction} entry rejected (${fillResult.reason}) — no position`);
