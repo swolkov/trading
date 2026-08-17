@@ -688,7 +688,21 @@ async function resolveContracts() {
       // expiry) ahead of the actively traded GCQ6, which is why demo gold silently stopped trading
       // after the late-May roll. pickActiveContract restricts to months liquidity actually uses;
       // symbols without a restriction (every micro + the index quarterlies) are unaffected.
-      const picked = pickActiveContract(sym, results);
+      //
+      // FIRST, trade the month the PRICES are on (2026-08-17). Every price this engine sees is the
+      // Databento continuous v.0 (volume-ranked). When gold entered its August delivery period,
+      // volume rolled Q6→Z6 (skipping thin October) and the feed followed — but this list still led
+      // with Q6, so live priced a validated short on Z6 and ORDERED it on Q6: broker rejected, twice,
+      // 2026-08-17 morning. (lib/tradovate.findContract got this fix first, but THIS map — not
+      // findContract — is what executeTrade uses, which is why the first deploy didn't stop the
+      // rejections.) Resolution unavailable → fall back to the listed-month picker unchanged.
+      let picked: typeof results[number] | undefined;
+      try {
+        const { resolveFrontMonthCode } = await import("../lib/databento");
+        const code = await resolveFrontMonthCode(sym);
+        if (code) picked = results.find((r) => r.name === `${sym}${code}`);
+      } catch { /* fall through */ }
+      picked ??= pickActiveContract(sym, results);
       if (picked) {
         contracts.set(sym, { id: picked.id, name: picked.name, tickSize: picked.providerTickSize || picked.tickSize, symbol: sym });
         log(`Resolved ${sym} → ${picked.name} (ID: ${picked.id})`);
