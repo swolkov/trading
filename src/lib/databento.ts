@@ -14,6 +14,59 @@ const DBN_MAP: Record<string, string> = {
 const cache = new Map<string, { at: number; bars: BarData[] }>();
 const TTL_MS = 30_000;   // avoid hammering the historical API on every 15s chart refresh
 
+// ── FRONT-MONTH RESOLUTION (2026-08-17) ─────────────────────────────────────────────────────────
+// Every price this system sees — sidecar quotes AND preloaded bars — is the CONTINUOUS
+// volume-ranked front month (v.0). The ORDER path resolved its contract separately from
+// Tradovate's chronological /contract/suggest list, and the two disagreed the moment a
+// physical-delivery contract entered its delivery period: gold volume rolled out of MGCQ6
+// (August) around first notice (~Jul 31), the sidecar followed it, but /contract/suggest still
+// listed Q6 first — so on 2026-08-17 a validated live gold short was PRICED on the new front
+// month and ORDERED on the delivery-month contract, which the broker rejected. Demo full-size
+// gold had the same mismatch. One source of truth: ask Databento which raw contract v.0 IS,
+// and let the order path trade exactly that month.
+const fmCache = new Map<string, { at: number; code: string | null }>();
+const FM_TTL_MS = 3600_000; // roll changes ~monthly; 1h staleness is harmless (guarded by fallback)
+
+/** Month-and-year code of the contract the continuous feed currently prices, e.g. "Z6" for GCZ6.
+ *  null when unresolvable (no key / API error) — callers MUST fall back, never guess. */
+export async function resolveFrontMonthCode(symbol: string): Promise<string | null> {
+  const dbnSym = DBN_MAP[symbol];
+  const auth = authHeader();
+  if (!dbnSym || !auth) return null;
+  const hit = fmCache.get(dbnSym);
+  if (hit && Date.now() - hit.at < FM_TTL_MS) return hit.code;
+  try {
+    const day = 86_400_000;
+    const start = new Date(Date.now() - 3 * day).toISOString().slice(0, 10); // weekend-safe window
+    const end = new Date(Date.now() - 0 * day).toISOString().slice(0, 10);
+    // The API rejects continuous→raw_symbol directly (422): resolve in two supported hops,
+    // continuous → instrument_id → raw_symbol.
+    const resolve = async (symbols: string, stypeIn: string, stypeOut: string) => {
+      const body = new URLSearchParams({
+        dataset: "GLBX.MDP3", symbols, stype_in: stypeIn, stype_out: stypeOut,
+        start_date: start, end_date: end,
+      });
+      const res = await fetch("https://hist.databento.com/v0/symbology.resolve", {
+        method: "POST", headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded" }, body,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json() as { result?: Record<string, { s?: string }[]> };
+      const mappings = j?.result?.[symbols];
+      return mappings?.length ? mappings[mappings.length - 1]?.s ?? null : null; // latest interval = current
+    };
+    const instrumentId = await resolve(dbnSym, "continuous", "instrument_id");
+    const raw = instrumentId ? await resolve(instrumentId, "instrument_id", "raw_symbol") : null;
+    // "GCZ6" with root "GC" (from the v.0 name) → "Z6". Guard against unexpected shapes.
+    const root = dbnSym.split(".")[0];
+    const code = raw && raw.startsWith(root) && raw.length <= root.length + 3 ? raw.slice(root.length) : null;
+    fmCache.set(dbnSym, { at: Date.now(), code });
+    return code;
+  } catch {
+    fmCache.set(dbnSym, { at: Date.now(), code: null });
+    return null;
+  }
+}
+
 function authHeader(): string | null {
   const k = process.env.DATABENTO_API_KEY;
   return k ? "Basic " + Buffer.from(k + ":").toString("base64") : null;

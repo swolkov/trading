@@ -331,6 +331,22 @@ export async function findContract(symbol: string, modeOverride?: TradingMode): 
       // the liquid months, which is exactly why MGC resolved correctly and GC did not — and why
       // demo gold silently stopped trading after the late-May roll (last fill 2026-05-22).
       // Where a symbol has thin listed months, restrict to the ones liquidity actually uses.
+      //
+      // FIRST, though: trade the month the PRICES are on. All quotes and preloaded bars come from
+      // the Databento continuous front month (v.0, volume-ranked). When a physical-delivery month
+      // (gold) enters delivery, volume rolls to the next month and the feed follows — but this
+      // chronological list still puts the delivery month first, so orders went to a contract the
+      // broker rejects, priced off a different one (live MGC short rejected 2026-08-17, and demo
+      // full-size gold dead the same way). Ask Databento which raw month v.0 currently is and
+      // prefer the candidate that matches it; every fallback path below remains intact.
+      try {
+        const { resolveFrontMonthCode } = await import("./databento");
+        const code = await resolveFrontMonthCode(symbol);
+        if (code) {
+          const match = contracts.find((c) => c.name === `${symbol}${code}`);
+          if (match) return { id: match.id, name: match.name, tickSize: match.providerTickSize || match.tickSize };
+        }
+      } catch { /* resolution unavailable — fall through to the listed-month picker */ }
       const pick = pickActiveContract(symbol, contracts) ?? contracts[0];
       return { id: pick.id, name: pick.name, tickSize: pick.providerTickSize || pick.tickSize };
     }
