@@ -261,6 +261,99 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
       INDEX_LONG_SYMS.has(m.sym) && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
       m.rsi >= 75 && m.rsi < 80,
   },
+
+  // ────────────────────────────────────────────────────────────────────────────────────────────
+  // ORPHANED-SETUP DEMO TRIALS — added 2026-08-19 after a full-system audit found that 6 of the
+  // engine's 9 setup detectors had NO registry entry at all. They fired, scored, passed their local
+  // R:R checks, and were then discarded every single time on BOTH engines with "no registered edge"
+  // — roughly 1,300 lines of detection logic that could never produce a fill, and (worse) no way to
+  // ever learn whether they work, because shadow counterfactuals are recorded BEFORE the sizing and
+  // R:R gates and carry no slippage, so they systematically overstate (the gap_fill lesson).
+  //
+  // These are DEMO-ONLY trials: defaultDemo true / defaultLive false. Their job is to convert
+  // "unknown" into REAL FILLS with real slippage and real management. None may be promoted without
+  // the standard bar — t>2 on real fills, both halves positive, plus review. Delete any that come
+  // back dead rather than leaving them to bleed the research engine.
+  {
+    key: "gap_fill_trial",
+    name: "Gap fill (demo trial)",
+    blurb: "Fade the opening gap toward the prior close, first 30 min.",
+    symbolClass: "index",
+    evidence:
+      "UNPROVEN, AND THE SHADOW NUMBER IS KNOWN TO LIE. Its counterfactuals looked outstanding (the 2026-07-25 audit called it the top research lead) but the 2026-07-29 re-measurement found the shadow row is written at recordDecision, BEFORE the R:R>=2.0 gate — and gap geometry means only 6.8-28.2% of gap_fills ever clear it (median R:R 1.10/0.88/0.63), because the stop is fixed at the opening gap while the target shrinks as the gap fills. Raw, it also loses. This trial exists to settle it with fills that pass every real gate, not to endorse it. Expect it to die; that is a useful result.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) => INDEX_LONG_SYMS.has(m.sym) && m.setupType === "gap_fill",
+  },
+  {
+    key: "vwap_reclaim_trial",
+    name: "VWAP reclaim (demo trial)",
+    blurb: "Price closes back through VWAP after 5+ bars on one side.",
+    symbolClass: "index",
+    evidence:
+      "UNPROVEN — no backtest, no fills, never registered. Chosen for a trial because it was the most FREQUENT orphaned setup in the live decline log (94 long + 6 short declines on live in 30 days), so it will reach a decision-grade sample fastest. Nominal geometry is 3.5 ATR target / 1.3 ATR stop = 2.69 R:R, which clears the hard gate by construction. NOTE its VWAP input changed on 2026-08-19 (anchor moved from the 02:00 ET accounting roll to the 09:30 RTH open), so any pre-2026-08-19 intuition about this setup is void.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) => INDEX_LONG_SYMS.has(m.sym) && m.setupType === "vwap_reclaim",
+  },
+  {
+    key: "vwap_bounce_trial",
+    name: "VWAP bounce (demo trial)",
+    blurb: "Rejection candle off VWAP in the direction of the session trend.",
+    symbolClass: "index",
+    evidence:
+      "UNPROVEN — no backtest, never registered. Trend-following complement to vwap_reclaim (which fades), so running both on demo separates 'VWAP is informative' from 'one direction of VWAP is informative'. 3.0 ATR target / 1.2 ATR stop = 2.5 R:R. Same 2026-08-19 VWAP-anchor caveat applies.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) => INDEX_LONG_SYMS.has(m.sym) && m.setupType === "vwap_bounce",
+  },
+  {
+    key: "failed_ib_breakout_trial",
+    name: "Failed IB breakout (demo trial)",
+    blurb: "Fade a break of the opening range that gets rejected back inside.",
+    symbolClass: "index",
+    evidence:
+      "UNPROVEN — no backtest, never registered. The one orphan with its OWN local R:R>=2.0 check before it even reaches the global gate, so its signals are pre-filtered for reward geometry. Its opening-range inputs were corrupted until 2026-08-19 on any day the engine restarted (preload bucketed days in UTC and seeded the OR from the 02:00 ET London hour), so this trial is also the first clean test of the OR itself.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) => INDEX_LONG_SYMS.has(m.sym) && m.setupType === "failed_ib_breakout",
+  },
+  {
+    key: "ib_extension_trial",
+    name: "IB extension (demo trial)",
+    blurb: "Continuation beyond the opening range on expanding volume.",
+    symbolClass: "index",
+    evidence:
+      "UNPROVEN — no backtest, never registered. Directional twin of failed_ib_breakout: one fades the OR break, the other rides it. Running both on demo is a controlled A/B on the same event, which is worth more than either alone. Same post-2026-08-19 caveat: OR data before that date was unreliable after restarts.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) => INDEX_LONG_SYMS.has(m.sym) && m.setupType === "ib_extension",
+  },
+  {
+    key: "range_bounce_trial",
+    name: "Range bounce (demo trial)",
+    blurb: "Fade session/prior-day extremes on range days.",
+    symbolClass: "index",
+    evidence:
+      "UNPROVEN — no backtest, never registered. ⚠️ KNOWN HOLE: its local R:R floor is 1.5 while the engine's hard gate is 2.0, so signals in the 1.5-2.0 band clear detection and then die silently in executeTrade. That gap is deliberate for now — it makes this trial a strict subset (only R:R>=2.0 range bounces trade), which is the version worth measuring anyway. Do not 'fix' the local floor to 2.0 without re-reading this note; the two numbers are testing different things.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) => INDEX_LONG_SYMS.has(m.sym) && m.setupType === "range_bounce",
+  },
+  {
+    key: "gold_rsi_bounce_orphans_trial",
+    name: "Gold non-RSI setups (demo trial)",
+    blurb: "MGC/GC — the OR/VWAP/IB family on gold, which the registry only ever covered for index.",
+    symbolClass: "metals",
+    evidence:
+      "UNPROVEN — gold is registered ONLY for extreme_rsi_bounce, so every other gold setup was discarded unmeasured (the live decline log shows these as 'gold trades RSI-bounce edge only'). Gold is also the single instrument with positive realized live P&L (+$109 over 25 fills, PF 1.15) while index micros are negative, so the question 'do gold's OTHER setups work?' is the highest-value unknown in the book. Excludes trend_continuation, which the engine deliberately skips for gold.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) =>
+      METALS.has(m.sym) &&
+      (m.setupType === "or_breakout" || m.setupType === "vwap_reclaim" || m.setupType === "vwap_bounce" ||
+       m.setupType === "failed_ib_breakout" || m.setupType === "ib_extension" || m.setupType === "range_bounce"),
+  },
 ];
 
 /** Find the registered edge an evaluated setup belongs to, or null (→ default-deny / skip). */

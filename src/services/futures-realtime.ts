@@ -1376,6 +1376,28 @@ function getSizeMultiplier(sym?: string): number {
  *  across two days. */
 const SESSION_RESET_ET_HOUR = 2.0;
 
+// ── ET time helpers for ARBITRARY timestamps (2026-08-19) ────────────────────────────────────
+// session-time.ts's getETHour()/getETDateString() only answer "right now". Bucketing historical
+// bars needs the same answers for a given bar, in ET, with the engine's 02:00 accounting-day
+// boundary — doing it in UTC (as preload did) puts the day break at ~19:00/20:00 ET, mid-session.
+const ET_PARTS = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+function etPartsOf(ms: number) {
+  const p = ET_PARTS.formatToParts(new Date(ms));
+  const g = (t: string) => parseInt(p.find(x => x.type === t)!.value, 10);
+  return { y: g("year"), mo: g("month"), d: g("day"), h: g("hour") + g("minute") / 60 };
+}
+/** ET clock hour (fractional) of a timestamp, e.g. 9.5 = 09:30 ET. */
+function etHourOf(ms: number): number { return etPartsOf(ms).h; }
+/** The engine's accounting day (YYYY-MM-DD) a timestamp belongs to: rolls at 02:00 ET, not UTC midnight. */
+function etAccountingDay(ms: number): string {
+  const { y, mo, d, h } = etPartsOf(ms);
+  const base = Date.UTC(y, mo - 1, d) - (h < SESSION_RESET_ET_HOUR ? 86_400_000 : 0);
+  return new Date(base).toISOString().slice(0, 10);
+}
+
 function checkSessionReset() {
   const now = new Date();
   const todayET = getETDateString();
@@ -2108,15 +2130,30 @@ function checkPositions(sym: string, price: number, reliable = true) {
           const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
           const acct = accounts.find(a => a.id === accountId) || accounts[0];
           const side = pos.direction === "long" ? "Buy" : "Sell";
-          await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          const addOrder = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
             accountSpec: acct.name, accountId, action: side, symbol: pos.contractId,
             orderQty: addQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-          })});
-          // Update average entry price: weighted average of existing + new contracts
+          })}) as { orderId: number };
+          // VERIFY THE ADD FILLED before mutating position state (2026-08-19). This was
+          // fire-and-forget: a rejected or partial add still incremented pos.quantity and then
+          // RESIZED THE BROKER STOP LARGER THAN THE POSITION ACTUALLY HELD — when that stop
+          // triggered, the excess would have opened a brand-new position in the opposite
+          // direction. Size everything to what actually filled, or change nothing at all.
+          const addFill = await verifyOrderFill(addOrder.orderId, addQty);
+          if (addFill.status !== "filled" || addFill.qty < 1) {
+            const why = addFill.status === "rejected" ? addFill.reason : addFill.status;
+            log(`${sym}: PYRAMID ADD DID NOT FILL (${why}) — position unchanged at ${pos.quantity}x, existing stop untouched.`);
+            notify(`${MODE_TAG} ${sym}: pyramid add did not fill (${why}) — position unchanged at ${pos.quantity}x.`);
+            return;
+          }
+          const filledAddQty = addFill.qty;
+          const addPrice = addFill.price > 0 ? addFill.price : price;
+          if (filledAddQty < addQty) log(`${sym}: PARTIAL pyramid add — ${filledAddQty}/${addQty} filled; sizing to the fill.`);
+          // Update average entry price: weighted average of existing + ACTUALLY FILLED contracts
           const oldQty = pos.quantity;
           const oldEntry = pos.entryPrice;
-          pos.quantity += addQty;
-          pos.entryPrice = (oldEntry * oldQty + price * addQty) / pos.quantity;
+          pos.quantity += filledAddQty;
+          pos.entryPrice = (oldEntry * oldQty + addPrice * filledAddQty) / pos.quantity;
           pos.pyramided = true;
           // ROOT FIX: modify the existing stop IN PLACE to cover the new total quantity at the new
           // average entry — no cancel-then-place naked window. Falls back to place only if untracked.
@@ -2133,17 +2170,28 @@ function checkPositions(sym: string, price: number, reliable = true) {
             })}) as { orderId: number };
             pos.stopOrderId = s.orderId;
           }
-          log(`${sym}: Pyramid filled — ${oldQty}x@$${oldEntry.toFixed(2)} + ${addQty}x@$${price.toFixed(2)} = ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}`);
-          notify(`PYRAMID ${sym}: +${addQty}x @ $${price.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}.`);
+          // Resize the TARGET to the new total as well — it was left at the pre-pyramid quantity,
+          // so a target fill would flatten only part of the position and leave an untracked residual.
+          if (pos.targetOrderId) {
+            try {
+              await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+                orderId: pos.targetOrderId, orderType: "Limit", orderQty: pos.quantity, price: roundToTick(sym, pos.target), isAutomated: true,
+              })});
+            } catch (e) { log(`${sym}: pyramid target resize failed (${e}) — cancelling it so the stop/trail owns the exit`); 
+              try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+              pos.targetOrderId = null; }
+          }
+          log(`${sym}: Pyramid filled — ${oldQty}x@$${oldEntry.toFixed(2)} + ${filledAddQty}x@$${addPrice.toFixed(2)} = ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}`);
+          notify(`PYRAMID ${sym}: +${filledAddQty}x @ $${addPrice.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}.`);
 
           // Log pyramid entry to DB so orders page shows it
           try {
             await prisma.autoTradeLog.create({ data: {
               symbol: `FUT:${sym}`,
               action: `${TRADE_ACTION_PREFIX}_pyramid`,
-              qty: addQty,
+              qty: filledAddQty,
               price,
-              reason: `[${MODE_TAG} ${sym}] Pyramid +${addQty}x @ $${price.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}. Original: ${oldQty}x @ $${oldEntry.toFixed(2)}`,
+              reason: `[${MODE_TAG} ${sym}] Pyramid +${filledAddQty}x @ $${addPrice.toFixed(2)}. Now ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}. Original: ${oldQty}x @ $${oldEntry.toFixed(2)}`,
             }});
           } catch {}
 
@@ -2336,30 +2384,37 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
       }),
     }) as { orderId: number };
 
-    // Get actual fill price from Tradovate
-    try {
-      await new Promise(r => setTimeout(r, 1500));
-      const fills = await apiFetch("/fill/list") as { orderId: number; price: number; qty: number }[];
-      const myFills = fills.filter(f => f.orderId === scaleOrder.orderId);
-      if (myFills.length > 0) {
-        const totalQty = myFills.reduce((s, f) => s + f.qty, 0);
-        const actualPrice = myFills.reduce((s, f) => s + f.price * f.qty, 0) / totalQty;
-        if (Math.abs(actualPrice - price) > 0.01) {
-          log(`${sym}: Scale-out actual fill $${actualPrice.toFixed(2)} (bar was $${price.toFixed(2)})`);
-          price = actualPrice;
-        }
-      }
-    } catch { /* use bar price */ }
+    // VERIFY THE SCALE ACTUALLY FILLED before mutating any state (2026-08-19).
+    // This used to only *look up a price*: on a rejected scale order it fell through to
+    // `catch { /* use bar price */ }`, then halved pos.quantity, resized the stop down to that
+    // phantom half (leaving the OTHER half of a real position unprotected), booked profit into
+    // dailyPnl that never happened, and had already cancelled the target. Now the fill is
+    // authoritative — and a partial fill scales exactly what filled, never what was requested.
+    const scaleFill = await verifyOrderFill(scaleOrder.orderId, scaleQty);
+    if (scaleFill.status !== "filled" || scaleFill.qty < 1) {
+      const why = scaleFill.status === "rejected" ? scaleFill.reason : scaleFill.status;
+      log(`${sym}: SCALE-OUT DID NOT FILL (${why}) — position left intact at ${pos.quantity}x. Stop still covers full size; target was cancelled, trailing stop now owns the exit.`);
+      notify(`${MODE_TAG} ${sym}: scale-out did not fill (${why}) — position unchanged at ${pos.quantity}x, protected by its stop.`);
+      pos.targetOrderId = null; // it WAS cancelled above; don't leave a stale id pointing at nothing
+      await savePositions();
+      return;
+    }
+    const filledScaleQty = scaleFill.qty;
+    if (scaleFill.price > 0 && Math.abs(scaleFill.price - price) > 0.01) {
+      log(`${sym}: Scale-out actual fill $${scaleFill.price.toFixed(2)} (bar was $${price.toFixed(2)})`);
+      price = scaleFill.price;
+    }
+    if (filledScaleQty < scaleQty) log(`${sym}: PARTIAL scale-out — ${filledScaleQty}/${scaleQty} filled; sizing everything to what actually filled.`);
 
-    // Recalculate P&L with actual fill price
+    // Recalculate P&L with actual fill price AND actual filled quantity
     const actualDiff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
-    const actualPnl = actualDiff * mult * scaleQty;
+    const actualPnl = actualDiff * mult * filledScaleQty;
 
-    pos.quantity -= scaleQty;
+    pos.quantity -= filledScaleQty;
     pos.scaledOut = true;
     dailyPnl += actualPnl;
-    log(`${sym}: SCALE OUT ${scaleQty}x @ $${price.toFixed(2)} — locked in $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`);
-    notify(`SCALE OUT ${sym}: +$${actualPnl.toFixed(0)} locked (${scaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
+    log(`${sym}: SCALE OUT ${filledScaleQty}x @ $${price.toFixed(2)} — locked in $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`);
+    notify(`SCALE OUT ${sym}: +$${actualPnl.toFixed(0)} locked (${filledScaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
 
 
     // Log to database
@@ -2367,10 +2422,10 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
         action: `${TRADE_ACTION_PREFIX}_scale_out`,
-        qty: scaleQty,
+        qty: filledScaleQty,
         price,
         pnl: actualPnl,
-        reason: `[FUTURES ${sym}] Scale out 50% at 1R: ${scaleQty}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${actualPnl.toFixed(0)}. Remaining: ${pos.quantity}x`,
+        reason: `[FUTURES ${sym}] Scale out 50% at 1R: ${filledScaleQty}x @ $${price.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${actualPnl.toFixed(0)}. Remaining: ${pos.quantity}x`,
         orderId: null,
       }});
     } catch {}
@@ -2405,7 +2460,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         direction: pos.direction === "long" ? "LONG" : "SHORT",
         strategy: "futures-scalping",
         setupType: "scale_out",
-        contracts: scaleQty,
+        contracts: filledScaleQty,
         entryPrice: pos.entryPrice,
         stopPrice: pos.stopLoss,
         targetPrice: pos.target,
@@ -2415,7 +2470,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         conviction: 3,
         exitReason: "scale_out",
       }, AGENT_NAME);
-      await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `Scale out ${scaleQty}x @ $${price.toFixed(2)}: P&L $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`, actualPnl > 0 ? 4 : 2);
+      await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `Scale out ${filledScaleQty}x @ $${price.toFixed(2)}: P&L $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`, actualPnl > 0 ? 4 : 2);
     } catch { /* vault optional */ }
 
     await savePositions();
@@ -2695,6 +2750,21 @@ async function closePosition(sym: string, price: number, reason: string) {
           }),
         }) as { orderId: number };
         closeOrderId = orderResult.orderId;
+        // "The POST returned an id" is NOT a close (2026-08-19). Tradovate answers synchronously
+        // and can reject milliseconds later — the entry path already guards for exactly this. If
+        // the close was rejected we must NOT fall through: the brackets were cancelled at the top
+        // of this attempt, and the caller goes on to positions.delete(sym) + recentlyClosedAt,
+        // which blocks re-adoption for 5 minutes. That combination is a real position with no
+        // stop, no target and no engine tracking. Treat a rejection as a failed attempt and retry.
+        const closeFill = await verifyOrderFill(closeOrderId, pos.quantity);
+        if (closeFill.status === "rejected") throw new Error(`close order rejected: ${closeFill.reason}`);
+        if (closeFill.status === "filled" && closeFill.qty < pos.quantity) {
+          // Partial close: the remainder is still live and now unbracketed. Shrink tracking to it
+          // and retry — never report a partial as flat.
+          log(`[CLOSE] ${sym}: PARTIAL close ${closeFill.qty}/${pos.quantity} — ${pos.quantity - closeFill.qty}x still open, retrying.`);
+          pos.quantity -= closeFill.qty;
+          throw new Error(`partial close (${closeFill.qty} of ${pos.quantity + closeFill.qty})`);
+        }
         // Success — break out of retry loop
         break;
     } catch (err) {
@@ -3176,7 +3246,18 @@ async function onBarClose(sym: string, bar: Bar) {
   // BLOCKS the long during warmup (~first 2.5 sessions after a restart) rather than letting an un-validated
   // long through — the backtest that validated it always had a real 200-EMA. Only the long reads ema200.
   const ema200 = ema200arr.length ? ema200arr[ema200arr.length - 1] : Infinity;
-  const vwapData = b.sessionBars.length >= 3 ? calcVwap(b.sessionBars) : calcVwap(bars.slice(-78));
+  // VWAP ANCHOR (fixed 2026-08-19). sessionBars accumulate from the 02:00 ET accounting roll, so
+  // during RTH the "session VWAP" every setup reads was polluted with ~7.5h of Asia/Europe/pre-market
+  // volume — not the institutional 09:30-anchored VWAP the strategies were written against. Opening
+  // Range got this clock-gating fix on 2026-08-02; VWAP was missed. Once RTH has begun we anchor at
+  // 09:30 ET; overnight sessions (London gold) legitimately keep the accounting-day anchor since
+  // there is no RTH open to anchor to yet. Falls back to the old behaviour in the first ~15 minutes
+  // after the open, when too few RTH bars exist to form a meaningful VWAP.
+  const rthVwapBars = getETHour() >= 9.5
+    ? b.sessionBars.filter(x => etHourOf(x.t * 1000) >= 9.5 && etAccountingDay(x.t * 1000) === etAccountingDay(Date.now()))
+    : [];
+  const vwapSource = rthVwapBars.length >= 3 ? rthVwapBars : b.sessionBars;
+  const vwapData = vwapSource.length >= 3 ? calcVwap(vwapSource) : calcVwap(bars.slice(-78));
 
   // Volume analysis
   const last20 = bars.slice(-20);
@@ -4843,10 +4924,14 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
   b.bars5m = bars.slice(-200);
   b.lastPrice = bars[bars.length - 1].c;
 
-  const today = new Date();
-  const todayStr = today.toISOString().split("T")[0];
-  const prevDayBars = bars.filter(bar => new Date(bar.t * 1000).toISOString().split("T")[0] < todayStr);
-  const todayBars = bars.filter(bar => new Date(bar.t * 1000).toISOString().split("T")[0] === todayStr);
+  // Bucket by the engine's ET ACCOUNTING DAY, not UTC (fixed 2026-08-19). toISOString() breaks the
+  // day at UTC midnight = ~19:00/20:00 ET, which is inside eth_evening and hours before the real
+  // 02:00 ET roll. A restart in that window (routine: evening redeploys, London hours) put part of
+  // TODAY into prevDayBars — corrupting PDH/PDL/prevDayClose — and truncated sessionBars, which is
+  // what VWAP is computed from. Every downstream level was wrong for the rest of the day.
+  const todayStr = etAccountingDay(Date.now());
+  const prevDayBars = bars.filter(bar => etAccountingDay(bar.t * 1000) < todayStr);
+  const todayBars = bars.filter(bar => etAccountingDay(bar.t * 1000) === todayStr);
 
   if (prevDayBars.length > 0) {
     b.prevDayHigh = Math.max(...prevDayBars.map(x => x.h));
@@ -4857,11 +4942,16 @@ async function preloadBarsForSymbol(sym: string): Promise<void> {
   b.sessionBars = todayBars;
   b.barCount = todayBars.length;
 
-  if (todayBars.length >= 12) {
-    const orBars = todayBars.slice(0, 12);
-    b.openingRangeHigh = Math.max(...orBars.map(x => x.h));
-    b.openingRangeLow = Math.min(...orBars.map(x => x.l));
-  }
+  // OPENING RANGE = first 60 min of RTH, clock-gated — the same rule the live builder uses.
+  // This used to take todayBars.slice(0,12), i.e. the first 12 bars after the 02:00 ET roll, which
+  // is the LONDON hour, and it never set orBarCount — so the live builder (which only ever widens
+  // the range with Math.max/min) merged the real 09:30 range into that stale overnight one for the
+  // whole day. orSize feeds dayType, which gates setups, so this corrupted more than or_breakout.
+  const rthBars = todayBars.filter(x => etHourOf(x.t * 1000) >= 9.5);
+  const orBars = rthBars.slice(0, 12);
+  b.orBarCount = orBars.length;
+  b.openingRangeHigh = orBars.length ? Math.max(...orBars.map(x => x.h)) : 0;
+  b.openingRangeLow = orBars.length ? Math.min(...orBars.map(x => x.l)) : 0;
 
   log(`  ${sym}: Loaded ${bars.length} bars | Last: $${b.lastPrice.toFixed(2)} | PDH:$${b.prevDayHigh.toFixed(2)} PDL:$${b.prevDayLow.toFixed(2)} | Today: ${todayBars.length} bars`);
 }
