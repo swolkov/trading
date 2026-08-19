@@ -2718,6 +2718,15 @@ async function closePosition(sym: string, price: number, reason: string) {
           stoppedSymbols.add(`close_failed_${sym}`);
           notify(`CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 retries! Manual intervention needed.`, "general");
         }
+        // RELEASE THE LOCK BEFORE RETURNING (2026-08-19). This `return` sits OUTSIDE the
+        // try/finally below that normally deletes the lock, so without this line the symbol
+        // stayed locked for the life of the process: every later closePosition() — trail stop,
+        // breakeven, hard-loss backstop, EOD flatten, drawdown kill — hit the "Close already in
+        // progress" guard and returned immediately, and syncPositions skipped the symbol too.
+        // Since attempt 1 already cancelled the stop AND target, the outcome was a REAL position
+        // with no broker protection, no software exit, and no possible close until a restart.
+        // The comment below says "retry next tick" — that intent only works if the lock is freed.
+        closingLocks.delete(sym);
         return; // Don't remove from tracking — retry next tick
       }
       await new Promise(r => setTimeout(r, 2000 * attempt));
@@ -3268,7 +3277,16 @@ async function onBarClose(sym: string, bar: Bar) {
     // setup is ~37% but winners are ~2.3x losers, so it nets positive. The improved trailing stop (1.1R)
     // banks gains on pullbacks BEFORE the far target, which lifts the effective win rate without a closer
     // target (a closer 1:1 target would fail the R:R gate and block every gold trade — verified in review).
-    const targetDist = currentATR * 3.5;
+    // BOTH legs scale with VIX (fixed 2026-08-19). The stop used `adjustedATR` (= currentATR ×
+    // vix.stopMult) while the target used the RAW currentATR, so the R:R silently collapsed exactly
+    // when volatility rose: at VIX>25 (stopMult 1.5) R:R = 3.5/2.25 = 1.56, and at VIX>30
+    // (stopMult 2.0) it is 3.5/3.0 = 1.17 — both BELOW the hard rr<2.0 gate in executeTrade, which
+    // silently returns. Since gold_long_europe and gold_short (two of the three live edges) are both
+    // this setup, the live book switched itself off in every high-vol regime — after already paying
+    // for the pattern-memory lookup and, when enabled, a ~9s grader round trip. Scaling both legs
+    // keeps the ratio at the validated 2.33 in every regime while the wider stop still absorbs the
+    // extra volatility (position size shrinks via vix.sizeMult, which is the intended defence).
+    const targetDist = adjustedATR * 3.5;
     const stopDistRSI = adjustedATR * 1.5;
 
     // Need declining volume (exhaustion, not capitulation)

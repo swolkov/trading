@@ -1099,19 +1099,43 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
 
   // ============ MANAGE EXISTING POSITIONS ============
-  // Pre-fetch bars for each unique symbol (Tradovate primary, Yahoo fallback)
-  const posBarCache: Record<string, { bars: { t: number; o: number; h: number; l: number; c: number; v: number }[]; price: number; atrVal: number }> = {};
+  // Pre-fetch bars for each unique symbol. DATABENTO FIRST (2026-08-19).
+  //
+  // This price does not just render a number — it drives the aggregate-drawdown kill switch below,
+  // which market-closes REAL positions. It used to come from getFuturesIntradayBars (Tradovate →
+  // YAHOO), and Yahoo is the feed that was purged from the realtime engine on 2026-07-29 for
+  // pricing a DIFFERENT CONTRACT MONTH frozen at the 17:00 ET close (63-point basis on gold). This
+  // failover runs precisely when the realtime engine is down, and Tradovate market data is not
+  // subscribed on this account — so Yahoo was the steady-state source here, not a rare last resort.
+  // A frozen/wrong-month price can either force-close a healthy position or hide a real blowout.
+  // Databento is the same continuous front-month series the engine and sidecar use; the old chain
+  // remains as a last resort, and a symbol that prices at 0 is simply skipped by the callers below.
+  const posBarCache: Record<string, { bars: { t: number; o: number; h: number; l: number; c: number; v: number }[]; price: number; atrVal: number; src: string }> = {};
   for (const pos of futuresPositions) {
     const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
     if (sym && !posBarCache[sym]) {
+      let bars: { t: number; o: number; h: number; l: number; c: number; v: number }[] = [];
+      let src = "none";
       try {
-        const bars = await getFuturesIntradayBars(sym, "5m", "1d");
-        posBarCache[sym] = {
-          bars,
-          price: bars.length > 0 ? bars[bars.length - 1].c : 0,
-          atrVal: atr(bars.map((b) => ({ h: b.h, l: b.l, c: b.c }))),
-        };
-      } catch { posBarCache[sym] = { bars: [], price: 0, atrVal: 5 }; }
+        const { getDatabentoIntradayBars } = await import("./databento");
+        bars = await getDatabentoIntradayBars(sym, "5m", "1d");
+        if (bars.length > 0) src = "databento";
+      } catch { /* fall through to the legacy chain */ }
+      if (bars.length === 0) {
+        try {
+          bars = await getFuturesIntradayBars(sym, "5m", "1d");
+          if (bars.length > 0) src = "tradovate_or_yahoo";
+        } catch { /* leave empty — callers skip price 0 */ }
+      }
+      posBarCache[sym] = {
+        bars,
+        price: bars.length > 0 ? bars[bars.length - 1].c : 0,
+        atrVal: bars.length > 0 ? atr(bars.map((b) => ({ h: b.h, l: b.l, c: b.c }))) : 5,
+        src,
+      };
+      if (src === "tradovate_or_yahoo") {
+        details.push(`WARNING: ${sym} position priced from the LEGACY feed (Databento empty) — contract-month risk; drawdown kill switch suppressed for this symbol`);
+      }
     }
   }
 
@@ -1128,8 +1152,12 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   // Railway owns MGC/MNQ/MES/GC/NQ/ES — the cron must NEVER market-close those (it force-closed
   // a healthy live gold position on 2026-07-13 doing exactly that).
   const killablePositions = futuresPositions.filter((pos) => {
-    if (!opts.registryOnly) return true;
     const sym = Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s));
+    // NEVER market-close a position whose price came from the legacy (Tradovate→Yahoo) chain:
+    // Yahoo has priced the wrong contract month before, and this switch closes real positions.
+    // No trustworthy price → no automated close. The broker's own stop still protects the position.
+    if (sym && posBarCache[sym]?.src === "tradovate_or_yahoo") return false;
+    if (!opts.registryOnly) return true;
     return !!sym && isRegistryOnlySymbol(sym);
   });
   const aggregateUnrealizedPnl = killablePositions.reduce((sum, pos) => {
