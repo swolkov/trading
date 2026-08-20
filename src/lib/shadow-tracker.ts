@@ -23,6 +23,7 @@
 import { prisma } from "@/lib/db";
 import { getDatabentoIntradayBars } from "@/lib/databento";
 import { getFuturesIntradayBars } from "@/lib/futures-data";
+import { isFreshPositiveEquity } from "@/lib/risk-sizing";
 
 // Mirror the engine (futures-realtime.ts): time-exit a trade that hasn't reached +1R
 // within 30 minutes; otherwise let it ride to stop/target inside a bounded window.
@@ -67,9 +68,10 @@ export function shadowDollars(
   const { riskPct, maxContracts } = sizing;
   const pv = POINT_VALUE[t.symbol] ?? 10;
   const perContractRisk = Math.abs(t.entry - t.stop) * pv;
-  if (perContractRisk <= 0 || equity <= 0) return { contracts: 1, dollarPnl: 0 };
+  if (perContractRisk <= 0 || equity <= 0 || maxContracts < 1) return { contracts: 0, dollarPnl: 0 };
   const riskTarget = equity * (riskPct / 100);
-  const contracts = Math.max(1, Math.min(maxContracts, Math.floor(riskTarget / perContractRisk)));
+  const contracts = Math.min(maxContracts, Math.floor(riskTarget / perContractRisk));
+  if (contracts < 1) return { contracts: 0, dollarPnl: 0 };
   return { contracts, dollarPnl: t.rMultiple * perContractRisk * contracts };
 }
 
@@ -144,26 +146,38 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
     take: 200,
   });
 
-  // Fetch the live account equity once so we can translate R into real dollars. Demo uses its
-  // simulated equity. Best-effort — if the balance call fails we fall back to a sane default.
-  let liveEquity = 1104;
+  // Translate every counterfactual, including demo, onto the current live account. Demo's large
+  // broker balance is execution capacity, not the capital base we are trying to grow. Using the old
+  // hardcoded $59K / 7% demo assumptions overstated the dollar value of trial edges by many times.
+  // Fail closed at $0 if neither broker nor heartbeat can provide a real balance; R statistics still
+  // resolve normally, but the dashboard will not invent dollar P&L.
+  let liveEquity = 0;
   try {
     const { getTradovateAccountSummary } = await import("@/lib/tradovate");
     const s = await getTradovateAccountSummary("live");
     if (s?.netLiq > 0) liveEquity = s.netLiq;
-  } catch { /* keep fallback */ }
-  // Live sizing must mirror the REAL live caps (1 micro), read from DB so it never drifts stale.
-  let liveMaxContracts = 1, liveRiskPct = 6;
+  } catch { /* try the engine heartbeat below */ }
+  if (liveEquity <= 0) {
+    try {
+      const row = await prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } });
+      const heartbeat = JSON.parse(row?.value || "{}") as { equity?: number; timestamp?: string };
+      const heartbeatAt = Date.parse(heartbeat.timestamp || "");
+      if (isFreshPositiveEquity(Number(heartbeat.equity), heartbeatAt, Date.now(), 15 * 60_000)) {
+        liveEquity = Number(heartbeat.equity);
+      }
+    } catch { /* keep fail-closed zero */ }
+  }
+  // Read the real live caps from DB so dollar normalization follows the account as settings change.
+  let liveMaxContracts = 1, liveRiskPct = 1;
   try {
     const cfg = await prisma.agentConfig.findMany({ where: { key: { in: ["live_futures_max_contracts", "live_futures_risk_per_trade_pct"] } } });
     const mc = parseInt(cfg.find((c) => c.key === "live_futures_max_contracts")?.value ?? "");
     const rp = parseFloat(cfg.find((c) => c.key === "live_futures_risk_per_trade_pct")?.value ?? "");
     if (Number.isFinite(mc) && mc > 0) liveMaxContracts = mc;
     if (Number.isFinite(rp) && rp > 0) liveRiskPct = rp;
-  } catch { /* keep defaults (1 micro / 6%) */ }
-  const equityFor = (mode: string) => (mode === "live" ? liveEquity : 59_000);
-  const sizingFor = (mode: string) =>
-    mode === "live" ? { riskPct: liveRiskPct, maxContracts: liveMaxContracts } : { riskPct: 7, maxContracts: 10 };
+  } catch { /* keep conservative defaults */ }
+  const normalizedEquity = liveEquity;
+  const normalizedSizing = { riskPct: liveRiskPct, maxContracts: liveMaxContracts };
 
   // Group by symbol+mode so we fetch each symbol's bars once.
   const byKey = new Map<string, typeof open>();
@@ -206,8 +220,8 @@ export async function resolveOpenShadowTrades(): Promise<{ scanned: number; reso
       if (!res) continue;
       const { contracts, dollarPnl } = shadowDollars(
         { symbol, entry: t.entry, stop: t.stop, rMultiple: res.rMultiple },
-        sizingFor(mode),
-        equityFor(mode),
+        normalizedSizing,
+        normalizedEquity,
       );
       await prisma.shadowTrade.update({
         where: { id: t.id },

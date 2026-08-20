@@ -36,6 +36,10 @@ export function parseSetupType(reason: string): string | null {
   return null;
 }
 
+export function parseEdgeKey(reason: string): string | null {
+  return reason.match(/Edge:\s*([a-z0-9_]+)/i)?.[1] ?? null;
+}
+
 /** Intended dollar risk for the trade. Prefers the engine's own "Risk: $N" (authoritative — it is
  *  what the sizer actually budgeted); falls back to reconstructing from the logged stop. */
 export function parseRiskDollars(reason: string, entryPrice: number, contracts: number, mult: number): number | null {
@@ -99,7 +103,9 @@ export async function attributeRoundTrip(rt: {
   const tol = Math.max(rt.entryPrice * 0.002, 1);   // 20bps or 1 point
   if (Math.abs((best.price ?? 0) - rt.entryPrice) > tol) return { setupType: null, rMultiple: null };
 
-  const setupType = parseSetupType(best.reason);
+  // New entry rows carry the exact registry edge key, including session-split variants.
+  // Older rows fall back to the canonical setup type and remain intentionally less specific.
+  const setupType = parseEdgeKey(best.reason) ?? parseSetupType(best.reason);
   const mult = MULT[rt.symbol] ?? 5;
   const risk = parseRiskDollars(best.reason, rt.entryPrice, rt.contracts, mult);
   const rMultiple = risk && risk > 0 ? Number((rt.pnl / risk).toFixed(3)) : null;

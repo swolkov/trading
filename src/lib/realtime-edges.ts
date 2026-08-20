@@ -12,8 +12,8 @@
  *
  * SAFETY / NO-SURPRISE DESIGN
  *   - The switch is ADDITIVE. When a switch flag is absent from config (the initial state), the
- *     edge falls back to its registry default — and the three current live edges default to ON
- *     for BOTH demo and live, so wiring this in changes live behaviour by exactly nothing.
+ *     edge falls back to its registry default. Live defaults are fail-closed; explicit DB flags
+ *     and the promotion gate are required before real money can trade an edge.
  *   - A NEW edge added here defaults to demo=ON, live=OFF, so it can never reach real money until
  *     it is deliberately promoted.
  *   - Default-DENY on no match: a setup that matches no registered edge is skipped, identical to
@@ -96,7 +96,7 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     evidence:
       "The BEST cell in the entire 12-cell gold grid and one of only two that survive both halves: PF 1.37 over 310 trades (train 1.19 / test 1.51) — the largest passing sample of any gold cell, and steadier across halves than the morning short (1.10/2.46) that already trades live. London is gold's most liquid stretch outside NY. NOTE the pooled gold-long number (PF 0.71) is dragged down entirely by the other sessions — see gold_long.",
     defaultDemo: true,
-    defaultLive: true,
+    defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long" &&
       m.session === GOLD_LONG_SESSION,
@@ -127,7 +127,7 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     evidence:
       "MORNING ONLY (09:45–12:00 ET) as of 2026-07-28. Engine-exact 3-yr test, all 12 gold session×direction cells: the morning short is one of only TWO that survive both halves — PF 1.72 (1.10 train / 2.46 test) over 117 trades. Every other gold short session fails its train half: afternoon 1.92 (0.86), eth_evening 1.15 (0.76), midday 1.03 (0.74), eth_europe 0.96 (0.58). Live corroborates: gold is −$92 over 10 trades while the morning book is +$329.",
     defaultDemo: true,
-    defaultLive: true,
+    defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
       m.session === GOLD_SHORT_SESSION,

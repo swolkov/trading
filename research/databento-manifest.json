@@ -1,0 +1,86 @@
+{
+  "formatVersion": 1,
+  "provider": "Databento",
+  "dataset": "GLBX.MDP3",
+  "schema": "ohlcv-1m",
+  "stypeIn": "continuous",
+  "rollPolicy": "volume-ranked v.0; validators reset the 200-bar indicator buffer on instrument_id changes and never carry a trade across a roll",
+  "files": [
+    {
+      "path": "data/ES_1m.csv",
+      "bytes": 112568998,
+      "sha256": "25afaacb00d1d872e3c915a9e401981415128f82462afe3f12badea131f469bf",
+      "rows": 1060422,
+      "firstEvent": "2023-05-22T20:05:00.000000000Z",
+      "lastEvent": "2026-05-21T20:04:00.000000000Z",
+      "instrumentIds": [
+        "118",
+        "14160",
+        "17077",
+        "183748",
+        "294973",
+        "314863",
+        "3445",
+        "42140864",
+        "42140878",
+        "4916",
+        "5002",
+        "5602",
+        "95414"
+      ],
+      "header": "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume"
+    },
+    {
+      "path": "data/NQ_1m.csv",
+      "bytes": 117452269,
+      "sha256": "3eb916b7be60e7f8c9d39e8a91f3e16195fe9ff43daee9f5fde1f018d5757bbe",
+      "rows": 1060685,
+      "firstEvent": "2023-05-22T20:05:00.000000000Z",
+      "lastEvent": "2026-05-21T20:04:00.000000000Z",
+      "instrumentIds": [
+        "106364",
+        "13743",
+        "158704",
+        "2130",
+        "260937",
+        "3522",
+        "42002475",
+        "42004058",
+        "42005804",
+        "42008487",
+        "42288528",
+        "4358",
+        "750"
+      ],
+      "header": "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume"
+    },
+    {
+      "path": "data/gold3y/GC_1m.csv",
+      "bytes": 117215306,
+      "sha256": "c3632f2b6ecacb2e443605ae556b654c27bd7f4872213834bddf7ff0fc91e943",
+      "rows": 1113805,
+      "firstEvent": "2023-05-22T00:00:00.000000000Z",
+      "lastEvent": "2026-07-24T20:59:00.000000000Z",
+      "instrumentIds": [
+        "1551",
+        "19181",
+        "19604",
+        "2017",
+        "287",
+        "30052",
+        "39231",
+        "393",
+        "41512",
+        "42000890",
+        "42001025",
+        "42008094",
+        "42011464",
+        "44740",
+        "669",
+        "7246",
+        "9466"
+      ],
+      "header": "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume"
+    }
+  ]
+}

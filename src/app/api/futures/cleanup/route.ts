@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/db";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 export async function POST() {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
+
   try {
     // Delete backfilled entries with wrong P&L estimates
     const deleted = await prisma.autoTradeLog.deleteMany({

@@ -1,6 +1,7 @@
 import { runFuturesAgent } from "@/lib/futures-agent";
 import { checkTradovateAuth } from "@/lib/tradovate";
 import { getViewMode } from "@/lib/trading-mode";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 export const maxDuration = 300;
 
@@ -22,6 +23,9 @@ export async function GET() {
 }
 
 export async function POST() {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
+
   try {
     const result = await runFuturesAgent();
     return Response.json(result);

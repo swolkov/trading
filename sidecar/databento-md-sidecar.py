@@ -48,6 +48,7 @@ def db_connect():
             symbol text PRIMARY KEY, bid double precision, ask double precision,
             mid double precision, ts bigint, source text, updated_at timestamptz DEFAULT now())""")
         c.execute("ALTER TABLE live_quotes ADD COLUMN IF NOT EXISTS vol double precision DEFAULT 0")
+        c.execute("ALTER TABLE live_quotes ADD COLUMN IF NOT EXISTS raw_contract text")
         c.execute("""CREATE TABLE IF NOT EXISTS live_depth (
             symbol text PRIMARY KEY,
             bids jsonb,         -- array of {price, size} sorted desc
@@ -59,12 +60,21 @@ def db_connect():
     return conn
 
 def upsert_quotes(conn, latest):
+    from psycopg2.extras import execute_values
+    rows = [
+        (sym, bid, ask, (bid + ask) / 2, ts, vol, raw_contract)
+        for sym, (bid, ask, ts, vol, raw_contract) in latest.items()
+    ]
+    if not rows:
+        return
     with conn.cursor() as c:
-        for sym, (bid, ask, ts, vol) in latest.items():
-            c.execute("""INSERT INTO live_quotes(symbol,bid,ask,mid,ts,vol,source,updated_at)
-                VALUES(%s,%s,%s,%s,%s,%s,'databento',now())
-                ON CONFLICT(symbol) DO UPDATE SET bid=%s,ask=%s,mid=%s,ts=%s,vol=%s,source='databento',updated_at=now()""",
-                (sym, bid, ask, (bid+ask)/2, ts, vol, bid, ask, (bid+ask)/2, ts, vol))
+        execute_values(c, """INSERT INTO live_quotes(symbol,bid,ask,mid,ts,vol,raw_contract,source,updated_at)
+            VALUES %s
+            ON CONFLICT(symbol) DO UPDATE SET
+              bid=EXCLUDED.bid, ask=EXCLUDED.ask, mid=EXCLUDED.mid, ts=EXCLUDED.ts,
+              vol=EXCLUDED.vol, raw_contract=EXCLUDED.raw_contract, source='databento', updated_at=now()""",
+            rows,
+            template="(%s,%s,%s,%s,%s,%s,%s,'databento',now())")
 
 def upsert_depth(conn, depth_latest):
     with conn.cursor() as c:
@@ -108,7 +118,7 @@ def stream_once(conn):
     schemas = "mbp-1 + trades" + (" + mbp-10" if mbp10_subscribed else "")
     print(f"[sidecar] subscribed {SYMBOLS} ({schemas})", flush=True)
 
-    id_to_sym, latest, depth_latest, cumvol = {}, {}, {}, {}
+    id_to_sym, id_to_contract, latest, depth_latest, cumvol = {}, {}, {}, {}, {}
     last_write, last_depth_write, last_log = 0.0, 0.0, 0.0
     # Stale-mapping watchdog: detect quarterly contract rollovers (e.g. NQM→NQU) without a stream crash.
     # After the first successful symbol match, count consecutive messages with unrecognized instrument IDs.
@@ -118,8 +128,10 @@ def stream_once(conn):
     for rec in client:
         name = type(rec).__name__
         if name == "SymbolMappingMsg":
-            raw = getattr(rec, "stype_in_symbol", None) or getattr(rec, "stype_out_symbol", "")
-            id_to_sym[rec.instrument_id] = raw.split(".")[0]
+            continuous = getattr(rec, "stype_in_symbol", "")
+            raw_contract = getattr(rec, "stype_out_symbol", "")
+            id_to_sym[rec.instrument_id] = continuous.split(".")[0]
+            id_to_contract[rec.instrument_id] = raw_contract
             consec_unknown = 0  # fresh mapping = connection is healthy
             continue
         sym = id_to_sym.get(getattr(rec, "instrument_id", None))
@@ -147,7 +159,7 @@ def stream_once(conn):
         # Top of book always — keep live_quotes fresh
         bid_l, ask_l = lv[0].bid_px / 1e9, lv[0].ask_px / 1e9
         if bid_l > 0 and ask_l > 0:
-            latest[sym] = (bid_l, ask_l, int(getattr(rec, "ts_event", time.time_ns()) // 1_000_000), cumvol.get(sym, 0))
+            latest[sym] = (bid_l, ask_l, int(getattr(rec, "ts_event", time.time_ns()) // 1_000_000), cumvol.get(sym, 0), id_to_contract.get(getattr(rec, "instrument_id", None), ""))
 
         # Depth — only when message carries 10 levels (MBP-10 schema)
         if mbp10_subscribed and len(lv) > 1:

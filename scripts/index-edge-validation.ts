@@ -76,19 +76,19 @@ const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
 // correlation guard), so it trades a much worse population. Use it for RELATIVE comparisons.
 // For anything exit-related prefer scripts/live-exit-forensics.ts, which replays REAL broker fills.
 //
-const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.6;
+const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.8;
 const TRAIL_R = parseFloat(process.env.G_TRAIL_R || "") || 1.1;
-const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
-const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 0.9) * 1.5;   // index
-const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
+const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 90);
+const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 1.4) * 1.5;   // index
+const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.45;
 // Index target, in ATR. Default 3.5 ATR against a 1.5 ATR stop = 2.33R. Sweepable because live has
 // now produced 23 winners and NOT ONE reached 2.33R (best 1.92R) — a target the fills never touch
 // converts every winner into a lock-out, so it has to be tested rather than assumed.
-const TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 5.0;
+const TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 4.0;
 // Stop width in ATR. MUST MATCH LIVE: live_futures_atr_stop_multiplier = 1.4 (NOT 1.5). Verified
 // against AgentConfig 2026-08-06 — every sweep before that date modelled 1.5/3.5 while live ran
 // 1.4/5.0, so their absolute numbers describe a config the account was not trading.
-const STOP_ATR_MULT = parseFloat(process.env.G_STOP || "") || 1.4;
+const STOP_ATR_MULT = parseFloat(process.env.G_STOP || "") || 1.5;
 const BUFFER = 200;
 
 const etFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -101,7 +101,7 @@ function etOffset(t: number): number {
   const off = Date.UTC(+p.year, +p.month - 1, +p.day, hh, +p.minute) - hr * 3600000;
   offCache.set(hr, off); return off;
 }
-interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; }
+interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; instrumentId: string; }
 function sessionName(hour: number, dow: number): string {
   if (dow === 6 || (dow === 5 && hour >= 17) || (dow === 0 && hour < 18)) return "halt";
   if (hour >= 17 && hour < 18) return "halt";
@@ -132,13 +132,17 @@ function load(file: string) {
     const r = lines[i]; if (!r) continue;
     const f = r.split(","); const t = Date.parse(f[0]); const c = +f[7];
     if (!isFinite(t) || !isFinite(c) || c <= 0) continue;
-    const etMs = t + etOffset(t); const day = Math.floor(etMs / 86400000);
-    m1.push({ t, o: +f[4], h: +f[5], l: +f[6], c, v: +f[8] || 0, day, hour: (etMs - day * 86400000) / 3600000, dayISO: new Date(etMs).toISOString().slice(0, 10) });
+    const etMs = t + etOffset(t);
+    const calendarDay = Math.floor(etMs / 86400000);
+    const hour = (etMs - calendarDay * 86400000) / 3600000;
+    const accountingMs = etMs - (hour < 2 ? 86400000 : 0);
+    const day = Math.floor(accountingMs / 86400000);
+    m1.push({ t, o: +f[4], h: +f[5], l: +f[6], c, v: +f[8] || 0, day, hour, dayISO: new Date(accountingMs).toISOString().slice(0, 10), instrumentId: f[3] });
   }
   const m5: Bar[] = []; let key = -1;
   for (const b of m1) {
     const k = Math.floor(b.t / 300000);
-    if (k !== key) { key = k; m5.push({ ...b, t: k * 300000 }); }
+    if (k !== key || m5[m5.length - 1]?.instrumentId !== b.instrumentId) { key = k; m5.push({ ...b, t: k * 300000 }); }
     else { const j = m5.length - 1; if (b.h > m5[j].h) m5[j].h = b.h; if (b.l < m5[j].l) m5[j].l = b.l; m5[j].c = b.c; m5[j].v += b.v; }
   }
   return { m1, m5 };
@@ -182,6 +186,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     if (sizeMult <= 0) continue;
 
     const buf = m5.slice(i - BUFFER + 1, i + 1);
+    if (buf.some((candidate) => candidate.instrumentId !== bar.instrumentId)) continue;
     const closes = buf.map(b => b.c);
     const rawATR = atrOf(buf); if (rawATR <= 0) continue;
     const currentATR = rawATR;                       // index atrScale = 1.0
@@ -349,12 +354,13 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     const entryTime = bar.t + 300000 + ENTRY_DELAY_MIN * 60000;
     while (m1Cursor < m1.length && m1[m1Cursor].t < entryTime) m1Cursor++;
     if (m1Cursor >= m1.length) break;
-    // Re-anchor to the actual price at the delayed entry. With no delay this is the signal price,
-    // so G_DELAY=0 reproduces the original behaviour exactly.
-    const refPrice = ENTRY_DELAY_MIN > 0 ? m1[m1Cursor].c : price;
+    if (m1[m1Cursor].instrumentId !== bar.instrumentId) continue;
+    // The signal is only known after the five-minute bar closes. Re-anchor to the next tradable
+    // minute's open, including when there is no optional delay, to avoid look-ahead execution.
+    const refPrice = m1[m1Cursor].o;
     const entry = short ? refPrice - SLIP : refPrice + SLIP;
-    const hardStop = short ? refPrice + stopDist : refPrice - stopDist;
-    const target = short ? refPrice - targetDist : refPrice + targetDist;
+    const hardStop = short ? entry + stopDist : entry - stopDist;
+    const target = short ? entry - targetDist : entry + targetDist;
     const riskDollars = stopDist * S.ptVal;
 
     let peak = 0, reachedBE = false, trail: number | null = null, atrNow = currentATR;
@@ -362,6 +368,11 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
 
     for (let k = m1Cursor; k < m1.length && !exited; k++) {
       const b1 = m1[k];
+      if (b1.instrumentId !== bar.instrumentId) {
+        const previous = m1[Math.max(m1Cursor, k - 1)];
+        exited = { px: short ? previous.c + S.tick : previous.c - S.tick, why: "contract_roll", k };
+        break;
+      }
       const s1 = sessionName(b1.hour, new Date(b1.t + etOffset(b1.t)).getUTCDay());
       const mins = (b1.t - entryTime) / 60000;
       if (indexSizeMult(s1) <= 0) { exited = { px: short ? b1.c + S.tick : b1.c - S.tick, why: "session_close", k }; break; }

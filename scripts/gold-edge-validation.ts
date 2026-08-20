@@ -58,10 +58,11 @@ const STALE_OVERRIDE = process.env.G_STALE || "";
 const PT_VAL = 10;        // MGC
 const TICK = 0.1;
 const COMMISSION = 2.02;
+const ENTRY_SLIP = process.env.G_SLIP !== undefined ? parseFloat(process.env.G_SLIP) : 0.50;
 const ATR_SCALE_METALS = 1.5;
 const VIX_STOP_MULT = 1.0;
-const BREAKEVEN_R = 0.6, TRAIL_R = 1.1;
-const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
+const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.8, TRAIL_R = 1.1;
+const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 90);
 const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 1.0) * 1.5;   // metals
 const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
 const BUFFER = 200;                  // engine's bars5m cap
@@ -83,7 +84,7 @@ function etOffset(t: number): number {
   return off;
 }
 
-interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; }
+interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; instrumentId: string; }
 
 /** Engine session names (getSessionName, line 953-970). */
 function sessionName(hour: number, dow: number): string {
@@ -130,19 +131,23 @@ function load(file: string): { m1: Bar[]; m5: Bar[] } {
     const c = +f[7];
     if (!isFinite(t) || !isFinite(c) || c <= 0) continue;
     const etMs = t + etOffset(t);
-    const day = Math.floor(etMs / 86400000);
-    const d = new Date(etMs);
+    const calendarDay = Math.floor(etMs / 86400000);
+    const hour = (etMs - calendarDay * 86400000) / 3600000;
+    const accountingMs = etMs - (hour < 2 ? 86400000 : 0);
+    const day = Math.floor(accountingMs / 86400000);
+    const d = new Date(accountingMs);
     m1.push({
       t, o: +f[4], h: +f[5], l: +f[6], c, v: +f[8] || 0, day,
-      hour: (etMs - day * 86400000) / 3600000,
+      hour,
       dayISO: d.toISOString().slice(0, 10),
+      instrumentId: f[3],
     });
   }
   const m5: Bar[] = [];
   let key = -1;
   for (const b of m1) {
     const k = Math.floor(b.t / 300000);
-    if (k !== key) { key = k; m5.push({ ...b, t: k * 300000 }); }
+    if (k !== key || m5[m5.length - 1]?.instrumentId !== b.instrumentId) { key = k; m5.push({ ...b, t: k * 300000 }); }
     else {
       const j = m5.length - 1;
       if (b.h > m5[j].h) m5[j].h = b.h;
@@ -215,6 +220,7 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
 
     // rolling 200-bar buffer — exactly what the engine holds
     const buf = m5.slice(i - BUFFER + 1, i + 1);
+    if (buf.some((candidate) => candidate.instrumentId !== bar.instrumentId)) continue;
     const closes = buf.map(b => b.c);
     const rawATR = atrOf(buf);
     if (rawATR <= 0) continue;
@@ -243,17 +249,21 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
     score += sizeMult >= 1 ? 5 : sizeMult >= 0.5 ? 0 : -10;
     if (Math.max(0, Math.min(100, score)) < 75) continue;
 
-    const price = bar.c;
     const stopDist = adjustedATR * 1.5;
     const targetDist = currentATR * 3.5;               // engine uses the UNadjusted ATR here
     const short = dir === "short";
-    const entry = short ? price - TICK : price + TICK;
-    const hardStop = short ? price + stopDist : price - stopDist;
-    const target = short ? price - targetDist : price + targetDist;
-    const riskDollars = stopDist * PT_VAL;
 
     const entryTime = bar.t + 300000;
     while (m1Cursor < m1.length && m1[m1Cursor].t < entryTime) m1Cursor++;
+    if (m1Cursor >= m1.length) break;
+    if (m1[m1Cursor].instrumentId !== bar.instrumentId) continue;
+    // The signal is only known after the five-minute bar closes. Enter from the next tradable
+    // minute's open and charge measured MGC slippage, never from the already-finished signal bar.
+    const refPrice = m1[m1Cursor].o;
+    const entry = short ? refPrice - ENTRY_SLIP : refPrice + ENTRY_SLIP;
+    const hardStop = short ? entry + stopDist : entry - stopDist;
+    const target = short ? entry - targetDist : entry + targetDist;
+    const riskDollars = stopDist * PT_VAL;
 
     let peak = 0, reachedBE = false, trail: number | null = null;
     let exited: { px: number; why: string; k: number } | null = null;
@@ -261,6 +271,11 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
 
     for (let k = m1Cursor; k < m1.length && !exited; k++) {
       const b1 = m1[k];
+      if (b1.instrumentId !== bar.instrumentId) {
+        const previous = m1[Math.max(m1Cursor, k - 1)];
+        exited = { px: short ? previous.c + TICK : previous.c - TICK, why: "contract_roll", k };
+        break;
+      }
       const dow1 = new Date(b1.t + etOffset(b1.t)).getUTCDay();
       const s1 = sessionName(b1.hour, dow1);
       const mins = (b1.t - entryTime) / 60000;

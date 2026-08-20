@@ -11,9 +11,11 @@ import { logTradeToJournal, logDecision, logObservation, vaultRead, vaultWrite, 
 import { getETHour, getETDayOfWeek, getETDateString, isWeekend as isWeekendET, isHalt as isHaltET } from "../lib/session-time";
 import { TradovateWebSocket, type QuoteUpdate } from "./tradovate-ws";
 import { getPlanContextForGrading } from "../lib/advisor";
-import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, REALTIME_EDGES } from "../lib/realtime-edges";
+import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, edgeFlagKey, REALTIME_EDGES } from "../lib/realtime-edges";
 import { VAULT_SESSION_RULES } from "../lib/vault-session-gates";
-import { pickActiveContract } from "../lib/contract-months";
+import { reconcileBrokerPosition } from "../lib/broker-position-reconciliation";
+import { cappedContractLimit, isFreshPositiveEquity } from "../lib/risk-sizing";
+import { createServer } from "node:http";
 
 
 // ── Config ──────────────────────────────────────────────
@@ -27,8 +29,11 @@ const LIVE_API = "https://live.tradovateapi.com/v1";
 const ENGINE_MODE = (process.env.ENGINE_MODE || "demo") as "demo" | "live";
 const IS_DEMO = ENGINE_MODE === "demo";
 const IS_LIVE = ENGINE_MODE === "live";
+// Real-money entries require an explicit infrastructure-level arm in addition to every DB gate.
+// Current corrected Databento replays fail, so an old DB flag must not silently keep live risk on.
+const LIVE_TRADING_ARMED = process.env.LIVE_TRADING_ARMED === "true";
 const ORDER_API = IS_LIVE ? LIVE_API : DEMO_API;
-const POLL_INTERVAL_MS = 5000; // Databento live_quotes poll cadence (sidecar writes ~1s)
+const POLL_INTERVAL_MS = 1000; // Match the sidecar cadence; single-flight guard prevents overlap.
 
 // WebSocket state — when connected, polling pauses
 let wsConnected = false;
@@ -41,6 +46,7 @@ const POSITIONS_KEY = `futures_positions_${ENGINE_MODE}`;
 const TRADE_ACTION_PREFIX = IS_LIVE ? "live" : "futures";
 const MODE_TAG = IS_LIVE ? "LIVE" : "DEMO";
 const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
+const STRATEGY_VERSION = "2026-08-20-parity-v1";
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
@@ -70,6 +76,7 @@ const INDEX_SYMS = new Set(["ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K"]
 // applied in setup detection via price>ema200, is what makes both work.)
 const INDEX_LONG_SYMS = new Set(["NQ", "MNQ", "ES", "MES"]);
 let indexEntryReservedUntil = 0;
+let entryExecutionInFlight = false;
 // Live full-size threshold — set so the MNQ→NQ switch is a RAMP, not a cliff (Fable 5 review).
 // At 1% risk a ~30pt NQ stop ($600) needs ~$60k for 1 NQ to equal the ~10 MNQ the account was already
 // trading; below $60k MNQ scales smoothly via risk-based sizing. (Was $25k — a 10× exposure jump.)
@@ -79,21 +86,32 @@ const FULL_SIZE_EQUITY_THRESHOLD = 60_000;
 let SYMBOLS = FULL_SIZE_SYMBOLS; // default to full-size (demo), downgraded to micros for small live accounts
 // PHASE 0 (live): optional symbol whitelist from DB config (live_futures_symbols), e.g. "MES" for day-1.
 let symbolWhitelist: string[] | null = null;
-// PHASE 0 (live): pyramiding OFF by default on live (1-contract rule); demo may still pyramid for learning.
-const ALLOW_PYRAMID = process.env.ALLOW_PYRAMID ? process.env.ALLOW_PYRAMID === "true" : IS_DEMO;
+// Pyramiding changes payoff geometry and makes demo incomparable with the live micro book.
+// Keep it opt-in in every mode until a production-parity replay validates it explicitly.
+const ALLOW_PYRAMID = process.env.ALLOW_PYRAMID === "true";
+const DEMO_LIVE_CLONE = process.env.DEMO_LIVE_CLONE !== "false";
+const USES_LIVE_POLICY = IS_LIVE || (IS_DEMO && DEMO_LIVE_CLONE);
+const LIVE_HEARTBEAT_KEY = "futures_engine_heartbeat_live";
+const LIVE_MIRROR_MAX_AGE_MS = 3 * 60_000;
+const BROKER_EQUITY_MAX_AGE_MS = 15 * 60_000;
+let liveMirrorEquity = 0;
+let liveMirrorHeartbeatAt = 0;
 
 function updateTradingSymbols() {
   const prev = SYMBOLS.join(",");
-  // DEMO: Always trade full-size (ES, NQ, GC) — $50K demo account, max learning
-  // LIVE: Micros until equity >= $25K, then full-size
+  const selectionEquity = IS_DEMO && DEMO_LIVE_CLONE ? liveMirrorEquity : tradovateEquity;
+  // Demo defaults to the same micro contracts as live so its execution evidence transfers.
+  // Set DEMO_LIVE_CLONE=false only for a deliberately separate full-size research service.
   let next = IS_LIVE
     ? (tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
-    : FULL_SIZE_SYMBOLS;
+    : (DEMO_LIVE_CLONE
+      ? (liveMirrorEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
+      : FULL_SIZE_SYMBOLS);
   // PHASE 0: restrict to the whitelist if set (e.g. ["MES"] for live day-1)
   if (symbolWhitelist && symbolWhitelist.length > 0) next = next.filter(s => symbolWhitelist!.includes(s));
   SYMBOLS = next;
   if (prev !== SYMBOLS.join(",")) {
-    log(`[SIZING] Equity $${tradovateEquity.toFixed(0)} → trading ${SYMBOLS.join(", ") || "(none)"}${symbolWhitelist ? ` [whitelist: ${symbolWhitelist.join(",")}]` : ""}`);
+    log(`[SIZING] Policy equity $${selectionEquity.toFixed(0)} → trading ${SYMBOLS.join(", ") || "(none)"}${symbolWhitelist ? ` [whitelist: ${symbolWhitelist.join(",")}]` : ""}`);
   }
 }
 
@@ -686,8 +704,7 @@ async function resolveContracts() {
       // /contract/suggest is ordered by expiry, so results[0] is the NEAREST month — wrong for any
       // symbol the exchange also lists in thin months. Full-size gold listed GCN6 (July, days from
       // expiry) ahead of the actively traded GCQ6, which is why demo gold silently stopped trading
-      // after the late-May roll. pickActiveContract restricts to months liquidity actually uses;
-      // symbols without a restriction (every micro + the index quarterlies) are unaffected.
+      // after the late-May roll.
       //
       // FIRST, trade the month the PRICES are on (2026-08-17). Every price this engine sees is the
       // Databento continuous v.0 (volume-ranked). When gold entered its August delivery period,
@@ -695,14 +712,24 @@ async function resolveContracts() {
       // with Q6, so live priced a validated short on Z6 and ORDERED it on Q6: broker rejected, twice,
       // 2026-08-17 morning. (lib/tradovate.findContract got this fix first, but THIS map — not
       // findContract — is what executeTrade uses, which is why the first deploy didn't stop the
-      // rejections.) Resolution unavailable → fall back to the listed-month picker unchanged.
+      // rejections.) Resolution unavailable now fails closed. Trading nothing is safer than
+      // pricing one contract and submitting an order in another month.
       let picked: typeof results[number] | undefined;
       try {
-        const { resolveFrontMonthCode } = await import("../lib/databento");
-        const code = await resolveFrontMonthCode(sym);
-        if (code) picked = results.find((r) => r.name === `${sym}${code}`);
-      } catch { /* fall through */ }
-      picked ??= pickActiveContract(sym, results);
+        const priceRoot = FULL_EQUIVALENT[sym] || sym;
+        const rows = await prisma.$queryRawUnsafe<{ raw_contract: string; ts: bigint | number }[]>(
+          "SELECT raw_contract, ts FROM live_quotes WHERE symbol = $1 LIMIT 1", priceRoot,
+        );
+        const rawContract = rows[0]?.raw_contract;
+        if (!rawContract || !rawContract.startsWith(priceRoot)) throw new Error("sidecar contract mapping unavailable");
+        const code = rawContract.slice(priceRoot.length);
+        picked = results.find((r) => r.name === `${sym}${code}`);
+        if (!picked) throw new Error(`${sym}${code} not present in Tradovate suggestions`);
+      } catch (error) {
+        contracts.delete(sym);
+        log(`Failed to resolve ${sym} to the Databento price contract: ${error}. Symbol disabled until next resolution.`);
+        continue;
+      }
       if (picked) {
         contracts.set(sym, { id: picked.id, name: picked.name, tickSize: picked.providerTickSize || picked.tickSize, symbol: sym });
         log(`Resolved ${sym} → ${picked.name} (ID: ${picked.id})`);
@@ -797,27 +824,35 @@ interface PlanSnapshot {
 }
 const planSnapshots = new Map<string, PlanSnapshot>();
 
+/** One authoritative contract ceiling shared by telemetry and execution. The equity ladder is an
+ * automatic growth ceiling, while maxContractsPerTrade remains a true operator maximum that can
+ * always reduce exposure. Aggregate open exposure is subtracted before a new order is sized. */
+function contractCapFor(sym: string, equity: number, session: string | undefined): number {
+  const openContracts = [...positions.values()].reduce((sum, position) => sum + position.quantity, 0);
+  let cap = cappedContractLimit(
+    riskConfig.maxContractsPerTrade,
+    MICRO_SYMBOLS.includes(sym) ? microContractCap(equity) : riskConfig.maxContractsPerTrade,
+    riskConfig.maxTotalContracts,
+    openContracts,
+  );
+  if (MICRO_SYMBOLS.includes(sym) && (!session || !RTH_SESSIONS.has(session))) {
+    cap = Math.min(cap, OVERNIGHT_MICRO_CAP, overnightMarginCap(sym, equity));
+  }
+  return cap;
+}
+
 /** MIRRORS the sizing block in evaluateAndTrade — see the warning comment there. Answers "if a setup
  *  fired on this bar, how many contracts would it take?" so the admin panel can show intent without a
  *  second implementation of the maths living in the web app. */
 function plannedQtyFor(sym: string, adjustedATR: number, session: string, sizeMult: number): number {
-  const equity = riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity;
+  const equity = riskSizingEquity();
   if (equity <= 0 || adjustedATR <= 0 || sizeMult <= 0) return 0;
   const maxRisk = equity * (riskConfig.riskPerTradePct / 100) * sizeMult;
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  let stopDist = adjustedATR * 1.5;                       // the hardcoded stop every live edge uses
-  let riskPer = stopDist * mult;
-  if (riskPer > maxRisk) {                                // adaptive tighten, then floor at 0.75x ATR
-    const affordable = maxRisk / mult;
-    if (affordable < adjustedATR * 0.75) return 0;
-    stopDist = affordable; riskPer = stopDist * mult;
-  }
-  let cap = MICRO_SYMBOLS.includes(sym)
-    ? Math.max(riskConfig.maxContractsPerTrade, microContractCap(equity))
-    : riskConfig.maxContractsPerTrade;
-  if (MICRO_SYMBOLS.includes(sym) && !RTH_SESSIONS.has(session)) {
-    cap = Math.min(cap, OVERNIGHT_MICRO_CAP, overnightMarginCap(sym, equity));
-  }
+  const stopDist = adjustedATR * 1.5;                     // the hardcoded stop every live edge uses
+  const riskPer = stopDist * mult;
+  if (riskPer > maxRisk) return 0;                        // never change validated stop geometry to force a trade
+  const cap = contractCapFor(sym, equity, session);
   if (cap < 1) return 0;
   const qty = Math.min(cap, Math.floor(maxRisk / riskPer));
   if (qty < 1) return 0;
@@ -1000,7 +1035,7 @@ async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume
   } catch { /* fall through */ }
 
   // FALLBACK 2 (live only): Demo MD server with demo contract IDs (same prices, free)
-  if (IS_LIVE) {
+  if (USES_LIVE_POLICY) {
     const demoToken = await authenticateDemoMd();
     const demoContract = demoContracts.get(sym) || demoContracts.get(FULL_EQUIVALENT[sym] || "");
     if (demoToken && demoContract) {
@@ -1044,13 +1079,11 @@ const MD_BLACKOUT_ALERT_MIN = 3;
 const MD_SYMBOL_BLACKOUT_ALERT_MIN = 15;
 let databentoMdEnabled = false;   // flipped via DB config (no engine restart needed)
 let lastMdSource = "yahoo";       // tracks actual MD source for heartbeat reporting
-let aiVetoEnabled = true;         // AI grader can BLOCK a setup. Live: ALWAYS on (real-money safety). Demo: off if futures_ai_grader="false" (the AI-on/off experiment).
+let aiReviewEnabled = true;       // Post-trade AI review only. Never blocks or delays an order.
 // Marketable-LIMIT entries instead of market orders, capped at EXEC_COST_CAP_FRACTION of the stop.
-// Defaults: DEMO on, LIVE off. Deliberately asymmetric — this changes which trades get filled at all
-// (a miss is a skipped trade, not a worse fill), so demo measures the fill-rate cost on real fills
-// before real money adopts it. That is the same demo-first bar /promote-edge sets for edges, applied
-// to execution. Override per engine with `<live_futures|futures>_entry_limit` = "true"/"false".
-let entryLimitEnabled = IS_DEMO;
+// Disabled for the live-clone demo because entry type must match before its fills can validate live.
+// A separate research service may enable it explicitly to measure capped-IOC behavior.
+let entryLimitEnabled = false;
 // Live-only empirical entry floor: block at a genuine 25-trade sample of sub-25% win rate. Reads
 // pattern memory locally — no API call, no latency — so it is ON by default independently of the
 // grader. See the long note at its call site for why the two were untangled.
@@ -1060,6 +1093,7 @@ let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuatio
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
 let edgeFlags: Record<string, string | undefined> = {};
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
+const lastDatabentoTop = new Map<string, { bid: number; ask: number; ts: number }>();
 /** How old a Databento live_quotes row may be and still DRAW A BAR. Gold ticks sparsely (ES/NQ update
  *  every ~1s, GC ages to 8-18s in quiet stretches), so a 30s cutoff was discarding paid data we pay
  *  for. 90s stays well inside a 5-minute bar.
@@ -1070,17 +1104,18 @@ const DBN_STALE_MS = 90_000;
 async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number; ts: number }>> {
   if (!databentoMdEnabled) return new Map();
   try {
-    const rows = await prisma.$queryRawUnsafe<{ symbol: string; mid: number; vol: number; ts: bigint | number }[]>(
-      "SELECT symbol, mid, vol, ts FROM live_quotes",
+    const rows = await prisma.$queryRawUnsafe<{ symbol: string; bid: number; ask: number; mid: number; vol: number; ts: bigint | number }[]>(
+      "SELECT symbol, bid, ask, mid, vol, ts FROM live_quotes",
     );
     const out = new Map<string, { mid: number; vol: number; ts: number }>();
     const now = Date.now();
     for (const r of rows) {
-      const ts = Number(r.ts), mid = Number(r.mid), cum = Number(r.vol) || 0;
+      const ts = Number(r.ts), bid = Number(r.bid), ask = Number(r.ask), mid = Number(r.mid), cum = Number(r.vol) || 0;
       if (mid > 0 && now - ts < DBN_STALE_MS) {
         const last = lastCumVol.get(r.symbol) ?? cum;
         const delta = cum >= last ? cum - last : cum;   // reset-safe (sidecar restart drops the cumulative count)
         lastCumVol.set(r.symbol, cum);
+        if (bid > 0 && ask >= bid) lastDatabentoTop.set(r.symbol, { bid, ask, ts });
         out.set(r.symbol, { mid, vol: Math.max(1, delta), ts });   // usable quote + traded volume since last poll
       }
     }
@@ -1089,6 +1124,16 @@ async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: n
   } catch {
     return new Map();   // fail-safe: never let an MD-source error halt the engine
   }
+}
+
+function getActionableEntryPrice(sym: string, direction: string): number {
+  const candidates = [sym, FULL_EQUIVALENT[sym], MICRO_EQUIVALENT[sym]].filter(Boolean);
+  for (const candidate of candidates) {
+    const top = lastDatabentoTop.get(candidate);
+    if (!top || Date.now() - top.ts >= ENTRY_MAX_QUOTE_AGE_MS) continue;
+    return direction === "long" ? top.ask : top.bid;
+  }
+  return 0;
 }
 
 async function pollPrices() {
@@ -1289,7 +1334,7 @@ function getSizeMultiplier(sym?: string): number {
   // trade the evening session — where its RSI-bounce edge lives and the demo already trades metals. Index
   // stays RTH-only always. At sub-threshold equity (e.g. $821 today) this branch is skipped → identical to
   // the old RTH-only behavior. It flips on by itself the moment the account is funded past the threshold.
-  if (IS_LIVE) {
+  if (USES_LIVE_POLICY) {
     if (s === "morning" || s === "afternoon") return 1.0;   // RTH prime — full size
     if (s === "midday") return 0.5;                         // lunch — half size
     // Funded-enough GOLD gets the evening session; deep overnight (asia/europe) stays blocked (thin liquidity).
@@ -1334,7 +1379,7 @@ function getSizeMultiplier(sym?: string): number {
     // Side effect as with the evening: sizeMult 1.0 makes these sessions "prime" (+5 confluence). If that
     // proves too loose, raise the score threshold rather than dropping the multiplier — a fractional
     // multiplier silently becomes a total block once one contract's risk exceeds the reduced budget.
-    if (sym && METALS.has(sym) && tradovateEquity >= LIVE_EVENING_GOLD_MIN_EQUITY &&
+    if (sym && METALS.has(sym) && riskSizingEquity() >= LIVE_EVENING_GOLD_MIN_EQUITY &&
         (s === "eth_evening" || s === "eth_europe")) return 1.0;
     return 0;                                               // BLOCK open, close, deep-ETH, index evenings, and gold when underfunded
   }
@@ -1541,7 +1586,7 @@ function checkSessionReset() {
               mode: IS_LIVE ? "live" : "demo",
               balanceDelta, endBalance: eodBalance, engineDailyPnl: dailyPnl,
               tradesToday: dailyTradeCount,
-              dailyLossLimit: tradovateEquity > 0 ? tradovateEquity * (riskConfig.dailyLossLimitPct / 100) : null,
+              dailyLossLimit: riskSizingEquity() > 0 ? riskSizingEquity() * (riskConfig.dailyLossLimitPct / 100) : null,
             });
             log(digest);
             await notify(digest, "futures");
@@ -1693,10 +1738,43 @@ const LIVE_DEFAULTS: RiskConfig = {
 
 let riskConfig: RiskConfig = IS_LIVE ? LIVE_DEFAULTS : DEMO_DEFAULTS;
 
+/** Equity used for every strategy-level risk decision. A demo live-clone must never size from its
+ * much larger broker balance: it follows the live heartbeat and fails closed if that heartbeat is
+ * missing or stale. The actual demo balance remains available for broker/margin reconciliation. */
+function riskSizingEquity(): number {
+  if (IS_DEMO && DEMO_LIVE_CLONE) {
+    return liveMirrorEquity > 0 && Date.now() - liveMirrorHeartbeatAt <= LIVE_MIRROR_MAX_AGE_MS
+      ? liveMirrorEquity
+      : 0;
+  }
+  if (riskConfig.simulatedEquity > 0) return riskConfig.simulatedEquity;
+  return isFreshPositiveEquity(tradovateEquity, lastTradovateEquityAt, Date.now(), BROKER_EQUITY_MAX_AGE_MS)
+    ? tradovateEquity
+    : 0;
+}
+
+async function refreshLiveMirrorEquity(): Promise<void> {
+  if (!IS_DEMO || !DEMO_LIVE_CLONE) return;
+  try {
+    const row = await prisma.agentConfig.findUnique({ where: { key: LIVE_HEARTBEAT_KEY } });
+    const heartbeat = row?.value ? JSON.parse(row.value) as { equity?: number; timestamp?: string } : null;
+    const equity = Number(heartbeat?.equity ?? 0);
+    const heartbeatAt = Date.parse(heartbeat?.timestamp ?? "");
+    if (equity > 0 && Number.isFinite(heartbeatAt)) {
+      liveMirrorEquity = equity;
+      liveMirrorHeartbeatAt = heartbeatAt;
+      updateTradingSymbols();
+    }
+  } catch (err) {
+    log(`[LIVE MIRROR] Could not refresh live equity; new demo entries remain fail-closed: ${err}`);
+  }
+}
+
 async function loadRiskConfig() {
-  const defaults = IS_LIVE ? LIVE_DEFAULTS : DEMO_DEFAULTS;
-  // Live reads from live_futures_* keys, demo reads from futures_* keys
-  const kp = IS_LIVE ? "live_futures" : "futures";
+  const isLiveRiskProfile = IS_LIVE || (IS_DEMO && DEMO_LIVE_CLONE);
+  const defaults = isLiveRiskProfile ? LIVE_DEFAULTS : DEMO_DEFAULTS;
+  // A demo live-clone reads the live risk/execution profile but keeps its independent demo edge flags.
+  const kp = isLiveRiskProfile ? "live_futures" : "futures";
   try {
     const keys = [
       `${kp}_max_contracts`, `${kp}_max_total_contracts`, `${kp}_max_trades_per_day`,
@@ -1721,14 +1799,13 @@ async function loadRiskConfig() {
     riskConfig = {
       maxContractsPerTrade: parseInt(cfg[`${kp}_max_contracts`]) || defaults.maxContractsPerTrade,
       maxTotalContracts: parseInt(cfg[`${kp}_max_total_contracts`]) || defaults.maxTotalContracts,
-      // Demo mode: never tighter than demo defaults — learn faster, don't stop early
-      maxTradesPerDay: IS_DEMO ? Math.max(dbTradesPerDay, DEMO_DEFAULTS.maxTradesPerDay) : dbTradesPerDay,
+      maxTradesPerDay: IS_DEMO && !DEMO_LIVE_CLONE ? Math.max(dbTradesPerDay, DEMO_DEFAULTS.maxTradesPerDay) : dbTradesPerDay,
       riskPerTradePct: parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || defaults.riskPerTradePct,
-      dailyLossLimitPct: IS_DEMO ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
+      dailyLossLimitPct: IS_DEMO && !DEMO_LIVE_CLONE ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
       maxDrawdownPct: parseFloat(cfg[`${kp}_max_drawdown_pct`]) || defaults.maxDrawdownPct,
       // Live is ISOLATED to its mode-keyed limit (no leak from the shared max_positions / stocks setting);
       // demo keeps the legacy shared key for backward-compat.
-      maxConcurrentPositions: parseInt(cfg[`${kp}_max_positions`]) || (IS_DEMO ? parseInt(cfg.max_positions) : 0) || defaults.maxConcurrentPositions,
+      maxConcurrentPositions: parseInt(cfg[`${kp}_max_positions`]) || (IS_DEMO && !DEMO_LIVE_CLONE ? parseInt(cfg.max_positions) : 0) || defaults.maxConcurrentPositions,
       atrStopMultiplier: parseFloat(cfg[`${kp}_atr_stop_multiplier`]) || defaults.atrStopMultiplier,
       atrTargetMultiplier: parseFloat(cfg[`${kp}_atr_target_multiplier`]) || defaults.atrTargetMultiplier,
       simulatedEquity: parseFloat(cfg[`${kp}_simulated_equity`]) || defaults.simulatedEquity,
@@ -1737,12 +1814,11 @@ async function loadRiskConfig() {
     const symbolsCfg = cfg[`${kp}_symbols`];
     symbolWhitelist = symbolsCfg && symbolsCfg.trim() ? symbolsCfg.split(",").map(s => s.trim()).filter(Boolean) : null;
     databentoMdEnabled = cfg[`${kp}_databento_md`] === "true";   // flip Databento MD on/off without a restart
-    // 2026-05-29: Spencer explicit override — AI grader now config-toggleable on LIVE too.
-    // Set live_futures_ai_grader="false" in DB to disable; default true preserves the original
-    // real-money safety. Demo uses futures_ai_grader.
-    aiVetoEnabled = cfg[`${kp}_ai_grader`] !== "false";
+    // Existing config key retained for compatibility; review is post-trade advisory only.
+    aiReviewEnabled = cfg[`${kp}_ai_grader`] !== "false";
     // Absent key → mode default (demo true / live false), so this only turns on where it is asked for.
-    entryLimitEnabled = cfg[`${kp}_entry_limit`] !== undefined ? cfg[`${kp}_entry_limit`] === "true" : IS_DEMO;
+    const configuredEntryLimit = cfg[`${kp}_entry_limit`] !== undefined ? cfg[`${kp}_entry_limit`] === "true" : false;
+    entryLimitEnabled = configuredEntryLimit;
     // Guarded: a 0/NaN cap would price every entry AT the signal and miss essentially everything.
     const ticksCfg = parseFloat(cfg[`${kp}_entry_limit_ticks`]);
     entryLimitTicks = Number.isFinite(ticksCfg) && ticksCfg >= 1 ? ticksCfg : ENTRY_LIMIT_TICKS_DEFAULT;
@@ -1757,8 +1833,36 @@ async function loadRiskConfig() {
       const md = IS_LIVE ? "live" : "demo";
       if (edgeFlags[`edge_index_trend_long_${md}`] === undefined) edgeFlags[`edge_index_trend_long_${md}`] = "false";
     }
+    // Forward-performance circuit breaker. Exact edge keys are now written into RoundTrip.setupType;
+    // once 20 position-level fills exist, negative rolling expectancy automatically removes live risk.
+    for (const edge of REALTIME_EDGES) {
+      const recent = await prisma.roundTrip.findMany({
+        where: { mode: IS_LIVE ? "live" : "paper", setupType: edge.key },
+        orderBy: { exitTime: "desc" },
+        take: 20,
+        select: { pnl: true },
+      });
+      if (recent.length < 20) continue;
+      const expectancy = recent.reduce((sum, row) => sum + row.pnl, 0) / recent.length;
+      const flag = edgeFlagKey(edge.key, IS_LIVE ? "live" : "demo");
+      if (IS_LIVE && expectancy < 0) {
+        edgeFlags[flag] = "false";
+        if (cfg[flag] !== "false") {
+          await prisma.agentConfig.upsert({ where: { key: flag }, update: { value: "false" }, create: { key: flag, value: "false" } });
+          log(`[EDGE AUTO-DEMOTE] ${edge.key}: rolling-20 expectancy $${expectancy.toFixed(2)} < 0; live disabled.`);
+        }
+      } else if (IS_DEMO && expectancy > 0 && cfg[flag] === "false") {
+        edgeFlags[flag] = "true";
+        await prisma.agentConfig.upsert({ where: { key: flag }, update: { value: "true" }, create: { key: flag, value: "true" } });
+        log(`[EDGE DEMO RE-ARM] ${edge.key}: rolling-20 expectancy $${expectancy.toFixed(2)} > 0; demo re-enabled.`);
+      }
+    }
+    await refreshLiveMirrorEquity();
     updateTradingSymbols();
-    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${entryLimitTicks} ticks)` : "MARKET"} | grader=${aiVetoEnabled ? "ON" : "off"}${IS_LIVE ? ` | patternFloor=${patternFloorEnabled ? "ON" : "off"}` : ""}`);
+    const mirrorStatus = IS_DEMO && DEMO_LIVE_CLONE
+      ? ` | liveMirror=${riskSizingEquity() > 0 ? `$${riskSizingEquity().toFixed(0)}` : "STALE/MISSING (entries blocked)"}`
+      : "";
+    log(`[CONFIG] Loaded risk config from DB: ${JSON.stringify(riskConfig)}${symbolWhitelist ? ` | symbols=${symbolWhitelist.join(",")}` : ""} | entry=${entryLimitEnabled ? `LIMIT(cap ${entryLimitTicks} ticks)` : "MARKET"} | postTradeAI=${aiReviewEnabled ? "ON" : "off"}${IS_LIVE ? ` | patternFloor=${patternFloorEnabled ? "ON" : "off"}` : ""}${mirrorStatus}`);
     // DEPLOY VERIFICATION — prints which edges THIS BINARY contains and how each resolves for this
     // engine. Added 2026-07-28 after a stale deploy went unnoticed for a full session: `railway
     // redeploy` (without --from-source) REBUILDS THE PREVIOUS COMMIT, so the container image carries a
@@ -2139,7 +2243,28 @@ function checkPositions(sym: string, price: number, reliable = true) {
           // RESIZED THE BROKER STOP LARGER THAN THE POSITION ACTUALLY HELD — when that stop
           // triggered, the excess would have opened a brand-new position in the opposite
           // direction. Size everything to what actually filled, or change nothing at all.
-          const addFill = await verifyOrderFill(addOrder.orderId, addQty);
+          let addFill = await verifyOrderFill(addOrder.orderId, addQty);
+          if (addFill.status === "unknown") {
+            if (!await cancelOrderAndWaitForTerminal(addOrder.orderId)) {
+              log(`🚨 ${sym}: pyramid add cancellation did not reach a terminal state; quarantining this add.`);
+              notify(`🚨 ${MODE_TAG} ${sym}: pyramid add still indeterminate. Check broker position and protection.`, "general");
+              return;
+            }
+            const brokerPosition = await getBrokerPositionSnapshot(pos.contractId);
+            const expectedSign = pos.direction === "long" ? 1 : -1;
+            if (brokerPosition && Math.sign(brokerPosition.netPos) === expectedSign && Math.abs(brokerPosition.netPos) > pos.quantity) {
+              addFill = {
+                status: "filled",
+                price: brokerPosition.netPrice > 0 ? brokerPosition.netPrice : price,
+                qty: Math.abs(brokerPosition.netPos) - pos.quantity,
+              };
+              log(`${sym}: indeterminate pyramid add reconciled from broker position (+${addFill.qty}x).`);
+            } else if (brokerPosition === undefined) {
+              log(`🚨 ${sym}: pyramid add state unresolved — position state unchanged; broker sync required.`);
+              notify(`🚨 ${MODE_TAG} ${sym}: pyramid add state unresolved. Check broker position and protection.`, "general");
+              return;
+            }
+          }
           if (addFill.status !== "filled" || addFill.qty < 1) {
             const why = addFill.status === "rejected" ? addFill.reason : addFill.status;
             log(`${sym}: PYRAMID ADD DID NOT FILL (${why}) — position unchanged at ${pos.quantity}x, existing stop untouched.`);
@@ -2335,10 +2460,11 @@ function checkPositions(sym: string, price: number, reliable = true) {
   //   live  (risk $256):  max(2x256=512, min(750, 10% of $5,114 = 511))  = $512  — unchanged in practice
   //   demo  (risk $2,405): max(2x2405=4810, min(750, $8,016))            = $4,810 — now a real backstop
   // Still equity-relative on the upper side, so a drawdown tightens it automatically.
-  const perTradeRisk = tradovateEquity > 0 ? tradovateEquity * (riskConfig.riskPerTradePct / 100) : 0;
+  const sizingEquity = riskSizingEquity();
+  const perTradeRisk = sizingEquity > 0 ? sizingEquity * (riskConfig.riskPerTradePct / 100) : 0;
   const perPositionLimit = Math.max(
     perTradeRisk * 2,
-    tradovateEquity > 0 ? Math.min(750, tradovateEquity * 0.10) : 750,
+    sizingEquity > 0 ? Math.min(750, sizingEquity * 0.10) : 750,
   );
   if (pnlDollars < -perPositionLimit) {
     if (!pos.emergencyWarningTick) {
@@ -2390,7 +2516,45 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     // phantom half (leaving the OTHER half of a real position unprotected), booked profit into
     // dailyPnl that never happened, and had already cancelled the target. Now the fill is
     // authoritative — and a partial fill scales exactly what filled, never what was requested.
-    const scaleFill = await verifyOrderFill(scaleOrder.orderId, scaleQty);
+    let scaleFill = await verifyOrderFill(scaleOrder.orderId, scaleQty);
+    if (scaleFill.status === "unknown") {
+      if (!await cancelOrderAndWaitForTerminal(scaleOrder.orderId)) {
+        log(`🚨 ${sym}: scale-out cancellation did not reach a terminal state; tracked quantity remains unchanged.`);
+        notify(`🚨 ${MODE_TAG} ${sym}: scale-out still indeterminate. Check broker quantity and protection.`, "general");
+        return;
+      }
+      const brokerPosition = await getBrokerPositionSnapshot(pos.contractId);
+      const expectedSign = pos.direction === "long" ? 1 : -1;
+      if (brokerPosition === null) {
+        // Another exit flattened the position. Remove every leftover close-side order before it can
+        // become a reverse entry, then remove local tracking. Fills are reconciled asynchronously.
+        for (const orderId of [pos.stopOrderId, pos.targetOrderId]) {
+          if (orderId) await cancelOrderAndWaitForTerminal(orderId);
+        }
+        try {
+          const orders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
+          for (const order of orders.filter((item) => item.contractId === pos.contractId && ["Working", "Accepted"].includes(item.ordStatus))) {
+            await cancelOrderAndWaitForTerminal(order.id);
+          }
+        } catch { /* sync will retry orphan cleanup */ }
+        positions.delete(sym);
+        recentlyClosedAt.set(sym, Date.now());
+        await savePositions();
+        log(`${sym}: indeterminate scale-out reconciled FLAT; remaining orders cancelled and tracking cleared.`);
+        return;
+      } else if (brokerPosition && Math.sign(brokerPosition.netPos) === expectedSign && Math.abs(brokerPosition.netPos) < pos.quantity) {
+        scaleFill = {
+          status: "filled",
+          price,
+          qty: pos.quantity - Math.abs(brokerPosition.netPos),
+        };
+        log(`${sym}: indeterminate scale-out reconciled from broker position (-${scaleFill.qty}x).`);
+      } else if (brokerPosition === undefined) {
+        log(`🚨 ${sym}: scale-out state unresolved — not changing tracked quantity or stop size.`);
+        notify(`🚨 ${MODE_TAG} ${sym}: scale-out state unresolved. Check broker quantity and stop size now.`, "general");
+        return;
+      }
+    }
     if (scaleFill.status !== "filled" || scaleFill.qty < 1) {
       const why = scaleFill.status === "rejected" ? scaleFill.reason : scaleFill.status;
       log(`${sym}: SCALE-OUT DID NOT FILL (${why}) — position left intact at ${pos.quantity}x. Stop still covers full size; target was cancelled, trailing stop now owns the exit.`);
@@ -2448,7 +2612,16 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         })}) as { orderId: number };
         pos.stopOrderId = s.orderId;
       }
-    } catch {}
+    } catch (error) {
+      log(`🚨 ${sym}: stop resize after scale-out failed (${error}); flattening the remainder to prevent an oversized stop reversal.`);
+      notify(`🚨 ${MODE_TAG} ${sym}: protection resize failed after scale-out. Flattening ${pos.quantity}x remainder.`, "general");
+      if (pos.stopOrderId) await cancelOrderAndWaitForTerminal(pos.stopOrderId);
+      pos.stopOrderId = null;
+      pos.targetOrderId = null;
+      await savePositions();
+      await closePosition(sym, price, "protection_resize_failed");
+      return;
+    }
     pos.targetOrderId = null; // target removed, trail handles exit
 
     // Log scale-out to Obsidian vault (learning loop)
@@ -2490,7 +2663,7 @@ interface CloseMeta {
   target: number;
   quantity: number;
   contractId: number;
-  closeOrderId: number | null;
+  closeOrderIds: number[];
   reason: string;
   mult: number;
   estimatedPnl: number;
@@ -2556,8 +2729,8 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
     const fills = await apiFetch("/fill/list") as { id: number; orderId: number; contractId: number; action: string; price: number; qty: number; timestamp: string }[];
 
     // Match fills: by orderId (exact) or by contractId + side + recency (fuzzy)
-    const myFills = meta.closeOrderId
-      ? fills.filter(f => f.orderId === meta.closeOrderId)
+    const myFills = meta.closeOrderIds.length > 0
+      ? fills.filter(f => meta.closeOrderIds.includes(f.orderId))
       : fills
           .filter(f => f.contractId === meta.contractId && f.action === closeSide)
           .filter(f => Date.now() - new Date(f.timestamp).getTime() < 300_000) // within 5 min
@@ -2569,10 +2742,10 @@ async function deferredPnlCheck(meta: CloseMeta, attempt: number) {
     // Only trust the fuzzy match when its total quantity exactly equals the close size; otherwise treat
     // it as "no fill yet" and defer to the reconciliation cron, which sees the full fill history.
     const matchedQty = myFills.reduce((s, f) => s + f.qty, 0);
-    const untrustworthyFuzzy = !meta.closeOrderId && matchedQty !== meta.quantity;
+    const quantityMismatch = matchedQty !== meta.quantity;
 
-    if (myFills.length === 0 || untrustworthyFuzzy) {
-      if (untrustworthyFuzzy) log(`[DEFERRED] ${meta.sym}: fuzzy match qty ${matchedQty}≠${meta.quantity} — not trusting, deferring to reconciler`);
+    if (myFills.length === 0 || quantityMismatch) {
+      if (quantityMismatch) log(`[DEFERRED] ${meta.sym}: matched close qty ${matchedQty}≠${meta.quantity} — waiting for the complete fill set`);
       if (attempt < 2) {
         log(`[DEFERRED] ${meta.sym}: No fills yet (attempt ${attempt}). Retrying in 60s...`);
         setTimeout(() => deferredPnlCheck(meta, attempt + 1), 60_000);
@@ -2691,7 +2864,7 @@ let syncInFlight = false; // re-entrancy guard: never run two reconciles at once
 const recentlyClosedAt = new Map<string, number>(); // sym → epoch ms of last close
 const RECENTLY_CLOSED_TTL = 5 * 60_000; // 5 minutes
 
-async function closePosition(sym: string, price: number, reason: string) {
+async function closePosition(sym: string, price: number, reason: string, brokerAlreadyFlat = false) {
   // Prevent double-close: if another close is already in progress, skip
   if (closingLocks.get(sym)) {
     log(`${sym}: Close already in progress (${reason}) — skipping duplicate`);
@@ -2701,47 +2874,159 @@ async function closePosition(sym: string, price: number, reason: string) {
   if (!pos) return;
   closingLocks.set(sym, true);
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
+  const originalQuantity = pos.quantity;
 
   // CHECK: Is the position still open on Tradovate? Bracket stop/target may have already filled.
-  let positionAlreadyClosed = false;
-  try {
-    const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number }[];
-    const tvMatch = tvPos.find(p => p.contractId === pos.contractId && p.netPos !== 0);
-    if (!tvMatch) {
-      positionAlreadyClosed = true;
-      log(`${sym}: Position already closed on Tradovate (bracket filled). Using actual fill for P&L.`);
+  let positionAlreadyClosed = brokerAlreadyFlat;
+  if (!brokerAlreadyFlat) {
+    const initialBrokerPosition = await getBrokerPositionSnapshot(pos.contractId, 3);
+    if (initialBrokerPosition === undefined) {
+      // Never guess that a tracked position still exists and send an opposite-side order. If the
+      // bracket filled while the broker API was unavailable, that "close" would open a reversal.
+      log(`[CLOSE] ${sym}: broker position unavailable; refusing to submit a close that could reverse the account`);
+      notify(`🚨 ${MODE_TAG} ${sym}: close paused because broker position could not be verified. Existing protection remains in place.`, "general");
+      closingLocks.delete(sym);
+      return;
     }
-  } catch { /* if check fails, proceed with close attempt */ }
+    if (initialBrokerPosition === null) positionAlreadyClosed = true;
+  }
+  if (positionAlreadyClosed) {
+    log(`${sym}: Position already closed on Tradovate (bracket filled). Using actual fill for P&L.`);
+  }
 
-  let closeOrderId: number | null = null;
+  const closeOrderIds: number[] = [];
 
   // Helper: cancel ALL working orders for this contract (catches orphans after restarts)
-  const cancelAllOrdersForContract = async () => {
+  const cancelAllOrdersForContract = async (): Promise<boolean> => {
     try {
-      if (pos.stopOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); } catch (e) { log(`${sym}: Failed to cancel stop #${pos.stopOrderId}: ${e}`); }
-      if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch (e) { log(`${sym}: Failed to cancel target #${pos.targetOrderId}: ${e}`); }
       // Also scan for ANY working orders on this contract (catches orphans with unknown IDs)
       const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
       const orphans = allOrders.filter(o => o.contractId === pos.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
-      for (const o of orphans) {
-        try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch (e) { log(`${sym}: Failed to cancel orphan order #${o.id}: ${e}`); }
+      const orderIds = new Set<number>([
+        ...(pos.stopOrderId ? [pos.stopOrderId] : []),
+        ...(pos.targetOrderId ? [pos.targetOrderId] : []),
+        ...orphans.map((order) => order.id),
+      ]);
+      for (const orderId of orderIds) {
+        if (!await cancelOrderAndWaitForTerminal(orderId)) {
+          log(`${sym}: order #${orderId} did not reach a terminal state after cancellation`);
+          return false;
+        }
       }
-      if (orphans.length > 0) log(`${sym}: Cancelled ${orphans.length} orphaned orders for contract`);
-    } catch (e) { log(`${sym}: cancelAllOrdersForContract FAILED: ${e}`); }
+      if (orderIds.size > 0) log(`${sym}: Confirmed ${orderIds.size} contract order(s) terminal before close`);
+      return true;
+    } catch (e) {
+      log(`${sym}: cancelAllOrdersForContract FAILED: ${e}`);
+      return false;
+    }
+  };
+
+  const restoreProtectiveStop = async (quantity = pos.quantity): Promise<boolean> => {
+    if (quantity < 1) return true;
+    try {
+      const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+      const acct = accounts.find(a => a.id === accountId) || accounts[0];
+      const restored = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        accountSpec: acct.name, accountId,
+        action: pos.direction === "long" ? "Sell" : "Buy",
+        symbol: pos.contractId, orderQty: quantity, orderType: "Stop",
+        stopPrice: roundToTick(sym, pos.stopLoss), timeInForce: "GTC", isAutomated: true,
+      })}) as { orderId: number };
+      const restoredStatus = await protectionOrderStatus(restored.orderId);
+      if (restoredStatus !== "active") throw new Error(`restored stop #${restored.orderId} is ${restoredStatus}`);
+      pos.stopOrderId = restored.orderId;
+      pos.targetOrderId = null;
+      await savePositions();
+      log(`[CLOSE] ${sym}: restored protective stop #${restored.orderId} for ${quantity}x after incomplete close.`);
+      return true;
+    } catch (error) {
+      log(`[CLOSE] CRITICAL: ${sym} could not restore protection after incomplete close: ${error}`);
+      notify(`🚨 ${MODE_TAG} ${sym}: close incomplete and protective stop restore FAILED. Check broker now.`, "general");
+      return false;
+    }
   };
 
   if (positionAlreadyClosed) {
     // Bracket already closed the position — cancel any remaining bracket orders
-    await cancelAllOrdersForContract();
+    if (!await cancelAllOrdersForContract()) {
+      log(`[CLOSE] CRITICAL: ${sym} is flat but a sibling/orphan order could not be confirmed canceled; retaining local tracking`);
+      notify(`🚨 ${MODE_TAG} ${sym}: position is flat but an order remains unresolved. Check broker orders now.`, "general");
+      closingLocks.delete(sym);
+      return;
+    }
+    // A previously-unverified stop can fill while its cancellation is settling. Terminal "Filled"
+    // is not the same as harmlessly canceled: when the position was already flat, that late fill
+    // creates a reverse position. Recheck after every sibling is terminal before deleting tracking.
+    const brokerAfterCancellation = await getBrokerPositionSnapshot(pos.contractId, 3);
+    if (brokerAfterCancellation === undefined) {
+      log(`[CLOSE] CRITICAL: ${sym} broker state unavailable after terminal cancellation; retaining local tracking`);
+      notify(`🚨 ${MODE_TAG} ${sym}: broker state unavailable after bracket cleanup. Tracking retained; check account.`, "general");
+      closingLocks.delete(sym);
+      return;
+    }
+    if (brokerAfterCancellation !== null) {
+      const reversedDirection = brokerAfterCancellation.netPos > 0 ? "long" : "short";
+      log(`[CLOSE] CRITICAL: ${sym} has ${brokerAfterCancellation.netPos} contract(s) after terminal cancellation; flattening the late-fill reversal`);
+      notify(`🚨 ${MODE_TAG} ${sym}: a bracket filled during cancellation and created a ${reversedDirection} position. Flattening now.`, "general");
+      pos.direction = reversedDirection;
+      pos.quantity = Math.abs(brokerAfterCancellation.netPos);
+      pos.entryPrice = brokerAfterCancellation.netPrice || price;
+      pos.stopOrderId = null;
+      pos.targetOrderId = null;
+      await savePositions();
+      closingLocks.delete(sym);
+      await closePosition(sym, pos.entryPrice, "late_bracket_reversal");
+      return;
+    }
   } else {
     // Position still open — close it manually with retry
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        // Cancel ALL bracket/working orders for this contract
-        await cancelAllOrdersForContract();
+        // Resolve account identity before the final broker snapshot so no avoidable network round
+        // trip reopens the stop-fill race between "position exists" and close submission.
+        let acct: { id: number; name: string };
+        if (accountId && accountName) {
+          acct = { id: accountId, name: accountName };
+        } else {
+          const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
+          acct = accounts.find(a => a.id === accountId) || accounts[0];
+        }
 
-        const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-        const acct = accounts.find(a => a.id === accountId) || accounts[0];
+        // Cancel ALL bracket/working orders for this contract
+        if (!await cancelAllOrdersForContract()) {
+          log(`[CLOSE] CRITICAL: ${sym} bracket cancellation was not confirmed; no close order submitted`);
+          notify(`🚨 ${MODE_TAG} ${sym}: brackets could not be confirmed canceled. No close submitted to prevent reversal.`, "general");
+          closingLocks.delete(sym);
+          return;
+        }
+
+        // Reconcile again AFTER cancellation and immediately before any close order. A stop can fill
+        // between the initial snapshot and its cancellation. Sending the old quantity after that
+        // race would reverse an already-flat position or over-close a partial remainder.
+        const brokerBeforeClose = await getBrokerPositionSnapshot(pos.contractId, 3);
+        if (brokerBeforeClose === undefined) {
+          log(`[CLOSE] CRITICAL: ${sym} broker state unavailable after bracket cancellation; no close submitted`);
+          notify(`🚨 ${MODE_TAG} ${sym}: broker state unavailable after canceling brackets. Restoring protection; check account.`, "general");
+          closingLocks.delete(sym);
+          return;
+        }
+        if (brokerBeforeClose === null) {
+          log(`[CLOSE] ${sym}: bracket filled during cancellation; broker is flat and no close order is needed.`);
+          break;
+        }
+        const brokerDirection = brokerBeforeClose.netPos > 0 ? "long" : "short";
+        if (brokerDirection !== pos.direction) {
+          log(`[CLOSE] CRITICAL: ${sym} broker direction is ${brokerDirection}, expected ${pos.direction}; no close submitted`);
+          notify(`🚨 ${MODE_TAG} ${sym}: broker direction changed before close. No order submitted; check account now.`, "general");
+          closingLocks.delete(sym);
+          return;
+        }
+        const brokerQty = Math.abs(brokerBeforeClose.netPos);
+        if (brokerQty !== pos.quantity) {
+          log(`[CLOSE] ${sym}: broker quantity changed ${pos.quantity} → ${brokerQty} before close; using the verified remainder.`);
+          pos.quantity = brokerQty;
+        }
+
         const orderResult = await apiFetch("/order/placeorder", {
           method: "POST",
           body: JSON.stringify({
@@ -2749,21 +3034,57 @@ async function closePosition(sym: string, price: number, reason: string) {
             symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
           }),
         }) as { orderId: number };
-        closeOrderId = orderResult.orderId;
+        const closeOrderId = orderResult.orderId;
+        closeOrderIds.push(closeOrderId);
         // "The POST returned an id" is NOT a close (2026-08-19). Tradovate answers synchronously
         // and can reject milliseconds later — the entry path already guards for exactly this. If
         // the close was rejected we must NOT fall through: the brackets were cancelled at the top
         // of this attempt, and the caller goes on to positions.delete(sym) + recentlyClosedAt,
         // which blocks re-adoption for 5 minutes. That combination is a real position with no
         // stop, no target and no engine tracking. Treat a rejection as a failed attempt and retry.
-        const closeFill = await verifyOrderFill(closeOrderId, pos.quantity);
+        const quantityBeforeAttempt = pos.quantity;
+        const closeFill = await verifyOrderFill(closeOrderId, quantityBeforeAttempt);
         if (closeFill.status === "rejected") throw new Error(`close order rejected: ${closeFill.reason}`);
-        if (closeFill.status === "filled" && closeFill.qty < pos.quantity) {
+        if (closeFill.status === "unknown") {
+          if (!await cancelOrderAndWaitForTerminal(closeOrderId)) {
+            throw new Error("close order did not reach a terminal state after cancellation");
+          }
+          const brokerPosition = await getBrokerPositionSnapshot(pos.contractId);
+          if (brokerPosition === undefined) {
+            log(`[CLOSE] CRITICAL: ${sym} close state unresolved. Refusing to submit another order that could reverse the position.`);
+            notify(`🚨 ${MODE_TAG} ${sym}: close state unresolved. No retry submitted to avoid reversing the position. Check broker now.`, "general");
+            await restoreProtectiveStop();
+            closingLocks.delete(sym);
+            return;
+          }
+          if (brokerPosition === null) {
+            log(`[CLOSE] ${sym}: indeterminate close reconciled FLAT from broker position.`);
+            break;
+          }
+          const brokerDirection = brokerPosition.netPos > 0 ? "long" : "short";
+          if (brokerDirection !== pos.direction) {
+            log(`[CLOSE] CRITICAL: ${sym} broker direction flipped during close (${brokerDirection}). Stopping automatic retries.`);
+            notify(`🚨 ${MODE_TAG} ${sym}: broker direction flipped during close. Check account now.`, "general");
+            closingLocks.delete(sym);
+            return;
+          }
+          const remainingQty = Math.abs(brokerPosition.netPos);
+          if (remainingQty >= quantityBeforeAttempt) {
+            log(`[CLOSE] ${sym}: indeterminate close reconciled with broker position unchanged. Stopping this cycle before any retry can over-close.`);
+            await restoreProtectiveStop(remainingQty);
+            closingLocks.delete(sym);
+            return;
+          }
+          log(`[CLOSE] ${sym}: indeterminate close reconciled PARTIAL ${quantityBeforeAttempt - remainingQty}/${quantityBeforeAttempt}; ${remainingQty}x remains.`);
+          pos.quantity = remainingQty;
+          throw new Error(`partial close (${quantityBeforeAttempt - remainingQty} of ${quantityBeforeAttempt})`);
+        }
+        if (closeFill.status === "filled" && closeFill.qty < quantityBeforeAttempt) {
           // Partial close: the remainder is still live and now unbracketed. Shrink tracking to it
           // and retry — never report a partial as flat.
-          log(`[CLOSE] ${sym}: PARTIAL close ${closeFill.qty}/${pos.quantity} — ${pos.quantity - closeFill.qty}x still open, retrying.`);
+          log(`[CLOSE] ${sym}: PARTIAL close ${closeFill.qty}/${quantityBeforeAttempt} — ${quantityBeforeAttempt - closeFill.qty}x still open, retrying.`);
           pos.quantity -= closeFill.qty;
-          throw new Error(`partial close (${closeFill.qty} of ${pos.quantity + closeFill.qty})`);
+          throw new Error(`partial close (${closeFill.qty} of ${quantityBeforeAttempt})`);
         }
         // Success — break out of retry loop
         break;
@@ -2788,6 +3109,7 @@ async function closePosition(sym: string, price: number, reason: string) {
           stoppedSymbols.add(`close_failed_${sym}`);
           notify(`CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 retries! Manual intervention needed.`, "general");
         }
+        await restoreProtectiveStop(pos.quantity);
         // RELEASE THE LOCK BEFORE RETURNING (2026-08-19). This `return` sits OUTSIDE the
         // try/finally below that normally deletes the lock, so without this line the symbol
         // stayed locked for the life of the process: every later closePosition() — trail stop,
@@ -2809,7 +3131,7 @@ async function closePosition(sym: string, price: number, reason: string) {
     // Estimate P&L from Yahoo price for immediate logging (tilt, notifications)
     // REAL P&L comes from Tradovate fills via deferredPnlCheck() — never trust Yahoo for DB/patterns
     const estimatedDiff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
-    const estimatedPnl = estimatedDiff * mult * pos.quantity;
+    const estimatedPnl = estimatedDiff * mult * originalQuantity;
 
     // Tilt tracking uses estimates (needs to be immediate for risk management)
     dailyPnl += estimatedPnl;
@@ -2824,8 +3146,10 @@ async function closePosition(sym: string, price: number, reason: string) {
       // Demo (paper): no tilt pause — let the engine press through variance and accumulate data.
       // Auto-prune disables truly broken setupTypes mechanically, so tilt protection is redundant
       // for paper testing. Live keeps full tilt protection (real money discipline).
-      const pauseSchedule = IS_DEMO ? [0, 0, 0, 0, 0] : [0, 0, 30, 60, 120];
-      const pauseMin = (IS_DEMO ? 0 : (consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0)));
+      const pauseSchedule = USES_LIVE_POLICY ? [0, 0, 30, 60, 120] : [0, 0, 0, 0, 0];
+      const pauseMin = USES_LIVE_POLICY
+        ? (consecutiveStops >= 5 ? Infinity : (pauseSchedule[consecutiveStops] || 0))
+        : 0;
 
       if (pauseMin > 0) {
         tiltPauseUntil = pauseMin === Infinity ? Infinity : Date.now() + pauseMin * 60_000;
@@ -2849,12 +3173,12 @@ async function closePosition(sym: string, price: number, reason: string) {
       const dbLog = await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
         action: `${TRADE_ACTION_PREFIX}_${reason}`,
-        qty: pos.quantity,
+        qty: originalQuantity,
         price, // Yahoo price as reference (fillPrice will have the real one)
         pnl: null, // DEFERRED — filled by deferredPnlCheck() from actual Tradovate fill
         originalPnl: estimatedPnl, // Save Yahoo estimate for audit/comparison
-        reason: `[FUTURES ${sym}] ${reason}: Closed ${pos.quantity}x. Entry: $${pos.entryPrice.toFixed(2)}. Est: $${estimatedPnl.toFixed(0)} (fill pending)`,
-        orderId: closeOrderId ? String(closeOrderId) : null,
+        reason: `[FUTURES ${sym}] ${reason}: Closed ${originalQuantity}x. Entry: $${pos.entryPrice.toFixed(2)}. Est: $${estimatedPnl.toFixed(0)} (fill pending)`,
+        orderId: closeOrderIds.length ? String(closeOrderIds.at(-1)) : null,
       }});
       dbLogId = dbLog.id;
     } catch {}
@@ -2867,9 +3191,9 @@ async function closePosition(sym: string, price: number, reason: string) {
       entryPrice: pos.entryPrice,
       stopLoss: pos.stopLoss,
       target: pos.target,
-      quantity: pos.quantity,
+      quantity: originalQuantity,
       contractId: pos.contractId,
-      closeOrderId,
+      closeOrderIds,
       reason,
       mult,
       estimatedPnl,
@@ -2971,7 +3295,7 @@ GOLD-SPECIFIC RULES:
     // risk, sizing and survivability against an account 4.7x smaller than the real one, which biases
     // it toward reflexive caution on exactly the trades this context was added to stop it fearing.
     const liveContext = IS_LIVE
-      ? `\nThis is the LIVE account, currently $${Math.round((riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity) || 0).toLocaleString()}, risking ${riskConfig.riskPerTradePct}% per trade. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
+      ? `\nThis is the LIVE account, currently $${Math.round(riskSizingEquity() || 0).toLocaleString()}, risking ${riskConfig.riskPerTradePct}% per trade. Be empirically grounded. Trust historical pattern data over subjective intuition. If the data says a setup works, take it.\n`
       : "";
 
     // Pattern-memory empirical evidence block — 2026-06-03: thresholds raised because 10 trades
@@ -3318,7 +3642,7 @@ async function onBarClose(sym: string, bar: Bar) {
   try {
     const { strategiesFor, isRegistryOnlySymbol } = await import("../lib/strategies/registry");
     const registered = strategiesFor(sym);
-    if (registered.length > 0 && IS_DEMO) {  // demo only — MBT day margin (~$2k) won't fit $1K live
+    if (registered.length > 0 && IS_DEMO && !DEMO_LIVE_CLONE) {  // separate research demo only
       const { runStrategy, buildTodayDailyBar } = await import("../lib/strategy-runner");
       const today = buildTodayDailyBar(b.bars5m, Date.now());
       for (const strat of registered) {
@@ -3793,16 +4117,17 @@ async function checkEntriesPaused(): Promise<{ paused: boolean; reason: string }
 // believes a stop is protecting the position when nothing is — the exact failure that left a gold
 // position naked for 39 min. Polls briefly; fail-OPEN on uncertainty (don't flatten a possibly-good
 // stop over an API hiccup) — the price-rounding fix is what prevents rejection in the first place.
-async function orderRejected(orderId: number): Promise<boolean> {
+async function protectionOrderStatus(orderId: number): Promise<"active" | "filled" | "rejected" | "unknown"> {
   for (let i = 0; i < 3; i++) {
     await new Promise((r) => setTimeout(r, i === 0 ? 600 : 500));
     try {
       const o = (await apiFetch(`/order/item?id=${orderId}`)) as { ordStatus?: string };
-      if (o?.ordStatus === "Rejected" || o?.ordStatus === "Canceled") return true;
-      if (o?.ordStatus === "Working" || o?.ordStatus === "Accepted" || o?.ordStatus === "Filled") return false;
+      if (o?.ordStatus === "Rejected" || o?.ordStatus === "Canceled" || o?.ordStatus === "Expired") return "rejected";
+      if (o?.ordStatus === "Working" || o?.ordStatus === "Accepted") return "active";
+      if (o?.ordStatus === "Filled") return "filled";
     } catch { /* keep polling */ }
   }
-  return false; // status indeterminate after polling → trust it (rounding fix prevents real rejections)
+  return "unknown";
 }
 
 // Verify an entry order actually filled before we commit a tracked position and rest
@@ -3853,6 +4178,49 @@ async function verifyOrderFill(orderId: number, requestedQty: number): Promise<
   return { status: "unknown" };
 }
 
+async function cancelOrderAndWaitForTerminal(orderId: number): Promise<boolean> {
+  try {
+    await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId }) });
+  } catch { /* the order may already be terminal */ }
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      const order = await apiFetch(`/order/item?id=${orderId}`) as { ordStatus?: string };
+      if (["Filled", "Canceled", "Rejected", "Expired"].includes(order.ordStatus || "")) return true;
+    } catch { /* keep polling */ }
+  }
+  return false;
+}
+
+type BrokerPositionSnapshot = { netPos: number; netPrice: number };
+
+/**
+ * Resolve an indeterminate order from the broker's actual position.
+ * null means the broker answered and the contract is flat; undefined means the
+ * broker never answered, which must not be interpreted as either filled or flat.
+ */
+async function getBrokerPositionSnapshot(
+  contractId: number,
+  attempts = 5,
+): Promise<BrokerPositionSnapshot | null | undefined> {
+  let previous: BrokerPositionSnapshot | null | undefined;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 750));
+    try {
+      const brokerPositions = await apiFetch("/position/list") as {
+        contractId: number;
+        netPos: number;
+        netPrice?: number;
+      }[];
+      const match = brokerPositions.find((position) => position.contractId === contractId && position.netPos !== 0);
+      const current = match ? { netPos: match.netPos, netPrice: Number(match.netPrice || 0) } : null;
+      if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(current)) return current;
+      previous = current;
+    } catch { /* retry without guessing */ }
+  }
+  return undefined;
+}
+
 async function evaluateAndTrade(
   sym: string, direction: string, price: number,
   stopDist: number, targetDist: number, sizeMult: number, technicalScore: number,
@@ -3897,8 +4265,8 @@ async function evaluateAndTrade(
   }
   // 3. UNKNOWN ACCOUNT BALANCE. Every risk limit is a multiple of equity, so sizing anything before
   //    the real balance has landed is guesswork. Explicit rather than relying on maxRisk falling to 0.
-  if (riskConfig.simulatedEquity <= 0 && tradovateEquity <= 0) {
-    log(`  ${sym}: SKIP — account equity not yet known (waiting on the balance fetch; sizing would be a guess)`);
+  if (riskSizingEquity() <= 0) {
+    log(`  ${sym}: SKIP — sizing equity unavailable${IS_DEMO && DEMO_LIVE_CLONE ? " (fresh live heartbeat required for demo clone)" : " (waiting on balance fetch)"}`);
     return;
   }
 
@@ -3913,6 +4281,10 @@ async function evaluateAndTrade(
   if (!matchedEdge) {
     log(`  ${sym}: SKIP — no registered edge for ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`);
     recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", reason: `no registered edge for ${setupType}/${direction} (RSI ${rsiVal.toFixed(0)})`, ...shadowGeometry(direction, price, stopDist, targetDist) });
+    return;
+  }
+  if (IS_LIVE && !LIVE_TRADING_ARMED) {
+    log(`  ${sym}: SKIP — real-money engine is not infrastructure-armed (LIVE_TRADING_ARMED=true required)`);
     return;
   }
   if (!isEdgeEnabled(matchedEdge.key, ENGINE_MODE, edgeFlags)) {
@@ -3987,7 +4359,7 @@ async function evaluateAndTrade(
     // underperformers; this early hard-block only fires if we have a genuine 25-trade sample
     // of statistical losing.
     // ── DECOUPLED FROM THE GRADER (2026-08-16) ────────────────────────────────────────────────
-    // This floor used to ride on aiVetoEnabled, on the reasoning that it reads the same
+    // This floor used to ride on the AI switch, on the reasoning that it reads the same
     // pattern-memory WR the grader reads, so disregarding the grader meant disregarding the data.
     // That was correct WHEN IT WAS WRITTEN and is not correct now, for two reasons:
     //
@@ -4009,76 +4381,17 @@ async function evaluateAndTrade(
     // deliberately extreme — sub-25% WR on a 25+ sample — so an imperfectly reconciled book still
     // clears it easily, and the cost of a false block is a skipped trade, which is free. Asymmetric
     // in favour of being on. Disable with `<live_futures|futures>_pattern_floor=false`.
-    if (IS_LIVE && patternFloorEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
-      log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping for live`);
+    if (USES_LIVE_POLICY && patternFloorEnabled && pred.matchCount >= 25 && pred.winRate < 0.25) {
+      log(`  BLOCKED by pattern memory: ${(pred.winRate * 100).toFixed(0)}% WR < 25% on ${pred.matchCount} matches — skipping under live policy`);
       recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "pattern_blocked", reason: `${(pred.winRate * 100).toFixed(0)}% WR on ${pred.matchCount} matches`, ...shadowGeometry(direction, price, stopDist, targetDist) });
       feedLog("skip", `${sym} ${setupType} ${direction} blocked by pattern memory (${(pred.winRate * 100).toFixed(0)}% WR)`);
       return;
     }
   } catch { /* pattern memory is optional */ }
 
-  // ── LATENCY: DO NOT CALL THE GRADER WHEN IT IS SWITCHED OFF (2026-07-30) ────────────────────
-  // getAIConfirmation is an Anthropic API round trip, and it sat on the critical path BETWEEN the
-  // signal price and the order. Measured on live today: bar closed 15:05:00 with MNQ at 28094.13,
-  // the order submitted at 15:05:10 and filled at 28111.75 — 17.63 points, $35, i.e. 23% of that
-  // trade's entire $154 risk budget, burned waiting. And with live_futures_ai_grader=false the
-  // verdict is DISCARDED anyway ("AI WOULD REJECT ... TAKING ANYWAY [grader off]").
-  //
-  // So we were paying real slippage for an answer we had already decided to ignore. When the veto
-  // is off the call is skipped entirely: confidence 0 means the score-boost block below is skipped
-  // (finalScore stays technicalScore, still far above the 55 live floor), and aiDown is undefined
-  // so an unreachable grader no longer blocks a trade it was not going to influence — it is
-  // incoherent to ignore the verdict but honour its absence.
-  //
-  // Flipping the grader back ON restores the call, the veto, and the confidence boost together.
-  const ai = !aiVetoEnabled
-    ? { agree: true, confidence: 0, reasoning: "grader off — not called, kept off the order path" }
-    : await getAIConfirmation({
-    sym, direction, reasoning, price,
-    rsi: rsiVal, atr: atrVal, vwap: vwapVal,
-    dayType, session, trend15, prevDayHigh, prevDayLow,
-    patternStats,
-  });
-
-  // SAFEGUARD (live only): never trade real money blind. If every AI grader model is unreachable
-  // (API/models down — not just a slow timeout), pause this entry instead of default-approving on
-  // mechanical signals alone. Demo keeps trading (learning mode). Stateless — auto-resumes the moment
-  // a grader model is reachable again.
-  if (IS_LIVE && ai.aiDown) {
-    log(`  LIVE ENTRY PAUSED: AI gave no verdict (${ai.reasoning}) — skipping ${sym} ${direction} to protect real money. Auto-resumes next setup.`);
-    recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "no_verdict", reason: ai.reasoning, ...shadowGeometry(direction, price, stopDist, targetDist) });
-    feedLog("cooldown", `LIVE entry paused — AI no verdict (${ai.reasoning})`);
-    notify(`LIVE entry paused: AI grader gave no verdict (${ai.reasoning}). Skipping ${sym} ${direction} to protect real money — auto-resumes when AI is back.`, "general");
-    return;
-  }
-
-  // Adjust confidence based on AI
-  let finalScore = technicalScore;
-  // We DON'T record "confirmed" here — a setup is only recorded as taken once it actually opens a
-  // position (see the canExec block below). Otherwise, while already holding gold, every 5-min re-grade
-  // of the same trend would log a fresh "confirmed" and the feed would look like it fired 12 trades
-  // when it holds 1. wouldTakeReason carries the reason forward to the execution point.
-  let wouldTakeReason: string | null = null;
-  if (ai.confidence > 0) {
-    if (ai.agree) {
-      finalScore += Math.min(10, Math.round(ai.confidence / 10));
-      log(`  AI CONFIRMS (${ai.confidence}%): ${ai.reasoning} → final ${finalScore}%`);
-      feedLog("setup", `**${sym} ${setupType} ${direction}** ${finalScore}% — AI confirms: ${ai.reasoning}`);
-      wouldTakeReason = ai.reasoning;
-    } else if (aiVetoEnabled) {
-      log(`  AI REJECTS (${ai.confidence}%): ${ai.reasoning} — trade blocked`);
-      recordDecision({ sym, direction, setupType, confidence: technicalScore, verdict: "rejected", aiConfidence: ai.confidence, reason: ai.reasoning, ...shadowGeometry(direction, price, stopDist, targetDist) });
-      feedLog("skip", `${sym} ${setupType} ${direction} ${technicalScore}% — AI rejected: ${ai.reasoning}`);
-      return;
-    } else {
-      // GRADER OFF: the AI would block, but we take the mechanical trade anyway (live + demo).
-      log(`  AI WOULD REJECT (${ai.confidence}%): ${ai.reasoning} — TAKING ANYWAY [grader off]`);
-      wouldTakeReason = `Grader OFF — taking despite AI disagree: ${ai.reasoning}`;
-    }
-  } else {
-    log(`  AI: ${ai.reasoning}`);
-    wouldTakeReason = ai.reasoning || "mechanical setup";
-  }
+  // The entry decision is deterministic and local. AI grading is advisory telemetry only and runs
+  // after order handling, because measured grader latency consumed more movement than MNQ can afford.
+  const finalScore = technicalScore;
 
   // Re-entry cooldown check: was this symbol+direction recently stopped out?
   const cooldownKey = `${sym}:${direction}`;
@@ -4097,7 +4410,7 @@ async function evaluateAndTrade(
   // of how much we can fire and let the auto-prune mechanic retire whatever doesn't earn its keep.
   // Live stays disciplined-but-aggressive: 55 lets validated setups (trend continuation, VWAP reclaim)
   // through that the prior 60 cutoff was blocking. Auto-prune retires anything that bleeds.
-  const MIN_CONFIDENCE = IS_LIVE ? 55 : 50;
+  const MIN_CONFIDENCE = USES_LIVE_POLICY ? 55 : 50;
   if (finalScore < MIN_CONFIDENCE) {
     log(`  SKIPPED: Final confidence ${finalScore}% below ${MIN_CONFIDENCE}% threshold (${MODE_TAG})`);
     return;
@@ -4117,20 +4430,30 @@ async function evaluateAndTrade(
   const currentTotalContracts = [...positions.values()].reduce((s, p) => s + p.quantity, 0);
   const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < riskConfig.maxConcurrentPositions
     && currentTotalContracts < riskConfig.maxTotalContracts
-    && dailyTradeCount < riskConfig.maxTradesPerDay && dailyPnl >= -(startOfDayBalance || tradovateEquity) * (riskConfig.dailyLossLimitPct / 100)
-    && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym);
+    && dailyTradeCount < riskConfig.maxTradesPerDay && dailyPnl >= -riskSizingEquity() * (riskConfig.dailyLossLimitPct / 100)
+    && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym) && !entryExecutionInFlight;
 
   if (canExec) {
-    // Pattern memory hard block was already evaluated up front before the AI call,
-    // so by the time we reach here the setup has cleared both the empirical floor and the AI.
+    // Pattern memory hard block was already evaluated up front.
     log(`  EXECUTING: ${direction.toUpperCase()} ${sym} @ $${price.toFixed(2)} | Confidence: ${finalScore}% | ${MODE_TAG}`);
-    // Record the decision as taken ONLY here — at the actual entry — so the feed shows one "confirmed"
-    // per real position, not one per re-grade while already holding.
-    recordDecision({ sym, direction, setupType, confidence: finalScore, verdict: "confirmed", aiConfidence: ai.confidence, reason: wouldTakeReason ?? ai.reasoning });
-    feedLog("trade", `**${MODE_TAG} ${direction.toUpperCase()} ${sym}** @ $${price.toFixed(2)} | ${finalScore}% confidence`);
-    await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
-      `[${finalScore}% confidence] ${reasoning}. AI: ${ai.agree ? "confirms" : "disagrees"} — ${ai.reasoning}`,
-      { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session, setupType });
+    entryExecutionInFlight = true;
+    try {
+      await executeTrade(sym, direction as "long" | "short", price, stopDist, targetDist, sizeMult, finalScore,
+        `[${finalScore}% confidence] Edge: ${matchedEdge.key}. ${reasoning}. Deterministic entry; AI is post-trade advisory only.`,
+        { rsi: rsiVal, vwap: vwapVal, trend15m: trend15, dayType, session, setupType });
+    } finally {
+      entryExecutionInFlight = false;
+    }
+    if (aiReviewEnabled) {
+      void getAIConfirmation({
+        sym, direction, reasoning, price,
+        rsi: rsiVal, atr: atrVal, vwap: vwapVal,
+        dayType, session, trend15, prevDayHigh, prevDayLow,
+        patternStats,
+      }).then((review) => {
+        log(`  [AI POST-TRADE] ${review.agree ? "agrees" : "disagrees"} (${review.confidence}%): ${review.reasoning}`);
+      }).catch(() => { /* advisory telemetry never affects trading */ });
+    }
   } else {
     // Approved but can't enter — usually because we're already holding this symbol (one position per
     // symbol), or a daily/tilt limit. This is a NON-EVENT (the engine is just holding); we deliberately
@@ -4142,11 +4465,12 @@ async function evaluateAndTrade(
 // ── Trade Execution ─────────────────────────────────────
 
 // Phase-0 execution-quality capture (intended vs actual fill, slippage, latency). Fully isolated — never throws into trading.
-async function logExecutionQuality(e: { mode: string; sym: string; side: string; intended: number; fill: number; qty: number; latencyMs: number; status: string }) {
+async function logExecutionQuality(e: { mode: string; sym: string; side: string; intended: number; fill: number; qty: number; latencyMs: number; status: string; edgeKey?: string }) {
   try {
     await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS execution_quality (id serial PRIMARY KEY, ts timestamptz DEFAULT now(), mode text, symbol text, side text, intended double precision, fill double precision, slippage double precision, qty int, latency_ms int, status text)`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE execution_quality ADD COLUMN IF NOT EXISTS edge_key text, ADD COLUMN IF NOT EXISTS strategy_version text`);
     const slip = e.side === "Buy" ? (e.fill - e.intended) : (e.intended - e.fill);   // + = adverse (paid up)
-    await prisma.$executeRawUnsafe(`INSERT INTO execution_quality(mode,symbol,side,intended,fill,slippage,qty,latency_ms,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, e.mode, e.sym, e.side, e.intended, e.fill, slip, e.qty, e.latencyMs, e.status);
+    await prisma.$executeRawUnsafe(`INSERT INTO execution_quality(mode,symbol,side,intended,fill,slippage,qty,latency_ms,status,edge_key,strategy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, e.mode, e.sym, e.side, e.intended, e.fill, slip, e.qty, e.latencyMs, e.status, e.edgeKey ?? null, STRATEGY_VERSION);
     log(`[EXEC-Q] ${e.sym} ${e.side} intended ${e.intended.toFixed(2)} fill ${e.fill.toFixed(2)} slip ${slip.toFixed(2)} lat ${e.latencyMs}ms ${e.status}`);
   } catch { /* telemetry must never affect trading */ }
 }
@@ -4154,33 +4478,22 @@ async function logExecutionQuality(e: { mode: string; sym: string; side: string;
 async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string, setupContext?: { rsi: number; vwap: number; trend15m: string; dayType: string; session: string; setupType: string }) {
   const contract = contracts.get(sym);
   if (!contract) return;
+  const executionEdgeKey = reasoning.match(/Edge:\s*([a-z0-9_]+)/i)?.[1];
 
   // Demo always executes (24/7 learning). Live mirrors during RTH if enabled.
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   // Use simulated equity for sizing (demo simulates $1K). Fall back to actual if not set.
-  const equity = riskConfig.simulatedEquity > 0 ? riskConfig.simulatedEquity : tradovateEquity;
+  const equity = riskSizingEquity();
   const riskPct = riskConfig.riskPerTradePct / 100;
   const maxRisk = equity * riskPct * sizeMult;
-  let riskPer = stopDist * mult; // Dollar risk per 1 contract
+  const riskPer = stopDist * mult; // Dollar risk per 1 contract
 
-  // ADAPTIVE STOP SIZING: if the ideal stop doesn't fit, tighten it to the max affordable level.
-  // Floor: 0.75× ATR — below that the stop is too tight to survive normal volatility.
-  // This lets small accounts trade with the same entries but tighter risk, improving R:R.
+  // Preserve the strategy's validated stop geometry. If one contract does not fit the risk budget,
+  // skip the trade rather than silently converting it into a different, untested strategy.
   if (riskPer > maxRisk) {
-    const b = barBuilders.get(sym);
-    const currentATR = b ? atr(b.bars5m) : 0;
-    const maxAffordableStop = maxRisk / mult; // max stop distance in points
-    const minViableStop = currentATR * 0.75;  // floor: 0.75× ATR
-
-    if (currentATR > 0 && maxAffordableStop >= minViableStop) {
-      log(`${sym}: TIGHT STOP — ideal $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)}, tightening stop from ${stopDist.toFixed(1)} to ${maxAffordableStop.toFixed(1)} pts (${(maxAffordableStop / currentATR).toFixed(2)}× ATR). R:R improves ${(targetDist / stopDist).toFixed(1)} → ${(targetDist / maxAffordableStop).toFixed(1)}`);
-      stopDist = maxAffordableStop;
-      riskPer = stopDist * mult;
-    } else {
-      log(`${sym}: SKIP — 1 contract risk $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)} (${(riskPct * 100)}% of $${equity.toFixed(0)}). Even min stop (0.75× ATR = $${(minViableStop * mult).toFixed(0)}) too wide.`);
-      return;
-    }
+    log(`${sym}: SKIP — validated 1-contract risk $${riskPer.toFixed(0)} exceeds max $${maxRisk.toFixed(0)} (${(riskPct * 100)}% of $${equity.toFixed(0)}). Stop geometry unchanged.`);
+    return;
   }
 
   // ⚠️ IF YOU CHANGE THE SIZING BELOW, UPDATE plannedQtyFor() TOO — it mirrors this block to tell the
@@ -4190,14 +4503,13 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // earned rather than because someone raised a flag after a good week. Full-size contracts keep the
   // configured cap. At today's ~$5.2k equity microContractCap() = 1 for all three, so this is
   // behaviour-identical to the previous line until the account reaches $10,000.
-  // For micros the ladder is a FLOOR that grows with equity, and the configured cap is a manual
-  // override that can raise it — whichever is higher wins. So `${mode}_futures_max_contracts` is a
-  // live control again (set to 2 on 2026-07-25 by explicit decision), while the ladder still steps
-  // the account up on its own at $10k / $18k without anyone touching a flag. Full-size symbols
-  // continue to use the configured cap alone.
-  let perTradeCap = MICRO_SYMBOLS.includes(sym)
-    ? Math.max(riskConfig.maxContractsPerTrade, microContractCap(equity))
-    : riskConfig.maxContractsPerTrade;
+  // The growth ladder and configured maximum are both ceilings. This lets equity-earned scale-ups
+  // happen automatically while preserving the operator's ability to reduce maximum size instantly.
+  let perTradeCap = contractCapFor(sym, equity, setupContext?.session);
+  if (perTradeCap < 1) {
+    log(`${sym}: SKIP — no aggregate contract capacity remains (limit ${riskConfig.maxTotalContracts})`);
+    return;
+  }
   // ── OVERNIGHT MARGIN GOVERNOR ────────────────────────────────────────────────────────────────
   // The per-trade cap of 4 only works during RTH, where the exchange charges DAY-TRADE margin
   // (~$50-100/micro). Outside RTH it charges INITIAL margin — MGC $2,242.90 — so on a ~$5,227
@@ -4220,7 +4532,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   const isOvernightEntry = MICRO_SYMBOLS.includes(sym) && (!execSession || !RTH_SESSIONS.has(execSession));
   if (isOvernightEntry) {
     const marginCap = overnightMarginCap(sym, equity);
-    const overnightCap = Math.min(OVERNIGHT_MICRO_CAP, marginCap);
+    const overnightCap = Math.min(perTradeCap, OVERNIGHT_MICRO_CAP, marginCap);
     if (overnightCap < 1) {
       const per = OVERNIGHT_INITIAL_MARGIN[sym];
       log(`${sym}: SKIP — overnight (session ${execSession ?? "unknown"}), and equity $${equity.toFixed(0)} cannot margin even 1 contract at ${per ? `$${per.toFixed(0)} initial` : "an UNKNOWN initial margin"} (cap ${(OVERNIGHT_MARGIN_UTILISATION_CAP * 100).toFixed(0)}% of equity)`);
@@ -4238,7 +4550,12 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // Hard ceiling: never risk more than 15% of equity on a single entry
   const totalRisk = riskPer * qty;
   if (totalRisk > equity * 0.15) {
-    qty = Math.max(1, Math.floor((equity * 0.15) / riskPer));
+    const hardCapQty = Math.floor((equity * 0.15) / riskPer);
+    if (hardCapQty < 1) {
+      log(`${sym}: SKIP — one contract would exceed the 15% single-entry hard ceiling`);
+      return;
+    }
+    qty = Math.min(qty, hardCapQty);
     log(`${sym}: HARD CAP — risk $${totalRisk.toFixed(0)} exceeds 15% equity, capped to ${qty} contracts`);
   }
   const rr = targetDist / stopDist;
@@ -4281,16 +4598,42 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // market has already moved MORE THAN 10% OF THE STOP DISTANCE against us, don't chase. 10% of the
     // stop is 10% of the trade's risk, which is the most execution should ever be allowed to cost.
     // A skipped trade is free; a chased one pays the whole tail. Favourable moves are never blocked.
-    const freshPrice = barBuilders.get(sym)?.lastPrice ?? 0;
+    // Orders cross the book, so buys are anchored to the ask and sells to the bid.
+    // Midpoint remains appropriate for bar construction but is not an executable price.
+    let freshPrice = getActionableEntryPrice(sym, direction) || barBuilders.get(sym)?.lastPrice || 0;
     const maxChase = stopDist * EXEC_COST_CAP_FRACTION;
-    if (freshPrice > 0 && stopDist > 0) {
-      const adverse = direction === "long" ? freshPrice - price : price - freshPrice;
+    const chaseExceeded = (candidatePrice: number) => {
+      if (candidatePrice <= 0 || stopDist <= 0) return false;
+      const adverse = direction === "long" ? candidatePrice - price : price - candidatePrice;
       if (adverse > maxChase) {
         log(`  ${sym}: SKIP — price already ran ${adverse.toFixed(2)} pts against us since the signal (max chase ${maxChase.toFixed(2)} = ${(EXEC_COST_CAP_FRACTION * 100).toFixed(0)}% of the ${stopDist.toFixed(1)}-pt stop). Not buying the move.`);
         feedLog("skip", `${sym} ${direction} skipped — ran ${adverse.toFixed(1)} pts before entry (chase guard)`);
-        return;
+        return true;
       }
+      return false;
+    };
+    if (chaseExceeded(freshPrice)) return;
+
+    // The local position map is not authoritative enough to prove this contract is flat. Capture a
+    // stable broker snapshot before submitting so an indeterminate new order can never adopt and
+    // bracket a manual, stale, or externally-created position as if it were its own fill.
+    const brokerBeforeEntry = await getBrokerPositionSnapshot(contract.id, 3);
+    if (brokerBeforeEntry === undefined) {
+      log(`  ${sym}: SKIP — broker position state unavailable before entry`);
+      notify(`⚠️ ${MODE_TAG} ${sym}: entry blocked because broker position state could not be verified flat.`);
+      return;
     }
+    if (brokerBeforeEntry !== null) {
+      log(`  ${sym}: SKIP — broker already holds ${brokerBeforeEntry.netPos} contract(s) not represented by this entry`);
+      notify(`⚠️ ${MODE_TAG} ${sym}: entry blocked because broker already holds ${brokerBeforeEntry.netPos}. Reconcile positions first.`);
+      return;
+    }
+
+    // The stable-flat check intentionally waits for two matching broker reads. Price can move while
+    // that safety check runs, so refresh the executable quote and enforce the chase ceiling again
+    // immediately before constructing and submitting the order.
+    freshPrice = getActionableEntryPrice(sym, direction) || barBuilders.get(sym)?.lastPrice || 0;
+    if (chaseExceeded(freshPrice)) return;
 
     // ── ENTRY ORDER: MARKETABLE LIMIT vs MARKET ──────────────────────────────────────────────
     // The chase guard above only refuses to chase a move that ALREADY happened. It cannot bound what
@@ -4339,7 +4682,36 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // Confirm the entry filled BEFORE resting protective orders or tracking a position.
     // Only skip on a positively-confirmed rejection (no fill); unknown → fall back to
     // current behavior (track at estimated price) so we never abandon a real fill.
-    const fillResult = await verifyOrderFill(entry.orderId, qty);
+    let fillResult = await verifyOrderFill(entry.orderId, qty);
+    if (fillResult.status === "unknown") {
+      // Stop a still-working order before reconciling. A returned order id is not proof of a fill,
+      // and placing opposite-side brackets against an unknown entry can create a reverse position.
+      if (!await cancelOrderAndWaitForTerminal(entry.orderId)) {
+        log(`  🚨 ${sym}: entry cancellation did not reach a terminal state; symbol requires broker reconciliation.`);
+        notify(`🚨 ${MODE_TAG} ${sym}: entry order still indeterminate. Check broker now.`, "general");
+        return;
+      }
+
+      const brokerPosition = await getBrokerPositionSnapshot(contract.id);
+      const resolution = reconcileBrokerPosition(direction as "long" | "short", 0, brokerPosition);
+      if (resolution.status === "increased") {
+        fillResult = {
+          status: "filled",
+          price: resolution.netPrice > 0 ? resolution.netPrice : price,
+          qty: resolution.quantity,
+        };
+        log(`  ${sym}: indeterminate entry reconciled from broker position (${fillResult.qty}x @ $${fillResult.price.toFixed(2)})`);
+      } else if (resolution.status === "flat") {
+        log(`  ${sym}: indeterminate entry reconciled FLAT — no brackets placed, no position tracked`);
+        void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: price, qty: 0, latencyMs: Date.now() - submitTs, status: "unknown_flat" });
+        return;
+      } else {
+        log(`  🚨 ${sym}: entry state unresolved after broker reconciliation — no opposite-side orders placed; sync will adopt any real position`);
+        notify(`🚨 ${MODE_TAG} ${sym}: entry state unresolved. No brackets were placed to avoid a reverse position. Check broker now.`, "general");
+        void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: price, qty: 0, latencyMs: Date.now() - submitTs, status: "unknown_unresolved" });
+        return;
+      }
+    }
     if (fillResult.status === "rejected") {
       // An IOC that found no liquidity inside the cap is a MISS, not a broker rejection. It is the
       // designed outcome (a skipped trade is free), so it is logged and counted, never alerted on —
@@ -4361,6 +4733,11 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     const fillConfirmed = fillResult.status === "filled";
     const entryPrice = fillConfirmed ? fillResult.price : price; // real fill price when known
     const fillQty = fillConfirmed ? fillResult.qty : qty;        // size protective orders to ACTUAL fill, never larger
+    await recordDecision({
+      sym, direction, setupType: setupContext?.setupType ?? "unknown", confidence: confidenceScore,
+      verdict: "confirmed", aiConfidence: 0, reason: reasoning,
+    });
+    feedLog("trade", `**${MODE_TAG} ${direction.toUpperCase()} ${sym}** filled ${fillQty}x @ $${entryPrice.toFixed(2)} | ${confidenceScore}% confidence`);
 
     // ── RE-ANCHOR THE BRACKET TO THE ACTUAL FILL (2026-07-30) ────────────────────────────────
     // The stop was priced off the SIGNAL price, which is computed before the order exists. Any
@@ -4375,65 +4752,17 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       targetPrice = roundToTick(sym, direction === "long" ? entryPrice + targetDist : entryPrice - targetDist);
     }
     // EXECUTION TELEMETRY (Phase 0) — fire-and-forget; isolated so it can never affect the order
-    void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: entryPrice, qty: fillQty, latencyMs: Date.now() - submitTs, status: fillResult.status });
+    void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: entryPrice, qty: fillQty, latencyMs: Date.now() - submitTs, status: fillResult.status, edgeKey: executionEdgeKey });
 
     // Protective STOP — retry once; for a real position this is non-negotiable.
-    let stopOrderId: number | null = null;
-    for (let a = 0; a < 2 && stopOrderId === null; a++) {
-      try {
-        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
-          orderQty: fillQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        // placeorder returns an id even for orders the broker then REJECTS — confirm it's actually
-        // live before trusting it as protection, else the flatten-safety below never fires.
-        if (await orderRejected(s.orderId)) {
-          log(`  ${sym}: stop order #${s.orderId} REJECTED by broker (attempt ${a + 1}) — retrying`);
-          if (a === 0) await new Promise(r => setTimeout(r, 800));
-          continue;
-        }
-        stopOrderId = s.orderId;
-      } catch { if (a === 0) await new Promise(r => setTimeout(r, 800)); }
-    }
-
-    // SAFETY: never hold a CONFIRMED position without a protective stop. If the stop couldn't be
-    // placed, flatten the just-filled entry immediately rather than run naked.
-    if (stopOrderId === null && fillConfirmed) {
-      log(`  🚨 STOP PLACEMENT FAILED for ${sym} — flattening ${fillQty}x entry to avoid a naked position`);
-      notify(`🚨 ${MODE_TAG} ${sym}: stop order FAILED — flattening entry (no naked position)`);
-      try {
-        await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
-          orderQty: fillQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-        })});
-        feedLog("skip", `${sym} flattened — stop placement failed`);
-      } catch (e) {
-        log(`  🚨🚨 FLATTEN ALSO FAILED for ${sym}: ${e} — MANUAL INTERVENTION NEEDED`);
-        notify(`🚨🚨 ${MODE_TAG} ${sym}: entry filled, stop FAILED, flatten FAILED — CHECK ACCOUNT NOW`);
-      }
-      return; // never track a stopless position; never place a target on a flattened entry
-    }
-    if (stopOrderId === null) {
-      // Fill UNCONFIRMED + stop failed: can't safely flatten (may hold nothing). Track so the
-      // software hard-stop manages it, but alert loudly.
-      log(`  ⚠️ ${sym}: stop placement failed, fill unconfirmed — tracking with SOFTWARE stop only`);
-      notify(`⚠️ ${MODE_TAG} ${sym}: no broker stop (fill unconfirmed) — software stop active, watch it`);
-    }
-
-    let targetOrderId: number | null = null;
-    try {
-      const t = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-        accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
-        orderQty: fillQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
-      })}) as { orderId: number };
-      targetOrderId = t.orderId;
-    } catch {}
-
+    // Track and persist the confirmed fill BEFORE placing protection. A stop can fill immediately;
+    // if it does, closePosition needs this state to account for the round trip, daily trade limit,
+    // and realized P&L instead of silently losing the trade because the broker is already flat.
     positions.set(sym, {
       symbol: sym, contractId: contract.id, direction, quantity: fillQty,
       entryPrice, stopLoss: stopPrice, target: targetPrice,
       trailStop: null, reachedBreakeven: false,
-      stopOrderId, targetOrderId, entryTime: Date.now(),
+      stopOrderId: null, targetOrderId: null, entryTime: Date.now(),
       entryStopLoss: stopPrice,
       scaledOut: false, originalQty: fillQty, consecutiveStops: 0,
       pyramided: false,
@@ -4446,23 +4775,98 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       emergencyWarningTick: 0,
     });
     dailyTradeCount++;
-    log(`Order #${entry.orderId} ${fillConfirmed ? `FILLED @ $${entryPrice.toFixed(2)}` : "placed (fill unconfirmed — tracking at est)"} | Stop #${stopOrderId} | Target #${targetOrderId}`);
-    notify(`${side} ${fillQty}x ${sym} @ $${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (est)"} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
     await savePositions();
-
-    // Log to database so Vercel dashboard shows it
     try {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
         action: `${TRADE_ACTION_PREFIX}_${direction}`,
         qty: fillQty,
         price: entryPrice,
-        reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * qty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x. Fill: ${fillConfirmed ? "confirmed" : "unconfirmed(est)"}`,
+        reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * fillQty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x. Fill: confirmed`,
         aiScore: confidenceScore,
         aiSignal: direction,
         orderId: String(entry.orderId),
       }});
     } catch {}
+
+    let stopOrderId: number | null = null;
+    let stopVerified = false;
+    for (let a = 0; a < 2 && stopOrderId === null; a++) {
+      try {
+        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
+          orderQty: fillQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        // placeorder returns an id even for orders the broker then REJECTS — confirm it's actually
+        // live before trusting it as protection, else the flatten-safety below never fires.
+        const protectionStatus = await protectionOrderStatus(s.orderId);
+        if (protectionStatus === "rejected") {
+          log(`  ${sym}: stop order #${s.orderId} REJECTED by broker (attempt ${a + 1}) — retrying`);
+          if (a === 0) await new Promise(r => setTimeout(r, 800));
+          continue;
+        }
+        if (protectionStatus === "filled") {
+          log(`  ${sym}: protective stop #${s.orderId} filled immediately; entry is no longer open`);
+          notify(`${MODE_TAG} ${sym}: protective stop filled immediately after entry. Recording the completed trade now.`);
+          await closePosition(sym, stopPrice, "stop_loss", true);
+          return;
+        }
+        if (protectionStatus === "unknown") {
+          const brokerPosition = await getBrokerPositionSnapshot(contract.id, 3);
+          if (brokerPosition === null) {
+            log(`  ${sym}: stop status unknown but broker is flat; recording the completed trade`);
+            await closePosition(sym, stopPrice, "protection_flat", true);
+            return;
+          }
+          if (brokerPosition === undefined || Math.sign(brokerPosition.netPos) !== (direction === "long" ? 1 : -1)) {
+            log(`  🚨 ${sym}: stop status and broker position are both unresolved; no additional opposite-side orders placed`);
+            notify(`🚨 ${MODE_TAG} ${sym}: protection state unresolved after a confirmed entry. Check broker immediately.`, "general");
+            return;
+          }
+          log(`  🚨 ${sym}: stop #${s.orderId} status unverified while position remains open; flattening fail-closed`);
+          notify(`🚨 ${MODE_TAG} ${sym}: broker stop could not be verified. Flattening the entry now.`, "general");
+          await closePosition(sym, brokerPosition.netPrice || entryPrice, "protection_unverified");
+          return;
+        }
+        stopOrderId = s.orderId;
+        stopVerified = true;
+      } catch { if (a === 0) await new Promise(r => setTimeout(r, 800)); }
+    }
+
+    // SAFETY: never hold a CONFIRMED position without a protective stop. If the stop couldn't be
+    // placed, flatten the just-filled entry immediately rather than run naked.
+    if (stopOrderId === null && fillConfirmed) {
+      log(`  🚨 STOP PLACEMENT FAILED for ${sym} — flattening ${fillQty}x entry to avoid a naked position`);
+      notify(`🚨 ${MODE_TAG} ${sym}: stop order FAILED — flattening entry (no naked position)`);
+      await closePosition(sym, entryPrice, "stop_placement_failed");
+      return;
+    }
+    if (stopOrderId === null) {
+      // Fill UNCONFIRMED + stop failed: can't safely flatten (may hold nothing). Track so the
+      // software hard-stop manages it, but alert loudly.
+      log(`  ⚠️ ${sym}: stop placement failed, fill unconfirmed — tracking with SOFTWARE stop only`);
+      notify(`⚠️ ${MODE_TAG} ${sym}: no broker stop (fill unconfirmed) — software stop active, watch it`);
+    }
+
+    let targetOrderId: number | null = null;
+    if (stopVerified) {
+      try {
+        const t = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
+          orderQty: fillQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
+        })}) as { orderId: number };
+        targetOrderId = t.orderId;
+      } catch {}
+    }
+
+    const trackedPosition = positions.get(sym);
+    if (trackedPosition) {
+      trackedPosition.stopOrderId = stopOrderId;
+      trackedPosition.targetOrderId = targetOrderId;
+    }
+    log(`Order #${entry.orderId} ${fillConfirmed ? `FILLED @ $${entryPrice.toFixed(2)}` : "placed (fill unconfirmed — tracking at est)"} | Stop #${stopOrderId} | Target #${targetOrderId}`);
+    notify(`${side} ${fillQty}x ${sym} @ $${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (est)"} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
+    await savePositions();
 
     // Brain: update dashboard after trade entry (throttled)
     throttledBrainUpdate(`trade-entry-${sym}`);
@@ -4474,10 +4878,13 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
 async function writeHeartbeat() {
   try {
+    await refreshLiveMirrorEquity();
+    const sizingEquity = riskSizingEquity();
     const payload = JSON.stringify({
       timestamp: new Date().toISOString(),
       tickCount,
       mode: ENGINE_MODE,
+      liveTradingArmed: IS_LIVE ? LIVE_TRADING_ARMED : false,
       positions: positions.size,
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
@@ -4486,8 +4893,12 @@ async function writeHeartbeat() {
       // "Today's plan" telemetry — what the engine sees and what size it intends per symbol, so the
       // admin panel renders the ENGINE's numbers instead of recomputing them in the web app.
       equity: Math.round(tradovateEquity),
-      riskPerTrade: Math.round(tradovateEquity * (riskConfig.riskPerTradePct / 100)),
-      dailyLossLimit: Math.round(tradovateEquity * (riskConfig.dailyLossLimitPct / 100)),
+      sizingEquity: Math.round(sizingEquity),
+      liveMirror: IS_DEMO && DEMO_LIVE_CLONE,
+      liveMirrorFresh: IS_DEMO && DEMO_LIVE_CLONE ? sizingEquity > 0 : undefined,
+      policy: USES_LIVE_POLICY ? "live" : "research",
+      riskPerTrade: Math.round(sizingEquity * (riskConfig.riskPerTradePct / 100)),
+      dailyLossLimit: Math.round(sizingEquity * (riskConfig.dailyLossLimitPct / 100)),
       maxTradesPerDay: riskConfig.maxTradesPerDay,
       maxContractsPerTrade: riskConfig.maxContractsPerTrade,
       symbols: Object.fromEntries([...planSnapshots.entries()]),
@@ -4985,14 +5396,17 @@ async function preloadBars() {
 // maxRisk 0, so the adaptive-stop path SKIPs the trade until the true balance lands. Never guess an
 // account balance upward; not trading for one minute costs nothing, mis-sizing 10x does not.
 let tradovateEquity = 0;
+let lastTradovateEquityAt = 0;
 let startOfDayBalance = 0; // Set at session reset, used for daily loss limit
 let marginDriftAlerted = false; // OVERNIGHT_INITIAL_MARGIN self-audit — alert once, not every cycle
 
 async function updateTradovateEquity() {
   try {
     const cashBalances = await apiFetch(`/cashBalance/getCashBalanceSnapshot?accountId=${accountId}`) as Record<string, number>;
-    if (cashBalances?.totalCashValue) {
-      tradovateEquity = cashBalances.totalCashValue;
+    const fetchedEquity = Number(cashBalances?.totalCashValue);
+    if (Number.isFinite(fetchedEquity) && fetchedEquity >= 0) {
+      tradovateEquity = fetchedEquity;
+      lastTradovateEquityAt = Date.now();
       updateTradingSymbols();
       log(`[EQUITY] Tradovate account equity: $${tradovateEquity.toLocaleString()}`);
 
@@ -5372,12 +5786,15 @@ async function updateSectorRotation() {
 // ── Reliability: Safe interval wrapper ───────────────────
 
 function safeInterval(fn: () => void | Promise<void>, ms: number, label: string): NodeJS.Timeout {
-  return setInterval(async () => {
-    try {
-      await fn();
-    } catch (err) {
+  let inFlight = false;
+  return setInterval(() => {
+    if (inFlight) return;
+    inFlight = true;
+    Promise.resolve(fn()).catch((err) => {
       log(`[SAFE-INTERVAL] ${label} threw: ${err}`);
-    }
+    }).finally(() => {
+      inFlight = false;
+    });
   }, ms);
 }
 
@@ -5410,12 +5827,10 @@ function startWatchdog() {
 // ── Reliability: Health check HTTP server ────────────────
 
 function startHealthServer() {
-  // Dynamic import to avoid issues if http is somehow unavailable
-  const http = require("http");
   const port = parseInt(process.env.PORT || "3001", 10);
   const startTime = Date.now();
 
-  const server = http.createServer((_req: unknown, res: { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }) => {
+  const server = createServer((_req: unknown, res: { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }) => {
     const now = Date.now();
     const uptimeSeconds = Math.round((now - startTime) / 1000);
     const lastTickAge = tickCount > 0 ? Math.round((now - lastTickCheckTime) / 1000) : -1;
@@ -5562,7 +5977,7 @@ async function main() {
   log("╔══════════════════════════════════════════════╗");
   log(`║  ESBUENO FUTURES — ${MODE_TAG} ENGINE ${"".padEnd(16 - MODE_TAG.length)}║`);
   log("╚══════════════════════════════════════════════╝");
-  log(`Mode: ${IS_LIVE ? "LIVE — real money, RTH prime only" : "DEMO 24/7 learning"} | Data: Databento live_quotes → Tradovate (5s), NO Yahoo price fallback | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
+  log(`Mode: ${IS_LIVE ? "LIVE real money" : DEMO_LIVE_CLONE ? "DEMO live-account clone" : "DEMO research"} | Policy: ${USES_LIVE_POLICY ? "live sessions/risk/gates" : "24/7 research"} | Data: Databento live_quotes → Tradovate (1s), NO Yahoo price fallback | Orders: ${IS_LIVE ? "LIVE" : "DEMO"} Tradovate`);
 
   // Validate all required env vars BEFORE doing anything else
   validateEnvironment();
@@ -5721,6 +6136,7 @@ async function main() {
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
+  safeInterval(resolveContracts, 300_000, "resolveContracts"); // fail-closed symbols retry automatically
   safeInterval(sweepPhantomCloseRows, 1800_000, "sweepPhantoms"); // auto-clean phantom close-rows every 30min
   safeInterval(proactiveTokenRefresh, 600_000, "tokenRefresh"); // check token expiry every 10min
   // Mode is fixed by ENGINE_MODE env var — no polling needed

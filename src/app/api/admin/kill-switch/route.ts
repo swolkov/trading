@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 /**
  * Master kill switch — sets trading_mode_futures to "disabled" so the engine stops firing
@@ -13,9 +14,12 @@ import { prisma } from "@/lib/db";
  * triggered accidentally.
  */
 
-const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD || "golive";
+const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD;
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
+  if (!LIVE_PASSWORD) return Response.json({ error: "Live trading password is not configured" }, { status: 503 });
   try {
     const body = await request.json().catch(() => ({}));
     const { password, action } = body as { password?: string; action?: "kill" | "restore" };
