@@ -15,6 +15,13 @@ import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, edgeFlagKey, REALTIME_EDGES 
 import { VAULT_SESSION_RULES } from "../lib/vault-session-gates";
 import { reconcileBrokerPosition } from "../lib/broker-position-reconciliation";
 import { cappedContractLimit, isFreshPositiveEquity } from "../lib/risk-sizing";
+import {
+  FULL_SIZE_FUTURES,
+  MICRO_FUTURES,
+  livePolicySessionMultiplier,
+  overnightMarginContractCap,
+  selectFuturesSymbols,
+} from "../lib/futures-trading-policy";
 import { createServer } from "node:http";
 
 
@@ -59,9 +66,9 @@ const STRATEGY_VERSION = "2026-08-20-parity-v1";
 // 1-contract stop vs the $924 account: MES ~$75 (8%), MGC ~$93 (10%), MNQ ~$132 (14%) — all fit under
 // the 15% risk cap (MES is actually cheaper than gold). All trade only their validated pocket via the
 // evaluateAndTrade gate: gold = full RSI-bounce edge, index (NQ/ES) = RSI≥80 overbought-shorts only.
-const FULL_SIZE_SYMBOLS = ["GC", "NQ", "ES"];
+const FULL_SIZE_SYMBOLS: string[] = [...FULL_SIZE_FUTURES];
 // Live <$60k micros — same edges, ~1/10 size. Databento feeds them via FULL_EQUIVALENT (MGC→GC etc).
-const MICRO_SYMBOLS = ["MGC", "MNQ", "MES"];
+const MICRO_SYMBOLS: string[] = [...MICRO_FUTURES];
 // Map full-size to micro equivalents (for market data fallback — micros have same price)
 const MICRO_EQUIVALENT: Record<string, string> = { ES: "MES", NQ: "MNQ", GC: "MGC", YM: "MYM" };
 const FULL_EQUIVALENT: Record<string, string> = { MES: "ES", MNQ: "NQ", MGC: "GC", MYM: "YM" };
@@ -86,11 +93,11 @@ const FULL_SIZE_EQUITY_THRESHOLD = 60_000;
 let SYMBOLS = FULL_SIZE_SYMBOLS; // default to full-size (demo), downgraded to micros for small live accounts
 // PHASE 0 (live): optional symbol whitelist from DB config (live_futures_symbols), e.g. "MES" for day-1.
 let symbolWhitelist: string[] | null = null;
-// Pyramiding changes payoff geometry and makes demo incomparable with the live micro book.
-// Keep it opt-in in every mode until a production-parity replay validates it explicitly.
-const ALLOW_PYRAMID = process.env.ALLOW_PYRAMID === "true";
 const DEMO_LIVE_CLONE = process.env.DEMO_LIVE_CLONE !== "false";
 const USES_LIVE_POLICY = IS_LIVE || (IS_DEMO && DEMO_LIVE_CLONE);
+// Pyramiding changes payoff geometry and makes demo incomparable with the live book. A stale
+// Railway ALLOW_PYRAMID=true must not bypass policy, so only a separate research demo may opt in.
+const ALLOW_PYRAMID = !USES_LIVE_POLICY && process.env.ALLOW_PYRAMID === "true";
 const LIVE_HEARTBEAT_KEY = "futures_engine_heartbeat_live";
 const LIVE_MIRROR_MAX_AGE_MS = 3 * 60_000;
 const BROKER_EQUITY_MAX_AGE_MS = 15 * 60_000;
@@ -102,14 +109,14 @@ function updateTradingSymbols() {
   const selectionEquity = IS_DEMO && DEMO_LIVE_CLONE ? liveMirrorEquity : tradovateEquity;
   // Demo defaults to the same micro contracts as live so its execution evidence transfers.
   // Set DEMO_LIVE_CLONE=false only for a deliberately separate full-size research service.
-  let next = IS_LIVE
-    ? (tradovateEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
-    : (DEMO_LIVE_CLONE
-      ? (liveMirrorEquity >= FULL_SIZE_EQUITY_THRESHOLD ? FULL_SIZE_SYMBOLS : MICRO_SYMBOLS)
-      : FULL_SIZE_SYMBOLS);
-  // PHASE 0: restrict to the whitelist if set (e.g. ["MES"] for live day-1)
-  if (symbolWhitelist && symbolWhitelist.length > 0) next = next.filter(s => symbolWhitelist!.includes(s));
-  SYMBOLS = next;
+  SYMBOLS = selectFuturesSymbols({
+    mode: ENGINE_MODE,
+    accountEquity: tradovateEquity,
+    liveMirrorEquity,
+    demoLiveClone: DEMO_LIVE_CLONE,
+    fullSizeThreshold: FULL_SIZE_EQUITY_THRESHOLD,
+    whitelist: symbolWhitelist,
+  });
   if (prev !== SYMBOLS.join(",")) {
     log(`[SIZING] Policy equity $${selectionEquity.toFixed(0)} → trading ${SYMBOLS.join(", ") || "(none)"}${symbolWhitelist ? ` [whitelist: ${symbolWhitelist.join(",")}]` : ""}`);
   }
@@ -175,16 +182,17 @@ function microContractCap(equity: number): number {
 // be governed separately. Module-scope so the entry sizer and the pyramid add cannot drift apart
 // (they previously used different caps: per-trade 2 vs maxTotalContracts 8).
 const RTH_SESSIONS = new Set(["open", "morning", "midday", "afternoon", "close"]);
-/** Hard contract ceiling for a single overnight micro entry, independent of margin. */
-const OVERNIGHT_MICRO_CAP = 2;
-/** Overnight INITIAL margin per MICRO contract, in dollars. VERIFIED from Tradovate 2026-07-28:
- *  MGC $2,242.90. Index micros are never traded overnight today (getSizeMultiplier returns 0 for
- *  non-metals outside RTH), but they are listed so a future session change cannot get a free pass.
+/** Hard contract ceiling for a single overnight entry, independent of margin. */
+const OVERNIGHT_CONTRACT_CAP = 2;
+/** Overnight INITIAL margin per contract, in dollars. MGC was verified from Tradovate 2026-07-28.
+ *  GC uses the conservative 10x notional equivalent until a live broker snapshot verifies it.
+ *  Index micros are never traded overnight today (getSizeMultiplier returns 0 for non-metals), but
+ *  they are listed so a future session change cannot get a free pass.
  *  A hardcoded margin number HAS already gone stale here once — a comment claimed MGC was
  *  ~$1,000-1,150 when the real figure was $2,242.90 — so updateTradovateEquity() now self-audits
  *  this table against what the broker actually charges and logs loudly on drift. */
 const OVERNIGHT_INITIAL_MARGIN: Record<string, number> = {
-  MGC: 2242.90, MNQ: 4171, MES: 2657, MYM: 1000, M2K: 1000,
+  GC: 22429, MGC: 2242.90, MNQ: 4171, MES: 2657, MYM: 1000, M2K: 1000,
 };
 /** Ceiling on the share of equity that overnight INITIAL margin may consume.
  *  This is the point of the whole governor: the limit tracks EQUITY instead of being a blind
@@ -199,9 +207,11 @@ const OVERNIGHT_MARGIN_UTILISATION_CAP = 0.90;
  *  which is exactly how the 2026-06-30 naked-stop incident started ("the broker will just reject
  *  it" is not a safety mechanism). */
 function overnightMarginCap(sym: string, equity: number): number {
-  const perContract = OVERNIGHT_INITIAL_MARGIN[sym];
-  if (!perContract || perContract <= 0 || equity <= 0) return 0;
-  return Math.floor((equity * OVERNIGHT_MARGIN_UTILISATION_CAP) / perContract);
+  return overnightMarginContractCap(
+    equity,
+    OVERNIGHT_INITIAL_MARGIN[sym],
+    OVERNIGHT_MARGIN_UTILISATION_CAP,
+  );
 }
 
 // ── THE EXECUTION-COST CEILING ───────────────────────────────────────────────────────────────────
@@ -835,8 +845,8 @@ function contractCapFor(sym: string, equity: number, session: string | undefined
     riskConfig.maxTotalContracts,
     openContracts,
   );
-  if (MICRO_SYMBOLS.includes(sym) && (!session || !RTH_SESSIONS.has(session))) {
-    cap = Math.min(cap, OVERNIGHT_MICRO_CAP, overnightMarginCap(sym, equity));
+  if (!session || !RTH_SESSIONS.has(session)) {
+    cap = Math.min(cap, OVERNIGHT_CONTRACT_CAP, overnightMarginCap(sym, equity));
   }
   return cap;
 }
@@ -1324,8 +1334,6 @@ function getMinutesSinceRTHOpen(): number {
 function getSizeMultiplier(sym?: string): number {
   const s = getSessionName();
 
-  if (s === "halt") return 0; // market closed (5-6 PM daily break)
-
   // LIVE ENGINE: RTH-only by default (reverted from 24/7 on 2026-05-27 — overnight initial margin for 1 MES
   // (~$2,657, confirmed real from Tradovate's cashBalance API) EXCEEDS a ~$1K account → margin deficit /
   // liquidation risk. Day-trade margin (~$50) only applies during RTH.
@@ -1335,9 +1343,7 @@ function getSizeMultiplier(sym?: string): number {
   // stays RTH-only always. At sub-threshold equity (e.g. $821 today) this branch is skipped → identical to
   // the old RTH-only behavior. It flips on by itself the moment the account is funded past the threshold.
   if (USES_LIVE_POLICY) {
-    if (s === "morning" || s === "afternoon") return 1.0;   // RTH prime — full size
-    if (s === "midday") return 0.5;                         // lunch — half size
-    // Funded-enough GOLD gets the evening session; deep overnight (asia/europe) stays blocked (thin liquidity).
+    // Funded-enough GOLD gets the evening and London sessions; Asia stays blocked.
     // 2026-07-28: was 0.5, which had become a BLOCK rather than a reduction. "Half size" is meaningless
     // once the position is already the smallest contract that exists — you get 1 micro or 0, never half.
     // At gold ATR 8.2 one MGC risks ~$122 while a half-size budget is 3% x $5,250 x 0.5 = $78, so the
@@ -1379,10 +1385,10 @@ function getSizeMultiplier(sym?: string): number {
     // Side effect as with the evening: sizeMult 1.0 makes these sessions "prime" (+5 confluence). If that
     // proves too loose, raise the score threshold rather than dropping the multiplier — a fractional
     // multiplier silently becomes a total block once one contract's risk exceeds the reduced budget.
-    if (sym && METALS.has(sym) && riskSizingEquity() >= LIVE_EVENING_GOLD_MIN_EQUITY &&
-        (s === "eth_evening" || s === "eth_europe")) return 1.0;
-    return 0;                                               // BLOCK open, close, deep-ETH, index evenings, and gold when underfunded
+    return livePolicySessionMultiplier(sym, s, riskSizingEquity(), LIVE_EVENING_GOLD_MIN_EQUITY);
   }
+
+  if (s === "halt") return 0; // market closed (5-6 PM daily break)
 
   // DEMO ENGINE: trades 24/7 for maximum learning
   if (sym && METALS.has(sym)) {
@@ -2222,8 +2228,8 @@ function checkPositions(sym: string, price: number, reliable = true) {
     // does not exist. ALLOW_PYRAMID is false on live today, so this is defence-in-depth against the
     // env flag being flipped, but an entry cap that an ADD can ignore is not a cap.
     const addSession = getSessionName();
-    if (MICRO_SYMBOLS.includes(sym) && !RTH_SESSIONS.has(addSession)) {
-      const overnightCap = Math.min(OVERNIGHT_MICRO_CAP, overnightMarginCap(sym, tradovateEquity));
+    if (!RTH_SESSIONS.has(addSession)) {
+      const overnightCap = Math.min(OVERNIGHT_CONTRACT_CAP, overnightMarginCap(sym, riskSizingEquity()));
       if (overnightCap < maxTotalContracts) maxTotalContracts = overnightCap;
     }
     if (pos.quantity + addQty <= maxTotalContracts) {
@@ -4529,10 +4535,10 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // must never quietly authorise a size the account cannot margin — see the 2026-06-30 naked-stop
   // incident for why "the broker will just reject it" is not a safety mechanism.
   const execSession = setupContext?.session;
-  const isOvernightEntry = MICRO_SYMBOLS.includes(sym) && (!execSession || !RTH_SESSIONS.has(execSession));
+  const isOvernightEntry = !execSession || !RTH_SESSIONS.has(execSession);
   if (isOvernightEntry) {
     const marginCap = overnightMarginCap(sym, equity);
-    const overnightCap = Math.min(perTradeCap, OVERNIGHT_MICRO_CAP, marginCap);
+    const overnightCap = Math.min(perTradeCap, OVERNIGHT_CONTRACT_CAP, marginCap);
     if (overnightCap < 1) {
       const per = OVERNIGHT_INITIAL_MARGIN[sym];
       log(`${sym}: SKIP — overnight (session ${execSession ?? "unknown"}), and equity $${equity.toFixed(0)} cannot margin even 1 contract at ${per ? `$${per.toFixed(0)} initial` : "an UNKNOWN initial margin"} (cap ${(OVERNIGHT_MARGIN_UTILISATION_CAP * 100).toFixed(0)}% of equity)`);
