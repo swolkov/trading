@@ -1,9 +1,10 @@
 import { prisma } from "@/lib/db";
-import { auth } from "@clerk/nextjs/server";
+import { authorizeOwnerRequest } from "@/auth/owner";
 
 export async function POST(request: Request) {
-  const { userId } = await auth();
-  if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const authorization = await authorizeOwnerRequest();
+  if (authorization.response) return authorization.response;
+  const { userId } = authorization;
 
   const body = await request.json();
   const { username, password, appId, cid, secret, environment } = body;
@@ -84,8 +85,9 @@ export async function POST(request: Request) {
 }
 
 export async function GET() {
-  const { userId } = await auth();
-  if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const authorization = await authorizeOwnerRequest();
+  if (authorization.response) return authorization.response;
+  const { userId } = authorization;
 
   const connections = await prisma.brokerConnection.findMany({
     where: { userId },
@@ -99,8 +101,9 @@ export async function GET() {
 }
 
 export async function DELETE(request: Request) {
-  const { userId } = await auth();
-  if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const authorization = await authorizeOwnerRequest();
+  if (authorization.response) return authorization.response;
+  const { userId } = authorization;
 
   const { connectionId } = await request.json();
   await prisma.brokerConnection.deleteMany({

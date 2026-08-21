@@ -1,8 +1,8 @@
 import { prisma } from "@/lib/db";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 export async function POST() {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {

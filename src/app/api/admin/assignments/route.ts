@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { invalidateAssignmentsCache, type AccountKey } from "@/lib/strategy-assignments";
 import { STRATEGIES } from "@/lib/strategies/registry";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 const VALID_STATUSES = ["active", "observation", "disabled"] as const;
 const VALID_ACCOUNTS = ["demo-futures", "live-futures", "paper-stocks", "paper-crypto"] as const;
@@ -17,7 +17,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
   try {
     const body = await request.json();

@@ -2,7 +2,7 @@ import { checkTradovateAuth, getTradovatePositions, placeMarketOrder, getOpenOrd
 import { prisma } from "@/lib/db";
 import { logTradeToJournal, logDecision } from "@/lib/vault";
 import { getViewMode } from "@/lib/trading-mode";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 // Multipliers for both micro (live) and full-size (demo) contracts.
 // Crypto micros: MBT/BFF underlying is BTC price; MET underlying is ETH; MXR XRP; MSL SOL.
@@ -14,7 +14,7 @@ const MULTIPLIERS: Record<string, number> = {
 const KNOWN_SYMBOLS = ["MES", "MNQ", "MGC", "MYM", "M2K", "ES", "NQ", "GC", "YM", "RTY", "MBT", "MET", "BFF", "MXR", "MSL"];
 
 export async function POST(request: Request) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {

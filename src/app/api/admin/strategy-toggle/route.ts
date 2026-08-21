@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { REALTIME_EDGES, edgeFlagKey } from "@/lib/realtime-edges";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 import { FUTURES_STRATEGY_VERSION } from "@/lib/strategy-version";
 import { pnlEvidence } from "@/lib/futures-admin-state";
 
@@ -19,7 +19,7 @@ const CURRENT_STRATEGY_VERSION = FUTURES_STRATEGY_VERSION;
 const MAX_P90_SLIPPAGE: Record<string, number> = { MGC: 0.50, MNQ: 1.50, MES: 0.50 };
 
 export async function POST(request: Request) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {

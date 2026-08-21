@@ -38,7 +38,10 @@ export default function RootLayout({
         <meta name="apple-mobile-web-app-title" content="Esbueno Trades" />
       </head>
       <body className="h-full flex bg-background">
-        <ClerkProvider appearance={{ variables: { colorPrimary: "#3b82f6" }, elements: { card: "bg-[#0a0a0f] border border-white/10" } }}>
+        <ClerkProvider
+          proxyUrl="/__clerk"
+          appearance={{ variables: { colorPrimary: "#3b82f6" }, elements: { card: "bg-[#0a0a0f] border border-white/10" } }}
+        >
           <Sidebar />
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             <TopBar />
