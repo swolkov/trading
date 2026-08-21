@@ -162,7 +162,7 @@ export default function AgentHubPage() {
       desc: "Realtime demo research on MGC, MNQ and MES; manual runs are position checks only",
       schedule: futuresStatus?.connected ? "Real-time 5s (Railway)" : "Waiting",
       endpoint: "/api/futures",
-      canRun: futuresStatus?.connected || false,
+      canRun: false,
       status: futuresStatus?.connected ? "active" : "waiting",
     },
     {

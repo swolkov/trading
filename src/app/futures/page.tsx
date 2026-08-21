@@ -377,15 +377,13 @@ export default function FuturesPage() {
 
   const runAgent = async () => {
     setRunning(true);
-    try {
-      const res = await fetch("/api/futures", { method: "POST" });
-      setResult(await res.json());
-    } catch (err) {
-      setResult({ trades: [], managed: 0, details: [`Error: ${err}`] });
-    }
+    await Promise.all([loadQuotes(), loadStatus(), loadPositions()]);
+    setResult({
+      trades: [],
+      managed: 0,
+      details: ["Read-only refresh complete. Railway retains exclusive order ownership."],
+    });
     setRunning(false);
-    loadStatus();
-    loadPositions();
   };
 
   // ── Derived data ─────────────────────────────────────

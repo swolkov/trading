@@ -21,7 +21,7 @@ import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, u
 import { strategiesFor, isRegistryOnlySymbol } from "./strategies/registry";
 import type { OHLCBar, StrategySignal } from "./strategies/types";
 import { accountKeyForFuturesMode, getAssignment, resolveMaxContracts, type AccountKey } from "./strategy-assignments";
-import { futuresActionPrefix, legacyAgentCanScanNewTrades } from "./futures-fallback-policy";
+import { futuresActionPrefix } from "./futures-fallback-policy";
 import { logRegistryTradeOpen, closeRegistryTrade } from "./strategy-performance";
 
 /** Extract root symbol from a contract name like "MBTM6" -> "MBT". */
@@ -866,10 +866,8 @@ interface FuturesTradeResult {
 /**
  * Run the futures agent.
  *
- * Three modes:
+ * Two modes:
  * - Default (no options): full agent for explicit/manual runs.
- * - `{ managementOnly: true }`: manages the currently selected account but never scans or submits a
- *   new entry. This is the only safe realtime-engine failover mode.
  * - `{ registryOnly: true }`: ONLY processes symbols routed through the strategy registry
  *   (crypto futures like MBT NR4). Skips legacy 5m intraday. Safe to run every minute alongside
  *   the realtime engine because the realtime engine doesn't trade these symbols.
@@ -877,7 +875,7 @@ interface FuturesTradeResult {
  * The registry-only path is how MBT NR4 actually fires in production — the realtime engine
  * on Railway scans ES/NQ/GC, this cron path scans the registry symbols. No overlap.
  */
-export async function runFuturesAgent(opts: { registryOnly?: boolean; managementOnly?: boolean } = {}): Promise<{
+export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Promise<{
   trades: FuturesTradeResult[];
   managed: number;
   details: string[];
@@ -920,20 +918,15 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean; management
   const totalRTHMinutes = (FUTURES_RULES.RTH_END_ET - FUTURES_RULES.RTH_START_ET) * 60; // 390 min
   const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (totalRTHMinutes - FUTURES_RULES.AVOID_LAST_MINUTES));
   const timeQuality = getTimeQuality(session, minutesSinceOpen);
-  const canScanNewTrades = legacyAgentCanScanNewTrades({
-    managementOnly: opts.managementOnly === true,
-    tradingMode,
-    timeQualityAllowsEntry: timeQuality.sizeMultiplier > 0,
-    isFirstOrLast15Minutes: isFirstLast15,
-  });
+  const canScanNewTrades = tradingMode === "paper"
+    ? true
+    : timeQuality.sizeMultiplier > 0 && !isFirstLast15;
   if (!canScanNewTrades) {
-    const reason = opts.managementOnly
-      ? "management-only realtime-engine failover"
-      : tradingMode === "paper"
-        ? "market halted"
-        : (timeQuality.sizeMultiplier === 0
-          ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
-          : "first/last 15 min RTH");
+    const reason = tradingMode === "paper"
+      ? "market halted"
+      : (timeQuality.sizeMultiplier === 0
+        ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
+        : "first/last 15 min RTH");
     details.push(`New trade scanning BLOCKED (${reason}) — position management still active`);
   }
 
@@ -1034,8 +1027,8 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean; management
     }
   } catch { /* use defaults */ }
 
-  // These legacy full-agent limits are not used by realtime-engine failover, which is strictly
-  // management-only. They remain for explicit/manual research runs.
+  // These legacy full-agent limits are not used by realtime-engine failover, which is recovery-only.
+  // They remain for explicit/internal research runs.
   const demoMaxContracts = tradingMode === "paper" ? 25 : FUTURES_RULES.MAX_TOTAL_CONTRACTS;
   const demoMaxContractsPerTrade = tradingMode === "paper" ? 20 : FUTURES_RULES.MAX_CONTRACTS_PER_TRADE;
   // LIVE hard per-trade contract ceiling. The configured value is authoritative; missing or invalid
@@ -1445,11 +1438,6 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean; management
         } catch {}
       } catch (err) { details.push(`  Emergency close failed: ${err}`); }
     }
-  }
-
-  if (opts.managementOnly) {
-    details.push("[MANAGEMENT-ONLY MODE] Existing positions checked; new entry scanning is disabled during realtime-engine failover.");
-    return { trades, managed, details };
   }
 
   // ============ SCAN FOR NEW TRADES (or paper-track if outside windows) ============

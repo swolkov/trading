@@ -5,7 +5,7 @@ import { slowTrendBreakout } from "../src/lib/edge-factory/candidates";
 import { replayCandidate, replayCandidateDetailed } from "../src/lib/edge-factory/replay";
 import { oneSidedStudentTPValue, validateCandidate } from "../src/lib/edge-factory/validation";
 import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber, riskSizedContractQuantity } from "../src/lib/risk-sizing";
-import { futuresActionPrefix, legacyAgentCanScanNewTrades } from "../src/lib/futures-fallback-policy";
+import { futuresActionPrefix } from "../src/lib/futures-fallback-policy";
 import type { EdgeCandidate, MarketSpec, ReplayTrade, ResearchBar } from "../src/lib/edge-factory/types";
 
 const market: MarketSpec = {
@@ -139,13 +139,9 @@ test("live-clone sizing can reach five but remains risk and session capped", () 
   assert.equal(riskSizedContractQuantity({ ...base, sizeMultiplier: 4, perContractRisk: 700, maxContracts: 5 }), 0);
 });
 
-test("legacy failover is management-only and preserves action-mode isolation", () => {
+test("legacy records preserve action-mode isolation", () => {
   assert.equal(futuresActionPrefix("live"), "live");
   assert.equal(futuresActionPrefix("paper"), "futures");
-  assert.equal(legacyAgentCanScanNewTrades({ managementOnly: true, tradingMode: "live", timeQualityAllowsEntry: true, isFirstOrLast15Minutes: false }), false);
-  assert.equal(legacyAgentCanScanNewTrades({ managementOnly: true, tradingMode: "paper", timeQualityAllowsEntry: true, isFirstOrLast15Minutes: false }), false);
-  assert.equal(legacyAgentCanScanNewTrades({ managementOnly: false, tradingMode: "live", timeQualityAllowsEntry: true, isFirstOrLast15Minutes: false }), true);
-  assert.equal(legacyAgentCanScanNewTrades({ managementOnly: false, tradingMode: "live", timeQualityAllowsEntry: false, isFirstOrLast15Minutes: false }), false);
 });
 
 test("operator zero risk settings remain zero instead of falling back to live defaults", () => {

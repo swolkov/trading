@@ -2,7 +2,6 @@ import { runFuturesAgent } from "@/lib/futures-agent";
 import { checkTradovateAuth } from "@/lib/tradovate";
 import { reconcileFills } from "@/lib/fill-reconciliation";
 import { prisma } from "@/lib/db";
-import { getETHour, isWeekend as isWeekendET } from "@/lib/session-time";
 
 export const maxDuration = 300;
 
@@ -144,14 +143,8 @@ export async function GET(request: Request) {
     const demoStatus = await checkEngine("demo");
     const liveStatus = await checkEngine("live");
 
-    // Determine if we should run the fallback agent
-    const etH = getETHour();
-    const isRTH = !isWeekendET() && etH >= 9.5 && etH < 16;
-
-    let fallbackResult = null;
-
     if (!demoStatus.alive) {
-      console.log(`[cron/futures] Demo engine down — running fallback agent`);
+      console.log("[cron/futures] Demo engine down — recovery monitor active");
 
       // If demo engine is stale AND no shared token exists, create one so Railway can recover
       try {
@@ -196,24 +189,16 @@ export async function GET(request: Request) {
       console.log("[cron/futures] Demo fallback is recovery-only; no legacy demo orders will be submitted");
     }
 
-    // Run the live fallback whenever the live engine heartbeat is stale — NOT just during RTH. The live account
-    // can hold a gold micro through the evening/overnight session, so if the engine dies then, an open
-    // position would otherwise get NO aggregate-drawdown-kill or stop management from the cron until
-    // 9:30am. The fallback is explicitly management-only, so an engine outage can never create new risk.
+    // Legacy order management is intentionally disabled for a stale live engine. Railway may recover
+    // between this heartbeat read and any later broker request, which would create two position
+    // managers without a shared fencing lease. Existing broker brackets and the realtime engine's
+    // durable startup recovery remain authoritative.
     if (!liveStatus.alive) {
-      console.log(`[cron/futures] Live engine down (RTH=${isRTH}) — running fallback agent to protect any open position`);
-      if (!fallbackResult) {
-        try {
-          fallbackResult = await runFuturesAgent({ managementOnly: true });
-        } catch (err) {
-          console.error("[cron/futures] Live fallback agent error:", err);
-        }
-      }
+      console.log("[cron/futures] Live engine down — recovery monitor active; no legacy broker mutations");
     }
 
-    // Defer only when both engines are alive. A stale demo is recovery-only; a stale live engine gets
-    // management-only protection at any open session hour. During the exchange halt, broker brackets
-    // remain authoritative and the legacy manager deliberately takes no action.
+    // Defer only when both engines are alive. A stale engine remains recovery-only so the web cron
+    // can never race Railway for broker mutation ownership.
     if (demoStatus.alive && liveStatus.alive) {
       return Response.json({
         status: "deferred",
@@ -224,10 +209,10 @@ export async function GET(request: Request) {
     }
 
     return Response.json({
-      status: fallbackResult ? "fallback_ran" : !demoStatus.alive ? "demo_recovery_wait" : "deferred",
+      status: "engine_recovery_wait",
       demo: demoStatus.reason,
       live: liveStatus.reason,
-      fallback: fallbackResult,
+      fallback: null,
       reconciliation: { demo: demoReconciliation, live: liveReconciliation },
     });
   } catch (error) {
