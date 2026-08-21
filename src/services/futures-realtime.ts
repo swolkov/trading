@@ -15,6 +15,7 @@ import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, edgeFlagKey, REALTIME_EDGES 
 import { VAULT_SESSION_RULES } from "../lib/vault-session-gates";
 import { reconcileBrokerPosition } from "../lib/broker-position-reconciliation";
 import { cappedContractLimit, isFreshPositiveEquity } from "../lib/risk-sizing";
+import { contractMappingMatchesBroker, selectFreshContractMapping } from "../lib/databento-contract-mapping";
 import {
   FULL_SIZE_FUTURES,
   MICRO_FUTURES,
@@ -705,6 +706,10 @@ async function resolveDemoContracts(): Promise<void> {
 
 interface ContractInfo { id: number; name: string; tickSize: number; symbol: string; }
 const contracts: Map<string, ContractInfo> = new Map();
+// The sidecar row chosen while resolving the broker contract. This must remain pinned: micro and
+// full-size continuous symbols can roll on different ticks, so dynamically switching quote rows
+// after resolution can price one month while sending the order to another.
+const databentoPriceRoots: Map<string, string> = new Map();
 
 async function resolveContracts() {
   // Resolve both full-size and micro contracts so we can switch dynamically
@@ -725,26 +730,42 @@ async function resolveContracts() {
       // rejections.) Resolution unavailable now fails closed. Trading nothing is safer than
       // pricing one contract and submitting an order in another month.
       let picked: typeof results[number] | undefined;
+      let mappedPriceRoot: string | undefined;
       try {
-        const priceRoot = FULL_EQUIVALENT[sym] || sym;
-        const rows = await prisma.$queryRawUnsafe<{ raw_contract: string; ts: bigint | number }[]>(
-          "SELECT raw_contract, ts FROM live_quotes WHERE symbol = $1 LIMIT 1", priceRoot,
-        );
-        const rawContract = rows[0]?.raw_contract;
-        if (!rawContract || !rawContract.startsWith(priceRoot)) throw new Error("sidecar contract mapping unavailable");
-        const code = rawContract.slice(priceRoot.length);
+        // Resolve from the SAME row pollPrices/getActionableEntryPrice will prefer. Micro and full
+        // volume-ranked continuous symbols can roll on different days, so pricing MNQ from MNQU6
+        // while deriving the order month from NQZ6 recreates the wrong-contract failure this guard
+        // exists to prevent. Exact symbol first; sibling fallback remains an atomic quote+mapping pair.
+        const priceRoots = [...new Set([sym, FULL_EQUIVALENT[sym]].filter((root): root is string => Boolean(root)))];
+        const contractRows: Array<{ symbol: string; rawContract: string | null; timestampMs: number }> = [];
+        for (const priceRoot of priceRoots) {
+          const rows = await prisma.$queryRawUnsafe<{ raw_contract: string | null; ts: bigint | number }[]>(
+            "SELECT raw_contract, ts FROM live_quotes WHERE symbol = $1 LIMIT 1", priceRoot,
+          );
+          if (rows[0]) contractRows.push({ symbol: priceRoot, rawContract: rows[0].raw_contract, timestampMs: Number(rows[0].ts) });
+        }
+        const mapped = selectFreshContractMapping(priceRoots, contractRows, Date.now(), DBN_STALE_MS);
+        if (!mapped) throw new Error(`sidecar contract mapping unavailable for ${priceRoots.join("/")}`);
+        const code = mapped.rawContract!.slice(mapped.symbol.length);
         picked = results.find((r) => r.name === `${sym}${code}`);
         if (!picked) throw new Error(`${sym}${code} not present in Tradovate suggestions`);
+        mappedPriceRoot = mapped.symbol;
       } catch (error) {
         contracts.delete(sym);
+        databentoPriceRoots.delete(sym);
         log(`Failed to resolve ${sym} to the Databento price contract: ${error}. Symbol disabled until next resolution.`);
         continue;
       }
-      if (picked) {
+      if (picked && mappedPriceRoot) {
         contracts.set(sym, { id: picked.id, name: picked.name, tickSize: picked.providerTickSize || picked.tickSize, symbol: sym });
+        databentoPriceRoots.set(sym, mappedPriceRoot);
         log(`Resolved ${sym} → ${picked.name} (ID: ${picked.id})`);
       }
-    } catch (err) { log(`Failed to resolve ${sym}: ${err}`); }
+    } catch (err) {
+      contracts.delete(sym);
+      databentoPriceRoots.delete(sym);
+      log(`Failed to resolve ${sym}: ${err}`);
+    }
   }
   // Live engine: also resolve demo contracts for MD fallback
   await resolveDemoContracts();
@@ -1103,7 +1124,8 @@ let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuatio
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
 let edgeFlags: Record<string, string | undefined> = {};
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
-const lastDatabentoTop = new Map<string, { bid: number; ask: number; ts: number }>();
+const lastDatabentoTop = new Map<string, { bid: number; ask: number; ts: number; rawContract: string }>();
+const lastContractMismatchLogAt = new Map<string, number>();
 /** How old a Databento live_quotes row may be and still DRAW A BAR. Gold ticks sparsely (ES/NQ update
  *  every ~1s, GC ages to 8-18s in quiet stretches), so a 30s cutoff was discarding paid data we pay
  *  for. 90s stays well inside a 5-minute bar.
@@ -1111,22 +1133,43 @@ const lastDatabentoTop = new Map<string, { bid: number; ask: number; ts: number 
  *  own exchange timestamp — the two used to be conflated, which let a 90s-old quote price a live
  *  order and the stop hanging off it. */
 const DBN_STALE_MS = 90_000;
-async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: number; ts: number }>> {
+type DatabentoQuote = { mid: number; vol: number; ts: number; rawContract: string };
+
+function databentoContractIsAligned(sym: string, sourceRoot: string, rawContract: string): boolean {
+  const brokerContract = contracts.get(sym);
+  if (!brokerContract || !rawContract.startsWith(sourceRoot)) return false;
+  if (contractMappingMatchesBroker(sym, sourceRoot, rawContract, brokerContract.name)) return true;
+
+  // A volume-ranked continuous contract can roll between resolution cycles. Remove both mappings
+  // immediately so neither Databento nor Tradovate can open risk until the next resolution picks
+  // the new broker month. Existing broker brackets remain untouched.
+  contracts.delete(sym);
+  databentoPriceRoots.delete(sym);
+  const now = Date.now();
+  if (now - (lastContractMismatchLogAt.get(sym) ?? 0) >= 60_000) {
+    lastContractMismatchLogAt.set(sym, now);
+    log(`[MD] CONTRACT ROLL/MISMATCH ${sym}: ${sourceRoot} row is ${rawContract}, broker map is ${brokerContract.name}. Symbol disabled until re-resolution.`);
+  }
+  return false;
+}
+
+async function fetchDatabentoQuotes(): Promise<Map<string, DatabentoQuote>> {
   if (!databentoMdEnabled) return new Map();
   try {
-    const rows = await prisma.$queryRawUnsafe<{ symbol: string; bid: number; ask: number; mid: number; vol: number; ts: bigint | number }[]>(
-      "SELECT symbol, bid, ask, mid, vol, ts FROM live_quotes",
+    const rows = await prisma.$queryRawUnsafe<{ symbol: string; bid: number; ask: number; mid: number; vol: number; ts: bigint | number; raw_contract: string | null }[]>(
+      "SELECT symbol, bid, ask, mid, vol, ts, raw_contract FROM live_quotes",
     );
-    const out = new Map<string, { mid: number; vol: number; ts: number }>();
+    const out = new Map<string, DatabentoQuote>();
     const now = Date.now();
     for (const r of rows) {
       const ts = Number(r.ts), bid = Number(r.bid), ask = Number(r.ask), mid = Number(r.mid), cum = Number(r.vol) || 0;
-      if (mid > 0 && now - ts < DBN_STALE_MS) {
+      const rawContract = r.raw_contract ?? "";
+      if (mid > 0 && rawContract.startsWith(r.symbol) && now - ts < DBN_STALE_MS) {
         const last = lastCumVol.get(r.symbol) ?? cum;
         const delta = cum >= last ? cum - last : cum;   // reset-safe (sidecar restart drops the cumulative count)
         lastCumVol.set(r.symbol, cum);
-        if (bid > 0 && ask >= bid) lastDatabentoTop.set(r.symbol, { bid, ask, ts });
-        out.set(r.symbol, { mid, vol: Math.max(1, delta), ts });   // usable quote + traded volume since last poll
+        if (bid > 0 && ask >= bid) lastDatabentoTop.set(r.symbol, { bid, ask, ts, rawContract });
+        out.set(r.symbol, { mid, vol: Math.max(1, delta), ts, rawContract });   // usable quote + traded volume since last poll
       }
     }
     if (out.size !== dbnMdLogged) { log(`[MD] Databento primary: ${out.size} fresh symbols from live_quotes`); dbnMdLogged = out.size; }
@@ -1137,13 +1180,12 @@ async function fetchDatabentoQuotes(): Promise<Map<string, { mid: number; vol: n
 }
 
 function getActionableEntryPrice(sym: string, direction: string): number {
-  const candidates = [sym, FULL_EQUIVALENT[sym], MICRO_EQUIVALENT[sym]].filter(Boolean);
-  for (const candidate of candidates) {
-    const top = lastDatabentoTop.get(candidate);
-    if (!top || Date.now() - top.ts >= ENTRY_MAX_QUOTE_AGE_MS) continue;
-    return direction === "long" ? top.ask : top.bid;
-  }
-  return 0;
+  const sourceRoot = databentoPriceRoots.get(sym);
+  if (!sourceRoot) return 0;
+  const top = lastDatabentoTop.get(sourceRoot);
+  if (!top || Date.now() - top.ts >= ENTRY_MAX_QUOTE_AGE_MS) return 0;
+  if (!databentoContractIsAligned(sym, sourceRoot, top.rawContract)) return 0;
+  return direction === "long" ? top.ask : top.bid;
 }
 
 async function pollPrices() {
@@ -1164,10 +1206,13 @@ async function pollPrices() {
     const served = new Set<string>();
     const dbn = await fetchDatabentoQuotes();
     for (const sym of SYMBOLS) {
-      const q = dbn.get(sym) ?? dbn.get(FULL_EQUIVALENT[sym] || "") ?? dbn.get(MICRO_EQUIVALENT[sym] || "");
+      const sourceRoot = databentoPriceRoots.get(sym);
+      const q = sourceRoot ? dbn.get(sourceRoot) : undefined;
       // Pass the sidecar's own exchange timestamp so entry-freshness measures the QUOTE's age, not
       // the age of our poll — a 90s-old row must not read as a fresh price to trade on.
-      if (q && q.mid > 0) { onPrice(sym, q.mid, q.vol, true, q.ts); received++; served.add(sym); }
+      if (sourceRoot && q && q.mid > 0 && databentoContractIsAligned(sym, sourceRoot, q.rawContract)) {
+        onPrice(sym, q.mid, q.vol, true, q.ts); received++; served.add(sym);
+      }
     }
     const querySymbols = SYMBOLS.filter(s => !served.has(s));
 
@@ -1199,9 +1244,14 @@ async function pollPrices() {
         const microSym = MICRO_EQUIVALENT[sym];
         if (microSym) {
           try {
-            const microQuote = await fetchTradovateQuote(microSym);
+            const fullContract = contracts.get(sym)?.name;
+            const microContract = contracts.get(microSym)?.name;
+            const sameMonth = fullContract?.startsWith(sym)
+              && microContract?.startsWith(microSym)
+              && fullContract.slice(sym.length) === microContract.slice(microSym.length);
+            const microQuote = sameMonth ? await fetchTradovateQuote(microSym) : null;
             if (microQuote) {
-              onPrice(sym, microQuote.price, microQuote.volume); // sibling contract — same price
+              onPrice(sym, microQuote.price, microQuote.volume); // verified same delivery month
               received++;
               continue;
             }
@@ -1355,17 +1405,10 @@ function getSizeMultiplier(sym?: string): number {
     // "good" (+0) to "prime" (+5) in scoreSetup. Evening gold setups therefore clear the 75 gate more
     // easily and will fire more often. Evening gold backtests PF 1.05 (train 0.67 / test 1.18) — real but
     // regime-dependent — so watch the frequency. Revert = put 0.5 back.
-    // 2026-07-28 (morning): eth_europe (03:00-09:00 ET) added alongside the evening on a session-level
-    // PF of 1.13 — "gold's best session".
-    // 2026-07-28 (same day, CORRECTED): that 1.13 was a SESSION-LEVEL number pooling both directions,
-    // and it is carried ENTIRELY by the longs, which are switched off on live. Splitting it:
-    //     eth_europe LONG   n=310  PF 1.37  (train 1.19 / test 1.51)  <- both halves, best gold cell
-    //     eth_europe SHORT  n=289  PF 0.96  (train 0.58 / test 1.24)  <- a loser, and the ONLY side
-    //                                                                    live could actually have taken
-    // So opening Europe made the live book strictly worse. The fix is at the EDGE layer, not here:
-    // gold_short is now scoped to the morning (the one gold cell that survives both halves, PF 1.72)
-    // and gold_short_offpeak is live-disabled.
-    // LESSON: never justify a session from a pooled PF when only one direction is enabled.
+    // London and evening remain technically available to the gold session policy, but edge flags
+    // decide whether any setup may use them. The corrected 2026-08-20 replay invalidated the older
+    // London-long PF 1.37 claim (PF 0.89, train 0.74 / test 0.99; fresh holdout PF 0.71), so every
+    // live edge is explicitly off. Availability is not evidence and must never be treated as such.
     //
     // ⚠️ CORRECTED 2026-07-29 — this comment used to end "that leaves this branch UNREACHABLE for
     // live gold". THAT IS NO LONGER TRUE. a288af2 added `gold_long_europe`, which is ON for live, so
@@ -1691,8 +1734,8 @@ interface RiskConfig {
   // and target = currentATR x 3.5 → R:R 2.33, and the other setups compute their own inline.
   // The DB currently holds 1.4 / 5.0 for live, i.e. someone tuned these expecting an effect and got
   // none. DO NOT "fix" this by wiring them in: every edge's evidence — the 3-yr engine-exact
-  // validations behind gold_short PF 1.72, gold_long_europe PF 1.37, index_trend_long, and the
-  // index_overbought_short rejection — was measured at 1.5 stop / 3.5 target. Wiring 1.4/5.0 in would
+  // corrected validations and the index_overbought_short rejection were measured at the hardcoded
+  // setup geometry. Wiring the stale 1.4/5.0 config fields in would
   // change R:R from 2.33 to 3.57 and silently invalidate all of it. The hardcoded values ARE the
   // validated ones; the config fields are what is wrong, and the fix belongs in the UI.
   atrStopMultiplier: number;
@@ -4600,13 +4643,17 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // the edge from PF ~1.0 to 0.72. Those extremes happen when price has ALREADY run away between
     // the signal and the submission; we then chase it with a market order and buy the top of the move.
     //
-    // So: re-read the freshest tick (Databento, via the bar builder — no extra round trip) and if the
+    // So: re-read the freshest executable Databento top of book and if the
     // market has already moved MORE THAN 10% OF THE STOP DISTANCE against us, don't chase. 10% of the
     // stop is 10% of the trade's risk, which is the most execution should ever be allowed to cost.
     // A skipped trade is free; a chased one pays the whole tail. Favourable moves are never blocked.
     // Orders cross the book, so buys are anchored to the ask and sells to the bid.
     // Midpoint remains appropriate for bar construction but is not an executable price.
-    let freshPrice = getActionableEntryPrice(sym, direction) || barBuilders.get(sym)?.lastPrice || 0;
+    let freshPrice = getActionableEntryPrice(sym, direction);
+    if (freshPrice <= 0) {
+      log(`  ${sym}: SKIP — no fresh executable quote aligned to broker contract ${contract.name}`);
+      return;
+    }
     const maxChase = stopDist * EXEC_COST_CAP_FRACTION;
     const chaseExceeded = (candidatePrice: number) => {
       if (candidatePrice <= 0 || stopDist <= 0) return false;
@@ -4638,8 +4685,20 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // The stable-flat check intentionally waits for two matching broker reads. Price can move while
     // that safety check runs, so refresh the executable quote and enforce the chase ceiling again
     // immediately before constructing and submitting the order.
-    freshPrice = getActionableEntryPrice(sym, direction) || barBuilders.get(sym)?.lastPrice || 0;
+    freshPrice = getActionableEntryPrice(sym, direction);
+    if (freshPrice <= 0) {
+      log(`  ${sym}: SKIP — executable quote became stale or changed contract during broker-flat verification`);
+      return;
+    }
     if (chaseExceeded(freshPrice)) return;
+
+    // resolveContracts may run while the broker-flat check is awaiting network responses. Never
+    // submit with the stale object captured above if the active broker month changed underneath us.
+    const submissionContract = contracts.get(sym);
+    if (!submissionContract || submissionContract.id !== contract.id || submissionContract.name !== contract.name) {
+      log(`  ${sym}: SKIP — broker contract changed during entry verification (${contract.name} → ${submissionContract?.name ?? "unresolved"})`);
+      return;
+    }
 
     // ── ENTRY ORDER: MARKETABLE LIMIT vs MARKET ──────────────────────────────────────────────
     // The chase guard above only refuses to chase a move that ALREADY happened. It cannot bound what
@@ -4659,7 +4718,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // trades we miss were better or worse than average. Only real fills answer that, which is why
     // this is DEMO-ON / LIVE-OFF until demo has the sample.
     const useLimit = entryLimitEnabled && stopDist > 0;
-    const limitAnchor = freshPrice > 0 ? freshPrice : price;
+    const limitAnchor = freshPrice;
     const tick = TICK_SIZES[sym] || contracts.get(sym)?.tickSize || 0.25;
     // Ticks first (what the EDGE can afford), then the fraction-of-stop as a secondary ceiling (what
     // the TRADE can afford). The tighter of the two wins — see ENTRY_LIMIT_TICKS_DEFAULT.

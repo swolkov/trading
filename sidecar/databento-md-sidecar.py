@@ -17,6 +17,7 @@ import os, re, sys, time, traceback, json
 
 SYMBOLS = [
     "ES.v.0", "NQ.v.0", "GC.v.0",  # equity indexes + gold (engines map MES/MNQ/MGC to these prices)
+    "MES.v.0", "MNQ.v.0", "MGC.v.0",  # exact contracts live actually trades; preferred by engine lookup
     "MBT.v.0", "MET.v.0", "BFF.v.0", "MXR.v.0", "MSL.v.0",  # CME crypto micros (BTC/ETH/BTC-weekly/XRP/SOL)
 ]
 WRITE_EVERY = 1.0           # seconds between DB upserts of live_quotes (throttle)

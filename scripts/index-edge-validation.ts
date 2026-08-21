@@ -1,5 +1,5 @@
 /**
- * INDEX EDGE VALIDATION — both live index edges, engine-exact, session-by-session.
+ * INDEX EDGE VALIDATION — conservative replay of index candidates, session-by-session.
  *
  * Answers "is the gold session/direction finding only a gold thing?" and CORRECTS the bar-buffer
  * error in scripts/trend-long-validation.ts, which built RTH-only bars. The engine's onPrice()
@@ -19,8 +19,8 @@
  *   NOTE trend_continuation additionally requires session morning|afternoon in its own condition,
  *   so midday can only ever produce RSI-bounce shorts.
  *
- * MANAGEMENT: 0.6R breakeven, 1.1R trail at 0.9*1.5 = 1.35x ATR (index), 65% profit-lock past 1R,
- *   30-min stale exit, flat when the tradeable window ends. 1 contract, no scale-out, no pyramid.
+ * MANAGEMENT: 0.8R breakeven, 1.1R trail at 1.4*1.5 = 2.1x ATR (index), 45% profit-lock past 1R,
+ *   90-min stale exit, flat when the tradeable window ends. 1 contract, no scale-out, no pyramid.
  *
  * KNOWN LIMITATION (this explains why this harness fires ~3x more than production): the engine
  *   evaluates gap_fill / or_breakout / failed_ib_breakout / ib_extension BEFORE trend_continuation
@@ -42,6 +42,7 @@
  * USE THIS FOR RELATIVE COMPARISONS ONLY (session vs session, direction vs direction, slippage
  * sensitivity). Do NOT use its absolute PF to judge a live edge that has its own forward record.
  * Usage: TL_DATA_DIR=data/live-window npx tsx scripts/index-edge-validation.ts ES
+ *        TL_DATA_DIR=data/micro-live-window npx tsx scripts/index-edge-validation.ts MES
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from "node:fs";
@@ -54,6 +55,8 @@ const SINCE = process.env.G_SINCE || "";
 const SPEC: Record<string, { ptVal: number; tick: number; label: string }> = {
   ES: { ptVal: 5, tick: 0.25, label: "ES → MES ($5/pt)" },
   NQ: { ptVal: 2, tick: 0.25, label: "NQ → MNQ ($2/pt)" },
+  MES: { ptVal: 5, tick: 0.25, label: "MES actual micro ($5/pt)" },
+  MNQ: { ptVal: 2, tick: 0.25, label: "MNQ actual micro ($2/pt)" },
   YM: { ptVal: 0.5, tick: 1, label: "YM → MYM ($0.50/pt)" },
 };
 const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
@@ -81,13 +84,10 @@ const TRAIL_R = parseFloat(process.env.G_TRAIL_R || "") || 1.1;
 const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 90);
 const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 1.4) * 1.5;   // index
 const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.45;
-// Index target, in ATR. Default 3.5 ATR against a 1.5 ATR stop = 2.33R. Sweepable because live has
-// now produced 23 winners and NOT ONE reached 2.33R (best 1.92R) — a target the fills never touch
-// converts every winner into a lock-out, so it has to be tested rather than assumed.
-const TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 4.0;
-// Stop width in ATR. MUST MATCH LIVE: live_futures_atr_stop_multiplier = 1.4 (NOT 1.5). Verified
-// against AgentConfig 2026-08-06 — every sweep before that date modelled 1.5/3.5 while live ran
-// 1.4/5.0, so their absolute numbers describe a config the account was not trading.
+// Production geometry is hardcoded per setup. The similarly named AgentConfig ATR fields are inert.
+// Extreme RSI uses 1.5/3.5 ATR; trend continuation uses 1.5/4.0 ATR.
+const RSI_TARGET_ATR_MULT = parseFloat(process.env.G_RSI_TGT || "") || 3.5;
+const TREND_TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 4.0;
 const STOP_ATR_MULT = parseFloat(process.env.G_STOP || "") || 1.5;
 const BUFFER = 200;
 
@@ -216,7 +216,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       // registry: index only permits the SHORT side, and only at RSI >= 80
       if (Math.max(0, Math.min(100, sc)) >= 75 && !isOversold && rsi >= 80) {
         edge = "index_overbought_short"; dir = "short";
-        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = currentATR * TARGET_ATR_MULT;
+        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * RSI_TARGET_ATR_MULT;
         // REGIME SPLIT (2026-07-29). Disjoint, same pattern as index_trend_short_below200:
         //   _below200 = price BELOW the 200-EMA → shorting WITH the trend (a momentum short)
         //   the base row = price ABOVE it       → the true counter-trend overbought fade
@@ -234,7 +234,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       // Modelled with the engine's own geometry and the same >=75 score gate; mirror of the short.
       else if (Math.max(0, Math.min(100, sc)) >= 75 && isOversold && rsi <= 20) {
         edge = "index_oversold_long"; dir = "long";
-        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = currentATR * TARGET_ATR_MULT;
+        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * RSI_TARGET_ATR_MULT;
         if (price > ema200) edge = "index_oversold_long_above200";   // dip-buy in an uptrend vs falling knife
       }
       // FALL THROUGH — do NOT consume the bar (corrected 2026-08-05). This previously did
@@ -309,7 +309,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
                        : process.env.G_VWAP === "below" ? price <= vwap : true;
           if (Math.max(0, Math.min(100, sc)) >= 75 && vwapOK) {
             edge = "index_trend_long"; dir = "long";
-            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
+            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TREND_TARGET_ATR_MULT;
           }
         }
         // SHORT side — added 2026-07-29. The engine ALREADY generates these (futures-realtime.ts
@@ -326,7 +326,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
           sc += sessScore;
           if (Math.max(0, Math.min(100, sc)) >= 75) {
             edge = "index_trend_short"; dir = "short";
-            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
+            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TREND_TARGET_ATR_MULT;
             // Flag whether the SYMMETRIC 200-EMA filter would also have passed, so the report can
             // test "shorts only below the 200-EMA" without a second run.
             if (price < ema200) edge = "index_trend_short_below200";
@@ -414,7 +414,7 @@ function stats(ts: T[]) {
 const f = (s: ReturnType<typeof stats>) => s ? `n=${String(s.n).padStart(4)} win ${(s.wr * 100).toFixed(0).padStart(3)}% PF ${(s.pf === Infinity ? 99 : s.pf).toFixed(2).padStart(5)} avg$${(s.avg >= 0 ? "+" : "") + s.avg.toFixed(2)} net$${s.net.toFixed(0)}` : "n=0";
 
 const syms = (process.argv[2] || "ES,NQ").split(",");
-console.log("INDEX EDGES — engine-exact, 24h rolling 200-bar buffer (CORRECTED), full trade management");
+console.log("INDEX EDGES — conservative production replay, 24h rolling 200-bar buffer");
 console.log(`Sessions modelled: ${ALL_SESSIONS ? "ALL (incl. currently blocked)" : "live index only — morning/midday/afternoon"}\n`);
 for (const sym of syms) {
   const { m1, m5 } = load(`${DATA_DIR}/${sym}_1m.csv`);

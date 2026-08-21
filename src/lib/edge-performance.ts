@@ -81,7 +81,7 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
   const isIdx = (s: string) => idxSyms.includes(s);
   const DEFS = [
     { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" },
-    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — short RSI>75 overbought fade, MORNINGS only. 3-yr rebuild: morning PF 1.72 (both halves) vs afternoon 1.92/train 0.86, evening 1.15/train 0.76, Europe 0.96/train 0.58 — so every off-peak hour is switched off.`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
+    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — morning RSI>75 research candidate. Corrected replay PF 1.27 failed stability (train 0.65 / test 2.20), so it is not qualified for live.`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
     { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade, afternoon excluded: ES 0.46 / NQ 0.71 after 14:00 ET, the worst cell on both symbols.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
     // Blurb corrected 2026-07-25: it previously claimed "PF 1.22, +both halves" from a backtest whose
     // script no longer exists. An engine-exact rebuild with full trade management could not reproduce
@@ -133,8 +133,8 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     // index trend-long card showed +$388 next to an amber "off" and was misread exactly that way.
     const PARTIAL: Record<string, { label: string; note: string }> = {
       gold_long: {
-        label: "london hours on",
-        note: "Running London hours 03:00–09:00 ET, gold's best long window (PF 1.37 over 310 trades, positive in both halves). Every other hour is switched off — the US morning is gold long's worst cell at PF 0.53.",
+        label: "demo evidence only",
+        note: "London hours 03:00–09:00 ET are rejected for live. Corrected replay PF 0.89 and fresh holdout PF 0.71 invalidated the older PF 1.37 claim.",
       },
       gold_short: {
         label: "mornings on",

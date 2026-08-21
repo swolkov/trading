@@ -1,7 +1,7 @@
 /**
  * MICROSTRUCTURE PREVIEW — confirm cost/access for the order-book data that tests the new-edge frontier
  * (H1 opening-auction imbalance, H4 failed-auction continuation — see EDGE-HIERARCHY Tier 3).
- * Standard plan INCLUDES ~1 month of L2/L3 at $0 marginal cost. This previews cost only — NO download.
+ * This previews the account's actual cost/entitlement only — NO download.
  *   npx tsx scripts/dbn-micro-preview.ts
  */
 import fs from "node:fs";
@@ -33,9 +33,11 @@ async function main() {
   console.log("  Tests the Tier-3 frontier: H1 opening-auction imbalance, H4 failed-auction continuation.");
   console.log("═".repeat(78));
   const probes: [string, string, string][] = [
-    ["mbp-1", "ES.v.0", "L1 top-of-book (bid/ask/size) — cheapest book data"],
+    ["mbp-1", "MES.v.0,MNQ.v.0,MGC.v.0", "Exact live micro contracts, every top-of-book update"],
+    ["tbbo", "MES.v.0,MNQ.v.0,MGC.v.0", "Exact live micros, BBO immediately before each trade"],
+    ["bbo-1s", "MES.v.0,MNQ.v.0,MGC.v.0", "Exact live micros, lightweight one-second BBO sample"],
     ["mbp-10", "ES.v.0", "L2 10-level depth — needed for imbalance/absorption (H1/H4)"],
-    ["mbp-10", "ES.v.0,NQ.v.0,CL.v.0", "L2 for 3 liquid markets — a real H1/H4 test slice"],
+    ["mbp-10", "MES.v.0,MNQ.v.0,MGC.v.0", "Exact micro L2 for execution/imbalance research"],
   ];
   for (const [schema, syms, desc] of probes) {
     try {
@@ -45,8 +47,8 @@ async function main() {
       console.log(`           ${desc}`);
     } catch (e) { console.log(`  ${schema} ${syms}: error — ${e instanceof Error ? e.message : e}`); }
   }
-  console.log("\n  → 'usage-rate $' is the metered price; within the included 1-month L2 window the $179 plan should cover it.");
-  console.log("  Next: pull the slice (a fetch like dbn-fetch-intraday but schema=mbp-10) → build the H1/H4 imbalance test.");
+  console.log("\n  → 'usage-rate $' is the account-specific estimate returned by Databento; $0.00 means covered now.");
+  console.log("  Prefer TBBO/BBO for execution validation. Pull MBP-10 only for a specific depth hypothesis.");
   console.log("═".repeat(78) + "\n");
 }
 main().catch(e => { console.error(e); process.exit(1); });
