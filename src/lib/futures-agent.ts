@@ -21,6 +21,7 @@ import { getVaultContextForAI, logTradeToJournal, logDecision, logObservation, u
 import { strategiesFor, isRegistryOnlySymbol } from "./strategies/registry";
 import type { OHLCBar, StrategySignal } from "./strategies/types";
 import { accountKeyForFuturesMode, getAssignment, resolveMaxContracts, type AccountKey } from "./strategy-assignments";
+import { futuresActionPrefix, legacyAgentCanScanNewTrades } from "./futures-fallback-policy";
 import { logRegistryTradeOpen, closeRegistryTrade } from "./strategy-performance";
 
 /** Extract root symbol from a contract name like "MBTM6" -> "MBT". */
@@ -70,7 +71,7 @@ const FUTURES_RULES_DEFAULTS = {
 };
 
 // Mutable rules — populated from DB config at runtime, falls back to defaults
-let FUTURES_RULES = { ...FUTURES_RULES_DEFAULTS };
+const FUTURES_RULES = { ...FUTURES_RULES_DEFAULTS };
 
 /** Load futures config overrides from Agent Hub DB settings */
 async function loadFuturesConfig() {
@@ -865,9 +866,10 @@ interface FuturesTradeResult {
 /**
  * Run the futures agent.
  *
- * Two modes:
- * - Default (no options): full agent — runs as the failover when realtime engine on Railway is stalled.
- *   Handles ALL priority symbols including legacy 5m intraday on ES/NQ/GC/MES/MNQ.
+ * Three modes:
+ * - Default (no options): full agent for explicit/manual runs.
+ * - `{ managementOnly: true }`: manages the currently selected account but never scans or submits a
+ *   new entry. This is the only safe realtime-engine failover mode.
  * - `{ registryOnly: true }`: ONLY processes symbols routed through the strategy registry
  *   (crypto futures like MBT NR4). Skips legacy 5m intraday. Safe to run every minute alongside
  *   the realtime engine because the realtime engine doesn't trade these symbols.
@@ -875,7 +877,7 @@ interface FuturesTradeResult {
  * The registry-only path is how MBT NR4 actually fires in production — the realtime engine
  * on Railway scans ES/NQ/GC, this cron path scans the registry symbols. No overlap.
  */
-export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Promise<{
+export async function runFuturesAgent(opts: { registryOnly?: boolean; managementOnly?: boolean } = {}): Promise<{
   trades: FuturesTradeResult[];
   managed: number;
   details: string[];
@@ -895,6 +897,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   }
   // Verify trading mode — default is DEMO, must be explicitly changed to live
   const tradingMode = await (await import("./trading-mode")).getTradingMode("futures");
+  const tradeActionPrefix = futuresActionPrefix(tradingMode);
   details.push(`TRADOVATE: Connected — Account ${auth.accountName} (#${auth.accountId}) — MODE: ${tradingMode.toUpperCase()}`);
   if (tradingMode === "live") {
     details.push("⚠ LIVE MODE — real money at risk");
@@ -917,15 +920,20 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   const totalRTHMinutes = (FUTURES_RULES.RTH_END_ET - FUTURES_RULES.RTH_START_ET) * 60; // 390 min
   const isFirstLast15 = isRTH && (minutesSinceOpen < FUTURES_RULES.AVOID_FIRST_MINUTES || minutesSinceOpen > (totalRTHMinutes - FUTURES_RULES.AVOID_LAST_MINUTES));
   const timeQuality = getTimeQuality(session, minutesSinceOpen);
-  const canScanNewTrades = tradingMode === "paper"
-    ? true  // Demo: all sessions (halt already returned above)
-    : (timeQuality.sizeMultiplier > 0 && !isFirstLast15);  // Live: RTH prime only (overnight margin > small acct)
+  const canScanNewTrades = legacyAgentCanScanNewTrades({
+    managementOnly: opts.managementOnly === true,
+    tradingMode,
+    timeQualityAllowsEntry: timeQuality.sizeMultiplier > 0,
+    isFirstOrLast15Minutes: isFirstLast15,
+  });
   if (!canScanNewTrades) {
-    const reason = tradingMode === "paper"
-      ? "market halted"
-      : (timeQuality.sizeMultiplier === 0
-        ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
-        : "first/last 15 min RTH");
+    const reason = opts.managementOnly
+      ? "management-only realtime-engine failover"
+      : tradingMode === "paper"
+        ? "market halted"
+        : (timeQuality.sizeMultiplier === 0
+          ? `outside trading windows (${session}) — only morning 9:45-11:30 + afternoon 2:00-3:30`
+          : "first/last 15 min RTH");
     details.push(`New trade scanning BLOCKED (${reason}) — position management still active`);
   }
 
@@ -940,10 +948,8 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   }
 
   // Macro context + vault brain update
-  let vixValue = 0;
   try {
     const signals = await getCrossAssetSignals();
-    vixValue = signals.vix;
     details.push(`MACRO: VIX: ${signals.vix.toFixed(1)} (${signals.vixSignal}) | Macro: ${signals.macroSignal}`);
 
     // Update vault brain with live data
@@ -1028,14 +1034,12 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     }
   } catch { /* use defaults */ }
 
-  // DEMO: Ultra-aggressive mode — target thousands/day on $50K account
-  // Full-size ES/NQ/GC with massive position sizing and high trade volume
+  // These legacy full-agent limits are not used by realtime-engine failover, which is strictly
+  // management-only. They remain for explicit/manual research runs.
   const demoMaxContracts = tradingMode === "paper" ? 25 : FUTURES_RULES.MAX_TOTAL_CONTRACTS;
   const demoMaxContractsPerTrade = tradingMode === "paper" ? 20 : FUTURES_RULES.MAX_CONTRACTS_PER_TRADE;
-  // LIVE hard per-trade contract ceiling — the same knob the realtime engine + $5k forward test use
-  // (live_futures_max_contracts=1). The fallback agent sizes off the REAL balance now, and MGC has no
-  // entry in LIVE_MAX_CONTRACTS_PER_SYMBOL, so without this it could size gold at several micros.
-  // Default 1 (fail-safe): if the knob is missing, never exceed one live contract.
+  // LIVE hard per-trade contract ceiling. The configured value is authoritative; missing or invalid
+  // configuration fails safe at one contract.
   let liveMaxContractsPerTrade = 1;
   if (tradingMode === "live") {
     try {
@@ -1063,9 +1067,9 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   // Filter trades by THIS mode's symbols to avoid demo/live cross-contamination
   const modeSymbols = getTradePriority(equity, tradingMode).map((s) => `FUT:${s.symbol}`);
   const todayTrades = await prisma.autoTradeLog.findMany({
-    where: { symbol: { in: modeSymbols }, createdAt: { gte: todayStart } },
+    where: { symbol: { in: modeSymbols }, action: { startsWith: `${tradeActionPrefix}_` }, createdAt: { gte: todayStart } },
   });
-  const todayTradeCount = todayTrades.filter((t) => t.action.startsWith("futures_") || t.action.startsWith("live_")).length;
+  const todayTradeCount = todayTrades.length;
   // Daily P&L from balance delta (accurate), NOT DB trade P&L sums (inflated by double-logging)
   const sodKey = tradingMode === "paper" ? "start_of_day_balance" : "live_start_of_day_balance";
   const sodCfg = await prisma.agentConfig.findUnique({ where: { key: sodKey } }).catch(() => null);
@@ -1187,7 +1191,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
         await placeMarketOrder({ contractId: pos.contractId, action: pos.netPos > 0 ? "Sell" : "Buy", quantity: absQty });
         closedCount++;
         await prisma.autoTradeLog.create({ data: {
-          symbol: `FUT:${pos.contractName}`, action: tradingMode === "live" ? "live_emergency_close" : "futures_emergency_close",
+          symbol: `FUT:${pos.contractName}`, action: `${tradeActionPrefix}_emergency_close`,
           qty: absQty, price: posBarCache[Object.keys(FUTURES_CONTRACTS).find((s) => pos.contractName.startsWith(s)) || ""]?.price || 0,
           pnl: null, orderId: null,
           reason: `AGGREGATE DRAWDOWN KILL: Combined P&L $${aggregateDrawdown.toFixed(0)} exceeded ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity limit. Closed all positions.`,
@@ -1234,7 +1238,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
 
     // Find the trade log for stop/target reference
     const tradeLog = await prisma.autoTradeLog.findFirst({
-      where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: { startsWith: "futures_" }, orderId: { not: null } },
+      where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: { startsWith: `${tradeActionPrefix}_` }, orderId: { not: null } },
       orderBy: { createdAt: "desc" },
     });
 
@@ -1286,11 +1290,11 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
 
         // Check if we should record that this position reached 2R (for breakeven tracking)
         const reached2R = await prisma.autoTradeLog.findFirst({
-          where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_reached_2r", createdAt: { gte: todayStart } },
+          where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: `${tradeActionPrefix}_reached_2r`, createdAt: { gte: todayStart } },
         });
         if (!reached2R) {
           await prisma.autoTradeLog.create({ data: {
-            symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_reached_2r",
+            symbol: `FUT:${symbolMatch || pos.contractName}`, action: `${tradeActionPrefix}_reached_2r`,
             qty: absQty, price: currentPrice, pnl: null, orderId: null,
             reason: `Position reached ${(priceDiff / stopDistance).toFixed(1)}R. Trail stop active at $${trailStop.toFixed(2)}.`,
           }});
@@ -1305,7 +1309,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
       const everReached1R = await prisma.autoTradeLog.findFirst({
         where: {
           symbol: `FUT:${symbolMatch || pos.contractName}`,
-          action: { in: ["futures_reached_2r", "futures_scale_out"] },
+          action: { in: [`${tradeActionPrefix}_reached_2r`, `${tradeActionPrefix}_scale_out`] },
           createdAt: { gte: todayStart },
         },
       });
@@ -1316,7 +1320,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
           await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: absQty });
           await cancelBracketOrders();
           await prisma.autoTradeLog.create({ data: {
-            symbol: `FUT:${pos.contractName}`, action: "futures_breakeven_close",
+            symbol: `FUT:${pos.contractName}`, action: `${tradeActionPrefix}_breakeven_close`,
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
             reason: `Breakeven stop: Position was at 1R+, pulled back past entry. P&L: $${unrealizedPnl.toFixed(0)}`,
           }});
@@ -1341,7 +1345,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
           await placeMarketOrder({ contractId: pos.contractId, action: direction === "long" ? "Sell" : "Buy", quantity: absQty });
           await cancelBracketOrders();
           await prisma.autoTradeLog.create({ data: {
-            symbol: `FUT:${pos.contractName}`, action: "futures_stop_loss",
+            symbol: `FUT:${pos.contractName}`, action: `${tradeActionPrefix}_stop_loss`,
             qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
             reason: `HARD STOP: Price $${currentPrice.toFixed(2)} past stop $${origStop.toFixed(2)}. Broker stop may have failed. P&L: $${unrealizedPnl.toFixed(0)}`,
           }});
@@ -1364,7 +1368,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
       const scaleQty = absQty >= 2 ? Math.floor(absQty / 2) : 0; // Don't scale 1-contract — let it run
       if (scaleQty >= 1) {
         const alreadyScaled = await prisma.autoTradeLog.findFirst({
-          where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out", createdAt: { gte: todayStart } },
+          where: { symbol: `FUT:${symbolMatch || pos.contractName}`, action: `${tradeActionPrefix}_scale_out`, createdAt: { gte: todayStart } },
         });
         if (!alreadyScaled) {
           details.push(`    SCALE OUT: Taking profit on ${scaleQty}/${absQty} at 2R`);
@@ -1387,7 +1391,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
               try { await sendNotification(`Scale-out stop FAILED for ${pos.contractName}. ${remainingQty}x UNPROTECTED.`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
             }
             await prisma.autoTradeLog.create({ data: {
-              symbol: `FUT:${symbolMatch || pos.contractName}`, action: "futures_scale_out",
+              symbol: `FUT:${symbolMatch || pos.contractName}`, action: `${tradeActionPrefix}_scale_out`,
               qty: scaleQty, price: currentPrice, pnl: priceDiff * multiplier * scaleQty, orderId: null,
               reason: `Scale out: Closed ${scaleQty}/${absQty} at 2R ($${currentPrice.toFixed(2)}). Remaining ${remainingQty} protected with breakeven stop.`,
             }});
@@ -1408,7 +1412,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
         await placeMarketOrder({ contractId: pos.contractId, action: qty > 0 ? "Sell" : "Buy", quantity: absQty });
         await cancelBracketOrders();
         await prisma.autoTradeLog.create({ data: {
-          symbol: `FUT:${pos.contractName}`, action: "futures_session_close",
+          symbol: `FUT:${pos.contractName}`, action: `${tradeActionPrefix}_session_close`,
           qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
           reason: `Session close: EOD in choppy market. P&L: $${unrealizedPnl.toFixed(0)}`,
         }});
@@ -1429,7 +1433,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
         await placeMarketOrder({ contractId: pos.contractId, action: qty > 0 ? "Sell" : "Buy", quantity: absQty });
         await cancelBracketOrders();
         await prisma.autoTradeLog.create({ data: {
-          symbol: `FUT:${pos.contractName}`, action: "futures_emergency_close",
+          symbol: `FUT:${pos.contractName}`, action: `${tradeActionPrefix}_emergency_close`,
           qty: absQty, price: currentPrice, pnl: unrealizedPnl, orderId: null,
           reason: `EMERGENCY: Drawdown kill switch. P&L: $${unrealizedPnl.toFixed(0)} exceeds ${(FUTURES_RULES.MAX_DRAWDOWN_PCT * 100).toFixed(0)}% equity.`,
         }});
@@ -1443,6 +1447,11 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     }
   }
 
+  if (opts.managementOnly) {
+    details.push("[MANAGEMENT-ONLY MODE] Existing positions checked; new entry scanning is disabled during realtime-engine failover.");
+    return { trades, managed, details };
+  }
+
   // ============ SCAN FOR NEW TRADES (or paper-track if outside windows) ============
   // LEARNING MODE: Even when we can't trade (lunch, overnight, daily limit hit, tilt),
   // we still scan for setups and log them as "paper trades" with hypothetical entry/stop/target.
@@ -1454,7 +1463,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
   let consecutiveStops = 0;
   {
     const recentCloses = todayTrades
-      .filter((t) => t.action.startsWith("futures_") && t.action !== "futures_long" && t.action !== "futures_short")
+      .filter((t) => t.action.startsWith(`${tradeActionPrefix}_`) && t.action !== `${tradeActionPrefix}_long` && t.action !== `${tradeActionPrefix}_short`)
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
     // Track symbols that were stopped out today — no re-entry
@@ -1914,7 +1923,7 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
       await prisma.autoTradeLog.create({
         data: {
           symbol: `FUT:${symbol}`,
-          action: `futures_${setup.direction}`,
+          action: `${tradeActionPrefix}_${setup.direction}`,
           qty: contracts,
           price,
           reason: `[FUTURES ${symbol}] ${setup.type.replace(/_/g, " ").toUpperCase()}: ${side} ${contracts}x @ $${price.toFixed(2)}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${riskReward.toFixed(1)}. Risk: $${(riskPerContract * contracts).toFixed(0)} (${(FUTURES_RULES.RISK_PER_TRADE_PCT * 100).toFixed(1)}% of equity). ${setup.reasoning}`,

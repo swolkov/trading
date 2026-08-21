@@ -5,7 +5,7 @@ import dynamic from "next/dynamic";
 import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
+import { assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
 import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
 import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
@@ -288,11 +288,17 @@ export default function FuturesPage() {
   const [activeAssetClass, setActiveAssetClass] = useState<AssetClass>(
     availableAssetClasses[0]?.id ?? "equity_index_futures",
   );
+  const displayedAssetClass = availableAssetClasses.some((assetClass) => assetClass.id === activeAssetClass)
+    ? activeAssetClass
+    : (availableAssetClasses[0]?.id ?? "equity_index_futures");
   const CONTRACTS = useMemo(
-    () => filterByAssetClass(ALL_CONTRACTS, activeAssetClass),
-    [ALL_CONTRACTS, activeAssetClass],
+    () => filterByAssetClass(ALL_CONTRACTS, displayedAssetClass),
+    [ALL_CONTRACTS, displayedAssetClass],
   );
   const [selectedContract, setSelectedContract] = useState("MGC");
+  const displayedContract = CONTRACTS.includes(selectedContract)
+    ? selectedContract
+    : (CONTRACTS[0] ?? selectedContract);
   const [activeTab, setActiveTab] = useState<"chart" | "depth" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
@@ -324,29 +330,22 @@ export default function FuturesPage() {
     } catch { /* ignore */ }
   }, []);
 
-  // Reset selected contract when view mode or asset class changes
   useEffect(() => {
-    if (CONTRACTS.length > 0 && !CONTRACTS.includes(selectedContract)) {
-      setSelectedContract(CONTRACTS[0]);
-    }
-  }, [isLiveView, activeAssetClass, CONTRACTS, selectedContract]);
-
-  // If the current asset class becomes unavailable (e.g., live mode has no crypto), snap to first
-  useEffect(() => {
-    if (!availableAssetClasses.some((ac) => ac.id === activeAssetClass) && availableAssetClasses[0]) {
-      setActiveAssetClass(availableAssetClasses[0].id);
-    }
-  }, [availableAssetClasses, activeAssetClass]);
-
-  useEffect(() => {
-    loadQuotes();
-    loadStatus();
-    loadPositions();
+    const initialLoad = window.setTimeout(() => {
+      void loadQuotes();
+      void loadStatus();
+      void loadPositions();
+    }, 0);
     // Refresh quotes every 15s, positions every 10s, status every 30s
     const quoteInterval = setInterval(loadQuotes, 15000);
     const posInterval = setInterval(loadPositions, 10000);
     const statusInterval = setInterval(loadStatus, 30000);
-    return () => { clearInterval(quoteInterval); clearInterval(posInterval); clearInterval(statusInterval); };
+    return () => {
+      window.clearTimeout(initialLoad);
+      clearInterval(quoteInterval);
+      clearInterval(posInterval);
+      clearInterval(statusInterval);
+    };
   }, [loadQuotes, loadStatus, loadPositions]);
 
   // When the global view mode flips (demo↔live), refresh all page data immediately and clear
@@ -391,7 +390,7 @@ export default function FuturesPage() {
 
   // ── Derived data ─────────────────────────────────────
 
-  const selectedQuote = quotes.find((q) => q.symbol === selectedContract);
+  const selectedQuote = quotes.find((q) => q.symbol === displayedContract);
   const allTrades = posData?.activity || [];
   const fillPnl = posData?.fillBasedPnl;
 
@@ -514,7 +513,7 @@ export default function FuturesPage() {
             </span>
           </div>
           <Button onClick={runAgent} disabled={running || !status?.connected} size="sm" variant="outline" className="text-xs h-7">
-            {running ? "Running..." : "Run Agent"}
+            {running ? "Checking..." : "Check Positions"}
           </Button>
         </div>
       </div>
@@ -543,7 +542,7 @@ export default function FuturesPage() {
         <div className="flex items-center justify-between gap-2 border-b border-border">
           <div className="flex items-center gap-1">
             {availableAssetClasses.map((ac) => {
-              const active = ac.id === activeAssetClass;
+              const active = ac.id === displayedAssetClass;
               const count = filterByAssetClass(ALL_CONTRACTS, ac.id).length;
               return (
                 <button
@@ -576,13 +575,13 @@ export default function FuturesPage() {
       {/* ── Live Price Tiles ── */}
       {CONTRACTS.length === 0 ? (
         <div className="text-xs text-muted-foreground py-4 text-center">
-          No {availableAssetClasses.find((ac) => ac.id === activeAssetClass)?.shortLabel ?? "matching"} contracts in this view.
+          No {availableAssetClasses.find((ac) => ac.id === displayedAssetClass)?.shortLabel ?? "matching"} contracts in this view.
         </div>
       ) : (
       <div className={`grid ${CONTRACTS.length <= 2 ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
         {CONTRACTS.map((sym) => {
           const q = quotes.find((x) => x.symbol === sym);
-          const isSelected = sym === selectedContract;
+          const isSelected = sym === displayedContract;
           const isUp = (q?.change ?? 0) >= 0;
           return (
             <button
@@ -681,7 +680,7 @@ export default function FuturesPage() {
             <div className="space-y-4">
               <Card className="border-white/[0.06]">
                 <CardContent className="pt-4">
-                  <FuturesChart symbol={selectedContract} height={560} />
+                  <FuturesChart symbol={displayedContract} height={560} />
                 </CardContent>
               </Card>
               <EdgeScoreboard mode={isLiveView ? "live" : "demo"} />
@@ -691,7 +690,7 @@ export default function FuturesPage() {
 
           {/* Depth & Tape tab — Databento volume profile + time and sales */}
           {activeTab === "depth" && (
-            <DepthTapeView symbol={selectedContract} />
+            <DepthTapeView symbol={displayedContract} />
           )}
 
           {/* Strategy tab */}
@@ -1557,7 +1556,6 @@ export default function FuturesPage() {
             const todayPnl = calendarDayPnl ?? dailyPnl;
             const lossUsed = todayPnl < 0 ? Math.abs(todayPnl) : 0;
             const budgetPct = rm.dailyLossLimit > 0 ? Math.min(100, (lossUsed / rm.dailyLossLimit) * 100) : 0;
-            const tradePct = rm.maxTradesPerDay > 0 ? (rm.todayTradeCount / rm.maxTradesPerDay) * 100 : 0;
             const budgetColor = budgetPct > 80 ? "bg-red-500" : budgetPct > 50 ? "bg-amber-500" : "bg-emerald-500";
             return (
               <Card className="border-white/[0.06]">

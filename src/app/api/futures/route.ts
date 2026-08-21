@@ -27,7 +27,9 @@ export async function POST() {
   if (unauthorized) return unauthorized;
 
   try {
-    const result = await runFuturesAgent();
+    // Railway realtime engines own all new entries. A dashboard-triggered legacy run may inspect
+    // and protect the selected account, but must not create a competing entry.
+    const result = await runFuturesAgent({ managementOnly: true });
     return Response.json(result);
   } catch (error) {
     console.error("[/api/futures]", error);

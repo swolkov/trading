@@ -49,20 +49,20 @@ async function checkEngine(mode: "demo" | "live"): Promise<{
     return { alive: false, reason: `Heartbeat stale (${ageMinutes.toFixed(0)} min)`, tickCount: currentTickCount, mdHealth };
   }
 
-  // Fresh heartbeat — check for stall (tick count unchanged)
+  // A fresh heartbeat remains authoritative even when no new ticks arrived. Quiet sessions, the
+  // daily maintenance break, and a temporary market-data interruption can all leave tickCount
+  // unchanged. Starting the legacy manager while that process still owns its lease would create two
+  // broker-mutating position managers. Record the observation, but only take over after heartbeat
+  // staleness has revoked the realtime engine's mutation authority.
+  let tickObservation = "";
   if (currentTickCount !== null) {
     const prevTickRecord = await prisma.agentConfig.findUnique({ where: { key: tickCountKey } });
 
     if (prevTickRecord?.value) {
       const prevTickCount = parseInt(prevTickRecord.value, 10);
       if (currentTickCount <= prevTickCount) {
-        console.log(`[cron/futures] ${mode} engine STALLED: tickCount ${currentTickCount} unchanged. Taking over.`);
-        await prisma.agentConfig.upsert({
-          where: { key: tickCountKey },
-          update: { value: String(currentTickCount) },
-          create: { key: tickCountKey, value: String(currentTickCount) },
-        });
-        return { alive: false, reason: `Stalled (tickCount ${currentTickCount} unchanged)`, tickCount: currentTickCount, mdHealth };
+        tickObservation = ", ticks unchanged";
+        console.log(`[cron/futures] ${mode} tickCount ${currentTickCount} unchanged, but heartbeat is fresh; realtime engine retains authority.`);
       }
     }
 
@@ -75,7 +75,7 @@ async function checkEngine(mode: "demo" | "live"): Promise<{
 
   return {
     alive: true,
-    reason: `Alive (heartbeat ${ageMinutes.toFixed(1)} min ago, ticks: ${currentTickCount ?? "?"}, md: ${mdHealth ?? "?"})`,
+    reason: `Alive (heartbeat ${ageMinutes.toFixed(1)} min ago, ticks: ${currentTickCount ?? "?"}${tickObservation}, md: ${mdHealth ?? "?"})`,
     tickCount: currentTickCount,
     mdHealth,
   };
@@ -190,32 +190,30 @@ export async function GET(request: Request) {
         console.error("[cron/futures] Demo token recovery failed:", err);
       }
 
-      try {
-        fallbackResult = await runFuturesAgent();
-      } catch (err) {
-        console.error("[cron/futures] Fallback agent error:", err);
-        fallbackResult = { error: String(err) };
-      }
+      // The legacy agent resolves the globally selected Tradovate account, which is live in
+      // production. It must never pretend to take over demo or open differently-sized paper trades.
+      // Demo keeps its broker brackets while Railway recovers from the refreshed shared token.
+      console.log("[cron/futures] Demo fallback is recovery-only; no legacy demo orders will be submitted");
     }
 
-    // Run the live fallback whenever the live engine is down — NOT just during RTH. The live account
+    // Run the live fallback whenever the live engine heartbeat is stale — NOT just during RTH. The live account
     // can hold a gold micro through the evening/overnight session, so if the engine dies then, an open
     // position would otherwise get NO aggregate-drawdown-kill or stop management from the cron until
-    // 9:30am. runFuturesAgent ALWAYS manages/protects existing positions; new-entry scanning stays
-    // internally session-gated (live only opens during RTH prime), so this can't open off-hours trades.
+    // 9:30am. The fallback is explicitly management-only, so an engine outage can never create new risk.
     if (!liveStatus.alive) {
       console.log(`[cron/futures] Live engine down (RTH=${isRTH}) — running fallback agent to protect any open position`);
       if (!fallbackResult) {
         try {
-          fallbackResult = await runFuturesAgent();
+          fallbackResult = await runFuturesAgent({ managementOnly: true });
         } catch (err) {
           console.error("[cron/futures] Live fallback agent error:", err);
         }
       }
     }
 
-    // Defer only when BOTH engines are alive — if either is down we must run the fallback (above),
-    // at any hour, so a dead engine never leaves an open position unprotected.
+    // Defer only when both engines are alive. A stale demo is recovery-only; a stale live engine gets
+    // management-only protection at any open session hour. During the exchange halt, broker brackets
+    // remain authoritative and the legacy manager deliberately takes no action.
     if (demoStatus.alive && liveStatus.alive) {
       return Response.json({
         status: "deferred",
@@ -226,7 +224,7 @@ export async function GET(request: Request) {
     }
 
     return Response.json({
-      status: fallbackResult ? "fallback_ran" : "deferred",
+      status: fallbackResult ? "fallback_ran" : !demoStatus.alive ? "demo_recovery_wait" : "deferred",
       demo: demoStatus.reason,
       live: liveStatus.reason,
       fallback: fallbackResult,

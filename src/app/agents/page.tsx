@@ -116,22 +116,6 @@ export default function AgentHubPage() {
     };
   }, [loadData]);
 
-  const switchMode = async (type: string, mode: string) => {
-    if (!modePassword) { setModeMessage("Enter password first"); return; }
-    setModeMessage("");
-    try {
-      const res = await fetch("/api/trading-mode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type, mode, password: modePassword }),
-      });
-      const data = await res.json();
-      if (data.error) { setModeMessage(data.error); return; }
-      setModeMessage(data.message);
-      loadData();
-    } catch { setModeMessage("Failed to switch mode"); }
-  };
-
   const runAgent = async (endpoint: string, agentId: string) => {
     setRunningAgent(agentId);
     try {
@@ -175,7 +159,7 @@ export default function AgentHubPage() {
     {
       id: "futures",
       name: "Futures Engine",
-      desc: "24/5 demo research on MGC, MNQ and MES, sized from fresh live equity",
+      desc: "Realtime demo research on MGC, MNQ and MES; manual runs are position checks only",
       schedule: futuresStatus?.connected ? "Real-time 5s (Railway)" : "Waiting",
       endpoint: "/api/futures",
       canRun: futuresStatus?.connected || false,
@@ -255,18 +239,6 @@ export default function AgentHubPage() {
       schedule: "Sundays",
       endpoint: "/api/cron/walk-forward",
       canRun: true,
-    },
-  ];
-
-  const brokers = [
-    {
-      name: "Tradovate",
-      types: ["futures"] as const,
-      desc: "Micro Futures",
-      color: "blue",
-      extra: futuresStatus?.connected
-        ? `Connected: ${futuresStatus.accountName}`
-        : "Not connected",
     },
   ];
 
