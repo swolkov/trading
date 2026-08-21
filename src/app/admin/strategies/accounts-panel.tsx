@@ -21,12 +21,35 @@ interface AccountInfo {
   viewMode: "paper" | "live";
   tradingMode: "paper" | "live" | "disabled";
   liveTradingActivated: boolean;
+  entryGates: {
+    entriesAllowed: boolean;
+    modeRequested: boolean;
+    alive: boolean;
+    ready: boolean;
+    currentVersion: boolean;
+    marketDataHealthy: boolean;
+    infrastructureArmed: boolean;
+    operatorEnabled: boolean;
+    riskConfigHealthy: boolean;
+    hasEnabledEdge: boolean;
+    heartbeatAgeSec: number | null;
+    deploymentId: string | null;
+    strategyVersion: string | null;
+    enabledEdges: string[];
+    blockers: string[];
+  } | null;
   pnlSparkline: number[];
 }
 
 interface AccountsResponse {
   accounts: AccountInfo[];
-  summary: { anyLiveTrading: boolean; futuresLiveActivated: boolean; viewingLive: boolean };
+  summary: {
+    anyLiveTrading: boolean;
+    futuresLiveActivated: boolean;
+    futuresLiveRequested: boolean;
+    viewingLive: boolean;
+    flattenRequest: { requestId?: string; status?: string; requestedAt?: string; completedAt?: string } | null;
+  };
 }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
@@ -51,7 +74,7 @@ function KillSwitchButton({ futuresLive, currentMode }: { futuresLive: boolean; 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const execute = async (action: "kill" | "restore") => {
+  const execute = async (action: "kill" | "flatten" | "restore") => {
     setBusy(true);
     setErr("");
     try {
@@ -101,7 +124,7 @@ function KillSwitchButton({ futuresLive, currentMode }: { futuresLive: boolean; 
                 {isDisabled ? (
                   <>Sets <code className="bg-muted px-1 rounded text-[11px]">trading_mode_futures = paper</code>. Engine resumes paper trading within ~30s. Re-flipping to LIVE requires a separate password-gated action from Agent Hub.</>
                 ) : (
-                  <>Sets <code className="bg-muted px-1 rounded text-[11px]">trading_mode_futures = disabled</code>. Engine stops firing new trades within ~30s. <strong>Open positions are NOT closed</strong> — use broker app. Live: {futuresLive ? "ON (real money exposed)" : "off (paper)"}.</>
+                  <>Both actions disable new futures entries. <strong>Stop new entries</strong> leaves existing broker protection in place. <strong>Stop + flatten</strong> sends a durable request to the lease-owning live engine and verifies the broker is flat. Keep Tradovate open for confirmation. Live authorization: {futuresLive ? "armed" : "not armed"}.</>
                 )}
               </p>
               <input
@@ -123,14 +146,18 @@ function KillSwitchButton({ futuresLive, currentMode }: { futuresLive: boolean; 
                     Restore to PAPER
                   </button>
                 ) : (
-                  <button
-                    onClick={() => execute("kill")}
-                    disabled={busy || !pwd}
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 text-sm font-semibold px-3 py-2 rounded-md border border-red-500/40 bg-red-500/15 text-red-300 hover:bg-red-500/25 disabled:opacity-50"
-                  >
-                    <Skull className="w-4 h-4" />
-                    Kill trading
-                  </button>
+                  <>
+                    <button
+                      onClick={() => execute("kill")}
+                      disabled={busy || !pwd}
+                      className="flex-1 text-sm font-semibold px-3 py-2 rounded-md border border-red-500/40 bg-red-500/15 text-red-300 hover:bg-red-500/25 disabled:opacity-50"
+                    >Stop new entries</button>
+                    <button
+                      onClick={() => execute("flatten")}
+                      disabled={busy || !pwd}
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 text-sm font-semibold px-3 py-2 rounded-md border border-red-500/60 bg-red-500/25 text-red-200 hover:bg-red-500/35 disabled:opacity-50"
+                    ><Skull className="w-4 h-4" />Stop + flatten</button>
+                  </>
                 )}
                 <button onClick={() => setOpen(false)} className="px-3 py-2 text-sm rounded-md border border-border hover:bg-muted/30">Cancel</button>
               </div>
@@ -167,26 +194,34 @@ export function AccountsPanel() {
   if (!data) return null;
 
   const liveActivated = data.summary.futuresLiveActivated;
+  const liveRequested = data.summary.futuresLiveRequested;
   const futuresAccount = data.accounts.find((a) => a.key === "live-futures");
   const currentTradingMode = futuresAccount?.tradingMode ?? "paper";
+  const blockers = futuresAccount?.entryGates?.blockers ?? [];
 
   return (
     <div className="space-y-2">
       {/* Master live indicator + kill switch */}
-      <Card className={liveActivated ? "border-red-500/40 bg-red-500/[0.04]" : currentTradingMode === "disabled" ? "border-amber-500/30 bg-amber-500/[0.04]" : "border-emerald-500/30 bg-emerald-500/[0.03]"}>
+      <Card className={liveActivated ? "border-red-500/40 bg-red-500/[0.04]" : currentTradingMode === "disabled" || liveRequested ? "border-amber-500/30 bg-amber-500/[0.04]" : "border-emerald-500/30 bg-emerald-500/[0.03]"}>
         <CardContent className="py-2.5">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="flex items-center gap-2">
-              {liveActivated ? <AlertTriangle className="w-4 h-4 text-red-400" /> : currentTradingMode === "disabled" ? <ShieldOff className="w-4 h-4 text-amber-400" /> : <ShieldCheck className="w-4 h-4 text-emerald-400" />}
+              {liveActivated ? <AlertTriangle className="w-4 h-4 text-red-400" /> : currentTradingMode === "disabled" || liveRequested ? <ShieldOff className="w-4 h-4 text-amber-400" /> : <ShieldCheck className="w-4 h-4 text-emerald-400" />}
               <div>
-                <div className={`text-xs font-bold ${liveActivated ? "text-red-300" : currentTradingMode === "disabled" ? "text-amber-300" : "text-emerald-300"}`}>
-                  {liveActivated ? "LIVE TRADING ACTIVATED" : currentTradingMode === "disabled" ? "TRADING DISABLED" : "All trading in paper/demo mode"}
+                <div className={`text-xs font-bold ${liveActivated ? "text-red-300" : currentTradingMode === "disabled" || liveRequested ? "text-amber-300" : "text-emerald-300"}`}>
+                  {liveActivated ? "LIVE AUTHORIZATION ARMED" : currentTradingMode === "disabled" ? "TRADING DISABLED" : liveRequested ? "LIVE ENGINE DISARMED" : "LIVE MODE NOT SELECTED"}
                 </div>
                 <div className="text-[10px] text-muted-foreground/70 mt-0.5">
-                  {liveActivated ? "Real money at risk — futures engine fires live trades to Tradovate live account." :
+                  {liveActivated ? "Global authorization gates are open. Session, quote, limits and trade-specific checks still control every order." :
                    currentTradingMode === "disabled" ? "Engine will not fire any trades until restored." :
-                   "Engines run trades to paper/demo accounts only."}
+                   liveRequested ? `No real-money entries. Blocked by: ${blockers.join("; ") || "engine readiness"}.` :
+                   "The live engine cannot enter real-money trades."}
                 </div>
+                {data.summary.flattenRequest?.status && (
+                  <div className={`text-[9px] mt-1 ${data.summary.flattenRequest.status === "completed" ? "text-emerald-400" : "text-amber-300"}`}>
+                    Emergency flatten: {data.summary.flattenRequest.status}
+                  </div>
+                )}
               </div>
             </div>
             <KillSwitchButton futuresLive={liveActivated} currentMode={currentTradingMode} />
@@ -243,7 +278,7 @@ export function AccountsPanel() {
         };
         // Each broker = its own walled-off account/money. Honest edge note per broker.
         const BROKERS: { key: string; title: string; note: string }[] = [
-          { key: "Tradovate", title: "Tradovate · Futures", note: "Gold (MGC/GC) — the one edge that survived every test (thin, real)" },
+          { key: "Tradovate", title: "Tradovate · Futures", note: "MGC, MNQ and MES · demo evidence required before any edge can use real money" },
         ];
         return (
           <div className="space-y-3">

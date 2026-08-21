@@ -227,6 +227,11 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
             setupType: attr.setupType, rMultiple: attr.rMultiple, source: "broker_fill_estimated_fees",
           },
         });
+        await prisma.$executeRawUnsafe(`ALTER TABLE "RoundTrip" ADD COLUMN IF NOT EXISTS entry_order_id text`);
+        await prisma.$executeRawUnsafe(
+          `UPDATE "RoundTrip" SET entry_order_id = $1 WHERE mode = $2 AND "entryFillId" = $3 AND "exitFillId" = $4`,
+          String(rt.entryFill.orderId), rtMode, String(rt.entryFill.id), String(rt.exitFill.id),
+        );
         rtPersisted++;
       } catch { /* best-effort ledger write */ }
     }

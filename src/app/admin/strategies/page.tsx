@@ -1,6 +1,5 @@
 import { STRATEGIES, STRATEGY_REGISTRY_ONLY_SYMBOLS } from "@/lib/strategies/registry";
 import { ASSET_CLASSES, assetClassFor, type AssetClass } from "@/lib/asset-classes";
-import { Card, CardContent } from "@/components/ui/card";
 import Link from "next/link";
 import { Brain, ArrowRight, Activity, Eye, PowerOff, Info } from "lucide-react";
 import { StrategyRowCompact } from "./strategy-row-compact";
@@ -27,24 +26,24 @@ interface LegacyStrategy {
 
 const LEGACY_STRATEGIES: LegacyStrategy[] = [
   {
-    name: "Equity index 5m — GATED to 2 validated edges",
+    name: "Equity index 5m — demo research",
     setupTypes: ["RSI≥80 overbought SHORT (MNQ/MES)", "Trend-continuation LONG in uptrend, price>200-EMA (MNQ/MES)"],
     symbols: ["MNQ", "MES"],
     assetClass: "equity_index_futures",
     tier: 2,
-    status: "active",
-    description: "The engine scans ~8 setup types per 5m bar, but the GATE rejects all index setups except two that hold out-of-sample: (1) extreme-RSI overbought SHORT at RSI≥80, and (2) trend-continuation LONG — buy EMA9 pullbacks ONLY when price is above the 200-EMA (confirmed uptrend). The long is validated on a 4.5-yr backtest INCLUDING the 2022 bear (real micro fills): PF 1.22 pooled, positive in BOTH train (1.15) and test (1.31); NQ 1.24 / ES 1.18. The SAME long below the 200-EMA loses (PF 0.55) — the regime filter is the edge. Everything else (gap-fill, OR-breakout, IB-ext, VWAP, index shorts other than the RSI≥80 fade) is GATED OFF. 1 micro, RTH.",
+    status: "research",
+    description: "Historical testing identifies two index candidates, but neither is authorized for live trading. Current-version micro fills on MNQ and MES must each pass the promotion gate before real money can be enabled. The edge control board above is the source of truth.",
     backtest: { pf: 1.22, trades: 5077, period: "4.5yr (2022-2026), regime-filtered long" },
     codeFile: "futures-realtime.ts",
   },
   {
-    name: "Gold RSI extreme bounce (5m) — flagship edge",
+    name: "Gold RSI extreme bounce (5m) — demo research",
     setupTypes: ["extreme_rsi_bounce ONLY (RSI<25 long / RSI>75 short)"],
     symbols: ["MGC", "GC"],
     assetClass: "metals_futures",
     tier: 2,
-    status: "active",
-    description: "Gold is GATED to its single out-of-sample edge: the RSI extreme bounce (both directions). Every other gold setup (trend-continuation, gap-fill, VWAP) is REJECTED — trend-continuation is exactly what bled the live account in early July. 26-yr daily backtest PF 1.58 (positive in every 5-yr block, 2000-2026); live PF ~1.5 over 60d. Evening half-size on MGC once equity ≥ $3k. The most durable edge in the system.",
+    status: "research",
+    description: "Historical testing makes the RSI extreme bounce a demo candidate, not a live-qualified edge. Current-version MGC fills must pass the promotion gate before real money can be enabled. Other gold setups remain rejected, and the edge control board above is the source of truth.",
     backtest: { pf: 1.24, trades: 720, period: "OOS 2026 / 26yr daily PF 1.58" },
     codeFile: "futures-realtime.ts",
   },
@@ -121,7 +120,7 @@ export default async function StrategiesAdminPage() {
         </Link>
       </div>
 
-      {/* LIVE per-edge results — what's actually working in real money, since inception */}
+      {/* LIVE per-edge results — what is actually working in real money, since inception */}
       {edgePerf && (
         <div className="border border-border rounded-lg bg-muted/10 p-3">
           <div className="flex items-center justify-between mb-2">
@@ -163,14 +162,14 @@ export default async function StrategiesAdminPage() {
       <details className="text-xs">
         <summary className="cursor-pointer text-muted-foreground/60 hover:text-foreground inline-flex items-center gap-1">
           <Info className="w-3 h-3" />
-          Why am I seeing different "live" indicators? (3 layers explained)
+          Why am I seeing different &quot;live&quot; indicators? (3 layers explained)
         </summary>
         <div className="mt-2 border border-border rounded-md bg-muted/10 p-3 space-y-2 text-[11px] text-muted-foreground">
           <div><strong className="text-foreground">1. View Mode (top bar):</strong> which account&apos;s data you&apos;re looking at. Toggle freely. Does NOT cause live trades.</div>
-          <div><strong className="text-foreground">2. Trading Mode (Agent Hub → LIVE TRADING):</strong> whether the engine actually fires live trades. Password-gated. This is the &quot;live trading activated&quot; state shown in the red banner above.</div>
-          <div><strong className="text-foreground">3. Strategy Assignment (this page):</strong> per-strategy per-account on/off switch. Even with Trading Mode = LIVE, individual strategies stay in observation/disabled here unless you flip them.</div>
+          <div><strong className="text-foreground">2. Trading Mode (Agent Hub):</strong> an operator request to allow live trading. It cannot bypass engine health, risk, infrastructure-arm, or edge-evidence gates.</div>
+          <div><strong className="text-foreground">3. Edge gate (board above):</strong> a current-version edge must independently qualify and be enabled before the live engine can enter.</div>
           <div className="pt-1 border-t border-border/40 text-foreground/70">
-            For a strategy to fire live trades: Trading Mode = LIVE <strong>AND</strong> strategy assignment on live = ACTIVE. Both required.
+            Live entry requires every gate shown in the account banner. A green backtest or a mode label alone never authorizes real money.
           </div>
         </div>
       </details>

@@ -42,15 +42,12 @@ export async function POST(request: Request) {
     if (mode !== "paper" && mode !== "live") {
       return Response.json({ error: "Mode must be 'paper' or 'live'" }, { status: 400 });
     }
+    if (password && (!LIVE_PASSWORD || password !== LIVE_PASSWORD)) {
+      return Response.json({ error: LIVE_PASSWORD ? "Incorrect password" : "Live trading password is not configured" }, { status: LIVE_PASSWORD ? 403 : 503 });
+    }
 
     // If activating live trading, require password and set BOTH view + trading mode
     if (mode === "live" && password) {
-      if (!LIVE_PASSWORD) {
-        return Response.json({ error: "Live trading password is not configured" }, { status: 503 });
-      }
-      if (password !== LIVE_PASSWORD) {
-        return Response.json({ error: "Incorrect password" }, { status: 403 });
-      }
       // Set trading mode (engine reads this for live execution)
       await prisma.agentConfig.upsert({
         where: { key: `trading_mode_${type}` },

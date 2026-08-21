@@ -20,6 +20,8 @@ import { FUTURES_STRATEGY_VERSION } from "../lib/strategy-version";
 import {
   FULL_SIZE_FUTURES,
   MICRO_FUTURES,
+  isBrokerAccountClear,
+  isEngineLeaseValid,
   livePolicySessionMultiplier,
   overnightMarginContractCap,
   selectFuturesSymbols,
@@ -60,7 +62,7 @@ const STRATEGY_VERSION = FUTURES_STRATEGY_VERSION;
 const ENGINE_STARTED_AT = new Date().toISOString();
 const ORDER_OWNER_ID = `${process.env.RAILWAY_DEPLOYMENT_ID || "local"}:${ENGINE_STARTED_AT}`;
 let engineReady = false;
-type PendingOrderKind = "entry" | "close" | "stop" | "target";
+type PendingOrderKind = "entry" | "close" | "scale" | "stop" | "target";
 type PendingOrderSubmission = {
   clOrdId: string;
   label: string;
@@ -73,6 +75,12 @@ type PendingOrderSubmission = {
 };
 let activePendingOrderSubmission: PendingOrderSubmission | null = null;
 let pendingOrderReservationInFlight = false;
+let ownsEngineLease = false;
+let engineLeaseValidUntil = 0;
+let engineLeaseActivationInFlight = false;
+function hasValidEngineLease(): boolean {
+  return isEngineLeaseValid(ownsEngineLease, engineLeaseValidUntil);
+}
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
@@ -563,6 +571,23 @@ async function apiFetch(path: string, options?: RequestInit): Promise<unknown> {
   return res.json();
 }
 
+/** Single-shot broker mutation fenced by the local lease deadline immediately before send. */
+async function brokerMutationApiFetch(path: string, options?: RequestInit): Promise<unknown> {
+  const token = await authenticate();
+  if (!hasValidEngineLease()) throw new Error(`engine lease expired before broker mutation ${path}`);
+  const response = await fetch(`${ORDER_API}${path}`, {
+    ...options,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...options?.headers },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Broker mutation ${path} API ${response.status}: ${await response.text().catch(() => "")}`);
+  const text = await response.text();
+  if (!text) return {};
+  const result = JSON.parse(text) as { failureReason?: string; failureText?: string };
+  if (result.failureReason || result.failureText) throw new Error(`${path} rejected: ${result.failureReason || result.failureText}`);
+  return result;
+}
+
 function log(msg: string) {
   const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
   console.log(`[${ts}] ${msg}`);
@@ -570,6 +595,7 @@ function log(msg: string) {
 
 // Cancel all working orders on Tradovate (cleanup orphaned brackets)
 async function cancelAllOrders() {
+  if (!hasValidEngineLease()) return;
   try {
     const orders = await apiFetch("/order/list") as { id: number; ordStatus: string }[];
     const working = orders.filter(o => o.ordStatus === "Working" || o.ordStatus === "Accepted");
@@ -577,7 +603,7 @@ async function cancelAllOrders() {
     log(`[CLEANUP] Cancelling ${working.length} orphaned working orders`);
     for (const order of working) {
       try {
-        await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: order.id }) });
+        await brokerMutationApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: order.id }) });
       } catch {}
     }
     log(`[CLEANUP] Done — all orders cancelled`);
@@ -857,6 +883,8 @@ function initBarBuilder(sym: string) {
 }
 
 let tickCount = 0;
+let lastPollCompletedAt = 0;
+let lastUsableQuoteAt = 0;
 
 // Date-based flags to ensure exactly one session reset and one EOD close per day
 let lastResetDate = "";
@@ -1030,7 +1058,14 @@ function onPrice(sym: string, price: number, volume: number, reliable = true, qu
   }
 
   // Tick-by-tick position management
-  checkPositions(sym, price, reliable);
+  const trackedPosition = positions.get(sym);
+  const currentContract = contracts.get(sym);
+  const positionContractAligned = !trackedPosition || currentContract?.id === trackedPosition.contractId;
+  if (hasValidEngineLease() && positionContractAligned) {
+    checkPositions(sym, price, reliable);
+  } else if (trackedPosition?.emergencyWarningTick) {
+    trackedPosition.emergencyWarningTick = 0;
+  }
 }
 
 async function fetchTradovateQuote(sym: string): Promise<{ price: number; volume: number } | null> {
@@ -1344,6 +1379,7 @@ async function pollPrices() {
     }
     if (served.size > 0) lastMdSource = "databento";
     else if (received === 0) lastMdSource = "none";
+    if (received > 0) lastUsableQuoteAt = Date.now();
 
     // Track failures. A SCHEDULED halt (the daily 17:00-18:00 ET CME break) legitimately has no
     // ticks — that is market structure, not a feed failure, so it must neither count toward the
@@ -1407,6 +1443,8 @@ async function pollPrices() {
       log(`[MD] Circuit OPEN — pausing polls for ${Math.round(cooldownMs / 1000)}s (backoff x${backoffMultiplier})`);
       notify(`Market data down (${mdConsecutiveFailures} failures) — polls paused ${Math.round(cooldownMs / 1000)}s`, "general");
     }
+  } finally {
+    lastPollCompletedAt = Date.now();
   }
 }
 
@@ -2322,23 +2360,18 @@ function checkPositions(sym: string, price: number, reliable = true) {
           // If the modify fails, the ORIGINAL stop stays live (nothing was cancelled), so the position
           // is never left unprotected — the exact failure that caused the -$24,100 runaway.
           if (pos.stopOrderId) {
-            await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+            await brokerMutationApiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
               orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: breakevenPrice, isAutomated: true,
             })});
             pos.stopLoss = breakevenPrice;
             log(`${sym}: Broker stop MODIFIED to breakeven $${breakevenPrice.toFixed(2)} (order #${pos.stopOrderId})`);
           } else {
-            // No tracked stop order — place a fresh protective stop.
-            const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-            const acct = accounts.find(a => a.id === accountId) || accounts[0];
-            const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-            const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-              accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-              orderQty: pos.quantity, orderType: "Stop", stopPrice: breakevenPrice, timeInForce: "GTC", isAutomated: true,
-            })}) as { orderId: number };
-            pos.stopOrderId = s.orderId;
-            pos.stopLoss = breakevenPrice;
-            log(`${sym}: Broker stop placed at breakeven $${breakevenPrice.toFixed(2)} (order #${s.orderId})`);
+            // A fresh stop placement needs durable clOrdId recovery. Reaching breakeven with no
+            // tracked protection is already an abnormal state, so flatten through the recoverable
+            // close path instead of risking an ambiguous stop response that cannot be identified.
+            log(`🚨 ${sym}: no tracked stop at breakeven; flattening through durable recovery`);
+            await closePosition(sym, price, "missing_stop_at_breakeven");
+            return;
           }
 
         } catch (err) {
@@ -2376,7 +2409,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
           const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
           const acct = accounts.find(a => a.id === accountId) || accounts[0];
           const side = pos.direction === "long" ? "Buy" : "Sell";
-          const addOrder = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+          const addOrder = await brokerMutationApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
             accountSpec: acct.name, accountId, action: side, symbol: pos.contractId,
             orderQty: addQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
           })}) as { orderId: number };
@@ -2427,11 +2460,11 @@ function checkPositions(sym: string, price: number, reliable = true) {
           const closeSide = pos.direction === "long" ? "Sell" : "Buy";
           const pyramidStop = roundToTick(sym, pos.entryPrice); // weighted avg → must snap to tick
           if (pos.stopOrderId) {
-            await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+            await brokerMutationApiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
               orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: pyramidStop, isAutomated: true,
             })});
           } else {
-            const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+            const s = await brokerMutationApiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
               accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
               orderQty: pos.quantity, orderType: "Stop", stopPrice: pyramidStop, timeInForce: "GTC", isAutomated: true,
             })}) as { orderId: number };
@@ -2441,11 +2474,11 @@ function checkPositions(sym: string, price: number, reliable = true) {
           // so a target fill would flatten only part of the position and leave an untracked residual.
           if (pos.targetOrderId) {
             try {
-              await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+              await brokerMutationApiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
                 orderId: pos.targetOrderId, orderType: "Limit", orderQty: pos.quantity, price: roundToTick(sym, pos.target), isAutomated: true,
               })});
             } catch (e) { log(`${sym}: pyramid target resize failed (${e}) — cancelling it so the stop/trail owns the exit`); 
-              try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+              try { await brokerMutationApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
               pos.targetOrderId = null; }
           }
           log(`${sym}: Pyramid filled — ${oldQty}x@$${oldEntry.toFixed(2)} + ${filledAddQty}x@$${addPrice.toFixed(2)} = ${pos.quantity}x avg $${pos.entryPrice.toFixed(2)}`);
@@ -2526,20 +2559,14 @@ function checkPositions(sym: string, price: number, reliable = true) {
           (async () => {
             try {
               if (pos.stopOrderId) {
-                await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+                await brokerMutationApiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
                   orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: trail, isAutomated: true,
                 })});
                 if (isNew) log(`${sym}: Broker trail stop MODIFIED to $${trail.toFixed(2)} (1.5x ATR, order #${pos.stopOrderId})`);
               } else {
-                const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
-                const acct = accounts.find(a => a.id === accountId) || accounts[0];
-                const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-                const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-                  accountSpec: acct.name, accountId, action: closeSide, symbol: pos.contractId,
-                  orderQty: pos.quantity, orderType: "Stop", stopPrice: trail, timeInForce: "GTC", isAutomated: true,
-                })}) as { orderId: number };
-                pos.stopOrderId = s.orderId;
-                if (isNew) log(`${sym}: Broker trail stop PLACED at $${trail.toFixed(2)} (1.5x ATR, order #${s.orderId})`);
+                log(`🚨 ${sym}: no tracked stop while trailing; flattening through durable recovery`);
+                await closePosition(sym, price, "missing_stop_at_trail");
+                return;
               }
             } catch (err) {
               log(`${sym}: WARNING — failed to set broker trail stop: ${err}`);
@@ -2630,27 +2657,122 @@ function checkPositions(sym: string, price: number, reliable = true) {
 
 async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
   const pos = positions.get(sym);
-  if (!pos || pos.scaledOut) return;
+  if (!pos || pos.scaledOut || !hasValidEngineLease()) return;
+  if (!pos.stopOrderId) {
+    log(`${sym}: scale-out skipped because no verified protective stop is tracked`);
+    return;
+  }
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  const diff = pos.direction === "long" ? price - pos.entryPrice : pos.entryPrice - price;
-  const pnl = diff * mult * scaleQty;
 
   try {
     const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
     const acct = accounts.find(a => a.id === accountId) || accounts[0];
 
-    // Cancel the old target bracket (it's for full qty)
-    if (pos.targetOrderId) try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); } catch {}
+    // The original target is sized for the full position. It must be conclusively terminal before a
+    // reduction, otherwise it can later flatten/reverse the smaller remainder.
+    if (pos.targetOrderId) await cancelOrderUntilTerminal(pos.targetOrderId, `${sym} pre-scale target`);
+    pos.targetOrderId = null;
+    await savePositionsForOrderRecovery();
 
-    // Market close half
-    const scaleOrder = await apiFetch("/order/placeorder", {
-      method: "POST",
-      body: JSON.stringify({
-        accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
-        symbol: pos.contractId, orderQty: scaleQty, orderType: "Market", timeInForce: "Day", isAutomated: true,
-      }),
-    }) as { orderId: number };
+    // Market close half. This must be single-shot and recoverable because a duplicate reduction can
+    // flatten or reverse the account while the original full-size stop is still working.
+    const scaleClientOrderId = `FRT-SCALE-${ENGINE_MODE}-${sym}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let scaleOrderId: number | null = null;
+    let scaleFill: Awaited<ReturnType<typeof verifyOrderFill>> | null = null;
+    try {
+      const scaleToken = await authenticate();
+      await reservePendingOrderSubmission({
+        clOrdId: scaleClientOrderId, label: `${sym} scale out`, kind: "scale", symbol: sym,
+        contractId: pos.contractId, createdAt: new Date().toISOString(), phase: "reserved", ownerId: ORDER_OWNER_ID,
+      });
+      const [brokerBeforeScale, stopStatus] = await Promise.all([
+        getBrokerPositionSnapshot(pos.contractId, 5),
+        protectionOrderStatus(pos.stopOrderId),
+      ]);
+      const expectedSign = pos.direction === "long" ? 1 : -1;
+      if (!hasValidEngineLease() || stopStatus !== "active" || !brokerBeforeScale
+        || Math.sign(brokerBeforeScale.netPos) !== expectedSign || Math.abs(brokerBeforeScale.netPos) !== pos.quantity
+        || Math.abs(brokerBeforeScale.netPos) < scaleQty) {
+        if (!hasValidEngineLease()) {
+          log(`${sym}: scale-out lease expired during preflight; reserved recovery retained for the next owner`);
+          return;
+        }
+        if (brokerBeforeScale === null) {
+          await updatePendingOrderPhase(scaleClientOrderId, "rejected");
+          if (pos.stopOrderId) await cancelOrderUntilTerminal(pos.stopOrderId, `${sym} flat-position stop cleanup`);
+          positions.delete(sym);
+          await savePositions();
+          await clearPendingOrderSubmission(scaleClientOrderId);
+        } else if (brokerBeforeScale) {
+          pos.direction = brokerBeforeScale.netPos > 0 ? "long" : "short";
+          pos.quantity = Math.abs(brokerBeforeScale.netPos);
+          pos.entryPrice = brokerBeforeScale.netPrice || pos.entryPrice;
+          await savePositionsForOrderRecovery();
+          await markPendingFlattenRequired(scaleClientOrderId);
+          log(`${sym}: scale-out aborted with open exposure; durable flatten handoff retained`);
+          await closePosition(sym, brokerBeforeScale.netPrice || price, "pre_scale_state_changed");
+        } else {
+          log(`${sym}: scale-out broker state unavailable; reserved recovery retained for the next owner`);
+        }
+        return;
+      }
+      if (!await authorizePendingOrderAndMarkSent(scaleClientOrderId)) {
+        throw new Error(`${sym} scale-out lease lost before broker send`);
+      }
+      const scaleResponsePromise = fetch(`${ORDER_API}/order/placeorder`, {
+        method: "POST",
+        body: JSON.stringify({
+          accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
+          symbol: pos.contractId, clOrdId: scaleClientOrderId, orderQty: scaleQty,
+          orderType: "Market", timeInForce: "Day", isAutomated: true,
+        }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${scaleToken}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      scaleOrderId = await resolveSubmittedOrder(scaleResponsePromise, scaleClientOrderId, `${sym} scale out`);
+    } catch (error) {
+      if (error instanceof DefinitiveOrderSubmissionError) {
+        await clearPendingOrderSubmission(scaleClientOrderId);
+        throw error;
+      }
+      if (!(error instanceof AmbiguousOrderSubmissionError)) throw error;
+      const brokerPosition = await getBrokerPositionSnapshot(pos.contractId, 5);
+      const expectedSign = pos.direction === "long" ? 1 : -1;
+      if (brokerPosition === null) {
+        for (const orderId of [pos.stopOrderId, pos.targetOrderId]) if (orderId) await cancelOrderUntilTerminal(orderId, `${sym} orphan protection`);
+        positions.delete(sym);
+        recentlyClosedAt.set(sym, Date.now());
+        await savePositions();
+        await clearPendingOrderSubmission(scaleClientOrderId);
+        log(`${sym}: ambiguous scale-out reconciled stably flat`);
+        return;
+      }
+      if (brokerPosition && Math.sign(brokerPosition.netPos) === expectedSign && Math.abs(brokerPosition.netPos) < pos.quantity) {
+        scaleFill = { status: "filled", price: brokerPosition.netPrice || price, qty: pos.quantity - Math.abs(brokerPosition.netPos) };
+        log(`${sym}: ambiguous scale-out reconciled from stable broker quantity (-${scaleFill.qty}x)`);
+      } else if (brokerPosition && Math.sign(brokerPosition.netPos) !== expectedSign) {
+        if (pos.stopOrderId) await cancelOrderUntilTerminal(pos.stopOrderId, `${sym} wrong-side stop after scale reversal`);
+        pos.direction = brokerPosition.netPos > 0 ? "long" : "short";
+        pos.quantity = Math.abs(brokerPosition.netPos);
+        pos.entryPrice = brokerPosition.netPrice || price;
+        pos.stopOrderId = null;
+        pos.targetOrderId = null;
+        await savePositionsForOrderRecovery();
+        await markPendingFlattenRequired(scaleClientOrderId);
+        notify(`🚨 ${MODE_TAG} ${sym}: ambiguous scale-out reversed the position. Automated flattening is continuing.`, "general");
+        await closePosition(sym, pos.entryPrice, "ambiguous_scale_reversal");
+        return;
+      } else if (brokerPosition && Math.sign(brokerPosition.netPos) === expectedSign && Math.abs(brokerPosition.netPos) === pos.quantity) {
+        await updatePendingOrderPhase(scaleClientOrderId, "rejected");
+        await clearPendingOrderSubmission(scaleClientOrderId);
+        log(`${sym}: ambiguous scale-out reconciled with unchanged broker quantity; no reduction recorded`);
+        return;
+      } else {
+        notify(`🚨 ${MODE_TAG} ${sym}: scale-out response remains ambiguous. Existing stop is retained and no duplicate order will be sent. Check broker now.`, "general");
+        return;
+      }
+    }
 
     // VERIFY THE SCALE ACTUALLY FILLED before mutating any state (2026-08-19).
     // This used to only *look up a price*: on a rejected scale order it fell through to
@@ -2658,9 +2780,10 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     // phantom half (leaving the OTHER half of a real position unprotected), booked profit into
     // dailyPnl that never happened, and had already cancelled the target. Now the fill is
     // authoritative — and a partial fill scales exactly what filled, never what was requested.
-    let scaleFill = await verifyOrderFill(scaleOrder.orderId, scaleQty);
+    if (!scaleFill && scaleOrderId) scaleFill = await verifyOrderFill(scaleOrderId, scaleQty);
+    if (!scaleFill) throw new Error(`${sym} scale-out has neither an order nor reconciled broker quantity`);
     if (scaleFill.status === "unknown") {
-      if (!await cancelOrderAndWaitForTerminal(scaleOrder.orderId)) {
+      if (!scaleOrderId || !await cancelOrderAndWaitForTerminal(scaleOrderId)) {
         log(`🚨 ${sym}: scale-out cancellation did not reach a terminal state; tracked quantity remains unchanged.`);
         notify(`🚨 ${MODE_TAG} ${sym}: scale-out still indeterminate. Check broker quantity and protection.`, "general");
         return;
@@ -2671,17 +2794,16 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         // Another exit flattened the position. Remove every leftover close-side order before it can
         // become a reverse entry, then remove local tracking. Fills are reconciled asynchronously.
         for (const orderId of [pos.stopOrderId, pos.targetOrderId]) {
-          if (orderId) await cancelOrderAndWaitForTerminal(orderId);
+          if (orderId) await cancelOrderUntilTerminal(orderId, `${sym} protection after indeterminate scale`);
         }
-        try {
-          const orders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
-          for (const order of orders.filter((item) => item.contractId === pos.contractId && ["Working", "Accepted"].includes(item.ordStatus))) {
-            await cancelOrderAndWaitForTerminal(order.id);
-          }
-        } catch { /* sync will retry orphan cleanup */ }
+        const orders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
+        for (const order of orders.filter((item) => item.contractId === pos.contractId && ["Working", "Accepted"].includes(item.ordStatus))) {
+          await cancelOrderUntilTerminal(order.id, `${sym} contract order after indeterminate scale`);
+        }
         positions.delete(sym);
         recentlyClosedAt.set(sym, Date.now());
         await savePositions();
+        await clearPendingOrderSubmission(scaleClientOrderId);
         log(`${sym}: indeterminate scale-out reconciled FLAT; remaining orders cancelled and tracking cleared.`);
         return;
       } else if (brokerPosition && Math.sign(brokerPosition.netPos) === expectedSign && Math.abs(brokerPosition.netPos) < pos.quantity) {
@@ -2691,6 +2813,17 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
           qty: pos.quantity - Math.abs(brokerPosition.netPos),
         };
         log(`${sym}: indeterminate scale-out reconciled from broker position (-${scaleFill.qty}x).`);
+      } else if (brokerPosition && Math.sign(brokerPosition.netPos) !== expectedSign) {
+        if (pos.stopOrderId) await cancelOrderUntilTerminal(pos.stopOrderId, `${sym} wrong-side stop after indeterminate scale`);
+        pos.direction = brokerPosition.netPos > 0 ? "long" : "short";
+        pos.quantity = Math.abs(brokerPosition.netPos);
+        pos.entryPrice = brokerPosition.netPrice || price;
+        pos.stopOrderId = null;
+        pos.targetOrderId = null;
+        await savePositionsForOrderRecovery();
+        await markPendingFlattenRequired(scaleClientOrderId);
+        await closePosition(sym, pos.entryPrice, "indeterminate_scale_reversal");
+        return;
       } else if (brokerPosition === undefined) {
         log(`🚨 ${sym}: scale-out state unresolved — not changing tracked quantity or stop size.`);
         notify(`🚨 ${MODE_TAG} ${sym}: scale-out state unresolved. Check broker quantity and stop size now.`, "general");
@@ -2703,6 +2836,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
       notify(`${MODE_TAG} ${sym}: scale-out did not fill (${why}) — position unchanged at ${pos.quantity}x, protected by its stop.`);
       pos.targetOrderId = null; // it WAS cancelled above; don't leave a stale id pointing at nothing
       await savePositions();
+      await clearPendingOrderSubmission(scaleClientOrderId);
       return;
     }
     const filledScaleQty = scaleFill.qty;
@@ -2718,12 +2852,43 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
 
     pos.quantity -= filledScaleQty;
     pos.scaledOut = true;
+    // The broker position is smaller now while the exchange stop still has the old full quantity.
+    // Persist the authoritative remainder, then resize and verify protection before any notification,
+    // journal, or accounting write can delay this critical section.
+    await savePositionsForOrderRecovery();
+    try {
+      const remStop = roundToTick(sym, pos.stopLoss);
+      if (pos.stopOrderId) {
+        await brokerMutationApiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
+          orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: remStop, isAutomated: true,
+        })});
+        const exactProtection = await protectionOrderMatches(pos.stopOrderId, {
+          contractId: pos.contractId,
+          action: pos.direction === "long" ? "Sell" : "Buy",
+          quantity: pos.quantity,
+          stopPrice: remStop,
+          tickSize: TICK_SIZES[sym] || 0.25,
+        });
+        if (!exactProtection) throw new Error("broker did not confirm the resized stop quantity and price");
+      } else throw new Error("verified stop disappeared during scale-out reconciliation");
+    } catch (error) {
+      log(`🚨 ${sym}: stop resize after scale-out failed (${error}); flattening the remainder to prevent an oversized stop reversal.`);
+      notify(`🚨 ${MODE_TAG} ${sym}: protection resize failed after scale-out. Flattening ${pos.quantity}x remainder.`, "general");
+      await savePositionsForOrderRecovery();
+      await markPendingFlattenRequired(scaleClientOrderId);
+      if (pos.stopOrderId) await cancelOrderUntilTerminal(pos.stopOrderId, `${sym} failed scale protection`);
+      pos.stopOrderId = null;
+      pos.targetOrderId = null;
+      await savePositionsForOrderRecovery();
+      await closePosition(sym, price, "protection_resize_failed");
+      return;
+    }
+    pos.targetOrderId = null; // target removed, trail handles exit
+
     dailyPnl += actualPnl;
     log(`${sym}: SCALE OUT ${filledScaleQty}x @ $${price.toFixed(2)} — locked in $${actualPnl.toFixed(0)}. ${pos.quantity}x remaining.`);
     notify(`SCALE OUT ${sym}: +$${actualPnl.toFixed(0)} locked (${filledScaleQty}x @ $${price.toFixed(2)}). ${pos.quantity}x trailing.`);
 
-
-    // Log to database
     try {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
@@ -2735,36 +2900,6 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
         orderId: null,
       }});
     } catch {}
-
-    // Resize the stop bracket to the remaining qty — modify IN PLACE (no cancel-then-place naked
-    // window); only place fresh if no stop is tracked.
-    try {
-      const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-      const remStop = roundToTick(sym, pos.stopLoss);
-      if (pos.stopOrderId) {
-        await apiFetch("/order/modifyorder", { method: "POST", body: JSON.stringify({
-          orderId: pos.stopOrderId, orderType: "Stop", orderQty: pos.quantity, stopPrice: remStop, isAutomated: true,
-        })});
-      } else {
-        const accounts2 = await apiFetch("/account/list") as { id: number; name: string }[];
-        const acct2 = accounts2.find(a => a.id === accountId) || accounts2[0];
-        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
-          accountSpec: acct2.name, accountId, action: closeSide, symbol: pos.contractId,
-          orderQty: pos.quantity, orderType: "Stop", stopPrice: remStop, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        pos.stopOrderId = s.orderId;
-      }
-    } catch (error) {
-      log(`🚨 ${sym}: stop resize after scale-out failed (${error}); flattening the remainder to prevent an oversized stop reversal.`);
-      notify(`🚨 ${MODE_TAG} ${sym}: protection resize failed after scale-out. Flattening ${pos.quantity}x remainder.`, "general");
-      if (pos.stopOrderId) await cancelOrderAndWaitForTerminal(pos.stopOrderId);
-      pos.stopOrderId = null;
-      pos.targetOrderId = null;
-      await savePositions();
-      await closePosition(sym, price, "protection_resize_failed");
-      return;
-    }
-    pos.targetOrderId = null; // target removed, trail handles exit
 
     // Log scale-out to Obsidian vault (learning loop)
     try {
@@ -2789,6 +2924,7 @@ async function scaleOutPosition(sym: string, price: number, scaleQty: number) {
     } catch { /* vault optional */ }
 
     await savePositions();
+    await clearPendingOrderSubmission(scaleClientOrderId);
   } catch (err) { log(`Scale out failed ${sym}: ${err}`); }
 }
 
@@ -3007,6 +3143,7 @@ const recentlyClosedAt = new Map<string, number>(); // sym → epoch ms of last 
 const RECENTLY_CLOSED_TTL = 5 * 60_000; // 5 minutes
 
 async function closePosition(sym: string, price: number, reason: string, brokerAlreadyFlat = false) {
+  if (!hasValidEngineLease()) return;
   // Prevent double-close: if another close is already in progress, skip
   if (closingLocks.get(sym)) {
     log(`${sym}: Close already in progress (${reason}) — skipping duplicate`);
@@ -3121,6 +3258,19 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
   };
 
   if (positionAlreadyClosed) {
+    // Cancellation can race a late bracket fill into a reversal. Persist the flatten intent before
+    // touching either leg so a crash or lease handoff cannot lose ownership of that exposure.
+    const cleanupClientOrderId = `FRT-CLOSE-${ENGINE_MODE}-${sym}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await reservePendingOrderSubmission({
+      clOrdId: cleanupClientOrderId,
+      label: `${sym} flat cleanup`,
+      kind: "close",
+      symbol: sym,
+      contractId: pos.contractId,
+      createdAt: new Date().toISOString(),
+      phase: "reserved",
+      ownerId: ORDER_OWNER_ID,
+    });
     // Bracket already closed the position — cancel any remaining bracket orders
     if (!await cancelAllOrdersForContract()) {
       log(`[CLOSE] CRITICAL: ${sym} is flat but a sibling/orphan order could not be confirmed canceled; retaining local tracking`);
@@ -3152,9 +3302,17 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
       await closePosition(sym, pos.entryPrice, "late_bracket_reversal");
       return;
     }
+    await clearPendingOrderSubmission(cleanupClientOrderId);
   } else {
     // Position still open — close it manually with retry
+    let directionBeforeAttempt = pos.direction;
     for (let attempt = 1; ; attempt++) {
+      if (!hasValidEngineLease()) {
+        log(`[CLOSE] ${sym}: lease expired before attempt ${attempt}; durable recovery retained for the next owner`);
+        closingLocks.delete(sym);
+        return;
+      }
+      directionBeforeAttempt = pos.direction;
       try {
         // Resolve account identity before the final broker snapshot so no avoidable network round
         // trip reopens the stop-fill race between "position exists" and close submission.
@@ -3168,6 +3326,21 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         // Prepare authentication before the final broker snapshot. Close orders, like entries, must
         // not authenticate or rate-limit-retry after their quantity was verified.
         const closeToken = await authenticate();
+
+        // Persist close ownership BEFORE canceling brackets. If cancellation, the broker snapshot,
+        // or the lease fails afterward, startup sees this reserved close and safely reconciles the
+        // account instead of trusting stale local stop IDs.
+        const closeClientOrderId = `FRT-CLOSE-${ENGINE_MODE}-${sym}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await reservePendingOrderSubmission({
+          clOrdId: closeClientOrderId,
+          label: `${sym} close`,
+          kind: "close",
+          symbol: sym,
+          contractId: pos.contractId,
+          createdAt: new Date().toISOString(),
+          phase: "reserved",
+          ownerId: ORDER_OWNER_ID,
+        });
 
         // Cancel ALL bracket/working orders for this contract
         if (!await cancelAllOrdersForContract()) {
@@ -3189,6 +3362,7 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         }
         if (brokerBeforeClose === null) {
           log(`[CLOSE] ${sym}: bracket filled during cancellation; broker is flat and no close order is needed.`);
+          await clearPendingOrderSubmission(closeClientOrderId);
           break;
         }
         const brokerDirection = brokerBeforeClose.netPos > 0 ? "long" : "short";
@@ -3210,23 +3384,14 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         }
 
         const quantityBeforeAttempt = pos.quantity;
-        const closeClientOrderId = `FRT-CLOSE-${ENGINE_MODE}-${sym}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        await reservePendingOrderSubmission({
-          clOrdId: closeClientOrderId,
-          label: `${sym} close`,
-          kind: "close",
-          symbol: sym,
-          contractId: pos.contractId,
-          createdAt: new Date().toISOString(),
-          phase: "reserved",
-          ownerId: ORDER_OWNER_ID,
-        });
         const brokerAtSend = await getBrokerPositionSnapshot(pos.contractId, 3);
         if (!brokerAtSend || brokerAtSend.netPos !== brokerBeforeClose.netPos) {
           await updatePendingOrderPhase(closeClientOrderId, "rejected");
           throw new Error(`${sym} broker position changed while close intent was persisted`);
         }
-        await updatePendingOrderPhase(closeClientOrderId, "sent");
+        if (!await authorizePendingOrderAndMarkSent(closeClientOrderId)) {
+          throw new Error(`${sym} close lease lost before broker send`);
+        }
         const closeResponsePromise = fetch(`${ORDER_API}/order/placeorder`, {
           method: "POST",
           body: JSON.stringify({
@@ -3280,10 +3445,16 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           await savePositionsForOrderRecovery();
           log(`[CLOSE] ${sym}: broker position did not shrink after terminal close; no duplicate close will be sent.`);
           if (stopLossIsValidated) {
-            await restoreProtectiveStop(remainingQty);
-            closingLocks.delete(sym);
-            return;
+            await updatePendingOrderPhase(closeClientOrderId, "rejected");
+            const restored = await restoreProtectiveStop(remainingQty);
+            if (restored) {
+              closingLocks.delete(sym);
+              return;
+            }
+            await ensurePendingFlattenRequired(sym, pos.contractId, `${sym} flatten after failed stop restore`);
+            throw new Error(`replacement protection failed for unchanged ${remainingDirection} ${remainingQty}x remainder`);
           }
+          await markPendingFlattenRequired(closeClientOrderId);
           throw new Error(`unintended reversal remains ${remainingDirection} ${remainingQty}x`);
         } else {
           log(`[CLOSE] ${sym}: broker confirms partial close ${quantityBeforeAttempt - remainingQty}/${quantityBeforeAttempt}; retrying ${remainingQty}x remainder.`);
@@ -3294,9 +3465,56 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         pos.stopOrderId = null;
         pos.targetOrderId = null;
         await savePositionsForOrderRecovery();
+        // The terminal order left exposure. Keep a durable flatten handoff across the retry gap so
+        // a crash or lease expiry cannot strand the naked remainder without startup recovery.
+        await markPendingFlattenRequired(closeClientOrderId);
         throw new Error(`broker remainder ${remainingDirection} ${remainingQty}x after close`);
     } catch (err) {
       log(`[CLOSE] Attempt ${attempt} failed for ${sym}: ${err}`);
+      if (err instanceof DefinitiveOrderSubmissionError && activePendingOrderSubmission?.kind === "close"
+        && activePendingOrderSubmission.phase === "sent") {
+        await updatePendingOrderPhase(activePendingOrderSubmission.clOrdId, "rejected");
+      }
+      if (err instanceof AmbiguousOrderSubmissionError) {
+        const brokerAfterAmbiguousClose = await getBrokerPositionSnapshot(pos.contractId, 5);
+        if (brokerAfterAmbiguousClose === null) {
+          await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
+          log(`[CLOSE] ${sym}: ambiguous response reconciled stably flat`);
+          break;
+        }
+        if (brokerAfterAmbiguousClose === undefined) {
+          notify(`🚨 ${MODE_TAG} ${sym}: close response is ambiguous and broker position is unavailable. Durable recovery retained; check broker now.`, "general");
+          closingLocks.delete(sym);
+          return;
+        }
+        const remainingDirection = brokerAfterAmbiguousClose.netPos > 0 ? "long" : "short";
+        pos.direction = remainingDirection;
+        pos.quantity = Math.abs(brokerAfterAmbiguousClose.netPos);
+        pos.entryPrice = brokerAfterAmbiguousClose.netPrice || pos.entryPrice;
+        pos.stopOrderId = null;
+        pos.targetOrderId = null;
+        await savePositionsForOrderRecovery();
+        if (remainingDirection === directionBeforeAttempt) {
+          await updatePendingOrderPhase(activePendingOrderSubmission?.clOrdId || "", "rejected");
+          const restored = await restoreProtectiveStop(pos.quantity);
+          log(`[CLOSE] ${sym}: ambiguous close left ${pos.quantity}x; protective stop restore ${restored ? "confirmed" : "unresolved"}`);
+          if (!restored) {
+            await ensurePendingFlattenRequired(sym, pos.contractId, `${sym} flatten after failed stop restore`);
+            closingLocks.delete(sym);
+            await closePosition(sym, pos.entryPrice, "ambiguous_close_unprotected");
+            return;
+          }
+        } else {
+          const ambiguousId = activePendingOrderSubmission?.clOrdId || "";
+          await markPendingFlattenRequired(ambiguousId);
+          notify(`🚨 ${MODE_TAG} ${sym}: ambiguous close left a reversed position. Automated flattening is continuing.`, "general");
+          closingLocks.delete(sym);
+          await closePosition(sym, pos.entryPrice, "ambiguous_close_reversal");
+          return;
+        }
+        closingLocks.delete(sym);
+        return;
+      }
       if (attempt % 3 === 0) {
         log(`[CLOSE] CRITICAL: Could not close ${sym} after ${attempt} attempts; entries remain blocked and flattening continues`);
         // Persist failed close to database — survives restarts, visible on dashboard
@@ -3328,14 +3546,18 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           await savePositions();
           if (stopLossIsValidated) {
             const restored = await restoreProtectiveStop(pos.quantity);
-            if (!restored) log(`[CLOSE] ${sym}: replacement protection remains unresolved; flattening retries continue`);
-            closingLocks.delete(sym);
-            return;
+            if (restored) {
+              closingLocks.delete(sym);
+              return;
+            }
+            log(`[CLOSE] ${sym}: replacement protection remains unresolved; flattening retries continue`);
+            await ensurePendingFlattenRequired(sym, pos.contractId, `${sym} flatten after repeated close failure`);
           } else {
             notify(`🚨 ${MODE_TAG} ${sym}: unintended reverse position remains. Automated flattening is continuing without submitting new entries.`, "general");
           }
         } else if (confirmedRemainder === null) {
           log(`[CLOSE] ${sym}: broker confirms flat after failed close attempts.`);
+          await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
           break;
         } else {
           notify(`🚨 ${MODE_TAG} ${sym}: broker state remains unavailable after failed close. Automated reconciliation continues.`, "general");
@@ -4350,6 +4572,27 @@ async function protectionOrderStatus(orderId: number): Promise<"active" | "fille
   return "unknown";
 }
 
+async function protectionOrderMatches(
+  orderId: number,
+  expected: { contractId: number; action: "Buy" | "Sell"; quantity: number; stopPrice: number; tickSize: number },
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 300 : 500));
+    try {
+      const order = await apiFetch(`/order/item?id=${orderId}`) as {
+        ordStatus?: string; contractId?: number; action?: string; orderQty?: number; stopPrice?: number;
+      };
+      if (["Rejected", "Canceled", "Expired", "Filled"].includes(order.ordStatus || "")) return false;
+      if ((order.ordStatus === "Working" || order.ordStatus === "Accepted")
+        && Number(order.contractId) === expected.contractId
+        && order.action === expected.action
+        && Number(order.orderQty) === expected.quantity
+        && Math.abs(Number(order.stopPrice) - expected.stopPrice) <= expected.tickSize / 10) return true;
+    } catch { /* retry exact broker verification */ }
+  }
+  return false;
+}
+
 // Verify an entry order actually filled before we commit a tracked position and rest
 // protective stop/target orders. SAFETY-BIASED: only reports "rejected" when positively
 // confirmed (order in a terminal non-filled state AND no fill exists). Any uncertainty
@@ -4399,8 +4642,9 @@ async function verifyOrderFill(orderId: number, requestedQty: number): Promise<
 }
 
 async function cancelOrderAndWaitForTerminal(orderId: number): Promise<boolean> {
+  if (!hasValidEngineLease()) return false;
   try {
-    await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId }) });
+    await brokerMutationApiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId }) });
   } catch { /* the order may already be terminal */ }
   for (let attempt = 0; attempt < 8; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -4414,7 +4658,9 @@ async function cancelOrderAndWaitForTerminal(orderId: number): Promise<boolean> 
 
 async function cancelOrderUntilTerminal(orderId: number, label: string): Promise<void> {
   let alerted = false;
-  while (!await cancelOrderAndWaitForTerminal(orderId)) {
+  while (true) {
+    if (!hasValidEngineLease()) throw new Error(`${label}: engine lease expired during cancellation`);
+    if (await cancelOrderAndWaitForTerminal(orderId)) return;
     if (!alerted) {
       alerted = true;
       notify(`🚨 ${MODE_TAG} ${label}: order #${orderId} is still indeterminate. New action is blocked until broker confirms terminal.`, "general");
@@ -4437,6 +4683,7 @@ async function findOrderIdByClientId(clOrdId: string, attempts = 6): Promise<num
 }
 
 class DefinitiveOrderSubmissionError extends Error {}
+class AmbiguousOrderSubmissionError extends Error {}
 
 async function reservePendingOrderSubmission(pending: PendingOrderSubmission): Promise<void> {
   if (pendingOrderReservationInFlight || (activePendingOrderSubmission
@@ -4451,7 +4698,12 @@ async function reservePendingOrderSubmission(pending: PendingOrderSubmission): P
       const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
       if (row?.value) {
         const existing = JSON.parse(row.value) as PendingOrderSubmission;
-        const replaceOwnedSymbol = existing.ownerId === ORDER_OWNER_ID && existing.symbol === pending.symbol;
+        const replaceOwnedSymbol = existing.ownerId === ORDER_OWNER_ID
+          && existing.symbol === pending.symbol
+          && ((pending.kind === "stop" && (existing.kind === "entry" || (existing.kind === "close" && existing.phase === "rejected")))
+            || (pending.kind === "stop" && existing.kind === "stop" && existing.phase === "rejected")
+            || (pending.kind === "close" && existing.kind === "close"
+              && (existing.phase === "reserved" || existing.phase === "rejected")));
         if (existing.clOrdId !== pending.clOrdId && !replaceOwnedSymbol) {
           throw new Error(`durable order submission blocked by ${existing.label} owned by ${existing.ownerId}`);
         }
@@ -4485,7 +4737,71 @@ async function updatePendingOrderPhase(clOrdId: string, phase: PendingOrderSubmi
   activePendingOrderSubmission = updated;
 }
 
+async function markPendingFlattenRequired(clOrdId: string): Promise<void> {
+  if (activePendingOrderSubmission?.clOrdId !== clOrdId) throw new Error(`cannot transition unowned ${clOrdId} to flatten-required`);
+  const updated: PendingOrderSubmission = {
+    ...activePendingOrderSubmission,
+    label: `${activePendingOrderSubmission.symbol} flatten required`,
+    kind: "close",
+    phase: "reserved",
+  };
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
+    const stored = row?.value ? JSON.parse(row.value) as PendingOrderSubmission : null;
+    if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID) throw new Error(`flatten handoff ownership changed for ${clOrdId}`);
+    await tx.agentConfig.update({ where: { key: PENDING_ORDER_KEY }, data: { value: JSON.stringify(updated) } });
+  });
+  activePendingOrderSubmission = updated;
+}
+
+async function ensurePendingFlattenRequired(symbol: string, contractId: number, label: string): Promise<void> {
+  if (activePendingOrderSubmission) {
+    if (activePendingOrderSubmission.symbol !== symbol) {
+      throw new Error(`${label}: blocked by ${activePendingOrderSubmission.label}`);
+    }
+    await markPendingFlattenRequired(activePendingOrderSubmission.clOrdId);
+    return;
+  }
+  await reservePendingOrderSubmission({
+    clOrdId: `FRT-FLATTEN-${ENGINE_MODE}-${symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    label,
+    kind: "close",
+    symbol,
+    contractId,
+    createdAt: new Date().toISOString(),
+    phase: "reserved",
+    ownerId: ORDER_OWNER_ID,
+  });
+}
+
+async function authorizePendingOrderAndMarkSent(clOrdId: string): Promise<boolean> {
+  if (!hasValidEngineLease()) return false;
+  const sent = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    const [pendingRow, heartbeatRow] = await Promise.all([
+      tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } }),
+      tx.agentConfig.findUnique({ where: { key: HEARTBEAT_KEY } }),
+    ]);
+    const stored = pendingRow?.value ? JSON.parse(pendingRow.value) as PendingOrderSubmission : null;
+    const heartbeat = heartbeatRow?.value
+      ? JSON.parse(heartbeatRow.value) as { timestamp?: string; startedAt?: string; deploymentId?: string | null }
+      : null;
+    const heartbeatOwner = heartbeat?.startedAt ? `${heartbeat.deploymentId || "local"}:${heartbeat.startedAt}` : "";
+    const heartbeatAge = Date.now() - Date.parse(heartbeat?.timestamp || "");
+    if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID || stored.phase !== "reserved"
+      || heartbeatOwner !== ORDER_OWNER_ID || !Number.isFinite(heartbeatAge) || heartbeatAge < 0 || heartbeatAge >= 75_000) return null;
+    const updated = { ...stored, phase: "sent" as const };
+    await tx.agentConfig.update({ where: { key: PENDING_ORDER_KEY }, data: { value: JSON.stringify(updated) } });
+    return updated;
+  });
+  if (!sent) return false;
+  activePendingOrderSubmission = sent;
+  return true;
+}
+
 async function authorizePendingEntryAndMarkSent(clOrdId: string): Promise<boolean> {
+  if (!hasValidEngineLease()) return false;
   const updated = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
     const [pendingRow, gateRow, heartbeatRow] = await Promise.all([
@@ -4502,9 +4818,12 @@ async function authorizePendingEntryAndMarkSent(clOrdId: string): Promise<boolea
       : null;
     const heartbeatOwner = heartbeat?.startedAt ? `${heartbeat.deploymentId || "local"}:${heartbeat.startedAt}` : "";
     const heartbeatAge = Date.now() - Date.parse(heartbeat?.timestamp || "");
-    const anotherGenerationIsActive = heartbeatOwner !== "" && heartbeatOwner !== ORDER_OWNER_ID
-      && Number.isFinite(heartbeatAge) && heartbeatAge < 90_000;
-    const gateAllowed = !anotherGenerationIsActive
+    // Entries require this exact generation to own a freshly committed heartbeat. Merely proving
+    // that no other generation is fresh is insufficient because a stale process could otherwise
+    // submit during the 15-second gap before standby takeover.
+    const ownsFreshHeartbeat = heartbeatOwner === ORDER_OWNER_ID
+      && Number.isFinite(heartbeatAge) && heartbeatAge >= 0 && heartbeatAge < 75_000;
+    const gateAllowed = ownsFreshHeartbeat
       && gateRow?.value !== "disabled" && (!IS_LIVE || gateRow?.value === "live");
     if (!gateAllowed) return null;
     const sent = { ...stored, phase: "sent" as const };
@@ -4560,18 +4879,15 @@ async function resolveSubmittedOrder(
     }
     log(`🚨 ${label}: response ambiguous (${error}); blocking until broker order ${clOrdId} is recovered`);
     notify(`🚨 ${MODE_TAG} ${label}: broker response was lost. New submissions are blocked while order ${clOrdId} is recovered.`, "general");
-    // A bounded timeout cannot prove a command never reached the broker. Keep ownership of this
-    // submission indefinitely. The durable pending record lets startup resume this exact clOrdId.
-    let lastWaitLogAt = 0;
-    while (true) {
+    // Observe the exact client id for a bounded period, then hand control back to the caller for a
+    // stable broker-position reconciliation. Waiting forever is unsafe after brackets were removed.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
       const recovered = await findOrderIdByClientId(clOrdId, 3);
       if (recovered) return recovered;
-      if (Date.now() - lastWaitLogAt >= 60_000) {
-        lastWaitLogAt = Date.now();
-        log(`[ORDER RECOVERY] ${label}: still waiting for ${clOrdId}; no retry will be submitted`);
-      }
       await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
+    throw new AmbiguousOrderSubmissionError(`${label}: ${clOrdId} did not appear within the recovery window`);
   }
 }
 
@@ -4594,7 +4910,7 @@ async function submitRecoverableOrder(
     phase: "reserved",
     ownerId: ORDER_OWNER_ID,
   });
-  await updatePendingOrderPhase(clOrdId, "sent");
+  if (!await authorizePendingOrderAndMarkSent(clOrdId)) throw new Error(`${label}: engine lease lost before broker send`);
   const responsePromise = fetch(`${ORDER_API}/order/placeorder`, {
     method: "POST",
     body: JSON.stringify({ ...body, clOrdId }),
@@ -4657,6 +4973,7 @@ async function recoverPendingOrderSubmissionOnStartup(): Promise<void> {
     const pos = positions.get(pending.symbol);
     if (!pos) throw new Error(`${pending.label} left an unprotected broker position that startup could not adopt`);
     log(`[ORDER RECOVERY] ${pending.label} was not safely active; flattening before startup completes`);
+    await markPendingFlattenRequired(pending.clOrdId);
     await closePosition(pending.symbol, brokerPosition.netPrice || pos.entryPrice, "startup_unsent_order_recovery");
     return;
   }
@@ -4684,7 +5001,7 @@ async function recoverPendingOrderSubmissionOnStartup(): Promise<void> {
             log(`[ORDER RECOVERY] ${pending.label}: missing optional target cleared; active stop #${pos.stopOrderId} remains`);
             return;
           }
-          await updatePendingOrderPhase(pending.clOrdId, "rejected");
+          await markPendingFlattenRequired(pending.clOrdId);
           log(`[ORDER RECOVERY] ${pending.label}: no broker order appeared after 60s while exposure remains; flattening fail-closed`);
           await closePosition(pending.symbol, brokerPosition.netPrice || pos.entryPrice, "startup_missing_order_recovery");
           return;
@@ -4729,6 +5046,7 @@ async function recoverPendingOrderSubmissionOnStartup(): Promise<void> {
   const pos = positions.get(pending.symbol);
   if (!pos) throw new Error(`${pending.label} left a broker position that startup could not adopt`);
   log(`[ORDER RECOVERY] ${pending.label} left ${brokerPosition.netPos} contract(s); flattening before startup completes`);
+  await markPendingFlattenRequired(pending.clOrdId);
   await closePosition(pending.symbol, brokerPosition.netPrice || pos.entryPrice, "startup_order_recovery");
 }
 
@@ -5015,17 +5333,18 @@ async function evaluateAndTrade(
 // ── Trade Execution ─────────────────────────────────────
 
 // Phase-0 execution-quality capture (intended vs actual fill, slippage, latency). Fully isolated — never throws into trading.
-async function logExecutionQuality(e: { mode: string; sym: string; side: string; intended: number; fill: number; qty: number; latencyMs: number; status: string; edgeKey?: string }) {
+async function logExecutionQuality(e: { mode: string; sym: string; side: string; intended: number; fill: number; qty: number; latencyMs: number; status: string; edgeKey?: string; orderId?: number | null }) {
   try {
     await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS execution_quality (id serial PRIMARY KEY, ts timestamptz DEFAULT now(), mode text, symbol text, side text, intended double precision, fill double precision, slippage double precision, qty int, latency_ms int, status text)`);
-    await prisma.$executeRawUnsafe(`ALTER TABLE execution_quality ADD COLUMN IF NOT EXISTS edge_key text, ADD COLUMN IF NOT EXISTS strategy_version text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE execution_quality ADD COLUMN IF NOT EXISTS edge_key text, ADD COLUMN IF NOT EXISTS strategy_version text, ADD COLUMN IF NOT EXISTS order_id text`);
     const slip = e.side === "Buy" ? (e.fill - e.intended) : (e.intended - e.fill);   // + = adverse (paid up)
-    await prisma.$executeRawUnsafe(`INSERT INTO execution_quality(mode,symbol,side,intended,fill,slippage,qty,latency_ms,status,edge_key,strategy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, e.mode, e.sym, e.side, e.intended, e.fill, slip, e.qty, e.latencyMs, e.status, e.edgeKey ?? null, STRATEGY_VERSION);
+    await prisma.$executeRawUnsafe(`INSERT INTO execution_quality(mode,symbol,side,intended,fill,slippage,qty,latency_ms,status,edge_key,strategy_version,order_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, e.mode, e.sym, e.side, e.intended, e.fill, slip, e.qty, e.latencyMs, e.status, e.edgeKey ?? null, STRATEGY_VERSION, e.orderId ? String(e.orderId) : null);
     log(`[EXEC-Q] ${e.sym} ${e.side} intended ${e.intended.toFixed(2)} fill ${e.fill.toFixed(2)} slip ${slip.toFixed(2)} lat ${e.latencyMs}ms ${e.status}`);
   } catch { /* telemetry must never affect trading */ }
 }
 
 async function executeTrade(sym: string, direction: "long" | "short", price: number, stopDist: number, targetDist: number, sizeMult: number, confidenceScore: number, reasoning: string, setupContext?: { rsi: number; vwap: number; trend15m: string; dayType: string; session: string; setupType: string }) {
+  if (!hasValidEngineLease()) return;
   const contract = contracts.get(sym);
   if (!contract) return;
   const executionEdgeKey = reasoning.match(/Edge:\s*([a-z0-9_]+)/i)?.[1];
@@ -5309,7 +5628,21 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       entryOrderId = await resolveSubmittedOrder(entryResponsePromise, entryClientOrderId, `${sym} entry`);
     } catch (error) {
       if (error instanceof DefinitiveOrderSubmissionError) await clearPendingOrderSubmission(entryClientOrderId);
-      throw error;
+      if (!(error instanceof AmbiguousOrderSubmissionError)) throw error;
+      const brokerPosition = await getBrokerPositionSnapshot(contract.id, 5);
+      const resolution = reconcileBrokerPosition(direction as "long" | "short", 0, brokerPosition);
+      if (resolution.status === "increased") {
+        fillResult = { status: "filled", price: resolution.netPrice > 0 ? resolution.netPrice : price, qty: resolution.quantity };
+        log(`  ${sym}: ambiguous entry reconciled from stable broker position (${fillResult.qty}x @ $${fillResult.price.toFixed(2)})`);
+      } else if (resolution.status === "flat") {
+        await clearPendingOrderSubmission(entryClientOrderId);
+        log(`  ${sym}: ambiguous entry reconciled stably flat; no position was opened`);
+        return;
+      } else {
+        log(`  🚨 ${sym}: ambiguous entry remains unresolved; durable recovery retained and entries remain blocked`);
+        notify(`🚨 ${MODE_TAG} ${sym}: entry response and broker position are unresolved. Check broker now.`, "general");
+        return;
+      }
     }
     if (useLimit) log(`  ENTRY as marketable LIMIT ${limitPrice} (signal ${price.toFixed(2)}, cap ${entryCap.toFixed(2)} pts = ${(entryCap / tick).toFixed(0)} ticks / $${(entryCap * (CONTRACT_MULTIPLIERS[sym] || 5)).toFixed(2)} per contract), IOC`);
 
@@ -5390,7 +5723,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       targetPrice = roundToTick(sym, direction === "long" ? entryPrice + targetDist : entryPrice - targetDist);
     }
     // EXECUTION TELEMETRY (Phase 0) — fire-and-forget; isolated so it can never affect the order
-    void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: entryPrice, qty: fillQty, latencyMs: Date.now() - submitTs, status: fillResult.status, edgeKey: executionEdgeKey });
+    void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: entryPrice, qty: fillQty, latencyMs: Date.now() - submitTs, status: fillResult.status, edgeKey: executionEdgeKey, orderId: entryOrderId });
 
     // Protective STOP — retry once; for a real position this is non-negotiable.
     // Track and persist the confirmed fill BEFORE placing protection. A stop can fill immediately;
@@ -5451,6 +5784,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
         if (protectionStatus === "filled") {
           log(`  ${sym}: protective stop #${submittedStopId} filled immediately; entry is no longer open`);
           notify(`${MODE_TAG} ${sym}: protective stop filled immediately after entry. Recording the completed trade now.`);
+          await ensurePendingFlattenRequired(sym, contract.id, `${sym} cleanup after immediate stop fill`);
           await closePosition(sym, stopPrice, "stop_loss", true);
           if (!positions.has(sym)) await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
           return;
@@ -5459,6 +5793,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
           const brokerPosition = await getBrokerPositionSnapshot(contract.id, 3);
           if (brokerPosition === null) {
             log(`  ${sym}: stop status unknown but broker is flat; recording the completed trade`);
+            await ensurePendingFlattenRequired(sym, contract.id, `${sym} cleanup after unverified stop`);
             await closePosition(sym, stopPrice, "protection_flat", true);
             if (!positions.has(sym)) await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
             return;
@@ -5470,6 +5805,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
           }
           log(`  🚨 ${sym}: stop #${submittedStopId} status unverified while position remains open; flattening fail-closed`);
           notify(`🚨 ${MODE_TAG} ${sym}: broker stop could not be verified. Flattening the entry now.`, "general");
+          await ensurePendingFlattenRequired(sym, contract.id, `${sym} flatten after unverified stop`);
           await closePosition(sym, brokerPosition.netPrice || entryPrice, "protection_unverified");
           return;
         }
@@ -5484,6 +5820,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     if (stopOrderId === null && fillConfirmed) {
       log(`  🚨 STOP PLACEMENT FAILED for ${sym} — flattening ${fillQty}x entry to avoid a naked position`);
       notify(`🚨 ${MODE_TAG} ${sym}: stop order FAILED — flattening entry (no naked position)`);
+      await ensurePendingFlattenRequired(sym, contract.id, `${sym} flatten after stop placement failure`);
       await closePosition(sym, entryPrice, "stop_placement_failed");
       return;
     }
@@ -5533,12 +5870,13 @@ async function writeHeartbeat() {
   try {
     await refreshLiveMirrorEquity();
     const sizingEquity = riskSizingEquity();
+    const heartbeatTimestamp = Date.now();
     const payload = JSON.stringify({
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(heartbeatTimestamp).toISOString(),
       startedAt: ENGINE_STARTED_AT,
       strategyVersion: STRATEGY_VERSION,
       deploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
-      ready: engineReady,
+      ready: engineReady && hasValidEngineLease(),
       registeredEdges: REALTIME_EDGES.length,
       enabledEdges: REALTIME_EDGES
         .filter((edge) => isEdgeEnabled(edge.key, ENGINE_MODE, edgeFlags))
@@ -5548,6 +5886,9 @@ async function writeHeartbeat() {
       liveTradingArmed: IS_LIVE ? LIVE_TRADING_ARMED : false,
       operatorTradingEnabled: futuresTradingEnabled,
       riskConfigHealthy,
+      entryAuthorizationReady: hasValidEngineLease() && engineReady && riskConfigHealthy && futuresTradingEnabled
+        && riskSizingEquity() > 0 && (!IS_LIVE || LIVE_TRADING_ARMED)
+        && REALTIME_EDGES.some((edge) => isEdgeEnabled(edge.key, ENGINE_MODE, edgeFlags)),
       positions: positions.size,
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
@@ -5588,21 +5929,39 @@ async function writeHeartbeat() {
       return true;
     });
     if (!heartbeatWritten) {
+      ownsEngineLease = false;
+      engineLeaseValidUntil = 0;
       futuresTradingEnabled = false;
-      log(`[HEARTBEAT] Prior ${MODE_TAG} generation still owns the lease; this process remains entry-disabled`);
-    }
+      log(`[HEARTBEAT] Prior ${MODE_TAG} generation still owns the lease; this process remains observation-only`);
+    } else if (!ownsEngineLease && !engineLeaseActivationInFlight) {
+      ownsEngineLease = true;
+      engineLeaseValidUntil = heartbeatTimestamp + 75_000;
+      engineLeaseActivationInFlight = true;
+      engineReady = false;
+      try {
+        await loadPositions();
+        await recoverPendingOrderSubmissionOnStartup();
+        engineReady = true;
+        log(`[HEARTBEAT] ${MODE_TAG} lease acquired; broker position management is now active`);
+      } finally {
+        engineLeaseActivationInFlight = false;
+      }
+    } else engineLeaseValidUntil = heartbeatTimestamp + 75_000;
     // Persist the tilt/trade-count circuit breaker so a deploy cannot silently re-arm an engine that
     // stopped itself. Written every heartbeat (cheap upsert) rather than only on change, so it can
     // never be missed. Restored on startup — see the [STARTUP] Tilt state block.
-    await prisma.agentConfig.upsert({
+    if (ownsEngineLease) await prisma.agentConfig.upsert({
       where: { key: `futures_tilt_state_${ENGINE_MODE}` },
       update: { value: JSON.stringify({ date: getETDateString(), consecutiveStops, pauseUntil: tiltPauseUntil === Infinity ? "Infinity" : tiltPauseUntil, trades: dailyTradeCount }) },
       create: { key: `futures_tilt_state_${ENGINE_MODE}`, value: JSON.stringify({ date: getETDateString(), consecutiveStops, pauseUntil: tiltPauseUntil === Infinity ? "Infinity" : tiltPauseUntil, trades: dailyTradeCount }) },
     }).catch(() => {});
 
     // Also persist position state (trailing stops, breakeven flags) every heartbeat
-    if (positions.size > 0) await savePositions();
+    if (ownsEngineLease && positions.size > 0) await savePositions();
   } catch (error) {
+    ownsEngineLease = false;
+    engineLeaseValidUntil = 0;
+    engineReady = false;
     futuresTradingEnabled = false;
     log(`[HEARTBEAT] Write failed; entries disabled: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -5611,7 +5970,7 @@ async function writeHeartbeat() {
 // ── Position Sync ───────────────────────────────────────
 
 async function syncPositions() {
-  if (syncInFlight) return; // another reconcile is mid-flight — don't overlap (would double-cancel/double-log)
+  if (!hasValidEngineLease() || syncInFlight) return; // only an unexpired heartbeat lease owner may mutate broker/local position state
   syncInFlight = true;
   try {
     const tvPos = await apiFetch("/position/list") as { contractId: number; netPos: number; netPrice: number; timestamp: string }[];
@@ -5639,10 +5998,12 @@ async function syncPositions() {
         if (closingLocks.get(sym)) continue; // a close is already tearing this position down
         if (stopMoveLocks.get(sym)) continue; // a trail/breakeven modify is mid-flight — its stop id may be transiently terminal
         if (isFilled(pos.stopOrderId, pos.contractId) && isResting(pos.targetOrderId, pos.contractId)) {
-          try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.targetOrderId }) }); log(`OCO: ${sym} stop filled → cancelled orphan target #${pos.targetOrderId}`); } catch (e) { log(`OCO: ${sym} failed to cancel orphan target #${pos.targetOrderId}: ${e}`); }
+          await cancelOrderUntilTerminal(pos.targetOrderId!, `${sym} orphan target after stop fill`);
+          log(`OCO: ${sym} stop filled → confirmed orphan target #${pos.targetOrderId} terminal`);
           pos.targetOrderId = null;
         } else if (isFilled(pos.targetOrderId, pos.contractId) && isResting(pos.stopOrderId, pos.contractId)) {
-          try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: pos.stopOrderId }) }); log(`OCO: ${sym} target filled → cancelled orphan stop #${pos.stopOrderId}`); } catch (e) { log(`OCO: ${sym} failed to cancel orphan stop #${pos.stopOrderId}: ${e}`); }
+          await cancelOrderUntilTerminal(pos.stopOrderId!, `${sym} orphan stop after target fill`);
+          log(`OCO: ${sym} target filled → confirmed orphan stop #${pos.stopOrderId} terminal`);
           pos.stopOrderId = null;
         }
       }
@@ -5668,114 +6029,10 @@ async function syncPositions() {
         syncMissCount.set(sym, misses);
         if (misses < 2) { log(`SYNC: ${sym} absent from broker (miss ${misses}/2) — deferring reconcile one cycle`); continue; }
         syncMissCount.delete(sym);
-        const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-
-        // Cancel any orphaned working orders for this contract
-        try {
-          const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
-          const orphans = allOrders.filter(o => o.contractId === pos.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
-          for (const o of orphans) { try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {} }
-          if (orphans.length > 0) log(`SYNC: Cancelled ${orphans.length} orphaned orders for ${sym}`);
-        } catch {}
-
-        // Check if this close was already logged (manual close from UI, or bracket order fill)
-        // to avoid double-logging P&L
-        let alreadyLogged = false;
-        try {
-          const recentClose = await prisma.autoTradeLog.findFirst({
-            where: {
-              symbol: `FUT:${sym}`,
-              action: { in: [`${TRADE_ACTION_PREFIX}_manual_close`, `${TRADE_ACTION_PREFIX}_take_profit`, `${TRADE_ACTION_PREFIX}_stop_loss`, `${TRADE_ACTION_PREFIX}_trail_stop`, `${TRADE_ACTION_PREFIX}_breakeven`, `${TRADE_ACTION_PREFIX}_emergency`, `${TRADE_ACTION_PREFIX}_bracket_close`] },
-              createdAt: { gte: new Date(Date.now() - 120_000) }, // within last 2 minutes
-            },
-            orderBy: { createdAt: "desc" },
-          });
-          if (recentClose) {
-            alreadyLogged = true;
-            const loggedPnl = recentClose.pnl || 0;
-            dailyPnl += loggedPnl;
-            log(`SYNC: ${sym} closed externally — already logged as ${recentClose.action} (P&L: $${loggedPnl.toFixed(0)}). Skipping duplicate log.`);
-          }
-        } catch {}
-
-        if (!alreadyLogged) {
-          // Position closed but not logged — get actual exit from Tradovate fills
-          let closePrice = 0;
-          let closeType = "bracket_close";
-
-          // Query recent fills to find the actual exit price
-          try {
-            const fills = await apiFetch("/fill/list") as { contractId: number; action: string; price: number; qty: number; timestamp: string }[];
-            const closeSide = pos.direction === "long" ? "Sell" : "Buy";
-            const recentFills = fills
-              .filter(f => f.contractId === pos.contractId && f.action === closeSide)
-              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-            if (recentFills.length > 0) {
-              closePrice = recentFills[0].price;
-              // Determine close type from price proximity
-              const stopDist = Math.abs(closePrice - pos.stopLoss);
-              const targetDist = Math.abs(closePrice - pos.target);
-              closeType = stopDist < targetDist ? "stop_loss" : "take_profit";
-              log(`SYNC: Found actual fill for ${sym}: ${closeSide} @ $${closePrice.toFixed(2)}`);
-            }
-          } catch {}
-
-          // Fallback if no fill found
-          if (closePrice === 0) {
-            const b = barBuilders.get(sym);
-            closePrice = b?.lastPrice || pos.entryPrice;
-            const stopDist = Math.abs(closePrice - pos.stopLoss);
-            const targetDist = Math.abs(closePrice - pos.target);
-            closeType = stopDist < targetDist ? "stop_loss" : "take_profit";
-            log(`SYNC: No fill found for ${sym}, using last price $${closePrice.toFixed(2)}`);
-          }
-
-          const diff = pos.direction === "long" ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
-          const pnl = diff * mult * pos.quantity;
-          dailyPnl += pnl;
-
-          log(`SYNC: ${sym} ${closeType} at exchange | Close: $${closePrice.toFixed(2)} | P&L: $${pnl.toFixed(0)} | Daily: $${dailyPnl.toFixed(0)}`);
-
-          try {
-            await prisma.autoTradeLog.create({ data: {
-              symbol: `FUT:${sym}`,
-              action: `${TRADE_ACTION_PREFIX}_${closeType}`,
-              qty: pos.quantity,
-              price: closePrice,
-              pnl,
-              reason: `[FUTURES ${sym}] ${closeType}: Closed ${pos.quantity}x @ $${closePrice.toFixed(2)}. Entry: $${pos.entryPrice.toFixed(2)}. P&L: $${pnl.toFixed(0)}. Daily: $${dailyPnl.toFixed(0)}`,
-              orderId: null,
-            }});
-          } catch {}
-
-          // Log synced close to Obsidian vault (learning loop)
-          try {
-            await logTradeToJournal({
-              tradeId: `${new Date().toISOString().slice(0, 10)}-FRT-${MODE_TAG}-${sym}`,
-              timestamp: new Date().toISOString(),
-              instrument: `FUT:${sym}`,
-              direction: pos.direction === "long" ? "LONG" : "SHORT",
-              strategy: "futures-scalping",
-              setupType: "realtime",
-              contracts: pos.quantity,
-              entryPrice: pos.entryPrice,
-              stopPrice: pos.stopLoss,
-              targetPrice: pos.target,
-              exitPrice: closePrice,
-              pnlDollars: pnl,
-              rMultiple: pos.stopLoss ? (closePrice - pos.entryPrice) / Math.abs(pos.entryPrice - pos.stopLoss) * (pos.direction === "long" ? 1 : -1) : undefined,
-              conviction: 3,
-              exitReason: closeType,
-            }, AGENT_NAME);
-            await logDecision(AGENT_NAME, "EXIT", `FUT:${sym}`, `${closeType}: P&L $${pnl.toFixed(0)}`, pnl > 0 ? 4 : 2);
-          } catch { /* vault optional */ }
-          throttledBrainUpdate(`synced-close-${sym}`);
-        }
-
-        positions.delete(sym);
-    syncMissCount.delete(sym); // clear reconcile miss-counter when a position leaves the book
-        await savePositions();
+        const closePrice = barBuilders.get(sym)?.lastPrice || pos.entryPrice;
+        // Reuse the durable flat-cleanup path. It terminal-confirms every sibling, takes another
+        // stable broker snapshot, and retains tracking if anything is unresolved.
+        await closePosition(sym, closePrice, "bracket_close", true);
       }
     }
 
@@ -5789,22 +6046,11 @@ async function syncPositions() {
       }
       if (!sym || positions.has(sym)) continue;
 
-      // Guard: if we closed this symbol recently, this Tradovate position is almost certainly a
-      // settlement-lag residual from overlapping close orders (e.g. scale-out stop + breakeven
-      // both firing as BUY orders in the same second, creating a net-LONG remnant on the paper
-      // account). Adopting it caused a phantom emergency close with a wrong direction and
-      // inflated P&L (-$24k). Instead, cancel any working orders and let it settle.
+      // A non-zero broker position after a recent close is exposure, not harmless settlement lag.
+      // Adopt its broker direction/quantity first, then immediately flatten it through the durable
+      // path below. Ignoring it previously left reversals unmanaged for up to five minutes.
       const lastClose = recentlyClosedAt.get(sym);
-      if (lastClose && Date.now() - lastClose < RECENTLY_CLOSED_TTL) {
-        log(`[SYNC] ${sym}: Tradovate shows residual position but we closed ${Math.round((Date.now() - lastClose) / 1000)}s ago — skipping adoption (settlement lag), cancelling orphaned orders`);
-        try {
-          const allOrders = await apiFetch("/order/list") as { id: number; contractId: number; ordStatus: string }[];
-          const orphans = allOrders.filter(o => o.contractId === tp.contractId && (o.ordStatus === "Working" || o.ordStatus === "Accepted"));
-          for (const o of orphans) { try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch {} }
-          if (orphans.length > 0) log(`[SYNC] ${sym}: Cancelled ${orphans.length} orphaned orders for residual position`);
-        } catch {}
-        continue;
-      }
+      const isRecentCloseResidual = Boolean(lastClose && Date.now() - lastClose < RECENTLY_CLOSED_TTL);
 
       // Orphaned position on Tradovate — adopt it with correct entry price from DB
       const direction: "long" | "short" = tp.netPos > 0 ? "long" : "short";
@@ -5876,6 +6122,11 @@ async function syncPositions() {
 
       log(`[SYNC] Adopted orphaned position: ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} | Stop: $${stopLoss.toFixed(2)} | Target: $${target.toFixed(2)}`);
       notify(`ADOPTED orphaned ${sym} ${direction} ${qty}x @ $${entryPrice.toFixed(2)} — managing now`);
+      if (isRecentCloseResidual) {
+        log(`[SYNC] ${sym}: exposure reappeared after a recent close; flattening the adopted residual now`);
+        await ensurePendingFlattenRequired(sym, tp.contractId, `${sym} residual flatten`);
+        await closePosition(sym, tp.netPrice || entryPrice, "post_close_residual");
+      }
     }
 
     // Step 3: Update direction/qty if Tradovate net differs from engine's view
@@ -5904,14 +6155,84 @@ async function syncPositions() {
       for (const tp of tvPos) { if (tp.netPos !== 0) activeContractIds.add(tp.contractId); }
       const orphans = working.filter(o => !activeContractIds.has(o.contractId));
       for (const o of orphans) {
-        try { await apiFetch("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId: o.id }) }); } catch (e) { log(`[SYNC] Failed to cancel orphan #${o.id}: ${e}`); }
+        await cancelOrderUntilTerminal(o.id, `orphan order #${o.id}`);
       }
-      if (orphans.length > 0) log(`[SYNC] Swept ${orphans.length} orphaned orders with no matching position`);
+      if (orphans.length > 0) log(`[SYNC] Confirmed ${orphans.length} orphaned orders terminal with no matching position`);
     } catch {}
 
     await savePositions();
   } catch (err) { log(`[SYNC] Position sync failed: ${err}`); }
   finally { syncInFlight = false; }
+}
+
+let operatorFlattenInFlight = false;
+async function confirmBrokerAccountClear(): Promise<boolean> {
+  let consecutiveClearReads = 0;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const [brokerPositions, brokerOrders] = await Promise.all([
+      apiFetch("/position/list") as Promise<{ netPos: number }[]>,
+      apiFetch("/order/list") as Promise<{ id: number; ordStatus: string }[]>,
+    ]);
+    const working = brokerOrders.filter((order) => order.ordStatus === "Working" || order.ordStatus === "Accepted");
+    if (working.length > 0) {
+      consecutiveClearReads = 0;
+      for (const order of working) await cancelOrderUntilTerminal(order.id, `emergency flatten order #${order.id}`);
+    } else if (isBrokerAccountClear(brokerPositions, brokerOrders)) {
+      consecutiveClearReads++;
+      if (consecutiveClearReads >= 2) return true;
+    } else {
+      consecutiveClearReads = 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  return false;
+}
+
+async function processOperatorFlattenRequest() {
+  if (!IS_LIVE || !hasValidEngineLease() || operatorFlattenInFlight) return;
+  const key = "futures_flatten_request_live";
+  const row = await prisma.agentConfig.findUnique({ where: { key } });
+  if (!row?.value) return;
+  let request: { requestId?: string; status?: string; requestedAt?: string };
+  try { request = JSON.parse(row.value); } catch { return; }
+  if (!request.requestId || !["requested", "processing"].includes(request.status ?? "")) return;
+
+  operatorFlattenInFlight = true;
+  try {
+    futuresTradingEnabled = false;
+    await prisma.agentConfig.update({
+      where: { key },
+      data: { value: JSON.stringify({ ...request, status: "processing", startedAt: new Date().toISOString(), ownerId: ORDER_OWNER_ID }) },
+    });
+    await syncPositions();
+    for (const [sym, pos] of [...positions]) {
+      const price = barBuilders.get(sym)?.lastPrice || pos.entryPrice;
+      await closePosition(sym, price, "operator_emergency_flatten");
+    }
+    // "Flat" is not enough while a working entry/target/stop can still fill and reopen exposure.
+    // Require two consecutive broker reads with zero positions and zero working/accepted orders.
+    const flat = await confirmBrokerAccountClear();
+    const current = await prisma.agentConfig.findUnique({ where: { key } });
+    const currentRequest = current?.value ? JSON.parse(current.value) as typeof request : null;
+    if (currentRequest?.requestId !== request.requestId) return;
+    await prisma.agentConfig.update({
+      where: { key },
+      data: { value: JSON.stringify({
+        ...request,
+        status: flat ? "completed" : "requested",
+        lastAttemptAt: new Date().toISOString(),
+        completedAt: flat ? new Date().toISOString() : undefined,
+        remainingTrackedPositions: positions.size,
+      }) },
+    });
+    if (flat) notify(`✅ ${MODE_TAG}: operator emergency flatten completed; broker account is flat.`, "general");
+    else notify(`🚨 ${MODE_TAG}: emergency flatten still has broker exposure. Automatic recovery remains active; check Tradovate now.`, "general");
+  } catch (error) {
+    log(`[OPERATOR FLATTEN] Attempt failed: ${error}`);
+    notify(`🚨 ${MODE_TAG}: emergency flatten attempt failed. Trading remains disabled; check Tradovate now.`, "general");
+  } finally {
+    operatorFlattenInFlight = false;
+  }
 }
 
 // ── Pre-load Historical Bars (so we can trade immediately) ──
@@ -6520,7 +6841,11 @@ function startHealthServer() {
     const now = Date.now();
     const uptimeSeconds = Math.round((now - startTime) / 1000);
     const lastTickAge = tickCount > 0 ? Math.round((now - lastTickCheckTime) / 1000) : -1;
-    const healthy = engineReady && riskConfigHealthy;
+    const pollAge = lastPollCompletedAt > 0 ? now - lastPollCompletedAt : Infinity;
+    const quoteAge = lastUsableQuoteAt > 0 ? now - lastUsableQuoteAt : Infinity;
+    const requiresFreshQuote = positions.size > 0 || getSessionName() !== "halt";
+    const marketDataHealthy = pollAge < 30_000 && (!requiresFreshQuote || quoteAge < 90_000);
+    const healthy = engineReady && riskConfigHealthy && marketDataHealthy;
 
     const status = {
       mode: ENGINE_MODE,
@@ -6530,6 +6855,9 @@ function startHealthServer() {
       uptime: uptimeSeconds,
       tickCount,
       lastTickAgeSec: lastTickAge,
+      lastPollAgeSec: Number.isFinite(pollAge) ? Math.round(pollAge / 1000) : -1,
+      lastUsableQuoteAgeSec: Number.isFinite(quoteAge) ? Math.round(quoteAge / 1000) : -1,
+      ownsEngineLease: hasValidEngineLease(),
       positions: positions.size,
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
@@ -6680,10 +7008,11 @@ async function main() {
   // Init bar builders for ALL symbols (both full-size and micro) so we can switch dynamically
   for (const sym of [...FULL_SIZE_SYMBOLS, ...MICRO_SYMBOLS]) initBarBuilder(sym);
 
-  // Restore positions from database (survive restarts)
-  await loadPositions();
-  await recoverPendingOrderSubmissionOnStartup();
-  // Each engine loads its own positions from POSITIONS_KEY
+  // Acquire the single-writer heartbeat lease before loading or mutating broker positions. During a
+  // rolling deployment the new generation may warm market data, but it remains observation-only
+  // until the prior healthy generation releases this lease.
+  await writeHeartbeat();
+  if (!ownsEngineLease) log(`[STARTUP] Prior ${MODE_TAG} generation owns position management; warming as standby`);
 
   // Pre-load historical bars so we can trade IMMEDIATELY
   await preloadBars();
@@ -6787,6 +7116,8 @@ async function main() {
             log("[WS-MD] First quote received — real-time streaming confirmed, Databento polling paused");
           }
           onPrice(quote.symbol, quote.price, quote.volume);
+          lastUsableQuoteAt = Date.now();
+          lastPollCompletedAt = Date.now();
           tickCount++;
           lastTickCheckTime = Date.now();
         },
@@ -6826,6 +7157,7 @@ async function main() {
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
   safeInterval(async () => { await refreshOperatorTradingGate(); }, 15_000, "operatorTradingGate");
+  safeInterval(processOperatorFlattenRequest, 5_000, "operatorFlattenRequest");
   safeInterval(resolveContracts, 300_000, "resolveContracts"); // fail-closed symbols retry automatically
   safeInterval(sweepPhantomCloseRows, 1800_000, "sweepPhantoms"); // auto-clean phantom close-rows every 30min
   safeInterval(proactiveTokenRefresh, 600_000, "tokenRefresh"); // check token expiry every 10min

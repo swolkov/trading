@@ -6,8 +6,8 @@ import type { Strategy } from "@/lib/strategies/types";
 import { Activity, Eye, PowerOff, ChevronDown, ChevronUp, FileText, Code2, ExternalLink } from "lucide-react";
 
 const ACCOUNTS = [
-  { key: "demo-futures", label: "Demo", capital: "$50K" },
-  { key: "live-futures", label: "Live", capital: "$1K" },
+  { key: "demo-futures", label: "Demo", capital: "live-equity clone" },
+  { key: "live-futures", label: "Live", capital: "real account" },
 ] as const;
 
 interface Assignment {
@@ -73,19 +73,21 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
 
   const statusFor = (acc: string): Status => {
     const row = data?.assignments.find((a) => a.accountKey === acc && a.strategyId === strategy.id);
-    return row?.status ?? "active";
+    return row?.status ?? (acc === "live-futures" ? "observation" : "active");
   };
   const perfFor = (acc: string): PerfRow | undefined =>
     perfData?.summary.find((p) => p.accountKey === acc && p.strategyId === strategy.id);
 
   const set = async (acc: string, status: Status) => {
+    const password = window.prompt("Enter the admin trading password");
+    if (!password) return;
     const k = `${acc}:${strategy.id}`;
     setBusy(k);
     try {
       const res = await fetch("/api/admin/assignments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountKey: acc, strategyId: strategy.id, status }),
+        body: JSON.stringify({ accountKey: acc, strategyId: strategy.id, status, password }),
       });
       if (res.ok) await globalMutate("/api/admin/assignments");
       else alert(`Failed: ${(await res.json().catch(() => ({}))).error || res.statusText}`);

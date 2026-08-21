@@ -24,13 +24,9 @@ export function EdgeControlBoard({ edges: initial }: { edges: EdgeVM[] }) {
 
   async function toggle(key: string, mode: "demo" | "live", next: boolean) {
     setErr(null);
-    // Promoting to LIVE requires the password.
-    let password: string | undefined;
-    if (mode === "live" && next) {
-      const edge = edges.find((e) => e.key === key);
-      password = window.prompt(`Enable "${edge?.name}" on LIVE (real money)?\n\nEnter the live password to confirm:`) || undefined;
-      if (!password) return; // cancelled
-    }
+    const edge = edges.find((e) => e.key === key);
+    const password = window.prompt(`${next ? "Enable" : "Disable"} "${edge?.name}" on ${mode.toUpperCase()}?\n\nEnter the admin trading password:`) || undefined;
+    if (!password) return;
     const flag = `${key}:${mode}`;
     setBusy(flag);
     // optimistic

@@ -36,14 +36,13 @@ const dirOf = (action: string): "long" | "short" | null =>
   action === "live_long" ? "long" : action === "live_short" ? "short" : null;
 
 export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promise<{ since: string; edges: EdgeStat[]; totalNet: number; totalTrades: number }> {
-  // Mode-aware so the SAME scoreboard works for the demo shadow-test. Live = MGC/MNQ/MES micros +
-  // live_ prefix + edge_scoreboard_since; demo = GC/NQ/ES full-size + futures_ prefix +
-  // demo_scoreboard_since (independent inception, so demo can be reset without touching live).
+  // Both engines use MGC/MNQ/MES under the live-clone policy. The action prefix and inception key
+  // separate their evidence without attributing demo fills to obsolete full-size symbols.
   const prefix = mode === "live" ? "live" : "futures";
-  const goldSym = mode === "live" ? "FUT:MGC" : "FUT:GC";
-  const idxSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
-  const dispGold = mode === "live" ? "MGC" : "GC";
-  const dispIdx = mode === "live" ? "MNQ/MES" : "NQ/ES";
+  const goldSym = "FUT:MGC";
+  const idxSyms = ["FUT:MNQ", "FUT:MES"];
+  const dispGold = "MGC";
+  const dispIdx = "MNQ/MES";
 
   const sinceKey = mode === "demo" ? "demo_scoreboard_since" : "edge_scoreboard_since";
   let sinceRow = await prisma.agentConfig.findUnique({ where: { key: sinceKey } });
@@ -175,8 +174,8 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
 
 // Per-REGISTRY-EDGE realized performance for a given engine (demo or live), keyed by the
 // realtime-edges.ts keys so the strategy control board can show each edge's demo vs live results
-// side by side. Live reads live_* rows on the micros (MGC/MNQ/MES); demo reads futures_* rows on the
-// full-size contracts (GC/NQ/ES). Same entry→exit pairing (attaches direction, sidesteps double-logs).
+// side by side. Both engines trade micros (MGC/MNQ/MES); their action prefixes keep the accounts
+// separate. Same entry→exit pairing (attaches direction, sidesteps double-logs).
 export interface RealtimeEdgePerf {
   key: string;
   net: number;
@@ -195,8 +194,8 @@ export interface FuturesClose { ts: Date; sym: string; dir: "long" | "short"; pn
 // read from session-scoped Tradovate fills while the counts came from the DB).
 export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesClose[]> {
   const prefix = mode === "live" ? "live" : "futures";
-  const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
-  const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const goldSyms = ["FUT:MGC"];
+  const indexSyms = ["FUT:MNQ", "FUT:MES"];
   const allSyms = [...goldSyms, ...indexSyms];
   // Live and demo have INDEPENDENT inception dates so demo can be reset for a fresh forward-test without
   // touching live's track record. Demo reads demo_scoreboard_since (falls back to the shared key if unset).
@@ -229,8 +228,8 @@ export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesCl
 }
 
 export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise<Record<string, RealtimeEdgePerf>> {
-  const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
-  const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const goldSyms = ["FUT:MGC"];
+  const indexSyms = ["FUT:MNQ", "FUT:MES"];
   const closes = await getFuturesCloses(mode);
 
   const isGold = (s: string) => goldSyms.includes(s);

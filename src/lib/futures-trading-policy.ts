@@ -3,6 +3,18 @@ export const MICRO_FUTURES = ["MGC", "MNQ", "MES"] as const;
 
 const METALS = new Set(["GC", "MGC"]);
 
+export function isEngineLeaseValid(ownsLease: boolean, validUntil: number, now = Date.now()): boolean {
+  return ownsLease && Number.isFinite(validUntil) && validUntil > now;
+}
+
+export function isBrokerAccountClear(
+  positions: readonly { netPos: number }[],
+  orders: readonly { ordStatus: string }[],
+): boolean {
+  return positions.every((position) => position.netPos === 0)
+    && orders.every((order) => order.ordStatus !== "Working" && order.ordStatus !== "Accepted");
+}
+
 export interface SymbolSelectionInput {
   mode: "demo" | "live";
   accountEquity: number;

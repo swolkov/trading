@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isBrokerAccountClear,
+  isEngineLeaseValid,
   livePolicySessionMultiplier,
   overnightMarginContractCap,
   selectFuturesSymbols,
 } from "../src/lib/futures-trading-policy";
+
+test("emergency flatten is complete only when positions and working orders are both clear", () => {
+  assert.equal(isBrokerAccountClear([], []), true);
+  assert.equal(isBrokerAccountClear([{ netPos: 0 }], [{ ordStatus: "Canceled" }]), true);
+  assert.equal(isBrokerAccountClear([{ netPos: 1 }], []), false);
+  assert.equal(isBrokerAccountClear([], [{ ordStatus: "Working" }]), false);
+  assert.equal(isBrokerAccountClear([], [{ ordStatus: "Accepted" }]), false);
+});
+
+test("an old generation loses mutation authority before a standby may take over", () => {
+  const renewedAt = 1_000_000;
+  const oldLeaseValidUntil = renewedAt + 75_000;
+  const standbyTakeoverAt = renewedAt + 90_000;
+  assert.equal(isEngineLeaseValid(true, oldLeaseValidUntil, renewedAt + 74_999), true);
+  assert.equal(isEngineLeaseValid(true, oldLeaseValidUntil, renewedAt + 75_000), false);
+  assert.equal(isEngineLeaseValid(true, oldLeaseValidUntil, standbyTakeoverAt), false);
+  assert.equal(isEngineLeaseValid(false, standbyTakeoverAt + 75_000, standbyTakeoverAt), false);
+});
 
 test("live and live-clone demo trade all three micros below the full-size threshold", () => {
   assert.deepEqual(selectFuturesSymbols({

@@ -29,9 +29,10 @@ interface AgentRun {
   details: string[];
 }
 
-interface TradingModes {
-  modes: Record<string, string>;
-  hasLiveKeys: Record<string, boolean>;
+interface LiveAccountState {
+  tradingMode: "paper" | "live" | "disabled";
+  liveTradingActivated: boolean;
+  entryGates?: { blockers?: string[] };
 }
 
 function pnlColor(val: number) {
@@ -40,7 +41,7 @@ function pnlColor(val: number) {
 
 const CONFIG_GROUPS = [
   {
-    label: "Futures — DEMO ($50K paper) · RESEARCH LAB (P&L is not proof)",
+    label: "Futures — DEMO LIVE-CLONE · RESEARCH LAB (P&L is not proof)",
     modeKey: "futures_mode",
     modeLabelMap: { disabled: "Disabled", demo: "Demo — 24/7 Learning", live: "Live — RTH Mirror" } as Record<string, string>,
     icon: "D",
@@ -59,7 +60,7 @@ const CONFIG_GROUPS = [
     ],
   },
   {
-    label: "Futures — LIVE ($1K real money) · validating execution, not proven alpha",
+    label: "Futures — LIVE (real account) · no edge is live-qualified yet",
     icon: "L",
     color: "from-red-500 to-rose-500",
     fields: [
@@ -92,7 +93,7 @@ export default function AgentHubPage() {
   const [activity, setActivity] = useState<Activity[]>([]);
   const [runResult, setRunResult] = useState<AgentRun | null>(null);
   const [futuresStatus, setFuturesStatus] = useState<{ connected: boolean; message?: string; accountName?: string } | null>(null);
-  const [tradingModes, setTradingModes] = useState<TradingModes | null>(null);
+  const [liveAccount, setLiveAccount] = useState<LiveAccountState | null>(null);
   const [modePassword, setModePassword] = useState("");
   const [modeMessage, setModeMessage] = useState("");
   const [runningAgent, setRunningAgent] = useState<string | null>(null);
@@ -100,11 +101,11 @@ export default function AgentHubPage() {
   const [saveMessage, setSaveMessage] = useState("");
 
   const loadData = useCallback(async () => {
-    const [configRes, activityRes, futuresRes, modesRes] = await Promise.all([
+    const [configRes, activityRes, futuresRes, accountsRes] = await Promise.all([
       fetch("/api/agent/config").then((r) => r.json()).catch(() => null),
       fetch("/api/agent/activity").then((r) => r.json()).catch(() => []),
       fetch("/api/futures").then((r) => r.json()).catch(() => ({ connected: false })),
-      fetch("/api/trading-mode").then((r) => r.json()).catch(() => null),
+      fetch("/api/admin/accounts").then((r) => r.json()).catch(() => null),
     ]);
     if (configRes) {
       setConfig(configRes);
@@ -112,13 +113,16 @@ export default function AgentHubPage() {
     }
     if (Array.isArray(activityRes)) setActivity(activityRes);
     if (futuresRes) setFuturesStatus(futuresRes);
-    if (modesRes) setTradingModes(modesRes);
+    if (accountsRes?.accounts) setLiveAccount(accountsRes.accounts.find((account: LiveAccountState & { key: string }) => account.key === "live-futures") ?? null);
   }, []);
 
   useEffect(() => {
-    loadData();
+    const initial = window.setTimeout(loadData, 0);
     const interval = setInterval(loadData, 60000);
-    return () => clearInterval(interval);
+    return () => {
+      window.clearTimeout(initial);
+      clearInterval(interval);
+    };
   }, [loadData]);
 
   const switchMode = async (type: string, mode: string) => {
@@ -164,7 +168,7 @@ export default function AgentHubPage() {
       const res = await fetch("/api/agent/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(changed),
+        body: JSON.stringify({ ...changed, livePassword: modePassword }),
       });
       const data = await res.json();
       if (data.error) { setSaveMessage(data.error); }
@@ -180,7 +184,7 @@ export default function AgentHubPage() {
     {
       id: "futures",
       name: "Futures Engine",
-      desc: "24/5 demo learning — ES, NQ, GC on Tradovate ($50K)",
+      desc: "24/5 demo research on MGC, MNQ and MES, sized from fresh live equity",
       schedule: futuresStatus?.connected ? "Real-time 5s (Railway)" : "Waiting",
       endpoint: "/api/futures",
       canRun: futuresStatus?.connected || false,
@@ -392,22 +396,24 @@ export default function AgentHubPage() {
                 </div>
                 <span className="text-[9px] text-emerald-400/60 font-medium">Always running · 24/7 · Learning</span>
               </div>
-              <p className="text-[9px] text-muted-foreground/50">Trading on demo account ($50K). Brain evolves from every trade. This never turns off.</p>
+              <p className="text-[9px] text-muted-foreground/50">Trading micros on the demo broker with live-equity sizing. Results are evidence, not proof.</p>
             </div>
 
             {/* Live Trading Activation */}
             <div className={`rounded-xl border p-4 space-y-3 ${
-              tradingModes?.modes?.futures === "live"
+              liveAccount?.liveTradingActivated
                 ? "border-red-500/20 bg-red-500/[0.03]"
                 : "border-white/[0.06] bg-white/[0.02]"
             }`}>
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-black">{tradingModes?.modes?.futures === "live" ? "🔴 LIVE TRADING ACTIVE" : "LIVE TRADING"}</p>
+                  <p className="text-sm font-black">{liveAccount?.liveTradingActivated ? "🔴 LIVE ENTRIES ENABLED" : liveAccount?.tradingMode === "live" ? "LIVE ENGINE DISARMED" : "LIVE TRADING"}</p>
                   <p className="text-[9px] text-muted-foreground/50 mt-0.5">
-                    {tradingModes?.modes?.futures === "live"
-                      ? "Real money at risk — Tradovate live account"
-                      : "Activate to trade your real $1K account (proven windows only)"}
+                    {liveAccount?.liveTradingActivated
+                      ? "Global live authorization is armed; every order still must pass session, quote, limit and trade-specific checks"
+                      : liveAccount?.tradingMode === "live"
+                        ? `No real-money entries: ${liveAccount.entryGates?.blockers?.join("; ") || "engine authorization is closed"}`
+                        : "Request live mode. Engine health, risk, infrastructure and edge gates still control authorization."}
                   </p>
                 </div>
                 <button
@@ -415,7 +421,7 @@ export default function AgentHubPage() {
                   onClick={async () => {
                     if (!modePassword) return;
                     setModeMessage("");
-                    const newMode = tradingModes?.modes?.futures === "live" ? "paper" : "live";
+                    const newMode = liveAccount?.tradingMode === "live" ? "paper" : "live";
                     const res = await fetch("/api/trading-mode", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
@@ -423,25 +429,20 @@ export default function AgentHubPage() {
                     });
                     const data = await res.json();
                     if (data.error) { setModeMessage(data.error); return; }
-                    setModeMessage(newMode === "live" ? "LIVE TRADING ACTIVATED" : "Live trading deactivated — demo continues");
+                    setModeMessage(newMode === "live" ? "Live mode requested. Waiting for every engine gate." : "Live mode deactivated; demo continues");
                     loadData();
                   }}
                   className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
-                    tradingModes?.modes?.futures === "live"
+                    liveAccount?.tradingMode === "live"
                       ? "bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30"
                       : "bg-white/[0.06] text-muted-foreground/60 ring-1 ring-white/[0.08] hover:bg-white/[0.1] hover:text-foreground disabled:opacity-30"
                   }`}
                 >
-                  {tradingModes?.modes?.futures === "live" ? "DEACTIVATE" : "ACTIVATE"}
+                  {liveAccount?.tradingMode === "live" ? "DEACTIVATE" : "REQUEST LIVE"}
                 </button>
               </div>
 
-              {tradingModes?.modes?.futures === "live" && (
-                <div className="flex items-center gap-2 text-[9px] text-red-400/70">
-                  <span className="animate-pulse">●</span>
-                  <span>Cron agent executing on live.tradovateapi.com during proven windows (9:45-11:30, 2:00-3:45 ET)</span>
-                </div>
-              )}
+              {liveAccount?.tradingMode === "live" && <div className="text-[9px] text-amber-300/70">Mode selection alone cannot authorize an order. See the Strategies account panel for every blocker.</div>}
             </div>
 
             {/* Password */}

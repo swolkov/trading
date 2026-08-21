@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { REALTIME_EDGES, edgeFlagKey } from "@/lib/realtime-edges";
 import { requireAuthenticatedUser } from "@/lib/api-auth";
 import { FUTURES_STRATEGY_VERSION } from "@/lib/strategy-version";
+import { pnlEvidence } from "@/lib/futures-admin-state";
 
 /**
  * Per-edge, per-engine on/off switch for the realtime futures engine.
@@ -16,14 +17,6 @@ import { FUTURES_STRATEGY_VERSION } from "@/lib/strategy-version";
 const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD;
 const CURRENT_STRATEGY_VERSION = FUTURES_STRATEGY_VERSION;
 const MAX_P90_SLIPPAGE: Record<string, number> = { MGC: 0.50, MNQ: 1.50, MES: 0.50 };
-
-function tStat(values: number[]): number {
-  if (values.length < 2) return 0;
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
-  const sd = Math.sqrt(variance);
-  return sd > 0 ? mean / (sd / Math.sqrt(values.length)) : 0;
-}
 
 export async function POST(request: Request) {
   const unauthorized = await requireAuthenticatedUser();
@@ -49,22 +42,31 @@ export async function POST(request: Request) {
       return Response.json({ error: "enabled must be a boolean" }, { status: 400 });
     }
 
+    if (!LIVE_PASSWORD) {
+      return Response.json({ error: "Admin trading password is not configured" }, { status: 503 });
+    }
+    if (!password || password !== LIVE_PASSWORD) {
+      return Response.json({ error: "Admin trading password required to change edge switches" }, { status: 403 });
+    }
+
     // Promoting an edge to LIVE (real money) is password-gated. Disabling live, or any demo change, is free.
     if (mode === "live" && enabled === true) {
-      if (!LIVE_PASSWORD) {
-        return Response.json({ error: "Live trading password is not configured" }, { status: 503 });
-      }
-      if (!password || password !== LIVE_PASSWORD) {
-        return Response.json({ error: "Live password required to enable an edge on real money" }, { status: 403 });
+      const heartbeatRow = await prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } });
+      let heartbeat: { timestamp?: string; ready?: boolean; strategyVersion?: string; deploymentId?: string | null } | null = null;
+      try { heartbeat = heartbeatRow?.value ? JSON.parse(heartbeatRow.value) : null; } catch { heartbeat = null; }
+      const heartbeatAt = Date.parse(heartbeat?.timestamp ?? "");
+      if (!Number.isFinite(heartbeatAt) || Date.now() - heartbeatAt >= 90_000 || heartbeat?.ready !== true
+        || heartbeat.strategyVersion !== CURRENT_STRATEGY_VERSION || !heartbeat.deploymentId) {
+        return Response.json({ error: "Current live engine deployment is not fresh and ready; promotion is blocked" }, { status: 409 });
       }
 
       const symbols = edge.symbolClass === "metals" ? ["MGC"] : ["MNQ", "MES"];
       // Only P&L whose entry has a matching current-version execution record may promote. This
       // prevents an old strategy's wins from re-arming materially changed code under the same key.
-      let evidence: Array<{ pnl: number }> = [];
+      let evidence: Array<{ symbol: string; pnl: number }> = [];
       try {
-        evidence = await prisma.$queryRawUnsafe<Array<{ pnl: number }>>(
-          `SELECT rt.pnl
+        evidence = await prisma.$queryRawUnsafe<Array<{ symbol: string; pnl: number }>>(
+          `SELECT rt.symbol, rt.pnl
              FROM "RoundTrip" rt
             WHERE rt.mode = 'paper' AND rt."setupType" = $1
               AND rt.symbol = ANY($2::text[])
@@ -72,7 +74,7 @@ export async function POST(request: Request) {
                 SELECT 1 FROM execution_quality eq
                  WHERE eq.mode = 'demo' AND eq.status = 'filled' AND eq.qty > 0
                    AND eq.symbol = rt.symbol AND eq.edge_key = $1 AND eq.strategy_version = $3
-                   AND ABS(EXTRACT(EPOCH FROM (eq.ts - rt."entryTime"))) <= 600
+                   AND eq.order_id = rt.entry_order_id
               )
             ORDER BY rt."exitTime" ASC`,
           key, symbols, CURRENT_STRATEGY_VERSION,
@@ -80,16 +82,16 @@ export async function POST(request: Request) {
       } catch {
         return Response.json({ error: "No current-version P&L evidence is available" }, { status: 409 });
       }
-      const pnls = evidence.map((row) => row.pnl);
-      const split = Math.floor(pnls.length / 2);
-      const firstHalf = pnls.slice(0, split).reduce((sum, pnl) => sum + pnl, 0);
-      const secondHalf = pnls.slice(split).reduce((sum, pnl) => sum + pnl, 0);
-      const statistic = tStat(pnls);
-      if (pnls.length < 30 || statistic <= 2 || firstHalf <= 0 || secondHalf <= 0) {
+      const requiredPnlTrades = edge.symbolClass === "metals" ? 30 : 15;
+      const evidenceBySymbol = symbols.map((symbol) => ({
+        symbol,
+        ...pnlEvidence(evidence.filter((row) => row.symbol === symbol).map((row) => row.pnl), requiredPnlTrades),
+      }));
+      if (evidenceBySymbol.some((item) => !item.passes)) {
         return Response.json({
-          error: "Edge has not passed the live-promotion evidence gate",
-          evidence: { trades: pnls.length, tStat: Number(statistic.toFixed(2)), firstHalf, secondHalf },
-          required: { trades: 30, tStat: "> 2", firstHalf: "> 0", secondHalf: "> 0" },
+          error: "Every traded symbol must independently pass the live-promotion evidence gate",
+          evidence: evidenceBySymbol.map((item) => ({ ...item, tStat: Number(item.tStat.toFixed(2)) })),
+          required: { tradesPerSymbol: requiredPnlTrades, tStat: "> 2", firstHalf: "> 0", secondHalf: "> 0" },
         }, { status: 409 });
       }
 
