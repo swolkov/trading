@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getTradovateAccountSummary, checkTradovateAuth } from "@/lib/tradovate";
+import { evaluateFuturesEntryGates, type FuturesEntryGates, type FuturesHeartbeatState } from "@/lib/futures-admin-state";
 
 /**
  * Comprehensive account state for the admin dashboard. Returns:
@@ -31,6 +32,7 @@ interface AccountInfo {
   viewMode: "paper" | "live";
   tradingMode: "paper" | "live" | "disabled";
   liveTradingActivated: boolean;
+  entryGates: FuturesEntryGates | null;
   // Time series
   pnlSparkline: number[]; // last 30 days of daily P&L (oldest → newest)
 }
@@ -74,9 +76,14 @@ function computeDailyPnl(history: { date: string; balance: number }[]): number[]
 async function getTodayPnl(mode: "paper" | "live"): Promise<{ pnl: number; trades: number }> {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  const symbols = mode === "live" ? ["FUT:MES", "FUT:MNQ", "FUT:BFF"] : ["FUT:ES", "FUT:NQ", "FUT:GC", "FUT:MBT", "FUT:MET", "FUT:BFF", "FUT:MXR", "FUT:MSL"];
+  const symbols = ["FUT:MGC", "FUT:MNQ", "FUT:MES"];
   const logs = await prisma.autoTradeLog.findMany({
-    where: { symbol: { in: symbols }, createdAt: { gte: start }, pnl: { not: null } },
+    where: {
+      symbol: { in: symbols },
+      action: { startsWith: mode === "live" ? "live_" : "futures_" },
+      createdAt: { gte: start },
+      pnl: { not: null },
+    },
   });
   const pnl = logs.reduce((s, l) => s + (l.pnl ?? 0), 0);
   return { pnl, trades: logs.length };
@@ -101,6 +108,8 @@ export async function GET() {
       demoHistory, liveHistory,
       demoToday, liveToday,
       demoBrokerLive, liveBrokerLive,
+      demoHeartbeatRow, liveHeartbeatRow,
+      flattenRequestRow,
     ] = await Promise.all([
       getMode("view_mode_futures"),
       getMode("trading_mode_futures"),
@@ -112,7 +121,18 @@ export async function GET() {
       getTodayPnl("live"),
       getBrokerBalance("paper"),
       getBrokerBalance("live"),
+      prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_demo" } }),
+      prisma.agentConfig.findUnique({ where: { key: "futures_engine_heartbeat_live" } }),
+      prisma.agentConfig.findUnique({ where: { key: "futures_flatten_request_live" } }),
     ]);
+
+    const parseHeartbeat = (value?: string): FuturesHeartbeatState | null => {
+      try { return value ? JSON.parse(value) as FuturesHeartbeatState : null; } catch { return null; }
+    };
+    const demoGates = evaluateFuturesEntryGates("demo", futuresTrading, parseHeartbeat(demoHeartbeatRow?.value));
+    const liveGates = evaluateFuturesEntryGates("live", futuresTrading, parseHeartbeat(liveHeartbeatRow?.value));
+    let flattenRequest: { requestId?: string; status?: string; requestedAt?: string; completedAt?: string } | null = null;
+    try { flattenRequest = flattenRequestRow?.value ? JSON.parse(flattenRequestRow.value) : null; } catch { flattenRequest = null; }
 
     const demoPnlSpark = computeDailyPnl(demoHistory);
     const livePnlSpark = computeDailyPnl(liveHistory);
@@ -165,6 +185,7 @@ export async function GET() {
         viewMode: futuresView === "live" ? "live" : "paper",
         tradingMode: futuresTrading,
         liveTradingActivated: false,
+        entryGates: demoGates,
         pnlSparkline: demoPnlSpark,
       },
       {
@@ -181,7 +202,8 @@ export async function GET() {
         drawdownPct: liveDrawdown,
         viewMode: futuresView === "live" ? "live" : "paper",
         tradingMode: futuresTrading,
-        liveTradingActivated: futuresTrading === "live",
+        liveTradingActivated: liveGates.entriesAllowed,
+        entryGates: liveGates,
         pnlSparkline: livePnlSpark,
       },
     ];
@@ -190,8 +212,10 @@ export async function GET() {
       accounts,
       summary: {
         anyLiveTrading: accounts.some((a) => a.liveTradingActivated),
-        futuresLiveActivated: futuresTrading === "live",
+        futuresLiveActivated: liveGates.entriesAllowed,
+        futuresLiveRequested: futuresTrading === "live",
         viewingLive: futuresView === "live",
+        flattenRequest,
       },
     });
   } catch (e) {

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { invalidateAssignmentsCache, type AccountKey } from "@/lib/strategy-assignments";
 import { STRATEGIES } from "@/lib/strategies/registry";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 const VALID_STATUSES = ["active", "observation", "disabled"] as const;
 const VALID_ACCOUNTS = ["demo-futures", "live-futures", "paper-stocks", "paper-crypto"] as const;
@@ -16,13 +17,16 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json();
-    const { accountKey, strategyId, status, maxContractsOverride } = body as {
+    const { accountKey, strategyId, status, maxContractsOverride, password } = body as {
       accountKey?: string;
       strategyId?: string;
       status?: string;
       maxContractsOverride?: number | null;
+      password?: string;
     };
 
     // Validation
@@ -34,6 +38,16 @@ export async function POST(request: Request) {
     }
     if (status !== undefined && !VALID_STATUSES.includes(status as typeof VALID_STATUSES[number])) {
       return Response.json({ error: `status must be one of: ${VALID_STATUSES.join(", ")}` }, { status: 400 });
+    }
+    if (maxContractsOverride !== undefined && maxContractsOverride !== null
+      && (!Number.isInteger(maxContractsOverride) || maxContractsOverride < 0 || maxContractsOverride > 100)) {
+      return Response.json({ error: "maxContractsOverride must be null or an integer from 0 to 100" }, { status: 400 });
+    }
+    if (!process.env.LIVE_TRADING_PASSWORD) {
+      return Response.json({ error: "Admin trading password is not configured" }, { status: 503 });
+    }
+    if (password !== process.env.LIVE_TRADING_PASSWORD) {
+      return Response.json({ error: "Admin trading password required for assignment changes" }, { status: 403 });
     }
 
     const data: { status?: string; maxContractsOverride?: number | null } = {};

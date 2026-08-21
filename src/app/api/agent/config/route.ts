@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 const DEFAULTS: Record<string, string> = {
   strategy: "balanced", // aggressive, balanced, conservative
@@ -54,7 +55,45 @@ const DEFAULTS: Record<string, string> = {
   live_futures_atr_stop_multiplier: "1.5",
   live_futures_atr_target_multiplier: "4.0",
   live_futures_simulated_equity: "0",
+  live_futures_symbols: "MGC,MNQ,MES",
 };
+
+const NUMERIC_KEYS = new Set([
+  "max_positions", "max_per_sector", "max_position_pct", "min_score", "min_confidence",
+  "stop_loss_atr", "take_profit_pct", "cash_reserve_pct", "max_daily_trades",
+  "options_stop_loss_pct", "options_profit_pct", "cooldown_hours", "daily_loss_limit",
+  "daily_spend_cap", "max_options_exposure", "per_trade_max", "drawdown_kill_pct",
+  "stock_min_score", "stock_min_confidence",
+  "futures_risk_per_trade_pct", "futures_daily_loss_limit_pct", "futures_max_drawdown_pct",
+  "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day",
+  "futures_atr_stop_multiplier", "futures_atr_target_multiplier", "futures_simulated_equity",
+  "live_futures_risk_per_trade_pct", "live_futures_daily_loss_limit_pct", "live_futures_max_drawdown_pct",
+  "live_futures_max_contracts", "live_futures_max_total_contracts", "live_futures_max_trades_per_day",
+  "live_futures_max_positions", "live_futures_atr_stop_multiplier", "live_futures_atr_target_multiplier",
+  "live_futures_simulated_equity",
+]);
+const INTEGER_KEYS = new Set([
+  "max_positions", "max_per_sector", "max_daily_trades", "futures_max_contracts",
+  "futures_max_total_contracts", "futures_max_trades_per_day", "live_futures_max_contracts",
+  "live_futures_max_total_contracts", "live_futures_max_trades_per_day", "live_futures_max_positions",
+]);
+const PERCENTAGE_KEYS = new Set([
+  "max_position_pct", "min_score", "min_confidence", "take_profit_pct", "cash_reserve_pct",
+  "options_stop_loss_pct", "options_profit_pct", "drawdown_kill_pct", "stock_min_score", "stock_min_confidence",
+  "futures_risk_per_trade_pct", "futures_daily_loss_limit_pct", "futures_max_drawdown_pct",
+  "live_futures_risk_per_trade_pct", "live_futures_daily_loss_limit_pct", "live_futures_max_drawdown_pct",
+]);
+const POSITIVE_KEYS = new Set([
+  "stop_loss_atr", "futures_atr_stop_multiplier", "futures_atr_target_multiplier",
+  "live_futures_atr_stop_multiplier", "live_futures_atr_target_multiplier",
+]);
+const ENUM_VALUES: Record<string, readonly string[]> = {
+  strategy: ["aggressive", "balanced", "conservative"],
+  options_mode: ["disabled", "paper", "live"],
+  futures_mode: ["disabled", "demo", "live"],
+  stocks_enabled: ["disabled", "paper", "live"],
+};
+const BOOLEAN_KEYS = new Set(["enabled", "trade_options"]);
 
 export async function GET() {
   try {
@@ -74,6 +113,7 @@ export async function GET() {
     if (!result.futures_mode || result.futures_mode === DEFAULTS.futures_mode) {
       const tradingMode = result.trading_mode_futures;
       if (tradingMode === "live") result.futures_mode = "live";
+      else if (tradingMode === "disabled") result.futures_mode = "disabled";
       else result.futures_mode = "demo";
     }
     return Response.json(result);
@@ -84,26 +124,51 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  // Auth check: require CRON_SECRET for config changes
-  const authHeader = request.headers.get("authorization");
-  if (
-    !process.env.CRON_SECRET ||
-    authHeader !== `Bearer ${process.env.CRON_SECRET}`
-  ) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
 
   try {
-    const updates: Record<string, string> = await request.json();
+    const body = await request.json() as Record<string, string> & { livePassword?: string };
+    const { livePassword, ...updates } = body;
+    if (!process.env.LIVE_TRADING_PASSWORD) {
+      return Response.json({ error: "Admin trading password is not configured" }, { status: 503 });
+    }
+    if (livePassword !== process.env.LIVE_TRADING_PASSWORD) {
+      return Response.json({ error: "Admin trading password required to change engine settings" }, { status: 403 });
+    }
 
-    // Validate numeric values to prevent dangerous configs
-    const numericKeys = ["max_positions", "max_per_sector", "futures_max_contracts", "futures_max_total_contracts", "futures_max_trades_per_day", "daily_loss_limit", "daily_spend_cap", "max_options_exposure", "per_trade_max",
-      "live_futures_risk_per_trade_pct", "live_futures_daily_loss_limit_pct", "live_futures_max_drawdown_pct", "live_futures_max_contracts", "live_futures_max_total_contracts", "live_futures_max_trades_per_day", "live_futures_max_positions", "live_futures_atr_stop_multiplier", "live_futures_atr_target_multiplier"];
-    for (const key of numericKeys) {
+    const unknownKeys = Object.keys(updates).filter((key) => !(key in DEFAULTS));
+    if (unknownKeys.length > 0) {
+      return Response.json({ error: `Unknown config key(s): ${unknownKeys.join(", ")}` }, { status: 400 });
+    }
+
+    for (const [key, allowed] of Object.entries(ENUM_VALUES)) {
+      if (key in updates && !allowed.includes(String(updates[key]))) {
+        return Response.json({ error: `${key} must be one of: ${allowed.join(", ")}` }, { status: 400 });
+      }
+    }
+    for (const key of BOOLEAN_KEYS) {
+      if (key in updates && !["true", "false"].includes(String(updates[key]))) {
+        return Response.json({ error: `${key} must be true or false` }, { status: 400 });
+      }
+    }
+
+    if (updates.live_futures_symbols) {
+      const symbols = updates.live_futures_symbols.split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
+      if (symbols.some((symbol) => !["MGC", "MNQ", "MES"].includes(symbol))) {
+        return Response.json({ error: "Live symbol whitelist may contain only MGC, MNQ and MES" }, { status: 400 });
+      }
+      updates.live_futures_symbols = symbols.join(",");
+    }
+
+    // Validate every accepted numeric field. Number() rejects partial strings such as "0junk".
+    for (const key of NUMERIC_KEYS) {
       if (key in updates) {
-        const num = parseFloat(updates[key]);
-        if (isNaN(num) || num < 0) {
-          return Response.json({ error: `Invalid value for ${key}: must be a positive number` }, { status: 400 });
+        const raw = String(updates[key]).trim();
+        const num = Number(raw);
+        if (!raw || !Number.isFinite(num) || num < 0 || (POSITIVE_KEYS.has(key) && num <= 0)
+          || (INTEGER_KEYS.has(key) && !Number.isInteger(num)) || (PERCENTAGE_KEYS.has(key) && num > 100)) {
+          return Response.json({ error: `Invalid numeric value for ${key}` }, { status: 400 });
         }
       }
     }
@@ -125,11 +190,11 @@ export async function POST(request: Request) {
       await prisma.agentConfig.upsert({ where: { key: "trade_options" }, update: { value: String(enabled) }, create: { key: "trade_options", value: String(enabled) } });
     }
     if (updates.futures_mode) {
-      const modeVal = updates.futures_mode === "live" ? "live" : "paper";
+      const modeVal = updates.futures_mode === "live" ? "live" : updates.futures_mode === "disabled" ? "disabled" : "paper";
       await prisma.agentConfig.upsert({ where: { key: "trading_mode_futures" }, update: { value: modeVal }, create: { key: "trading_mode_futures", value: modeVal } });
     }
     if (updates.stocks_enabled) {
-      const modeVal = updates.stocks_enabled === "live" ? "live" : "paper";
+      const modeVal = updates.stocks_enabled === "live" ? "live" : updates.stocks_enabled === "disabled" ? "disabled" : "paper";
       await prisma.agentConfig.upsert({ where: { key: "trading_mode_stocks" }, update: { value: modeVal }, create: { key: "trading_mode_stocks", value: modeVal } });
     }
 

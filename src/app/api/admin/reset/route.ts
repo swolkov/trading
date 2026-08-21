@@ -1,6 +1,9 @@
 import { prisma } from "@/lib/db";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
   // Require the trading mode password for safety
   const body = await request.json().catch(() => ({}));
   const password = body.password;

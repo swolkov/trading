@@ -36,14 +36,13 @@ const dirOf = (action: string): "long" | "short" | null =>
   action === "live_long" ? "long" : action === "live_short" ? "short" : null;
 
 export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promise<{ since: string; edges: EdgeStat[]; totalNet: number; totalTrades: number }> {
-  // Mode-aware so the SAME scoreboard works for the demo shadow-test. Live = MGC/MNQ/MES micros +
-  // live_ prefix + edge_scoreboard_since; demo = GC/NQ/ES full-size + futures_ prefix +
-  // demo_scoreboard_since (independent inception, so demo can be reset without touching live).
+  // Both engines use MGC/MNQ/MES under the live-clone policy. The action prefix and inception key
+  // separate their evidence without attributing demo fills to obsolete full-size symbols.
   const prefix = mode === "live" ? "live" : "futures";
-  const goldSym = mode === "live" ? "FUT:MGC" : "FUT:GC";
-  const idxSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
-  const dispGold = mode === "live" ? "MGC" : "GC";
-  const dispIdx = mode === "live" ? "MNQ/MES" : "NQ/ES";
+  const goldSym = "FUT:MGC";
+  const idxSyms = ["FUT:MNQ", "FUT:MES"];
+  const dispGold = "MGC";
+  const dispIdx = "MNQ/MES";
 
   const sinceKey = mode === "demo" ? "demo_scoreboard_since" : "edge_scoreboard_since";
   let sinceRow = await prisma.agentConfig.findUnique({ where: { key: sinceKey } });
@@ -81,7 +80,7 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
   const isIdx = (s: string) => idxSyms.includes(s);
   const DEFS = [
     { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" },
-    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — short RSI>75 overbought fade, MORNINGS only. 3-yr rebuild: morning PF 1.72 (both halves) vs afternoon 1.92/train 0.86, evening 1.15/train 0.76, Europe 0.96/train 0.58 — so every off-peak hour is switched off.`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
+    { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — morning RSI>75 research candidate. Corrected replay PF 1.27 failed stability (train 0.65 / test 2.20), so it is not qualified for live.`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
     { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade, afternoon excluded: ES 0.46 / NQ 0.71 after 14:00 ET, the worst cell on both symbols.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
     // Blurb corrected 2026-07-25: it previously claimed "PF 1.22, +both halves" from a backtest whose
     // script no longer exists. An engine-exact rebuild with full trade management could not reproduce
@@ -133,8 +132,8 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     // index trend-long card showed +$388 next to an amber "off" and was misread exactly that way.
     const PARTIAL: Record<string, { label: string; note: string }> = {
       gold_long: {
-        label: "london hours on",
-        note: "Running London hours 03:00–09:00 ET, gold's best long window (PF 1.37 over 310 trades, positive in both halves). Every other hour is switched off — the US morning is gold long's worst cell at PF 0.53.",
+        label: "demo evidence only",
+        note: "London hours 03:00–09:00 ET are rejected for live. Corrected replay PF 0.89 and fresh holdout PF 0.71 invalidated the older PF 1.37 claim.",
       },
       gold_short: {
         label: "mornings on",
@@ -175,8 +174,8 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
 
 // Per-REGISTRY-EDGE realized performance for a given engine (demo or live), keyed by the
 // realtime-edges.ts keys so the strategy control board can show each edge's demo vs live results
-// side by side. Live reads live_* rows on the micros (MGC/MNQ/MES); demo reads futures_* rows on the
-// full-size contracts (GC/NQ/ES). Same entry→exit pairing (attaches direction, sidesteps double-logs).
+// side by side. Both engines trade micros (MGC/MNQ/MES); their action prefixes keep the accounts
+// separate. Same entry→exit pairing (attaches direction, sidesteps double-logs).
 export interface RealtimeEdgePerf {
   key: string;
   net: number;
@@ -195,8 +194,8 @@ export interface FuturesClose { ts: Date; sym: string; dir: "long" | "short"; pn
 // read from session-scoped Tradovate fills while the counts came from the DB).
 export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesClose[]> {
   const prefix = mode === "live" ? "live" : "futures";
-  const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
-  const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const goldSyms = ["FUT:MGC"];
+  const indexSyms = ["FUT:MNQ", "FUT:MES"];
   const allSyms = [...goldSyms, ...indexSyms];
   // Live and demo have INDEPENDENT inception dates so demo can be reset for a fresh forward-test without
   // touching live's track record. Demo reads demo_scoreboard_since (falls back to the shared key if unset).
@@ -229,8 +228,8 @@ export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesCl
 }
 
 export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise<Record<string, RealtimeEdgePerf>> {
-  const goldSyms = mode === "live" ? ["FUT:MGC"] : ["FUT:GC"];
-  const indexSyms = mode === "live" ? ["FUT:MNQ", "FUT:MES"] : ["FUT:NQ", "FUT:ES"];
+  const goldSyms = ["FUT:MGC"];
+  const indexSyms = ["FUT:MNQ", "FUT:MES"];
   const closes = await getFuturesCloses(mode);
 
   const isGold = (s: string) => goldSyms.includes(s);

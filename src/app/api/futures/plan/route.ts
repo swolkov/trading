@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
-import { REALTIME_EDGES, isEdgeEnabled, type EngineMode } from "@/lib/realtime-edges";
+import { REALTIME_EDGES, type EngineMode } from "@/lib/realtime-edges";
 import { activeVaultGates } from "@/lib/vault-session-gates";
+import { evaluateFuturesEntryGates } from "@/lib/futures-admin-state";
 
 /**
  * "Today's plan" read model for the Futures admin — answers *what will the engine actually do
@@ -38,17 +39,14 @@ function liveSizeMult(session: string, isMetal: boolean, equity: number): number
 }
 
 /** Does any enabled edge match this symbol-class in this session? Uses the real registry matcher. */
-function armedEdges(session: string, mode: EngineMode, cfg: Record<string, string | undefined>) {
-  const probes = [
-    { sym: "MGC", setupType: "extreme_rsi_bounce", direction: "long" as const, rsi: 20 },
-    { sym: "MGC", setupType: "extreme_rsi_bounce", direction: "short" as const, rsi: 85 },
-    { sym: "MES", setupType: "extreme_rsi_bounce", direction: "short" as const, rsi: 85 },
-    { sym: "MES", setupType: "trend_continuation", direction: "long" as const, rsi: 50 },
-  ];
+function armedEdges(session: string, runtimeEnabled: Set<string>) {
+  const setupTypes = ["extreme_rsi_bounce", "failed_ib_breakout", "gap_fill", "ib_extension", "or_breakout", "range_bounce", "trend_continuation", "vwap_bounce", "vwap_reclaim"];
+  const probes = ["MGC", "MES"].flatMap((sym) => setupTypes.flatMap((setupType) =>
+    (["long", "short"] as const).flatMap((direction) => [20, 50, 77, 85].map((rsi) => ({ sym, setupType, direction, rsi })))));
   const hits: { key: string; name: string }[] = [];
   for (const p of probes) {
     const edge = REALTIME_EDGES.find((e) => e.matches({ ...p, session }));
-    if (edge && isEdgeEnabled(edge.key, mode, cfg) && !hits.some((h) => h.key === edge.key)) {
+    if (edge && runtimeEnabled.has(edge.key) && !hits.some((h) => h.key === edge.key)) {
       hits.push({ key: edge.key, name: edge.name });
     }
   }
@@ -67,10 +65,14 @@ export async function GET(req: Request) {
     const hb = hbRaw ? JSON.parse(hbRaw) : null;
     const hbAgeSec = hb?.timestamp ? Math.round((Date.now() - Date.parse(hb.timestamp)) / 1000) : null;
     const equity = Number(hb?.equity ?? 0);
+    const runtimeEnabled = new Set<string>(Array.isArray(hb?.enabledEdges) ? hb.enabledEdges : []);
+    const tradingModeRaw = cfg.trading_mode_futures;
+    const tradingMode = tradingModeRaw === "live" || tradingModeRaw === "disabled" ? tradingModeRaw : "paper";
+    const entryGates = evaluateFuturesEntryGates(mode, tradingMode, hb);
 
     // Schedule: for each session window, which edges are armed and at what size multiplier.
     const schedule = WINDOWS.map((w) => {
-      const edges = armedEdges(w.session, mode, cfg);
+      const edges = armedEdges(w.session, runtimeEnabled);
       const metalMult = liveSizeMult(w.session, true, equity);
       const indexMult = liveSizeMult(w.session, false, equity);
       // An edge only truly trades if its session ALSO has a non-zero size multiplier for that class.
@@ -78,7 +80,7 @@ export async function GET(req: Request) {
         const isMetal = e.key.startsWith("gold");
         return (isMetal ? metalMult : indexMult) > 0;
       });
-      return { ...w, edges: live, metalMult, indexMult, tradable: live.length > 0 };
+      return { ...w, edges: live, metalMult, indexMult, tradable: entryGates.entriesAllowed && live.length > 0 };
     });
 
     // Which symbol CLASSES actually have an armed edge in the session running right now. Without
@@ -112,9 +114,13 @@ export async function GET(req: Request) {
 
     return Response.json({
       mode,
+      entryGates,
       vaultGates,
       engine: hb
-        ? { alive: hbAgeSec !== null && hbAgeSec < 180, ageSec: hbAgeSec, session: hb.session, mdHealth: hb.mdHealth,
+        ? { alive: entryGates.alive, ageSec: hbAgeSec, session: hb.session, mdHealth: hb.mdHealth,
+            ready: hb.ready, deploymentId: hb.deploymentId, strategyVersion: hb.strategyVersion,
+            liveTradingArmed: hb.liveTradingArmed, operatorTradingEnabled: hb.operatorTradingEnabled,
+            riskConfigHealthy: hb.riskConfigHealthy, enabledEdges: hb.enabledEdges,
             positions: hb.positions, dailyTrades: hb.dailyTrades, dailyPnl: hb.dailyPnl }
         : null,
       risk: hb
@@ -126,7 +132,7 @@ export async function GET(req: Request) {
       symbols,
       edges: REALTIME_EDGES.map((e) => ({
         key: e.key, name: e.name, blurb: e.blurb,
-        enabled: isEdgeEnabled(e.key, mode, cfg),
+        enabled: runtimeEnabled.has(e.key),
       })),
     });
   } catch (e) {

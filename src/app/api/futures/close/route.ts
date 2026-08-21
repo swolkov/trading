@@ -2,6 +2,7 @@ import { checkTradovateAuth, getTradovatePositions, placeMarketOrder, getOpenOrd
 import { prisma } from "@/lib/db";
 import { logTradeToJournal, logDecision } from "@/lib/vault";
 import { getViewMode } from "@/lib/trading-mode";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 // Multipliers for both micro (live) and full-size (demo) contracts.
 // Crypto micros: MBT/BFF underlying is BTC price; MET underlying is ETH; MXR XRP; MSL SOL.
@@ -13,12 +14,24 @@ const MULTIPLIERS: Record<string, number> = {
 const KNOWN_SYMBOLS = ["MES", "MNQ", "MGC", "MYM", "M2K", "ES", "NQ", "GC", "YM", "RTY", "MBT", "MET", "BFF", "MXR", "MSL"];
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
+
   try {
     const body = await request.json().catch(() => ({}));
     const targetSymbol = body.symbol || "all";
 
     // Use view mode so the Close button acts on the account the user is viewing
     const mode = body.mode || await getViewMode("futures");
+    if (mode !== "paper" && mode !== "live") {
+      return Response.json({ error: "mode must be 'paper' or 'live'" }, { status: 400 });
+    }
+    // The dashboard close path cannot atomically coordinate with the Railway engine's broker
+    // brackets. Disable it for real money so a stop/target fill cannot race a manual close into a
+    // reverse position. Use Tradovate directly for an emergency live flatten.
+    if (mode === "live") {
+      return Response.json({ error: "Live dashboard closes are disabled for safety. Close the position in Tradovate." }, { status: 409 });
+    }
 
     const auth = await checkTradovateAuth(mode);
     if (!auth.authenticated) {
@@ -59,6 +72,7 @@ export async function POST(request: Request) {
           contractId: pos.contractId,
           action: direction === "long" ? "Sell" : "Buy",
           quantity: qty,
+          mode,
         });
         orderId = result.orderId;
       } catch (err) {

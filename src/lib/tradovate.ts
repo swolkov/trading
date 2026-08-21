@@ -456,21 +456,23 @@ export async function placeMarketOrder(params: {
   contractId: number;
   action: "Buy" | "Sell";
   quantity: number;
+  mode?: TradingMode;
 }): Promise<TradovateOrderResult> {
-  if (!_accountId) await checkTradovateAuth();
+  const accountId = await getAccountIdForMode(params.mode);
+  if (!accountId) throw new Error(`Tradovate ${params.mode ?? "execution"} account unavailable`);
 
   const data = await tvFetch("/order/placeorder", {
     method: "POST",
     body: JSON.stringify({
-      accountSpec: _accountId,
-      accountId: _accountId,
+      accountSpec: accountId,
+      accountId,
       action: params.action,
       symbol: params.contractId,
       orderQty: params.quantity,
       orderType: "Market",
       isAutomated: true,
     }),
-  }) as { orderId: number; orderStatus?: string };
+  }, params.mode) as { orderId: number; orderStatus?: string };
 
   return { orderId: data.orderId, status: data.orderStatus || "submitted" };
 }

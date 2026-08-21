@@ -1,5 +1,5 @@
 /**
- * GOLD RSI-BOUNCE VALIDATION — the live flagship edge, engine-exact, with full trade management.
+ * GOLD RSI-BOUNCE VALIDATION — conservative replay of the production setup and trade management.
  *
  * WHY: the earlier timeframe sweep tested gold with a FIXED stop/target and no trade management.
  * For the index trend-long edge that turned out to matter enormously (the trailing/profit-lock
@@ -21,7 +21,7 @@
  *     scoreSetup base 70: +8 surge / +5 declining / -5 dry; trend15Aligns is
  *       oversold ? tf15 !== "down" : tf15 !== "up"  (+10 / -10); rsiExtreme +3;
  *       priceAboveVWAP hardcoded FALSE (+0); session prime +5 / good +0 / avoid -10. Gate: >= 75.
- *     stop = adjustedATR * 1.5 ; target = currentATR * 3.5   (note: target uses the UNadjusted ATR)
+ *     stop = adjustedATR * 1.5 ; target = adjustedATR * 3.5
  *     GOLD ATR SCALE: currentATR = rawATR * 1.5 for metals (line 2634) — gold gets wider stops.
  *
  *   SESSIONS (getSizeMultiplier, line 976-995) — LIVE gold may trade where sizeMult > 0:
@@ -31,8 +31,8 @@
  *     BLOCKED: open, close, eth_asia (22:00-03:00), eth_europe (03:00-09:00), pre_market, halt.
  *
  *   MANAGEMENT (line 1518-1745), 1 contract — no scale-out, no pyramid:
- *     0.6R breakeven, 1.1R trail at 1.0*1.5 = 1.5x ATR for METALS, 65% profit-lock once past 1R,
- *     30-min stale exit if under 1R and breakeven never reached, flat at the end of the gold window.
+ *     0.8R breakeven, 1.1R trail at 1.0*1.5 = 1.5x ATR for METALS, 65% profit-lock once past 1R,
+ *     90-min stale exit if under 1R and breakeven never reached, flat at the end of the gold window.
  *
  *   COSTS: MGC $10/pt, 0.1 tick ($1.00). 1 tick adverse on entry and on market-type exits, target
  *     filled exactly, $2.02 round-turn commission (measured from the live account).
@@ -40,28 +40,33 @@
  * ASSUMPTIONS: VIX normal (stopMult 1.0). Macro-event blackouts, the vault anti-pattern gate and
  *   the pattern-memory auto-prune are not modelled. Intrabar: adverse extreme assumed first.
  *
- * Usage: TL_DATA_DIR=data/gold3y npx tsx scripts/gold-edge-validation.ts
+ * LIMITATION: historical VIX, macro/vault/pattern gates, broker latency, partial fills and competing
+ * setup priority are not reproduced. This is a conservative research replay, never promotion proof.
+ * Usage: TL_DATA_DIR=data/gold3y npx tsx scripts/gold-edge-validation.ts GC
+ *        TL_DATA_DIR=data/micro-live-window npx tsx scripts/gold-edge-validation.ts MGC
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from "node:fs";
 
 const ROOT = new URL("..", import.meta.url);
 const DATA_DIR = process.env.TL_DATA_DIR || "data/gold3y";
+const SYMBOL = (process.argv[2] || "GC").toUpperCase();
+if (!new Set(["GC", "MGC"]).has(SYMBOL)) throw new Error(`Unsupported gold symbol: ${SYMBOL}`);
 const SINCE = process.env.G_SINCE || "";
 /** Test the sessions the engine currently BLOCKS (asia/europe/open/close) as if they were enabled
  *  at half size — answers "is there profitable gold time we are simply not trading?" */
 const ALL_SESSIONS = process.env.G_ALL_SESSIONS === "1";
-/** Stale-exit timer sweep. The live value is 30 minutes and has never been tested; it currently
- *  closes ~half of all gold trades. "none" disables it. */
+/** Stale-exit timer sweep. Production uses 90 minutes. "none" disables it. */
 const STALE_OVERRIDE = process.env.G_STALE || "";
 
 const PT_VAL = 10;        // MGC
 const TICK = 0.1;
 const COMMISSION = 2.02;
+const ENTRY_SLIP = process.env.G_SLIP !== undefined ? parseFloat(process.env.G_SLIP) : 0.50;
 const ATR_SCALE_METALS = 1.5;
 const VIX_STOP_MULT = 1.0;
-const BREAKEVEN_R = 0.6, TRAIL_R = 1.1;
-const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
+const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.8, TRAIL_R = 1.1;
+const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 90);
 const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 1.0) * 1.5;   // metals
 const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
 const BUFFER = 200;                  // engine's bars5m cap
@@ -83,7 +88,7 @@ function etOffset(t: number): number {
   return off;
 }
 
-interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; }
+interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; instrumentId: string; }
 
 /** Engine session names (getSessionName, line 953-970). */
 function sessionName(hour: number, dow: number): string {
@@ -130,19 +135,23 @@ function load(file: string): { m1: Bar[]; m5: Bar[] } {
     const c = +f[7];
     if (!isFinite(t) || !isFinite(c) || c <= 0) continue;
     const etMs = t + etOffset(t);
-    const day = Math.floor(etMs / 86400000);
-    const d = new Date(etMs);
+    const calendarDay = Math.floor(etMs / 86400000);
+    const hour = (etMs - calendarDay * 86400000) / 3600000;
+    const accountingMs = etMs - (hour < 2 ? 86400000 : 0);
+    const day = Math.floor(accountingMs / 86400000);
+    const d = new Date(accountingMs);
     m1.push({
       t, o: +f[4], h: +f[5], l: +f[6], c, v: +f[8] || 0, day,
-      hour: (etMs - day * 86400000) / 3600000,
+      hour,
       dayISO: d.toISOString().slice(0, 10),
+      instrumentId: f[3],
     });
   }
   const m5: Bar[] = [];
   let key = -1;
   for (const b of m1) {
     const k = Math.floor(b.t / 300000);
-    if (k !== key) { key = k; m5.push({ ...b, t: k * 300000 }); }
+    if (k !== key || m5[m5.length - 1]?.instrumentId !== b.instrumentId) { key = k; m5.push({ ...b, t: k * 300000 }); }
     else {
       const j = m5.length - 1;
       if (b.h > m5[j].h) m5[j].h = b.h;
@@ -215,6 +224,7 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
 
     // rolling 200-bar buffer — exactly what the engine holds
     const buf = m5.slice(i - BUFFER + 1, i + 1);
+    if (buf.some((candidate) => candidate.instrumentId !== bar.instrumentId)) continue;
     const closes = buf.map(b => b.c);
     const rawATR = atrOf(buf);
     if (rawATR <= 0) continue;
@@ -243,17 +253,21 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
     score += sizeMult >= 1 ? 5 : sizeMult >= 0.5 ? 0 : -10;
     if (Math.max(0, Math.min(100, score)) < 75) continue;
 
-    const price = bar.c;
     const stopDist = adjustedATR * 1.5;
-    const targetDist = currentATR * 3.5;               // engine uses the UNadjusted ATR here
+    const targetDist = adjustedATR * 3.5;
     const short = dir === "short";
-    const entry = short ? price - TICK : price + TICK;
-    const hardStop = short ? price + stopDist : price - stopDist;
-    const target = short ? price - targetDist : price + targetDist;
-    const riskDollars = stopDist * PT_VAL;
 
     const entryTime = bar.t + 300000;
     while (m1Cursor < m1.length && m1[m1Cursor].t < entryTime) m1Cursor++;
+    if (m1Cursor >= m1.length) break;
+    if (m1[m1Cursor].instrumentId !== bar.instrumentId) continue;
+    // The signal is only known after the five-minute bar closes. Enter from the next tradable
+    // minute's open and charge measured MGC slippage, never from the already-finished signal bar.
+    const refPrice = m1[m1Cursor].o;
+    const entry = short ? refPrice - ENTRY_SLIP : refPrice + ENTRY_SLIP;
+    const hardStop = short ? entry + stopDist : entry - stopDist;
+    const target = short ? entry - targetDist : entry + targetDist;
+    const riskDollars = stopDist * PT_VAL;
 
     let peak = 0, reachedBE = false, trail: number | null = null;
     let exited: { px: number; why: string; k: number } | null = null;
@@ -261,6 +275,11 @@ function backtest(m1: Bar[], m5: Bar[]): T[] {
 
     for (let k = m1Cursor; k < m1.length && !exited; k++) {
       const b1 = m1[k];
+      if (b1.instrumentId !== bar.instrumentId) {
+        const previous = m1[Math.max(m1Cursor, k - 1)];
+        exited = { px: short ? previous.c + TICK : previous.c - TICK, why: "contract_roll", k };
+        break;
+      }
       const dow1 = new Date(b1.t + etOffset(b1.t)).getUTCDay();
       const s1 = sessionName(b1.hour, dow1);
       const mins = (b1.t - entryTime) / 60000;
@@ -320,15 +339,15 @@ function stats(ts: T[]) {
 const f = (s: ReturnType<typeof stats>) =>
   s ? `n=${String(s.n).padStart(4)} win ${(s.wr * 100).toFixed(0).padStart(3)}% PF ${(s.pf === Infinity ? 99 : s.pf).toFixed(2).padStart(5)} avg$${(s.avg >= 0 ? "+" : "") + s.avg.toFixed(2)} net$${s.net.toFixed(0)}` : "n=0";
 
-const { m1, m5 } = load(`${DATA_DIR}/GC_1m.csv`);
+const { m1, m5 } = load(`${DATA_DIR}/${SYMBOL}_1m.csv`);
 const all = backtest(m1, m5);
 (globalThis as any).__allTrades = all;
 const days = [...new Set(all.map(t => t.dayISO))].sort();
 const cut = days[Math.floor(days.length * 0.6)];
 const W = 116;
-console.log("GOLD RSI-BOUNCE (MGC) — engine-exact, FULL trade management, 24h rolling 200-bar buffer");
-console.log(`Sessions the live engine allows gold: morning, midday, afternoon, eth_evening. ${m5.length} 5-min bars, ${days[0]} → ${days[days.length - 1]}`);
-console.log(`Costs: 1 tick ($1.00) adverse entry + 1 tick on market exits + $${COMMISSION} round-turn.\n`);
+console.log(`GOLD RSI-BOUNCE (${SYMBOL} prices → MGC execution economics) — conservative production replay`);
+console.log(`Sessions modelled: morning, midday, afternoon, eth_evening${DEPLOYED ? ", eth_europe" : ""}. ${m5.length} 5-min bars, ${days[0]} → ${days[days.length - 1]}`);
+console.log(`Costs: ${ENTRY_SLIP.toFixed(2)} point adverse entry + 1 tick on market exits + $${COMMISSION} round-turn.\n`);
 console.log("═".repeat(W));
 console.log("  OVERALL");
 console.log("═".repeat(W));

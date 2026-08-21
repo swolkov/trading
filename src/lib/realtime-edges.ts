@@ -12,8 +12,8 @@
  *
  * SAFETY / NO-SURPRISE DESIGN
  *   - The switch is ADDITIVE. When a switch flag is absent from config (the initial state), the
- *     edge falls back to its registry default — and the three current live edges default to ON
- *     for BOTH demo and live, so wiring this in changes live behaviour by exactly nothing.
+ *     edge falls back to its registry default. Live defaults are fail-closed; explicit DB flags
+ *     and the promotion gate are required before real money can trade an edge.
  *   - A NEW edge added here defaults to demo=ON, live=OFF, so it can never reach real money until
  *     it is deliberately promoted.
  *   - Default-DENY on no match: a setup that matches no registered edge is skipped, identical to
@@ -66,10 +66,9 @@ const INDEX_LONG_SYMS = new Set(["NQ", "MNQ", "ES", "MES"]);
  * trade. The earlier version treated a missing session as the *enabled* half — the wrong way round,
  * and the same shape of mistake that let a stale build trade an evening gold short on 2026-07-28.
  */
-/** 09:45–12:00 ET. Gold's only both-halves-positive SHORT cell (PF 1.72). */
+/** 09:45–12:00 ET. Research/demo candidate only; corrected replay fails stability. */
 const GOLD_SHORT_SESSION = "morning";
-/** 03:00–09:00 ET, London. Gold's only both-halves-positive LONG cell (PF 1.37, n=310 — the largest
- *  passing sample of any gold cell). London is gold's most liquid stretch outside NY. */
+/** 03:00–09:00 ET, London. Corrected replay rejects it; retained for demo evidence only. */
 const GOLD_LONG_SESSION = "eth_europe";
 
 export function edgeSymbolClass(sym: string): EdgeSymbolClass {
@@ -94,9 +93,9 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     blurb: "MGC/GC — buy deep-oversold RSI extremes (RSI<25) during London hours, 03:00–09:00 ET.",
     symbolClass: "metals",
     evidence:
-      "The BEST cell in the entire 12-cell gold grid and one of only two that survive both halves: PF 1.37 over 310 trades (train 1.19 / test 1.51) — the largest passing sample of any gold cell, and steadier across halves than the morning short (1.10/2.46) that already trades live. London is gold's most liquid stretch outside NY. NOTE the pooled gold-long number (PF 0.71) is dragged down entirely by the other sessions — see gold_long.",
+      "REJECTED FOR LIVE 2026-08-20. The older PF 1.37 claim used signal-bar closes, one-tick entry cost, and carried indicators across continuous-contract rolls. The corrected next-minute, measured-slippage, roll-safe replay produced PF 0.89 over 307 trades (train 0.74 / test 0.99), and the fresh May-Aug holdout produced PF 0.71. Keep demo-only until real demo fills meet the promotion bar.",
     defaultDemo: true,
-    defaultLive: true,
+    defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "long" &&
       m.session === GOLD_LONG_SESSION,
@@ -125,9 +124,9 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
     blurb: "MGC/GC — fade deep-overbought RSI extremes (RSI>75).",
     symbolClass: "metals",
     evidence:
-      "MORNING ONLY (09:45–12:00 ET) as of 2026-07-28. Engine-exact 3-yr test, all 12 gold session×direction cells: the morning short is one of only TWO that survive both halves — PF 1.72 (1.10 train / 2.46 test) over 117 trades. Every other gold short session fails its train half: afternoon 1.92 (0.86), eth_evening 1.15 (0.76), midday 1.03 (0.74), eth_europe 0.96 (0.58). Live corroborates: gold is −$92 over 10 trades while the morning book is +$329.",
+      "REJECTED FOR LIVE 2026-08-20. Corrected replay produced PF 1.27 over 120 trades but failed stability badly (train 0.65 / test 2.20). The fresh May-Aug holdout had only 13 morning shorts, and real live fills were 1 win in 4 for -$188. Keep demo-only until real fills achieve t>2 with positive halves.",
     defaultDemo: true,
-    defaultLive: true,
+    defaultLive: false,
     matches: (m) =>
       edgeSymbolClass(m.sym) === "metals" && m.setupType === "extreme_rsi_bounce" && m.direction === "short" &&
       m.session === GOLD_SHORT_SESSION,

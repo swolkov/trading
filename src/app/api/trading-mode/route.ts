@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { invalidateViewCache } from "@/lib/trading-mode";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 // ============ VIEW MODE API ============
 // Controls which account data the dashboard DISPLAYS (demo vs live).
@@ -23,9 +24,11 @@ export async function GET() {
   }
 }
 
-const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD || "golive";
+const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD;
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json();
     const { type, mode, password } = body;
@@ -39,12 +42,12 @@ export async function POST(request: Request) {
     if (mode !== "paper" && mode !== "live") {
       return Response.json({ error: "Mode must be 'paper' or 'live'" }, { status: 400 });
     }
+    if (password && (!LIVE_PASSWORD || password !== LIVE_PASSWORD)) {
+      return Response.json({ error: LIVE_PASSWORD ? "Incorrect password" : "Live trading password is not configured" }, { status: LIVE_PASSWORD ? 403 : 503 });
+    }
 
     // If activating live trading, require password and set BOTH view + trading mode
     if (mode === "live" && password) {
-      if (password !== LIVE_PASSWORD) {
-        return Response.json({ error: "Incorrect password" }, { status: 403 });
-      }
       // Set trading mode (engine reads this for live execution)
       await prisma.agentConfig.upsert({
         where: { key: `trading_mode_${type}` },

@@ -1,5 +1,5 @@
 /**
- * INDEX EDGE VALIDATION — both live index edges, engine-exact, session-by-session.
+ * INDEX EDGE VALIDATION — conservative replay of index candidates, session-by-session.
  *
  * Answers "is the gold session/direction finding only a gold thing?" and CORRECTS the bar-buffer
  * error in scripts/trend-long-validation.ts, which built RTH-only bars. The engine's onPrice()
@@ -19,8 +19,8 @@
  *   NOTE trend_continuation additionally requires session morning|afternoon in its own condition,
  *   so midday can only ever produce RSI-bounce shorts.
  *
- * MANAGEMENT: 0.6R breakeven, 1.1R trail at 0.9*1.5 = 1.35x ATR (index), 65% profit-lock past 1R,
- *   30-min stale exit, flat when the tradeable window ends. 1 contract, no scale-out, no pyramid.
+ * MANAGEMENT: 0.8R breakeven, 1.1R trail at 1.4*1.5 = 2.1x ATR (index), 45% profit-lock past 1R,
+ *   90-min stale exit, flat when the tradeable window ends. 1 contract, no scale-out, no pyramid.
  *
  * KNOWN LIMITATION (this explains why this harness fires ~3x more than production): the engine
  *   evaluates gap_fill / or_breakout / failed_ib_breakout / ib_extension BEFORE trend_continuation
@@ -42,6 +42,7 @@
  * USE THIS FOR RELATIVE COMPARISONS ONLY (session vs session, direction vs direction, slippage
  * sensitivity). Do NOT use its absolute PF to judge a live edge that has its own forward record.
  * Usage: TL_DATA_DIR=data/live-window npx tsx scripts/index-edge-validation.ts ES
+ *        TL_DATA_DIR=data/micro-live-window npx tsx scripts/index-edge-validation.ts MES
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from "node:fs";
@@ -54,6 +55,8 @@ const SINCE = process.env.G_SINCE || "";
 const SPEC: Record<string, { ptVal: number; tick: number; label: string }> = {
   ES: { ptVal: 5, tick: 0.25, label: "ES → MES ($5/pt)" },
   NQ: { ptVal: 2, tick: 0.25, label: "NQ → MNQ ($2/pt)" },
+  MES: { ptVal: 5, tick: 0.25, label: "MES actual micro ($5/pt)" },
+  MNQ: { ptVal: 2, tick: 0.25, label: "MNQ actual micro ($2/pt)" },
   YM: { ptVal: 0.5, tick: 1, label: "YM → MYM ($0.50/pt)" },
 };
 const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
@@ -76,19 +79,16 @@ const COMMISSION = 2.02, VIX_STOP_MULT = 1.0;
 // correlation guard), so it trades a much worse population. Use it for RELATIVE comparisons.
 // For anything exit-related prefer scripts/live-exit-forensics.ts, which replays REAL broker fills.
 //
-const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.6;
+const BREAKEVEN_R = parseFloat(process.env.G_BE || "") || 0.8;
 const TRAIL_R = parseFloat(process.env.G_TRAIL_R || "") || 1.1;
-const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 30);
-const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 0.9) * 1.5;   // index
-const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.65;
-// Index target, in ATR. Default 3.5 ATR against a 1.5 ATR stop = 2.33R. Sweepable because live has
-// now produced 23 winners and NOT ONE reached 2.33R (best 1.92R) — a target the fills never touch
-// converts every winner into a lock-out, so it has to be tested rather than assumed.
-const TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 5.0;
-// Stop width in ATR. MUST MATCH LIVE: live_futures_atr_stop_multiplier = 1.4 (NOT 1.5). Verified
-// against AgentConfig 2026-08-06 — every sweep before that date modelled 1.5/3.5 while live ran
-// 1.4/5.0, so their absolute numbers describe a config the account was not trading.
-const STOP_ATR_MULT = parseFloat(process.env.G_STOP || "") || 1.4;
+const STALE_MIN = process.env.G_STALE === "none" ? Infinity : (parseFloat(process.env.G_STALE || "") || 90);
+const TRAIL_ATR_MULT = (parseFloat(process.env.G_TRAIL_ATR || "") || 1.4) * 1.5;   // index
+const PROFIT_LOCK_FRAC = parseFloat(process.env.G_LOCK || "") || 0.45;
+// Production geometry is hardcoded per setup. The similarly named AgentConfig ATR fields are inert.
+// Extreme RSI uses 1.5/3.5 ATR; trend continuation uses 1.5/4.0 ATR.
+const RSI_TARGET_ATR_MULT = parseFloat(process.env.G_RSI_TGT || "") || 3.5;
+const TREND_TARGET_ATR_MULT = parseFloat(process.env.G_TGT || "") || 4.0;
+const STOP_ATR_MULT = parseFloat(process.env.G_STOP || "") || 1.5;
 const BUFFER = 200;
 
 const etFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -101,7 +101,7 @@ function etOffset(t: number): number {
   const off = Date.UTC(+p.year, +p.month - 1, +p.day, hh, +p.minute) - hr * 3600000;
   offCache.set(hr, off); return off;
 }
-interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; }
+interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; day: number; hour: number; dayISO: string; instrumentId: string; }
 function sessionName(hour: number, dow: number): string {
   if (dow === 6 || (dow === 5 && hour >= 17) || (dow === 0 && hour < 18)) return "halt";
   if (hour >= 17 && hour < 18) return "halt";
@@ -132,13 +132,17 @@ function load(file: string) {
     const r = lines[i]; if (!r) continue;
     const f = r.split(","); const t = Date.parse(f[0]); const c = +f[7];
     if (!isFinite(t) || !isFinite(c) || c <= 0) continue;
-    const etMs = t + etOffset(t); const day = Math.floor(etMs / 86400000);
-    m1.push({ t, o: +f[4], h: +f[5], l: +f[6], c, v: +f[8] || 0, day, hour: (etMs - day * 86400000) / 3600000, dayISO: new Date(etMs).toISOString().slice(0, 10) });
+    const etMs = t + etOffset(t);
+    const calendarDay = Math.floor(etMs / 86400000);
+    const hour = (etMs - calendarDay * 86400000) / 3600000;
+    const accountingMs = etMs - (hour < 2 ? 86400000 : 0);
+    const day = Math.floor(accountingMs / 86400000);
+    m1.push({ t, o: +f[4], h: +f[5], l: +f[6], c, v: +f[8] || 0, day, hour, dayISO: new Date(accountingMs).toISOString().slice(0, 10), instrumentId: f[3] });
   }
   const m5: Bar[] = []; let key = -1;
   for (const b of m1) {
     const k = Math.floor(b.t / 300000);
-    if (k !== key) { key = k; m5.push({ ...b, t: k * 300000 }); }
+    if (k !== key || m5[m5.length - 1]?.instrumentId !== b.instrumentId) { key = k; m5.push({ ...b, t: k * 300000 }); }
     else { const j = m5.length - 1; if (b.h > m5[j].h) m5[j].h = b.h; if (b.l < m5[j].l) m5[j].l = b.l; m5[j].c = b.c; m5[j].v += b.v; }
   }
   return { m1, m5 };
@@ -182,6 +186,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     if (sizeMult <= 0) continue;
 
     const buf = m5.slice(i - BUFFER + 1, i + 1);
+    if (buf.some((candidate) => candidate.instrumentId !== bar.instrumentId)) continue;
     const closes = buf.map(b => b.c);
     const rawATR = atrOf(buf); if (rawATR <= 0) continue;
     const currentATR = rawATR;                       // index atrScale = 1.0
@@ -211,7 +216,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       // registry: index only permits the SHORT side, and only at RSI >= 80
       if (Math.max(0, Math.min(100, sc)) >= 75 && !isOversold && rsi >= 80) {
         edge = "index_overbought_short"; dir = "short";
-        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = currentATR * TARGET_ATR_MULT;
+        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * RSI_TARGET_ATR_MULT;
         // REGIME SPLIT (2026-07-29). Disjoint, same pattern as index_trend_short_below200:
         //   _below200 = price BELOW the 200-EMA → shorting WITH the trend (a momentum short)
         //   the base row = price ABOVE it       → the true counter-trend overbought fade
@@ -229,7 +234,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
       // Modelled with the engine's own geometry and the same >=75 score gate; mirror of the short.
       else if (Math.max(0, Math.min(100, sc)) >= 75 && isOversold && rsi <= 20) {
         edge = "index_oversold_long"; dir = "long";
-        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = currentATR * TARGET_ATR_MULT;
+        stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * RSI_TARGET_ATR_MULT;
         if (price > ema200) edge = "index_oversold_long_above200";   // dip-buy in an uptrend vs falling knife
       }
       // FALL THROUGH — do NOT consume the bar (corrected 2026-08-05). This previously did
@@ -304,7 +309,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
                        : process.env.G_VWAP === "below" ? price <= vwap : true;
           if (Math.max(0, Math.min(100, sc)) >= 75 && vwapOK) {
             edge = "index_trend_long"; dir = "long";
-            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
+            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TREND_TARGET_ATR_MULT;
           }
         }
         // SHORT side — added 2026-07-29. The engine ALREADY generates these (futures-realtime.ts
@@ -321,7 +326,7 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
           sc += sessScore;
           if (Math.max(0, Math.min(100, sc)) >= 75) {
             edge = "index_trend_short"; dir = "short";
-            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TARGET_ATR_MULT;
+            stopDist = adjustedATR * STOP_ATR_MULT; targetDist = adjustedATR * TREND_TARGET_ATR_MULT;
             // Flag whether the SYMMETRIC 200-EMA filter would also have passed, so the report can
             // test "shorts only below the 200-EMA" without a second run.
             if (price < ema200) edge = "index_trend_short_below200";
@@ -349,12 +354,13 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
     const entryTime = bar.t + 300000 + ENTRY_DELAY_MIN * 60000;
     while (m1Cursor < m1.length && m1[m1Cursor].t < entryTime) m1Cursor++;
     if (m1Cursor >= m1.length) break;
-    // Re-anchor to the actual price at the delayed entry. With no delay this is the signal price,
-    // so G_DELAY=0 reproduces the original behaviour exactly.
-    const refPrice = ENTRY_DELAY_MIN > 0 ? m1[m1Cursor].c : price;
+    if (m1[m1Cursor].instrumentId !== bar.instrumentId) continue;
+    // The signal is only known after the five-minute bar closes. Re-anchor to the next tradable
+    // minute's open, including when there is no optional delay, to avoid look-ahead execution.
+    const refPrice = m1[m1Cursor].o;
     const entry = short ? refPrice - SLIP : refPrice + SLIP;
-    const hardStop = short ? refPrice + stopDist : refPrice - stopDist;
-    const target = short ? refPrice - targetDist : refPrice + targetDist;
+    const hardStop = short ? entry + stopDist : entry - stopDist;
+    const target = short ? entry - targetDist : entry + targetDist;
     const riskDollars = stopDist * S.ptVal;
 
     let peak = 0, reachedBE = false, trail: number | null = null, atrNow = currentATR;
@@ -362,6 +368,11 @@ function backtest(sym: string, m1: Bar[], m5: Bar[]): T[] {
 
     for (let k = m1Cursor; k < m1.length && !exited; k++) {
       const b1 = m1[k];
+      if (b1.instrumentId !== bar.instrumentId) {
+        const previous = m1[Math.max(m1Cursor, k - 1)];
+        exited = { px: short ? previous.c + S.tick : previous.c - S.tick, why: "contract_roll", k };
+        break;
+      }
       const s1 = sessionName(b1.hour, new Date(b1.t + etOffset(b1.t)).getUTCDay());
       const mins = (b1.t - entryTime) / 60000;
       if (indexSizeMult(s1) <= 0) { exited = { px: short ? b1.c + S.tick : b1.c - S.tick, why: "session_close", k }; break; }
@@ -403,7 +414,7 @@ function stats(ts: T[]) {
 const f = (s: ReturnType<typeof stats>) => s ? `n=${String(s.n).padStart(4)} win ${(s.wr * 100).toFixed(0).padStart(3)}% PF ${(s.pf === Infinity ? 99 : s.pf).toFixed(2).padStart(5)} avg$${(s.avg >= 0 ? "+" : "") + s.avg.toFixed(2)} net$${s.net.toFixed(0)}` : "n=0";
 
 const syms = (process.argv[2] || "ES,NQ").split(",");
-console.log("INDEX EDGES — engine-exact, 24h rolling 200-bar buffer (CORRECTED), full trade management");
+console.log("INDEX EDGES — conservative production replay, 24h rolling 200-bar buffer");
 console.log(`Sessions modelled: ${ALL_SESSIONS ? "ALL (incl. currently blocked)" : "live index only — morning/midday/afternoon"}\n`);
 for (const sym of syms) {
   const { m1, m5 } = load(`${DATA_DIR}/${sym}_1m.csv`);

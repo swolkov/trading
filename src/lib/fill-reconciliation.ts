@@ -8,6 +8,7 @@ import { getTradovateFills, checkTradovateAuth, TRADOVATE_CONTRACTS, resolveCont
 import { logTradeToJournal, logDecision } from "./vault";
 import { closeRegistryTrade } from "./strategy-performance";
 import { accountKeyForFuturesMode } from "./strategy-assignments";
+import { matchFillsToRoundTrips } from "./fill-matching";
 
 // Contract ID → symbol mapping (populated from fills + known contracts)
 async function buildContractMap(fills: TradovateFill[]): Promise<Record<number, string>> {
@@ -44,99 +45,6 @@ function matchSymbolFromName(name: string): string | null {
     if (name.startsWith(sym)) return sym;
   }
   return null;
-}
-
-interface RoundTrip {
-  symbol: string;
-  direction: "long" | "short";
-  entryFill: TradovateFill;
-  exitFill: TradovateFill;
-  entryPrice: number;
-  exitPrice: number;
-  qty: number;
-  pnl: number;
-  entryTime: string;
-  exitTime: string;
-}
-
-// Match fills into round-trip trades
-function matchFillsToRoundTrips(fills: TradovateFill[], contractMap: Record<number, string>): RoundTrip[] {
-  const roundTrips: RoundTrip[] = [];
-
-  // Group fills by contractId
-  const byContract: Record<number, TradovateFill[]> = {};
-  for (const f of fills) {
-    if (!byContract[f.contractId]) byContract[f.contractId] = [];
-    byContract[f.contractId].push(f);
-  }
-
-  for (const [contractIdStr, contractFills] of Object.entries(byContract)) {
-    const contractId = parseInt(contractIdStr);
-    const sym = contractMap[contractId] || "UNKNOWN";
-    const multiplier = TRADOVATE_CONTRACTS[sym]?.multiplier || 5;
-
-    // Sort by timestamp
-    const sorted = [...contractFills].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
-
-    // FIFO matching: Buy opens, Sell closes (or vice versa for shorts)
-    let position = 0; // positive = long, negative = short
-    let entryFills: TradovateFill[] = [];
-
-    for (const fill of sorted) {
-      const fillQty = fill.action === "Buy" ? fill.qty : -fill.qty;
-
-      if (position === 0) {
-        // Opening a new position
-        position = fillQty;
-        entryFills = [fill];
-      } else if ((position > 0 && fillQty < 0) || (position < 0 && fillQty > 0)) {
-        // Closing (partially or fully)
-        const closeQty = Math.min(Math.abs(position), Math.abs(fillQty));
-        const direction = position > 0 ? "long" : "short";
-        // Use volume-weighted average entry price across all entry fills
-        const totalEntryQty = entryFills.reduce((s, f) => s + Math.abs(f.qty), 0);
-        const entryPrice = totalEntryQty > 0
-          ? entryFills.reduce((s, f) => s + f.price * Math.abs(f.qty), 0) / totalEntryQty
-          : entryFills[0]?.price || 0;
-        const exitPrice = fill.price;
-
-        const priceDiff = direction === "long"
-          ? exitPrice - entryPrice
-          : entryPrice - exitPrice;
-        const pnl = priceDiff * multiplier * closeQty;
-
-        roundTrips.push({
-          symbol: sym,
-          direction,
-          entryFill: entryFills[0],
-          exitFill: fill,
-          entryPrice,
-          exitPrice,
-          qty: closeQty,
-          pnl,
-          entryTime: entryFills[0]?.timestamp || fill.timestamp,
-          exitTime: fill.timestamp,
-        });
-
-        const oldPosition = position;
-        position += fillQty;
-        if (position === 0) {
-          entryFills = [];
-        } else if (Math.sign(position) !== Math.sign(oldPosition)) {
-          // Flipped direction — new entry with remaining qty
-          entryFills = [fill];
-        }
-      } else {
-        // Adding to position
-        position += fillQty;
-        entryFills.push(fill);
-      }
-    }
-  }
-
-  return roundTrips;
 }
 
 export interface ReconciliationResult {
@@ -293,12 +201,21 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
           });
         } catch { /* attribution is additive — never block the ledger write */ }
 
+        // Tradovate's fill list is session-scoped. If the session began with an already-open
+        // position, the first observed fill may be an exit and cannot safely be reconstructed as
+        // an entry. Only persist trips that match a real engine entry log; missing data is safer
+        // than fabricating performance that could promote the wrong edge.
+        if (!attr.setupType) {
+          details.push(`Skipped unattributed ${rt.symbol} round trip from session-scoped fills`);
+          continue;
+        }
+
         await prisma.roundTrip.upsert({
           where: { mode_entryFillId_exitFillId: { mode: rtMode, entryFillId: String(rt.entryFill.id), exitFillId: String(rt.exitFill.id) } },
           // Only overwrite attribution when we actually resolved it, so a later re-reconcile can
           // never blank a value that an earlier pass got right.
           update: {
-            pnl: rt.pnl, exitPrice: rt.exitPrice, contracts: rt.qty,
+            pnl: rt.pnl, exitPrice: rt.exitPrice, contracts: rt.qty, source: "broker_fill_estimated_fees",
             ...(attr.setupType ? { setupType: attr.setupType } : {}),
             ...(attr.rMultiple != null ? { rMultiple: attr.rMultiple } : {}),
           },
@@ -307,9 +224,14 @@ export async function reconcileFills(modeOverride?: "paper" | "live"): Promise<R
             entryPrice: rt.entryPrice, exitPrice: rt.exitPrice, pnl: rt.pnl,
             entryFillId: String(rt.entryFill.id), exitFillId: String(rt.exitFill.id),
             entryTime: new Date(rt.entryTime), exitTime: new Date(rt.exitTime),
-            setupType: attr.setupType, rMultiple: attr.rMultiple,
+            setupType: attr.setupType, rMultiple: attr.rMultiple, source: "broker_fill_estimated_fees",
           },
         });
+        await prisma.$executeRawUnsafe(`ALTER TABLE "RoundTrip" ADD COLUMN IF NOT EXISTS entry_order_id text`);
+        await prisma.$executeRawUnsafe(
+          `UPDATE "RoundTrip" SET entry_order_id = $1 WHERE mode = $2 AND "entryFillId" = $3 AND "exitFillId" = $4`,
+          String(rt.entryFill.orderId), rtMode, String(rt.entryFill.id), String(rt.exitFill.id),
+        );
         rtPersisted++;
       } catch { /* best-effort ledger write */ }
     }

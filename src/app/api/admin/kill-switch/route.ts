@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { requireAuthenticatedUser } from "@/lib/api-auth";
 
 /**
  * Master kill switch — sets trading_mode_futures to "disabled" so the engine stops firing
@@ -13,12 +14,15 @@ import { prisma } from "@/lib/db";
  * triggered accidentally.
  */
 
-const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD || "golive";
+const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD;
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuthenticatedUser();
+  if (unauthorized) return unauthorized;
+  if (!LIVE_PASSWORD) return Response.json({ error: "Live trading password is not configured" }, { status: 503 });
   try {
     const body = await request.json().catch(() => ({}));
-    const { password, action } = body as { password?: string; action?: "kill" | "restore" };
+    const { password, action } = body as { password?: string; action?: "kill" | "flatten" | "restore" };
 
     if (!password || password !== LIVE_PASSWORD) {
       return Response.json({ error: "Password required" }, { status: 403 });
@@ -40,6 +44,23 @@ export async function POST(request: Request) {
       return Response.json({ status: "killed", tradingMode: "disabled" });
     }
 
+    if (action === "flatten") {
+      const requestId = `flatten-${Date.now()}`;
+      await prisma.$transaction([
+        prisma.agentConfig.upsert({
+          where: { key: "trading_mode_futures" },
+          update: { value: "disabled" },
+          create: { key: "trading_mode_futures", value: "disabled" },
+        }),
+        prisma.agentConfig.upsert({
+          where: { key: "futures_flatten_request_live" },
+          update: { value: JSON.stringify({ requestId, status: "requested", requestedAt: new Date().toISOString() }) },
+          create: { key: "futures_flatten_request_live", value: JSON.stringify({ requestId, status: "requested", requestedAt: new Date().toISOString() }) },
+        }),
+      ]);
+      return Response.json({ status: "flatten_requested", tradingMode: "disabled", requestId });
+    }
+
     if (action === "restore") {
       // Restore to paper (demo) — never auto-restore to live
       await prisma.agentConfig.upsert({
@@ -55,7 +76,7 @@ export async function POST(request: Request) {
       return Response.json({ status: "restored", tradingMode: "paper" });
     }
 
-    return Response.json({ error: "action must be 'kill' or 'restore'" }, { status: 400 });
+    return Response.json({ error: "action must be 'kill', 'flatten', or 'restore'" }, { status: 400 });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

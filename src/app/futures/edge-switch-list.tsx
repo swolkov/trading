@@ -6,7 +6,7 @@ import type { EdgeSwitchVM, EdgePerfLite } from "@/lib/realtime-edges";
 
 // Inline demo/live switch list for the Futures "Strategy" tab — the same edges + switches as the
 // admin control board, right where you watch the market. State comes from /api/futures/edge-switches;
-// flips POST to /api/admin/strategy-toggle (enabling on LIVE is password-gated server-side).
+// flips POST to /api/admin/strategy-toggle (every mutation is admin-password gated server-side).
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toFixed(0)}`;
@@ -25,11 +25,8 @@ export function EdgeSwitchList() {
 
   async function toggle(e: EdgeSwitchVM, mode: "demo" | "live", next: boolean) {
     setErr(null);
-    let password: string | undefined;
-    if (mode === "live" && next) {
-      password = window.prompt(`Turn "${e.name}" ON for LIVE (real money)?\n\nEnter the live password to confirm:`) || undefined;
-      if (!password) return; // cancelled
-    }
+    const password = window.prompt(`Turn "${e.name}" ${next ? "ON" : "OFF"} for ${mode.toUpperCase()}?\n\nEnter the admin trading password:`) || undefined;
+    if (!password) return;
     setBusy(`${e.key}:${mode}`);
     // optimistic local update
     mutate(
