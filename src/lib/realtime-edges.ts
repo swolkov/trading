@@ -147,6 +147,18 @@ export const REALTIME_EDGES: RealtimeEdge[] = [
       m.session !== GOLD_SHORT_SESSION,
   },
   {
+    key: "gold_trend_continuation",
+    name: "Gold trend-continuation LONG (demo trial)",
+    blurb: "MGC — buy a confirmed trend-continuation pullback; demo evidence only.",
+    symbolClass: "metals",
+    evidence:
+      "NOT VALIDATED — added 2026-08-21 after 9 resolved MGC shadow marks were +$351.50 net counterfactual, but with no slippage and too little data to promote. The setup is deliberately MGC-only, demo-only, and must earn real fills before any live consideration.",
+    defaultDemo: true,
+    defaultLive: false,
+    matches: (m) =>
+      m.sym === "MGC" && m.setupType === "trend_continuation" && m.direction === "long",
+  },
+  {
     key: "index_overbought_short",
     name: "Index overbought-short",
     blurb: "MNQ/MES — short when RSI ≥ 80 (the overbought fade).",

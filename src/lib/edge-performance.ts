@@ -32,6 +32,10 @@ export interface EdgeStat {
   parts?: { key: string; label: string; enabled: boolean }[];
 }
 
+function edgeKeyFromReason(reason: string): string | null {
+  return reason.match(/Edge:\s*([a-z0-9_]+)/i)?.[1] ?? null;
+}
+
 const dirOf = (action: string): "long" | "short" | null =>
   action === "live_long" ? "long" : action === "live_short" ? "short" : null;
 
@@ -64,22 +68,23 @@ export async function getEdgePerformance(mode: "live" | "demo" = "live"): Promis
     action === `${prefix}_long` ? "long" : action === `${prefix}_short` ? "short" : null;
 
   // Pair entries → exits per symbol so each realized P&L carries the direction it was taken in.
-  const openDir: Record<string, "long" | "short" | null> = {};
-  type Close = { ts: Date; sym: string; dir: "long" | "short"; exit: string; pnl: number };
+  const openTrade: Record<string, { dir: "long" | "short"; edgeKey: string | null } | null> = {};
+  type Close = { ts: Date; sym: string; dir: "long" | "short"; exit: string; pnl: number; edgeKey: string | null };
   const closes: Close[] = [];
   for (const r of rows) {
     const d = dirFor(r.action);
-    if (d) { openDir[r.symbol] = d; continue; }   // entry — remember the direction we opened in
+    if (d) { openTrade[r.symbol] = { dir: d, edgeKey: edgeKeyFromReason(r.reason) }; continue; }   // entry — remember direction + exact edge
     if (r.pnl == null) continue;                  // not a realized close
-    const dir = openDir[r.symbol];
-    if (!dir) continue;                           // exit with no matching in-window entry — skip
-    closes.push({ ts: r.createdAt, sym: r.symbol, dir, exit: r.action.replace(new RegExp(`^${prefix}_`), ""), pnl: r.pnl });
-    openDir[r.symbol] = null;
+    const open = openTrade[r.symbol];
+    if (!open) continue;                           // exit with no matching in-window entry — skip
+    closes.push({ ts: r.createdAt, sym: r.symbol, dir: open.dir, edgeKey: open.edgeKey, exit: r.action.replace(new RegExp(`^${prefix}_`), ""), pnl: r.pnl });
+    openTrade[r.symbol] = null;
   }
 
   const isIdx = (s: string) => idxSyms.includes(s);
   const DEFS = [
-    { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" },
+    { key: "gold_long", name: "Gold RSI — oversold LONG", blurb: `${dispGold} — buy RSI<25 oversold bounce (long side of the flagship edge).`, match: (c: Close) => c.sym === goldSym && c.dir === "long" && c.edgeKey !== "gold_trend_continuation" },
+    { key: "gold_trend_continuation", name: "Gold trend-continuation LONG", blurb: `${dispGold} — demo-only trend-continuation pullback trial.`, match: (c: Close) => c.sym === goldSym && c.edgeKey === "gold_trend_continuation" },
     { key: "gold_short", name: "Gold RSI — overbought SHORT", blurb: `${dispGold} — morning RSI>75 research candidate. Corrected replay PF 1.27 failed stability (train 0.65 / test 2.20), so it is not qualified for live.`, match: (c: Close) => c.sym === goldSym && c.dir === "short" },
     { key: "index_short", name: "Index overbought-short", blurb: `${dispIdx} — short at RSI≥80. The overbought fade, afternoon excluded: ES 0.46 / NQ 0.71 after 14:00 ET, the worst cell on both symbols.`, match: (c: Close) => isIdx(c.sym) && c.dir === "short" },
     // Blurb corrected 2026-07-25: it previously claimed "PF 1.22, +both halves" from a backtest whose
@@ -186,7 +191,7 @@ export interface RealtimeEdgePerf {
   lastTs: string | null;
 }
 
-export interface FuturesClose { ts: Date; sym: string; dir: "long" | "short"; pnl: number }
+export interface FuturesClose { ts: Date; sym: string; dir: "long" | "short"; pnl: number; edgeKey: string | null }
 
 // Paired entry→exit closes for an engine (live/demo), Jul 16-17 incident window excluded. THE shared
 // basis for per-edge perf AND the account-stats panel, so trade count / best / worst / win-rate can
@@ -213,16 +218,16 @@ export async function getFuturesCloses(mode: "live" | "demo"): Promise<FuturesCl
     take: 2000,
   })).filter((r) => { const t = r.createdAt.getTime(); return t < INCIDENT_START || t >= INCIDENT_END; });
 
-  const openDir: Record<string, "long" | "short" | null> = {};
+  const openTrade: Record<string, { dir: "long" | "short"; edgeKey: string | null } | null> = {};
   const closes: FuturesClose[] = [];
   for (const r of rows) {
     const d = dir(r.action);
-    if (d) { openDir[r.symbol] = d; continue; }
+    if (d) { openTrade[r.symbol] = { dir: d, edgeKey: edgeKeyFromReason(r.reason) }; continue; }
     if (r.pnl == null) continue;
-    const od = openDir[r.symbol];
-    if (!od) continue;
-    closes.push({ ts: r.createdAt, sym: r.symbol, dir: od, pnl: r.pnl });
-    openDir[r.symbol] = null;
+    const open = openTrade[r.symbol];
+    if (!open) continue;
+    closes.push({ ts: r.createdAt, sym: r.symbol, dir: open.dir, edgeKey: open.edgeKey, pnl: r.pnl });
+    openTrade[r.symbol] = null;
   }
   return closes;
 }
@@ -245,7 +250,8 @@ export async function getRealtimeEdgePerformance(mode: "live" | "demo"): Promise
   // Closing it properly needs an entry-session column on the close record — not worth a migration
   // while the off-peak halves are live-disabled.
   const bucket = (c: FuturesClose): string | null =>
-    isGold(c.sym) ? (c.dir === "long" ? "gold_long" : "gold_short")
+    c.edgeKey && REALTIME_EDGES.some((edge) => edge.key === c.edgeKey) ? c.edgeKey
+    : isGold(c.sym) ? (c.dir === "long" ? "gold_long" : "gold_short")
     : isIndex(c.sym) && c.dir === "short" ? "index_overbought_short"
     : isIndex(c.sym) && c.dir === "long" ? "index_trend_long"
     : null;
