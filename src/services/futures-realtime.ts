@@ -14,8 +14,9 @@ import { getPlanContextForGrading } from "../lib/advisor";
 import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, edgeFlagKey, REALTIME_EDGES } from "../lib/realtime-edges";
 import { VAULT_SESSION_RULES } from "../lib/vault-session-gates";
 import { reconcileBrokerPosition } from "../lib/broker-position-reconciliation";
-import { cappedContractLimit, isFreshPositiveEquity } from "../lib/risk-sizing";
+import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber } from "../lib/risk-sizing";
 import { contractMappingMatchesBroker, selectFreshContractMapping } from "../lib/databento-contract-mapping";
+import { FUTURES_STRATEGY_VERSION } from "../lib/strategy-version";
 import {
   FULL_SIZE_FUTURES,
   MICRO_FUTURES,
@@ -54,7 +55,7 @@ const POSITIONS_KEY = `futures_positions_${ENGINE_MODE}`;
 const TRADE_ACTION_PREFIX = IS_LIVE ? "live" : "futures";
 const MODE_TAG = IS_LIVE ? "LIVE" : "DEMO";
 const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
-const STRATEGY_VERSION = "2026-08-20-parity-v1";
+const STRATEGY_VERSION = FUTURES_STRATEGY_VERSION;
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
@@ -1123,6 +1124,18 @@ let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuatio
 // Per-edge on/off switches for THIS engine (demo/live), loaded from DB each config cycle. Absent flag →
 // registry default (current edges default ON for both, so behaviour is unchanged until a switch is set).
 let edgeFlags: Record<string, string | undefined> = {};
+let futuresTradingEnabled = !IS_LIVE;
+let riskConfigHealthy = false;
+
+async function refreshOperatorTradingGate(): Promise<void> {
+  try {
+    const row = await prisma.agentConfig.findUnique({ where: { key: "trading_mode_futures" } });
+    futuresTradingEnabled = row?.value !== "disabled" && (!IS_LIVE || row?.value === "live");
+  } catch (error) {
+    if (USES_LIVE_POLICY) futuresTradingEnabled = false;
+    log(`[CONFIG] Operator trading gate unavailable${USES_LIVE_POLICY ? "; entries fail closed" : ""}: ${error}`);
+  }
+}
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
 const lastDatabentoTop = new Map<string, { bid: number; ask: number; ts: number; rawContract: string }>();
 const lastContractMismatchLogAt = new Map<string, number>();
@@ -1796,7 +1809,9 @@ function riskSizingEquity(): number {
       ? liveMirrorEquity
       : 0;
   }
-  if (riskConfig.simulatedEquity > 0) return riskConfig.simulatedEquity;
+  // Real-money sizing must always use a fresh broker balance. Simulated equity is research-only;
+  // a stale positive live_futures_simulated_equity value must never manufacture buying power.
+  if (IS_DEMO && !DEMO_LIVE_CLONE && riskConfig.simulatedEquity > 0) return riskConfig.simulatedEquity;
   return isFreshPositiveEquity(tradovateEquity, lastTradovateEquityAt, Date.now(), BROKER_EQUITY_MAX_AGE_MS)
     ? tradovateEquity
     : 0;
@@ -1836,28 +1851,36 @@ async function loadRiskConfig() {
       "index_trend_long_enabled",   // global (both modes) off-switch for the NQ trend-long edge — MUST be in this list or the DB flag is never read
       ...allEdgeFlagKeys(),         // per-edge, per-engine on/off switches (edge_<key>_<demo|live>) — the strategy control board writes these
       "macro_blackout_dates",       // comma-separated YYYY-MM-DD (CPI etc, 8:30 ET releases) — maintained in config, no deploy to update
+      "trading_mode_futures",       // operator kill switch; live requires the explicit "live" value
+      ...REALTIME_EDGES.map((edge) => `edge_${edge.key}_live_version`),
     ];
     const configs = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const cfg: Record<string, string> = {};
     for (const c of configs) cfg[c.key] = c.value;
     macroBlackoutDates = new Set((cfg["macro_blackout_dates"] || "").split(",").map(x => x.trim()).filter(Boolean));
 
-    const dbTradesPerDay = parseInt(cfg[`${kp}_max_trades_per_day`]) || defaults.maxTradesPerDay;
-    const dbDailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || defaults.dailyLossLimitPct;
+    const nonNegative = nonNegativeConfigNumber;
+    const nonNegativeInt = (raw: string | undefined, fallback: number): number => Math.floor(nonNegative(raw, fallback));
+    const dbTradesPerDay = nonNegativeInt(cfg[`${kp}_max_trades_per_day`], defaults.maxTradesPerDay);
+    const dbDailyLossPct = nonNegative(cfg[`${kp}_daily_loss_limit_pct`], defaults.dailyLossLimitPct);
 
     riskConfig = {
-      maxContractsPerTrade: parseInt(cfg[`${kp}_max_contracts`]) || defaults.maxContractsPerTrade,
-      maxTotalContracts: parseInt(cfg[`${kp}_max_total_contracts`]) || defaults.maxTotalContracts,
+      maxContractsPerTrade: nonNegativeInt(cfg[`${kp}_max_contracts`], defaults.maxContractsPerTrade),
+      maxTotalContracts: nonNegativeInt(cfg[`${kp}_max_total_contracts`], defaults.maxTotalContracts),
       maxTradesPerDay: IS_DEMO && !DEMO_LIVE_CLONE ? Math.max(dbTradesPerDay, DEMO_DEFAULTS.maxTradesPerDay) : dbTradesPerDay,
-      riskPerTradePct: parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || defaults.riskPerTradePct,
+      riskPerTradePct: nonNegative(cfg[`${kp}_risk_per_trade_pct`], defaults.riskPerTradePct),
       dailyLossLimitPct: IS_DEMO && !DEMO_LIVE_CLONE ? Math.max(dbDailyLossPct, DEMO_DEFAULTS.dailyLossLimitPct) : dbDailyLossPct,
-      maxDrawdownPct: parseFloat(cfg[`${kp}_max_drawdown_pct`]) || defaults.maxDrawdownPct,
+      maxDrawdownPct: nonNegative(cfg[`${kp}_max_drawdown_pct`], defaults.maxDrawdownPct),
       // Live is ISOLATED to its mode-keyed limit (no leak from the shared max_positions / stocks setting);
       // demo keeps the legacy shared key for backward-compat.
-      maxConcurrentPositions: parseInt(cfg[`${kp}_max_positions`]) || (IS_DEMO && !DEMO_LIVE_CLONE ? parseInt(cfg.max_positions) : 0) || defaults.maxConcurrentPositions,
-      atrStopMultiplier: parseFloat(cfg[`${kp}_atr_stop_multiplier`]) || defaults.atrStopMultiplier,
-      atrTargetMultiplier: parseFloat(cfg[`${kp}_atr_target_multiplier`]) || defaults.atrTargetMultiplier,
-      simulatedEquity: parseFloat(cfg[`${kp}_simulated_equity`]) || defaults.simulatedEquity,
+      maxConcurrentPositions: cfg[`${kp}_max_positions`] !== undefined
+        ? nonNegativeInt(cfg[`${kp}_max_positions`], defaults.maxConcurrentPositions)
+        : (IS_DEMO && !DEMO_LIVE_CLONE && cfg.max_positions !== undefined
+          ? nonNegativeInt(cfg.max_positions, defaults.maxConcurrentPositions)
+          : defaults.maxConcurrentPositions),
+      atrStopMultiplier: nonNegative(cfg[`${kp}_atr_stop_multiplier`], defaults.atrStopMultiplier),
+      atrTargetMultiplier: nonNegative(cfg[`${kp}_atr_target_multiplier`], defaults.atrTargetMultiplier),
+      simulatedEquity: nonNegative(cfg[`${kp}_simulated_equity`], defaults.simulatedEquity),
     };
     // PHASE 0: optional symbol whitelist (e.g. live_futures_symbols="MES"). Empty/unset = default behavior.
     const symbolsCfg = cfg[`${kp}_symbols`];
@@ -1878,6 +1901,16 @@ async function loadRiskConfig() {
     // so the trend-long edge can't silently turn back on for this engine.
     edgeFlags = {};
     for (const k of allEdgeFlagKeys()) edgeFlags[k] = cfg[k];
+    if (IS_LIVE) {
+      for (const edge of REALTIME_EDGES) {
+        const flag = edgeFlagKey(edge.key, "live");
+        if (edgeFlags[flag] === "true" && cfg[`edge_${edge.key}_live_version`] !== STRATEGY_VERSION) {
+          edgeFlags[flag] = "false";
+          await prisma.agentConfig.upsert({ where: { key: flag }, update: { value: "false" }, create: { key: flag, value: "false" } });
+          log(`[EDGE VERSION BLOCK] ${edge.key}: stale or missing promotion version; live disabled.`);
+        }
+      }
+    }
     if (cfg["index_trend_long_enabled"] === "false") {
       const md = IS_LIVE ? "live" : "demo";
       if (edgeFlags[`edge_index_trend_long_${md}`] === undefined) edgeFlags[`edge_index_trend_long_${md}`] = "false";
@@ -1907,6 +1940,8 @@ async function loadRiskConfig() {
       }
     }
     await refreshLiveMirrorEquity();
+    futuresTradingEnabled = cfg.trading_mode_futures !== "disabled" && (!IS_LIVE || cfg.trading_mode_futures === "live");
+    riskConfigHealthy = true;
     updateTradingSymbols();
     const mirrorStatus = IS_DEMO && DEMO_LIVE_CLONE
       ? ` | liveMirror=${riskSizingEquity() > 0 ? `$${riskSizingEquity().toFixed(0)}` : "STALE/MISSING (entries blocked)"}`
@@ -1923,6 +1958,11 @@ async function loadRiskConfig() {
       REALTIME_EDGES.map((e) => `${e.key}=${isEdgeEnabled(e.key, ENGINE_MODE, edgeFlags) ? "ON" : "off"}`).join(" "));
   } catch (err) {
     riskConfig = defaults;
+    riskConfigHealthy = false;
+    if (USES_LIVE_POLICY) {
+      futuresTradingEnabled = false;
+      for (const edge of REALTIME_EDGES) edgeFlags[edgeFlagKey(edge.key, ENGINE_MODE)] = "false";
+    }
     log(`[CONFIG] Failed to load from DB, using defaults: ${err}`);
   }
 }
@@ -2101,7 +2141,7 @@ function checkPositions(sym: string, price: number, reliable = true) {
   // unknown data is strictly safer than acting on wrong data.
   // Only the AGGREGATE check is gated — this symbol just ticked, so its own profit-lock, time exit
   // and hard-loss backstop below must keep running normally.
-  const MAX_DRAWDOWN_PCT = 0.15;
+  const maxDrawdownFraction = riskConfig.maxDrawdownPct / 100;
   const aggregateTrustworthy = allPositionsFreshlyPriced();
   if (!aggregateTrustworthy && Date.now() - lastAggSkipLogAt > 60_000) {
     lastAggSkipLogAt = Date.now();
@@ -2115,8 +2155,8 @@ function checkPositions(sym: string, price: number, reliable = true) {
     return sum + d * m * p.quantity;
   }, 0);
   const totalDrawdown = aggregateUnrealized + dailyPnl;
-  if (aggregateTrustworthy && tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * MAX_DRAWDOWN_PCT)) {
-    log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${(MAX_DRAWDOWN_PCT * 100)}% of equity $${tradovateEquity.toFixed(0)} — CLOSING ALL`);
+  if (aggregateTrustworthy && tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * maxDrawdownFraction)) {
+    log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${riskConfig.maxDrawdownPct}% of equity $${tradovateEquity.toFixed(0)} — CLOSING ALL`);
     notify(`🚨 AGGREGATE DRAWDOWN KILL: ~$${totalDrawdown.toFixed(0)} (est) — closing all positions; actual fill P&L posts per-position as it reconciles.`, "general");
     for (const [s, p] of positions) {
       closePosition(s, barBuilders.get(s)?.currentBar?.c || p.entryPrice, "emergency");
@@ -3055,7 +3095,7 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         const brokerBeforeClose = await getBrokerPositionSnapshot(pos.contractId, 3);
         if (brokerBeforeClose === undefined) {
           log(`[CLOSE] CRITICAL: ${sym} broker state unavailable after bracket cancellation; no close submitted`);
-          notify(`🚨 ${MODE_TAG} ${sym}: broker state unavailable after canceling brackets. Restoring protection; check account.`, "general");
+          notify(`🚨 ${MODE_TAG} ${sym}: broker state unavailable after canceling brackets. No order can be sized safely; check account now.`, "general");
           closingLocks.delete(sym);
           return;
         }
@@ -3066,7 +3106,15 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         const brokerDirection = brokerBeforeClose.netPos > 0 ? "long" : "short";
         if (brokerDirection !== pos.direction) {
           log(`[CLOSE] CRITICAL: ${sym} broker direction is ${brokerDirection}, expected ${pos.direction}; no close submitted`);
-          notify(`🚨 ${MODE_TAG} ${sym}: broker direction changed before close. No order submitted; check account now.`, "general");
+          pos.direction = brokerDirection;
+          pos.quantity = Math.abs(brokerBeforeClose.netPos);
+          pos.entryPrice = brokerBeforeClose.netPrice || price;
+          const protectiveAtr = atr(barBuilders.get(sym)?.bars5m || []);
+          const protectiveDistance = protectiveAtr > 0 ? protectiveAtr * 1.5 : Math.max(Math.abs(pos.entryPrice - pos.stopLoss), TICK_SIZES[sym] || 0.25);
+          pos.stopLoss = roundToTick(sym, brokerDirection === "long" ? pos.entryPrice - protectiveDistance : pos.entryPrice + protectiveDistance);
+          pos.targetOrderId = null;
+          await restoreProtectiveStop(pos.quantity);
+          notify(`🚨 ${MODE_TAG} ${sym}: broker direction changed before close. Tracking and emergency protection were rebuilt; check account now.`, "general");
           closingLocks.delete(sym);
           return;
         }
@@ -3101,8 +3149,7 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           const brokerPosition = await getBrokerPositionSnapshot(pos.contractId);
           if (brokerPosition === undefined) {
             log(`[CLOSE] CRITICAL: ${sym} close state unresolved. Refusing to submit another order that could reverse the position.`);
-            notify(`🚨 ${MODE_TAG} ${sym}: close state unresolved. No retry submitted to avoid reversing the position. Check broker now.`, "general");
-            await restoreProtectiveStop();
+            notify(`🚨 ${MODE_TAG} ${sym}: close state unresolved. No close or stop can be sized safely; check broker now.`, "general");
             closingLocks.delete(sym);
             return;
           }
@@ -3113,7 +3160,15 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           const brokerDirection = brokerPosition.netPos > 0 ? "long" : "short";
           if (brokerDirection !== pos.direction) {
             log(`[CLOSE] CRITICAL: ${sym} broker direction flipped during close (${brokerDirection}). Stopping automatic retries.`);
-            notify(`🚨 ${MODE_TAG} ${sym}: broker direction flipped during close. Check account now.`, "general");
+            pos.direction = brokerDirection;
+            pos.quantity = Math.abs(brokerPosition.netPos);
+            pos.entryPrice = brokerPosition.netPrice || price;
+            const protectiveAtr = atr(barBuilders.get(sym)?.bars5m || []);
+            const protectiveDistance = protectiveAtr > 0 ? protectiveAtr * 1.5 : Math.max(Math.abs(pos.entryPrice - pos.stopLoss), TICK_SIZES[sym] || 0.25);
+            pos.stopLoss = roundToTick(sym, brokerDirection === "long" ? pos.entryPrice - protectiveDistance : pos.entryPrice + protectiveDistance);
+            pos.targetOrderId = null;
+            await restoreProtectiveStop(pos.quantity);
+            notify(`🚨 ${MODE_TAG} ${sym}: broker direction flipped during close. Tracking and emergency protection were rebuilt; check account now.`, "general");
             closingLocks.delete(sym);
             return;
           }
@@ -3158,7 +3213,22 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           stoppedSymbols.add(`close_failed_${sym}`);
           notify(`CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 retries! Manual intervention needed.`, "general");
         }
-        await restoreProtectiveStop(pos.quantity);
+        const confirmedRemainder = await getBrokerPositionSnapshot(pos.contractId, 3);
+        if (confirmedRemainder) {
+          const confirmedDirection = confirmedRemainder.netPos > 0 ? "long" : "short";
+          pos.direction = confirmedDirection;
+          pos.quantity = Math.abs(confirmedRemainder.netPos);
+          pos.entryPrice = confirmedRemainder.netPrice || price;
+          const protectiveAtr = atr(barBuilders.get(sym)?.bars5m || []);
+          const protectiveDistance = protectiveAtr > 0 ? protectiveAtr * 1.5 : Math.max(Math.abs(pos.entryPrice - pos.stopLoss), TICK_SIZES[sym] || 0.25);
+          pos.stopLoss = roundToTick(sym, confirmedDirection === "long" ? pos.entryPrice - protectiveDistance : pos.entryPrice + protectiveDistance);
+          pos.targetOrderId = null;
+          await restoreProtectiveStop(pos.quantity);
+        } else if (confirmedRemainder === null) {
+          log(`[CLOSE] ${sym}: broker confirms flat after failed close attempts; retaining tracking for sync reconciliation.`);
+        } else {
+          notify(`🚨 ${MODE_TAG} ${sym}: broker state remains unavailable after failed close. No protective order was guessed; check broker now.`, "general");
+        }
         // RELEASE THE LOCK BEFORE RETURNING (2026-08-19). This `return` sits OUTSIDE the
         // try/finally below that normally deletes the lock, so without this line the symbol
         // stayed locked for the life of the process: every later closePosition() — trail stop,
@@ -4221,9 +4291,9 @@ async function verifyOrderFill(orderId: number, requestedQty: number): Promise<
       }
     } catch { /* transient API error — keep polling, resolve as unknown */ }
   }
-  // Polling ended: if ANY fill was seen, treat as filled at the ACTUAL (possibly partial) qty so
-  // protective orders are sized to what we really hold — never larger (oversize → reversal risk).
-  if (lastFilledQty > 0) return { status: "filled", price: lastVwap, qty: lastFilledQty };
+  // A partial fill with non-terminal order state is unresolved. Returning it as filled would let the
+  // caller bracket only the observed quantity while the working remainder can fill later. The caller
+  // must cancel the order, wait for terminal state, then reconcile the final broker position.
   return { status: "unknown" };
 }
 
@@ -4316,6 +4386,10 @@ async function evaluateAndTrade(
   //    the real balance has landed is guesswork. Explicit rather than relying on maxRisk falling to 0.
   if (riskSizingEquity() <= 0) {
     log(`  ${sym}: SKIP — sizing equity unavailable${IS_DEMO && DEMO_LIVE_CLONE ? " (fresh live heartbeat required for demo clone)" : " (waiting on balance fetch)"}`);
+    return;
+  }
+  if (USES_LIVE_POLICY && (!riskConfigHealthy || !futuresTradingEnabled)) {
+    log(`  ${sym}: SKIP — operator trading gate is ${riskConfigHealthy ? "disabled" : "unavailable"}`);
     return;
   }
 
@@ -4465,7 +4539,7 @@ async function evaluateAndTrade(
     return;
   }
 
-  // Orchestrator pause gate (fail-open) — respect VIX-spike / consecutive-stop pauses
+  // Orchestrator pause gate. Live-policy engines fail closed when this safety state cannot be read.
   try {
     const pause = await checkEntriesPaused();
     if (pause.paused) {
@@ -4473,7 +4547,12 @@ async function evaluateAndTrade(
       feedLog("cooldown", `Entries paused — ${pause.reason}`);
       return;
     }
-  } catch { /* fail-open: proceed normally if the pause check fails */ }
+  } catch (error) {
+    if (USES_LIVE_POLICY) {
+      log(`  ${sym}: SKIP — orchestrator pause state unavailable: ${error}`);
+      return;
+    }
+  }
 
   // Execution gates — limits from DB config (Agent Hub manages these)
   const currentTotalContracts = [...positions.values()].reduce((s, p) => s + p.quantity, 0);
@@ -4700,6 +4779,25 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       return;
     }
 
+    // Final operator gate inside the submission critical section. The earlier strategy gate can be
+    // minutes old after broker verification waits. This DB read yields, so quote and contract
+    // alignment are deliberately revalidated immediately after it.
+    await refreshOperatorTradingGate();
+    if (USES_LIVE_POLICY && (!riskConfigHealthy || !futuresTradingEnabled)) {
+      log(`  ${sym}: SKIP — operator kill switch engaged before order submission`);
+      return;
+    }
+    freshPrice = getActionableEntryPrice(sym, direction);
+    if (freshPrice <= 0 || chaseExceeded(freshPrice)) {
+      if (freshPrice <= 0) log(`  ${sym}: SKIP — executable quote became stale or changed contract during final operator check`);
+      return;
+    }
+    const finalContract = contracts.get(sym);
+    if (!finalContract || finalContract.id !== contract.id || finalContract.name !== contract.name) {
+      log(`  ${sym}: SKIP — broker contract changed during final operator check (${contract.name} → ${finalContract?.name ?? "unresolved"})`);
+      return;
+    }
+
     // ── ENTRY ORDER: MARKETABLE LIMIT vs MARKET ──────────────────────────────────────────────
     // The chase guard above only refuses to chase a move that ALREADY happened. It cannot bound what
     // the market hands us once a MARKET order is submitted — and that unbounded part is where the
@@ -4719,7 +4817,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     // this is DEMO-ON / LIVE-OFF until demo has the sample.
     const useLimit = entryLimitEnabled && stopDist > 0;
     const limitAnchor = freshPrice;
-    const tick = TICK_SIZES[sym] || contracts.get(sym)?.tickSize || 0.25;
+    const tick = TICK_SIZES[sym] || finalContract.tickSize || 0.25;
     // Ticks first (what the EDGE can afford), then the fraction-of-stop as a secondary ceiling (what
     // the TRADE can afford). The tighter of the two wins — see ENTRY_LIMIT_TICKS_DEFAULT.
     const entryCap = Math.min(entryLimitTicks * tick, maxChase);
@@ -6201,6 +6299,7 @@ async function main() {
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
+  safeInterval(refreshOperatorTradingGate, 15_000, "operatorTradingGate");
   safeInterval(resolveContracts, 300_000, "resolveContracts"); // fail-closed symbols retry automatically
   safeInterval(sweepPhantomCloseRows, 1800_000, "sweepPhantoms"); // auto-clean phantom close-rows every 30min
   safeInterval(proactiveTokenRefresh, 600_000, "tokenRefresh"); // check token expiry every 10min

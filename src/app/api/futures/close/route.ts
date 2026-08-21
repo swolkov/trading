@@ -23,6 +23,15 @@ export async function POST(request: Request) {
 
     // Use view mode so the Close button acts on the account the user is viewing
     const mode = body.mode || await getViewMode("futures");
+    if (mode !== "paper" && mode !== "live") {
+      return Response.json({ error: "mode must be 'paper' or 'live'" }, { status: 400 });
+    }
+    // The dashboard close path cannot atomically coordinate with the Railway engine's broker
+    // brackets. Disable it for real money so a stop/target fill cannot race a manual close into a
+    // reverse position. Use Tradovate directly for an emergency live flatten.
+    if (mode === "live") {
+      return Response.json({ error: "Live dashboard closes are disabled for safety. Close the position in Tradovate." }, { status: 409 });
+    }
 
     const auth = await checkTradovateAuth(mode);
     if (!auth.authenticated) {
@@ -63,6 +72,7 @@ export async function POST(request: Request) {
           contractId: pos.contractId,
           action: direction === "long" ? "Sell" : "Buy",
           quantity: qty,
+          mode,
         });
         orderId = result.orderId;
       } catch (err) {

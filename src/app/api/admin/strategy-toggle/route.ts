@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { REALTIME_EDGES, edgeFlagKey } from "@/lib/realtime-edges";
 import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { FUTURES_STRATEGY_VERSION } from "@/lib/strategy-version";
 
 /**
  * Per-edge, per-engine on/off switch for the realtime futures engine.
@@ -13,7 +14,7 @@ import { requireAuthenticatedUser } from "@/lib/api-auth";
  */
 
 const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD;
-const CURRENT_STRATEGY_VERSION = "2026-08-20-parity-v1";
+const CURRENT_STRATEGY_VERSION = FUTURES_STRATEGY_VERSION;
 const MAX_P90_SLIPPAGE: Record<string, number> = { MGC: 0.50, MNQ: 1.50, MES: 0.50 };
 
 function tStat(values: number[]): number {
@@ -57,11 +58,28 @@ export async function POST(request: Request) {
         return Response.json({ error: "Live password required to enable an edge on real money" }, { status: 403 });
       }
 
-      const evidence = await prisma.roundTrip.findMany({
-        where: { mode: "paper", setupType: key },
-        orderBy: { exitTime: "asc" },
-        select: { pnl: true },
-      });
+      const symbols = edge.symbolClass === "metals" ? ["MGC"] : ["MNQ", "MES"];
+      // Only P&L whose entry has a matching current-version execution record may promote. This
+      // prevents an old strategy's wins from re-arming materially changed code under the same key.
+      let evidence: Array<{ pnl: number }> = [];
+      try {
+        evidence = await prisma.$queryRawUnsafe<Array<{ pnl: number }>>(
+          `SELECT rt.pnl
+             FROM "RoundTrip" rt
+            WHERE rt.mode = 'paper' AND rt."setupType" = $1
+              AND rt.symbol = ANY($2::text[])
+              AND EXISTS (
+                SELECT 1 FROM execution_quality eq
+                 WHERE eq.mode = 'demo' AND eq.status = 'filled' AND eq.qty > 0
+                   AND eq.symbol = rt.symbol AND eq.edge_key = $1 AND eq.strategy_version = $3
+                   AND ABS(EXTRACT(EPOCH FROM (eq.ts - rt."entryTime"))) <= 600
+              )
+            ORDER BY rt."exitTime" ASC`,
+          key, symbols, CURRENT_STRATEGY_VERSION,
+        );
+      } catch {
+        return Response.json({ error: "No current-version P&L evidence is available" }, { status: 409 });
+      }
       const pnls = evidence.map((row) => row.pnl);
       const split = Math.floor(pnls.length / 2);
       const firstHalf = pnls.slice(0, split).reduce((sum, pnl) => sum + pnl, 0);
@@ -77,7 +95,6 @@ export async function POST(request: Request) {
 
       // Backtest expectancy is not enough for real money. Require a meaningful set of successful
       // demo executions on the same micro instruments so latency and slippage have been observed.
-      const symbols = edge.symbolClass === "metals" ? ["MGC"] : ["MNQ", "MES"];
       let execution: Array<{ symbol: string; trades: bigint; p90: number | null }> = [];
       try {
         execution = await prisma.$queryRawUnsafe<Array<{ symbol: string; trades: bigint; p90: number | null }>>(
@@ -109,11 +126,19 @@ export async function POST(request: Request) {
 
     const flag = edgeFlagKey(key, mode);
     const value = enabled ? "true" : "false";
-    await prisma.agentConfig.upsert({
-      where: { key: flag },
-      update: { value },
-      create: { key: flag, value },
-    });
+    if (mode === "live") {
+      const versionFlag = `edge_${key}_live_version`;
+      await prisma.$transaction([
+        prisma.agentConfig.upsert({ where: { key: flag }, update: { value }, create: { key: flag, value } }),
+        prisma.agentConfig.upsert({
+          where: { key: versionFlag },
+          update: { value: enabled ? CURRENT_STRATEGY_VERSION : "" },
+          create: { key: versionFlag, value: enabled ? CURRENT_STRATEGY_VERSION : "" },
+        }),
+      ]);
+    } else {
+      await prisma.agentConfig.upsert({ where: { key: flag }, update: { value }, create: { key: flag, value } });
+    }
 
     return Response.json({ ok: true, key, mode, enabled, flag });
   } catch (e) {

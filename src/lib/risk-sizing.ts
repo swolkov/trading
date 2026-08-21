@@ -22,3 +22,10 @@ export function cappedContractLimit(
     remaining,
   ));
 }
+
+/** Parse an operator risk setting without turning an intentional zero into a default. */
+export function nonNegativeConfigNumber(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}

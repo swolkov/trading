@@ -4,7 +4,7 @@ import { compoundRMultiples, requiredExpectancyR } from "../src/lib/account-grow
 import { slowTrendBreakout } from "../src/lib/edge-factory/candidates";
 import { replayCandidate, replayCandidateDetailed } from "../src/lib/edge-factory/replay";
 import { oneSidedStudentTPValue, validateCandidate } from "../src/lib/edge-factory/validation";
-import { cappedContractLimit, isFreshPositiveEquity } from "../src/lib/risk-sizing";
+import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber } from "../src/lib/risk-sizing";
 import type { EdgeCandidate, MarketSpec, ReplayTrade, ResearchBar } from "../src/lib/edge-factory/types";
 
 const market: MarketSpec = {
@@ -127,6 +127,13 @@ test("operator and aggregate contract limits remain hard ceilings", () => {
   assert.equal(cappedContractLimit(1, 3, 8, 0), 1);
   assert.equal(cappedContractLimit(4, 4, 4, 3), 1);
   assert.equal(cappedContractLimit(4, 4, 4, 4), 0);
+});
+
+test("operator zero risk settings remain zero instead of falling back to live defaults", () => {
+  assert.equal(nonNegativeConfigNumber("0", 5), 0);
+  assert.equal(nonNegativeConfigNumber(undefined, 5), 5);
+  assert.equal(nonNegativeConfigNumber("invalid", 5), 5);
+  assert.equal(nonNegativeConfigNumber("-1", 5), 5);
 });
 
 test("stale or future-dated equity is never usable", () => {
