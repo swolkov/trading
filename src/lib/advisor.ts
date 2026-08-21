@@ -146,7 +146,7 @@ export async function generateDailyPlan(context: {
 
   // Load recent performance — CLEAN sources only, MODE-SEPARATED.
   // Bug fixed 2026-06-15: this previously summed autoTradeLog.pnl across BOTH demo and live with no
-  // mode filter. Demo's $59K-account swings (7% risk) got attributed to "the desk" and applied to LIVE
+  // mode filter. Demo's paper-account swings got attributed to "the desk" and applied to LIVE
   // grading — the advisor reasoned "desk down $15.7K → A+ only" on a $1K account that was actually +$62.
   // Real-money P&L now comes from the LIVE balance delta (never a DB trade-pnl sum — those are
   // double-logged/inflated); demo is reported separately and explicitly flagged as research, not the desk.
@@ -186,8 +186,8 @@ export async function generateDailyPlan(context: {
 
     if (liveRows.length || demoRows.length) {
       recentPerf = `\nRECENT 7-DAY PERFORMANCE (LIVE = real money; DEMO = research only, NOT the desk's capital — do not let demo swings drive live caution):`
-        + `\n- LIVE ($1K): ${wr(liveRows)}${livePnl}`
-        + `\n- DEMO ($59K paper, 7% risk research): ${wr(demoRows)} — aggressive throughput, not a real-money signal`;
+        + `\n- LIVE (funded account): ${wr(liveRows)}${livePnl}`
+        + `\n- DEMO (paper execution, live-equity risk sizing): ${wr(demoRows)} — forward research, not a real-money signal`;
     }
   } catch { /* perf optional */ }
 

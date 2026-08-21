@@ -1474,11 +1474,11 @@ tags: [brain, daily-brief]
 > - **Session focus:** 9:45-11:30 + 2:00-3:30 ET
 > - **Note:** ${playbook.note}
 
-### Futures (Demo paper — ULTRA-AGGRESSIVE research engine)
-> [!warning] 7% Risk — research throughput, NOT a fundable track record
-> - 55% confidence gate, all setup types active (trend continuation enabled)
-> - Max 10 contracts (20 total), 20% daily loss / 40% drawdown, up to 12 positions, 120 trades/day
-> - MGC / MNQ / MES micros + registered MBT trials. Demo P&L is research signal, not an investor curve.
+### Futures (Demo live-clone — paper execution)
+> [!warning] Same live-equity sizing and active risk limits shown above; demo P&L is research, not proof
+> - MGC / MNQ / MES micros with independent demo edge switches for forward testing
+> - Contract quantity is stop-risk sized up to the active per-trade cap; five is a ceiling, never a fixed size
+> - Overnight MGC is capped at two and must pass the margin governor
 
 ### Crypto (Alpaca)
 > - **Regime:** ${cryptoRegime} → ${cryptoPlay}
