@@ -4447,7 +4447,7 @@ async function reservePendingOrderSubmission(pending: PendingOrderSubmission): P
   pendingOrderReservationInFlight = true;
   try {
     await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
       const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
       if (row?.value) {
         const existing = JSON.parse(row.value) as PendingOrderSubmission;
@@ -4474,7 +4474,7 @@ async function updatePendingOrderPhase(clOrdId: string, phase: PendingOrderSubmi
   }
   const updated = { ...activePendingOrderSubmission, phase };
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
     const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
     const stored = row?.value ? JSON.parse(row.value) as PendingOrderSubmission : null;
     if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID) {
@@ -4487,7 +4487,7 @@ async function updatePendingOrderPhase(clOrdId: string, phase: PendingOrderSubmi
 
 async function authorizePendingEntryAndMarkSent(clOrdId: string): Promise<boolean> {
   const updated = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
     const [pendingRow, gateRow, heartbeatRow] = await Promise.all([
       tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } }),
       tx.agentConfig.findUnique({ where: { key: "trading_mode_futures" } }),
@@ -4519,7 +4519,7 @@ async function authorizePendingEntryAndMarkSent(clOrdId: string): Promise<boolea
 async function clearPendingOrderSubmission(clOrdId: string): Promise<void> {
   if (activePendingOrderSubmission?.clOrdId !== clOrdId) return;
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
     const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
     const stored = row?.value ? JSON.parse(row.value) as PendingOrderSubmission : null;
     if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID) {
@@ -4624,7 +4624,7 @@ async function recoverPendingOrderSubmissionOnStartup(): Promise<void> {
       throw new Error(`${pending.label} is still owned by a healthy prior process; refusing overlapping startup`);
     }
     pending = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
       const current = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
       const stored = current?.value ? JSON.parse(current.value) as PendingOrderSubmission : null;
       if (!stored || stored.clOrdId !== pending.clOrdId || stored.ownerId !== pending.ownerId) {
@@ -5567,7 +5567,7 @@ async function writeHeartbeat() {
       symbols: Object.fromEntries([...planSnapshots.entries()]),
     });
     const heartbeatWritten = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${HEARTBEAT_KEY}))`;
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${HEARTBEAT_KEY}))`;
       const current = await tx.agentConfig.findUnique({ where: { key: HEARTBEAT_KEY } });
       const existing = current?.value
         ? JSON.parse(current.value) as { timestamp?: string; startedAt?: string; deploymentId?: string | null }
@@ -5602,7 +5602,10 @@ async function writeHeartbeat() {
 
     // Also persist position state (trailing stops, breakeven flags) every heartbeat
     if (positions.size > 0) await savePositions();
-  } catch { /* best-effort */ }
+  } catch (error) {
+    futuresTradingEnabled = false;
+    log(`[HEARTBEAT] Write failed; entries disabled: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // ── Position Sync ───────────────────────────────────────

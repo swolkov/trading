@@ -23,10 +23,14 @@ const MAX_HEARTBEAT_AGE_MS = 90_000;
 const key = `futures_engine_heartbeat_${mode}`;
 const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
-const client = new pg.Client({
+const pool = new pg.Pool({
   connectionString: databaseUrl,
   ssl: /localhost|127\.0\.0\.1/.test(databaseUrl) ? undefined : { rejectUnauthorized: false },
 });
+// Railway's public Postgres proxy can occasionally recycle a socket during the
+// multi-minute observation. Pool queries surface that as a catchable error and
+// recover on the next poll instead of crashing the verifier process.
+pool.on("error", () => undefined);
 
 type EngineHeartbeat = {
   timestamp?: string;
@@ -84,7 +88,7 @@ function assertHealthy(heartbeat: EngineHeartbeat): void {
 }
 
 async function readHeartbeat(): Promise<EngineHeartbeat> {
-  const result = await client.query<{ value: string }>(
+  const result = await pool.query<{ value: string }>(
     `SELECT value FROM "AgentConfig" WHERE key = $1 LIMIT 1`,
     [key],
   );
@@ -93,7 +97,6 @@ async function readHeartbeat(): Promise<EngineHeartbeat> {
 }
 
 async function main(): Promise<void> {
-  await client.connect();
   const deadline = Date.now() + TIMEOUT_MS;
   let healthySince = 0;
   let observationTickCount = 0;
@@ -134,7 +137,7 @@ async function main(): Promise<void> {
 }
 
 main()
-  .finally(() => client.end())
+  .finally(() => pool.end())
   .catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
