@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { checkTradovateAuth, getTradovatePositions, getCashBalanceLogs, getTradovateAccountSummary } from "@/lib/tradovate";
 import { getViewMode } from "@/lib/trading-mode";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 const MULTIPLIERS: Record<string, number> = {
   MES: 5, MNQ: 2, MGC: 10, MYM: 0.5, M2K: 5,
@@ -14,7 +14,7 @@ export const maxDuration = 60;
 // PUT: Auto-pull daily balance history from Tradovate cash balance logs + fill-based reconstruction
 // Also accepts manual overrides: { balances: [{ date: "2026-05-14", balance: 51800 }] }
 export async function PUT(req: NextRequest) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {
@@ -137,7 +137,7 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function POST() {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {

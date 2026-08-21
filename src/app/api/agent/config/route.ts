@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 const DEFAULTS: Record<string, string> = {
   strategy: "balanced", // aggressive, balanced, conservative
@@ -124,7 +124,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {

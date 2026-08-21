@@ -1,7 +1,7 @@
 import { getViewMode } from "@/lib/trading-mode";
 import { getCapitalFlows, reconcileCapitalFlows, recordManualFlow, netFlowsAfterInception } from "@/lib/capital-flows";
 import { prisma } from "@/lib/db";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 async function getInception(): Promise<string> {
   const row = await prisma.agentConfig.findUnique({ where: { key: "strategy_inception" } });
@@ -40,7 +40,7 @@ export async function GET(request: Request) {
 // POST /api/futures/capital-flows  { date: "YYYY-MM-DD", amount: number, note?, mode? }
 // Manual override / backstop. amount>0 deposit, <0 withdrawal, 0 removes the manual flow for that date.
 export async function POST(request: Request) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
   try {

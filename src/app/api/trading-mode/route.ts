@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { invalidateViewCache } from "@/lib/trading-mode";
-import { requireAuthenticatedUser } from "@/lib/api-auth";
+import { requireOwnerUser } from "@/auth/owner";
 
 // ============ VIEW MODE API ============
 // Controls which account data the dashboard DISPLAYS (demo vs live).
@@ -27,7 +27,7 @@ export async function GET() {
 const LIVE_PASSWORD = process.env.LIVE_TRADING_PASSWORD;
 
 export async function POST(request: Request) {
-  const unauthorized = await requireAuthenticatedUser();
+  const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
   try {
     const body = await request.json();
