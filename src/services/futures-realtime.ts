@@ -52,10 +52,27 @@ const BAR_INTERVAL_MS = 5 * 60 * 1000; // 5-minute bars
 // Mode-keyed DB keys (both engines share DB, don't collide)
 const HEARTBEAT_KEY = `futures_engine_heartbeat_${ENGINE_MODE}`;
 const POSITIONS_KEY = `futures_positions_${ENGINE_MODE}`;
+const PENDING_ORDER_KEY = `futures_pending_order_${ENGINE_MODE}`;
 const TRADE_ACTION_PREFIX = IS_LIVE ? "live" : "futures";
 const MODE_TAG = IS_LIVE ? "LIVE" : "DEMO";
 const AGENT_NAME = `futures-realtime-${ENGINE_MODE}`;
 const STRATEGY_VERSION = FUTURES_STRATEGY_VERSION;
+const ENGINE_STARTED_AT = new Date().toISOString();
+const ORDER_OWNER_ID = `${process.env.RAILWAY_DEPLOYMENT_ID || "local"}:${ENGINE_STARTED_AT}`;
+let engineReady = false;
+type PendingOrderKind = "entry" | "close" | "stop" | "target";
+type PendingOrderSubmission = {
+  clOrdId: string;
+  label: string;
+  kind: PendingOrderKind;
+  symbol: string;
+  contractId: number;
+  createdAt: string;
+  phase: "reserved" | "sent" | "rejected";
+  ownerId: string;
+};
+let activePendingOrderSubmission: PendingOrderSubmission | null = null;
+let pendingOrderReservationInFlight = false;
 
 // DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
 // LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
@@ -1126,14 +1143,38 @@ let indexTrendLongEnabled = true; // 2nd validated index edge: trend-continuatio
 let edgeFlags: Record<string, string | undefined> = {};
 let futuresTradingEnabled = !IS_LIVE;
 let riskConfigHealthy = false;
+let operatorGateRequestSequence = 0;
+let operatorGateAppliedSequence = 0;
 
-async function refreshOperatorTradingGate(): Promise<void> {
+async function refreshOperatorTradingGate(): Promise<boolean> {
+  const requestSequence = ++operatorGateRequestSequence;
   try {
-    const row = await prisma.agentConfig.findUnique({ where: { key: "trading_mode_futures" } });
-    futuresTradingEnabled = row?.value !== "disabled" && (!IS_LIVE || row?.value === "live");
+    const [row, heartbeatRow] = await Promise.all([
+      prisma.agentConfig.findUnique({ where: { key: "trading_mode_futures" } }),
+      prisma.agentConfig.findUnique({ where: { key: HEARTBEAT_KEY } }),
+    ]);
+    const heartbeat = heartbeatRow?.value
+      ? JSON.parse(heartbeatRow.value) as { timestamp?: string; startedAt?: string; deploymentId?: string | null }
+      : null;
+    const heartbeatOwner = heartbeat?.startedAt ? `${heartbeat.deploymentId || "local"}:${heartbeat.startedAt}` : "";
+    const heartbeatAge = Date.now() - Date.parse(heartbeat?.timestamp || "");
+    const anotherGenerationIsActive = heartbeatOwner !== "" && heartbeatOwner !== ORDER_OWNER_ID
+      && Number.isFinite(heartbeatAge) && heartbeatAge < 90_000;
+    const enabled = !anotherGenerationIsActive
+      && row?.value !== "disabled" && (!IS_LIVE || row?.value === "live");
+    // An older, slower DB read must never overwrite a newer kill-switch result.
+    if (requestSequence >= operatorGateAppliedSequence) {
+      operatorGateAppliedSequence = requestSequence;
+      futuresTradingEnabled = enabled;
+    }
+    return enabled;
   } catch (error) {
-    if (USES_LIVE_POLICY) futuresTradingEnabled = false;
+    if (requestSequence >= operatorGateAppliedSequence && USES_LIVE_POLICY) {
+      operatorGateAppliedSequence = requestSequence;
+      futuresTradingEnabled = false;
+    }
     log(`[CONFIG] Operator trading gate unavailable${USES_LIVE_POLICY ? "; entries fail closed" : ""}: ${error}`);
+    return !USES_LIVE_POLICY;
   }
 }
 const lastCumVol = new Map<string, number>();   // per-poll traded-volume delta from the sidecar's cumulative count
@@ -1940,7 +1981,9 @@ async function loadRiskConfig() {
       }
     }
     await refreshLiveMirrorEquity();
-    futuresTradingEnabled = cfg.trading_mode_futures !== "disabled" && (!IS_LIVE || cfg.trading_mode_futures === "live");
+    // Read the operator gate again after the config loop's awaited queries. Reusing the snapshot from
+    // the beginning of this function could re-enable trading after a kill arrived mid-refresh.
+    await refreshOperatorTradingGate();
     riskConfigHealthy = true;
     updateTradingSymbols();
     const mirrorStatus = IS_DEMO && DEMO_LIVE_CLONE
@@ -1980,6 +2023,15 @@ async function savePositions() {
       create: { key: POSITIONS_KEY, value: JSON.stringify(data) },
     });
   } catch (err) { log(`[PERSIST] Failed to save positions: ${err}`); }
+}
+
+async function savePositionsForOrderRecovery(): Promise<void> {
+  const data = Object.fromEntries([...positions].map(([key, value]) => [key, { ...value }]));
+  await prisma.agentConfig.upsert({
+    where: { key: POSITIONS_KEY },
+    update: { value: JSON.stringify(data) },
+    create: { key: POSITIONS_KEY, value: JSON.stringify(data) },
+  });
 }
 
 async function loadPositions() {
@@ -2155,8 +2207,9 @@ function checkPositions(sym: string, price: number, reliable = true) {
     return sum + d * m * p.quantity;
   }, 0);
   const totalDrawdown = aggregateUnrealized + dailyPnl;
-  if (aggregateTrustworthy && tradovateEquity > 0 && totalDrawdown < -(tradovateEquity * maxDrawdownFraction)) {
-    log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${riskConfig.maxDrawdownPct}% of equity $${tradovateEquity.toFixed(0)} — CLOSING ALL`);
+  const drawdownEquity = riskSizingEquity();
+  if (aggregateTrustworthy && drawdownEquity > 0 && totalDrawdown < -(drawdownEquity * maxDrawdownFraction)) {
+    log(`🚨 AGGREGATE DRAWDOWN KILL: Combined P&L $${totalDrawdown.toFixed(0)} exceeds ${riskConfig.maxDrawdownPct}% of fresh sizing equity $${drawdownEquity.toFixed(0)} — CLOSING ALL`);
     notify(`🚨 AGGREGATE DRAWDOWN KILL: ~$${totalDrawdown.toFixed(0)} (est) — closing all positions; actual fill P&L posts per-position as it reconciles.`, "general");
     for (const [s, p] of positions) {
       closePosition(s, barBuilders.get(s)?.currentBar?.c || p.entryPrice, "emergency");
@@ -2961,6 +3014,10 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
   }
   const pos = positions.get(sym);
   if (!pos) return;
+  // The original stop remains valid only while the broker position stays on the same side. If a
+  // close over-fills and reverses the account, keep flattening it instead of inventing risk geometry
+  // for an unintended trade.
+  let stopLossIsValidated = true;
   closingLocks.set(sym, true);
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
   const originalQuantity = pos.quantity;
@@ -3012,21 +3069,49 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
 
   const restoreProtectiveStop = async (quantity = pos.quantity): Promise<boolean> => {
     if (quantity < 1) return true;
+    pos.stopOrderId = null;
+    pos.targetOrderId = null;
+    await savePositions();
     try {
       const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
       const acct = accounts.find(a => a.id === accountId) || accounts[0];
-      const restored = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+      const restoredOrderId = await submitRecoverableOrder({
         accountSpec: acct.name, accountId,
         action: pos.direction === "long" ? "Sell" : "Buy",
         symbol: pos.contractId, orderQty: quantity, orderType: "Stop",
         stopPrice: roundToTick(sym, pos.stopLoss), timeInForce: "GTC", isAutomated: true,
-      })}) as { orderId: number };
-      const restoredStatus = await protectionOrderStatus(restored.orderId);
-      if (restoredStatus !== "active") throw new Error(`restored stop #${restored.orderId} is ${restoredStatus}`);
-      pos.stopOrderId = restored.orderId;
+      }, `${sym} replacement stop`, { kind: "stop", symbol: sym, contractId: pos.contractId });
+      // Persist before status checks. If the status API is ambiguous, later close/sync still owns it.
+      pos.stopOrderId = restoredOrderId;
+      await savePositionsForOrderRecovery();
+      const restoredStatus = await protectionOrderStatus(restoredOrderId);
+      if (restoredStatus === "unknown") {
+        // The order may be working. Persist its id so a later close/sync can cancel and reconcile it;
+        // never place a second guessed stop against the same position.
+        notify(`🚨 ${MODE_TAG} ${sym}: replacement stop #${restoredOrderId} could not be verified. It remains tracked; check broker now.`, "general");
+        return false;
+      }
+      if (restoredStatus === "rejected" || restoredStatus === "filled") {
+        pos.stopOrderId = null;
+        await savePositions();
+        if (restoredStatus === "filled") {
+          const brokerAfterStop = await getBrokerPositionSnapshot(pos.contractId, 3);
+          if (brokerAfterStop) {
+            pos.direction = brokerAfterStop.netPos > 0 ? "long" : "short";
+            pos.quantity = Math.abs(brokerAfterStop.netPos);
+            pos.entryPrice = brokerAfterStop.netPrice || pos.entryPrice;
+            stopLossIsValidated = false;
+            await savePositions();
+          } else if (brokerAfterStop === null) {
+            await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
+          }
+        }
+        throw new Error(`restored stop #${restoredOrderId} is ${restoredStatus}`);
+      }
+      await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
       pos.targetOrderId = null;
       await savePositions();
-      log(`[CLOSE] ${sym}: restored protective stop #${restored.orderId} for ${quantity}x after incomplete close.`);
+      log(`[CLOSE] ${sym}: restored protective stop #${restoredOrderId} for ${quantity}x after incomplete close.`);
       return true;
     } catch (error) {
       log(`[CLOSE] CRITICAL: ${sym} could not restore protection after incomplete close: ${error}`);
@@ -3069,7 +3154,7 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
     }
   } else {
     // Position still open — close it manually with retry
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; ; attempt++) {
       try {
         // Resolve account identity before the final broker snapshot so no avoidable network round
         // trip reopens the stop-fill race between "position exists" and close submission.
@@ -3080,6 +3165,9 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           const accounts = await apiFetch("/account/list") as { id: number; name: string }[];
           acct = accounts.find(a => a.id === accountId) || accounts[0];
         }
+        // Prepare authentication before the final broker snapshot. Close orders, like entries, must
+        // not authenticate or rate-limit-retry after their quantity was verified.
+        const closeToken = await authenticate();
 
         // Cancel ALL bracket/working orders for this contract
         if (!await cancelAllOrdersForContract()) {
@@ -3105,18 +3193,15 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         }
         const brokerDirection = brokerBeforeClose.netPos > 0 ? "long" : "short";
         if (brokerDirection !== pos.direction) {
-          log(`[CLOSE] CRITICAL: ${sym} broker direction is ${brokerDirection}, expected ${pos.direction}; no close submitted`);
+          log(`[CLOSE] CRITICAL: ${sym} broker direction is ${brokerDirection}, expected ${pos.direction}; flattening the unintended reversal`);
           pos.direction = brokerDirection;
           pos.quantity = Math.abs(brokerBeforeClose.netPos);
           pos.entryPrice = brokerBeforeClose.netPrice || price;
-          const protectiveAtr = atr(barBuilders.get(sym)?.bars5m || []);
-          const protectiveDistance = protectiveAtr > 0 ? protectiveAtr * 1.5 : Math.max(Math.abs(pos.entryPrice - pos.stopLoss), TICK_SIZES[sym] || 0.25);
-          pos.stopLoss = roundToTick(sym, brokerDirection === "long" ? pos.entryPrice - protectiveDistance : pos.entryPrice + protectiveDistance);
+          stopLossIsValidated = false;
+          pos.stopOrderId = null;
           pos.targetOrderId = null;
-          await restoreProtectiveStop(pos.quantity);
-          notify(`🚨 ${MODE_TAG} ${sym}: broker direction changed before close. Tracking and emergency protection were rebuilt; check account now.`, "general");
-          closingLocks.delete(sym);
-          return;
+          await savePositions();
+          notify(`🚨 ${MODE_TAG} ${sym}: broker direction changed before close. Flattening the unintended reversal now.`, "general");
         }
         const brokerQty = Math.abs(brokerBeforeClose.netPos);
         if (brokerQty !== pos.quantity) {
@@ -3124,14 +3209,35 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           pos.quantity = brokerQty;
         }
 
-        const orderResult = await apiFetch("/order/placeorder", {
+        const quantityBeforeAttempt = pos.quantity;
+        const closeClientOrderId = `FRT-CLOSE-${ENGINE_MODE}-${sym}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await reservePendingOrderSubmission({
+          clOrdId: closeClientOrderId,
+          label: `${sym} close`,
+          kind: "close",
+          symbol: sym,
+          contractId: pos.contractId,
+          createdAt: new Date().toISOString(),
+          phase: "reserved",
+          ownerId: ORDER_OWNER_ID,
+        });
+        const brokerAtSend = await getBrokerPositionSnapshot(pos.contractId, 3);
+        if (!brokerAtSend || brokerAtSend.netPos !== brokerBeforeClose.netPos) {
+          await updatePendingOrderPhase(closeClientOrderId, "rejected");
+          throw new Error(`${sym} broker position changed while close intent was persisted`);
+        }
+        await updatePendingOrderPhase(closeClientOrderId, "sent");
+        const closeResponsePromise = fetch(`${ORDER_API}/order/placeorder`, {
           method: "POST",
           body: JSON.stringify({
             accountSpec: acct.name, accountId, action: pos.direction === "long" ? "Sell" : "Buy",
-            symbol: pos.contractId, orderQty: pos.quantity, orderType: "Market", timeInForce: "Day", isAutomated: true,
+            symbol: pos.contractId, clOrdId: closeClientOrderId, orderQty: quantityBeforeAttempt,
+            orderType: "Market", timeInForce: "Day", isAutomated: true,
           }),
-        }) as { orderId: number };
-        const closeOrderId = orderResult.orderId;
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${closeToken}` },
+          signal: AbortSignal.timeout(15_000),
+        });
+        const closeOrderId = await resolveSubmittedOrder(closeResponsePromise, closeClientOrderId, `${sym} close`);
         closeOrderIds.push(closeOrderId);
         // "The POST returned an id" is NOT a close (2026-08-19). Tradovate answers synchronously
         // and can reject milliseconds later — the entry path already guards for exactly this. If
@@ -3139,63 +3245,60 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
         // of this attempt, and the caller goes on to positions.delete(sym) + recentlyClosedAt,
         // which blocks re-adoption for 5 minutes. That combination is a real position with no
         // stop, no target and no engine tracking. Treat a rejection as a failed attempt and retry.
-        const quantityBeforeAttempt = pos.quantity;
         const closeFill = await verifyOrderFill(closeOrderId, quantityBeforeAttempt);
-        if (closeFill.status === "rejected") throw new Error(`close order rejected: ${closeFill.reason}`);
+        if (closeFill.status === "rejected") {
+          await updatePendingOrderPhase(closeClientOrderId, "rejected");
+          throw new Error(`close order rejected: ${closeFill.reason}`);
+        }
         if (closeFill.status === "unknown") {
-          if (!await cancelOrderAndWaitForTerminal(closeOrderId)) {
-            throw new Error("close order did not reach a terminal state after cancellation");
-          }
-          const brokerPosition = await getBrokerPositionSnapshot(pos.contractId);
-          if (brokerPosition === undefined) {
-            log(`[CLOSE] CRITICAL: ${sym} close state unresolved. Refusing to submit another order that could reverse the position.`);
-            notify(`🚨 ${MODE_TAG} ${sym}: close state unresolved. No close or stop can be sized safely; check broker now.`, "general");
-            closingLocks.delete(sym);
-            return;
-          }
-          if (brokerPosition === null) {
-            log(`[CLOSE] ${sym}: indeterminate close reconciled FLAT from broker position.`);
-            break;
-          }
-          const brokerDirection = brokerPosition.netPos > 0 ? "long" : "short";
-          if (brokerDirection !== pos.direction) {
-            log(`[CLOSE] CRITICAL: ${sym} broker direction flipped during close (${brokerDirection}). Stopping automatic retries.`);
-            pos.direction = brokerDirection;
-            pos.quantity = Math.abs(brokerPosition.netPos);
-            pos.entryPrice = brokerPosition.netPrice || price;
-            const protectiveAtr = atr(barBuilders.get(sym)?.bars5m || []);
-            const protectiveDistance = protectiveAtr > 0 ? protectiveAtr * 1.5 : Math.max(Math.abs(pos.entryPrice - pos.stopLoss), TICK_SIZES[sym] || 0.25);
-            pos.stopLoss = roundToTick(sym, brokerDirection === "long" ? pos.entryPrice - protectiveDistance : pos.entryPrice + protectiveDistance);
-            pos.targetOrderId = null;
-            await restoreProtectiveStop(pos.quantity);
-            notify(`🚨 ${MODE_TAG} ${sym}: broker direction flipped during close. Tracking and emergency protection were rebuilt; check account now.`, "general");
-            closingLocks.delete(sym);
-            return;
-          }
-          const remainingQty = Math.abs(brokerPosition.netPos);
-          if (remainingQty >= quantityBeforeAttempt) {
-            log(`[CLOSE] ${sym}: indeterminate close reconciled with broker position unchanged. Stopping this cycle before any retry can over-close.`);
+          await cancelOrderUntilTerminal(closeOrderId, `${sym} close`);
+        }
+
+        // A fill record is not proof the account is flat. Reconcile after every terminal close so a
+        // partial, concurrent add, or accidental reversal can never fall through to tracking deletion.
+        const brokerAfterClose = await getBrokerPositionSnapshot(pos.contractId, 5);
+        if (brokerAfterClose === undefined) {
+          log(`[CLOSE] CRITICAL: ${sym} post-close broker state unresolved. Tracking retained.`);
+          notify(`🚨 ${MODE_TAG} ${sym}: close completed but final broker position is unavailable. Check broker now.`, "general");
+          closingLocks.delete(sym);
+          return;
+        }
+        if (brokerAfterClose === null) {
+          await clearPendingOrderSubmission(closeClientOrderId);
+          break;
+        }
+
+        const remainingDirection = brokerAfterClose.netPos > 0 ? "long" : "short";
+        const remainingQty = Math.abs(brokerAfterClose.netPos);
+        if (remainingDirection !== pos.direction) {
+          stopLossIsValidated = false;
+          log(`[CLOSE] CRITICAL: ${sym} close left an unintended ${remainingDirection} ${remainingQty}x reversal; retrying only to flatten it.`);
+          notify(`🚨 ${MODE_TAG} ${sym}: close reversed the position. Retrying to flatten it now.`, "general");
+        } else if (remainingQty >= quantityBeforeAttempt) {
+          pos.quantity = remainingQty;
+          pos.entryPrice = brokerAfterClose.netPrice || pos.entryPrice;
+          await savePositionsForOrderRecovery();
+          log(`[CLOSE] ${sym}: broker position did not shrink after terminal close; no duplicate close will be sent.`);
+          if (stopLossIsValidated) {
             await restoreProtectiveStop(remainingQty);
             closingLocks.delete(sym);
             return;
           }
-          log(`[CLOSE] ${sym}: indeterminate close reconciled PARTIAL ${quantityBeforeAttempt - remainingQty}/${quantityBeforeAttempt}; ${remainingQty}x remains.`);
-          pos.quantity = remainingQty;
-          throw new Error(`partial close (${quantityBeforeAttempt - remainingQty} of ${quantityBeforeAttempt})`);
+          throw new Error(`unintended reversal remains ${remainingDirection} ${remainingQty}x`);
+        } else {
+          log(`[CLOSE] ${sym}: broker confirms partial close ${quantityBeforeAttempt - remainingQty}/${quantityBeforeAttempt}; retrying ${remainingQty}x remainder.`);
         }
-        if (closeFill.status === "filled" && closeFill.qty < quantityBeforeAttempt) {
-          // Partial close: the remainder is still live and now unbracketed. Shrink tracking to it
-          // and retry — never report a partial as flat.
-          log(`[CLOSE] ${sym}: PARTIAL close ${closeFill.qty}/${quantityBeforeAttempt} — ${quantityBeforeAttempt - closeFill.qty}x still open, retrying.`);
-          pos.quantity -= closeFill.qty;
-          throw new Error(`partial close (${closeFill.qty} of ${quantityBeforeAttempt})`);
-        }
-        // Success — break out of retry loop
-        break;
+        pos.direction = remainingDirection;
+        pos.quantity = remainingQty;
+        pos.entryPrice = brokerAfterClose.netPrice || pos.entryPrice;
+        pos.stopOrderId = null;
+        pos.targetOrderId = null;
+        await savePositionsForOrderRecovery();
+        throw new Error(`broker remainder ${remainingDirection} ${remainingQty}x after close`);
     } catch (err) {
-      log(`[CLOSE] Attempt ${attempt}/3 failed for ${sym}: ${err}`);
-      if (attempt === 3) {
-        log(`[CLOSE] CRITICAL: Could not close ${sym} after 3 attempts!`);
+      log(`[CLOSE] Attempt ${attempt} failed for ${sym}: ${err}`);
+      if (attempt % 3 === 0) {
+        log(`[CLOSE] CRITICAL: Could not close ${sym} after ${attempt} attempts; entries remain blocked and flattening continues`);
         // Persist failed close to database — survives restarts, visible on dashboard
         try {
           await prisma.autoTradeLog.create({ data: {
@@ -3204,43 +3307,41 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
             qty: pos.quantity,
             price,
             pnl: 0,
-            reason: `CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 attempts. Entry: $${pos.entryPrice.toFixed(2)}. Current: $${price.toFixed(2)}. Manual intervention required.`,
+            reason: `CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after ${attempt} attempts. Entry: $${pos.entryPrice.toFixed(2)}. Current: $${price.toFixed(2)}. Automated flattening continues.`,
             orderId: null,
           }});
         } catch {}
         // Notify once per symbol to prevent Slack spam
         if (!stoppedSymbols.has(`close_failed_${sym}`)) {
           stoppedSymbols.add(`close_failed_${sym}`);
-          notify(`CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after 3 retries! Manual intervention needed.`, "general");
+          notify(`CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after ${attempt} attempts. New entries are blocked and flattening continues.`, "general");
         }
         const confirmedRemainder = await getBrokerPositionSnapshot(pos.contractId, 3);
         if (confirmedRemainder) {
           const confirmedDirection = confirmedRemainder.netPos > 0 ? "long" : "short";
+          if (confirmedDirection !== pos.direction) stopLossIsValidated = false;
           pos.direction = confirmedDirection;
           pos.quantity = Math.abs(confirmedRemainder.netPos);
           pos.entryPrice = confirmedRemainder.netPrice || price;
-          const protectiveAtr = atr(barBuilders.get(sym)?.bars5m || []);
-          const protectiveDistance = protectiveAtr > 0 ? protectiveAtr * 1.5 : Math.max(Math.abs(pos.entryPrice - pos.stopLoss), TICK_SIZES[sym] || 0.25);
-          pos.stopLoss = roundToTick(sym, confirmedDirection === "long" ? pos.entryPrice - protectiveDistance : pos.entryPrice + protectiveDistance);
+          pos.stopOrderId = null;
           pos.targetOrderId = null;
-          await restoreProtectiveStop(pos.quantity);
+          await savePositions();
+          if (stopLossIsValidated) {
+            const restored = await restoreProtectiveStop(pos.quantity);
+            if (!restored) log(`[CLOSE] ${sym}: replacement protection remains unresolved; flattening retries continue`);
+            closingLocks.delete(sym);
+            return;
+          } else {
+            notify(`🚨 ${MODE_TAG} ${sym}: unintended reverse position remains. Automated flattening is continuing without submitting new entries.`, "general");
+          }
         } else if (confirmedRemainder === null) {
-          log(`[CLOSE] ${sym}: broker confirms flat after failed close attempts; retaining tracking for sync reconciliation.`);
+          log(`[CLOSE] ${sym}: broker confirms flat after failed close attempts.`);
+          break;
         } else {
-          notify(`🚨 ${MODE_TAG} ${sym}: broker state remains unavailable after failed close. No protective order was guessed; check broker now.`, "general");
+          notify(`🚨 ${MODE_TAG} ${sym}: broker state remains unavailable after failed close. Automated reconciliation continues.`, "general");
         }
-        // RELEASE THE LOCK BEFORE RETURNING (2026-08-19). This `return` sits OUTSIDE the
-        // try/finally below that normally deletes the lock, so without this line the symbol
-        // stayed locked for the life of the process: every later closePosition() — trail stop,
-        // breakeven, hard-loss backstop, EOD flatten, drawdown kill — hit the "Close already in
-        // progress" guard and returned immediately, and syncPositions skipped the symbol too.
-        // Since attempt 1 already cancelled the stop AND target, the outcome was a REAL position
-        // with no broker protection, no software exit, and no possible close until a restart.
-        // The comment below says "retry next tick" — that intent only works if the lock is freed.
-        closingLocks.delete(sym);
-        return; // Don't remove from tracking — retry next tick
       }
-      await new Promise(r => setTimeout(r, 2000 * attempt));
+      await new Promise(r => setTimeout(r, Math.min(10_000, 2000 * attempt)));
       continue;
     }
   } // end retry loop
@@ -4311,6 +4412,326 @@ async function cancelOrderAndWaitForTerminal(orderId: number): Promise<boolean> 
   return false;
 }
 
+async function cancelOrderUntilTerminal(orderId: number, label: string): Promise<void> {
+  let alerted = false;
+  while (!await cancelOrderAndWaitForTerminal(orderId)) {
+    if (!alerted) {
+      alerted = true;
+      notify(`🚨 ${MODE_TAG} ${label}: order #${orderId} is still indeterminate. New action is blocked until broker confirms terminal.`, "general");
+    }
+    log(`[ORDER RECOVERY] ${label}: order #${orderId} still nonterminal; retrying cancellation without submitting another order`);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+}
+
+async function findOrderIdByClientId(clOrdId: string, attempts = 6): Promise<number | null> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 750));
+    try {
+      const orders = await apiFetch("/order/list") as { id: number; clOrdId?: string }[];
+      const match = orders.find((order) => order.clOrdId === clOrdId);
+      if (match?.id) return match.id;
+    } catch { /* keep polling; an accepted order can appear after the client lost its response */ }
+  }
+  return null;
+}
+
+class DefinitiveOrderSubmissionError extends Error {}
+
+async function reservePendingOrderSubmission(pending: PendingOrderSubmission): Promise<void> {
+  if (pendingOrderReservationInFlight || (activePendingOrderSubmission
+    && activePendingOrderSubmission.clOrdId !== pending.clOrdId
+    && activePendingOrderSubmission.symbol !== pending.symbol)) {
+    throw new Error(`order submission blocked by ${activePendingOrderSubmission?.label || "another order reservation"}`);
+  }
+  pendingOrderReservationInFlight = true;
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+      const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
+      if (row?.value) {
+        const existing = JSON.parse(row.value) as PendingOrderSubmission;
+        const replaceOwnedSymbol = existing.ownerId === ORDER_OWNER_ID && existing.symbol === pending.symbol;
+        if (existing.clOrdId !== pending.clOrdId && !replaceOwnedSymbol) {
+          throw new Error(`durable order submission blocked by ${existing.label} owned by ${existing.ownerId}`);
+        }
+      }
+      await tx.agentConfig.upsert({
+        where: { key: PENDING_ORDER_KEY },
+        update: { value: JSON.stringify(pending) },
+        create: { key: PENDING_ORDER_KEY, value: JSON.stringify(pending) },
+      });
+    });
+    activePendingOrderSubmission = pending;
+  } finally {
+    pendingOrderReservationInFlight = false;
+  }
+}
+
+async function updatePendingOrderPhase(clOrdId: string, phase: PendingOrderSubmission["phase"]): Promise<void> {
+  if (activePendingOrderSubmission?.clOrdId !== clOrdId) {
+    throw new Error(`cannot mark unowned order ${clOrdId} as ${phase}`);
+  }
+  const updated = { ...activePendingOrderSubmission, phase };
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
+    const stored = row?.value ? JSON.parse(row.value) as PendingOrderSubmission : null;
+    if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID) {
+      throw new Error(`durable ownership changed while marking ${clOrdId} as ${phase}`);
+    }
+    await tx.agentConfig.update({ where: { key: PENDING_ORDER_KEY }, data: { value: JSON.stringify(updated) } });
+  });
+  activePendingOrderSubmission = updated;
+}
+
+async function authorizePendingEntryAndMarkSent(clOrdId: string): Promise<boolean> {
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    const [pendingRow, gateRow, heartbeatRow] = await Promise.all([
+      tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } }),
+      tx.agentConfig.findUnique({ where: { key: "trading_mode_futures" } }),
+      tx.agentConfig.findUnique({ where: { key: HEARTBEAT_KEY } }),
+    ]);
+    const stored = pendingRow?.value ? JSON.parse(pendingRow.value) as PendingOrderSubmission : null;
+    if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID || stored.phase !== "reserved") {
+      throw new Error(`durable entry ownership changed before authorization for ${clOrdId}`);
+    }
+    const heartbeat = heartbeatRow?.value
+      ? JSON.parse(heartbeatRow.value) as { timestamp?: string; startedAt?: string; deploymentId?: string | null }
+      : null;
+    const heartbeatOwner = heartbeat?.startedAt ? `${heartbeat.deploymentId || "local"}:${heartbeat.startedAt}` : "";
+    const heartbeatAge = Date.now() - Date.parse(heartbeat?.timestamp || "");
+    const anotherGenerationIsActive = heartbeatOwner !== "" && heartbeatOwner !== ORDER_OWNER_ID
+      && Number.isFinite(heartbeatAge) && heartbeatAge < 90_000;
+    const gateAllowed = !anotherGenerationIsActive
+      && gateRow?.value !== "disabled" && (!IS_LIVE || gateRow?.value === "live");
+    if (!gateAllowed) return null;
+    const sent = { ...stored, phase: "sent" as const };
+    await tx.agentConfig.update({ where: { key: PENDING_ORDER_KEY }, data: { value: JSON.stringify(sent) } });
+    return sent;
+  });
+  if (!updated) return false;
+  activePendingOrderSubmission = updated;
+  return true;
+}
+
+async function clearPendingOrderSubmission(clOrdId: string): Promise<void> {
+  if (activePendingOrderSubmission?.clOrdId !== clOrdId) return;
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+    const row = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
+    const stored = row?.value ? JSON.parse(row.value) as PendingOrderSubmission : null;
+    if (!stored || stored.clOrdId !== clOrdId || stored.ownerId !== ORDER_OWNER_ID) {
+      throw new Error(`durable ownership changed before clearing ${clOrdId}`);
+    }
+    await tx.agentConfig.delete({ where: { key: PENDING_ORDER_KEY } });
+  });
+  activePendingOrderSubmission = null;
+}
+
+async function resolveSubmittedOrder(
+  responsePromise: Promise<Response>,
+  clOrdId: string,
+  label: string,
+): Promise<number> {
+  try {
+    const response = await responsePromise;
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      // A client error is a broker rejection of this command, not an uncertain network outcome.
+      if (response.status >= 400 && response.status < 500 && ![408, 425].includes(response.status)) {
+        throw new DefinitiveOrderSubmissionError(`${label} API ${response.status}: ${detail}`);
+      }
+      throw new Error(`${label} API ${response.status}: ${detail}`);
+    }
+    const result = await response.json() as { orderId?: number; failureReason?: string; failureText?: string };
+    if (result.failureReason || result.failureText) {
+      throw new DefinitiveOrderSubmissionError(
+        `${label} rejected: ${result.failureReason || "broker rejection"}${result.failureText ? ` (${result.failureText})` : ""}`,
+      );
+    }
+    if (!result.orderId) throw new Error(`${label} response did not contain an order id`);
+    return result.orderId;
+  } catch (error) {
+    if (error instanceof DefinitiveOrderSubmissionError) {
+      await updatePendingOrderPhase(clOrdId, "rejected");
+      throw error;
+    }
+    log(`🚨 ${label}: response ambiguous (${error}); blocking until broker order ${clOrdId} is recovered`);
+    notify(`🚨 ${MODE_TAG} ${label}: broker response was lost. New submissions are blocked while order ${clOrdId} is recovered.`, "general");
+    // A bounded timeout cannot prove a command never reached the broker. Keep ownership of this
+    // submission indefinitely. The durable pending record lets startup resume this exact clOrdId.
+    let lastWaitLogAt = 0;
+    while (true) {
+      const recovered = await findOrderIdByClientId(clOrdId, 3);
+      if (recovered) return recovered;
+      if (Date.now() - lastWaitLogAt >= 60_000) {
+        lastWaitLogAt = Date.now();
+        log(`[ORDER RECOVERY] ${label}: still waiting for ${clOrdId}; no retry will be submitted`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+}
+
+async function submitRecoverableOrder(
+  body: Record<string, unknown>,
+  label: string,
+  metadata: { kind: PendingOrderKind; symbol: string; contractId: number },
+): Promise<number> {
+  const clOrdId = typeof body.clOrdId === "string"
+    ? body.clOrdId
+    : `FRT-${label.replace(/[^A-Za-z0-9]/g, "").slice(0, 12)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const token = await authenticate();
+  await reservePendingOrderSubmission({
+    clOrdId,
+    label,
+    kind: metadata.kind,
+    symbol: metadata.symbol,
+    contractId: metadata.contractId,
+    createdAt: new Date().toISOString(),
+    phase: "reserved",
+    ownerId: ORDER_OWNER_ID,
+  });
+  await updatePendingOrderPhase(clOrdId, "sent");
+  const responsePromise = fetch(`${ORDER_API}/order/placeorder`, {
+    method: "POST",
+    body: JSON.stringify({ ...body, clOrdId }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  return resolveSubmittedOrder(responsePromise, clOrdId, label);
+}
+
+async function recoverPendingOrderSubmissionOnStartup(): Promise<void> {
+  const row = await prisma.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
+  if (!row?.value) return;
+  let pending = JSON.parse(row.value) as PendingOrderSubmission;
+  if (!pending.clOrdId || !pending.contractId || !pending.symbol || !pending.kind || !pending.phase || !pending.ownerId) {
+    throw new Error(`${PENDING_ORDER_KEY} is malformed; refusing to start trading`);
+  }
+  if (pending.ownerId !== ORDER_OWNER_ID) {
+    const heartbeatRow = await prisma.agentConfig.findUnique({ where: { key: HEARTBEAT_KEY } });
+    const heartbeat = heartbeatRow?.value
+      ? JSON.parse(heartbeatRow.value) as { timestamp?: string; startedAt?: string; deploymentId?: string | null }
+      : null;
+    const heartbeatOwner = heartbeat?.startedAt
+      ? `${heartbeat.deploymentId || "local"}:${heartbeat.startedAt}`
+      : "";
+    const heartbeatAge = Date.now() - Date.parse(heartbeat?.timestamp || "");
+    if (heartbeatOwner === pending.ownerId && Number.isFinite(heartbeatAge) && heartbeatAge < 90_000) {
+      throw new Error(`${pending.label} is still owned by a healthy prior process; refusing overlapping startup`);
+    }
+    pending = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${PENDING_ORDER_KEY}))`;
+      const current = await tx.agentConfig.findUnique({ where: { key: PENDING_ORDER_KEY } });
+      const stored = current?.value ? JSON.parse(current.value) as PendingOrderSubmission : null;
+      if (!stored || stored.clOrdId !== pending.clOrdId || stored.ownerId !== pending.ownerId) {
+        throw new Error("pending order ownership changed during startup claim");
+      }
+      const claimed = { ...stored, ownerId: ORDER_OWNER_ID };
+      await tx.agentConfig.update({ where: { key: PENDING_ORDER_KEY }, data: { value: JSON.stringify(claimed) } });
+      return claimed;
+    });
+  }
+  activePendingOrderSubmission = pending;
+  log(`[ORDER RECOVERY] Resuming durable ${pending.label} (${pending.clOrdId}) before engine startup`);
+  notify(`🚨 ${MODE_TAG}: recovering ${pending.label} from a prior process before any new order can be submitted.`, "general");
+
+  if (pending.phase !== "sent") {
+    if (pending.kind === "entry" || pending.kind === "target") {
+      await clearPendingOrderSubmission(pending.clOrdId);
+      log(`[ORDER RECOVERY] Cleared ${pending.phase} ${pending.kind} intent; no broker request could have been sent`);
+      return;
+    }
+    const brokerPosition = await getBrokerPositionSnapshot(pending.contractId, 5);
+    if (brokerPosition === undefined) {
+      throw new Error(`${pending.label} was ${pending.phase}, but broker position is unavailable`);
+    }
+    if (brokerPosition === null) {
+      await clearPendingOrderSubmission(pending.clOrdId);
+      return;
+    }
+    await syncPositions();
+    const pos = positions.get(pending.symbol);
+    if (!pos) throw new Error(`${pending.label} left an unprotected broker position that startup could not adopt`);
+    log(`[ORDER RECOVERY] ${pending.label} was not safely active; flattening before startup completes`);
+    await closePosition(pending.symbol, brokerPosition.netPrice || pos.entryPrice, "startup_unsent_order_recovery");
+    return;
+  }
+
+  let orderId: number | null = null;
+  let lastWaitLogAt = 0;
+  const missingOrderDeadline = Date.now() + 60_000;
+  while (!orderId) {
+    orderId = await findOrderIdByClientId(pending.clOrdId, 3);
+    if (!orderId) {
+      if (Date.now() >= missingOrderDeadline) {
+        const brokerPosition = await getBrokerPositionSnapshot(pending.contractId, 5);
+        if (brokerPosition !== undefined) {
+          if (brokerPosition === null) {
+            await clearPendingOrderSubmission(pending.clOrdId);
+            log(`[ORDER RECOVERY] ${pending.label}: no order appeared and broker is stably flat`);
+            return;
+          }
+          await syncPositions();
+          const pos = positions.get(pending.symbol);
+          if (!pos) throw new Error(`${pending.label} has broker exposure that startup could not adopt`);
+          if (pending.kind === "target" && pos.stopOrderId
+            && await protectionOrderStatus(pos.stopOrderId) === "active") {
+            await clearPendingOrderSubmission(pending.clOrdId);
+            log(`[ORDER RECOVERY] ${pending.label}: missing optional target cleared; active stop #${pos.stopOrderId} remains`);
+            return;
+          }
+          await updatePendingOrderPhase(pending.clOrdId, "rejected");
+          log(`[ORDER RECOVERY] ${pending.label}: no broker order appeared after 60s while exposure remains; flattening fail-closed`);
+          await closePosition(pending.symbol, brokerPosition.netPrice || pos.entryPrice, "startup_missing_order_recovery");
+          return;
+        }
+      }
+      if (Date.now() - lastWaitLogAt >= 60_000) {
+        lastWaitLogAt = Date.now();
+        log(`[ORDER RECOVERY] ${pending.label}: exact clOrdId not visible yet; startup remains fail-closed`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+
+  let status = await protectionOrderStatus(orderId);
+  while (status === "unknown") {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    status = await protectionOrderStatus(orderId);
+  }
+
+  if ((pending.kind === "stop" || pending.kind === "target") && status === "active") {
+    const pos = positions.get(pending.symbol);
+    if (pos && pos.contractId === pending.contractId) {
+      if (pending.kind === "stop") pos.stopOrderId = orderId;
+      else pos.targetOrderId = orderId;
+      await savePositionsForOrderRecovery();
+      await clearPendingOrderSubmission(pending.clOrdId);
+      log(`[ORDER RECOVERY] Reattached active ${pending.kind} #${orderId} to ${pending.symbol}`);
+      return;
+    }
+  }
+
+  if (status === "active") await cancelOrderUntilTerminal(orderId, pending.label);
+  const brokerPosition = await getBrokerPositionSnapshot(pending.contractId, 5);
+  if (brokerPosition === undefined) {
+    throw new Error(`${pending.label} reached terminal state but broker position remains unavailable`);
+  }
+  if (brokerPosition === null) {
+    await clearPendingOrderSubmission(pending.clOrdId);
+    return;
+  }
+  await syncPositions();
+  const pos = positions.get(pending.symbol);
+  if (!pos) throw new Error(`${pending.label} left a broker position that startup could not adopt`);
+  log(`[ORDER RECOVERY] ${pending.label} left ${brokerPosition.netPos} contract(s); flattening before startup completes`);
+  await closePosition(pending.symbol, brokerPosition.netPrice || pos.entryPrice, "startup_order_recovery");
+}
+
 type BrokerPositionSnapshot = { netPos: number; netPrice: number };
 
 /**
@@ -4559,7 +4980,8 @@ async function evaluateAndTrade(
   const canExec = sizeMult > 0 && !positions.has(sym) && positions.size < riskConfig.maxConcurrentPositions
     && currentTotalContracts < riskConfig.maxTotalContracts
     && dailyTradeCount < riskConfig.maxTradesPerDay && dailyPnl >= -riskSizingEquity() * (riskConfig.dailyLossLimitPct / 100)
-    && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym) && !entryExecutionInFlight;
+    && Date.now() >= tiltPauseUntil && !stoppedSymbols.has(sym) && !entryExecutionInFlight
+    && activePendingOrderSubmission === null && !pendingOrderReservationInFlight && closingLocks.size === 0;
 
   if (canExec) {
     // Pattern memory hard block was already evaluated up front.
@@ -4779,11 +5201,12 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       return;
     }
 
-    // Final operator gate inside the submission critical section. The earlier strategy gate can be
-    // minutes old after broker verification waits. This DB read yields, so quote and contract
-    // alignment are deliberately revalidated immediately after it.
-    await refreshOperatorTradingGate();
-    if (USES_LIVE_POLICY && (!riskConfigHealthy || !futuresTradingEnabled)) {
+    // Authenticate before the final operator check. The generic apiFetch helper may authenticate or
+    // sleep-and-retry before it sends, which would leave a window for a kill switch to arrive and then
+    // still be followed by an entry. Entries deliberately use one prepared token and never retry.
+    const entryToken = await authenticate();
+    const operatorGateAllowed = await refreshOperatorTradingGate();
+    if (USES_LIVE_POLICY && (!riskConfigHealthy || !operatorGateAllowed || !futuresTradingEnabled)) {
       log(`  ${sym}: SKIP — operator kill switch engaged before order submission`);
       return;
     }
@@ -4828,32 +5251,82 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       ? Number((Math.ceil(rawLimit / tick) * tick).toFixed((String(tick).split(".")[1] || "").length))
       : Number((Math.floor(rawLimit / tick) * tick).toFixed((String(tick).split(".")[1] || "").length));
 
-    const submitTs = Date.now();
-    const entry = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify(
+    // A client order id lets us recover the broker order even if the HTTP request is accepted but its
+    // response is lost. Tradovate supports clOrdId on placeorder and returns it on Order entities.
+    const entryClientOrderId = `FRT-${ENGINE_MODE}-${sym}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const entryBody = JSON.stringify(
       useLimit
         ? {
             accountSpec: acct.name, accountId, action: side, symbol: contract.id,
-            orderQty: qty, orderType: "Limit", price: limitPrice, timeInForce: "IOC", isAutomated: true,
+            clOrdId: entryClientOrderId, orderQty: qty, orderType: "Limit", price: limitPrice, timeInForce: "IOC", isAutomated: true,
           }
         : {
             accountSpec: acct.name, accountId, action: side, symbol: contract.id,
-            orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
+            clOrdId: entryClientOrderId, orderQty: qty, orderType: "Market", timeInForce: "Day", isAutomated: true,
           }
-    )}) as { orderId: number };
+    );
+    const submitTs = Date.now();
+    await reservePendingOrderSubmission({
+      clOrdId: entryClientOrderId,
+      label: `${sym} entry`,
+      kind: "entry",
+      symbol: sym,
+      contractId: contract.id,
+      createdAt: new Date().toISOString(),
+      phase: "reserved",
+      ownerId: ORDER_OWNER_ID,
+    });
+    // The operator gate, active Railway generation, durable ownership, and reserved→sent transition
+    // are one serialized database decision. Once it commits, only synchronous market/contract checks
+    // remain before the request starts.
+    const entryAuthorized = await authorizePendingEntryAndMarkSent(entryClientOrderId);
+    const atSendPrice = getActionableEntryPrice(sym, direction);
+    const atSendContract = contracts.get(sym);
+    if (
+      !entryAuthorized
+      || (USES_LIVE_POLICY && !riskConfigHealthy)
+      || atSendPrice <= 0
+      || chaseExceeded(atSendPrice)
+      || !atSendContract
+      || atSendContract.id !== contract.id
+      || atSendContract.name !== contract.name
+    ) {
+      await clearPendingOrderSubmission(entryClientOrderId);
+      log(`  ${sym}: SKIP — final safety state changed before the durable order was sent`);
+      return;
+    }
+    // Start the network request synchronously after the gate, quote, chase, and contract checks. There
+    // is intentionally no awaited authentication, retry delay, or other yield in this critical section.
+    const entryResponsePromise = fetch(`${ORDER_API}/order/placeorder`, {
+      method: "POST",
+      body: entryBody,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${entryToken}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    let entryOrderId: number | null = null;
+    let fillResult: Awaited<ReturnType<typeof verifyOrderFill>> | null = null;
+    try {
+      entryOrderId = await resolveSubmittedOrder(entryResponsePromise, entryClientOrderId, `${sym} entry`);
+    } catch (error) {
+      if (error instanceof DefinitiveOrderSubmissionError) await clearPendingOrderSubmission(entryClientOrderId);
+      throw error;
+    }
     if (useLimit) log(`  ENTRY as marketable LIMIT ${limitPrice} (signal ${price.toFixed(2)}, cap ${entryCap.toFixed(2)} pts = ${(entryCap / tick).toFixed(0)} ticks / $${(entryCap * (CONTRACT_MULTIPLIERS[sym] || 5)).toFixed(2)} per contract), IOC`);
 
     // Confirm the entry filled BEFORE resting protective orders or tracking a position.
     // Only skip on a positively-confirmed rejection (no fill); unknown → fall back to
     // current behavior (track at estimated price) so we never abandon a real fill.
-    let fillResult = await verifyOrderFill(entry.orderId, qty);
+    if (!fillResult && entryOrderId) fillResult = await verifyOrderFill(entryOrderId, qty);
+    if (!fillResult) {
+      log(`  🚨 ${sym}: entry could not be resolved to either an order or a broker position`);
+      notify(`🚨 ${MODE_TAG} ${sym}: entry reconciliation exhausted without a safe result. Check broker now.`, "general");
+      return;
+    }
     if (fillResult.status === "unknown") {
       // Stop a still-working order before reconciling. A returned order id is not proof of a fill,
       // and placing opposite-side brackets against an unknown entry can create a reverse position.
-      if (!await cancelOrderAndWaitForTerminal(entry.orderId)) {
-        log(`  🚨 ${sym}: entry cancellation did not reach a terminal state; symbol requires broker reconciliation.`);
-        notify(`🚨 ${MODE_TAG} ${sym}: entry order still indeterminate. Check broker now.`, "general");
-        return;
-      }
+      if (!entryOrderId) throw new Error(`${sym} entry is unknown without an order id`);
+      await cancelOrderUntilTerminal(entryOrderId, `${sym} entry`);
 
       const brokerPosition = await getBrokerPositionSnapshot(contract.id);
       const resolution = reconcileBrokerPosition(direction as "long" | "short", 0, brokerPosition);
@@ -4865,6 +5338,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
         };
         log(`  ${sym}: indeterminate entry reconciled from broker position (${fillResult.qty}x @ $${fillResult.price.toFixed(2)})`);
       } else if (resolution.status === "flat") {
+        await clearPendingOrderSubmission(entryClientOrderId);
         log(`  ${sym}: indeterminate entry reconciled FLAT — no brackets placed, no position tracked`);
         void logExecutionQuality({ mode: ENGINE_MODE, sym, side, intended: price, fill: price, qty: 0, latencyMs: Date.now() - submitTs, status: "unknown_flat" });
         return;
@@ -4876,6 +5350,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       }
     }
     if (fillResult.status === "rejected") {
+      await clearPendingOrderSubmission(entryClientOrderId);
       // An IOC that found no liquidity inside the cap is a MISS, not a broker rejection. It is the
       // designed outcome (a skipped trade is free), so it is logged and counted, never alerted on —
       // paging on a normal no-fill would train the alert to be ignored.
@@ -4938,7 +5413,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       emergencyWarningTick: 0,
     });
     dailyTradeCount++;
-    await savePositions();
+    await savePositionsForOrderRecovery();
     try {
       await prisma.autoTradeLog.create({ data: {
         symbol: `FUT:${sym}`,
@@ -4948,7 +5423,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
         reason: `[FUTURES ${sym}] ${reasoning}. Stop: $${stopPrice.toFixed(2)}, Target: $${targetPrice.toFixed(2)}. R:R ${rr.toFixed(1)}. Risk: $${(riskPer * fillQty).toFixed(0)}. Size: ${sizeMult.toFixed(1)}x. Fill: confirmed`,
         aiScore: confidenceScore,
         aiSignal: direction,
-        orderId: String(entry.orderId),
+        orderId: entryOrderId ? String(entryOrderId) : null,
       }});
     } catch {}
 
@@ -4956,22 +5431,28 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     let stopVerified = false;
     for (let a = 0; a < 2 && stopOrderId === null; a++) {
       try {
-        const s = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        const submittedStopId = await submitRecoverableOrder({
           accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
           orderQty: fillQty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
+        }, `${sym} initial stop`, { kind: "stop", symbol: sym, contractId: contract.id });
+        const tracked = positions.get(sym);
+        if (tracked) tracked.stopOrderId = submittedStopId;
+        await savePositionsForOrderRecovery();
         // placeorder returns an id even for orders the broker then REJECTS — confirm it's actually
         // live before trusting it as protection, else the flatten-safety below never fires.
-        const protectionStatus = await protectionOrderStatus(s.orderId);
+        const protectionStatus = await protectionOrderStatus(submittedStopId);
         if (protectionStatus === "rejected") {
-          log(`  ${sym}: stop order #${s.orderId} REJECTED by broker (attempt ${a + 1}) — retrying`);
+          if (tracked) tracked.stopOrderId = null;
+          await savePositions();
+          log(`  ${sym}: stop order #${submittedStopId} REJECTED by broker (attempt ${a + 1}) — retrying`);
           if (a === 0) await new Promise(r => setTimeout(r, 800));
           continue;
         }
         if (protectionStatus === "filled") {
-          log(`  ${sym}: protective stop #${s.orderId} filled immediately; entry is no longer open`);
+          log(`  ${sym}: protective stop #${submittedStopId} filled immediately; entry is no longer open`);
           notify(`${MODE_TAG} ${sym}: protective stop filled immediately after entry. Recording the completed trade now.`);
           await closePosition(sym, stopPrice, "stop_loss", true);
+          if (!positions.has(sym)) await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
           return;
         }
         if (protectionStatus === "unknown") {
@@ -4979,6 +5460,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
           if (brokerPosition === null) {
             log(`  ${sym}: stop status unknown but broker is flat; recording the completed trade`);
             await closePosition(sym, stopPrice, "protection_flat", true);
+            if (!positions.has(sym)) await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
             return;
           }
           if (brokerPosition === undefined || Math.sign(brokerPosition.netPos) !== (direction === "long" ? 1 : -1)) {
@@ -4986,13 +5468,14 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
             notify(`🚨 ${MODE_TAG} ${sym}: protection state unresolved after a confirmed entry. Check broker immediately.`, "general");
             return;
           }
-          log(`  🚨 ${sym}: stop #${s.orderId} status unverified while position remains open; flattening fail-closed`);
+          log(`  🚨 ${sym}: stop #${submittedStopId} status unverified while position remains open; flattening fail-closed`);
           notify(`🚨 ${MODE_TAG} ${sym}: broker stop could not be verified. Flattening the entry now.`, "general");
           await closePosition(sym, brokerPosition.netPrice || entryPrice, "protection_unverified");
           return;
         }
-        stopOrderId = s.orderId;
+        stopOrderId = submittedStopId;
         stopVerified = true;
+        await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
       } catch { if (a === 0) await new Promise(r => setTimeout(r, 800)); }
     }
 
@@ -5014,12 +5497,19 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
     let targetOrderId: number | null = null;
     if (stopVerified) {
       try {
-        const t = await apiFetch("/order/placeorder", { method: "POST", body: JSON.stringify({
+        targetOrderId = await submitRecoverableOrder({
           accountSpec: acct.name, accountId, action: closeSide, symbol: contract.id,
           orderQty: fillQty, orderType: "Limit", price: targetPrice, timeInForce: "GTC", isAutomated: true,
-        })}) as { orderId: number };
-        targetOrderId = t.orderId;
-      } catch {}
+        }, `${sym} target`, { kind: "target", symbol: sym, contractId: contract.id });
+        const tracked = positions.get(sym);
+        if (tracked) tracked.targetOrderId = targetOrderId;
+        await savePositionsForOrderRecovery();
+        await clearPendingOrderSubmission(activePendingOrderSubmission?.clOrdId || "");
+      } catch (error) {
+        if (activePendingOrderSubmission?.kind === "target" && activePendingOrderSubmission.phase === "rejected") {
+          await clearPendingOrderSubmission(activePendingOrderSubmission.clOrdId);
+        }
+      }
     }
 
     const trackedPosition = positions.get(sym);
@@ -5027,7 +5517,7 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       trackedPosition.stopOrderId = stopOrderId;
       trackedPosition.targetOrderId = targetOrderId;
     }
-    log(`Order #${entry.orderId} ${fillConfirmed ? `FILLED @ $${entryPrice.toFixed(2)}` : "placed (fill unconfirmed — tracking at est)"} | Stop #${stopOrderId} | Target #${targetOrderId}`);
+    log(`Order #${entryOrderId ?? "reconciled-position"} ${fillConfirmed ? `FILLED @ $${entryPrice.toFixed(2)}` : "placed (fill unconfirmed — tracking at est)"} | Stop #${stopOrderId} | Target #${targetOrderId}`);
     notify(`${side} ${fillQty}x ${sym} @ $${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (est)"} | Stop: $${stopPrice.toFixed(2)} | Target: $${targetPrice.toFixed(2)} | R:R ${rr.toFixed(1)}`);
     await savePositions();
 
@@ -5045,9 +5535,19 @@ async function writeHeartbeat() {
     const sizingEquity = riskSizingEquity();
     const payload = JSON.stringify({
       timestamp: new Date().toISOString(),
+      startedAt: ENGINE_STARTED_AT,
+      strategyVersion: STRATEGY_VERSION,
+      deploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
+      ready: engineReady,
+      registeredEdges: REALTIME_EDGES.length,
+      enabledEdges: REALTIME_EDGES
+        .filter((edge) => isEdgeEnabled(edge.key, ENGINE_MODE, edgeFlags))
+        .map((edge) => edge.key),
       tickCount,
       mode: ENGINE_MODE,
       liveTradingArmed: IS_LIVE ? LIVE_TRADING_ARMED : false,
+      operatorTradingEnabled: futuresTradingEnabled,
+      riskConfigHealthy,
       positions: positions.size,
       dailyPnl: Math.round(dailyPnl),
       dailyTrades: dailyTradeCount,
@@ -5066,11 +5566,31 @@ async function writeHeartbeat() {
       maxContractsPerTrade: riskConfig.maxContractsPerTrade,
       symbols: Object.fromEntries([...planSnapshots.entries()]),
     });
-    await prisma.agentConfig.upsert({
-      where: { key: HEARTBEAT_KEY },
-      update: { value: payload },
-      create: { key: HEARTBEAT_KEY, value: payload },
+    const heartbeatWritten = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${HEARTBEAT_KEY}))`;
+      const current = await tx.agentConfig.findUnique({ where: { key: HEARTBEAT_KEY } });
+      const existing = current?.value
+        ? JSON.parse(current.value) as { timestamp?: string; startedAt?: string; deploymentId?: string | null }
+        : null;
+      const existingOwner = existing?.startedAt
+        ? `${existing.deploymentId || "local"}:${existing.startedAt}`
+        : "";
+      const existingAge = Date.now() - Date.parse(existing?.timestamp || "");
+      if (existingOwner && existingOwner !== ORDER_OWNER_ID
+        && Number.isFinite(existingAge) && existingAge < 90_000) {
+        return false;
+      }
+      await tx.agentConfig.upsert({
+        where: { key: HEARTBEAT_KEY },
+        update: { value: payload },
+        create: { key: HEARTBEAT_KEY, value: payload },
+      });
+      return true;
     });
+    if (!heartbeatWritten) {
+      futuresTradingEnabled = false;
+      log(`[HEARTBEAT] Prior ${MODE_TAG} generation still owns the lease; this process remains entry-disabled`);
+    }
     // Persist the tilt/trade-count circuit breaker so a deploy cannot silently re-arm an engine that
     // stopped itself. Written every heartbeat (cheap upsert) rather than only on change, so it can
     // never be missed. Restored on startup — see the [STARTUP] Tilt state block.
@@ -5997,11 +6517,13 @@ function startHealthServer() {
     const now = Date.now();
     const uptimeSeconds = Math.round((now - startTime) / 1000);
     const lastTickAge = tickCount > 0 ? Math.round((now - lastTickCheckTime) / 1000) : -1;
-    const healthy = tickCount > 0 && (now - lastTickCheckTime) < 120_000;
+    const healthy = engineReady && riskConfigHealthy;
 
     const status = {
       mode: ENGINE_MODE,
       status: healthy ? "healthy" : "degraded",
+      strategyVersion: STRATEGY_VERSION,
+      startedAt: ENGINE_STARTED_AT,
       uptime: uptimeSeconds,
       tickCount,
       lastTickAgeSec: lastTickAge,
@@ -6157,6 +6679,7 @@ async function main() {
 
   // Restore positions from database (survive restarts)
   await loadPositions();
+  await recoverPendingOrderSubmissionOnStartup();
   // Each engine loads its own positions from POSITIONS_KEY
 
   // Pre-load historical bars so we can trade IMMEDIATELY
@@ -6299,7 +6822,7 @@ async function main() {
   safeInterval(updateVIX, 300_000, "updateVIX");
   safeInterval(updateTradovateEquity, 600_000, "updateTradovateEquity"); // every 10min
   safeInterval(loadRiskConfig, 300_000, "loadRiskConfig"); // refresh risk rules from DB every 5min
-  safeInterval(refreshOperatorTradingGate, 15_000, "operatorTradingGate");
+  safeInterval(async () => { await refreshOperatorTradingGate(); }, 15_000, "operatorTradingGate");
   safeInterval(resolveContracts, 300_000, "resolveContracts"); // fail-closed symbols retry automatically
   safeInterval(sweepPhantomCloseRows, 1800_000, "sweepPhantoms"); // auto-clean phantom close-rows every 30min
   safeInterval(proactiveTokenRefresh, 600_000, "tokenRefresh"); // check token expiry every 10min
@@ -6362,10 +6885,11 @@ async function main() {
     log(`STATUS: ${session.toUpperCase()} | ${vix.label} | ${crossAssetSummary || "No macro"} | Macro:${macroStatus} | Ticks:${tickCount} | Pos:${positions.size}/${riskConfig.maxConcurrentPositions} | P&L:$${dailyPnl.toFixed(0)} | ${dailyTradeCount}/${riskConfig.maxTradesPerDay} | MD:${mdStatus} | Tilt:${tiltStatus} | ${prices}`);
   }, 120_000, "statusLog");
 
-  log("Engine ready — scanning for setups on every 5-min bar close...");
-
   // First poll immediately
   await pollPrices();
+  engineReady = true;
+  await writeHeartbeat();
+  log("Engine ready — scanning for setups on every 5-min bar close...");
 }
 
 // ── Global error handlers (MUST NOT exit) ────────────────

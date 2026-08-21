@@ -12,10 +12,17 @@ on:
       - 'src/services/**'
       - 'src/lib/**'
       - 'sidecar/**'
+      - 'scripts/verify-sidecar-ready.ts'
+      - 'scripts/verify-engine-ready.ts'
+      - '.github/workflows/deploy-railway.yml'
       - 'prisma/**'
       - 'Dockerfile.engine'
       - 'package.json'
       - 'package-lock.json'
+
+concurrency:
+  group: futures-railway-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -30,7 +37,20 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Deploy Databento sidecar first
-        run: railway up ./sidecar --path-as-root --service databento-sidecar
+        run: |
+          deploy_output="$(railway up ./sidecar --path-as-root --service databento-sidecar --detach --json)"
+          deployment_id="$(printf '%s\n' "$deploy_output" | tail -n 1 | jq -r '.deploymentId // .id // empty')"
+          test -n "$deployment_id"
+          for _ in $(seq 1 120); do
+            status="$(railway deployment list --service databento-sidecar --limit 20 --json | jq -r --arg id "$deployment_id" '.[] | select(.id == $id) | .status')"
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED) echo "Sidecar deployment $deployment_id ended $status" >&2; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "Sidecar deployment $deployment_id did not reach SUCCESS" >&2
+          exit 1
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
@@ -40,12 +60,58 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
+      - name: Mark live deploy start
+        run: echo "LIVE_DEPLOY_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
       - name: Deploy live engine
-        run: railway up --service futures-engine-live
+        run: |
+          deploy_output="$(railway up --service futures-engine-live --detach --json)"
+          deployment_id="$(printf '%s\n' "$deploy_output" | tail -n 1 | jq -r '.deploymentId // .id // empty')"
+          test -n "$deployment_id"
+          echo "LIVE_DEPLOYMENT_ID=$deployment_id" >> "$GITHUB_ENV"
+          for _ in $(seq 1 120); do
+            status="$(railway deployment list --service futures-engine-live --limit 20 --json | jq -r --arg id "$deployment_id" '.[] | select(.id == $id) | .status')"
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED) echo "Live deployment $deployment_id ended $status" >&2; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "Live deployment $deployment_id did not reach SUCCESS" >&2
+          exit 1
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
+      - name: Verify live engine initialization
+        timeout-minutes: 10
+        run: railway run --service futures-engine-live -- env ENGINE_MODE=live DEPLOY_STARTED_AT="$LIVE_DEPLOY_STARTED_AT" EXPECTED_DEPLOYMENT_ID="$LIVE_DEPLOYMENT_ID" EXPECT_LIVE_ARMED=false REQUIRE_LIVE_EDGES_OFF=true node --import tsx scripts/verify-engine-ready.ts
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      - name: Mark demo deploy start
+        run: echo "DEMO_DEPLOY_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
       - name: Deploy demo engine
-        run: railway up --service futures-engine
+        run: |
+          deploy_output="$(railway up --service futures-engine --detach --json)"
+          deployment_id="$(printf '%s\n' "$deploy_output" | tail -n 1 | jq -r '.deploymentId // .id // empty')"
+          test -n "$deployment_id"
+          echo "DEMO_DEPLOYMENT_ID=$deployment_id" >> "$GITHUB_ENV"
+          for _ in $(seq 1 120); do
+            status="$(railway deployment list --service futures-engine --limit 20 --json | jq -r --arg id "$deployment_id" '.[] | select(.id == $id) | .status')"
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED) echo "Demo deployment $deployment_id ended $status" >&2; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "Demo deployment $deployment_id did not reach SUCCESS" >&2
+          exit 1
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      - name: Verify demo engine initialization
+        timeout-minutes: 10
+        run: railway run --service futures-engine -- env ENGINE_MODE=demo DEPLOY_STARTED_AT="$DEMO_DEPLOY_STARTED_AT" EXPECTED_DEPLOYMENT_ID="$DEMO_DEPLOYMENT_ID" node --import tsx scripts/verify-engine-ready.ts
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
