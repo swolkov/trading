@@ -14,7 +14,7 @@ import { getPlanContextForGrading } from "../lib/advisor";
 import { matchEdge, isEdgeEnabled, allEdgeFlagKeys, edgeFlagKey, REALTIME_EDGES } from "../lib/realtime-edges";
 import { VAULT_SESSION_RULES } from "../lib/vault-session-gates";
 import { reconcileBrokerPosition } from "../lib/broker-position-reconciliation";
-import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber } from "../lib/risk-sizing";
+import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber, riskSizedContractQuantity } from "../lib/risk-sizing";
 import { contractMappingMatchesBroker, selectFreshContractMapping } from "../lib/databento-contract-mapping";
 import { FUTURES_STRATEGY_VERSION } from "../lib/strategy-version";
 import {
@@ -82,17 +82,15 @@ function hasValidEngineLease(): boolean {
   return isEngineLeaseValid(ownsEngineLease, engineLeaseValidUntil);
 }
 
-// DEMO ($50K): Trade full-size ES, NQ, GC for maximum learning
-// LIVE ($1K): Micros only MES, MNQ, MYM until equity scales
+// The default demo is a live-clone paper engine: MGC, MNQ, and MES micros.
+// A separate research deployment can opt out with DEMO_LIVE_CLONE=false.
 // FOCUS (June 9, from P&L attribution): NQ is the only instrument the demo actually made money on;
 // EDGE-FOCUSED MULTI-INSTRUMENT (Jun 26): backtest (12k trades, walk-forward) verdict —
 //   • GOLD RSI-bounce = the durable edge (GC PF 1.25 OOS, positive every recent year) → trade fully.
 //   • Index (NQ/ES) only has OOS edge on the OVERBOUGHT-SHORT fade (RSI>80 short, PF 1.4-1.8); index
 //     longs + other index setups LOSE OOS → the evaluateAndTrade gate trades ONLY that pocket on index.
-// DEMO ($60k) trades gold + NQ + ES full-size; LIVE ($924) trades all three via micros. Per-trade
-// 1-contract stop vs the $924 account: MES ~$75 (8%), MGC ~$93 (10%), MNQ ~$132 (14%) — all fit under
-// the 15% risk cap (MES is actually cheaper than gold). All trade only their validated pocket via the
-// evaluateAndTrade gate: gold = full RSI-bounce edge, index (NQ/ES) = RSI≥80 overbought-shorts only.
+// The live-clone path uses the same three roots at micro size. All trade only their validated pocket
+// via the evaluateAndTrade gate: gold = RSI-bounce edge, index = overbought-short edge.
 const FULL_SIZE_SYMBOLS: string[] = [...FULL_SIZE_FUTURES];
 // Live <$60k micros — same edges, ~1/10 size. Databento feeds them via FULL_EQUIVALENT (MGC→GC etc).
 const MICRO_SYMBOLS: string[] = [...MICRO_FUTURES];
@@ -175,34 +173,6 @@ const METALS = new Set(["MGC", "GC"]);
 // 8:30 ET macro-release blackout dates (CPI etc), loaded from `macro_blackout_dates` config by
 // loadRiskConfig. NFP days are computed (first Friday), so only irregular dates live here.
 let macroBlackoutDates = new Set<string>();
-// GROWTH RAMP (micro gold only): contract ceiling by account equity so per-trade risk stays ~constant (~1%)
-// as the account grows, instead of being frozen at 1 micro forever. Dormant until $10k — at ~$5k it returns 1,
-// so it does NOT change current behavior. Scoped to MGC ONLY (never applied to full GC). Above ~$60k the
-// MICRO→FULL switch flips MGC→GC, so this only governs the micro range. Sim (Jul 13) showed >1 micro trips the
-// −25% kill-switch on a SMALL account — this ramp respects that by only sizing up once equity can absorb it.
-/**
- * Contract ladder for MICRO contracts (MGC/MNQ/MES) — size scales with the ACCOUNT, never with a
- * trade count or a flag flipped mid-streak.
- *
- * Calibrated off the live book's own realised losses (33 losing closes: avg $63.57, median $55,
- * worst $147). The safety measure that matters is "how many average losers does the 25% kill switch
- * absorb", which today is ~21 at one micro:
- *     2 micros (~$127 avg loss) needs ~$10.7k for the same margin  -> threshold $10,000
- *     3 micros (~$191 avg loss) at $18,000 absorbs ~24 losers      -> threshold $18,000  (safer still)
- * Below $10k this returns 1, so at today's $5,214 it changes NOTHING — it only ever engages once the
- * account has genuinely earned the size.
- *
- * MICRO ONLY, deliberately: demo trades FULL-SIZE GC/NQ/ES on ~$75k, and a micro-calibrated ladder
- * there would hand it 3 full contracts (~30x its current exposure) and destroy demo as a shadow of
- * live. Full-size symbols keep the configured cap; once live crosses FULL_SIZE_EQUITY_THRESHOLD it
- * moves to full-size contracts and this ladder correctly stops applying.
- */
-function microContractCap(equity: number): number {
-  if (equity >= 18000) return 3;
-  if (equity >= 10000) return 2;
-  return 1;
-}
-
 // ── OVERNIGHT MARGIN GOVERNOR (2026-07-29) ───────────────────────────────────────────────────────
 // Sessions the exchange treats as RTH, where it charges DAY-TRADE margin (~$50-100/micro). Anything
 // else charges INITIAL margin, which is 20-40x higher — that is the whole reason overnight size must
@@ -901,14 +871,14 @@ interface PlanSnapshot {
 }
 const planSnapshots = new Map<string, PlanSnapshot>();
 
-/** One authoritative contract ceiling shared by telemetry and execution. The equity ladder is an
- * automatic growth ceiling, while maxContractsPerTrade remains a true operator maximum that can
- * always reduce exposure. Aggregate open exposure is subtracted before a new order is sized. */
+/** One authoritative contract ceiling shared by telemetry and execution. Contract quantity is
+ * determined by the stop-distance risk budget, then trimmed by the operator and aggregate caps.
+ * Aggregate open exposure is subtracted before a new order is sized. */
 function contractCapFor(sym: string, equity: number, session: string | undefined): number {
   const openContracts = [...positions.values()].reduce((sum, position) => sum + position.quantity, 0);
   let cap = cappedContractLimit(
     riskConfig.maxContractsPerTrade,
-    MICRO_SYMBOLS.includes(sym) ? microContractCap(equity) : riskConfig.maxContractsPerTrade,
+    riskConfig.maxContractsPerTrade,
     riskConfig.maxTotalContracts,
     openContracts,
   );
@@ -931,9 +901,13 @@ function plannedQtyFor(sym: string, adjustedATR: number, session: string, sizeMu
   if (riskPer > maxRisk) return 0;                        // never change validated stop geometry to force a trade
   const cap = contractCapFor(sym, equity, session);
   if (cap < 1) return 0;
-  const qty = Math.min(cap, Math.floor(maxRisk / riskPer));
-  if (qty < 1) return 0;
-  return riskPer * qty > equity * 0.15 ? Math.max(1, Math.floor((equity * 0.15) / riskPer)) : qty;
+  return riskSizedContractQuantity({
+    equity,
+    riskPerTradePct: riskConfig.riskPerTradePct,
+    sizeMultiplier: sizeMult,
+    perContractRisk: riskPer,
+    maxContracts: cap,
+  });
 }
 
 /** Exchange timestamp of the last real quote per symbol (Databento's own ts when we have it, else
@@ -1865,8 +1839,8 @@ const DEMO_DEFAULTS: RiskConfig = {
 // 2026-07-10). At that size 1% (~$48) DOES fit a micro, so the old "1% is impossible here" argument
 // no longer holds and the 5% override is now a choice rather than a floor. See PHASE-0-LIVE.md.
 const LIVE_DEFAULTS: RiskConfig = {
-  maxContractsPerTrade: 3,
-  maxTotalContracts: 4,
+  maxContractsPerTrade: 5,
+  maxTotalContracts: 8,
   maxTradesPerDay: 6,
   riskPerTradePct: 1,            // 1% — pro standard. FALLBACK ONLY: live_futures_risk_per_trade_pct is 5.
   dailyLossLimitPct: 3,          // 3% daily loss → full stop
@@ -5352,7 +5326,8 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
   // Demo always executes (24/7 learning). Live mirrors during RTH if enabled.
 
   const mult = CONTRACT_MULTIPLIERS[sym] || 5;
-  // Use simulated equity for sizing (demo simulates $1K). Fall back to actual if not set.
+  // Live-clone demo and live both size from fresh live equity. A separate research demo may use its
+  // configured simulated equity; riskSizingEquity() owns that distinction.
   const equity = riskSizingEquity();
   const riskPct = riskConfig.riskPerTradePct / 100;
   const maxRisk = equity * riskPct * sizeMult;
@@ -5367,26 +5342,22 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
 
   // ⚠️ IF YOU CHANGE THE SIZING BELOW, UPDATE plannedQtyFor() TOO — it mirrors this block to tell the
   // admin panel what size the engine intends, and a silent divergence there means the panel lies.
-  // EVERY micro (MGC/MNQ/MES) now grows with the account, not just gold — so risk stays ~1%/trade
-  // instead of being frozen at 1 micro forever, and the step-up happens because the equity was
-  // earned rather than because someone raised a flag after a good week. Full-size contracts keep the
-  // configured cap. At today's ~$5.2k equity microContractCap() = 1 for all three, so this is
-  // behaviour-identical to the previous line until the account reaches $10,000.
-  // The growth ladder and configured maximum are both ceilings. This lets equity-earned scale-ups
-  // happen automatically while preserving the operator's ability to reduce maximum size instantly.
+  // MGC/MNQ/MES use the same stop-distance risk budget as every other contract. The configured
+  // maximum is a ceiling, never a target: five contracts are possible only when all five fit inside
+  // the risk budget and aggregate exposure limit. Overnight margin remains independently capped.
   let perTradeCap = contractCapFor(sym, equity, setupContext?.session);
   if (perTradeCap < 1) {
     log(`${sym}: SKIP — no aggregate contract capacity remains (limit ${riskConfig.maxTotalContracts})`);
     return;
   }
   // ── OVERNIGHT MARGIN GOVERNOR ────────────────────────────────────────────────────────────────
-  // The per-trade cap of 4 only works during RTH, where the exchange charges DAY-TRADE margin
-  // (~$50-100/micro). Outside RTH it charges INITIAL margin — MGC $2,242.90 — so on a ~$5,227
-  // account 2 contracts is 86% of equity and 3 is flatly impossible. The London gold long
+  // The per-trade cap of 5 only applies during RTH, where the exchange charges DAY-TRADE margin
+  // (~$50-100/micro). Outside RTH it charges INITIAL margin — MGC $2,242.90 — so on the current
+  // small account even 2 contracts can consume nearly all available equity. The London gold long
   // (03:00-09:00 ET, gold_long_europe=ON on live) is an overnight session, so it is governed here.
   //
-  // WHY THIS IS NOW A MARGIN CHECK AND NOT JUST A CONTRACT COUNT (2026-07-29): risk-based sizing
-  // targets 3% of equity and never looks at margin at all, so a contract count is the only thing
+  // WHY THIS IS NOW A MARGIN CHECK AND NOT JUST A CONTRACT COUNT (2026-07-29): stop-based sizing
+  // controls loss risk but does not look at margin, so a contract count is the only thing
   // standing between it and an order the account cannot margin. A fixed count also silently stops
   // being true when equity moves — and it nearly bit today: correcting the inflated ATR tightened
   // gold's stop from 15.7 to 7.5 points, which takes the SAME $150 of risk from 1 contract to 2 and
@@ -5414,19 +5385,16 @@ async function executeTrade(sym: string, direction: "long" | "short", price: num
       perTradeCap = overnightCap;
     }
   }
-  let qty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
+  const riskBudgetQty = Math.min(perTradeCap, Math.floor(maxRisk / riskPer));
+  const qty = riskSizedContractQuantity({
+    equity,
+    riskPerTradePct: riskConfig.riskPerTradePct,
+    sizeMultiplier: sizeMult,
+    perContractRisk: riskPer,
+    maxContracts: perTradeCap,
+  });
   if (qty < 1) { log(`${sym}: SKIP — calculated qty 0`); return; }
-  // Hard ceiling: never risk more than 15% of equity on a single entry
-  const totalRisk = riskPer * qty;
-  if (totalRisk > equity * 0.15) {
-    const hardCapQty = Math.floor((equity * 0.15) / riskPer);
-    if (hardCapQty < 1) {
-      log(`${sym}: SKIP — one contract would exceed the 15% single-entry hard ceiling`);
-      return;
-    }
-    qty = Math.min(qty, hardCapQty);
-    log(`${sym}: HARD CAP — risk $${totalRisk.toFixed(0)} exceeds 15% equity, capped to ${qty} contracts`);
-  }
+  if (qty < riskBudgetQty) log(`${sym}: HARD CAP — 15% single-entry ceiling reduced size ${riskBudgetQty} → ${qty}`);
   const rr = targetDist / stopDist;
   if (rr < 2.0) { log(`${sym}: R:R ${rr.toFixed(1)} too low (need 2.0+)`); return; }
 

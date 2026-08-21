@@ -7,9 +7,8 @@ import { getLiveFuturesPnl } from "@/lib/live-pnl";
 // ($4,821 funded) under live's rules (micro contracts + the 25% drawdown kill switch) and
 // shows what actually would have happened. Read-only — pure computation over the trade log.
 //
-// Why demo ≠ live: demo trades FULL-SIZE (ES $50/pt, NQ $20/pt, GC $100/pt) on ~$60k of fake
-// money with no real consequence to a −$18k week. Live trades micros (1/10 the $/pt) on real
-// money with a hard 25% kill switch. Same signal, wildly different survivability.
+// The simulator keeps the historical full-size-to-micro conversion for older demo rows. Current
+// demo and live-clone rows are both micros, so their ratio is 1 and the comparison is contract-exact.
 
 const RATIO_TO_MICRO = (sym: string): number => {
   // Full-size → micro dollar-per-point ratio. ES→MES, NQ→MNQ, GC→MGC are all 10×.
@@ -73,8 +72,9 @@ export async function GET() {
     const scRow = await prisma.agentConfig.findUnique({ where: { key: START_CAPITAL_KEY } });
     const startCapital = scRow?.value ? parseFloat(scRow.value) : 4821;
 
-    // Demo realized trades (full-size). Shadow live-symbol rows were retagged to shadow_*, so
-    // futures_* pnl rows here are genuine demo. Chronological for the equity replay. Entries carry
+    // Demo realized trades. Older rows may be full-size; current live-clone rows are micros.
+    // Shadow live-symbol rows were retagged to shadow_*, so futures_* pnl rows here are genuine demo.
+    // Chronological for the equity replay. Entries carry
     // pnl=null (excluded); every row with pnl is a realized cash event — full closes AND scale-outs —
     // so a scaled trade correctly contributes each partial as its own step in the equity curve.
     const demoRows = await prisma.autoTradeLog.findMany({
@@ -91,7 +91,7 @@ export async function GET() {
         demoPnl: r.pnl ?? 0,
       }));
 
-    // Demo's own numbers (full-size, its own fake account) — the number Spencer watches.
+    // Demo's own numbers on its paper account, including any historical full-size rows.
     const demoTotal = trades.reduce((s, t) => s + t.demoPnl, 0);
     const sortedByPnl = [...trades].sort((a, b) => b.demoPnl - a.demoPnl);
     const top1 = sortedByPnl[0];
@@ -101,8 +101,8 @@ export async function GET() {
     const grossWin = trades.filter((t) => t.demoPnl > 0).reduce((s, t) => s + t.demoPnl, 0);
     const grossLoss = Math.abs(trades.filter((t) => t.demoPnl < 0).reduce((s, t) => s + t.demoPnl, 0));
 
-    // Scenario A — "copy demo at 1 micro" (live's actual rule: 1 micro per signal).
-    //   live P&L = demo per-contract move ÷ (full→micro ratio). The realistic mirror.
+    // Scenario A is the fixed one-micro baseline. Current live-clone execution is risk-sized up to
+    // its configured cap, so this remains a conservative comparison rather than the live rule.
     const copyMicro = simulate(trades, startCapital, (t) => t.demoPnl / t.qty / RATIO_TO_MICRO(t.sym));
 
     // Scenario B — "copy demo AND its sizing" (same contract COUNT, but micros).

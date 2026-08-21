@@ -1474,11 +1474,11 @@ tags: [brain, daily-brief]
 > - **Session focus:** 9:45-11:30 + 2:00-3:30 ET
 > - **Note:** ${playbook.note}
 
-### Futures (Demo $50K — ULTRA-AGGRESSIVE research engine)
+### Futures (Demo paper — ULTRA-AGGRESSIVE research engine)
 > [!warning] 7% Risk — research throughput, NOT a fundable track record
 > - 55% confidence gate, all setup types active (trend continuation enabled)
 > - Max 10 contracts (20 total), 20% daily loss / 40% drawdown, up to 12 positions, 120 trades/day
-> - NQ full-size + MBT NR4 (ES/GC cut June 9). Demo P&L is research signal, not an investor curve.
+> - MGC / MNQ / MES micros + registered MBT trials. Demo P&L is research signal, not an investor curve.
 
 ### Crypto (Alpaca)
 > - **Regime:** ${cryptoRegime} → ${cryptoPlay}

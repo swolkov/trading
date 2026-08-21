@@ -41,22 +41,13 @@ function pnlColor(val: number) {
 
 const CONFIG_GROUPS = [
   {
-    label: "Futures — DEMO LIVE-CLONE · RESEARCH LAB (P&L is not proof)",
+    label: "Futures — DEMO LIVE-CLONE · inherits LIVE risk limits below",
     modeKey: "futures_mode",
     modeLabelMap: { disabled: "Disabled", demo: "Demo — 24/7 Learning", live: "Live — RTH Mirror" } as Record<string, string>,
     icon: "D",
     color: "from-emerald-500 to-teal-500",
     fields: [
       { key: "futures_mode", label: "Futures Mode", type: "select" as const, options: ["disabled", "demo", "live"] },
-      { key: "futures_risk_per_trade_pct", label: "Risk Per Trade %", type: "number" as const },
-      { key: "futures_daily_loss_limit_pct", label: "Daily Loss Limit %", type: "number" as const },
-      { key: "futures_max_drawdown_pct", label: "Max Drawdown Kill %", type: "number" as const },
-      { key: "futures_max_contracts", label: "Max Contracts / Trade", type: "number" as const },
-      { key: "futures_max_total_contracts", label: "Max Total Contracts", type: "number" as const },
-      { key: "futures_max_trades_per_day", label: "Max Trades / Day", type: "number" as const },
-      { key: "futures_atr_stop_multiplier", label: "ATR Stop Multiplier", type: "number" as const },
-      { key: "futures_atr_target_multiplier", label: "ATR Target Multiplier", type: "number" as const },
-      { key: "futures_simulated_equity", label: "Simulated Equity ($, 0=actual)", type: "number" as const },
     ],
   },
   {

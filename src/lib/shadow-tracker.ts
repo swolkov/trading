@@ -57,7 +57,7 @@ const POINT_VALUE: Record<string, number> = { MGC: 10, GC: 100, MNQ: 2, MES: 5, 
 /**
  * Translate a resolved counterfactual into real dollars using the SAME sizing the engine would
  * actually have used: contracts = min(maxContracts, floor(riskTarget / per-contract-stop-risk)).
- * `sizing` must reflect the live account's real caps (live trades 1 micro — live_futures_max_contracts),
+ * `sizing` must reflect the live account's real risk and contract caps,
  * NOT a stale hardcoded value, or the "would have won/lost" numbers come out several times too big.
  */
 export function shadowDollars(
