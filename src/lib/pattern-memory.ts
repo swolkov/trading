@@ -31,8 +31,8 @@ export interface SetupVector {
   bondTrend: "rising" | "falling" | "flat";
 
   // WHICH ENGINE PRODUCED THIS (2026-08-06). Demo and live share ONE pattern_memory key, and before
-  // this field they were blended: 101 demo vectors (NQ/ES, full-size) were mixed with 55 live ones
-  // (MNQ/MES/MGC, micros), so the live engine was predicting off demo's outcomes and vice versa.
+  // this field they were blended: historical demo vectors (including full-size research) were mixed
+  // with live micro outcomes, so the live engine was predicting off demo's outcomes and vice versa.
   // That is why memory reported a 52% win rate for trend_continuation where live's own ledger showed
   // 66%. Absent (legacy) records are classified by instrument: micros -> live, full-size -> demo.
   mode?: "live" | "demo";
@@ -42,7 +42,7 @@ export interface SetupVector {
   pnlR?: number; // P&L in R-multiples
 }
 
-/** Legacy vectors predate `mode`. Live trades micros only; demo trades full-size. */
+/** Legacy vectors predate `mode`; current runtime mode is authoritative for new records. */
 const MICRO = /^M(NQ|ES|GC|YM|BT|ET)$/;
 export function vectorMode(v: { mode?: string; instrument?: string }): "live" | "demo" {
   if (v.mode === "live" || v.mode === "demo") return v.mode;

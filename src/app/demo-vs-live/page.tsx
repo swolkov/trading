@@ -10,7 +10,7 @@ const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" 
 // Authoritative futures stats shape returned by GET /api/futures/live-pnl(?mode=demo) — the SAME
 // balance-based, incident-excluded round-trip set that drives the Track Record header and the
 // Futures Performance panel. Both columns on this page read this one source so they are directly
-// comparable — demo = 1 mini on ~$75k paper, live = 1 micro on ~$5k real, comparable risk.
+// Comparable contract family: both paths trade MGC, MNQ, and MES micros.
 interface Stats {
   ok: boolean;
   netPnl: number;
@@ -115,9 +115,9 @@ export default function DemoVsLivePage() {
       <div>
         <h1 className="text-xl font-bold">Demo vs Live — same strategy, two accounts</h1>
         <p className="text-xs text-muted-foreground/70 mt-1 max-w-2xl">
-          Both sides now run the <span className="font-semibold">same disciplined 1-contract strategy</span> — only the
-          size and stakes differ. Demo trades <span className="font-semibold">1 mini on ~$75k of paper money</span> (research,
-          reset today for a fresh forward-test); live trades <span className="font-semibold">1 micro on ~$5k of real money</span>.
+          Both sides run the <span className="font-semibold">same risk-sized micro strategy</span>. Demo uses its paper broker
+          for execution, but contract quantity is calculated from the same fresh live equity and live risk profile that
+          real-money trading will use. RTH size can reach five only when the stop-distance risk math permits it.
           Both numbers below come from the <span className="font-semibold">same authoritative source</span> — broker balance
           delta and a clean, incident-excluded round-trip set — so they are directly comparable.
         </p>
@@ -129,25 +129,23 @@ export default function DemoVsLivePage() {
           title="Demo"
           tag="PAPER · RESEARCH"
           tagClass="bg-amber-500/15 text-amber-400 border-amber-500/30"
-          accountLine="1 mini · ~$75k paper · reset today"
+          accountLine="MGC / MNQ / MES · paper execution · live-equity sizing"
         />
         <StatColumn
           stats={live}
           title="Live"
           tag="REAL MONEY"
           tagClass="bg-red-500/15 text-red-400 border-red-500/30"
-          accountLine="1 micro · ~$5k real"
+          accountLine="MGC / MNQ / MES · up to 5 RTH · risk-sized"
         />
       </div>
 
       <div className="rounded-xl border border-border bg-white/[0.02] p-4 text-[12px] leading-relaxed text-muted-foreground/80 space-y-2">
         <p className="font-semibold text-foreground">How to read this</p>
         <p>
-          Demo is the research sandbox — the same edge gate and 1-contract discipline as live, but on paper money, so a
-          bad stretch costs nothing real. Live is the same strategy sized down to 1 micro on the real ~$5k account with a
-          hard 25% kill switch. Because demo is a mini (10× the dollars-per-point of a micro) on a larger paper balance,
-          its per-trade dollar swings are bigger — the <span className="font-semibold">shape</span> (win rate, best/worst,
-          direction) is what&apos;s comparable, not the absolute dollars.
+          Demo is the research sandbox with independent edge switches and no real-money loss. It uses the same MGC, MNQ,
+          and MES contracts, stop geometry, equity input, risk budget, and exposure caps as live. Five is a ceiling, not a
+          fixed order size. Wider stops reduce quantity, and overnight gold is capped at two by margin.
         </p>
         <p>
           Demo P&L is <span className="font-semibold text-foreground">research, not proof</span>. If demo stays positive

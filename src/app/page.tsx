@@ -295,7 +295,7 @@ export default function DashboardPage() {
           <Link href="/futures" className="text-[10px] text-emerald-400 hover:underline">Open</Link>
         </div>
         <div className="grid grid-cols-3 divide-x divide-white/[0.04]">
-          {(viewMode === "live" ? ["MGC", "MNQ", "MES"] : ["ES", "NQ", "GC"]).map((sym) => {
+          {["MGC", "MNQ", "MES"].map((sym) => {
             const q = futuresQuotes.find((x) => x.symbol === sym);
             if (!q) return (
               <div key={sym} className="px-3 py-2.5 text-center">

@@ -111,14 +111,15 @@ async function loadFuturesConfig() {
 }
 
 // ============ WHICH CONTRACTS TO TRADE ============
-// DEMO ($50K): Trade everything — ES, NQ, GC, MGC. Max learning across all instruments.
-// LIVE ($1K): Micros only (MES, MNQ). Scale up as equity grows.
+// DEMO ($50K+): Use the same micro contract family as the live clone so paper results
+// are attributable to the contracts the funded engine can actually trade.
+// LIVE: Micros only (MGC, MNQ, MES) until the explicit equity policy allows scaling.
 const FULL_SIZE_EQUITY_THRESHOLD = 25_000;
 
 const DEMO_PRIORITY: { symbol: string; when: string }[] = [
-  { symbol: "ES", when: "always" },     // $50/pt — S&P 500, full-size execution learning
-  { symbol: "NQ", when: "always" },     // $20/pt — Nasdaq 100, learn trend character
-  { symbol: "GC", when: "always" },     // $100/pt — Gold, uncorrelated, Asia/London sessions
+  { symbol: "MES", when: "always" },    // $5/pt — S&P 500 micro
+  { symbol: "MNQ", when: "always" },    // $2/pt — Nasdaq 100 micro
+  { symbol: "MGC", when: "always" },    // $10/pt — Gold micro
   { symbol: "MBT", when: "always" },    // $0.10/$1 BTC — has Tier-2 NR4 edge; routed via strategy registry
   // MET/BFF/MXR/MSL are observation-only on demo (sidecar collects price, strategy registry has no
   // signal for them yet). Not listed here — they never reach the priority selector.
@@ -149,7 +150,7 @@ const LIVE_MAX_CONTRACTS_PER_SYMBOL: Record<string, number> = {
 };
 
 function getTradePriority(equity: number, mode: string = "paper"): { symbol: string; when: string }[] {
-  // DEMO: Always use full instrument set for maximum learning
+  // DEMO: mirror the live-clone micro contract family for comparable research.
   if (mode === "paper") return DEMO_PRIORITY;
   // LIVE: Equity-based selection — micros until $25K, then full-size
   const effectiveEquity = FUTURES_RULES.SIMULATED_EQUITY || equity;

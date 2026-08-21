@@ -46,7 +46,7 @@ export function EdgeScoreboard({ mode = "live" }: { mode?: "live" | "demo" }) {
           <h3 className="text-sm font-bold">Edge Test Scoreboard <span className="text-[10px] font-normal text-muted-foreground/50">· {isDemo ? "DEMO shadow — paper" : "which edge works · live"}</span></h3>
           <p className="text-[10px] text-muted-foreground/50">
             {isDemo
-              ? <>Per-edge P&amp;L on the <strong>demo shadow-test</strong> (1-contract, reset today) — same edges as live, on paper. Research, not proof.</>
+              ? <>Per-edge P&amp;L on the <strong>demo shadow-test</strong> (live-equity risk sizing, reset today) — same micro contracts as live, on paper. Research, not proof.</>
               : <>Per-edge P&amp;L (split by direction) on clean trades — is each edge actually working? Excludes the Jul 16–17 tracking incident; your <strong>account balance</strong> is the authoritative total P&amp;L.</>}
           </p>
         </div>

@@ -23,6 +23,7 @@ export async function PUT(req: NextRequest) {
     // Use view mode so backfill targets the account the user is viewing
     const mode = body.mode || await getViewMode("futures");
     const isLive = mode === "live";
+    const actionPrefix = isLive ? "live_" : "futures_";
     // Mode-prefixed keys prevent demo/live balance data from colliding
     const balKeyPrefix = isLive ? "live_daily_balance_" : "daily_balance_";
     const eodKeyPrefix = isLive ? "live_eod_balance_" : "eod_balance_";
@@ -77,10 +78,10 @@ export async function PUT(req: NextRequest) {
       // Fallback: reconstruct from fills + current balance (work backwards)
       // Filter trade logs by mode symbols to avoid cross-contamination
       const modeSymbols = isLive
-        ? ["FUT:MES", "FUT:MNQ", "FUT:BFF"]
-        : ["FUT:ES", "FUT:NQ", "FUT:GC", "FUT:MBT", "FUT:MET", "FUT:BFF", "FUT:MXR", "FUT:MSL"];
+        ? ["FUT:MGC", "FUT:MNQ", "FUT:MES"]
+        : ["FUT:MGC", "FUT:MNQ", "FUT:MES", "FUT:MBT", "FUT:MET", "FUT:BFF", "FUT:MXR", "FUT:MSL"];
       const tradeLogs = await prisma.autoTradeLog.findMany({
-        where: { symbol: { in: modeSymbols }, pnl: { not: null } },
+        where: { symbol: { in: modeSymbols }, action: { startsWith: actionPrefix }, pnl: { not: null } },
         orderBy: { createdAt: "desc" },
       });
 
@@ -143,12 +144,13 @@ export async function POST() {
   try {
     const mode = await getViewMode("futures");
     const isLive = mode === "live";
-    const modeSymbols = isLive ? ["FUT:MES", "FUT:MNQ"] : ["FUT:ES", "FUT:NQ", "FUT:GC"];
-    const knownSymbols = isLive ? ["MES", "MNQ", "MYM", "M2K", "MGC"] : ["ES", "NQ", "GC", "YM", "RTY"];
+    const actionPrefix = isLive ? "live" : "futures";
+    const modeSymbols = ["FUT:MGC", "FUT:MNQ", "FUT:MES"];
+    const knownSymbols = ["MGC", "MNQ", "MES", "MYM", "M2K"];
 
     // 1. Get futures trade logs for current mode
     const allLogs = await prisma.autoTradeLog.findMany({
-      where: { symbol: { in: modeSymbols } },
+      where: { symbol: { in: modeSymbols }, action: { startsWith: `${actionPrefix}_` } },
       orderBy: { createdAt: "asc" },
     });
 
@@ -167,7 +169,7 @@ export async function POST() {
     }
 
     // 3. Find entries without matching closes
-    const entries = allLogs.filter(l => l.action === "futures_long" || l.action === "futures_short");
+    const entries = allLogs.filter(l => l.action === `${actionPrefix}_long` || l.action === `${actionPrefix}_short`);
     const closes = allLogs.filter(l =>
       l.action.includes("stop_loss") || l.action.includes("take_profit") ||
       l.action.includes("trail_stop") || l.action.includes("breakeven") ||
@@ -227,7 +229,7 @@ export async function POST() {
         if (!stopPrice && !targetPrice) continue; // Can't determine close price
 
         const entryPrice = entry.price || 0;
-        const isLong = entry.action === "futures_long";
+        const isLong = entry.action === `${actionPrefix}_long`;
         const mult = MULTIPLIERS[baseSym] || 5;
         const qty = entry.qty;
 
@@ -268,7 +270,7 @@ export async function POST() {
         await prisma.autoTradeLog.create({
           data: {
             symbol: sym,
-            action: `futures_${closeType}`,
+            action: `${actionPrefix}_${closeType}`,
             qty,
             price: closePrice,
             pnl,

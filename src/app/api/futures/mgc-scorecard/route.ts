@@ -5,7 +5,7 @@ import { prisma } from "@/lib/db";
 // by-setup-type breakdown (win rate + net R) so we can see which setups actually earn
 // their place. The one OOS-validated edge (extreme_rsi_bounce, backtest PF ~1.24) is flagged.
 //
-// Live gold = MGC, demo gold = GC — a clean mode discriminator, so no mode column needed.
+// Both current engines use MGC; action prefixes provide the live/demo discriminator.
 const VALIDATED_EDGE = "extreme_rsi_bounce";
 
 export async function GET() {
@@ -13,50 +13,39 @@ export async function GET() {
     const sinceRow = await prisma.agentConfig.findUnique({ where: { key: "mgc_scorecard_since" } });
     const sinceTs = sinceRow?.value ? new Date(sinceRow.value) : new Date(0);
 
-    // ── Real $ P&L: LIVE gold closes since grader-off (AutoTradeLog, pnl reconciled from fills) ──
-    // Each close is double-logged (a live_* and a futures_* row with identical ts+pnl); dedup them.
-    const rawCloses = await prisma.autoTradeLog.findMany({
-      where: { symbol: "FUT:MGC", pnl: { not: null }, createdAt: { gte: sinceTs } },
-      orderBy: { createdAt: "desc" },
+    // RoundTrip is broker-fill sourced and carries an explicit mode. AutoTradeLog cannot safely
+    // distinguish current live/demo MGC by symbol because both engines trade the same micro.
+    const closes = await prisma.roundTrip.findMany({
+      where: { mode: "live", symbol: "MGC", exitTime: { gte: sinceTs } },
+      orderBy: { exitTime: "desc" },
       take: 200,
     });
-    const seen = new Set<string>();
-    const closes = rawCloses.filter((c) => {
-      const key = `${new Date(c.createdAt).toISOString().slice(0, 19)}|${(c.pnl ?? 0).toFixed(2)}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    const realDollars = closes.reduce((s, c) => s + (c.pnl ?? 0), 0);
-    const wins = closes.filter((c) => (c.pnl ?? 0) > 0).length;
-    const losses = closes.filter((c) => (c.pnl ?? 0) < 0).length;
+    const realDollars = closes.reduce((s, c) => s + c.pnl, 0);
+    const wins = closes.filter((c) => c.pnl > 0).length;
+    const losses = closes.filter((c) => c.pnl < 0).length;
 
-    // ── By setup type: pattern_memory filtered to MGC (live gold) — WR + net R per setup ──
-    let bySetup: Array<{ setupType: string; n: number; wins: number; winRate: number; netR: number; avgR: number; validated: boolean }> = [];
-    try {
-      const raw = (await prisma.agentConfig.findUnique({ where: { key: "pattern_memory" } }))?.value;
-      const pats: Array<{ instrument: string; setupType: string; outcome?: string; pnlR?: number }> = raw ? JSON.parse(raw) : [];
-      const mgc = pats.filter((p) => p.instrument === "MGC");
-      const groups: Record<string, { n: number; wins: number; r: number }> = {};
-      for (const p of mgc) {
-        const k = p.setupType || "unknown";
-        (groups[k] ??= { n: 0, wins: 0, r: 0 });
-        groups[k].n++;
-        if (p.outcome === "win") groups[k].wins++;
-        groups[k].r += p.pnlR ?? 0;
+    const groups: Record<string, { n: number; wins: number; r: number; withR: number }> = {};
+    for (const trade of closes) {
+      const key = trade.setupType || "unknown";
+      (groups[key] ??= { n: 0, wins: 0, r: 0, withR: 0 });
+      groups[key].n++;
+      if (trade.pnl > 0) groups[key].wins++;
+      if (trade.rMultiple !== null) {
+        groups[key].r += trade.rMultiple;
+        groups[key].withR++;
       }
-      bySetup = Object.entries(groups)
-        .map(([setupType, v]) => ({
-          setupType,
-          n: v.n,
-          wins: v.wins,
-          winRate: v.n > 0 ? v.wins / v.n : 0,
-          netR: v.r,
-          avgR: v.n > 0 ? v.r / v.n : 0,
-          validated: setupType === VALIDATED_EDGE,
-        }))
-        .sort((a, b) => b.netR - a.netR);
-    } catch { /* pattern memory optional */ }
+    }
+    const bySetup = Object.entries(groups)
+      .map(([setupType, value]) => ({
+        setupType,
+        n: value.n,
+        wins: value.wins,
+        winRate: value.n > 0 ? value.wins / value.n : 0,
+        netR: value.r,
+        avgR: value.withR > 0 ? value.r / value.withR : 0,
+        validated: setupType === VALIDATED_EDGE,
+      }))
+      .sort((a, b) => b.netR - a.netR);
 
     return Response.json({
       since: sinceTs.toISOString(),
@@ -66,8 +55,8 @@ export async function GET() {
       wins,
       losses,
       recent: closes.slice(0, 10).map((c) => ({
-        ts: c.createdAt,
-        exit: c.action.replace(/^(live_|futures_)/, ""),
+        ts: c.exitTime,
+        exit: c.setupType || "round_trip",
         pnl: c.pnl,
       })),
       bySetup,

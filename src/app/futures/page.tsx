@@ -198,10 +198,8 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-// Edge-focused: both engines trade the two validated micro edges — gold RSI-bounce + index
-// overbought-short. Demo trades full-size for research; live trades the micros (MGC/MNQ/MES),
-// 1 contract per trade at ~1-2% risk on the ~$5K account.
-const DEMO_CONTRACTS = ["GC", "NQ", "ES"];
+// Both engines trade the registered micro edges on the same contract family and size from live equity.
+const DEMO_CONTRACTS = ["MGC", "MNQ", "MES"];
 // Live: micro gold (MGC) + micro index (MNQ/MES). Two validated edges — gold RSI-bounce and
 // index overbought-short — traded raw with the AI grader OFF.
 const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
@@ -210,23 +208,24 @@ const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
 // Strategy tab shows every registered edge with live demo/live switch state — no static copy to drift.
 
 const DEMO_RISK_RULES = [
-  "7% risk/trade — GC (gold) + NQ/ES overbought-shorts",
-  "Up to 10 contracts/trade, 8 total open",
-  "ALL SESSIONS: 24/5 learning (Sun 6PM–Fri 5PM ET)",
-  "$7,500 daily loss limit (15% of $50K)",
-  "20 trades/day base, 40 with A+ override",
-  "Deterministic edge gate — only validated setups trade (paper test bed)",
+  "Live-clone risk budget — sized from fresh live equity, not the larger paper balance",
+  "Up to 5 micros/trade in RTH, 8 total; stop distance can reduce size",
+  "MGC overnight entries are capped at 2 and must pass the margin governor",
+  "Independent demo edge switches for forward testing",
+  "20 trades/day maximum",
+  "Deterministic edge gate — enabled demo setups trade on paper",
   "Tilt: pause after 2 stops",
   "Brain learns from every trade — vault syncs",
-  "25% drawdown kill ($12,500) → lockdown",
+  "Drawdown kill follows the live risk profile",
   "No re-entry on stopped symbols",
 ];
 const LIVE_RISK_RULES = [
-  "1 micro contract per trade (~1–2% risk) — no pyramiding",
-  "Validated edges only: gold RSI-bounce (long + short) + index overbought-short",
+  "5% risk budget — up to 5 micros in RTH, never a fixed order size",
+  "Only current-version, individually promoted edges can enter",
+  "MGC overnight entries are capped at 2 and margin-gated",
   "Broker stop-loss on every trade — defined risk",
-  "8% daily-loss halt — stops trading on a bad day",
-  "25% drawdown kill switch — halts & reassess",
+  "Daily-loss halt follows the engine's active live risk profile",
+  "Drawdown kill switch halts new entries and requires reassessment",
   "Deterministic edge gate — only validated setups trade (no per-trade AI veto)",
 ];
 
@@ -293,7 +292,7 @@ export default function FuturesPage() {
     () => filterByAssetClass(ALL_CONTRACTS, activeAssetClass),
     [ALL_CONTRACTS, activeAssetClass],
   );
-  const [selectedContract, setSelectedContract] = useState("ES");
+  const [selectedContract, setSelectedContract] = useState("MGC");
   const [activeTab, setActiveTab] = useState<"chart" | "depth" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
@@ -495,7 +494,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate {isLiveView ? "micro futures — MGC / MNQ / MES" : "futures — GC, NQ, ES"}
+            Tradovate micro futures — MGC / MNQ / MES
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
@@ -715,7 +714,7 @@ export default function FuturesPage() {
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
-                  Each edge has its own <b>Demo</b> and <b>Live</b> switch — Demo tests it in real-time, Live trades it with real money (1 contract, ~1–2% risk, broker stop on every trade). Demo P&L is research, not proof.
+                  Each edge has its own <b>Demo</b> and <b>Live</b> switch. Demo tests it in real time. Live uses stop-distance sizing up to the configured five-contract RTH ceiling, with a broker stop on every trade. Demo P&amp;L is research, not proof.
                 </div>
                 <EdgeSwitchList />
                 <div className="mt-4 pt-3 border-t border-white/[0.06]">

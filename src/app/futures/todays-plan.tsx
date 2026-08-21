@@ -200,7 +200,7 @@ export default function TodaysPlan({ mode = "live" }: { mode?: "live" | "demo" }
         <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
           <strong>Size now</strong> is what the engine would take if a setup fired on this bar. It is solved
           backwards from the risk budget, so a <em>tighter</em> ATR buys <em>more</em> contracts at the same
-          dollar risk — the cap ({risk?.maxContractsPerTrade ?? 4} in RTH, 2 overnight on gold) only ever trims it.
+          dollar risk — the cap ({risk?.maxContractsPerTrade ?? 5} in RTH, 2 overnight on gold) only ever trims it.
         </p>
       </div>
 

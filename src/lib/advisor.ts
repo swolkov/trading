@@ -203,9 +203,9 @@ ${context.newsHighlights.length > 0 ? `OVERNIGHT NEWS:\n${context.newsHighlights
 ${vaultContext}
 ${recentPerf}
 
-INSTRUMENTS AVAILABLE (as of 2026-06-15):
-- LIVE ($1K account): MNQ (Nasdaq micro, $2/pt) ONLY — ramps to NQ at $60K equity. MES/MGC are NOT traded live.
-- DEMO ($59K account): NQ ($20/pt) + MBT ($0.10/$1 BTC micro, via registry). ES and GC were CUT June 9 (they lost money).
+INSTRUMENTS AVAILABLE:
+- LIVE: MGC (gold micro), MNQ (Nasdaq micro), and MES (S&P micro), subject to the runtime gates and symbol whitelist.
+- DEMO: the same MGC/MNQ/MES micro contract family for comparable paper research, plus registered crypto research edges such as MBT.
 
 SETUP TYPES AVAILABLE: opening_range_breakout, gap_fill, vwap_reversion, trend_continuation, ema_momentum, pullback_to_ema, rsi_bounce, nr4 (narrow range breakout)
 
@@ -216,8 +216,9 @@ Respond ONLY with JSON (no markdown):
   "bias": "bullish"|"bearish"|"neutral",
   "biasConfidence": 50-95,
   "instruments": {
-    "MNQ": {"priority": "high"|"medium"|"low"|"avoid", "direction": "long"|"short"|"both"|"avoid", "notes": "why (LIVE $1K — Nasdaq micro)"},
-    "NQ": {"priority": "...", "direction": "...", "notes": "... (DEMO — Nasdaq full-size)"},
+    "MGC": {"priority": "high"|"medium"|"low"|"avoid", "direction": "long"|"short"|"both"|"avoid", "notes": "why (micro gold)"},
+    "MNQ": {"priority": "...", "direction": "...", "notes": "... (micro Nasdaq)"},
+    "MES": {"priority": "...", "direction": "...", "notes": "... (micro S&P)"},
     "MBT": {"priority": "...", "direction": "...", "notes": "... (DEMO — BTC micro, NR4)"}
   },
   "preferredSetups": ["setup_type_1", "setup_type_2"],
@@ -313,8 +314,9 @@ ${plan.reasoning}
       bias: "neutral",
       biasConfidence: 50,
       instruments: {
-        MNQ: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (LIVE)" },
-        NQ: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (DEMO)" },
+        MGC: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (micro gold)" },
+        MNQ: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (micro Nasdaq)" },
+        MES: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (micro S&P)" },
         MBT: { priority: "low", direction: "both", notes: "advisor unavailable (DEMO, NR4)" },
       },
       preferredSetups: [],
