@@ -9,6 +9,9 @@ import type { BarData } from "./tradovate";
 const DBN_MAP: Record<string, string> = {
   ES: "ES.v.0", NQ: "NQ.v.0", YM: "YM.v.0", RTY: "RTY.v.0", GC: "GC.v.0",
   MES: "ES.v.0", MNQ: "NQ.v.0", MYM: "YM.v.0", M2K: "RTY.v.0", MGC: "GC.v.0",
+  // Crypto registry symbols use their exact continuous roots for observation and research.
+  // No registered crypto strategy is currently authorized for broker execution.
+  MBT: "MBT.v.0", MET: "MET.v.0", BFF: "BFF.v.0", MXR: "MXR.v.0", MSL: "MSL.v.0",
 };
 
 const cache = new Map<string, { at: number; bars: BarData[] }>();

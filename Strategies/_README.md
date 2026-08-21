@@ -7,16 +7,16 @@ Code lives in `src/lib/strategies/<id>.ts`. Validation status comes from `EDGE-H
 
 ---
 
-## Live registry
+## Strategy registry
 
 | Strategy id | Asset | Timeframe | Symbols | Tier | Doc |
 |---|---|---|---|---|---|
-| `mbt-nr4-daily` | Crypto futures (BTC) | 1d | MBT | 2 | [mbt-nr4-range-expansion.md](mbt-nr4-range-expansion.md) |
+| `mbt-nr4-daily` | Crypto futures (BTC), observation only | 1d | MBT | 2 | [mbt-nr4-range-expansion.md](mbt-nr4-range-expansion.md) |
 
 ## Observation-only (symbols available, no registered strategy)
 
-These symbols stream via the Databento sidecar and are visible in the UI; the engine evaluates
-the registry on each cycle, finds no signal, and logs an observation. No trades placed.
+These symbols stream via the Databento sidecar and are visible for research. No crypto registry
+strategy is currently authorized to emit an executable signal or place an order.
 
 | Symbol | Reason | Next step |
 |---|---|---|

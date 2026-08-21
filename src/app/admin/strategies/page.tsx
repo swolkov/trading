@@ -230,6 +230,7 @@ export default async function StrategiesAdminPage() {
                     name: s.name,
                     timeframe: s.timeframe,
                     tier: s.tier,
+                    executionEligibility: s.executionEligibility,
                     description: s.description,
                     applicableSymbols: s.applicableSymbols,
                     backtest: s.backtest,

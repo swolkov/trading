@@ -73,22 +73,24 @@ async function seedStrategies() {
 }
 
 async function seedAssignments() {
-  // Default assignments — Tier 2 strategies are "active" on demo, "observation" on live.
-  // Tier 1 would be active on both. (No Tier 1 in registry yet.)
+  // Registered strategies always begin in observation. Promotion is explicit and evidence-backed.
   let created = 0;
   for (const s of STRATEGIES) {
-    const defaultDemoStatus = "active";
-    const defaultLiveStatus = s.tier === 1 ? "active" : "observation";
     for (const [accountKey, status] of [
-      ["demo-futures", defaultDemoStatus],
-      ["live-futures", defaultLiveStatus],
+      ["demo-futures", "observation"],
+      ["live-futures", "observation"],
     ] as const) {
       const existing = await prisma.strategyAssignment.findUnique({
         where: { accountKey_strategyId: { accountKey, strategyId: s.id } },
       });
       if (existing) continue;
       await prisma.strategyAssignment.create({
-        data: { accountKey, strategyId: s.id, status },
+        data: {
+          accountKey,
+          strategyId: s.id,
+          status,
+          maxContractsOverride: s.id === "mbt-nr4-daily" ? 1 : null,
+        },
       });
       created++;
     }

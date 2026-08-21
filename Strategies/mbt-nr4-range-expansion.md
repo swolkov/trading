@@ -2,101 +2,80 @@
 
 **Strategy id:** `mbt-nr4-daily`
 **Code:** `src/lib/strategies/mbt-nr4-daily.ts`
-**Tier:** 2 — plausible-unvalidated (positive 4-yr backtest, needs forward shadow execution)
-**Discovered:** 2026-05-28
-**Symbols:** MBT (Micro Bitcoin futures, CME GLBX.MDP3, 0.1 BTC contract)
-**Timeframe:** Daily bars
+**Tier:** 2, plausible research candidate
+**Execution authorization:** observation only, demo and live orders blocked
+**Symbols:** MBT (Micro Bitcoin futures, 0.1 BTC contract)
+**Timeframe:** UTC daily bars
 
----
+## Corrected evidence
 
-## Edge
+The bias-controlled study in `scripts/backtest-mbt-nr4-corrected.ts` supersedes the older
+PF 2.03 result. It fixes first-touch direction, starts exit evaluation after entry, models
+gap fills, matches Databento's UTC daily boundary, and applies realistic execution costs.
 
-4-year Databento backtest (2022-05-26 → 2026-05-25), `scripts/edge-scan-crypto-deep.ts`:
+| Metric | Corrected result |
+|---|---:|
+| Period | 2022-05-26 to 2026-05-25 |
+| Trades | 216 |
+| Profit factor | **1.23** |
+| Net per contract | **+$1,937** |
+| Expectancy | **+$9/trade** |
+| Win rate | 41% |
+| Student t-stat | **1.13** |
+| Bootstrap PF 95% CI | **[0.85, 1.78]** |
+| Cost model | 25 points adverse slippage per side + $4 round-trip commission |
 
-| Metric | Value |
-|---|---|
-| Trades | 136 |
-| Profit factor | **2.03** |
-| Net per contract | **+$4,177** |
-| Win rate | 54% |
-| Avg expectancy | +0.21R |
-| Years positive | 4 of 5 |
+### Year by year
 
-### Year-by-year
+| Year | Trades | PF | Net |
+|---|---:|---:|---:|
+| 2022 | 40 | 1.30 | +$195 |
+| 2023 | 52 | 0.96 | -$41 |
+| 2024 | 54 | 1.43 | +$1,116 |
+| 2025 | 55 | 0.95 | -$180 |
+| 2026 YTD | 15 | 2.38 | +$846 |
 
-| Year | Trades | PF | Net | Notes |
-|---|---|---|---|---|
-| 2022 | 23 | 1.26 | +$108 | Bear market, edge held |
-| 2023 | 34 | 0.90 | −$65 | Flat — only mildly negative year |
-| 2024 | 36 | **2.60** | **+$2,106** | Bull, strongest year |
-| 2025 | 32 | 1.68 | +$1,003 | Mixed chop, edge held |
-| 2026 | 11 | 5.55 | +$1,026 | YTD partial, small sample |
+The confidence interval includes PF below 1.0, t-stat is below 2, and two full years lost
+money. This fails the pre-committed demo-arm gate. The result is promising enough to retain
+for research, but not strong enough to put on a broker account.
 
-## Theory (pre-registered before backtest)
+## Research hypothesis
 
-Volatility compression → directional expansion. A narrow-range day (range < 0.5× ATR-20) is
-the market coiling; the next day's break of that day's H/L is the resolution. Mechanism is
-positional liquidity drying up at extremes, then directional traders pressing the break.
+Volatility can cluster. After an unusually narrow daily range, a first break of the prior
+day's high or low may start a directional expansion.
 
-Lineage: Linda Raschke's NR4/NR7 work on equity index futures. The pre-registration
-discipline (hypothesis named before running the scan) is what gives this edge credibility
-above the noise floor — we ran 7 such hypotheses, only this one cleared the bar.
+Correct test rules:
 
-## Why we trust the result
+1. Prior UTC day's range must be below 0.5 times ATR-20.
+2. On the next UTC day, the first touched boundary determines direction.
+3. Skip a one-minute bar that touches both boundaries because direction is unknowable.
+4. Anchor entry, stop, and target to the registered breakout level.
+5. Stop is one prior-day range; target is three prior-day ranges.
+6. Exit any remainder at the end of that UTC signal day.
+7. Allow one attempt total per UTC signal day.
 
-1. **Pre-registered** — the hypothesis was named before the backtest ran (vs. mining patterns post-hoc).
-2. **Year-on-year consistency** — positive in 4 of 5 years across distinct regimes (2022 bear, 2024 bull, 2025 chop, 2026 expansion).
-3. **Failed where theory predicts** — NR4 on MET (ETH) PF 0.18, on BFF (BTC weekly) PF 0.69. If this were curve-fit noise it would have worked everywhere it was tested.
-4. **Survives walk-forward** — split at 2026-01-01, in-sample and out-of-sample both positive.
+## Production state
 
-## Signal logic
+- Databento sidecar collects exact-contract MBT and MET quotes across CME's seven-day schedule,
+  excluding the exchange's published maintenance windows.
+- Both demo and live assignments are **observation** with a one-contract ceiling retained
+  for any future trial.
+- The web cron contains no crypto broker-order call.
+- The strategy dispatcher hard-blocks observation-only strategies from emitting executable
+  signals.
+- Admin blocks changing this strategy to Active while its execution eligibility is observation.
+- MET, BFF, MXR, and MSL remain observation-only because no qualifying edge was found.
 
-```
-Aggregate intraday bars → daily session bars (ET-aligned).
-At end of day D:
-  ATR_20 = 20-day average true range
-  rangeD = HighD − LowD
-  if rangeD < 0.5 × ATR_20 → mark day D as NR4 candle.
+## What would unlock a demo trial
 
-On day D+1:
-  if price breaks above HighD → enter LONG at HighD
-  if price breaks below LowD → enter SHORT at LowD
+The research must first show equivalent evidence with deterministic first-touch logic:
 
-Stop: 1 × rangeD from entry
-Target: 3 × rangeD from entry
-Hold: until stop, target, or end of D+1 session
-```
+- at least 50 resolved, de-clustered shadow signals;
+- positive net expectancy and t-stat at least 2;
+- both sample halves positive;
+- realistic costs, no single-period dependence, and no look-ahead;
+- an execution design with atomic daily reservation, exact-contract pricing, tick rounding,
+  chase protection, linked OCO protection, and the required end-of-day exit.
 
-## Risk + sizing
-
-- Per-contract stop dollar risk ≈ `rangeD × multiplier (0.10)`. Typical NR4 range on
-  BTC ≈ $500–1500 → $50–150 per contract stop risk.
-- Targets 3× the stop ⇒ asymmetric reward, win rate 54% is sufficient for PF > 2.
-- Max-hold: end of next session (D+1 close).
-
-## Capital requirements (why this is NOT on the $1K live account)
-
-MBT day margin ≈ $1,500–2,500 per contract. The $1K live account cannot meet margin without
-risking overrun. Deployment paths:
-
-1. **Demo first** — forward shadow execution on the $50K demo for 30+ trades. Confirm backtest fills hold up under realistic broker latency/slippage.
-2. **Topstep/Apex eval** — $50K eval account (~$150 entry). Fastest path to real capital deployment if forward test passes.
-3. **Organic account growth** — when live account hits $5–10K from existing edges (spread book, MES/MNQ), MBT becomes safely tradeable.
-
-## Caveats / open questions
-
-- **Backtest does NOT model the AI grader.** The futures-agent's AI confirmation overlay may filter some NR4 signals; backtest is a superset. Forward execution will reveal the real fired-trade rate.
-- **Stop placement at exactly prior-day H/L is a known liquidity zone.** Live fills may slip 1–2 ticks worse than backtest assumes.
-- **Concentration risk.** This is a single-asset, single-direction-at-a-time edge. Don't size as if it were an uncorrelated diversifier.
-- **Regime sensitivity untested.** 4 years covers some regime variation but not, e.g., a full multi-year bear market. The 2022 bear year (PF 1.26) is encouraging but small.
-
-## Forward validation criteria (gate to Tier 1)
-
-To promote to Tier 1 (real-capital ready) the strategy must show:
-
-- ≥ 30 forward demo trades
-- PF ≥ 1.50 forward (degradation from backtest's 2.03 is expected; 1.50 is the bar)
-- No single losing month > 3R loss
-- Live fills within 0.10R of backtest fills
-
-Until met, this strategy stays Tier 2 and runs demo-only.
+Only after that review may demo change from Observation to Active. Live promotion would still
+require real demo fills and the separate live evidence gate.

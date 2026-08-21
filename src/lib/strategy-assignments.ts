@@ -56,10 +56,10 @@ async function loadAssignmentsForAccount(accountKey: AccountKey): Promise<Map<st
     result.set(strat.id, {
       accountKey,
       strategyId: strat.id,
-      // Code default: registered strategies are "active" on their applicable accounts.
-      // For now, assume any account can run any registered strategy unless DB says otherwise.
-      status: "active",
-      maxContractsOverride: null,
+      // Registered strategies fail closed to observation when configuration is missing or the DB
+      // cannot be reached. Promotion is an explicit evidence-backed operator decision.
+      status: "observation",
+      maxContractsOverride: strat.id === "mbt-nr4-daily" ? 1 : null,
       source: "default",
     });
   }

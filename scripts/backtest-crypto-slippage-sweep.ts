@@ -7,7 +7,8 @@
  *
  *   "At what slippage level does our PF 2.03 edge stop being profitable?"
  *
- * The answer determines whether the edge is execution-robust or execution-fragile.
+ * DEPRECATED: this harness contains look-ahead and fill-sequencing bias. Its PF conclusions are
+ * superseded by scripts/backtest-mbt-nr4-corrected.ts and must not authorize demo or live trading.
  *
  * Methodology:
  *   - Same NR4 daily strategy as backtest-crypto.ts

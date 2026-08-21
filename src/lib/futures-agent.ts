@@ -121,9 +121,8 @@ const DEMO_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "MES", when: "always" },    // $5/pt — S&P 500 micro
   { symbol: "MNQ", when: "always" },    // $2/pt — Nasdaq 100 micro
   { symbol: "MGC", when: "always" },    // $10/pt — Gold micro
-  { symbol: "MBT", when: "always" },    // $0.10/$1 BTC — has Tier-2 NR4 edge; routed via strategy registry
-  // MET/BFF/MXR/MSL are observation-only on demo (sidecar collects price, strategy registry has no
-  // signal for them yet). Not listed here — they never reach the priority selector.
+  // Crypto micros are observation-only. The sidecar collects prices, but none reaches this
+  // broker-execution priority selector until it clears the evidence and safety gates.
 ];
 const FULL_SIZE_PRIORITY: { symbol: string; when: string }[] = [
   { symbol: "ES", when: "always" },     // $50/pt — primary money maker
@@ -868,12 +867,8 @@ interface FuturesTradeResult {
  *
  * Two modes:
  * - Default (no options): full agent for explicit/manual runs.
- * - `{ registryOnly: true }`: ONLY processes symbols routed through the strategy registry
- *   (crypto futures like MBT NR4). Skips legacy 5m intraday. Safe to run every minute alongside
- *   the realtime engine because the realtime engine doesn't trade these symbols.
- *
- * The registry-only path is how MBT NR4 actually fires in production — the realtime engine
- * on Railway scans ES/NQ/GC, this cron path scans the registry symbols. No overlap.
+ * - `{ registryOnly: true }`: legacy registry scanner retained for research tooling. It has no
+ *   deployed web caller, and observation-only strategies are hard-blocked below.
  */
 export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Promise<{
   trades: FuturesTradeResult[];
@@ -1510,9 +1505,8 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     .filter((s) => s.when === "always" || (s.when === "trending" && (regime === "bull" || regime === "bear")))
     .map((s) => s.symbol);
 
-  // Registry-only mode: skip legacy intraday symbols, only process registry-routed symbols.
-  // Used by the cron to fire crypto-futures strategies (e.g. MBT NR4) alongside the realtime
-  // engine without conflict — realtime trades ES/NQ/GC, this runs MBT/MET/BFF/etc.
+  // Legacy registry-only research mode. No deployed cron invokes it, and crypto is absent from
+  // the execution priority list. Observation eligibility is separately enforced before dispatch.
   if (opts.registryOnly) {
     symbolsToTrade = symbolsToTrade.filter((sym) => isRegistryOnlySymbol(sym));
     details.push(`[REGISTRY-ONLY MODE] Scanning ${symbolsToTrade.length} symbols: ${symbolsToTrade.join(", ") || "(none)"}`);
@@ -1596,7 +1590,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     details.push(`  DAY TYPE: ${dayClassification.reasoning}`);
     details.push(`  Levels: PDH $${keyLevels.prevDayHigh.toFixed(2)} | PDL $${keyLevels.prevDayLow.toFixed(2)} | OR ${keyLevels.openingRangeLow.toFixed(2)}-${keyLevels.openingRangeHigh.toFixed(2)}`);
 
-    // Detect setup — either via the strategy registry (per-symbol routing, validated edges only)
+    // Detect setup — either via the strategy registry (per-symbol routing, authorization-gated)
     // or the legacy 5m intraday library. Registry-only symbols (e.g., crypto futures) bypass the
     // legacy library entirely because that library was designed for equity index intraday and
     // catastrophically loses on crypto futures. See EDGE-HIERARCHY.md.
@@ -1605,13 +1599,14 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     const accountKey: AccountKey = accountKeyForFuturesMode(tradingMode);
     if (isRegistryOnlySymbol(symbol)) {
       const strategies = strategiesFor(symbol);
-      // Filter to strategies that are ACTIVE for this account per DB assignment (falls back to
-      // code default "active" if no DB row exists, preserving existing behavior pre-migration).
+      // Two independent gates are required: account assignment and code-level evidence status.
+      // A DB mistake or future caller can never activate an observation-only strategy.
       const activeStrategies = [];
       for (const s of strategies) {
         const a = await getAssignment(accountKey, s.id);
-        if (!a || a.status === "active") activeStrategies.push(s);
-        else details.push(`  ${symbol}: skipping ${s.id} (assignment status: ${a.status})`);
+        if ((!a || a.status === "active") && s.executionEligibility !== "observation") activeStrategies.push(s);
+        else if (s.executionEligibility === "observation") details.push(`  ${symbol}: skipping ${s.id} (evidence status: observation only)`);
+        else details.push(`  ${symbol}: skipping ${s.id} (assignment status: ${a?.status ?? "missing"})`);
       }
       let registrySignal: StrategySignal | null = null;
       for (const strat of activeStrategies) {
