@@ -7,7 +7,8 @@
  *
  *   "At what slippage level does our PF 2.03 edge stop being profitable?"
  *
- * The answer determines whether the edge is execution-robust or execution-fragile.
+ * DEPRECATED: this harness contains look-ahead and fill-sequencing bias. Its PF conclusions are
+ * superseded by scripts/backtest-mbt-nr4-corrected.ts and must not authorize demo or live trading.
  *
  * Methodology:
  *   - Same NR4 daily strategy as backtest-crypto.ts
@@ -176,7 +177,7 @@ async function main() {
           console.log(`    PF crosses below 1.0 at ${slip.toFixed(1)} ticks`);
           break;
         }
-        if (slip >= 4.9) console.log(`    Still PF >= 1.0 at 5 ticks slippage — edge is execution-robust`);
+        if (slip >= 4.9) console.log(`    Legacy biased harness remains above PF 1.0 at 5 ticks; do not use for authorization`);
       }
 
       // Per-trade economics at our standard (1 tick + $2)
@@ -188,10 +189,8 @@ async function main() {
   }
 
   console.log("\n" + "═".repeat(94));
-  console.log("  Interpretation guide:");
-  console.log("    PF >= 1.3 at 1 tick slip = solid edge");
-  console.log("    PF holds >= 1.0 at 2+ ticks = execution-robust (recommended for live)");
-  console.log("    PF drops below 1.0 at < 1.5 ticks = execution-fragile (paper only)");
+  console.log("  DEPRECATED HARNESS: results are diagnostic only and cannot authorize demo or live trading.");
+  console.log("  Use scripts/backtest-mbt-nr4-corrected.ts and the pre-committed evidence protocol.");
   console.log("═".repeat(94) + "\n");
 }
 main().catch(e => { console.error(e); process.exit(1); });

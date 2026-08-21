@@ -49,6 +49,12 @@ export interface BacktestEvidence {
   winRate: number;
   period: string; // "2022-05 → 2026-05"
   yearsPositive: string; // "4 of 5"
+  /** Student t-stat on per-trade P&L when the research harness reports it. */
+  tStat?: number;
+  /** Bootstrap 95% confidence interval for profit factor. */
+  pfCi95?: [number, number];
+  /** Execution-cost assumption used by the headline study. */
+  costModel?: string;
 }
 
 export interface Strategy {
@@ -62,6 +68,8 @@ export interface Strategy {
   timeframe: Timeframe;
   /** Validated tier per EDGE-HIERARCHY.md */
   tier: Tier;
+  /** Highest account authorization supported by current evidence and implementation. */
+  executionEligibility: "observation" | "demo" | "live";
   /** One-line description of the edge */
   description: string;
   /** Backtest evidence — what the historical data showed */

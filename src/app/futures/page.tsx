@@ -200,8 +200,8 @@ interface BacktestData {
 
 // Both engines trade the registered micro edges on the same contract family and size from live equity.
 const DEMO_CONTRACTS = ["MGC", "MNQ", "MES"];
-// Live: micro gold (MGC) + micro index (MNQ/MES). Two validated edges — gold RSI-bounce and
-// index overbought-short — traded raw with the AI grader OFF.
+// Live-capable contract family: micro gold (MGC) + micro index (MNQ/MES). Actual entry still
+// requires a current-version edge to pass every runtime and promotion gate.
 const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
 
 // The validated-edges list is now data-driven (see EdgeSwitchList / realtime-edges registry) so the
@@ -707,7 +707,7 @@ export default function FuturesPage() {
 
             <Card className="border-white/[0.06]">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Validated Edges — Priority Order</CardTitle>
+                <CardTitle className="text-sm">Edge Trials &amp; Controls</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">

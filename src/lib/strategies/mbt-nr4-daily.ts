@@ -1,25 +1,29 @@
 /**
  * mbt-nr4-daily — Bitcoin micro (MBT) NR4 range-expansion edge.
  *
- * EDGE (from 4-yr Databento backtest, 2022-05 to 2026-05, scripts/edge-scan-crypto-deep.ts):
- *   136 trades, PF 2.03, +$4,177 net per contract, 54% win rate.
- *   Positive in 4 of 5 years (2022 +$108, 2024 +$2,106, 2025 +$1,003, 2026 +$1,026).
- *   2023 flat at -$65. Edge is BTC-specific: MET PF 0.18, BFF PF 0.69 (both failed).
+ * CORRECTED RESEARCH (scripts/backtest-mbt-nr4-corrected.ts):
+ *   216 trades, PF 1.23, +$1,937 net per contract, 41% win rate at 25 points
+ *   of slippage plus $4 round-trip commission. Student t = 1.13 and bootstrap
+ *   PF 95% CI = [0.85, 1.78]. 2023 and 2025 were negative.
+ *
+ * This is a research candidate, not a demo-qualified edge. The earlier PF 2.03 study used
+ * look-ahead direction selection and optimistic fill assumptions and is superseded.
  *
  * THEORY (pre-registered before backtest): volatility clusters. A narrow-range day
  * (range < 0.5x ATR-20) is volatility compression; the next day's break of that
  * day's H/L is the directional expansion. Per Linda Raschke's NR4/NR7 work.
  *
  * SIGNAL:
- *   - Aggregate to daily bars (CME session, ET-aligned).
+ *   - Aggregate to Databento UTC daily bars.
  *   - At end-of-day: if today's range < 0.5x 20-day ATR -> arm an NR4 candle.
  *   - Next day: enter on first break of NR4 candle's high (long) or low (short).
  *   - Stop: 1x NR4 candle's range from entry.
  *   - Target: 3x NR4 candle's range from entry.
  *
  * CAVEATS:
- *   - Strategy is daily-bar; only fires once per day per direction.
- *   - Requires forward shadow execution before any live capital (Tier 2).
+ *   - Production execution is hard-disabled until the demo-arm evidence bar is met.
+ *   - Correct execution requires first-touch direction, one trade per UTC day, level-anchored
+ *     stop/target, a chase limit, and an end-of-day exit. The current detector is research-only.
  *   - Needs >=$5K account margin to trade MBT safely (~$1.5-2.5k day margin per contract).
  */
 
@@ -52,25 +56,32 @@ export const mbtNr4Daily: Strategy = {
   applicableSymbols: ["MBT"],
   timeframe: "1d",
   tier: 2,
+  executionEligibility: "observation",
   description:
-    "Narrow-range day on daily Bitcoin chart -> directional breakout next day. 4-yr backtest PF 2.03.",
+    "BTC NR4 research candidate. Corrected cost/slippage study PF 1.23, t=1.13; observation only and not demo-qualified.",
   backtest: {
-    pf: 2.03,
-    trades: 136,
-    netPerContract: 4177,
-    winRate: 0.54,
+    pf: 1.23,
+    trades: 216,
+    netPerContract: 1937,
+    winRate: 0.41,
     period: "2022-05 → 2026-05",
-    yearsPositive: "4 of 5",
+    yearsPositive: "3 of 5",
+    tStat: 1.13,
+    pfCi95: [0.85, 1.78],
+    costModel: "25-point slippage per side + $4 round-trip commission",
   },
   vaultDoc: "Strategies/mbt-nr4-range-expansion.md",
   codePath: "src/lib/strategies/mbt-nr4-daily.ts",
 
   /**
+   * Research detector only. Production dispatch refuses observation-only strategies before this
+   * method is called. The corrected executable version still needs persistent first-touch state.
+   *
    * Caller is responsible for passing DAILY-aggregated bars (timeframe === "1d" is declared above
    * so the engine's strategy dispatcher knows to aggregate before invoking).
    * Last bar = today (in-progress); second-to-last = yesterday's completed candle (the NR4 anchor).
    */
-  detect(bars, _context): StrategySignal | null {
+  detect(bars): StrategySignal | null {
     const daily = bars;
     if (daily.length < ATR_LOOKBACK + 2) return null;
 

@@ -45,7 +45,7 @@ Promising, not proven. Do not size real capital yet.*
 
 | Candidate | Status | What's missing |
 |-----------|--------|----------------|
-| **MBT (Micro Bitcoin) NR4 range expansion** | **Discovered 2026-05-28; slippage-stress-tested 2026-05-29.** 4yr Databento backtest (2022–2026). Two detection variants: 5m-bar-close (PF 2.03, n=136) and daily-only (PF 1.71, n=146). Both positive 4-of-5 years. Daily-bar signal: narrow-range day (range < 0.5× ATR-20) → next-day breakout of prior day H/L. Wide stop (1× prior range), 3× target. **Execution-robust:** PF holds > 1.0 even at 5 ticks slippage + $3 commission. Per-trade exp +$25 net, win 53%. | **Forward shadow execution** (30+ live demo trades) to validate vs backtest fills. **$1K cannot trade MBT** (day margin ~$1.5–2.5k); deployment path is demo → larger account (Topstep eval $50k or organic growth) → live. Most credible directional edge in the system after the spread book — slippage stress confirms execution-robust. |
+| **MBT (Micro Bitcoin) NR4 range expansion** | **Corrected 2026-08-21.** Bias-controlled 4yr Databento test: n=216, PF 1.23, +$9/trade, t=1.13, bootstrap PF 95% CI [0.85, 1.78]. 2023 and 2025 lost money. The older PF 2.03 result used look-ahead direction selection and optimistic fills and is superseded. | **Observation only.** It fails the pre-committed demo-arm bar (t≥2 with positive, robust evidence). Before any demo order: collect at least 50 deterministic first-touch shadows, require t≥2 and both halves positive, then build atomic daily dedupe, chase control, OCO protection, and the UTC-day time exit. |
 | **MBT buy-and-hold w/ wide ATR trail** | 4yr backtest, +$5,830 per contract at 10× daily ATR trail, max DD −$5,929. Captures secular BTC trend. | Complementary to NR4 not standalone; sizing must respect 100% drawdown of unrealized in trending pause. Same capital constraint as NR4. |
 | **Overnight equity drift** (long ~16:00 ET → exit ~09:30 ET, skip Friday) | Parity Sharpe ~1.84, but **bull-flattered** (3yr sample, mostly up-market). De-rated to ~1.3–1.5 in the combined book. | Test through a real bear leg; decompose how much is just beta/risk-premium harvesting vs a true overnight anomaly; overnight gap-risk accounting. Directional → vulnerable to regime. |
 | **Failed-reaction / failed-auction fade** (daily) | NFP/vol-shock studies hint at mild reversion (+0.05 ATR) after outsized moves; small, inconsistent. | Larger sample, precise intraday window (needs 1m + verified event dates), cost-stress. Likely too small to trade alone. |
@@ -122,9 +122,9 @@ mechanical rule on minute bars failed after costs" — NOT "the market is effici
 | **Crypto long-only daily momentum (H2, 2026-05-28)** | MBT PF 0.93 overall: +PF 1.61/1.59 in 2023/2024 bull, then PF 0.26/0.25 in 2025/2026 chop. Curve-fit to bull regime; no robust edge. |
 | **Crypto Asian-session fade (H3, 2026-05-28)** | MBT n=489 PF 0.91, MET n=617 PF 0.15, BFF n=194 PF 0.50. Fade-overnight-Asian-move at US open: consistently loses across instruments and years. |
 | **BFF Friday gamma scalp (H5, 2026-05-28)** | Long Fri morning n=79 PF 0.44; short Fri afternoon n=55 PF 0.38. Weekly-expiry gamma idea did not show edge. |
-| **NR4 on MET / BFF (H6, 2026-05-28)** | Same NR4 logic that works on MBT (PF 2.03) → MET PF 0.18, BFF PF 0.69. Edge is BTC-specific, not crypto-wide. Confirms NR4 is not curve-fit (it works where theory predicts, fails where it doesn't). |
+| **NR4 on MET / BFF (H6, 2026-05-28)** | MET PF 0.18 and BFF PF 0.69 failed. MBT's corrected PF 1.23 is only a research candidate, so this does not establish a robust crypto-wide or BTC-specific edge. |
 | **MSL (micro SOL) + XRP futures — daily pattern battery (2026-05-29)** | Goal: find 24/7 tradeable edge on $1K live with small-margin crypto micros. Tested NR4, 3-day momentum, 3-day mean reversion on 371 MSL bars (since 2025-03 launch) and 317 XRP bars (since 2025-05 launch). **EVERY pattern loses on BOTH symbols.** MSL: NR4 PF 0.44 (n=96, WR 24%), Momentum PF 0.45 (n=188), MeanRev PF 0.51 (n=82). XRP: NR4 PF 0.67 (n=93), Momentum PF 0.57, MeanRev PF 0.54. No yearly subset positive. Same pattern as MET/BFF: simple daily structure doesn't transfer to non-BTC crypto. **Decision: do NOT add to live whitelist.** Script: `scripts/backtest-msl-xrp.ts`. Note: micro XRP (MXR) symbol is not on Databento — only the full-size XRP futures (50,000 XRP/contract, way too big for $1K). |
-| **$1K 24/7 crypto trading path (2026-05-29)** | Conclusion across MBT/MET/BFF/MSL/XRP: only MBT has a validated daily edge (NR4), and its day margin (~$2k) won't fit $1K. Every smaller-margin micro tested (MET, BFF, MSL) has zero edge across multiple pattern families. **The $1K live account has NO 24/7 tradeable edge as of today.** Realistic paths: (1) grow account via RTH equity index trading until MBT NR4 margin fits, (2) prop firm $25-50K eval that lets MBT NR4 run live, (3) wait for new CME micro launches with better characteristics. |
+| **$1K 24/7 crypto trading path (updated 2026-08-21)** | No tested crypto micro clears the execution bar. MBT NR4 is positive but statistically unproven (PF 1.23, t=1.13); MET, BFF, MSL, and XRP pattern families lose. **The live account has no authorized 24/7 crypto edge.** Keep collecting exact-contract data and test hypothesis-first candidates without broker orders. |
 
 ---
 
@@ -132,7 +132,7 @@ mechanical rule on minute bars failed after costs" — NOT "the market is effici
 
 | Strategy | Status | Notes |
 |---|---|---|
-| **MBT NR4 (daily)** | **Live in demo engine** via strategy-runner adapter | Engine fetches MBT daily bars from Databento once/day, runs detect(), routes signals through evaluateAndTrade with setupType=`mbt-nr4-daily`. Demo-only — $1K live can't fit MBT day margin (~$2k). |
+| **MBT NR4 (daily)** | **Observation only** | Databento sidecar collects exact-contract crypto data. Broker execution is removed and admin activation is blocked because the corrected study fails the demo-arm evidence bar. |
 | **VWAP reclaim (5m)** | **Live on both engines** as setup #4.5 | Detects 5-of-6 bars on one side of VWAP, then close-back-through. Setup type `vwap_reclaim`. Joins the 5m library; pattern memory will rate it like any other setup. |
 | **Overnight equity drift** | **Deferred** | Code exists at `/lib/strategies/overnight-strategy.ts`. Wiring requires adding `isOvernight` flag to Position + gating 4 management code paths (trail stop, breakeven, stale-trade, pyramiding) so the time-based hold-through-globex thesis isn't broken. Needs its own session. |
 | **Spread book** | **Deferred** | Validated pairs (CL/RB, ZC/ZS, 6E/6B) need symbols/data we don't subscribe to via Databento sidecar. ES/NQ is not in the validated pair set. |
@@ -144,13 +144,14 @@ mechanical rule on minute bars failed after costs" — NOT "the market is effici
 ## The bottom line
 
 - **One validated edge:** the spread book — and it needs real capital ($100k+ / prop-firm), not $1K.
-- **Three plausible-unvalidated:** overnight equity drift, failed-reaction fade, and **MBT NR4 range expansion** (new, 4-yr backtest, PF 2.03; **now wired into demo engine 2026-05-29**). All need forward shadow execution before real capital.
+- **Three plausible-unvalidated:** overnight equity drift, failed-reaction fade, and **MBT NR4 range expansion** (corrected 4-yr PF 1.23, t=1.13, observation only). All need stronger shadow evidence before even a broker-demo trial.
 - **A defined speculative frontier:** five microstructure hypotheses, gated behind a deliberate
   tick/L2 data decision, prioritized by executability (H1/H4 first).
 - **A large, honestly-labeled rejected pile** — including the academically-famous pre-FOMC drift
   and the full crypto-intraday strategy battery (7 pre-registered hypotheses on 4 years of
-  Databento data — only NR4-on-MBT survived).
+  Databento data; MBT NR4 remains a weak research candidate, not a surviving executable edge).
 
-The $1K live account has **no validated edge it can trade.** The institutional spread engine and
-MBT NR4 both need bigger capital (spread book: $100k+; MBT NR4: $5–10k+ to fit margin safely).
-The realistic capital path is a prop-firm eval (Topstep/Apex), not grinding micros.
+The directional live account has **no crypto edge authorized to trade.** More capital would solve
+MBT's margin constraint, but it would not solve its failed evidence bar. The institutional spread
+book still needs substantially more capital; MBT needs better evidence and a safe execution design
+before capital size is relevant.

@@ -34,7 +34,21 @@ test("web recovery and manual checks cannot invoke the legacy broker manager", (
   const cronRoute = readFileSync(new URL("../src/app/api/cron/futures/route.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(manualRoute, /runFuturesAgent/);
-  assert.equal(cronRoute.match(/runFuturesAgent\(/g)?.length, 1);
-  assert.match(cronRoute, /runFuturesAgent\(\{ registryOnly: true \}\)/);
+  assert.doesNotMatch(cronRoute, /runFuturesAgent/);
+  assert.match(cronRoute, /checkTradovateAuth\("paper"\)/);
+  assert.match(cronRoute, /checkTradovateAuth\("live"\)/);
+  assert.match(cronRoute, /cryptoRegistry: "observation_only"/);
   assert.doesNotMatch(cronRoute, /managementOnly/);
+});
+
+test("registered crypto defaults fail closed to observation", () => {
+  const assignments = readFileSync(new URL("../src/lib/strategy-assignments.ts", import.meta.url), "utf8");
+  const runner = readFileSync(new URL("../src/lib/strategy-runner.ts", import.meta.url), "utf8");
+  const legacyAgent = readFileSync(new URL("../src/lib/futures-agent.ts", import.meta.url), "utf8");
+  const assignmentRoute = readFileSync(new URL("../src/app/api/admin/assignments/route.ts", import.meta.url), "utf8");
+  assert.match(assignments, /status: "observation"/);
+  assert.match(assignments, /strat\.id === "mbt-nr4-daily" \? 1 : null/);
+  assert.match(runner, /strategy\.executionEligibility === "observation"/);
+  assert.match(legacyAgent, /s\.executionEligibility !== "observation"/);
+  assert.match(assignmentRoute, /status === "active" && strategy\.executionEligibility === "observation"/);
 });

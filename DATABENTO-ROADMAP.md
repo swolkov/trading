@@ -21,7 +21,7 @@ We pay **$179/mo ($2,148/yr)** for Databento on the **Standard tier** (verified 
 | New capability | Where |
 |---|---|
 | Cross-asset correlation matrix | `/research/correlations` page + `/api/research/correlations` |
-| Slippage sensitivity sweep | `scripts/backtest-crypto-slippage-sweep.ts` (revealed MBT NR4 is execution-robust; PF 1.71 honest baseline) |
+| Slippage sensitivity sweep | Legacy harness in `scripts/backtest-crypto-slippage-sweep.ts` was invalidated by look-ahead/fill-bias audit. Corrected MBT result: PF 1.23, t=1.13, observation only. |
 | Statistics schema confirmed available | `scripts/research-h1-auction-imbalance.ts` proved CME GLOBEX statistics returns IOP (stat_type 2), settlement, open interest. **H1 microstructure hypothesis is testable on our current plan** — just need analysis logic added. |
 
 ### Tier 1 — quick wins (each ~1-2 hours)

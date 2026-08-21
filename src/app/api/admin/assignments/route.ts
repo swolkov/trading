@@ -33,7 +33,8 @@ export async function POST(request: Request) {
     if (!accountKey || !VALID_ACCOUNTS.includes(accountKey as AccountKey)) {
       return Response.json({ error: `accountKey must be one of: ${VALID_ACCOUNTS.join(", ")}` }, { status: 400 });
     }
-    if (!strategyId || !STRATEGIES.some((s) => s.id === strategyId)) {
+    const strategy = STRATEGIES.find((candidate) => candidate.id === strategyId);
+    if (!strategyId || !strategy) {
       return Response.json({ error: `strategyId not registered: ${strategyId}` }, { status: 400 });
     }
     if (status !== undefined && !VALID_STATUSES.includes(status as typeof VALID_STATUSES[number])) {
@@ -42,6 +43,11 @@ export async function POST(request: Request) {
     if (maxContractsOverride !== undefined && maxContractsOverride !== null
       && (!Number.isInteger(maxContractsOverride) || maxContractsOverride < 0 || maxContractsOverride > 100)) {
       return Response.json({ error: "maxContractsOverride must be null or an integer from 0 to 100" }, { status: 400 });
+    }
+    if (status === "active" && strategy.executionEligibility === "observation") {
+      return Response.json({
+        error: `${strategy.name} is observation-only and has not passed the demo-arm evidence gate`,
+      }, { status: 409 });
     }
     if (!process.env.LIVE_TRADING_PASSWORD) {
       return Response.json({ error: "Admin trading password is not configured" }, { status: 503 });

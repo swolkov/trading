@@ -23,12 +23,12 @@ const BRIEFING = `You are Fable 5 — the most capable model available — actin
 
 CAPITAL & ACCOUNTS:
 - LIVE: ~$926 real money on Tradovate. Trades MES only (S&P micro). MNQ was removed after losing -$213. MES is +$148 lifetime.
-- DEMO: $59K simulated account, 24/7 learning. Trades ES, NQ, GC, MBT. PF 1.26 overall BUT punctuated by ~30 catastrophic NQ blowups. Config: max 10 contracts/trade, 20 total, 120 trades/day, 7% risk/trade, 20% daily loss limit.
+- DEMO: live-clone micro-futures account for MGC/MNQ/MES. Crypto micros are observation-only and place no broker orders.
 
 VALIDATED EDGES (the actual evidence base):
 - Spread book (calendar/inter-product z-score): the ONLY fully validated edge. Needs $100k+ or a prop-firm account. Forward track record Sharpe ~1.59, ~$52k/$100k over 18mo. NOT runnable at $1K.
 - GC gold RSI-bounce: real edge, PF 1.23 in 1yr backtest. Currently runs in legacy 5m intraday path, NOT yet in the strategy registry.
-- MBT (micro Bitcoin) NR4 daily breakout: real edge, PF 1.71 at standard costs (1 tick + $2 comm), n=146, 53% WR, +$25/trade. Holds >1.0 even at 5x slippage. Needs ~$2.5K account for margin (runs demo-only today).
+- MBT (micro Bitcoin) NR4 daily breakout: research candidate only. Corrected first-touch/cost test n=216, PF 1.23, t=1.13, PF 95% CI [0.85,1.78], with 2023/2025 negative. Fails demo-arm evidence; observation only.
 - ES/NQ on the 5m setup library: LOSE. PF ~0.98 break-even at best; the live engine historically traded the losing micros.
 - Crypto on the 5m equity library: catastrophic (MET PF 0.06, BFF PF 0.27). Registry now routes crypto away from the 5m path.
 - Pre-FOMC drift: REJECTED (decayed + concentrated).

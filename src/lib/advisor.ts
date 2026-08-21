@@ -205,7 +205,7 @@ ${recentPerf}
 
 INSTRUMENTS AVAILABLE:
 - LIVE: MGC (gold micro), MNQ (Nasdaq micro), and MES (S&P micro), subject to the runtime gates and symbol whitelist.
-- DEMO: the same MGC/MNQ/MES micro contract family for comparable paper research, plus registered crypto research edges such as MBT.
+- DEMO: MGC/MNQ/MES for comparable paper execution. MBT is data observation only and cannot be ordered.
 
 SETUP TYPES AVAILABLE: opening_range_breakout, gap_fill, vwap_reversion, trend_continuation, ema_momentum, pullback_to_ema, rsi_bounce, nr4 (narrow range breakout)
 
@@ -219,7 +219,7 @@ Respond ONLY with JSON (no markdown):
     "MGC": {"priority": "high"|"medium"|"low"|"avoid", "direction": "long"|"short"|"both"|"avoid", "notes": "why (micro gold)"},
     "MNQ": {"priority": "...", "direction": "...", "notes": "... (micro Nasdaq)"},
     "MES": {"priority": "...", "direction": "...", "notes": "... (micro S&P)"},
-    "MBT": {"priority": "...", "direction": "...", "notes": "... (DEMO — BTC micro, NR4)"}
+    "MBT": {"priority": "avoid", "direction": "avoid", "notes": "Observation only; corrected NR4 evidence does not qualify for demo execution"}
   },
   "preferredSetups": ["setup_type_1", "setup_type_2"],
   "avoidSetups": ["setup_type_to_avoid"],
@@ -317,7 +317,7 @@ ${plan.reasoning}
         MGC: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (micro gold)" },
         MNQ: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (micro Nasdaq)" },
         MES: { priority: "high", direction: "both", notes: "advisor unavailable — default to technicals (micro S&P)" },
-        MBT: { priority: "low", direction: "both", notes: "advisor unavailable (DEMO, NR4)" },
+        MBT: { priority: "avoid", direction: "avoid", notes: "observation only; no broker execution authorized" },
       },
       preferredSetups: [],
       avoidSetups: [],

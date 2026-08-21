@@ -83,6 +83,9 @@ export async function runStrategy(
   now: number,
 ): Promise<StrategySignal | null> {
   try {
+    // Authorization fence: research metadata may remain registered for admin and analysis, but an
+    // observation-only strategy must never emit an executable signal from any caller.
+    if (strategy.executionEligibility === "observation") return null;
     const bars = await getBarsForStrategy(strategy, currentBar);
     if (!bars || bars.length === 0) return null;
     return strategy.detect(bars, { symbol, now });

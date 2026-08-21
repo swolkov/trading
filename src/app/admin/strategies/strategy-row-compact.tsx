@@ -15,6 +15,7 @@ interface Assignment {
   strategyId: string;
   status: "active" | "observation" | "disabled";
   maxContractsOverride: number | null;
+  notes?: string | null;
 }
 interface PerfRow {
   strategyId: string;
@@ -61,7 +62,7 @@ function tierLabel(tier: 1 | 2 | 3 | "rejected") {
 }
 
 interface CompactRowProps {
-  strategy: Pick<Strategy, "id" | "name" | "timeframe" | "tier" | "description" | "applicableSymbols" | "backtest" | "vaultDoc" | "codePath">;
+  strategy: Pick<Strategy, "id" | "name" | "timeframe" | "tier" | "executionEligibility" | "description" | "applicableSymbols" | "backtest" | "vaultDoc" | "codePath">;
   defaultOpen?: boolean;
 }
 
@@ -71,10 +72,10 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
   const { data } = useSWR<{ assignments: Assignment[]; warning?: string }>("/api/admin/assignments", fetcher, { refreshInterval: 60_000 });
   const { data: perfData } = useSWR<{ summary: PerfRow[] }>("/api/admin/strategy-performance", fetcher, { refreshInterval: 60_000 });
 
-  const statusFor = (acc: string): Status => {
-    const row = data?.assignments.find((a) => a.accountKey === acc && a.strategyId === strategy.id);
-    return row?.status ?? (acc === "live-futures" ? "observation" : "active");
-  };
+  const assignmentFor = (acc: string): Assignment | undefined =>
+    data?.assignments.find((a) => a.accountKey === acc && a.strategyId === strategy.id);
+  const statusFor = (acc: string): Status =>
+    assignmentFor(acc)?.status ?? "observation";
   const perfFor = (acc: string): PerfRow | undefined =>
     perfData?.summary.find((p) => p.accountKey === acc && p.strategyId === strategy.id);
 
@@ -99,6 +100,8 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
   const tier = tierLabel(strategy.tier);
   const demoStatus = statusFor("demo-futures");
   const liveStatus = statusFor("live-futures");
+  const demoAssignment = assignmentFor("demo-futures");
+  const liveAssignment = assignmentFor("live-futures");
   const demoPerf = perfFor("demo-futures");
   const livePerf = perfFor("live-futures");
 
@@ -179,6 +182,14 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
                 <div><div className="text-muted-foreground/60 text-[10px]">Win rate</div><div className="font-semibold tabular-nums">{(strategy.backtest.winRate * 100).toFixed(0)}%</div></div>
                 <div><div className="text-muted-foreground/60 text-[10px]">Years +</div><div className="font-semibold tabular-nums">{strategy.backtest.yearsPositive}</div></div>
               </div>
+              {strategy.backtest.tStat !== undefined ? (
+                <div className="mt-2 text-[10px] text-amber-300/90">
+                  Statistical confidence: t={strategy.backtest.tStat.toFixed(2)}
+                  {strategy.backtest.pfCi95 ? ` · PF 95% CI [${strategy.backtest.pfCi95[0].toFixed(2)}, ${strategy.backtest.pfCi95[1].toFixed(2)}]` : ""}
+                  {strategy.backtest.tStat < 2 ? " · fails demo-arm threshold" : ""}
+                </div>
+              ) : null}
+              {strategy.backtest.costModel ? <div className="text-[9px] text-muted-foreground/60 mt-1">Costs: {strategy.backtest.costModel}</div> : null}
               <div className="text-[9px] text-muted-foreground/50 mt-1">{strategy.backtest.period}</div>
             </div>
           )}
@@ -188,6 +199,7 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
             {ACCOUNTS.map((acc) => {
               const st = acc.key === "demo-futures" ? demoStatus : liveStatus;
               const perf = acc.key === "demo-futures" ? demoPerf : livePerf;
+              const assignment = acc.key === "demo-futures" ? demoAssignment : liveAssignment;
               return (
                 <div key={acc.key} className="border border-border rounded-md bg-background p-2.5">
                   <div className="flex items-center justify-between mb-1.5">
@@ -204,14 +216,16 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
                       const Icon = STATUS_ICON[s];
                       const isCurrent = st === s;
                       const k = `${acc.key}:${strategy.id}`;
+                      const blockedByEvidence = s === "active" && strategy.executionEligibility === "observation";
                       return (
                         <button
                           key={s}
-                          disabled={busy === k}
+                          disabled={busy === k || blockedByEvidence}
+                          title={blockedByEvidence ? "Blocked: this strategy has not passed the demo-arm evidence gate" : undefined}
                           onClick={(e) => { e.stopPropagation(); set(acc.key, s); }}
                           className={`flex-1 inline-flex items-center justify-center gap-1 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-1.5 rounded border transition-all ${
                             isCurrent ? STATUS_COLOR[s] : "bg-transparent text-muted-foreground/40 border-border hover:text-foreground hover:border-foreground/30"
-                          } ${busy === k ? "opacity-50" : ""}`}
+                          } ${busy === k || blockedByEvidence ? "opacity-35 cursor-not-allowed" : ""}`}
                         >
                           <Icon className="w-3 h-3" />
                           {s}
@@ -219,6 +233,15 @@ export function StrategyRowCompact({ strategy, defaultOpen = false }: CompactRow
                       );
                     })}
                   </div>
+                  {strategy.executionEligibility === "observation" ? (
+                    <p className="mt-2 text-[10px] text-amber-300/80">Execution locked: observation only until the evidence gate passes.</p>
+                  ) : null}
+                  <div className="mt-2 text-[10px] text-muted-foreground/70">
+                    Contract cap: <span className="font-semibold text-foreground/80 tabular-nums">{assignment?.maxContractsOverride ?? "account default"}</span>
+                  </div>
+                  {assignment?.notes ? (
+                    <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground/60">{assignment.notes}</p>
+                  ) : null}
                 </div>
               );
             })}

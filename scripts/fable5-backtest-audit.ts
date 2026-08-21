@@ -27,16 +27,16 @@ CONTEXT — three different Profit Factor (PF) numbers exist for this same strat
 The human auditor has already read the code and flagged these PRIOR SUSPICIONS — confirm, refute, or refine each, and find anything they missed:
 (S1) The slippage-sweep exit loop walks 1m bars from the session OPEN (dayStart), not from the entry moment — so a stop/target that printed BEFORE price broke nr4.h is counted as the trade outcome (sequencing look-ahead).
 (S2) Entry is confirmed using the COMPLETED daily bar's high/low (today.h/today.l). A gap-open above nr4.h would book a fill at nr4.h that never existed.
-(S3) The slippage sweep enters at exactly nr4.h (optimistic limit), while the deep edge-scan enters at next-day OPEN + 1 tick (realistic). The LIVE strategy copies the optimistic nr4.h entry. So the validated PF and the live behavior may not match.
+(S3) The slippage sweep enters at exactly nr4.h (optimistic limit), while the deep edge-scan enters at next-day OPEN + 1 tick (realistic). The then-proposed strategy copied the optimistic nr4.h entry, so the historical PF and proposed behavior may not match.
 (S4) Live/backtest divergence: backtest daily bars are CME-session (Databento ohlcv-1d, ~5pm ET boundary); the live buildTodayDailyBar cuts the day at UTC midnight. Different day boundaries → different NR4 anchors.
 
 YOUR DELIVERABLE:
 1. For each suspicion S1–S4: CONFIRMED / PARTIAL / REFUTED, with the specific line/mechanism and the DIRECTION + rough MAGNITUDE of PF distortion it causes.
 2. Any additional look-ahead, survivorship, or fill-realism bugs the human missed.
 3. Reconcile the 2.03 / 1.71 / 0.84 discrepancy — which number, if any, is trustworthy, and what is your best estimate of the TRUE cost-and-bias-corrected PF and its confidence interval given n≈136 and "4 of 5 years positive"?
-4. VERDICT: Is MBT NR4 a real edge worth $2.5K of real money? One of: TRADE IT / FIX-AND-RE-TEST FIRST / DEAD. Justify in 3 sentences. If FIX-AND-RE-TEST, list the exact code corrections required before the re-run is trustworthy.
+4. VERDICT: Is MBT NR4 a credible candidate worth further testing? One of: TRADE IT / FIX-AND-RE-TEST FIRST / DEAD. Justify in 3 sentences. If FIX-AND-RE-TEST, list the exact code corrections required before the re-run is trustworthy.
 
-=== FILE: src/lib/strategies/mbt-nr4-daily.ts (LIVE strategy) ===
+=== FILE: src/lib/strategies/mbt-nr4-daily.ts (then-proposed strategy; now observation-only) ===
 ${file("src/lib/strategies/mbt-nr4-daily.ts")}
 
 === FILE: src/lib/strategy-runner.ts (LIVE execution adapter) ===
@@ -45,7 +45,7 @@ ${file("src/lib/strategy-runner.ts")}
 === FILE: scripts/backtest-crypto-slippage-sweep.ts (the "PF holds at 5x slippage" validation) ===
 ${file("scripts/backtest-crypto-slippage-sweep.ts")}
 
-=== FILE: scripts/edge-scan-crypto-deep.ts (the PF 2.03 source of record) ===
+=== FILE: scripts/edge-scan-crypto-deep.ts (superseded PF 2.03 source under audit) ===
 ${file("scripts/edge-scan-crypto-deep.ts")}`;
 
 async function main() {
