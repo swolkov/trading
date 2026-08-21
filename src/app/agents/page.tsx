@@ -168,7 +168,7 @@ export default function AgentHubPage() {
     {
       id: "futures-cron",
       name: "Futures Cron (Live)",
-      desc: "Fallback execution + live trading when activated",
+      desc: "Recovery monitoring and registered-strategy routing",
       schedule: "Every 10m (market hrs)",
       endpoint: "/api/cron/futures",
       canRun: true,
