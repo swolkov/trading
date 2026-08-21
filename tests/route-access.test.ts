@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { isPublicPath } from "../src/lib/route-access";
 
@@ -26,4 +27,14 @@ test("lookalike prefixes do not become public", () => {
   assert.equal(isPublicPath("/proofreader"), false);
   assert.equal(isPublicPath("/funding"), false);
   assert.equal(isPublicPath("/api/funder/stats"), false);
+});
+
+test("web recovery and manual checks cannot invoke the legacy broker manager", () => {
+  const manualRoute = readFileSync(new URL("../src/app/api/futures/route.ts", import.meta.url), "utf8");
+  const cronRoute = readFileSync(new URL("../src/app/api/cron/futures/route.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(manualRoute, /runFuturesAgent/);
+  assert.equal(cronRoute.match(/runFuturesAgent\(/g)?.length, 1);
+  assert.match(cronRoute, /runFuturesAgent\(\{ registryOnly: true \}\)/);
+  assert.doesNotMatch(cronRoute, /managementOnly/);
 });

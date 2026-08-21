@@ -1,4 +1,3 @@
-import { runFuturesAgent } from "@/lib/futures-agent";
 import { checkTradovateAuth } from "@/lib/tradovate";
 import { getViewMode } from "@/lib/trading-mode";
 import { requireOwnerUser } from "@/auth/owner";
@@ -26,14 +25,11 @@ export async function POST() {
   const unauthorized = await requireOwnerUser();
   if (unauthorized) return unauthorized;
 
-  try {
-    const result = await runFuturesAgent();
-    return Response.json(result);
-  } catch (error) {
-    console.error("[/api/futures]", error);
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Futures agent failed" },
-      { status: 500 }
-    );
-  }
+  // Railway realtime engines exclusively own entries and position management. Keep this historical
+  // endpoint read-only so a dashboard click can never race broker mutations.
+  return Response.json({
+    trades: [],
+    managed: 0,
+    details: ["Read-only position refresh complete. Railway retains exclusive order ownership."],
+  });
 }

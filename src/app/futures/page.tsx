@@ -5,7 +5,7 @@ import dynamic from "next/dynamic";
 import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ASSET_CLASSES, assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
+import { assetClassesIn, filterByAssetClass, type AssetClass } from "@/lib/asset-classes";
 import { DepthTapeView } from "@/components/databento/depth-tape-view";
 import { EngineActivity } from "@/components/futures/engine-activity";
 import { EdgeScoreboard } from "@/components/futures/edge-scoreboard";
@@ -198,10 +198,8 @@ interface BacktestData {
 
 // ── Constants ──────────────────────────────────────────
 
-// Edge-focused: both engines trade the two validated micro edges — gold RSI-bounce + index
-// overbought-short. Demo trades full-size for research; live trades the micros (MGC/MNQ/MES),
-// 1 contract per trade at ~1-2% risk on the ~$5K account.
-const DEMO_CONTRACTS = ["GC", "NQ", "ES"];
+// Both engines trade the registered micro edges on the same contract family and size from live equity.
+const DEMO_CONTRACTS = ["MGC", "MNQ", "MES"];
 // Live: micro gold (MGC) + micro index (MNQ/MES). Two validated edges — gold RSI-bounce and
 // index overbought-short — traded raw with the AI grader OFF.
 const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
@@ -210,23 +208,24 @@ const LIVE_CONTRACTS = ["MGC", "MNQ", "MES"];
 // Strategy tab shows every registered edge with live demo/live switch state — no static copy to drift.
 
 const DEMO_RISK_RULES = [
-  "7% risk/trade — GC (gold) + NQ/ES overbought-shorts",
-  "Up to 10 contracts/trade, 8 total open",
-  "ALL SESSIONS: 24/5 learning (Sun 6PM–Fri 5PM ET)",
-  "$7,500 daily loss limit (15% of $50K)",
-  "20 trades/day base, 40 with A+ override",
-  "Deterministic edge gate — only validated setups trade (paper test bed)",
+  "Live-clone risk budget — sized from fresh live equity, not the larger paper balance",
+  "Up to 5 micros/trade in RTH, 8 total; stop distance can reduce size",
+  "MGC overnight entries are capped at 2 and must pass the margin governor",
+  "Independent demo edge switches for forward testing",
+  "20 trades/day maximum",
+  "Deterministic edge gate — enabled demo setups trade on paper",
   "Tilt: pause after 2 stops",
   "Brain learns from every trade — vault syncs",
-  "25% drawdown kill ($12,500) → lockdown",
+  "Drawdown kill follows the live risk profile",
   "No re-entry on stopped symbols",
 ];
 const LIVE_RISK_RULES = [
-  "1 micro contract per trade (~1–2% risk) — no pyramiding",
-  "Validated edges only: gold RSI-bounce (long + short) + index overbought-short",
+  "5% risk budget — up to 5 micros in RTH, never a fixed order size",
+  "Only current-version, individually promoted edges can enter",
+  "MGC overnight entries are capped at 2 and margin-gated",
   "Broker stop-loss on every trade — defined risk",
-  "8% daily-loss halt — stops trading on a bad day",
-  "25% drawdown kill switch — halts & reassess",
+  "Daily-loss halt follows the engine's active live risk profile",
+  "Drawdown kill switch halts new entries and requires reassessment",
   "Deterministic edge gate — only validated setups trade (no per-trade AI veto)",
 ];
 
@@ -289,11 +288,17 @@ export default function FuturesPage() {
   const [activeAssetClass, setActiveAssetClass] = useState<AssetClass>(
     availableAssetClasses[0]?.id ?? "equity_index_futures",
   );
+  const displayedAssetClass = availableAssetClasses.some((assetClass) => assetClass.id === activeAssetClass)
+    ? activeAssetClass
+    : (availableAssetClasses[0]?.id ?? "equity_index_futures");
   const CONTRACTS = useMemo(
-    () => filterByAssetClass(ALL_CONTRACTS, activeAssetClass),
-    [ALL_CONTRACTS, activeAssetClass],
+    () => filterByAssetClass(ALL_CONTRACTS, displayedAssetClass),
+    [ALL_CONTRACTS, displayedAssetClass],
   );
-  const [selectedContract, setSelectedContract] = useState("ES");
+  const [selectedContract, setSelectedContract] = useState("MGC");
+  const displayedContract = CONTRACTS.includes(selectedContract)
+    ? selectedContract
+    : (CONTRACTS[0] ?? selectedContract);
   const [activeTab, setActiveTab] = useState<"chart" | "depth" | "strategy" | "backtest">("chart");
   // Chart mode — Lightweight only (TradingView removed)
   const [backtest, setBacktest] = useState<BacktestData | null>(null);
@@ -325,29 +330,22 @@ export default function FuturesPage() {
     } catch { /* ignore */ }
   }, []);
 
-  // Reset selected contract when view mode or asset class changes
   useEffect(() => {
-    if (CONTRACTS.length > 0 && !CONTRACTS.includes(selectedContract)) {
-      setSelectedContract(CONTRACTS[0]);
-    }
-  }, [isLiveView, activeAssetClass, CONTRACTS, selectedContract]);
-
-  // If the current asset class becomes unavailable (e.g., live mode has no crypto), snap to first
-  useEffect(() => {
-    if (!availableAssetClasses.some((ac) => ac.id === activeAssetClass) && availableAssetClasses[0]) {
-      setActiveAssetClass(availableAssetClasses[0].id);
-    }
-  }, [availableAssetClasses, activeAssetClass]);
-
-  useEffect(() => {
-    loadQuotes();
-    loadStatus();
-    loadPositions();
+    const initialLoad = window.setTimeout(() => {
+      void loadQuotes();
+      void loadStatus();
+      void loadPositions();
+    }, 0);
     // Refresh quotes every 15s, positions every 10s, status every 30s
     const quoteInterval = setInterval(loadQuotes, 15000);
     const posInterval = setInterval(loadPositions, 10000);
     const statusInterval = setInterval(loadStatus, 30000);
-    return () => { clearInterval(quoteInterval); clearInterval(posInterval); clearInterval(statusInterval); };
+    return () => {
+      window.clearTimeout(initialLoad);
+      clearInterval(quoteInterval);
+      clearInterval(posInterval);
+      clearInterval(statusInterval);
+    };
   }, [loadQuotes, loadStatus, loadPositions]);
 
   // When the global view mode flips (demo↔live), refresh all page data immediately and clear
@@ -379,20 +377,18 @@ export default function FuturesPage() {
 
   const runAgent = async () => {
     setRunning(true);
-    try {
-      const res = await fetch("/api/futures", { method: "POST" });
-      setResult(await res.json());
-    } catch (err) {
-      setResult({ trades: [], managed: 0, details: [`Error: ${err}`] });
-    }
+    await Promise.all([loadQuotes(), loadStatus(), loadPositions()]);
+    setResult({
+      trades: [],
+      managed: 0,
+      details: ["Read-only refresh complete. Railway retains exclusive order ownership."],
+    });
     setRunning(false);
-    loadStatus();
-    loadPositions();
   };
 
   // ── Derived data ─────────────────────────────────────
 
-  const selectedQuote = quotes.find((q) => q.symbol === selectedContract);
+  const selectedQuote = quotes.find((q) => q.symbol === displayedContract);
   const allTrades = posData?.activity || [];
   const fillPnl = posData?.fillBasedPnl;
 
@@ -495,7 +491,7 @@ export default function FuturesPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Futures</h1>
           <p className="text-[11px] text-muted-foreground/50">
-            Tradovate {isLiveView ? "micro futures — MGC / MNQ / MES" : "futures — GC, NQ, ES"}
+            Tradovate micro futures — MGC / MNQ / MES
             {status?.connected && (
               <span className="text-emerald-400 ml-2">Tradovate Connected</span>
             )}
@@ -515,7 +511,7 @@ export default function FuturesPage() {
             </span>
           </div>
           <Button onClick={runAgent} disabled={running || !status?.connected} size="sm" variant="outline" className="text-xs h-7">
-            {running ? "Running..." : "Run Agent"}
+            {running ? "Checking..." : "Check Positions"}
           </Button>
         </div>
       </div>
@@ -544,7 +540,7 @@ export default function FuturesPage() {
         <div className="flex items-center justify-between gap-2 border-b border-border">
           <div className="flex items-center gap-1">
             {availableAssetClasses.map((ac) => {
-              const active = ac.id === activeAssetClass;
+              const active = ac.id === displayedAssetClass;
               const count = filterByAssetClass(ALL_CONTRACTS, ac.id).length;
               return (
                 <button
@@ -577,13 +573,13 @@ export default function FuturesPage() {
       {/* ── Live Price Tiles ── */}
       {CONTRACTS.length === 0 ? (
         <div className="text-xs text-muted-foreground py-4 text-center">
-          No {availableAssetClasses.find((ac) => ac.id === activeAssetClass)?.shortLabel ?? "matching"} contracts in this view.
+          No {availableAssetClasses.find((ac) => ac.id === displayedAssetClass)?.shortLabel ?? "matching"} contracts in this view.
         </div>
       ) : (
       <div className={`grid ${CONTRACTS.length <= 2 ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
         {CONTRACTS.map((sym) => {
           const q = quotes.find((x) => x.symbol === sym);
-          const isSelected = sym === selectedContract;
+          const isSelected = sym === displayedContract;
           const isUp = (q?.change ?? 0) >= 0;
           return (
             <button
@@ -682,7 +678,7 @@ export default function FuturesPage() {
             <div className="space-y-4">
               <Card className="border-white/[0.06]">
                 <CardContent className="pt-4">
-                  <FuturesChart symbol={selectedContract} height={560} />
+                  <FuturesChart symbol={displayedContract} height={560} />
                 </CardContent>
               </Card>
               <EdgeScoreboard mode={isLiveView ? "live" : "demo"} />
@@ -692,7 +688,7 @@ export default function FuturesPage() {
 
           {/* Depth & Tape tab — Databento volume profile + time and sales */}
           {activeTab === "depth" && (
-            <DepthTapeView symbol={selectedContract} />
+            <DepthTapeView symbol={displayedContract} />
           )}
 
           {/* Strategy tab */}
@@ -715,7 +711,7 @@ export default function FuturesPage() {
               </CardHeader>
               <CardContent>
                 <div className="mb-3 text-[10px] rounded-md bg-amber-500/10 text-amber-300/90 border border-amber-500/25 px-2.5 py-1.5">
-                  Each edge has its own <b>Demo</b> and <b>Live</b> switch — Demo tests it in real-time, Live trades it with real money (1 contract, ~1–2% risk, broker stop on every trade). Demo P&L is research, not proof.
+                  Each edge has its own <b>Demo</b> and <b>Live</b> switch. Demo tests it in real time. Live uses stop-distance sizing up to the configured five-contract RTH ceiling, with a broker stop on every trade. Demo P&amp;L is research, not proof.
                 </div>
                 <EdgeSwitchList />
                 <div className="mt-4 pt-3 border-t border-white/[0.06]">
@@ -1558,7 +1554,6 @@ export default function FuturesPage() {
             const todayPnl = calendarDayPnl ?? dailyPnl;
             const lossUsed = todayPnl < 0 ? Math.abs(todayPnl) : 0;
             const budgetPct = rm.dailyLossLimit > 0 ? Math.min(100, (lossUsed / rm.dailyLossLimit) * 100) : 0;
-            const tradePct = rm.maxTradesPerDay > 0 ? (rm.todayTradeCount / rm.maxTradesPerDay) * 100 : 0;
             const budgetColor = budgetPct > 80 ? "bg-red-500" : budgetPct > 50 ? "bg-amber-500" : "bg-emerald-500";
             return (
               <Card className="border-white/[0.06]">

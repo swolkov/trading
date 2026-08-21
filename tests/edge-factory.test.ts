@@ -4,7 +4,8 @@ import { compoundRMultiples, requiredExpectancyR } from "../src/lib/account-grow
 import { slowTrendBreakout } from "../src/lib/edge-factory/candidates";
 import { replayCandidate, replayCandidateDetailed } from "../src/lib/edge-factory/replay";
 import { oneSidedStudentTPValue, validateCandidate } from "../src/lib/edge-factory/validation";
-import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber } from "../src/lib/risk-sizing";
+import { cappedContractLimit, isFreshPositiveEquity, nonNegativeConfigNumber, riskSizedContractQuantity } from "../src/lib/risk-sizing";
+import { futuresActionPrefix } from "../src/lib/futures-fallback-policy";
 import type { EdgeCandidate, MarketSpec, ReplayTrade, ResearchBar } from "../src/lib/edge-factory/types";
 
 const market: MarketSpec = {
@@ -125,8 +126,22 @@ test("research status requires every stated statistical gate", () => {
 
 test("operator and aggregate contract limits remain hard ceilings", () => {
   assert.equal(cappedContractLimit(1, 3, 8, 0), 1);
+  assert.equal(cappedContractLimit(5, 5, 8, 0), 5);
   assert.equal(cappedContractLimit(4, 4, 4, 3), 1);
   assert.equal(cappedContractLimit(4, 4, 4, 4), 0);
+});
+
+test("live-clone sizing can reach five but remains risk and session capped", () => {
+  const base = { equity: 4_368, riskPerTradePct: 5, sizeMultiplier: 1, hardRiskLimitPct: 15 };
+  assert.equal(riskSizedContractQuantity({ ...base, perContractRisk: 43, maxContracts: 5 }), 5);
+  assert.equal(riskSizedContractQuantity({ ...base, perContractRisk: 55, maxContracts: 5 }), 3);
+  assert.equal(riskSizedContractQuantity({ ...base, perContractRisk: 43, maxContracts: 2 }), 2);
+  assert.equal(riskSizedContractQuantity({ ...base, sizeMultiplier: 4, perContractRisk: 700, maxContracts: 5 }), 0);
+});
+
+test("legacy records preserve action-mode isolation", () => {
+  assert.equal(futuresActionPrefix("live"), "live");
+  assert.equal(futuresActionPrefix("paper"), "futures");
 });
 
 test("operator zero risk settings remain zero instead of falling back to live defaults", () => {

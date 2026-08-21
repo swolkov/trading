@@ -9,14 +9,8 @@ import { getStartingCapital } from "@/lib/live-pnl";
 
 const KNOWN_SYMBOLS = ["MES", "MNQ", "MYM", "M2K", "MGC", "MBT", "MET", "BFF", "MXR", "MSL", "ES", "NQ", "YM", "RTY", "GC"];
 
-// DEMO/LIVE ISOLATION: the live engine trades only these micros (MGC/MNQ/MES). The cron futures-agent
-// (futures-agent.ts) logs position management with a hardcoded "futures_" prefix regardless of mode, so
-// a live gold trade leaves a "futures_MGC" shadow row that would otherwise bleed into the DEMO view
-// (which filters on the "futures_" prefix). Demo never trades these micros, so excluding them from the
-// demo-view autoTradeLog queries cleanly stops the leak. (Live view filters "live_" and is already clean.)
-// NOTE: revisit if the live account ever scales to full-size (GC/NQ/ES at ~$25K) — then a proper `mode`
-// column on AutoTradeLog is the durable fix, since symbol alone would no longer separate the two.
-const LIVE_ONLY_SYMBOLS = ["FUT:MGC", "FUT:MNQ", "FUT:MES"];
+// Mode isolation is carried by the action prefix (`live_` vs `futures_`). Both
+// current engines trade MGC/MNQ/MES, so symbol filtering must not hide demo micros.
 
 function matchSymbol(contractName: string): string | null {
   for (const sym of KNOWN_SYMBOLS) {
@@ -74,10 +68,7 @@ export async function GET() {
     // This is independent of the agent execution mode (trading_mode_futures).
     const viewMode = await getViewMode("futures");
     const actionPrefix = viewMode === "live" ? "live_" : "futures_";
-    // Demo view: exclude the live-only micro symbols so live gold's "futures_" shadow rows don't leak in.
-    const symbolWhere = viewMode === "live"
-      ? { startsWith: "FUT:" }
-      : { startsWith: "FUT:", notIn: LIVE_ONLY_SYMBOLS };
+    const symbolWhere = { startsWith: "FUT:" };
 
     // Kick off auth + all DB prefetches in parallel — none depend on each other
     const [auth, recentLogs, demoHB, liveHB] = await Promise.all([
@@ -381,7 +372,6 @@ export async function GET() {
 
     // Run all response-level DB computations in parallel — none depend on each other
     const isDemoView = viewMode !== "live";
-    const kp = isDemoView ? "futures" : "live_futures";
     const todayET = new Date().toISOString().slice(0, 10);
     const todayStart = new Date(todayET + "T00:00:00-04:00");
     const sodKey = viewMode === "live" ? "live_start_of_day_balance" : "start_of_day_balance";
@@ -389,26 +379,27 @@ export async function GET() {
 
     const [riskMetrics, startingCapitalRes, startOfDayBalance, balanceHistory] = await Promise.all([
 
-      // riskMetrics: dashboard risk gauge (mode-aware)
+      // The engine heartbeat is authoritative. In live-clone mode the demo intentionally ignores
+      // its larger broker balance and futures_* profile, sizing from fresh live equity with the
+      // live_futures_* profile. Recomputing here previously overstated demo risk by more than 10x.
       (async () => {
         try {
-          const rmKeys = [`${kp}_daily_loss_limit_pct`, `${kp}_max_trades_per_day`, `${kp}_risk_per_trade_pct`, `${kp}_simulated_equity`];
-          const [configs, todayTrades] = await Promise.all([
-            prisma.agentConfig.findMany({ where: { key: { in: rmKeys } } }),
-            prisma.autoTradeLog.count({
-              where: { symbol: isDemoView ? { startsWith: "FUT:", notIn: LIVE_ONLY_SYMBOLS } : { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
-            }),
-          ]);
-          const cfg: Record<string, string> = {};
-          for (const c of configs) cfg[c.key] = c.value;
-          const dailyLossPct = parseFloat(cfg[`${kp}_daily_loss_limit_pct`]) || (isDemoView ? 15 : 8);
-          const riskPct = parseFloat(cfg[`${kp}_risk_per_trade_pct`]) || (isDemoView ? 8 : 5);
-          const simCfg = parseFloat(cfg[`${kp}_simulated_equity`]) || 0;
-          const simEquity = isDemoView
-            ? (accountSummary?.netLiq || accountSummary?.balance || 50000)
-            : (simCfg > 0 ? simCfg : (accountSummary?.netLiq || accountSummary?.balance || 1000));
-          const maxTrades = isDemoView ? 20 : (parseInt(cfg[`${kp}_max_trades_per_day`]) || 1);
-          return { dailyLossLimit: simEquity * (dailyLossPct / 100), maxTradesPerDay: maxTrades, riskPerTrade: simEquity * (riskPct / 100), simEquity, todayTradeCount: todayTrades };
+          const heartbeatRow = isDemoView ? demoHB : liveHB;
+          const heartbeat = JSON.parse(heartbeatRow?.value || "{}") as {
+            timestamp?: string; sizingEquity?: number; riskPerTrade?: number;
+            dailyLossLimit?: number; maxTradesPerDay?: number;
+          };
+          const heartbeatAt = Date.parse(heartbeat.timestamp || "");
+          if (!Number.isFinite(heartbeatAt) || Date.now() - heartbeatAt < 0 || Date.now() - heartbeatAt >= 90_000) return null;
+          const simEquity = Number(heartbeat.sizingEquity);
+          const riskPerTrade = Number(heartbeat.riskPerTrade);
+          const dailyLossLimit = Number(heartbeat.dailyLossLimit);
+          const maxTradesPerDay = Number(heartbeat.maxTradesPerDay);
+          if (![simEquity, riskPerTrade, dailyLossLimit, maxTradesPerDay].every(Number.isFinite) || simEquity <= 0) return null;
+          const todayTradeCount = await prisma.autoTradeLog.count({
+            where: { symbol: { startsWith: "FUT:" }, action: { startsWith: modeActionPrefix }, pnl: { not: null }, createdAt: { gte: todayStart } },
+          });
+          return { dailyLossLimit, maxTradesPerDay, riskPerTrade, simEquity, todayTradeCount };
         } catch { return null; }
       })(),
 
