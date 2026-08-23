@@ -9,7 +9,7 @@
 // Honest: a real, disciplined edge with managed drawdown — not a $500-to-fortune machine.
 import { prisma } from "./db";
 import { getDipScan, runDipScan, type DipRow } from "./crypto-dip-scanner";
-import { krakenConfigured, getKrakenBalance, getKrakenAvailable, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets } from "./kraken";
+import { krakenConfigured, getKrakenBalance, getKrakenAvailable, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets, getKrakenBookSplit } from "./kraken";
 import { logTradeToJournal, logDecision, loadAgentContext } from "./vault";
 import { sendNotification } from "./notifications";
 
@@ -63,17 +63,17 @@ async function loadConfig(): Promise<KrakenConfig> {
 // This is the denominator for honest P&L: value − deposited. Cached hourly because the ledger
 // barely changes and every status call would otherwise page through it. Falls back to the
 // configured starting capital if the ledger can't be read, so P&L never breaks — but says so.
-interface InvestedCapital { usd: number; source: "kraken-ledger" | "config"; approximate: boolean; asOf?: string }
+interface InvestedCapital { usd: number; source: "kraken-ledger" | "config"; approximate: boolean; ownBookCost: number; splitOk: boolean; asOf?: string }
 
 async function resolveInvestedCapital(cfg: KrakenConfig, opts: { force?: boolean } = {}): Promise<InvestedCapital> {
-  const fallback: InvestedCapital = { usd: cfg.startCapital, source: "config", approximate: false };
+  const fallback: InvestedCapital = { usd: cfg.startCapital, source: "config", approximate: false, ownBookCost: 0, splitOk: false };
   let cached: (InvestedCapital & { ts?: string }) | null = null;
   try {
     const row = await prisma.agentConfig.findUnique({ where: { key: FLOWS_KEY } });
     if (row?.value) cached = JSON.parse(row.value);
   } catch { /* cache miss is fine */ }
   if (!opts.force && cached?.ts && Date.now() - new Date(cached.ts).getTime() < FLOWS_TTL_MS) {
-    return { usd: cached.usd, source: cached.source, approximate: cached.approximate, asOf: cached.ts };
+    return { usd: cached.usd, source: cached.source, approximate: cached.approximate, ownBookCost: cached.ownBookCost ?? 0, splitOk: cached.splitOk ?? false, asOf: cached.ts };
   }
   if (!krakenConfigured()) return cached ? { ...cached } : fallback;
   try {
@@ -81,15 +81,19 @@ async function resolveInvestedCapital(cfg: KrakenConfig, opts: { force?: boolean
     // No deposit history at all (e.g. a key without ledger permission) — don't overwrite a real
     // baseline with zero, which would report the entire account as profit.
     if (!flows.length || netUsd <= 0) return cached ? { ...cached } : fallback;
+    // How much of the deposits was moved out of the strategy into hand-picked positions.
+    const split = await getKrakenBookSplit(new Set(cfg.coins.map((c) => krakenBalanceAsset(c)))).catch(() => ({ ownBookCost: 0, ok: false }));
     const resolved: InvestedCapital & { ts: string } = {
-      usd: netUsd, source: "kraken-ledger", approximate, ts: new Date().toISOString(),
+      usd: netUsd, source: "kraken-ledger", approximate,
+      ownBookCost: split.ok ? split.ownBookCost : 0, splitOk: split.ok,
+      ts: new Date().toISOString(),
     };
     await prisma.agentConfig.upsert({
       where: { key: FLOWS_KEY },
       update: { value: JSON.stringify(resolved) },
       create: { key: FLOWS_KEY, value: JSON.stringify(resolved) },
     }).catch(() => {});
-    return { usd: resolved.usd, source: resolved.source, approximate: resolved.approximate, asOf: resolved.ts };
+    return { usd: resolved.usd, source: resolved.source, approximate: resolved.approximate, ownBookCost: resolved.ownBookCost, splitOk: resolved.splitOk, asOf: resolved.ts };
   } catch {
     return cached ? { ...cached } : fallback;
   }
@@ -295,8 +299,12 @@ export interface KrakenStatus {
   allocPct: number;                            // per-coin target as a share of the account
   targetPerCoin: number;                       // what that works out to in dollars right now
   strategyValue: number;                       // cash + the coins the strategy trades
+  strategyCapital: number;                     // deposits MINUS what was moved into hand-picked positions
+  strategyPnl: number;                         // the number that is actually the track record
   otherValue: number;                          // everything else held on the account (manual buys, dust)
+  otherCost: number;                           // USD spent acquiring those, net of sales
   otherAssets: { asset: string; value: number }[];
+  splitOk: boolean;                            // false = could not attribute; fall back to blended P&L
   mode: string;
   buyCount: number;
   config: Record<string, string>;
@@ -317,7 +325,8 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
     connected: krakenConfigured(), enabled: cfg.enabled, validateOnly: cfg.validateOnly,
     usd: 0, holdings: [], totalValue: 0,
     totalInvested: invested.usd, investedSource: invested.source, investedApproximate: invested.approximate,
-    allocPct: cfg.allocPct, targetPerCoin: 0, strategyValue: 0, otherValue: 0, otherAssets: [], mode: cfg.mode,
+    allocPct: cfg.allocPct, targetPerCoin: 0, strategyValue: 0, strategyCapital: 0, strategyPnl: 0,
+    otherValue: 0, otherCost: 0, otherAssets: [], splitOk: false, mode: cfg.mode,
     buyCount, config, lastRun,
   };
   if (!krakenConfigured()) return base;
@@ -350,6 +359,14 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
         .map((v) => ({ asset: v.asset.replace(/^X(?=[A-Z]{3,})/, "").replace(/\.[A-Z]+$/, ""), value: v.value }));
     } catch { /* pricing extras is best-effort — never break the panel over dust */ }
     base.totalValue = base.strategyValue + base.otherValue;
+    // Split the P&L so the strategy is judged on its own money. Only trust it when the ledger
+    // attribution succeeded AND leaves the strategy a sane cost basis; otherwise the panel falls
+    // back to the blended account-wide figure rather than showing an invented number.
+    base.otherCost = invested.ownBookCost;
+    const stratCap = invested.usd - invested.ownBookCost;
+    base.splitOk = invested.splitOk && stratCap > 0;
+    base.strategyCapital = base.splitOk ? stratCap : invested.usd;
+    base.strategyPnl = base.strategyValue - base.strategyCapital;
     // Sizing follows the STRATEGY's own money, not manual holdings — otherwise a PEPE punt would
     // inflate the BTC/ETH targets and the engine would try to buy with cash that isn't there.
     base.targetPerCoin = cfg.allocPct > 0 ? base.strategyValue * cfg.allocPct : cfg.perCoinUsd;

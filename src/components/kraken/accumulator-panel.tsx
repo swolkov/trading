@@ -17,8 +17,12 @@ interface Status {
   allocPct: number;
   targetPerCoin: number;
   strategyValue: number;
+  strategyCapital: number;
+  strategyPnl: number;
   otherValue: number;
+  otherCost: number;
   otherAssets: { asset: string; value: number }[];
+  splitOk: boolean;
   mode: string;
   buyCount: number;
   config: Record<string, string>;
@@ -36,8 +40,11 @@ export function AccumulatorPanel() {
   if (!data) return null;
 
   const coins = data.config?.kraken_coins || "BTC/USD,ETH/USD";
-  const pnl = data.totalValue - data.totalInvested;
-  const pnlPct = data.totalInvested > 0 ? (pnl / data.totalInvested) * 100 : 0;
+  // Headline the STRATEGY's own P&L when the two books could be told apart. Blending a hand-picked
+  // meme position into this number would make the track record measure something we did not do.
+  const pnl = data.splitOk ? data.strategyPnl : data.totalValue - data.totalInvested;
+  const pnlBase = data.splitOk ? data.strategyCapital : data.totalInvested;
+  const pnlPct = pnlBase > 0 ? (pnl / pnlBase) * 100 : 0;
   const usingPct = data.allocPct > 0;
   // What the engine aims to hold in each coin while that coin is above its 50-day line.
   const sizing = usingPct
@@ -83,17 +90,30 @@ export function AccumulatorPanel() {
         <>
           <div className="grid grid-cols-4 gap-3 text-center">
             <div><p className="text-[10px] text-muted-foreground/50">Cash</p><p className="text-sm font-bold tabular-nums">{fmt(data.usd)}</p></div>
-            <div><p className="text-[10px] text-muted-foreground/50">Deposited</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalInvested)}</p></div>
-            <div><p className="text-[10px] text-muted-foreground/50">Value</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalValue)}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">{data.splitOk ? "Strategy capital" : "Deposited"}</p><p className="text-sm font-bold tabular-nums">{fmt(pnlBase)}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">{data.splitOk ? "Strategy value" : "Value"}</p><p className="text-sm font-bold tabular-nums">{fmt(data.splitOk ? data.strategyValue : data.totalValue)}</p></div>
             <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(pnl)}<span className="text-[10px] font-medium opacity-70"> {pnl >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span></p></div>
           </div>
           {data.otherValue > 0 && (
-            <p className="text-[10px] text-amber-400/60 -mt-1">
-              Includes {fmt(data.otherValue)} in {data.otherAssets.map((a) => a.asset).join(", ")}{" "}that the strategy
-              does not trade — bought manually, or left over. It counts toward value and P&amp;L because your deposits
-              are counted account-wide, but the trend follower will never buy or sell it.
-              Strategy side only: {fmt(data.strategyValue)}.
-            </p>
+            <div className="rounded-md border border-border/60 bg-white/[0.02] px-2.5 py-2 space-y-1">
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground/50">Your own book — not managed here</p>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-muted-foreground/70">{data.otherAssets.map((a) => a.asset).join(", ")}</span>
+                <span className="tabular-nums">
+                  {fmt(data.otherValue)}
+                  {data.splitOk && (
+                    <span className={`ml-1.5 font-semibold ${data.otherValue - data.otherCost >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {data.otherValue - data.otherCost >= 0 ? "+" : ""}{fmt(data.otherValue - data.otherCost)}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <p className="text-[10px] text-muted-foreground/45">
+                {data.splitOk
+                  ? <>Bought by hand. {fmt(data.otherCost)} of deposits went into these, so it is excluded from the strategy&apos;s cost basis above — the trend follower is judged only on its own money.</>
+                  : <>Bought by hand. The trend follower never buys or sells these; the P&amp;L above is account-wide and includes them.</>}
+              </p>
+            </div>
           )}
           <p className="text-[10px] text-muted-foreground/40 -mt-1">
             {data.investedSource === "kraken-ledger"
