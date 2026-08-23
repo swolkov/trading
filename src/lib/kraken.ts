@@ -1,7 +1,7 @@
 // Kraken REST client — public market data + private trading (HMAC-SHA512 signed).
 // Credentials come ONLY from env (KRAKEN_API_KEY / KRAKEN_API_SECRET) set in the Vercel dashboard —
 // never from chat/DB. If they're absent the client is safely inert (krakenConfigured() === false).
-// Used by the buy-the-dip-and-HOLD accumulator (kraken-agent.ts). Spot, long-only, no leverage.
+// Used by the 50-day trend follower (kraken-agent.ts). Spot, long-only, no leverage.
 import crypto from "crypto";
 
 const API_URL = "https://api.kraken.com";
@@ -137,7 +137,7 @@ export interface KrakenCashFlow {
   amount: number;                 // native units, + deposit / − withdrawal
   usd: number;                    // valued in USD
   type: "deposit" | "withdrawal";
-  approximate: boolean;           // true when a non-USD transfer had to be valued at today's price
+  approximate: boolean;           // true only if transfer-date pricing was unavailable and spot was used
 }
 
 function isUsdAsset(asset: string): boolean {
@@ -151,8 +151,9 @@ function ledgerAssetToPair(asset: string): string {
 }
 
 // Every deposit and withdrawal on the account, oldest first, with the USD net.
-// Non-USD transfers are valued at the CURRENT price — an approximation, so it is flagged rather
-// than quietly folded in. A USD-funded account (ours) returns approximate: false.
+// Non-USD transfers are valued at their price ON THE TRANSFER DATE. Only when that history is
+// unavailable does it fall back to spot, and then `approximate` is set rather than quietly folding
+// a guess into the number. A USD-funded account returns approximate: false.
 export async function getKrakenCashFlows(): Promise<{ flows: KrakenCashFlow[]; netUsd: number; approximate: boolean }> {
   const raw: { id: string; time: number; type: string; asset: string; amount: number }[] = [];
   // Kraken pages the ledger 50 at a time; walk until we have them all (guard against runaway loops).
@@ -170,8 +171,12 @@ export async function getKrakenCashFlows(): Promise<{ flows: KrakenCashFlow[]; n
     if (entries.length === 0 || ofs + 50 >= count) break;
   }
 
-  // Price any non-USD transfers once per asset.
-  const priceCache = new Map<string, number>();
+  // Value non-USD transfers at the price ON THE DAY THEY MOVED, not today. Using today's price
+  // misstates deposited capital by however much the asset has since moved — a coin deposited cheap
+  // and now expensive would inflate "deposited" and hide real profit. Kraken's daily OHLC goes back
+  // ~720 candles, which covers this account; anything older falls back to spot and is flagged.
+  const histCache = new Map<string, Map<string, number> | null>();
+  const spotCache = new Map<string, number>();
   let approximate = false;
   const flows: KrakenCashFlow[] = [];
   for (const r of raw.sort((a, b) => a.time - b.time)) {
@@ -180,17 +185,33 @@ export async function getKrakenCashFlows(): Promise<{ flows: KrakenCashFlow[]; n
     if (isUsdAsset(r.asset)) {
       usd = r.amount;
     } else {
-      approx = true;
-      approximate = true;
       const pair = ledgerAssetToPair(r.asset);
-      if (!priceCache.has(pair)) {
+      if (!histCache.has(pair)) {
         try {
-          const res = await krakenPublic("Ticker", { pair });
-          const first = Object.values(res)[0] as { c?: string[] } | undefined;
-          priceCache.set(pair, parseFloat(first?.c?.[0] ?? "0") || 0);
-        } catch { priceCache.set(pair, 0); }
+          const res = await krakenPublic("OHLC", { pair, interval: "1440" });
+          const rows = Object.entries(res).find(([k]) => k !== "last")?.[1] as unknown[][] | undefined;
+          const byDay = new Map<string, number>();
+          for (const row of rows ?? []) {
+            byDay.set(new Date(Number(row[0]) * 1000).toISOString().slice(0, 10), parseFloat(row[4] as string));
+          }
+          histCache.set(pair, byDay.size ? byDay : null);
+        } catch { histCache.set(pair, null); }
       }
-      usd = r.amount * (priceCache.get(pair) || 0);
+      const onDay = histCache.get(pair)?.get(new Date(r.time * 1000).toISOString().slice(0, 10));
+      if (onDay && onDay > 0) {
+        usd = r.amount * onDay;                       // exact: priced on the transfer date
+      } else {
+        approx = true;
+        approximate = true;
+        if (!spotCache.has(pair)) {
+          try {
+            const res = await krakenPublic("Ticker", { pair });
+            const first = Object.values(res)[0] as { c?: string[] } | undefined;
+            spotCache.set(pair, parseFloat(first?.c?.[0] ?? "0") || 0);
+          } catch { spotCache.set(pair, 0); }
+        }
+        usd = r.amount * (spotCache.get(pair) || 0);
+      }
     }
     flows.push({
       time: new Date(r.time * 1000).toISOString(),
