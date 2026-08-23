@@ -119,6 +119,23 @@ export async function getKrakenBalance(): Promise<Record<string, number>> {
   return out;
 }
 
+// SPENDABLE balance, which is not the same as total balance. Kraken's `Balance` reports everything
+// you own INCLUDING amounts committed to open orders, so sizing an order off it throws
+// "EOrder:Insufficient funds" — observed live on 2026-08-23 with $65.06 of cash showing and the buy
+// rejected. `BalanceEx` splits the two, so the engine can size off what it can actually spend.
+// Use this for anything that PLACES an order; use getKrakenBalance for valuing what is owned.
+export async function getKrakenAvailable(): Promise<Record<string, number>> {
+  const res = await krakenPrivate("BalanceEx");
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(res)) {
+    const o = v as { balance?: string; hold_trade?: string };
+    const bal = parseFloat(o.balance ?? "0") || 0;
+    const hold = parseFloat(o.hold_trade ?? "0") || 0;
+    out[k] = Math.max(0, bal - hold);
+  }
+  return out;
+}
+
 export interface KrakenTradeBalance { usd: number; }
 export async function getKrakenUsd(): Promise<number> {
   const bal = await getKrakenBalance();
