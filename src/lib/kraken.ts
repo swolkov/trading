@@ -173,6 +173,45 @@ export async function valueKrakenAssets(bal: Record<string, number>): Promise<Kr
   });
 }
 
+// ---- book split (strategy money vs money the operator moved into their own positions) ----
+// The account holds two books: the coins the trend follower manages, and whatever was bought by
+// hand. Deposits are account-wide, so without splitting them a manual punt lands in the strategy's
+// P&L and the track record stops measuring the strategy. Every USD that bought a non-strategy asset
+// is capital that LEFT the strategy pool, so it is subtracted from the strategy's cost basis and
+// becomes the cost basis of the operator's own book. Sells back into USD reverse it.
+export interface KrakenBookSplit { ownBookCost: number; ok: boolean }
+export async function getKrakenBookSplit(strategyAssets: Set<string>): Promise<KrakenBookSplit> {
+  // Group ledger rows by refid: one trade writes a USD leg and an asset leg sharing a refid.
+  const groups = new Map<string, { usd: number; assets: string[] }>();
+  try {
+    for (let ofs = 0; ofs < 2000; ofs += 50) {
+      const res = await krakenPrivate("Ledgers", { type: "all", ofs: String(ofs) });
+      const ledger = (res.ledger ?? {}) as Record<string, { refid?: string; type: string; asset: string; amount: string }>;
+      const entries = Object.entries(ledger);
+      for (const [id, e] of entries) {
+        if (!["trade", "spend", "receive", "margin"].includes(e.type)) continue;
+        const amt = parseFloat(e.amount);
+        if (!isFinite(amt) || amt === 0) continue;
+        const key = e.refid || id;
+        if (!groups.has(key)) groups.set(key, { usd: 0, assets: [] });
+        const g = groups.get(key)!;
+        if (isUsdAsset(e.asset)) g.usd += amt;
+        else g.assets.push(e.asset);
+      }
+      const count = Number(res.count ?? 0);
+      if (entries.length === 0 || ofs + 50 >= count) break;
+    }
+  } catch { return { ownBookCost: 0, ok: false }; }
+
+  let ownBookCost = 0;
+  for (const g of groups.values()) {
+    if (!g.assets.length || g.usd === 0) continue;
+    // A trade touching ANY asset the strategy does not manage is an own-book trade.
+    if (g.assets.some((a) => !strategyAssets.has(a))) ownBookCost += -g.usd;   // USD out (negative) = cost
+  }
+  return { ownBookCost, ok: true };
+}
+
 // ---- capital flows (deposits / withdrawals) ----
 // P&L is only honest if we know how much was PUT IN. Reading that from Kraken's own ledger beats
 // a hardcoded starting-capital number, which silently turns the next deposit into fake "profit"
