@@ -125,6 +125,85 @@ export async function getKrakenUsd(): Promise<number> {
   return bal.ZUSD ?? bal.USD ?? 0;
 }
 
+// ---- capital flows (deposits / withdrawals) ----
+// P&L is only honest if we know how much was PUT IN. Reading that from Kraken's own ledger beats
+// a hardcoded starting-capital number, which silently turns the next deposit into fake "profit"
+// (a $5,000 wire would have shown as +$5,000 gained). Unlike the futures side — where flows have to
+// be inferred from balance snapshots because the broker's log is empty — Kraken hands us the actual
+// deposit records, so this is exact rather than derived.
+export interface KrakenCashFlow {
+  time: string;
+  asset: string;
+  amount: number;                 // native units, + deposit / − withdrawal
+  usd: number;                    // valued in USD
+  type: "deposit" | "withdrawal";
+  approximate: boolean;           // true when a non-USD transfer had to be valued at today's price
+}
+
+function isUsdAsset(asset: string): boolean {
+  const base = asset.replace(/\.[A-Z]+$/, "");   // strip .F / .S (earn / staked) suffixes
+  return base === "ZUSD" || base === "USD";
+}
+// Kraken ledger asset codes carry legacy prefixes (XXBT, XETH). Reduce to something Ticker accepts.
+function ledgerAssetToPair(asset: string): string {
+  const base = asset.replace(/\.[A-Z]+$/, "").replace(/^X(?=[A-Z]{3,})/, "");
+  return `${base}USD`;
+}
+
+// Every deposit and withdrawal on the account, oldest first, with the USD net.
+// Non-USD transfers are valued at the CURRENT price — an approximation, so it is flagged rather
+// than quietly folded in. A USD-funded account (ours) returns approximate: false.
+export async function getKrakenCashFlows(): Promise<{ flows: KrakenCashFlow[]; netUsd: number; approximate: boolean }> {
+  const raw: { id: string; time: number; type: string; asset: string; amount: number }[] = [];
+  // Kraken pages the ledger 50 at a time; walk until we have them all (guard against runaway loops).
+  for (let ofs = 0; ofs < 2000; ofs += 50) {
+    const res = await krakenPrivate("Ledgers", { type: "all", ofs: String(ofs) });
+    const ledger = (res.ledger ?? {}) as Record<string, { time: number; type: string; asset: string; amount: string }>;
+    const entries = Object.entries(ledger);
+    for (const [id, e] of entries) {
+      if (e.type !== "deposit" && e.type !== "withdrawal") continue;
+      const amt = parseFloat(e.amount);
+      if (!isFinite(amt) || amt === 0) continue;
+      raw.push({ id, time: e.time, type: e.type, asset: e.asset, amount: amt });
+    }
+    const count = Number(res.count ?? 0);
+    if (entries.length === 0 || ofs + 50 >= count) break;
+  }
+
+  // Price any non-USD transfers once per asset.
+  const priceCache = new Map<string, number>();
+  let approximate = false;
+  const flows: KrakenCashFlow[] = [];
+  for (const r of raw.sort((a, b) => a.time - b.time)) {
+    let usd = 0;
+    let approx = false;
+    if (isUsdAsset(r.asset)) {
+      usd = r.amount;
+    } else {
+      approx = true;
+      approximate = true;
+      const pair = ledgerAssetToPair(r.asset);
+      if (!priceCache.has(pair)) {
+        try {
+          const res = await krakenPublic("Ticker", { pair });
+          const first = Object.values(res)[0] as { c?: string[] } | undefined;
+          priceCache.set(pair, parseFloat(first?.c?.[0] ?? "0") || 0);
+        } catch { priceCache.set(pair, 0); }
+      }
+      usd = r.amount * (priceCache.get(pair) || 0);
+    }
+    flows.push({
+      time: new Date(r.time * 1000).toISOString(),
+      asset: r.asset,
+      amount: r.amount,
+      usd,
+      type: r.type === "deposit" ? "deposit" : "withdrawal",
+      approximate: approx,
+    });
+  }
+  return { flows, netUsd: flows.reduce((s, f) => s + f.usd, 0), approximate };
+}
+
 // Place a market BUY for a $ amount. validate=true tests the order path WITHOUT placing (safe).
 export async function krakenBuyMarket(
   symbol: string,
