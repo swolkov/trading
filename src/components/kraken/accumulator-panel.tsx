@@ -89,7 +89,7 @@ export function AccumulatorPanel() {
           </div>
           {data.otherValue > 0 && (
             <p className="text-[10px] text-amber-400/60 -mt-1">
-              Includes {fmt(data.otherValue)} in {data.otherAssets.map((a) => a.asset).join(", ")} that the strategy
+              Includes {fmt(data.otherValue)} in {data.otherAssets.map((a) => a.asset).join(", ")}{" "}that the strategy
               does not trade — bought manually, or left over. It counts toward value and P&amp;L because your deposits
               are counted account-wide, but the trend follower will never buy or sell it.
               Strategy side only: {fmt(data.strategyValue)}.
