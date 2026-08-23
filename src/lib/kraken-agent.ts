@@ -9,7 +9,7 @@
 // Honest: a real, disciplined edge with managed drawdown — not a $500-to-fortune machine.
 import { prisma } from "./db";
 import { getDipScan, runDipScan, type DipRow } from "./crypto-dip-scanner";
-import { krakenConfigured, getKrakenBalance, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets } from "./kraken";
+import { krakenConfigured, getKrakenBalance, getKrakenAvailable, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets } from "./kraken";
 import { logTradeToJournal, logDecision, loadAgentContext } from "./vault";
 import { sendNotification } from "./notifications";
 
@@ -126,10 +126,21 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
     if (regime) details.push(`Brain regime: ${regime}`);
   } catch { /* brain optional — never block a run on it */ }
 
+  // TWO balances, deliberately. `bal` is everything owned — the right basis for valuing positions
+  // and computing equity. `avail` subtracts anything committed to an open order — the only safe
+  // basis for SIZING an order. Using the total is what produced a live
+  // "EOrder:Insufficient funds" rejection on 2026-08-23.
   let bal: Record<string, number> = {};
+  let avail: Record<string, number> = {};
   try { bal = await getKrakenBalance(); } catch (e) { details.push(`balance error: ${e}`); return res; }
-  let usd = bal.ZUSD ?? bal.USD ?? 0;
-  details.push(`USD cash: $${usd.toFixed(2)}${cfg.validateOnly ? " | VALIDATE-ONLY (no real orders)" : ""} | mode: ${cfg.mode}`);
+  try { avail = await getKrakenAvailable(); } catch { avail = bal; /* fall back to total rather than stall */ }
+  const totalUsd = bal.ZUSD ?? bal.USD ?? 0;
+  let usd = Math.min(avail.ZUSD ?? avail.USD ?? totalUsd, totalUsd);   // spendable cash
+  const heldBack = totalUsd - usd;
+  details.push(
+    `USD cash: $${usd.toFixed(2)} spendable${heldBack > 0.01 ? ` (of $${totalUsd.toFixed(2)} — $${heldBack.toFixed(2)} tied up in open orders)` : ""}` +
+    `${cfg.validateOnly ? " | VALIDATE-ONLY (no real orders)" : ""} | mode: ${cfg.mode}`,
+  );
 
   // ── DCA MODE: buy a fixed $ of each coin once per UTC day and HOLD. No trend gate, no selling.
   // Accumulates daily until the deposited cash runs out (then refund to keep going). The 30-min cron
@@ -167,15 +178,19 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
     // Price every coin ONCE and snapshot total account value BEFORE placing anything. Snapshotting up
     // front matters: sizing off the running cash balance would shrink the second coin's target the
     // moment the first coin's buy settles, so the two coins would end up unevenly weighted.
-    const priced: { coin: string; row: DipRow | undefined; price: number; held: number; heldValue: number }[] = [];
+    const priced: { coin: string; row: DipRow | undefined; price: number; held: number; sellable: number; heldValue: number }[] = [];
     for (const coin of cfg.coins) {
       const row = byCoin[coin];
       let price = row?.price ?? 0;
       try { price = await getKrakenPrice(coin); } catch { /* fall back to the scan price */ }
-      const held = bal[krakenBalanceAsset(coin)] ?? 0;
-      priced.push({ coin, row, price, held, heldValue: held * price });
+      const asset = krakenBalanceAsset(coin);
+      const held = bal[asset] ?? 0;                          // owned — the basis for value and equity
+      const sellable = Math.min(avail[asset] ?? held, held); // free of open orders — the basis for exits
+      priced.push({ coin, row, price, held, sellable, heldValue: held * price });
     }
-    const equity = usd + priced.reduce((s, p) => s + p.heldValue, 0);
+    // Equity uses TOTAL holdings plus total cash: it is what the account is worth, not what is
+    // spendable right now. Only the per-order allocation is capped by spendable cash.
+    const equity = totalUsd + priced.reduce((s, p) => s + p.heldValue, 0);
     // Target per coin is a SHARE of the account, so a deposit deploys itself on the next run.
     const target = cfg.allocPct > 0 ? equity * cfg.allocPct : cfg.perCoinUsd;
     const band = Math.max(MIN_ORDER_USD, target * 0.1);  // rebalance band — don't churn on small wiggles
@@ -183,7 +198,7 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
       ? `Equity $${equity.toFixed(2)} → target $${target.toFixed(2)}/coin (${(cfg.allocPct * 100).toFixed(0)}% each) — deposits auto-deploy`
       : `Fixed target $${target.toFixed(2)}/coin (percentage sizing disabled)`);
 
-    for (const { coin, row, price, held, heldValue } of priced) {
+    for (const { coin, row, price, sellable, heldValue } of priced) {
       if (!row) { details.push(`${coin}: no trend data — skip`); continue; }
       const isHolding = heldValue >= MIN_HOLD_USD;
       // Trend state WITH hysteresis (see TREND_HYSTERESIS): when holding, stay in unless price drops
@@ -216,9 +231,9 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
       }
       // EXIT: downtrend + holding → sell to cash
       else if (isHolding) {
-        if (dry) { details.push(`[DRY] ${coin}: would SELL ${held} (~$${heldValue.toFixed(0)}) (below 50-day, exiting)`); continue; }
+        if (dry) { details.push(`[DRY] ${coin}: would SELL ${sellable} (~$${heldValue.toFixed(0)}) (below 50-day, exiting)`); continue; }
         try {
-          const order = await krakenSellMarket(coin, held, cfg.validateOnly);
+          const order = await krakenSellMarket(coin, sellable, cfg.validateOnly);
           details.push(`${coin}: ${cfg.validateOnly ? "VALIDATED sell" : "SOLD"} ${order.volume} (~$${heldValue.toFixed(0)}) @ $${price.toFixed(2)} (trend exit)`);
           if (!cfg.validateOnly) {
             usd += heldValue; res.sells++;
