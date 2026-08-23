@@ -16,6 +16,9 @@ interface Status {
   investedApproximate: boolean;
   allocPct: number;
   targetPerCoin: number;
+  strategyValue: number;
+  otherValue: number;
+  otherAssets: { asset: string; value: number }[];
   mode: string;
   buyCount: number;
   config: Record<string, string>;
@@ -84,6 +87,14 @@ export function AccumulatorPanel() {
             <div><p className="text-[10px] text-muted-foreground/50">Value</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalValue)}</p></div>
             <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(pnl)}<span className="text-[10px] font-medium opacity-70"> {pnl >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span></p></div>
           </div>
+          {data.otherValue > 0 && (
+            <p className="text-[10px] text-amber-400/60 -mt-1">
+              Includes {fmt(data.otherValue)} in {data.otherAssets.map((a) => a.asset).join(", ")} that the strategy
+              does not trade — bought manually, or left over. It counts toward value and P&amp;L because your deposits
+              are counted account-wide, but the trend follower will never buy or sell it.
+              Strategy side only: {fmt(data.strategyValue)}.
+            </p>
+          )}
           <p className="text-[10px] text-muted-foreground/40 -mt-1">
             {data.investedSource === "kraken-ledger"
               ? <>Deposited is read from Kraken&apos;s deposit/withdrawal ledger, so funding the account never shows up as profit.{data.investedApproximate ? " A non-USD transfer was valued at today's price — treat P&L as approximate." : ""}</>
