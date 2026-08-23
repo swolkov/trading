@@ -124,7 +124,18 @@ const USES_LIVE_POLICY = IS_LIVE || (IS_DEMO && DEMO_LIVE_CLONE);
 // Railway ALLOW_PYRAMID=true must not bypass policy, so only a separate research demo may opt in.
 const ALLOW_PYRAMID = !USES_LIVE_POLICY && process.env.ALLOW_PYRAMID === "true";
 const LIVE_HEARTBEAT_KEY = "futures_engine_heartbeat_live";
-const LIVE_MIRROR_MAX_AGE_MS = 3 * 60_000;
+// How old the mirrored LIVE equity may be before the demo clone refuses to size from it.
+// This is deliberately NOT a liveness check on the live engine. Equity is a slow-moving quantity —
+// bounded over a day by the 10% daily-loss limit — whereas a 3-minute bound (the original value)
+// meant any live restart, deploy, or DB blip silently stopped the demo engine from trading at all,
+// which is the one thing the research book cannot afford: it is the only source of the real fills
+// every promotion decision depends on. A stale-but-recent equity figure sizes demo slightly wrong;
+// no equity figure produces no evidence. 24h keeps the fail-closed property that matters (a demo
+// clone never sizes from its own much larger paper balance) without the false outage.
+const LIVE_MIRROR_MAX_AGE_MS = 24 * 60 * 60_000;
+/** Beyond this the mirror still sizes, but says so — it should be investigated, not ignored. */
+const LIVE_MIRROR_WARN_AGE_MS = 15 * 60_000;
+let lastLiveMirrorStaleWarnAt = 0;
 const BROKER_EQUITY_MAX_AGE_MS = 15 * 60_000;
 let liveMirrorEquity = 0;
 let liveMirrorHeartbeatAt = 0;
@@ -1752,6 +1763,18 @@ const stopMoveLocks = new Map<string, boolean>();
 let dailyTradeCount = 0;
 let dailyPnl = 0;
 const stoppedSymbols: Set<string> = new Set(); // symbols stopped out today — no re-entry
+// Close-failure bookkeeping. A close order cannot fill while the exchange is closed, so an
+// unclosable position used to retry every 10s forever: over a weekend that is ~8,600 rejected
+// orders and ~2,900 `*_close_failed` rows a day written into the SAME table the win-rate and
+// edge stats read from (observed 2026-08-23, demo MGC, 194 attempts before it was noticed).
+// Retries must continue — a naked position has to be flattened — but at a cadence matched to
+// when a fill is actually possible, and the DB record is throttled so it stays a signal.
+const CLOSE_FAILURE_LOG_INTERVAL_MS = 15 * 60_000;
+// 60s, not longer: the position is UNPROTECTED for the whole halt, so the engine must be back on
+// it within a minute of the reopen — that is exactly when a gap can move against an unstopped
+// position. This is a spam fix, not a reason to be slow when a fill becomes possible again.
+const CLOSE_RETRY_MARKET_CLOSED_MS = 60_000;
+const lastCloseFailureLoggedAt: Map<string, number> = new Map();
 let consecutiveStops = 0; // tilt protection counter
 let tiltPauseUntil = 0; // timestamp when tilt pause ends
 
@@ -1858,9 +1881,13 @@ let riskConfig: RiskConfig = IS_LIVE ? LIVE_DEFAULTS : DEMO_DEFAULTS;
  * missing or stale. The actual demo balance remains available for broker/margin reconciliation. */
 function riskSizingEquity(): number {
   if (IS_DEMO && DEMO_LIVE_CLONE) {
-    return liveMirrorEquity > 0 && Date.now() - liveMirrorHeartbeatAt <= LIVE_MIRROR_MAX_AGE_MS
-      ? liveMirrorEquity
-      : 0;
+    if (!isFreshPositiveEquity(liveMirrorEquity, liveMirrorHeartbeatAt, Date.now(), LIVE_MIRROR_MAX_AGE_MS)) return 0;
+    const mirrorAge = Date.now() - liveMirrorHeartbeatAt;
+    if (mirrorAge > LIVE_MIRROR_WARN_AGE_MS && Date.now() - lastLiveMirrorStaleWarnAt > LIVE_MIRROR_WARN_AGE_MS) {
+      lastLiveMirrorStaleWarnAt = Date.now();
+      log(`[LIVE MIRROR] Sizing from live equity $${liveMirrorEquity.toFixed(0)} that is ${Math.round(mirrorAge / 60_000)}min old — check the live engine.`);
+    }
+    return liveMirrorEquity;
   }
   // Real-money sizing must always use a fresh broker balance. Simulated equity is research-only;
   // a stale positive live_futures_simulated_equity value must never manufacture buying power.
@@ -3491,18 +3518,24 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
       }
       if (attempt % 3 === 0) {
         log(`[CLOSE] CRITICAL: Could not close ${sym} after ${attempt} attempts; entries remain blocked and flattening continues`);
-        // Persist failed close to database — survives restarts, visible on dashboard
-        try {
-          await prisma.autoTradeLog.create({ data: {
-            symbol: `FUT:${sym}`,
-            action: `${TRADE_ACTION_PREFIX}_close_failed`,
-            qty: pos.quantity,
-            price,
-            pnl: 0,
-            reason: `CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after ${attempt} attempts. Entry: $${pos.entryPrice.toFixed(2)}. Current: $${price.toFixed(2)}. Automated flattening continues.`,
-            orderId: null,
-          }});
-        } catch {}
+        // Persist failed close to database — survives restarts, visible on dashboard.
+        // Throttled: the reconciliation below still runs on every third attempt, but one row per
+        // 15 min is enough to make the condition visible without burying the trade table.
+        const lastLoggedAt = lastCloseFailureLoggedAt.get(sym) ?? 0;
+        if (Date.now() - lastLoggedAt >= CLOSE_FAILURE_LOG_INTERVAL_MS) {
+          lastCloseFailureLoggedAt.set(sym, Date.now());
+          try {
+            await prisma.autoTradeLog.create({ data: {
+              symbol: `FUT:${sym}`,
+              action: `${TRADE_ACTION_PREFIX}_close_failed`,
+              qty: pos.quantity,
+              price,
+              pnl: 0,
+              reason: `CRITICAL: Failed to close ${sym} ${pos.direction} ${pos.quantity}x after ${attempt} attempts. Entry: $${pos.entryPrice.toFixed(2)}. Current: $${price.toFixed(2)}. Automated flattening continues.`,
+              orderId: null,
+            }});
+          } catch {}
+        }
         // Notify once per symbol to prevent Slack spam
         if (!stoppedSymbols.has(`close_failed_${sym}`)) {
           stoppedSymbols.add(`close_failed_${sym}`);
@@ -3537,7 +3570,13 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
           notify(`🚨 ${MODE_TAG} ${sym}: broker state remains unavailable after failed close. Automated reconciliation continues.`, "general");
         }
       }
-      await new Promise(r => setTimeout(r, Math.min(10_000, 2000 * attempt)));
+      // A market close order cannot fill while the exchange is halted, so retrying every 10s only
+      // manufactures rejections. Keep flattening — the position is still unprotected and MUST be
+      // closed the moment the market reopens — but poll slowly until a fill is even possible.
+      const marketClosedForClose = getSessionName() === "halt";
+      await new Promise(r => setTimeout(r, marketClosedForClose
+        ? CLOSE_RETRY_MARKET_CLOSED_MS
+        : Math.min(10_000, 2000 * attempt)));
       continue;
     }
   } // end retry loop
@@ -3576,6 +3615,9 @@ async function closePosition(sym: string, price: number, reason: string, brokerA
     } else {
       consecutiveStops = 0;
     }
+    // The position is gone, so the next close failure is a NEW incident and must record itself
+    // immediately rather than being swallowed by this one's throttle window.
+    lastCloseFailureLoggedAt.delete(sym);
     log(`CLOSED ${sym}: ${reason} | Est P&L: $${estimatedPnl.toFixed(0)} (mark) | Daily: $${dailyPnl.toFixed(0)} | Fill P&L pending...`);
     // Do NOT broadcast the Yahoo estimate (it can be wildly wrong on fast/emergency closes — e.g. a
     // phantom -$17,200 vs a real -$9,325). Announce the close; deferredPnlCheck() posts the ACTUAL fill P&L.

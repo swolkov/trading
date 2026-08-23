@@ -3,7 +3,7 @@
  * Proves that the newly-started binary completed initialization and published a healthy heartbeat.
  */
 import pg from "pg";
-import { REALTIME_EDGES } from "../src/lib/realtime-edges";
+import { describeEdgeSetDrift, REALTIME_EDGES } from "../src/lib/realtime-edges";
 import { FUTURES_STRATEGY_VERSION } from "../src/lib/strategy-version";
 
 const mode = process.env.ENGINE_MODE === "demo" ? "demo" : process.env.ENGINE_MODE === "live" ? "live" : null;
@@ -14,8 +14,26 @@ if (!Number.isFinite(deployStartedAt)) throw new Error("DEPLOY_STARTED_AT must b
 const expectedDeploymentId = process.env.EXPECTED_DEPLOYMENT_ID;
 if (!expectedDeploymentId) throw new Error("EXPECTED_DEPLOYMENT_ID is required");
 
-const EXPECT_LIVE_ARMED = process.env.EXPECT_LIVE_ARMED === "true";
-const REQUIRE_LIVE_EDGES_OFF = process.env.REQUIRE_LIVE_EDGES_OFF === "true";
+/**
+ * Live arming/edge expectations are DRIFT DETECTION, not policy.
+ *
+ * These were previously `EXPECT_LIVE_ARMED=false` / `REQUIRE_LIVE_EDGES_OFF=true`, hardcoded in the
+ * deploy workflow. That made "live is switched off" a permanent property of the pipeline: the day
+ * live is armed to trade, the live gate throws — and because it runs BEFORE the demo deploy step,
+ * the demo engine silently stops receiving deploys too. A safety check that breaks the moment the
+ * system starts earning is not a safety check.
+ *
+ * Both are now optional declarations of intended state. Unset = observe and report only. Set = the
+ * engine's actual state must match exactly, which catches drift in BOTH directions: an edge that
+ * silently armed itself, and an edge that was supposed to be on but resolved off.
+ */
+const EXPECTED_LIVE_ARMED = process.env.EXPECTED_LIVE_ARMED === undefined
+  ? null
+  : process.env.EXPECTED_LIVE_ARMED === "true";
+/** Comma-separated edge keys. Empty string means "expect none enabled"; unset means "do not check". */
+const EXPECTED_LIVE_EDGES = process.env.EXPECTED_LIVE_EDGES === undefined
+  ? null
+  : process.env.EXPECTED_LIVE_EDGES.split(",").map((key) => key.trim()).filter(Boolean).sort();
 const TIMEOUT_MS = 8 * 60_000;
 const OBSERVE_MS = 70_000;
 const POLL_MS = 5_000;
@@ -79,11 +97,12 @@ function assertHealthy(heartbeat: EngineHeartbeat): void {
     throw new Error(`registered edge count is ${heartbeat.registeredEdges ?? "missing"}, expected ${REALTIME_EDGES.length}`);
   }
   if (!Array.isArray(heartbeat.enabledEdges)) throw new Error("enabled edge telemetry is missing");
-  if (mode === "live" && heartbeat.liveTradingArmed !== EXPECT_LIVE_ARMED) {
-    throw new Error(`live arm is ${String(heartbeat.liveTradingArmed)}, expected ${EXPECT_LIVE_ARMED}`);
+  if (mode === "live" && EXPECTED_LIVE_ARMED !== null && heartbeat.liveTradingArmed !== EXPECTED_LIVE_ARMED) {
+    throw new Error(`live arm is ${String(heartbeat.liveTradingArmed)}, expected ${EXPECTED_LIVE_ARMED}`);
   }
-  if (mode === "live" && REQUIRE_LIVE_EDGES_OFF && heartbeat.enabledEdges.length > 0) {
-    throw new Error(`live edges unexpectedly enabled: ${heartbeat.enabledEdges.join(", ")}`);
+  if (mode === "live" && EXPECTED_LIVE_EDGES !== null) {
+    const drift = describeEdgeSetDrift(heartbeat.enabledEdges, EXPECTED_LIVE_EDGES);
+    if (drift) throw new Error(`live edge set drifted — ${drift}`);
   }
 }
 
@@ -122,6 +141,11 @@ async function main(): Promise<void> {
           throw new Error("engine heartbeat did not advance during observation");
         }
         console.log(`${mode} engine gate passed: deployment ${heartbeat.deploymentId} stayed ready on ${heartbeat.mdHealth} with strategy ${heartbeat.strategyVersion}.`);
+        // Always report the trading posture, checked or not — a deploy that quietly leaves the
+        // real-money engine dark should be visible in the log without reading the database.
+        if (mode === "live") {
+          console.log(`  live posture: armed=${String(heartbeat.liveTradingArmed)}, enabled edges=[${heartbeat.enabledEdges?.join(", ") || "none"}]`);
+        }
         return;
       }
     } catch (error) {

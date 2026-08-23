@@ -395,6 +395,26 @@ export function isEdgeEnabled(edgeKey: string, mode: EngineMode, cfg: Record<str
   return mode === "live" ? def.defaultLive : def.defaultDemo;
 }
 
+/**
+ * Compare the edge set an engine actually resolved against the set the operator intended.
+ *
+ * Used by the post-deploy gate (scripts/verify-engine-ready.ts) as drift detection in BOTH
+ * directions: an edge that armed itself without a decision, and an edge that was meant to be
+ * trading but resolved off. Order-insensitive and duplicate-insensitive; returns null when they
+ * agree, or a human-readable description of the difference when they do not.
+ */
+export function describeEdgeSetDrift(actual: readonly string[], expected: readonly string[]): string | null {
+  const actualSet = new Set(actual);
+  const expectedSet = new Set(expected);
+  const unexpected = [...actualSet].filter((key) => !expectedSet.has(key)).sort();
+  const missing = [...expectedSet].filter((key) => !actualSet.has(key)).sort();
+  if (!unexpected.length && !missing.length) return null;
+  const parts: string[] = [];
+  if (unexpected.length) parts.push(`unexpectedly enabled: ${unexpected.join(", ")}`);
+  if (missing.length) parts.push(`expected but disabled: ${missing.join(", ")}`);
+  return parts.join("; ");
+}
+
 // ---- View-models shared by the admin control board AND the Futures-page inline switch list, so the
 // two control surfaces can never drift. Built server-side by getEdgeSwitchboard() (edge-performance.ts).
 export interface EdgePerfLite {

@@ -84,9 +84,17 @@ jobs:
 
       - name: Verify live engine initialization
         timeout-minutes: 10
-        run: railway run --service futures-engine-live -- env ENGINE_MODE=live DEPLOY_STARTED_AT="$LIVE_DEPLOY_STARTED_AT" EXPECTED_DEPLOYMENT_ID="$LIVE_DEPLOYMENT_ID" EXPECT_LIVE_ARMED=false REQUIRE_LIVE_EDGES_OFF=true node --import tsx scripts/verify-engine-ready.ts
+        # EXPECTED_LIVE_ARMED / EXPECTED_LIVE_EDGES declare the INTENDED live posture and fail the
+        # deploy if the engine disagrees, in either direction. They are repository variables rather
+        # than hardcoded values so that arming live is a config change, not a pipeline breakage —
+        # the previous hardcoded "must be off" would have failed every deploy from the moment live
+        # started trading, and taken the demo deploy (which runs after this step) down with it.
+        # Defaults match today's deliberate state: live dark, no edges enabled.
+        run: railway run --service futures-engine-live -- env ENGINE_MODE=live DEPLOY_STARTED_AT="$LIVE_DEPLOY_STARTED_AT" EXPECTED_DEPLOYMENT_ID="$LIVE_DEPLOYMENT_ID" EXPECTED_LIVE_ARMED="$EXPECTED_LIVE_ARMED" EXPECTED_LIVE_EDGES="$EXPECTED_LIVE_EDGES" node --import tsx scripts/verify-engine-ready.ts
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          EXPECTED_LIVE_ARMED: ${{ vars.EXPECTED_LIVE_ARMED || 'false' }}
+          EXPECTED_LIVE_EDGES: ${{ vars.EXPECTED_LIVE_EDGES || '' }}
 
       - name: Mark demo deploy start
         run: echo "DEMO_DEPLOY_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
