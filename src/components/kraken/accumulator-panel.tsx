@@ -11,7 +11,12 @@ interface Status {
   usd: number;
   holdings: Holding[];
   totalValue: number;
-  totalInvested: number; // deposited capital
+  totalInvested: number;                       // deposited capital, read from Kraken's own ledger
+  investedSource: "kraken-ledger" | "config";
+  investedApproximate: boolean;
+  allocPct: number;
+  targetPerCoin: number;
+  mode: string;
   buyCount: number;
   config: Record<string, string>;
   error?: string;
@@ -27,9 +32,14 @@ export function AccumulatorPanel() {
   const [msg, setMsg] = useState<string | null>(null);
   if (!data) return null;
 
-  const perCoin = data.config?.kraken_per_coin_usd || "10";
   const coins = data.config?.kraken_coins || "BTC/USD,ETH/USD";
   const pnl = data.totalValue - data.totalInvested;
+  const pnlPct = data.totalInvested > 0 ? (pnl / data.totalInvested) * 100 : 0;
+  const usingPct = data.allocPct > 0;
+  // What the engine aims to hold in each coin while that coin is above its 50-day line.
+  const sizing = usingPct
+    ? `${(data.allocPct * 100).toFixed(0)}% of the account each (~${fmt(data.targetPerCoin)})`
+    : `${fmt(Number(data.config?.kraken_per_coin_usd) || 0)} fixed per coin`;
 
   async function setLive(live: boolean) {
     setBusy(true); setMsg(null);
@@ -48,7 +58,7 @@ export function AccumulatorPanel() {
   return (
     <div className="rounded-lg border border-border bg-card p-5 space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="font-semibold text-sm">BTC/ETH DCA Accumulator</h2>
+        <h2 className="font-semibold text-sm">BTC/ETH 50-Day Trend Follower</h2>
         <div className="flex items-center gap-1.5">
           {data.connected ? (
             data.enabled ? (
@@ -64,7 +74,7 @@ export function AccumulatorPanel() {
 
       {!data.connected ? (
         <p className="text-[11px] text-muted-foreground/55 leading-relaxed">
-          Funded, built, and ready. Activates once <code className="bg-muted px-1 rounded">KRAKEN_API_KEY</code> / <code className="bg-muted px-1 rounded">KRAKEN_API_SECRET</code> (a fresh trade-only key) are added in the Vercel environment. Buys ${perCoin} of each {coins.replace(/\/USD/g, "")} every day and holds — never sells.
+          Built and ready. Activates once <code className="bg-muted px-1 rounded">KRAKEN_API_KEY</code> / <code className="bg-muted px-1 rounded">KRAKEN_API_SECRET</code> (a fresh trade-only key) are added in the Vercel environment. Holds {coins.replace(/\/USD/g, "")} while each is above its 50-day average and sells to cash when it drops below.
         </p>
       ) : (
         <>
@@ -72,14 +82,24 @@ export function AccumulatorPanel() {
             <div><p className="text-[10px] text-muted-foreground/50">Cash</p><p className="text-sm font-bold tabular-nums">{fmt(data.usd)}</p></div>
             <div><p className="text-[10px] text-muted-foreground/50">Deposited</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalInvested)}</p></div>
             <div><p className="text-[10px] text-muted-foreground/50">Value</p><p className="text-sm font-bold tabular-nums">{fmt(data.totalValue)}</p></div>
-            <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(pnl)}</p></div>
+            <div><p className="text-[10px] text-muted-foreground/50">P&amp;L</p><p className={`text-sm font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(pnl)}<span className="text-[10px] font-medium opacity-70"> {pnl >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span></p></div>
           </div>
+          <p className="text-[10px] text-muted-foreground/40 -mt-1">
+            {data.investedSource === "kraken-ledger"
+              ? <>Deposited is read from Kraken&apos;s deposit/withdrawal ledger, so funding the account never shows up as profit.{data.investedApproximate ? " A non-USD transfer was valued at today's price — treat P&L as approximate." : ""}</>
+              : <span className="text-amber-400/70">Deposited is a configured fallback — the Kraken ledger could not be read, so P&amp;L may count a deposit as profit.</span>}
+          </p>
           {data.holdings.length > 0 ? (
             <div className="space-y-1">
               <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider">Positions</p>
               {data.holdings.map((h) => (
                 <div key={h.coin} className="flex items-center justify-between text-[11px] px-2 py-1 rounded bg-white/[0.02]">
-                  <span className="font-semibold">{h.coin.replace("/USD", "")} <span className="text-emerald-400/70">HODL</span></span>
+                  <span className="font-semibold">
+                    {h.coin.replace("/USD", "")}{" "}
+                    {h.aboveTrend
+                      ? <span className="text-emerald-400/70">↑ above 50-day</span>
+                      : <span className="text-amber-400/80">↓ below — exits next run</span>}
+                  </span>
                   <span className="tabular-nums text-muted-foreground/70">{h.amount.toFixed(6)} @ {fmt(h.price)}</span>
                   <span className="tabular-nums font-medium">{fmt(h.value)}</span>
                 </div>
@@ -87,10 +107,14 @@ export function AccumulatorPanel() {
             </div>
           ) : (
             <div className="text-[11px] text-muted-foreground/55 px-2 py-1.5 rounded bg-white/[0.02]">
-              <span className="font-semibold text-foreground/70">No holdings yet.</span> It buys ${perCoin} of BTC and ${perCoin} of ETH every day; once the first buy lands, your holdings appear right here.
+              <span className="font-semibold text-foreground/70">In cash — nothing held.</span> Both coins are below their 50-day average, so it is waiting. It buys back in when a coin reclaims the trend, which is the drawdown protection working, not a fault.
             </div>
           )}
-          <p className="text-[10px] text-muted-foreground/45">Buys: {data.buyCount} · ${perCoin}/coin daily · {coins.replace(/\/USD/g, "")} · buy-and-hold, never sells{data.validateOnly ? " · validate mode = no real orders yet" : ""}</p>
+          <p className="text-[10px] text-muted-foreground/45">
+            {data.buyCount} trades · {coins.replace(/\/USD/g, "")} · target {sizing} · sells to cash below the 50-day
+            {usingPct ? " · deposits deploy automatically" : ""}
+            {data.validateOnly ? " · validate mode = no real orders yet" : ""}
+          </p>
 
           {/* Password-gated real-money arm/disarm */}
           <div className="border-t border-border/60 pt-3 mt-1">
@@ -116,7 +140,7 @@ export function AccumulatorPanel() {
               </div>
             ) : (
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — DCA accumulator</span>
+                <span className="text-[11px] text-emerald-400 font-semibold">🟢 LIVE — 50-day trend follower</span>
                 <div className="flex gap-2">
                   <input
                     type="password"
