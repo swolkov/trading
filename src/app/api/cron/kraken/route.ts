@@ -3,7 +3,8 @@ import { prisma } from "@/lib/db";
 
 export const maxDuration = 60;
 
-// Kraken accumulator cron — buys BTC/ETH on dips and HOLDS. Runs every 2h (crypto is 24/7).
+// Kraken trend-follower cron — holds BTC/ETH above their 50-day average, sells to cash below.
+// Runs every 30 min (crypto is 24/7); see vercel.json.
 // No real-time engine needed: dips last hours-to-days, and we never sell.
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");

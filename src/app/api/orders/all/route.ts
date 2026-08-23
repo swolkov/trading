@@ -48,7 +48,7 @@ export async function GET() {
       symbol: t.symbol.replace("KRK:", "").replace("/USD", ""),
       action: t.action === "kraken_buy" ? "buy" : "sell",
       size: t.price, // kraken logs the USD amount in `price`
-      pnl: null,     // accumulator/trend book — P&L is account-level, not per-trade
+      pnl: null,     // trend book — P&L is account-level, not per-trade
       time: t.createdAt.toISOString(),
       reason: t.reason,
     }));

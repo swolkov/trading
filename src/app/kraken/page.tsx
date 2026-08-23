@@ -2,9 +2,9 @@ import Link from "next/link";
 import { Bitcoin, TrendingUp, ShieldCheck, PlugZap } from "lucide-react";
 import { AccumulatorPanel } from "@/components/kraken/accumulator-panel";
 
-// Kraken — a dollar-cost-averaging accumulator. It buys $10 of BTC and $10 of ETH every day and
-// HOLDS. It never sells. This is not day-trading and not trend-following — it's slow, mechanical
-// long-term accumulation. Funded and live; positions show in the accumulator panel at the top.
+// Kraken — a 50-day trend follower on BTC and ETH. It holds a coin while that coin is above its
+// 50-day average and sells to cash when it drops below. Spot, long-only, no leverage. It BUYS AND
+// SELLS — the DCA accumulator this page used to describe was replaced in July 2026.
 
 export default function KrakenPage() {
   return (
@@ -15,8 +15,8 @@ export default function KrakenPage() {
           <Bitcoin className="w-5 h-5 text-purple-400" />
         </div>
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Kraken — DCA Accumulator</h1>
-          <p className="text-sm text-muted-foreground">Buys $10 of BTC and $10 of ETH every day and holds. Never sells.</p>
+          <h1 className="text-xl font-bold tracking-tight">Kraken — BTC/ETH Trend Follower</h1>
+          <p className="text-sm text-muted-foreground">Holds each coin while it&apos;s above its 50-day average. Sells to cash when it drops below.</p>
         </div>
       </div>
 
@@ -26,45 +26,75 @@ export default function KrakenPage() {
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div className="flex items-center gap-2">
           <TrendingUp className="w-4 h-4 text-emerald-400" />
-          <h2 className="font-semibold">The strategy: daily dollar-cost averaging</h2>
+          <h2 className="font-semibold">The strategy: follow the 50-day trend</h2>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Every day it buys a fixed $10 of Bitcoin and $10 of Ethereum, and then it holds — forever.
-          No selling, no timing, no reacting to price. Buying the same dollar amount on a schedule
-          means you automatically buy more coins when prices are low and fewer when they&apos;re high,
-          which smooths out your average entry price over time. It&apos;s the slow, boring,
-          long-term way to build a crypto position without trying to guess the market.
+          One rule, checked automatically every 30 minutes. If Bitcoin is trading above its average
+          price of the last 50 days, hold Bitcoin. If it falls clearly below that line, sell it and
+          sit in cash. Same rule for Ethereum, judged separately. That&apos;s the whole thing — no
+          predictions, no news, no discretion.
+        </p>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          The point isn&apos;t to earn more than simply holding crypto — it&apos;s to sit out the
+          worst of the crashes. Over the tested period this returned about the same as buy-and-hold
+          while cutting the worst peak-to-trough loss from roughly 68% to 36%. You give up some
+          upside in exchange for not living through the full drawdown.
         </p>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-md border border-border bg-background/40 p-3">
-            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">What it buys</div>
-            <div className="text-sm"><span className="text-emerald-400 font-semibold">$10 BTC</span> + <span className="text-emerald-400 font-semibold">$10 ETH</span> per day</div>
-            <div className="text-[11px] text-muted-foreground/70 mt-0.5">a fixed amount, on a schedule</div>
+            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">Above the 50-day</div>
+            <div className="text-sm"><span className="text-emerald-400 font-semibold">Hold</span> — and top up toward target</div>
+            <div className="text-[11px] text-muted-foreground/70 mt-0.5">winners above target are left to run</div>
           </div>
           <div className="rounded-md border border-border bg-background/40 p-3">
-            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">What it never does</div>
-            <div className="text-sm"><span className="text-red-400 font-semibold">Never sells</span></div>
-            <div className="text-[11px] text-muted-foreground/70 mt-0.5">pure buy-and-hold, no cash-outs</div>
+            <div className="text-[11px] uppercase tracking-wider text-muted-foreground/60 mb-1">Below the 50-day</div>
+            <div className="text-sm"><span className="text-red-400 font-semibold">Sell to cash</span></div>
+            <div className="text-[11px] text-muted-foreground/70 mt-0.5">waits, then buys back when the trend returns</div>
           </div>
         </div>
         <p className="text-[11px] text-muted-foreground/60">
-          Holds indefinitely — not days, not weeks. The win is discipline and a smoothed cost basis, not timing.
+          Each coin targets a share of the account rather than a fixed dollar amount, so money added
+          to the account is deployed automatically on the next check. A 1.5% buffer around the
+          50-day line stops it flip-flopping when price hovers right at the average.
         </p>
       </div>
 
-      {/* What it is NOT */}
+      {/* Why only two coins */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-2">
         <div className="flex items-center gap-2">
           <ShieldCheck className="w-4 h-4 text-blue-400" />
-          <h2 className="font-semibold">Why not crypto day-trading?</h2>
+          <h2 className="font-semibold">Why only Bitcoin and Ethereum?</h2>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Because it loses. Crypto day-trading (buy-the-dip / sell-the-rip, intraday) was tested across
-          every coin and year and came out at a profit factor of <span className="font-semibold text-red-400">0.73</span> —
-          a reliable money-loser. So instead of trying to trade in and out, this account just
-          accumulates and holds. It runs the boring approach that doesn&apos;t bleed to fees and
-          bad timing, not the exciting one that does.
+          Because everything else was tested and failed. The same rule was run coin-by-coin across
+          370 cryptocurrencies, and twelve different ways of ranking the whole market — momentum,
+          volatility, closeness to all-time highs, trading volume and more — were checked on data
+          the selection never saw. <span className="font-semibold text-red-400">Every one of them lost money</span> out
+          of sample. Holding an equal slice of every liquid coin lost about 45% a year over that
+          stretch while Bitcoin gained.
+        </p>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Picking coins by what did well recently is worse than useless: past performance ranked
+          slightly <span className="italic">negatively</span> against future performance. Broadening the
+          universe has been measured, repeatedly, and it makes results worse — so this account holds
+          the two coins that survive the test and nothing else.
+        </p>
+      </div>
+
+      {/* Honest expectations */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-amber-400" />
+          <h2 className="font-semibold">What to expect — honestly</h2>
+        </div>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Roughly <span className="font-semibold text-foreground/80">20% a year</span> with a
+          drawdown near <span className="font-semibold text-red-400">36%</span> that you should
+          expect to actually live through. Crypto day-trading was tested and loses to fees; leverage
+          was tested and made both returns and drawdowns worse. This is a way to compound capital
+          patiently, not a way to get rich quickly — the honest lever on the outcome is how much
+          capital is in the account, not how aggressively it&apos;s traded.
         </p>
       </div>
 
@@ -75,10 +105,12 @@ export default function KrakenPage() {
           <h2 className="font-semibold">Where Kraken positions show</h2>
         </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Right here — in the accumulator panel at the top of this page. Each broker&apos;s tab shows
-          its own positions: <Link href="/futures" className="text-purple-300 underline underline-offset-2">Futures</Link> for
-          Tradovate, and this tab for Kraken crypto. The accumulator buys a little every day, so your
-          BTC and ETH holdings grow steadily right here.
+          Right here — in the panel at the top of this page, which shows each coin&apos;s live trend
+          state and what the strategy is aiming to hold. Each broker&apos;s tab shows its own
+          positions: <Link href="/futures" className="text-purple-300 underline underline-offset-2">Futures</Link> for
+          Tradovate, and this tab for Kraken crypto. When both coins are below their 50-day the
+          account sits in cash and shows no holdings — that is the drawdown protection working, not
+          a fault.
         </p>
       </div>
     </div>

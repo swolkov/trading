@@ -36,8 +36,8 @@ export function UnifiedOrdersTable() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
   // Follow the same demo/live toggle the rest of the dashboard uses.
   const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  // Kraken hold value (unrealized, never sells) — same source the dashboard pillars use.
-  const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
+  // Kraken account value AND deposited capital — same source the dashboard pillars use.
+  const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
   const isLive = modeData?.modes?.futures === "live";
   const [cat, setCat] = useState<"all" | Order["category"]>("all");
 
@@ -59,9 +59,12 @@ export function UnifiedOrdersTable() {
   // Balance-based live-futures P&L (broker delta) — the single source of truth, NOT a sum of the row log.
   const lfp = data.liveFuturesPnl ?? null;
   const krkVal = krk?.connected ? krk?.totalValue ?? null : null;
-  const totalReal = lfp?.ok ? lfp.netPnl + (krkVal ?? 0) : null;
+  // Kraken's contribution has to be P&L, not account value: futures reports a DELTA, so adding a
+  // BALANCE to it mixed units and inflated "total real money" by the whole Kraken deposit.
+  const krkPnl = krkVal != null && krk?.totalInvested != null ? krkVal - krk.totalInvested : null;
+  const totalReal = lfp?.ok ? lfp.netPnl + (krkPnl ?? 0) : null;
   // Be honest when Kraken is unreachable: the total is then futures-only, not a silent $0 for Kraken.
-  const totalSub = krkVal != null ? "futures P&L + Kraken hold" : "futures P&L only (Kraken unreachable)";
+  const totalSub = krkPnl != null ? "futures P&L + Kraken P&L" : "futures P&L only (Kraken unreachable)";
 
   return (
     <div className="space-y-4">
@@ -85,9 +88,12 @@ export function UnifiedOrdersTable() {
               : "broker unreachable"}
           />
           <Stat
-            label="Kraken (HODL)"
-            value={krkVal != null ? `$${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
-            sub="hold value · never sells"
+            label="Kraken (BTC/ETH trend)"
+            value={krkPnl != null ? money(krkPnl) : "—"}
+            cls={krkPnl != null ? col(krkPnl) : ""}
+            sub={krkVal != null && krk?.totalInvested != null
+              ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} · sells below the 50-day`
+              : "account unreachable"}
           />
           <Stat
             label="Total real money"
