@@ -11,7 +11,7 @@ export async function GET() {
   }
 }
 
-// Manual trigger (auth-gated). POST ?dry=1 previews without ordering; else runs one accumulator tick.
+// Manual trigger (auth-gated). POST ?dry=1 previews without ordering; else runs one trend-follower tick.
 export async function POST(request: Request) {
   const authHeader = request.headers.get("authorization");
   if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {

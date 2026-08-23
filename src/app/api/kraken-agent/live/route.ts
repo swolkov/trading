@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 
-// Password-gated arm/disarm for the Kraken accumulator's REAL-MONEY buying.
+// Password-gated arm/disarm for the Kraken trend follower's REAL-MONEY trading.
 // live=true  -> kraken_validate_only=false (real buys on the next cron)
 // live=false -> kraken_validate_only=true  (safe: validate only, no spend)
 // Uses the same live-trading password as the futures kill switch, so only the owner can flip it.

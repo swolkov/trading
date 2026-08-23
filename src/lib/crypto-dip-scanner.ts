@@ -1,7 +1,7 @@
 // Crypto dip scanner — READ-ONLY detection of oversold / pulled-back coins (XRP, SOL, DOGE, etc.).
 // This is INFORMATION, not a buy signal: a dip detector tells you a coin is down/oversold; it does
 // NOT mean the dip will bounce profitably (rapid dip-buy/sell-bounce loses after fees — tested).
-// Prices come from KRAKEN's own public OHLC feed — the same venue the accumulator trades on, so the
+// Prices come from KRAKEN's own public OHLC feed — the same venue the trend follower trades on, so the
 // 50-day trend signal is a single source of truth. Alpaca's public bars are kept as an automatic
 // fallback so the signal never goes dark if Kraken's feed hiccups. Both are key-free public data.
 import { prisma } from "./db";

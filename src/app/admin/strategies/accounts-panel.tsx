@@ -54,6 +54,81 @@ interface AccountsResponse {
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
+interface KrakenStatus {
+  connected: boolean;
+  enabled: boolean;
+  validateOnly: boolean;
+  usd: number;
+  holdings: { coin: string; value: number; aboveTrend: boolean }[];
+  totalValue: number;
+  totalInvested: number;
+  investedSource: "kraken-ledger" | "config";
+  allocPct: number;
+  targetPerCoin: number;
+  mode: string;
+  buyCount: number;
+  error?: string;
+}
+
+// Kraken is a real funded account trading real money, so admin shows its live state rather than
+// the "coming soon" placeholder that sat here long after the integration shipped. Its own component
+// because the broker list below renders inside an IIFE, where a hook could not be called safely.
+function KrakenAdminCard() {
+  const { data } = useSWR<KrakenStatus>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
+  const pnl = data ? data.totalValue - data.totalInvested : 0;
+  const pnlPct = data && data.totalInvested > 0 ? (pnl / data.totalInvested) * 100 : 0;
+  return (
+    <div>
+      <div className="flex items-baseline gap-2 mb-1.5 px-0.5">
+        <span className="text-xs font-bold tracking-wide">Kraken · Crypto</span>
+        <span className="text-[10px] text-muted-foreground/55 truncate">
+          BTC + ETH 50-day trend follower · spot, long-only, no leverage · separate account, never touches futures
+        </span>
+      </div>
+      <Card>
+        <CardContent className="py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold">
+              {data?.mode === "dca" ? "DCA mode" : "Trend mode"}
+              <span className="text-muted-foreground/50 font-normal"> · {data?.buyCount ?? 0} trades</span>
+            </span>
+            {!data ? <span className="text-[10px] text-muted-foreground/40">loading…</span>
+              : !data.connected ? <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30"><WifiOff className="w-2.5 h-2.5" />No key</span>
+              : !data.enabled ? <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted/40 text-muted-foreground border border-border"><Pause className="w-2.5 h-2.5" />Off</span>
+              : data.validateOnly ? <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"><ShieldCheck className="w-2.5 h-2.5" />Validate</span>
+              : <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30"><Activity className="w-2.5 h-2.5" />Live</span>}
+          </div>
+          {data?.connected && (
+            <>
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <div><p className="text-[9px] text-muted-foreground/50 uppercase tracking-wider">Value</p><p className="text-xs font-bold tabular-nums">${data.totalValue.toFixed(0)}</p></div>
+                <div><p className="text-[9px] text-muted-foreground/50 uppercase tracking-wider">Deposited</p><p className="text-xs font-bold tabular-nums">${data.totalInvested.toFixed(0)}</p></div>
+                <div><p className="text-[9px] text-muted-foreground/50 uppercase tracking-wider">Cash</p><p className="text-xs font-bold tabular-nums">${data.usd.toFixed(0)}</p></div>
+                <div><p className="text-[9px] text-muted-foreground/50 uppercase tracking-wider">P&amp;L</p><p className={`text-xs font-bold tabular-nums ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>${pnl.toFixed(0)} <span className="font-medium opacity-70">{pnl >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span></p></div>
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-muted-foreground/55">
+                <span>
+                  {data.holdings.length
+                    ? data.holdings.map((h) => `${h.coin.replace("/USD", "")} $${h.value.toFixed(0)} ${h.aboveTrend ? "↑" : "↓"}`).join(" · ")
+                    : "in cash — both coins below their 50-day"}
+                </span>
+                <span>target ${data.targetPerCoin.toFixed(0)}/coin ({(data.allocPct * 100).toFixed(0)}%)</span>
+              </div>
+              {data.investedSource !== "kraken-ledger" && (
+                <p className="text-[10px] text-amber-400/70 flex items-center gap-1">
+                  <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                  Deposited is a fallback — the Kraken key needs the &quot;Query Ledger Entries&quot; permission, or a deposit will read as profit.
+                </p>
+              )}
+            </>
+          )}
+          {data?.error && <p className="text-[10px] text-red-400/70">{data.error}</p>}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function modeBadge(m: "paper" | "live" | "disabled") {
   if (m === "live") return <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30"><Activity className="w-2.5 h-2.5" />Live</span>;
   if (m === "paper") return <span className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"><ShieldCheck className="w-2.5 h-2.5" />Paper</span>;
@@ -295,16 +370,7 @@ export function AccountsPanel() {
                 </div>
               );
             })}
-            {/* Kraken — planned, not yet integrated */}
-            <div>
-              <div className="flex items-baseline gap-2 mb-1.5 px-0.5">
-                <span className="text-xs font-bold tracking-wide text-muted-foreground/70">Kraken · Crypto</span>
-                <span className="text-[10px] text-muted-foreground/55">day-trade — not wired up yet (backtested no edge; build when ready)</span>
-              </div>
-              <Card className="border-dashed border-border/50">
-                <CardContent className="py-3 text-[11px] text-muted-foreground/45">Coming soon — Kraken crypto integration isn&apos;t built here. Separate account, won&apos;t touch futures.</CardContent>
-              </Card>
-            </div>
+            <KrakenAdminCard />
           </div>
         );
       })()}
