@@ -3,13 +3,13 @@
 //   above the 50-day trend  → hold, and top up toward the target $ allocation with spare cash
 //                             (deploys idle cash + adds on pullbacks that stay above the 50-day)
 //   below the 50-day trend + holding → SELL to cash (exit before the deep bears)
-// Sizes off the LIVE account balance every run, so adding funds auto-deploys. BTC/ETH only —
+// Sizes each coin at a SHARE of the live account every run, so a deposit auto-deploys. BTC/ETH only —
 // the broad basket test showed almost every other coin (and every meme) lost money through a bull
 // market. Long-only spot, no leverage, trades rarely → tiny fee drag. Runs on a cron.
 // Honest: a real, disciplined edge with managed drawdown — not a $500-to-fortune machine.
 import { prisma } from "./db";
 import { getDipScan, runDipScan, type DipRow } from "./crypto-dip-scanner";
-import { krakenConfigured, getKrakenBalance, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows } from "./kraken";
+import { krakenConfigured, getKrakenBalance, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets } from "./kraken";
 import { logTradeToJournal, logDecision, loadAgentContext } from "./vault";
 import { sendNotification } from "./notifications";
 
@@ -279,6 +279,9 @@ export interface KrakenStatus {
   investedApproximate: boolean;                // true if a non-USD transfer had to be priced
   allocPct: number;                            // per-coin target as a share of the account
   targetPerCoin: number;                       // what that works out to in dollars right now
+  strategyValue: number;                       // cash + the coins the strategy trades
+  otherValue: number;                          // everything else held on the account (manual buys, dust)
+  otherAssets: { asset: string; value: number }[];
   mode: string;
   buyCount: number;
   config: Record<string, string>;
@@ -299,7 +302,7 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
     connected: krakenConfigured(), enabled: cfg.enabled, validateOnly: cfg.validateOnly,
     usd: 0, holdings: [], totalValue: 0,
     totalInvested: invested.usd, investedSource: invested.source, investedApproximate: invested.approximate,
-    allocPct: cfg.allocPct, targetPerCoin: 0, mode: cfg.mode,
+    allocPct: cfg.allocPct, targetPerCoin: 0, strategyValue: 0, otherValue: 0, otherAssets: [], mode: cfg.mode,
     buyCount, config, lastRun,
   };
   if (!krakenConfigured()) return base;
@@ -319,9 +322,22 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
       if (value < MIN_HOLD_USD) continue;
       base.holdings.push({ coin, amount: amt, price, value, aboveTrend: trend[coin] ?? true });
     }
-    base.totalValue = base.usd + base.holdings.reduce((s, h) => s + h.value, 0);
-    // Same rule the agent sizes with, so the panel shows the target it will actually aim for.
-    base.targetPerCoin = cfg.allocPct > 0 ? base.totalValue * cfg.allocPct : cfg.perCoinUsd;
+    base.strategyValue = base.usd + base.holdings.reduce((s, h) => s + h.value, 0);
+    // Anything held that the strategy does NOT trade — a manual buy, leftover dust. Deposited capital
+    // is measured account-wide, so total value must be too, or a manual punt reads as a strategy loss.
+    try {
+      const strategyAssets = new Set(cfg.coins.map((c) => krakenBalanceAsset(c)));
+      const valued = await valueKrakenAssets(bal);
+      const others = valued.filter((v) => !strategyAssets.has(v.asset) && v.value >= MIN_HOLD_USD);
+      base.otherValue = others.reduce((s, v) => s + v.value, 0);
+      base.otherAssets = others
+        .sort((a, b) => b.value - a.value)
+        .map((v) => ({ asset: v.asset.replace(/^X(?=[A-Z]{3,})/, "").replace(/\.[A-Z]+$/, ""), value: v.value }));
+    } catch { /* pricing extras is best-effort — never break the panel over dust */ }
+    base.totalValue = base.strategyValue + base.otherValue;
+    // Sizing follows the STRATEGY's own money, not manual holdings — otherwise a PEPE punt would
+    // inflate the BTC/ETH targets and the engine would try to buy with cash that isn't there.
+    base.targetPerCoin = cfg.allocPct > 0 ? base.strategyValue * cfg.allocPct : cfg.perCoinUsd;
   } catch (e) {
     base.error = String(e);
   }

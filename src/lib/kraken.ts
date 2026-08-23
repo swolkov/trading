@@ -125,6 +125,37 @@ export async function getKrakenUsd(): Promise<number> {
   return bal.ZUSD ?? bal.USD ?? 0;
 }
 
+// Value EVERY non-USD balance on the account, not just the coins the strategy trades. Deposited
+// capital is measured account-wide, so total value has to be too — otherwise buying something the
+// strategy doesn't trade (a manual PEPE punt) leaves the account but stays in the denominator and
+// shows up as a loss. One Ticker call for all pairs. Assets with no USD pair are returned at 0
+// value and flagged so they can be shown as unpriced rather than silently dropped.
+export interface KrakenAssetValue { asset: string; amount: number; price: number; value: number; priced: boolean }
+export async function valueKrakenAssets(bal: Record<string, number>): Promise<KrakenAssetValue[]> {
+  const held = Object.entries(bal).filter(([a, amt]) => amt > 0 && !isUsdAsset(a));
+  if (!held.length) return [];
+  const pairs = [...new Set(held.map(([a]) => ledgerAssetToPair(a)))];
+  let tick: Record<string, unknown> = {};
+  try { tick = await krakenPublic("Ticker", { pair: pairs.join(",") }); } catch { /* price what we can */ }
+  // Kraken echoes canonical pair names (XXBTZUSD for XBTUSD), so match loosely on the base symbol.
+  const priceFor = (pair: string): number => {
+    const base = pair.replace(/USD$/, "");
+    for (const [k, v] of Object.entries(tick)) {
+      const kb = k.replace(/^X/, "").replace(/(Z?USD)$/, "");
+      if (k === pair || kb === base.replace(/^X/, "")) {
+        const c = (v as { c?: string[] })?.c?.[0];
+        const px = c ? parseFloat(c) : NaN;
+        if (isFinite(px) && px > 0) return px;
+      }
+    }
+    return 0;
+  };
+  return held.map(([asset, amount]) => {
+    const price = priceFor(ledgerAssetToPair(asset));
+    return { asset, amount, price, value: amount * price, priced: price > 0 };
+  });
+}
+
 // ---- capital flows (deposits / withdrawals) ----
 // P&L is only honest if we know how much was PUT IN. Reading that from Kraken's own ledger beats
 // a hardcoded starting-capital number, which silently turns the next deposit into fake "profit"
