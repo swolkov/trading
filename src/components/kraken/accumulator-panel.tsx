@@ -3,7 +3,12 @@
 import useSWR from "swr";
 import { useState } from "react";
 
-interface Holding { coin: string; amount: number; price: number; value: number; aboveTrend: boolean; }
+interface Holding {
+  coin: string; amount: number; price: number; value: number; aboveTrend: boolean;
+  sma50: number | null;
+  exitPrice: number | null;   // the hysteresis-adjusted 50-day line the agent actually tests against
+  pctToExit: number | null;   // how far price must fall from here to trigger the sell (negative)
+}
 interface Status {
   connected: boolean;
   enabled: boolean;
@@ -26,7 +31,31 @@ interface Status {
   mode: string;
   buyCount: number;
   config: Record<string, string>;
+  lastRunTs?: string;
+  cronLastRun?: string;
+  flowsAsOf?: string;
   error?: string;
+}
+
+// Relative age, plus the staleness thresholds that decide whether to warn. These exist because a
+// two-day-old deposited-capital figure once made the panel report ~$6,500 of profit that was
+// actually Spencer's own deposit — with nothing on screen indicating the number was old.
+const RUN_STALE_MS = 90 * 60 * 1000;    // cron is every 30 min, so 3 missed ticks
+const FLOWS_STALE_MS = 3 * 60 * 60 * 1000; // ledger figure refreshes hourly on the cron
+function ageMs(iso?: string): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) ? Date.now() - t : null;
+}
+function ago(iso?: string): string {
+  const ms = ageMs(iso);
+  if (ms === null) return "never";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
@@ -124,15 +153,38 @@ export function AccumulatorPanel() {
             <div className="space-y-1">
               <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider">Positions</p>
               {data.holdings.map((h) => (
-                <div key={h.coin} className="flex items-center justify-between text-[11px] px-2 py-1 rounded bg-white/[0.02]">
+                <div key={h.coin} className="rounded bg-white/[0.02]">
+                <div className="flex items-center justify-between text-[11px] px-2 py-1">
                   <span className="font-semibold">
                     {h.coin.replace("/USD", "")}{" "}
-                    {h.aboveTrend
-                      ? <span className="text-emerald-400/70">↑ above 50-day</span>
-                      : <span className="text-amber-400/80">↓ below — exits next run</span>}
+                    {/* Judge by the SAME hysteresis-adjusted line the agent uses, not the raw 50-day
+                        cross. Price can sit below the 50-day but inside the 1.5% band, where the
+                        engine deliberately HOLDS — the old badge called that "exits next run". */}
+                    {(h.pctToExit != null ? h.pctToExit < 0 : h.aboveTrend)
+                      ? <span className="text-emerald-400/70">↑ holding</span>
+                      : <span className="text-amber-400/80">↓ below exit — sells next check</span>}
                   </span>
                   <span className="tabular-nums text-muted-foreground/70">{h.amount.toFixed(6)} @ {fmt(h.price)}</span>
                   <span className="tabular-nums font-medium">{fmt(h.value)}</span>
+                </div>
+                {h.exitPrice != null && h.pctToExit != null && (
+                  <p className="text-[10px] px-2 pb-0.5 text-muted-foreground/45">
+                    {h.pctToExit < 0 ? (
+                      <>
+                        sells below <span className="tabular-nums font-medium text-foreground/60">{fmt(h.exitPrice)}</span>
+                        {" — "}
+                        <span className={h.pctToExit > -5 ? "text-amber-400/85 font-semibold" : ""}>
+                          a {Math.abs(h.pctToExit).toFixed(1)}% drop from here
+                        </span>
+                        {h.pctToExit > -5 && " ⚠ close to the exit"}
+                      </>
+                    ) : (
+                      <span className="text-amber-400/85 font-semibold">
+                        already {h.pctToExit.toFixed(1)}% past its exit line ({fmt(h.exitPrice)}) — sells on the next check
+                      </span>
+                    )}
+                  </p>
+                )}
                 </div>
               ))}
             </div>
@@ -146,6 +198,29 @@ export function AccumulatorPanel() {
             {usingPct ? " · deposits deploy automatically" : ""}
             {data.validateOnly ? " · validate mode = no real orders yet" : ""}
           </p>
+
+          {/* Health strip — is the thing actually running, and is what it shows current?
+              Without this a stale figure looks identical to a fresh one. */}
+          {(() => {
+            const runAge = ageMs(data.lastRunTs);
+            const flowsAge = ageMs(data.flowsAsOf);
+            const runStale = runAge === null || runAge > RUN_STALE_MS;
+            const flowsStale = data.investedSource !== "kraken-ledger" || flowsAge === null || flowsAge > FLOWS_STALE_MS;
+            return (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2 text-[10px]">
+                <span className="uppercase tracking-wider text-muted-foreground/40">Health</span>
+                <span className={runStale ? "text-amber-400/85 font-semibold" : "text-muted-foreground/50"}>
+                  last check {ago(data.lastRunTs)}{runStale ? " ⚠ overdue" : ""}
+                </span>
+                <span className="text-muted-foreground/25">·</span>
+                <span className={flowsStale ? "text-amber-400/85 font-semibold" : "text-muted-foreground/50"}>
+                  deposits figure {ago(data.flowsAsOf)}{flowsStale ? " ⚠ stale" : ""}
+                </span>
+                <span className="text-muted-foreground/25">·</span>
+                <span className="text-muted-foreground/50">checks every 30 min</span>
+              </div>
+            );
+          })()}
 
           {/* Password-gated real-money arm/disarm */}
           <div className="border-t border-border/60 pt-3 mt-1">
