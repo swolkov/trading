@@ -434,7 +434,10 @@ export interface KrakenStatus {
   enabled: boolean;
   validateOnly: boolean;
   usd: number;
-  holdings: { coin: string; amount: number; price: number; value: number; aboveTrend: boolean }[];
+  // exitPrice/pctToExit answer the question the panel could not previously answer: how far does
+  // this have to fall before the strategy actually does something? It is the hysteresis-adjusted
+  // 50-day line, i.e. the SAME number the agent tests against, not an approximation of it.
+  holdings: { coin: string; amount: number; price: number; value: number; aboveTrend: boolean; sma50: number | null; exitPrice: number | null; pctToExit: number | null }[];
   totalValue: number;
   totalInvested: number; // = deposited capital, so panel P&L = totalValue - deposited (honest)
   investedSource: "kraken-ledger" | "config";  // where that figure came from
@@ -452,6 +455,9 @@ export interface KrakenStatus {
   buyCount: number;
   config: Record<string, string>;
   lastRun?: unknown;
+  lastRunTs?: string;      // when the agent last completed a tick
+  cronLastRun?: string;    // when the cron last fired (differs from lastRunTs if a run threw)
+  flowsAsOf?: string;      // when deposited capital was last read from Kraken's ledger
   error?: string;
 }
 
@@ -464,18 +470,31 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
   let lastRun: unknown = null;
   try { const lr = await prisma.agentConfig.findUnique({ where: { key: "kraken_last_run" } }); if (lr?.value) lastRun = JSON.parse(lr.value); } catch { /* ignore */ }
   const invested = await resolveInvestedCapital(cfg);
+  let cronLastRun: string | undefined;
+  let flowsAsOf: string | undefined = invested.asOf;
+  try {
+    const c = await prisma.agentConfig.findUnique({ where: { key: "kraken_cron_last_run" } });
+    if (c?.value) cronLastRun = c.value;
+    const f = await prisma.agentConfig.findUnique({ where: { key: FLOWS_KEY } });
+    if (f?.value) flowsAsOf = JSON.parse(f.value)?.ts ?? flowsAsOf;
+  } catch { /* freshness is informational — never break the panel over it */ }
+  const lastRunTs = (lastRun as { ts?: string } | null)?.ts;
   const base: KrakenStatus = {
     connected: krakenConfigured(), enabled: cfg.enabled, validateOnly: cfg.validateOnly,
     usd: 0, holdings: [], totalValue: 0,
     totalInvested: invested.usd, investedSource: invested.source, investedApproximate: invested.approximate,
     allocPct: cfg.allocPct, targetPerCoin: 0, strategyValue: 0, strategyCapital: 0, strategyPnl: 0,
     otherValue: 0, otherCost: 0, otherAssets: [], splitOk: false, mode: cfg.mode,
-    buyCount, config, lastRun,
+    buyCount, config, lastRun, lastRunTs, cronLastRun, flowsAsOf,
   };
   if (!krakenConfigured()) return base;
 
   const trend: Record<string, boolean> = {};
-  try { const scan = await getDipScan(); for (const r of scan?.rows || []) trend[r.symbol] = r.aboveTrend; } catch { /* ignore */ }
+  const sma: Record<string, number | null> = {};
+  try {
+    const scan = await getDipScan();
+    for (const r of scan?.rows || []) { trend[r.symbol] = r.aboveTrend; sma[r.symbol] = r.sma50; }
+  } catch { /* ignore */ }
 
   try {
     const bal = await getKrakenBalance();
@@ -487,7 +506,13 @@ export async function getKrakenStatus(): Promise<KrakenStatus> {
       try { price = await getKrakenPrice(coin); } catch { /* skip price */ }
       const value = amt * price;
       if (value < MIN_HOLD_USD) continue;
-      base.holdings.push({ coin, amount: amt, price, value, aboveTrend: trend[coin] ?? true });
+      // While a position is HELD the agent stays in until price < sma * (1 - TREND_HYSTERESIS),
+      // so that product IS the exit price. Null when the SMA is unavailable — better to show
+      // nothing than a confident wrong level.
+      const s50 = sma[coin] ?? null;
+      const exitPrice = s50 && s50 > 0 ? s50 * (1 - TREND_HYSTERESIS) : null;
+      const pctToExit = exitPrice && price > 0 ? (exitPrice / price - 1) * 100 : null;
+      base.holdings.push({ coin, amount: amt, price, value, aboveTrend: trend[coin] ?? true, sma50: s50, exitPrice, pctToExit });
     }
     base.strategyValue = base.usd + base.holdings.reduce((s, h) => s + h.value, 0);
     // Anything held that the strategy does NOT trade — a manual buy, leftover dust. Deposited capital
