@@ -386,6 +386,16 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
   } catch { /* best-effort */ }
   if (lockHeld) await releaseLock();
 
+  // Keep the deposited-capital baseline fresh. It was previously recomputed ONLY inside
+  // getKrakenStatus, i.e. only when somebody opened the Kraken page — so the P&L denominator sat two
+  // days stale at $822.70 after a $3,000 deposit landed, and the page reported that deposit as
+  // profit. The cron is the only thing guaranteed to run, so it has to own the refresh.
+  // resolveInvestedCapital is TTL-guarded (1h), so this is a cheap no-op on most runs, and it is
+  // best-effort: a display figure must never be able to affect trading.
+  if (!dry) {
+    try { await resolveInvestedCapital(cfg); } catch { /* display-only, never block a run */ }
+  }
+
   try {
     await prisma.agentConfig.upsert({
       where: { key: "kraken_last_run" },
