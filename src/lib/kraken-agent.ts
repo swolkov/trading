@@ -9,7 +9,7 @@
 // Honest: a real, disciplined edge with managed drawdown — not a $500-to-fortune machine.
 import { prisma } from "./db";
 import { getDipScan, runDipScan, type DipRow } from "./crypto-dip-scanner";
-import { krakenConfigured, getKrakenBalance, getKrakenAvailable, getKrakenPrice, krakenBuyMarket, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets, getKrakenBookSplit } from "./kraken";
+import { krakenConfigured, getKrakenBalance, getKrakenAvailable, getKrakenPrice, krakenBuyMarket, krakenBuyMakerAttempt, krakenCancelStaleOrders, krakenSettledCost, krakenSellMarket, krakenBalanceAsset, getKrakenCashFlows, valueKrakenAssets, getKrakenBookSplit } from "./kraken";
 import { logTradeToJournal, logDecision, loadAgentContext } from "./vault";
 import { sendNotification } from "./notifications";
 
@@ -22,9 +22,11 @@ interface KrakenConfig {
   validateOnly: boolean;
   mode: string;          // "trend" (50-day follower) | "dca" (daily accumulate & hold)
   dcaUsd: number;        // per-coin $ bought each day in DCA mode
+  makerOrders: boolean;  // rest buys at the bid to pay maker (0.40%) instead of taker (0.80%)
+  makerWaitMs: number;   // how long to wait for the maker fill before settling at market
 }
 
-const KEYS = ["kraken_enabled", "kraken_coins", "kraken_alloc_pct", "kraken_per_coin_usd", "kraken_start_capital", "kraken_validate_only", "kraken_mode", "kraken_dca_usd"];
+const KEYS = ["kraken_enabled", "kraken_coins", "kraken_alloc_pct", "kraken_per_coin_usd", "kraken_start_capital", "kraken_validate_only", "kraken_mode", "kraken_dca_usd", "kraken_maker_orders", "kraken_maker_wait_ms"];
 const MIN_HOLD_USD = 5;    // holdings above this = "in a position" (ignores dust)
 const MIN_ORDER_USD = 10;  // don't place sub-$10 orders
 // Per-coin target as a share of account value. Sizing off a FIXED dollar figure meant the account
@@ -39,6 +41,29 @@ const FLOWS_TTL_MS = 60 * 60 * 1000;   // re-read the deposit ledger at most hou
 // flipping state when price is clearly across the line (±1.5%) fixes it. Backtested on BTC+ETH daily:
 // ~40% fewer trades AND higher net return vs a 0% band. In the dead zone, keep the current position.
 const TREND_HYSTERESIS = 0.015; // 1.5%
+// Maker retries before giving up and crossing the spread. A post-only limit at the bid usually fills
+// within a cycle, but a one-way market can leave it unfilled indefinitely — and cash that never
+// deploys is a worse outcome than paying the taker fee. After this many consecutive misses the run
+// places a plain market order INSTEAD of (never in addition to) a maker order.
+const MAKER_MAX_MISSES = 4;
+const MAKER_MISS_KEY = "kraken_maker_misses";
+// Only one run may hold live orders at a time. Without this, a manual trigger firing during a cron
+// run sees the cash hold from the pending maker order but NOT the pending position (it is not
+// settled yet), computes the same deficit, and places a second buy for the same target.
+const RUN_LOCK_KEY = "kraken_run_lock";
+const RUN_LOCK_TTL_MS = 5 * 60 * 1000;
+// Must stay < RUN_LOCK_TTL_MS. If a run dies holding a resting maker order, the next run must clear
+// that order BEFORE it is allowed to size a new buy — otherwise it sees the cash freed by the
+// expired lock but not the pending position, and buys the same target twice.
+const STALE_ORDER_AGE_MS = 3 * 60 * 1000;
+
+async function releaseLock(): Promise<void> {
+  try {
+    await prisma.agentConfig.upsert({
+      where: { key: RUN_LOCK_KEY }, update: { value: "" }, create: { key: RUN_LOCK_KEY, value: "" },
+    });
+  } catch { /* lock self-expires after RUN_LOCK_TTL_MS */ }
+}
 
 async function loadConfig(): Promise<KrakenConfig> {
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: KEYS } } });
@@ -49,13 +74,21 @@ async function loadConfig(): Promise<KrakenConfig> {
   const rawPct = parseFloat(c.kraken_alloc_pct);
   return {
     enabled: c.kraken_enabled === "true",
-    coins: (c.kraken_coins || "BTC/USD,ETH/USD").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+    // Deduped: a repeated symbol would be processed twice in one run, and after the maker miss
+    // counter tips over it could place a maker attempt AND a market order for the same allocation.
+    coins: [...new Set((c.kraken_coins || "BTC/USD,ETH/USD").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean))],
     allocPct: Number.isFinite(rawPct) ? Math.max(0, Math.min(rawPct, 0.95)) : DEFAULT_ALLOC_PCT,
     perCoinUsd: parseFloat(c.kraken_per_coin_usd) || 250,
     startCapital: parseFloat(c.kraken_start_capital) || 500,
     validateOnly: c.kraken_validate_only !== "false", // default TRUE — safe until explicitly armed
     mode: (c.kraken_mode || "trend").toLowerCase(),
     dcaUsd: parseFloat(c.kraken_dca_usd) || 10,
+    // Maker-first buying is ON by default: it can only reduce the fee we pay, and it falls back to
+    // a market order for anything unfilled. Set kraken_maker_orders="false" to revert to pure market.
+    makerOrders: c.kraken_maker_orders !== "false",
+    // 15s default, hard-capped at 30s. With 2 coins the worst case is 60s of waiting inside the
+    // route's 300s budget, leaving ample room for the scan, balance and ledger calls.
+    makerWaitMs: Math.max(0, Math.min(parseFloat(c.kraken_maker_wait_ms) || 15000, 30000)),
   };
 }
 
@@ -130,13 +163,71 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
     if (regime) details.push(`Brain regime: ${regime}`);
   } catch { /* brain optional — never block a run on it */ }
 
+  // Safety net for maker orders: if a previous run died mid-wait (function timeout, deploy) it could
+  // leave one of OUR limit buys resting, tying up cash indefinitely. Clear anything of ours older
+  // than STALE_ORDER_AGE_MS BEFORE reading balances, so freed cash shows up as spendable this run.
+  // Scoped by userref — Spencer's own manual orders in this account are never touched.
+  // Runs regardless of cfg.makerOrders: disabling maker mode must not strand cash behind an order
+  // a previous run failed to cancel. STALE_ORDER_AGE_MS is deliberately SHORTER than RUN_LOCK_TTL_MS
+  // so a dead run's order is always cleared before another run can acquire the expired lock.
+  if (!dry && !cfg.validateOnly) {
+    try {
+      const { cancelled } = await krakenCancelStaleOrders(STALE_ORDER_AGE_MS / 1000);
+      if (cancelled > 0) details.push(`Cleared ${cancelled} stale bot order(s) from a previous run`);
+    } catch (e) { details.push(`stale-order sweep skipped: ${e}`); }
+  }
+
+  // Acquire the single-run lock BEFORE any sizing or ordering. Released via releaseLock() on every
+  // path that returns after acquisition (balance error and normal completion).
+  const live = !dry && !cfg.validateOnly;
+  let lockHeld = false;
+  if (live) {
+    // ATOMIC compare-and-swap, not read-then-write. A findUnique followed by an upsert lets two
+    // concurrent invocations both observe a free lock and both proceed. updateMany returns the
+    // number of rows it actually changed, so exactly one caller can win. ISO-8601 strings compare
+    // lexicographically in the same order as the instants they encode, so `value < cutoff` is a
+    // valid expiry test.
+    const now = new Date().toISOString();
+    const cutoff = new Date(Date.now() - RUN_LOCK_TTL_MS).toISOString();
+    try {
+      await prisma.agentConfig.upsert({
+        where: { key: RUN_LOCK_KEY }, update: {}, create: { key: RUN_LOCK_KEY, value: "" },
+      });
+      const won = await prisma.agentConfig.updateMany({
+        where: { key: RUN_LOCK_KEY, OR: [{ value: "" }, { value: { lt: cutoff } }] },
+        data: { value: now },
+      });
+      if (won.count !== 1) {
+        details.push("Another run holds the lock — skipping this tick to avoid duplicate orders");
+        return res;
+      }
+      lockHeld = true;
+    } catch (e) {
+      // FAIL CLOSED. If we cannot prove we hold the lock we must not place orders, because the
+      // failure mode of proceeding is buying the same target twice with real money.
+      details.push(`run-lock unavailable (${e}) — skipping this tick rather than risk a duplicate order`);
+      return res;
+    }
+  }
+
+  // Consecutive unfilled maker attempts per coin, so cash cannot sit undeployed forever.
+  let makerMisses: Record<string, number> = {};
+  try {
+    const row = await prisma.agentConfig.findUnique({ where: { key: MAKER_MISS_KEY } });
+    if (row?.value) makerMisses = JSON.parse(row.value);
+  } catch { /* start fresh */ }
+
   // TWO balances, deliberately. `bal` is everything owned — the right basis for valuing positions
   // and computing equity. `avail` subtracts anything committed to an open order — the only safe
   // basis for SIZING an order. Using the total is what produced a live
   // "EOrder:Insufficient funds" rejection on 2026-08-23.
   let bal: Record<string, number> = {};
   let avail: Record<string, number> = {};
-  try { bal = await getKrakenBalance(); } catch (e) { details.push(`balance error: ${e}`); return res; }
+  try { bal = await getKrakenBalance(); } catch (e) {
+    details.push(`balance error: ${e}`);
+    if (lockHeld) await releaseLock();          // don't hold the lock for a full TTL over a read error
+    return res;
+  }
   try { avail = await getKrakenAvailable(); } catch { avail = bal; /* fall back to total rather than stall */ }
   const totalUsd = bal.ZUSD ?? bal.USD ?? 0;
   let usd = Math.min(avail.ZUSD ?? avail.USD ?? totalUsd, totalUsd);   // spendable cash
@@ -224,12 +315,43 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
         }
         if (dry) { details.push(`[DRY] ${coin}: would BUY $${alloc.toFixed(0)} (above 50-day, ${isHolding ? "topping up" : "entering"} toward $${target.toFixed(0)})`); continue; }
         try {
-          const order = await krakenBuyMarket(coin, alloc, price, cfg.validateOnly);
-          details.push(`${coin}: ${cfg.validateOnly ? "VALIDATED buy" : "BOUGHT"} $${alloc.toFixed(0)} → ${order.volume} @ $${price.toFixed(2)} (${isHolding ? "trend top-up" : "trend entry"})`);
-          if (!cfg.validateOnly) {
-            usd -= alloc; res.buys++;
-            await logTrade(coin, "kraken_buy", alloc, price, `Trend ${isHolding ? "top-up" : "entry"}: above 50-day. Bought $${alloc.toFixed(0)} = ${order.volume} @ $${price.toFixed(2)} toward $${target.toFixed(0)} target.`, order.txid?.[0]);
-            await logDecision("kraken-trend", "ENTRY", `KRK:${coin}`, `Trend ${isHolding ? "top-up" : "entry"} (above 50-day) — bought $${alloc.toFixed(0)}`, 3).catch(() => {});
+          // EXACTLY ONE order per coin per run. Either a post-only maker attempt OR a market order,
+          // never both — that is what makes a double-spend structurally impossible here.
+          const misses = makerMisses[coin] ?? 0;
+          const tryMaker = cfg.makerOrders && !cfg.validateOnly && misses < MAKER_MAX_MISSES;
+          let spent = 0, volume = 0, txid: string | undefined, note: string;
+
+          if (tryMaker) {
+            const r = await krakenBuyMakerAttempt(coin, alloc, cfg.makerWaitMs);
+            volume = r.volume; txid = r.txid; note = r.note;
+            if (r.filled) { spent = r.filledUsd; makerMisses[coin] = 0; }
+            else { makerMisses[coin] = misses + 1; }
+          } else {
+            const mk = await krakenBuyMarket(coin, alloc, price, cfg.validateOnly);
+            volume = mk.volume; txid = mk.txid?.[0];
+            // Book what Kraken actually charged (cost + fee), not what we intended to spend — a
+            // market order can fill away from the snapshot price. Falls back to `alloc` (the
+            // long-standing behaviour) if the fill cannot be read, so this can only improve accuracy.
+            const settled = cfg.validateOnly || !txid ? null : await krakenSettledCost(txid);
+            spent = cfg.validateOnly ? 0 : (settled ?? alloc);
+            note = !cfg.makerOrders ? "market (maker disabled)"
+              : cfg.validateOnly ? "validate-only"
+              : `market (after ${misses} unfilled maker attempts)`;
+            makerMisses[coin] = 0;
+          }
+
+          if (spent > 0 || cfg.validateOnly) {
+            details.push(`${coin}: ${cfg.validateOnly ? "VALIDATED buy" : "BOUGHT"} $${(spent || alloc).toFixed(0)} → ${volume} @ $${price.toFixed(2)} (${isHolding ? "trend top-up" : "trend entry"}${tryMaker ? ", MAKER" : ""}) — ${note}`);
+          } else {
+            details.push(`${coin}: no fill — ${note} (attempt ${makerMisses[coin]}/${MAKER_MAX_MISSES}, market order after that)`);
+          }
+
+          // Book what ACTUALLY filled, never what was intended: an unfilled maker attempt must not
+          // produce a trade record or move the cash figure. The next run re-reads real balances.
+          if (!cfg.validateOnly && spent > 0) {
+            usd -= spent; res.buys++;
+            await logTrade(coin, "kraken_buy", spent, price, `Trend ${isHolding ? "top-up" : "entry"}: above 50-day. Bought $${spent.toFixed(0)} = ${volume} @ $${price.toFixed(2)} toward $${target.toFixed(0)} target.`, txid);
+            await logDecision("kraken-trend", "ENTRY", `KRK:${coin}`, `Trend ${isHolding ? "top-up" : "entry"} (above 50-day) — bought $${spent.toFixed(0)}`, 3).catch(() => {});
           }
         } catch (e) { details.push(`${coin}: buy error — ${e}`); }
       }
@@ -252,6 +374,17 @@ export async function runKrakenAgent(opts?: { dry?: boolean }): Promise<KrakenAg
       }
     }
   }
+
+  // Persist maker miss counters and RELEASE the run lock. Both are best-effort: the lock also
+  // self-expires after RUN_LOCK_TTL_MS so a crashed run can never wedge the bot permanently.
+  try {
+    await prisma.agentConfig.upsert({
+      where: { key: MAKER_MISS_KEY },
+      update: { value: JSON.stringify(makerMisses) },
+      create: { key: MAKER_MISS_KEY, value: JSON.stringify(makerMisses) },
+    });
+  } catch { /* best-effort */ }
+  if (lockHeld) await releaseLock();
 
   try {
     await prisma.agentConfig.upsert({

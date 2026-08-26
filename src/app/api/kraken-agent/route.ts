@@ -1,6 +1,6 @@
 import { getKrakenStatus, runKrakenAgent } from "@/lib/kraken-agent";
 
-export const maxDuration = 60;
+export const maxDuration = 300; // matches the cron route — maker-first buys wait for a fill
 
 // Read-only status for the /kraken page: connection, cash, holdings, total invested, buys.
 export async function GET() {

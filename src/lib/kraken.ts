@@ -333,6 +333,197 @@ export async function krakenBuyMarket(
   return { placed: !validate, volume: parseFloat(volume), txid: res.txid as string[] | undefined, descr };
 }
 
+// ---------------------------------------------------------------------------------------------
+// MAKER ORDERS
+//
+// Every order used to be `ordertype: "market"`, which pays Kraken's TAKER fee on both sides.
+// At the entry tier that is 0.80% taker vs 0.40% maker, so resting a post-only limit instead of
+// crossing the spread saves ~0.40% per side. Measured against 16 dead edge families, this is the
+// only certain improvement available — it does not depend on predicting anything.
+//
+// Applied to BUYS ONLY, deliberately. An entry has no urgency: if the limit does not fill this
+// cycle we re-price on the next one. An EXIT does — it fires because the trend broke, and being
+// 30 minutes late to sell a falling coin costs far more than the 0.40% saved. Exits stay market.
+// ---------------------------------------------------------------------------------------------
+
+// Tags every order this bot places. Spencer trades his own coins in the same account, so cancels
+// MUST be scoped to our own orders — never touch his resting manual orders. (See the two-book rule.)
+export const KRAKEN_USERREF = 770077;
+
+type PairMeta = { priceDecimals: number; lotDecimals: number; orderMin: number };
+const pairMetaCache = new Map<string, PairMeta>();
+
+// Kraken REJECTS a limit price carrying more decimals than the pair allows. An unrounded price is
+// exactly the failure that produced naked positions on the futures side — round before sending.
+async function getPairMeta(pair: string): Promise<PairMeta> {
+  const hit = pairMetaCache.get(pair);
+  if (hit) return hit;
+  const res = await krakenPublic("AssetPairs", { pair });
+  const first = Object.values(res)[0] as
+    | { pair_decimals?: number; lot_decimals?: number; ordermin?: string }
+    | undefined;
+  const meta: PairMeta = {
+    priceDecimals: first?.pair_decimals ?? 2,
+    lotDecimals: first?.lot_decimals ?? 8,
+    orderMin: parseFloat(first?.ordermin ?? "0") || 0,
+  };
+  pairMetaCache.set(pair, meta);
+  return meta;
+}
+
+// Best bid/ask. A post-only buy rests AT the bid so it is never the aggressor.
+export async function krakenTouch(symbol: string): Promise<{ bid: number; ask: number }> {
+  const pair = krakenPair(symbol);
+  const res = await krakenPublic("Ticker", { pair });
+  const first = Object.values(res)[0] as { a?: string[]; b?: string[] } | undefined;
+  return { bid: parseFloat(first?.b?.[0] ?? "0") || 0, ask: parseFloat(first?.a?.[0] ?? "0") || 0 };
+}
+
+// Post-only limit BUY resting at the bid. `post` makes Kraken REJECT rather than fill the order if
+// it would cross the spread, so we can never accidentally pay the taker fee.
+export async function krakenBuyLimitPostOnly(
+  symbol: string,
+  usd: number,
+  validate: boolean,
+): Promise<{ placed: boolean; volume: number; price: number; txid?: string[]; descr?: string }> {
+  const pair = krakenPair(symbol);
+  const { bid } = await krakenTouch(symbol);
+  if (!(bid > 0)) throw new Error(`no bid for ${symbol}`);
+  const meta = await getPairMeta(pair);
+  const price = Number(bid.toFixed(meta.priceDecimals));
+  const rawVol = usd / price;
+  const volume = Number(rawVol.toFixed(meta.lotDecimals));
+  if (meta.orderMin > 0 && volume < meta.orderMin) {
+    throw new Error(`volume ${volume} below Kraken minimum ${meta.orderMin} for ${symbol}`);
+  }
+  const params: Record<string, string> = {
+    pair,
+    type: "buy",
+    ordertype: "limit",
+    price: price.toFixed(meta.priceDecimals),
+    volume: volume.toFixed(meta.lotDecimals),
+    oflags: "post",
+    userref: String(KRAKEN_USERREF),
+  };
+  if (validate) params.validate = "true";
+  const res = await krakenPrivate("AddOrder", params);
+  const descr = (res.descr as { order?: string } | undefined)?.order;
+  return { placed: !validate, volume, price, txid: res.txid as string[] | undefined, descr };
+}
+
+type OpenOrder = { txid: string; userref?: number; opentm: number; pair: string; vol: number; volExec: number };
+
+export async function krakenOpenOrders(): Promise<OpenOrder[]> {
+  const res = await krakenPrivate("OpenOrders");
+  const open = (res.open ?? {}) as Record<string, {
+    userref?: number; opentm?: number; vol?: string; vol_exec?: string; descr?: { pair?: string };
+  }>;
+  return Object.entries(open).map(([txid, o]) => ({
+    txid,
+    userref: o.userref,
+    opentm: o.opentm ?? 0,
+    pair: o.descr?.pair ?? "",
+    vol: parseFloat(o.vol ?? "0") || 0,
+    volExec: parseFloat(o.vol_exec ?? "0") || 0,
+  }));
+}
+
+export async function krakenCancelOrder(txid: string): Promise<void> {
+  await krakenPrivate("CancelOrder", { txid });
+}
+
+// Cancel OUR unfilled resting orders older than maxAgeSec so the next cycle can re-price at the
+// current bid. Scoped by userref: orders Spencer placed by hand are never touched.
+export async function krakenCancelStaleOrders(maxAgeSec: number): Promise<{ cancelled: number; kept: number }> {
+  const orders = await krakenOpenOrders();
+  const now = Date.now() / 1000;
+  let cancelled = 0;
+  let kept = 0;
+  for (const o of orders) {
+    if (o.userref !== KRAKEN_USERREF) continue;      // not ours — leave it alone
+    if (now - o.opentm < maxAgeSec) { kept++; continue; }
+    try { await krakenCancelOrder(o.txid); cancelled++; } catch { /* already gone or filling */ }
+  }
+  return { cancelled, kept };
+}
+
+// Kraken reports `cost` (quote spent on the fill) and `fee` SEPARATELY. The USD actually debited is
+// cost + fee, so anything doing cash accounting must add them or it will under-count what was spent.
+export async function krakenOrderStatus(txid: string): Promise<{ status: string; volExec: number; cost: number; fee: number }> {
+  const res = await krakenPrivate("QueryOrders", { txid });
+  const o = (res as Record<string, { status?: string; vol_exec?: string; cost?: string; fee?: string }>)[txid];
+  return {
+    status: o?.status ?? "unknown",
+    volExec: parseFloat(o?.vol_exec ?? "0") || 0,
+    cost: parseFloat(o?.cost ?? "0") || 0,
+    fee: parseFloat(o?.fee ?? "0") || 0,
+  };
+}
+
+// Actual USD debited for a just-placed order: Kraken reports `cost` and `fee` separately, and a
+// market order can execute away from the price we sized against. Returns null if the fill cannot be
+// read, so callers fall back to the intended amount rather than booking a wrong number.
+export async function krakenSettledCost(txid: string, tries = 3): Promise<number | null> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const st = await krakenOrderStatus(txid);
+      if (st.status === "closed") return st.cost + st.fee;
+      if (st.status === "canceled" || st.status === "expired") return st.volExec > 0 ? st.cost + st.fee : 0;
+    } catch { /* retry */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return null;
+}
+
+// Maker-only buy attempt. Rests a post-only limit at the bid and waits briefly for a fill.
+//
+// CRITICAL DESIGN RULE: this function NEVER places a second order. An earlier version fell back to
+// a market order in the same invocation, which an adversarial review showed could double-spend in
+// three ways — an AddOrder whose response times out after Kraken accepted it, a CancelOrder that is
+// rate-limited while the limit still rests, and a cancel that races a fill. All three came from
+// inferring remote order state from local variables. Placing at most ONE order per invocation makes
+// double-spending impossible by construction rather than by careful reasoning.
+//
+// If it does not fill we cancel (best effort) and report filled:false. The caller simply retries on
+// the next 30-minute cycle; for a 50-day trend signal that delay is immaterial. Cash is never
+// stranded: any order still resting is excluded from spendable balance by BalanceEx, and the stale
+// sweep clears it next run.
+export async function krakenBuyMakerAttempt(
+  symbol: string,
+  usd: number,
+  waitMs: number,
+): Promise<{ filled: boolean; filledUsd: number; volume: number; txid?: string; price?: number; note: string }> {
+  let txid: string | undefined;
+  try {
+    const lim = await krakenBuyLimitPostOnly(symbol, usd, false);
+    txid = lim.txid?.[0];
+    if (!txid) return { filled: false, filledUsd: 0, volume: 0, note: "limit accepted but no txid returned" };
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const st = await krakenOrderStatus(txid);
+      if (st.status === "closed") {
+        // Kraken reports cost and fee separately; the actual USD debited is cost + fee.
+        return { filled: true, filledUsd: st.cost + st.fee, volume: st.volExec, txid, price: lim.price, note: `maker fill @ $${lim.price}` };
+      }
+      if (st.status === "canceled" || st.status === "expired") break;
+    }
+  } catch (e) {
+    // The order may or may not have landed. Do not guess — fall through to the cancel-and-report
+    // path below, which reconciles against Kraken rather than against local state.
+    if (!txid) return { filled: false, filledUsd: 0, volume: 0, note: `maker not placed (${e})` };
+  }
+  // Unfilled or partially filled: cancel and report exactly what Kraken says happened.
+  try { await krakenCancelOrder(txid!); } catch { /* may already be closed or cancelled */ }
+  try {
+    const st = await krakenOrderStatus(txid!);
+    if (st.volExec > 0) {
+      return { filled: true, filledUsd: st.cost + st.fee, volume: st.volExec, txid, note: `partial maker fill $${(st.cost + st.fee).toFixed(0)}` };
+    }
+  } catch { /* status unreadable — treat as no fill; the next run reconciles from real balances */ }
+  return { filled: false, filledUsd: 0, volume: 0, txid, note: "no maker fill — retry next cycle" };
+}
+
 // Place a market SELL of a base-currency volume (e.g. sell 0.02 ETH). validate=true tests only.
 export async function krakenSellMarket(
   symbol: string,
