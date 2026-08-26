@@ -1,7 +1,11 @@
 import { runKrakenAgent } from "@/lib/kraken-agent";
 import { prisma } from "@/lib/db";
 
-export const maxDuration = 60;
+// 300s (Vercel's current default ceiling), not 60s. Maker-first buying rests a limit order and
+// waits for the fill before settling any remainder at market; at 60s a two-coin run could be killed
+// mid-wait, leaving a resting order and an unlogged buy. The run still finishes in a few seconds
+// when nothing trades — this is headroom, not added cost.
+export const maxDuration = 300;
 
 // Kraken trend-follower cron — holds BTC/ETH above their 50-day average, sells to cash below.
 // Runs every 30 min (crypto is 24/7); see vercel.json.
