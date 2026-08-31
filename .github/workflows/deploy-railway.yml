@@ -1,24 +1,14 @@
 name: Deploy Futures Engine to Railway
 
+# RETIRED 2026-08-31 with the futures pivot to Kraken margin. The futures Railway services
+# (futures-engine-live / futures-engine / databento-sidecar) are stopped and the Databento
+# subscription is cancelled, so this pipeline can only ever FAIL — and it used to fire on
+# every push to main touching src/lib/** (which every margin change does), spamming failure
+# emails. Trigger changed to manual-only (workflow_dispatch) so it never auto-runs. The steps
+# are left intact, not deleted, so futures could be revived by flipping this back to `push`
+# and pointing PRICE_FEED at a live producer — but nothing runs it automatically anymore.
 on:
-  push:
-    branches: [main]
-    # The engine imports far more than the three files this list used to name — realtime-edges.ts
-    # (which edges exist at all), contract-months.ts (rollover), vault-session-gates.ts, databento.ts,
-    # session-time.ts, notifications, db... A change to any of those used to deploy NOTHING, with no
-    # error anywhere: the demo engine simply kept running the old code. Widened 2026-08-19 to the
-    # whole of src/lib and src/services. Over-deploying is free; a silent stale deploy is not.
-    paths:
-      - 'src/services/**'
-      - 'src/lib/**'
-      - 'sidecar/**'
-      - 'scripts/verify-sidecar-ready.ts'
-      - 'scripts/verify-engine-ready.ts'
-      - '.github/workflows/deploy-railway.yml'
-      - 'prisma/**'
-      - 'Dockerfile.engine'
-      - 'package.json'
-      - 'package-lock.json'
+  workflow_dispatch:
 
 concurrency:
   group: futures-railway-production
