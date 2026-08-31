@@ -2,35 +2,37 @@
 
 import useSWR from "swr";
 
-interface Order {
-  category: "kraken";
-  mode: "live";
+interface Fill {
   symbol: string;
   action: string;
-  size: number | null;
-  pnl: number | null;
+  price: number;
+  vol: number;
+  notional: number;
+  fee: number;
+  leveraged: boolean;
   time: string;
-  reason?: string | null;
 }
-interface Data { orders: Order[] }
+interface Data { orders: Fill[]; summary?: { total: number; totalFees: number; totalNotional: number } }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+const usd = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 
-// Kraken-only order log since the Aug 2026 futures retirement. All Kraken money is
-// real (no demo book), so there is no demo/live view toggle any more.
+// Every real Kraken fill (spot + margin), newest first — the raw-fills log for the margin era.
+// Replaced the retired trend-bot event log. All Kraken money is real (no demo book).
 export function UnifiedOrdersTable() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
   // Kraken account value AND deposited capital — same source the dashboard uses.
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
 
-  if (!data?.orders) return <div className="text-sm text-muted-foreground/60 py-6">Loading orders…</div>;
+  if (!data?.orders) return <div className="text-sm text-muted-foreground/60 py-6">Loading fills…</div>;
 
   const rows = data.orders;
   const krkVal = krk?.connected ? krk?.totalValue ?? null : null;
   // P&L must be balance-based (value − deposits), never a sum of the row log.
   const krkPnl = krkVal != null && krk?.totalInvested != null ? krkVal - krk.totalInvested : null;
+  const totalFees = data.summary?.totalFees ?? 0;
 
   return (
     <div className="space-y-4">
@@ -38,23 +40,24 @@ export function UnifiedOrdersTable() {
         <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded text-red-400/80 bg-red-500/[0.08]">
           🔴 Live · real money
         </span>
-        <span className="text-[10px] text-muted-foreground/45">{rows.length} orders · lifetime</span>
+        <span className="text-[10px] text-muted-foreground/45">{rows.length} fills · lifetime</span>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <Stat
           label="Kraken account P&L"
           value={krkPnl != null ? money(krkPnl) : "—"}
           cls={krkPnl != null ? col(krkPnl) : ""}
           sub={krkVal != null && krk?.totalInvested != null
-            ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} deposited → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} now`
+            ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} in → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} now`
             : "account unreachable"}
         />
-        <Stat label="Bot orders" value={`${rows.length}`} sub="trend-bot buys and sells, lifetime" />
+        <Stat label="Fills" value={`${rows.length}`} sub="real Kraken executions" />
+        <Stat label="Fees paid" value={`−$${totalFees.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} cls="text-red-400/80" sub="on these fills" />
       </div>
 
       {rows.length === 0 ? (
-        <p className="text-sm text-muted-foreground/55 py-6">No orders yet.</p>
+        <p className="text-sm text-muted-foreground/55 py-6">No fills yet.</p>
       ) : (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="max-h-[65vh] overflow-y-auto">
@@ -62,9 +65,12 @@ export function UnifiedOrdersTable() {
               <thead className="sticky top-0 bg-card border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground/45">
                 <tr>
                   <th className="text-left font-medium px-3 py-2">When</th>
-                  <th className="text-left font-medium px-2 py-2">Symbol</th>
-                  <th className="text-left font-medium px-2 py-2">Action</th>
-                  <th className="text-right font-medium px-3 py-2">Size</th>
+                  <th className="text-left font-medium px-2 py-2">Coin</th>
+                  <th className="text-left font-medium px-2 py-2">Side</th>
+                  <th className="text-right font-medium px-2 py-2">Price</th>
+                  <th className="text-right font-medium px-2 py-2">Size</th>
+                  <th className="text-right font-medium px-2 py-2">Value</th>
+                  <th className="text-right font-medium px-3 py-2">Fee</th>
                 </tr>
               </thead>
               <tbody>
@@ -73,13 +79,17 @@ export function UnifiedOrdersTable() {
                     <td className="px-3 py-1.5 text-muted-foreground/60 tabular-nums whitespace-nowrap">
                       {new Date(o.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(o.time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
                     </td>
-                    <td className="px-2 py-1.5 font-semibold">{o.symbol}</td>
-                    <td className="px-2 py-1.5 text-muted-foreground/70 capitalize" title={o.reason ?? undefined}>
+                    <td className="px-2 py-1.5 font-semibold">
+                      {o.symbol}
+                      {o.leveraged && <span className="ml-1 text-[8px] uppercase text-purple-400/70 align-top">margin</span>}
+                    </td>
+                    <td className={`px-2 py-1.5 font-medium capitalize ${o.action === "buy" ? "text-emerald-400" : "text-red-400"}`}>
                       {o.action}
                     </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground/70">
-                      {o.size != null ? `$${o.size}` : "—"}
-                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{o.price != null ? usd(o.price) : "—"}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/60">{o.vol != null ? o.vol.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "—"}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{o.notional != null ? usd(o.notional) : "—"}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-red-400/60">{o.fee ? `−${usd(o.fee)}` : "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -88,8 +98,8 @@ export function UnifiedOrdersTable() {
         </div>
       )}
       <p className="text-[10px] text-muted-foreground/40">
-        Trend-bot event log. The P&L above is balance-based (account value − deposits, from Kraken&apos;s own ledger) —
-        never a sum of these rows. Manual margin trades appear on the Margin Cockpit scoreboard, not here.
+        Every real Kraken fill (spot + margin), from Kraken&apos;s own trade history. The account P&L above is balance-based
+        (value − deposits), never a sum of these rows. Round-trip P&L and win rate are on the Margin Cockpit; this is the raw log.
       </p>
     </div>
   );

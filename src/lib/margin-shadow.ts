@@ -49,6 +49,7 @@ export async function ensureShadowColumns(): Promise<void> {
     "conviction text",                // low/med/high — set on auto-opened trades (confluence)
     "conviction_score double precision",
     "source text",                    // which strategy generated it: 'scanner' | 'manual'
+    "shadow_unrealized double precision",  // live mark-to-market P&L while open ("if closed now")
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -171,10 +172,16 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
     }
 
     if (exit == null) {
-      // Still open — persist the updated peak/stop so trailing continues next run.
+      // Still open — persist peak/stop for trailing, PLUS the live mark-to-market P&L: what
+      // this trade would net if closed right now (gross at current price − entry maker − exit
+      // taker − rollover accrued so far). Refreshed every 5 min so the log shows a live float.
+      const uGross = (dir * (now - entry)) / entry;
+      const uRoll = Math.ceil(ageH / 4);
+      const uNet = uGross - MAKER - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
+      const unrealized = uNet * perTradeUsd * lev;
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2 WHERE id=$3`,
-        peak, stopPx, r.id,
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3 WHERE id=$4`,
+        peak, stopPx, unrealized, r.id,
       );
       continue;
     }
@@ -188,7 +195,7 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
     const pnl = netPct * notional;
 
     await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5 WHERE id=$6`,
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL WHERE id=$6`,
       exit, pnl, reason, peak, stopPx, r.id,
     );
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction });
@@ -204,16 +211,17 @@ export interface ConvictionTier {
 // Tally of resolved shadow signals — the "would these signals have made money?" answer.
 export interface ShadowScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number;
-  avgWin: number; avgLoss: number; open: number; byConviction: ConvictionTier[];
+  avgWin: number; avgLoss: number; open: number; openUnrealized: number; byConviction: ConvictionTier[];
 }
 export async function shadowScore(): Promise<ShadowScore> {
   await ensureShadowColumns();
-  const [agg] = await prisma.$queryRawUnsafe<{ resolved: bigint; wins: bigint; total: number | null; open: bigint }[]>(
+  const [agg] = await prisma.$queryRawUnsafe<{ resolved: bigint; wins: bigint; total: number | null; open: bigint; openfloat: number | null }[]>(
     `SELECT
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
-       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open
+       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
+       COALESCE(sum(shadow_unrealized) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open'),0)::float AS openfloat
      FROM tradingview_alerts`,
   );
   const [wl] = await prisma.$queryRawUnsafe<{ avgwin: number | null; avgloss: number | null }[]>(
@@ -250,6 +258,7 @@ export async function shadowScore(): Promise<ShadowScore> {
     avgWin: wl.avgwin || 0,
     avgLoss: wl.avgloss || 0,
     open: Number(agg.open),
+    openUnrealized: agg.openfloat || 0,
     byConviction,
   };
 }
@@ -350,18 +359,18 @@ export async function edgeBreakdowns(): Promise<EdgeBreakdowns> {
 export interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
   leverage: number | null; conviction: string | null; entry: number | null;
-  exit: number | null; pnl: number | null; status: string; reason: string | null;
+  exit: number | null; pnl: number | null; unrealized: number | null; status: string; reason: string | null;
 }
 export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
   await ensureShadowColumns();
   const rows = await prisma.$queryRawUnsafe<{
     id: number; time: Date; source: string | null; symbol: string; side: string;
     leverage: number | null; conviction: string | null; mark_price: number | null;
-    shadow_exit: number | null; shadow_pnl: number | null; shadow_status: string | null;
-    shadow_reason: string | null;
+    shadow_exit: number | null; shadow_pnl: number | null; shadow_unrealized: number | null;
+    shadow_status: string | null; shadow_reason: string | null;
   }[]>(
     `SELECT id, time, source, symbol, side, leverage, conviction, mark_price,
-            shadow_exit, shadow_pnl, shadow_status, shadow_reason
+            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason
      FROM tradingview_alerts
      WHERE side IN ('buy','sell')
      ORDER BY time DESC LIMIT $1`,
@@ -377,6 +386,7 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     conviction: r.conviction,
     entry: r.mark_price,
     exit: r.shadow_exit,
+    unrealized: r.shadow_status === "resolved" ? null : r.shadow_unrealized,
     pnl: r.shadow_pnl,
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
