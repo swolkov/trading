@@ -132,8 +132,10 @@ export async function GET(request: Request) {
     flat = flat && positions.length === 0;
     if (positions.length) {
       const { krakenPublic } = await import("@/lib/kraken");
+      const { publicPairFor } = await import("@/lib/kraken-pairs");
       let tick: Record<string, unknown> = {};
-      try { tick = await krakenPublic("Ticker", { pair: positions.map((p) => p.pair).join(",") }); } catch { tick = {}; }
+      // Venue-suffixed position pairs (XBTUSD:BTNL) must be priced via public pairs.
+      try { tick = await krakenPublic("Ticker", { pair: [...new Set(positions.map((p) => publicPairFor(p.pair)))].join(",") }); } catch { tick = {}; }
       for (const p of positions) {
         const t = Object.entries(tick).find(([k]) => k === p.pair || pairBase(k) === pairBase(p.pair))?.[1] as { c?: string[] } | undefined;
         const px = t?.c?.[0] ? parseFloat(t.c[0]) : null;

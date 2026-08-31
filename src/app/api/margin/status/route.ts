@@ -1,6 +1,6 @@
 import { krakenConfigured, krakenPublic } from "@/lib/kraken";
 import { getKrakenMarginHealth, getKrakenMarginPositions, liquidationEstimate } from "@/lib/kraken-margin";
-import { pairBase } from "@/lib/kraken-pairs";
+import { pairBase, publicPairFor } from "@/lib/kraken-pairs";
 
 // Live margin state for the cockpit: account health (margin level vs the 80%/40%
 // call/liquidation lines), open positions with exact liquidation prices, and the
@@ -17,11 +17,12 @@ export async function GET() {
       getKrakenMarginPositions(),
     ]);
 
-    // One Ticker call for all open pairs to price liquidation distance.
+    // One Ticker call for all open pairs to price liquidation distance. Venue-suffixed
+    // pair names (XBTUSD:BTNL) are not valid market-data pairs — map to public ones.
     let prices: Record<string, number> = {};
     if (positions.length) {
       try {
-        const tick = await krakenPublic("Ticker", { pair: positions.map((p) => p.pair).join(",") });
+        const tick = await krakenPublic("Ticker", { pair: [...new Set(positions.map((p) => publicPairFor(p.pair)))].join(",") });
         for (const [k, v] of Object.entries(tick)) {
           const c = (v as { c?: string[] })?.c?.[0];
           if (c) prices[k] = parseFloat(c);
