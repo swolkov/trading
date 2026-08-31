@@ -27,11 +27,14 @@ export const SCAN_COINS: { name: string; symbol: string }[] = [
   { name: "HYPE", symbol: "HYPE/USD" },
 ];
 
-// Timeframes scanned for awareness. 1m/3m are deliberately NOT scanned: at that cadence
-// every coin trips a threshold constantly and the alerts become noise. Those frames are
-// for Spencer's own eyes on the chart; the scanner covers 15m and slower.
-interface TfSpec { interval: 15 | 60 | 240 | 1440; label: string; movePct: number; realertMs: number }
+// Timeframes scanned for awareness. 5m is the fastest — it's where intraday breakouts
+// live, and the cron runs every 5 min so a break is caught within one bar. 1m/3m are
+// deliberately excluded: at that cadence every coin trips a threshold constantly and the
+// alerts become noise; those frames are for Spencer's own eyes while actively trading.
+// `realertMs` is per-timeframe so a persistent condition pings once, not every scan.
+interface TfSpec { interval: 5 | 15 | 60 | 240 | 1440; label: string; movePct: number; realertMs: number }
 const TIMEFRAMES: TfSpec[] = [
+  { interval: 5, label: "5m", movePct: 0.015, realertMs: 1 * 3600_000 },
   { interval: 15, label: "15m", movePct: 0.02, realertMs: 2 * 3600_000 },
   { interval: 60, label: "1h", movePct: 0.03, realertMs: 6 * 3600_000 },
   { interval: 240, label: "4h", movePct: 0.05, realertMs: 24 * 3600_000 },
@@ -75,12 +78,16 @@ function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: Krak
   if (rsi <= 25) out.push(mk("oversold", `RSI ${rsi.toFixed(0)} oversold`));
   else if (rsi >= 75) out.push(mk("overbought", `RSI ${rsi.toFixed(0)} overbought`));
 
-  // 20-bar high/low break (uses the last CLOSED bar's level vs the prior 20).
+  // 20-bar high/low break — detected the moment the FORMING bar pierces the level, not
+  // when the candle finally closes. Kraken's last OHLC row is the in-progress bar, so
+  // last.h/last.l are the live intrabar extremes: this catches a breakout mid-bar rather
+  // than up to a full bar late. (Awareness, so a wick poke is worth surfacing — Spencer
+  // decides whether it's a real break.)
   const window = prev.slice(-20);
   const hh = Math.max(...window.map((b) => b.h));
   const ll = Math.min(...window.map((b) => b.l));
-  if (last.c > hh) out.push(mk("breakout", `broke 20-bar high $${hh.toLocaleString()}`));
-  else if (last.c < ll) out.push(mk("breakdown", `broke 20-bar low $${ll.toLocaleString()}`));
+  if (last.h > hh) out.push(mk("breakout", `pierced 20-bar high $${hh.toLocaleString()}`));
+  else if (last.l < ll) out.push(mk("breakdown", `pierced 20-bar low $${ll.toLocaleString()}`));
 
   // Recent move over ~3 bars, timeframe-scaled.
   const back = bars[Math.max(0, bars.length - 4)].c;
