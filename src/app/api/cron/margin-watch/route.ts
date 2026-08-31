@@ -188,6 +188,26 @@ export async function GET(request: Request) {
     errors.push(`fast-move: ${e}`);
   }
 
+  // 5) Event guardrail: levered into a high-impact macro print within 24h → one warning.
+  if (!flat) {
+    try {
+      const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
+      const r = await fetch(`${base}/api/margin/news`, { signal: AbortSignal.timeout(8000) });
+      const news = await r.json() as { imminent?: { name: string; date: string; time: string }[] };
+      for (const e of news.imminent ?? []) {
+        const key = `event-${e.name}-${e.date}`;
+        if (shouldFire(state, key)) {
+          await sendNotification(
+            `📅 Heads up: ${e.name} lands ${e.date} ${e.time} and you have margin positions open. That print can move more than a 20x cushion.`,
+            "kraken",
+          );
+          state.alerts[key] = new Date().toISOString();
+          sent.push(key);
+        }
+      }
+    } catch { /* event feed is best-effort */ }
+  }
+
   await saveState(state);
 
   // Fail loudly: an unhealthy guardian is worse than none, because it feels like cover.

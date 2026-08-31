@@ -82,6 +82,11 @@ export default function MarginCockpitPage() {
   const { data: score } = useSWR<{ scoreboard: Scoreboard; recentTrips: Trip[] }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 },
   );
+  const { data: news } = useSWR<{
+    headlines: { title: string; link: string; source: string; publishedAt: string | null }[];
+    upcoming: { date: string; time: string; name: string; approx: boolean }[];
+    imminent: { date: string; time: string; name: string }[];
+  }>("/api/margin/news", fetcher, { refreshInterval: 300_000 });
 
   const symbol = wsnameToSymbol(pairWs);
   const positions = status?.positions ?? [];
@@ -147,6 +152,18 @@ export default function MarginCockpitPage() {
           </div>
         )}
       </div>
+
+      {/* ── Imminent high-impact event warning ── */}
+      {(news?.imminent?.length ?? 0) > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/[0.07] px-4 py-3">
+          <p className="text-xs font-bold text-amber-400">
+            ⚠️ High-impact event within ~24h: {news!.imminent.map((e) => `${e.name} (${e.date} ${e.time})`).join(" · ")}
+          </p>
+          <p className="text-[11px] text-muted-foreground/60 mt-0.5">
+            Volatility around these prints routinely exceeds a 20x position&apos;s entire 3% cushion. Being levered into one is a choice — make it knowingly.
+          </p>
+        </div>
+      )}
 
       {/* ── Open positions ── */}
       <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -304,6 +321,43 @@ export default function MarginCockpitPage() {
             <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Rollover cost while held</p>
             <p className="text-xl font-black tabular-nums">${(beNotional * rollover).toFixed(2)}</p>
             <p className="text-[10px] text-muted-foreground/50">~0.02% of notional every 4 hours</p>
+          </div>
+        </div>
+      </div>
+
+      {/* ── News & events ── */}
+      <div className="grid md:grid-cols-3 gap-3">
+        <div className="md:col-span-2 rounded-xl border border-border bg-card overflow-hidden">
+          <p className="px-4 py-2.5 border-b border-border text-xs font-bold">Crypto Headlines</p>
+          <div className="max-h-64 overflow-y-auto divide-y divide-border/40">
+            {(news?.headlines ?? []).length === 0 ? (
+              <p className="px-4 py-4 text-sm text-muted-foreground/40">Loading headlines…</p>
+            ) : (
+              news!.headlines.map((h, i) => (
+                <a key={i} href={h.link} target="_blank" rel="noreferrer" className="block px-4 py-2 hover:bg-white/[0.02]">
+                  <p className="text-[12px] leading-snug">{h.title}</p>
+                  <p className="text-[9px] text-muted-foreground/40 mt-0.5">
+                    {h.source}{h.publishedAt ? ` · ${new Date(h.publishedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
+                  </p>
+                </a>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <p className="px-4 py-2.5 border-b border-border text-xs font-bold">High-Impact Calendar</p>
+          <div className="p-3 space-y-2">
+            {(news?.upcoming ?? []).length === 0 ? (
+              <p className="text-[11px] text-muted-foreground/40">Nothing major in the next 2 weeks.</p>
+            ) : (
+              news!.upcoming.map((e, i) => (
+                <div key={i} className="flex items-center justify-between text-[11px]">
+                  <span className="font-semibold">{e.name}</span>
+                  <span className="text-muted-foreground/60 tabular-nums">{e.date}{e.approx ? " ~" : ""}</span>
+                </div>
+              ))
+            )}
+            <p className="text-[9px] text-muted-foreground/35 pt-1">~ = date approximate; the daily brief verifies exact times.</p>
           </div>
         </div>
       </div>
