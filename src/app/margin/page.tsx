@@ -88,6 +88,8 @@ export default function MarginCockpitPage() {
     upcoming: { date: string; time: string; name: string; approx: boolean }[];
     imminent: { date: string; time: string; name: string }[];
   }>("/api/margin/news", fetcher, { refreshInterval: 300_000 });
+  const { data: sig } = useSWR<{ signals: { ts: string; coin: string; timeframe: string; kind: string; detail: string; price: number }[] }>(
+    "/api/margin/signals", fetcher, { refreshInterval: 120_000 });
 
   const symbol = wsnameToSymbol(pairWs);
   const positions = status?.positions ?? [];
@@ -213,6 +215,41 @@ export default function MarginCockpitPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+      </div>
+
+      {/* ── Live scanner signals ── */}
+      <div className="rounded-xl border border-border bg-card overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+          <p className="text-xs font-bold">🔎 Live Signals — all margin coins, all timeframes</p>
+          <p className="text-[10px] text-muted-foreground/45">awareness only · scans every 15 min · not trade advice</p>
+        </div>
+        {(sig?.signals?.length ?? 0) === 0 ? (
+          <p className="px-4 py-4 text-sm text-muted-foreground/40">No notable signals in the last 24h. The scanner is watching {`{`}BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK, LTC, DOT, SUI, AAVE, HYPE{`}`} on 15m/1h/4h/daily.</p>
+        ) : (
+          <div className="max-h-56 overflow-y-auto divide-y divide-border/40">
+            {sig!.signals.map((s, i) => {
+              const bullish = s.kind === "oversold" || s.kind === "breakout" || s.kind === "move-up";
+              const bearish = s.kind === "overbought" || s.kind === "breakdown" || s.kind === "move-down";
+              return (
+                <button
+                  key={i}
+                  onClick={() => { setPairWs(`${s.coin === "BTC" ? "BTC" : s.coin}/USD`); }}
+                  className="w-full flex items-center gap-3 px-4 py-1.5 hover:bg-white/[0.02] text-left"
+                >
+                  <span className="text-[10px] text-muted-foreground/45 tabular-nums w-16 shrink-0">
+                    {new Date(s.ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                  </span>
+                  <span className="font-bold text-[12px] w-12 shrink-0">{s.coin}</span>
+                  <span className="text-[10px] text-muted-foreground/50 w-8 shrink-0">{s.timeframe}</span>
+                  <span className={`text-[12px] flex-1 ${bullish ? "text-emerald-400" : bearish ? "text-red-400" : "text-muted-foreground/80"}`}>
+                    {s.detail}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground/40 tabular-nums">${s.price.toLocaleString()}</span>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
