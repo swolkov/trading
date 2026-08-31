@@ -1,68 +1,12 @@
 {
   "crons": [
     {
-      "path": "/api/cron/premarket",
-      "schedule": "0 13 * * 1-5"
-    },
-    {
       "path": "/api/cron/kraken",
       "schedule": "*/30 * * * *"
     },
     {
-      "path": "/api/cron/futures",
-      "schedule": "*/10 * * * 0-5"
-    },
-    {
-      "path": "/api/cron/review",
-      "schedule": "30 20 * * 1-5"
-    },
-    {
-      "path": "/api/cron/watchdog",
+      "path": "/api/cron/margin-watch",
       "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/regime-transition",
-      "schedule": "0 13,15,17,19 * * 1-5"
-    },
-    {
-      "path": "/api/cron/events",
-      "schedule": "0 12 * * 1-5"
-    },
-    {
-      "path": "/api/cron/execution-review",
-      "schedule": "0 21 * * 1-5"
-    },
-    {
-      "path": "/api/cron/walk-forward",
-      "schedule": "0 22 * * 0"
-    },
-    {
-      "path": "/api/cron/synthesis",
-      "schedule": "0 16,21,1 * * 1-5"
-    },
-    {
-      "path": "/api/cron/orchestrator",
-      "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/cron/warm-bars",
-      "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/cron/token-refresh",
-      "schedule": "0 4,16 * * *"
-    },
-    {
-      "path": "/api/cron/daily-research",
-      "schedule": "30 21 * * 1-5"
-    },
-    {
-      "path": "/api/cron/shadow-resolve",
-      "schedule": "*/10 * * * *"
-    },
-    {
-      "path": "/api/cron/daily-swing",
-      "schedule": "5 21 * * 1-5"
     }
   ]
 }

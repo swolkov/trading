@@ -3,9 +3,15 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { isPublicPath } from "../src/lib/route-access";
 
-test("only intended investor and cron paths are public", () => {
-  for (const pathname of ["/sign-in", "/fund", "/proof", "/api/fund/stats", "/api/cron/futures"]) {
+test("only sign-in, cron, and webhook paths are public", () => {
+  for (const pathname of ["/sign-in", "/api/cron/kraken", "/api/cron/margin-watch", "/api/webhook/tradingview"]) {
     assert.equal(isPublicPath(pathname), true, pathname);
+  }
+});
+
+test("the retired public futures track record is no longer public", () => {
+  for (const pathname of ["/fund", "/proof", "/api/fund/stats"]) {
+    assert.equal(isPublicPath(pathname), false, pathname);
   }
 });
 

@@ -7,31 +7,16 @@ import { useState, useEffect } from "react";
 import useSWR from "swr";
 import {
   LayoutDashboard,
-  BarChart3,
+  CandlestickChart,
   ClipboardList,
-  BookOpen,
-  TrendingUp,
-  Bot,
-  Link2,
-  Brain,
-  Layers,
-  Calendar,
-  FlaskConical,
-  Eye,
-  Search,
-  Sparkles,
-  Crosshair,
-  Sunrise,
-  Wallet,
-  PlugZap,
   Bitcoin,
   Activity,
 } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Curated IA around the two live pillars (Futures / Kraken). The Alpaca equities/options
-// brokerage integration was removed end-to-end (owner uses Fidelity off-platform).
+// Curated IA around the single live pillar (Kraken crypto). Futures/Tradovate was
+// retired Aug 2026 (pages redirect home via proxy.ts); Alpaca was removed earlier.
 const sections = [
   {
     label: "OVERVIEW",
@@ -42,25 +27,15 @@ const sections = [
   {
     label: "TRADING",
     links: [
-      { href: "/futures", label: "Futures", icon: BarChart3, broker: "Tradovate" },
+      { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart, broker: "Kraken" },
+      { href: "/kraken", label: "Trend Bot", icon: Bitcoin, broker: "Kraken" },
       { href: "/orders", label: "Orders", icon: ClipboardList },
-      { href: "/kraken", label: "Kraken", icon: Bitcoin, broker: "Kraken" },
-    ],
-  },
-  {
-    // The investor-facing story: the track record + the edge evidence.
-    label: "TRACK RECORD",
-    links: [
-      { href: "/performance", label: "Performance", icon: TrendingUp },
-      { href: "/backtest", label: "Edge / Backtest", icon: FlaskConical },
-      { href: "/demo-vs-live", label: "Demo vs Live", icon: Layers },
     ],
   },
   {
     label: "SYSTEM",
     links: [
       { href: "/command", label: "System Health", icon: Activity },
-      { href: "/connect", label: "Connections", icon: PlugZap },
     ],
   },
 ];
@@ -68,9 +43,10 @@ const sections = [
 export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  const modes = modeData?.modes || {};
-  const isLiveView = Object.values(modes).some(m => m === "live");
+  // Live = the Kraken bot is armed for real orders (validate-only off). The old
+  // /api/trading-mode source only ever flipped for futures, which is retired.
+  const { data: krkData } = useSWR<{ connected?: boolean; enabled?: boolean; validateOnly?: boolean }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
+  const isLiveView = Boolean(krkData?.connected && krkData?.enabled && !krkData?.validateOnly);
 
   useEffect(() => {
     setMobileOpen(false);
@@ -133,12 +109,7 @@ export function Sidebar() {
                     <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : "text-muted-foreground/50")} />
                     <span className="flex-1">{link.label}</span>
                     {"broker" in link && link.broker && (
-                      <span className={cn(
-                        "text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
-                        link.broker === "Tradovate" ? "text-amber-400/40 bg-amber-500/[0.06]"
-                          : link.broker === "Kraken" ? "text-purple-400/40 bg-purple-500/[0.06]"
-                          : "text-blue-400/40 bg-blue-500/[0.06]"
-                      )}>
+                      <span className="text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded text-purple-400/40 bg-purple-500/[0.06]">
                         {link.broker}
                       </span>
                     )}
@@ -153,7 +124,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
         <p className="text-[9px] text-muted-foreground/30 tracking-wider uppercase text-center">
-          Tradovate · Kraken · Claude AI
+          Kraken · Claude AI
         </p>
       </div>
     </>

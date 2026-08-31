@@ -1,11 +1,10 @@
 "use client";
 
-import { useState } from "react";
 import useSWR from "swr";
 
 interface Order {
-  category: "futures" | "kraken";
-  mode: "live" | "demo";
+  category: "kraken";
+  mode: "live";
   symbol: string;
   action: string;
   size: number | null;
@@ -13,115 +12,49 @@ interface Order {
   time: string;
   reason?: string | null;
 }
-interface LiveFuturesPnl {
-  ok: boolean;
-  netPnl: number;
-  currentBalance: number;
-  startingCapital: number;
-  roundTrips: number;
-  winRate: number;
-}
-interface Data { orders: Order[]; liveFuturesPnl?: LiveFuturesPnl | null }
+interface Data { orders: Order[] }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 
-const CAT_STYLE: Record<Order["category"], string> = {
-  futures: "text-amber-400/80 bg-amber-500/[0.08]",
-  kraken: "text-purple-400/80 bg-purple-500/[0.08]",
-};
-
+// Kraken-only order log since the Aug 2026 futures retirement. All Kraken money is
+// real (no demo book), so there is no demo/live view toggle any more.
 export function UnifiedOrdersTable() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
-  // Follow the same demo/live toggle the rest of the dashboard uses.
-  const { data: modeData } = useSWR<{ modes: Record<string, string> }>("/api/trading-mode", fetcher, { refreshInterval: 30000 });
-  // Kraken account value AND deposited capital — same source the dashboard pillars use.
+  // Kraken account value AND deposited capital — same source the dashboard uses.
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
-  const isLive = modeData?.modes?.futures === "live";
-  const [cat, setCat] = useState<"all" | Order["category"]>("all");
 
-  if (!data?.orders || !modeData) return <div className="text-sm text-muted-foreground/60 py-6">Loading orders…</div>;
+  if (!data?.orders) return <div className="text-sm text-muted-foreground/60 py-6">Loading orders…</div>;
 
-  // VIEW SPLIT: live view shows real-money books (live futures + Kraken); demo view shows demo
-  // futures only. Kraken is a real account with no demo equivalent, so it never shows in demo.
-  const viewOrders = data.orders.filter((o) =>
-    isLive ? (o.category !== "futures" || o.mode === "live") : (o.category === "futures" && o.mode === "demo"),
-  );
-
-  const catsPresent = Array.from(new Set(viewOrders.map((o) => o.category)));
-  const tabs: ("all" | Order["category"])[] = catsPresent.length > 1 ? ["all", ...catsPresent] : catsPresent;
-  const effectiveCat = tabs.includes(cat) ? cat : (tabs[0] ?? "all");
-  const rows = viewOrders.filter((o) => effectiveCat === "all" || o.category === effectiveCat);
-
-  const bookCount = (c: Order["category"]) => viewOrders.filter((o) => o.category === c).length;
-
-  // Balance-based live-futures P&L (broker delta) — the single source of truth, NOT a sum of the row log.
-  const lfp = data.liveFuturesPnl ?? null;
+  const rows = data.orders;
   const krkVal = krk?.connected ? krk?.totalValue ?? null : null;
-  // Kraken's contribution has to be P&L, not account value: futures reports a DELTA, so adding a
-  // BALANCE to it mixed units and inflated "total real money" by the whole Kraken deposit.
+  // P&L must be balance-based (value − deposits), never a sum of the row log.
   const krkPnl = krkVal != null && krk?.totalInvested != null ? krkVal - krk.totalInvested : null;
-  const totalReal = lfp?.ok ? lfp.netPnl + (krkPnl ?? 0) : null;
-  // Be honest when Kraken is unreachable: the total is then futures-only, not a silent $0 for Kraken.
-  const totalSub = krkPnl != null ? "futures P&L + Kraken P&L" : "futures P&L only (Kraken unreachable)";
 
   return (
     <div className="space-y-4">
-      {/* View indicator */}
       <div className="flex items-center gap-2">
-        <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded ${isLive ? "text-red-400/80 bg-red-500/[0.08]" : "text-emerald-400/80 bg-emerald-500/[0.08]"}`}>
-          {isLive ? "🔴 Live · real money" : "🟢 Demo"}
+        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded text-red-400/80 bg-red-500/[0.08]">
+          🔴 Live · real money
         </span>
-        <span className="text-[10px] text-muted-foreground/45">{viewOrders.length} orders · lifetime · toggle demo/live in the top bar</span>
+        <span className="text-[10px] text-muted-foreground/45">{rows.length} orders · lifetime</span>
       </div>
 
-      {/* Summary — real-money per-account breakdown (balance-based; NOT the raw row-log sum). */}
-      {isLive ? (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <Stat
-            label="Futures (live)"
-            value={lfp?.ok ? money(lfp.netPnl) : "—"}
-            cls={lfp?.ok ? col(lfp.netPnl) : ""}
-            sub={lfp?.ok
-              ? `$${lfp.startingCapital.toLocaleString(undefined, { maximumFractionDigits: 0 })} → $${lfp.currentBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })} · ${lfp.roundTrips} trades · ${Math.round(lfp.winRate * 100)}% win`
-              : "broker unreachable"}
-          />
-          <Stat
-            label="Kraken (BTC/ETH trend)"
-            value={krkPnl != null ? money(krkPnl) : "—"}
-            cls={krkPnl != null ? col(krkPnl) : ""}
-            sub={krkVal != null && krk?.totalInvested != null
-              ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} · sells below the 50-day`
-              : "account unreachable"}
-          />
-          <Stat
-            label="Total real money"
-            value={totalReal != null ? money(totalReal) : "—"}
-            cls={totalReal != null ? col(totalReal) : ""}
-            sub={totalSub}
-          />
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-2">
-          <Stat label="Demo futures" value={`${bookCount("futures")} trades`} sub="fake money · no real P&L" />
-        </div>
-      )}
-
-      {/* Category filter (only when >1 book present) */}
-      {tabs.length > 1 && (
-        <div className="flex gap-1.5 text-[11px] font-semibold">
-          {tabs.map((c) => (
-            <button key={c} onClick={() => setCat(c)}
-              className={`px-2.5 py-1 rounded-md border capitalize ${effectiveCat === c ? "bg-white/[0.08] text-foreground border-border" : "text-muted-foreground/50 border-transparent hover:text-muted-foreground"}`}>
-              {c}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <Stat
+          label="Kraken account P&L"
+          value={krkPnl != null ? money(krkPnl) : "—"}
+          cls={krkPnl != null ? col(krkPnl) : ""}
+          sub={krkVal != null && krk?.totalInvested != null
+            ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} deposited → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} now`
+            : "account unreachable"}
+        />
+        <Stat label="Bot orders" value={`${rows.length}`} sub="trend-bot buys and sells, lifetime" />
+      </div>
 
       {rows.length === 0 ? (
-        <p className="text-sm text-muted-foreground/55 py-6">No orders in this view yet.</p>
+        <p className="text-sm text-muted-foreground/55 py-6">No orders yet.</p>
       ) : (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="max-h-[65vh] overflow-y-auto">
@@ -129,11 +62,9 @@ export function UnifiedOrdersTable() {
               <thead className="sticky top-0 bg-card border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground/45">
                 <tr>
                   <th className="text-left font-medium px-3 py-2">When</th>
-                  <th className="text-left font-medium px-2 py-2">Book</th>
                   <th className="text-left font-medium px-2 py-2">Symbol</th>
                   <th className="text-left font-medium px-2 py-2">Action</th>
-                  <th className="text-right font-medium px-2 py-2">Size</th>
-                  <th className="text-right font-medium px-3 py-2">P&L</th>
+                  <th className="text-right font-medium px-3 py-2">Size</th>
                 </tr>
               </thead>
               <tbody>
@@ -142,18 +73,12 @@ export function UnifiedOrdersTable() {
                     <td className="px-3 py-1.5 text-muted-foreground/60 tabular-nums whitespace-nowrap">
                       {new Date(o.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(o.time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
                     </td>
-                    <td className="px-2 py-1.5">
-                      <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${CAT_STYLE[o.category]}`}>{o.category}</span>
-                    </td>
                     <td className="px-2 py-1.5 font-semibold">{o.symbol}</td>
                     <td className="px-2 py-1.5 text-muted-foreground/70 capitalize" title={o.reason ?? undefined}>
                       {o.action}
                     </td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">
-                      {o.size != null ? (o.category === "futures" ? `${o.size}x` : `$${o.size}`) : "—"}
-                    </td>
-                    <td className={`px-3 py-1.5 text-right tabular-nums font-semibold ${o.pnl != null ? col(o.pnl) : "text-muted-foreground/40"}`}>
-                      {o.pnl != null ? money(o.pnl) : "—"}
+                    <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground/70">
+                      {o.size != null ? `$${o.size}` : "—"}
                     </td>
                   </tr>
                 ))}
@@ -163,9 +88,8 @@ export function UnifiedOrdersTable() {
         </div>
       )}
       <p className="text-[10px] text-muted-foreground/40">
-        {isLive
-          ? "Live real-money order log — live futures + Kraken. The summary above is balance-based (broker delta = true account P&L); the table below is the event log and its per-row P&L will differ. Kraken P&L is account-level (hold value), not per-trade."
-          : "Demo futures order log (fake money). Kraken is a real-money account and only appears in the live view."}
+        Trend-bot event log. The P&L above is balance-based (account value − deposits, from Kraken&apos;s own ledger) —
+        never a sum of these rows. Manual margin trades appear on the Margin Cockpit scoreboard, not here.
       </p>
     </div>
   );
