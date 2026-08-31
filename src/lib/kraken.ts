@@ -90,7 +90,7 @@ function sign(path: string, params: Record<string, string>, secret: string): str
   return hmac.digest("base64");
 }
 
-async function krakenPrivate(method: string, params: Record<string, string> = {}): Promise<Record<string, unknown>> {
+export async function krakenPrivate(method: string, params: Record<string, string> = {}): Promise<Record<string, unknown>> {
   if (!krakenConfigured()) throw new Error("Kraken not configured (KRAKEN_API_KEY/SECRET missing in env)");
   const path = `/0/private/${method}`;
   const nonce = String(Date.now() * 1000);
