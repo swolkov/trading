@@ -158,11 +158,18 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const meta = await getPairMeta(pair);
     const volume = (notional / price).toFixed(meta.lotDecimals);
 
-    // Layer 7: attached stop-loss at half the liquidation cushion (0.3/leverage), so an
-    // armed position is never naked. Price MUST be rounded to the pair's tick or Kraken
-    // rejects the whole order (the gold naked-stop lesson).
+    // Layer 7: every armed entry carries an attached protective exit — never naked.
+    // Default: static stop-loss at half the liquidation cushion (0.3/leverage).
+    // If kraken_margin_trail_pct is set (> 0), a NATIVE Kraken trailing stop is attached
+    // instead: the exchange itself ratchets the stop behind the best price, locking
+    // profit as the trade runs ("increase stop to take profit when up") even if our
+    // infrastructure is down. Trailing offset uses Kraken's relative "+X%" syntax.
     const stopPct = Math.min(0.5, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", (0.3 / leverage) * 100)) / 100));
+    const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
     const stopPrice = alert.side === "buy" ? price * (1 - stopPct) : price * (1 + stopPct);
+    const closeParams: Record<string, string> = trailPct > 0
+      ? { "close[ordertype]": "trailing-stop", "close[price]": `+${trailPct.toFixed(2)}%` }
+      : { "close[ordertype]": "stop-loss", "close[price]": stopPrice.toFixed(meta.priceDecimals) };
     const params: Record<string, string> = {
       pair,
       type: alert.side,
@@ -170,8 +177,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       volume,
       leverage: String(leverage),
       userref: String(MARGIN_USERREF),
-      "close[ordertype]": "stop-loss",
-      "close[price]": stopPrice.toFixed(meta.priceDecimals),
+      ...closeParams,
     };
     if (validate) params.validate = "true";
     const res = await krakenPrivate("AddOrder", params);
@@ -181,7 +187,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${alert.side} $${notional} notional (${leverage}x on $${perTrade}) ${pair}, stop ${(stopPct * 100).toFixed(1)}% @ ${stopPrice.toFixed(meta.priceDecimals)}${validate ? " (validate)" : ""} — ${descr ?? ""}`,
+      note: `${alert.side} $${notional} notional (${leverage}x on $${perTrade}) ${pair}, ${trailPct > 0 ? `trailing stop ${trailPct.toFixed(1)}%` : `stop ${(stopPct * 100).toFixed(1)}% @ ${stopPrice.toFixed(meta.priceDecimals)}`}${validate ? " (validate)" : ""} — ${descr ?? ""}`,
     };
   } catch (e) {
     return { executed: false, validated: validate, note: `order failed: ${e}` };
