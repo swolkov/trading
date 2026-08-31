@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { MarginChart, INTERVAL_LABELS, useTimeframeStats, type PriceLevel } from "@/components/margin/margin-chart";
+import { pairMatchesSymbol } from "@/lib/kraken-pairs";
 
 // ============ MARGIN COCKPIT ============
 // Home base for discretionary margin trading: multi-timeframe charts on any
@@ -97,9 +98,8 @@ export default function MarginCockpitPage() {
   const levels = useMemo<PriceLevel[]>(() => {
     const out: PriceLevel[] = [];
     for (const p of positions) {
-      const base = p.pair.replace(/USD$/, "").replace(/^X+/, "").replace("XBT", "BTC");
-      if (!symbol.startsWith(base)) continue;
-      if (p.liqPrice) out.push({ price: p.liqPrice, label: `LIQUIDATION ${p.leverage.toFixed(0)}x`, color: "#ef4444" });
+      if (!pairMatchesSymbol(p.pair, symbol)) continue;
+      if (p.liqPrice) out.push({ price: p.liqPrice, label: `est. liquidation ${p.leverage.toFixed(0)}x`, color: "#ef4444" });
       out.push({ price: p.entryPrice, label: `entry ${p.side}`, color: "#a78bfa" });
     }
     return out;
@@ -188,7 +188,7 @@ export default function MarginCockpitPage() {
                   <th className="text-right px-2 py-2 font-medium">Entry</th>
                   <th className="text-right px-2 py-2 font-medium">Now</th>
                   <th className="text-right px-2 py-2 font-medium">P&L</th>
-                  <th className="text-right px-2 py-2 font-medium">Liquidation</th>
+                  <th className="text-right px-2 py-2 font-medium" title="Per-position estimate (0.6/leverage). The account margin level gauge is the authoritative number.">Liquidation (est.)</th>
                   <th className="text-right px-4 py-2 font-medium">Distance</th>
                 </tr>
               </thead>

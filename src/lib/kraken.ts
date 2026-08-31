@@ -90,10 +90,19 @@ function sign(path: string, params: Record<string, string>, secret: string): str
   return hmac.digest("base64");
 }
 
+// Kraken requires a strictly increasing nonce per key. Two private calls in the same
+// millisecond (e.g. a Promise.all) would collide on Date.now() and one would fail with
+// EAPI:Invalid nonce — so the nonce is monotonic within this process.
+let lastNonce = 0;
+function nextNonce(): string {
+  lastNonce = Math.max(lastNonce + 1, Date.now() * 1000);
+  return String(lastNonce);
+}
+
 export async function krakenPrivate(method: string, params: Record<string, string> = {}): Promise<Record<string, unknown>> {
   if (!krakenConfigured()) throw new Error("Kraken not configured (KRAKEN_API_KEY/SECRET missing in env)");
   const path = `/0/private/${method}`;
-  const nonce = String(Date.now() * 1000);
+  const nonce = nextNonce();
   const body = { nonce, ...params };
   const signature = sign(path, body, krakenSecret());
   const r = await fetch(`${API_URL}${path}`, {
@@ -355,7 +364,7 @@ const pairMetaCache = new Map<string, PairMeta>();
 
 // Kraken REJECTS a limit price carrying more decimals than the pair allows. An unrounded price is
 // exactly the failure that produced naked positions on the futures side — round before sending.
-async function getPairMeta(pair: string): Promise<PairMeta> {
+export async function getPairMeta(pair: string): Promise<PairMeta> {
   const hit = pairMetaCache.get(pair);
   if (hit) return hit;
   const res = await krakenPublic("AssetPairs", { pair });

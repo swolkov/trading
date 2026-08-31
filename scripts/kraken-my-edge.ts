@@ -27,39 +27,41 @@ interface Trip {
   notional: number; retOnNotional: number;
 }
 
+// FIFO lots — must mirror reconstructTrips in src/lib/kraken-margin.ts (Kraken closes
+// margin positions first-in-first-out; average-cost would misstate per-trip hit rate).
 function reconstruct(rows: Row[]): Trip[] {
   const trips: Trip[] = [];
-  const book = new Map<string, { sv: number; avg: number; feePool: number; openedAt: Date }>();
+  const book = new Map<string, { dir: 1 | -1; lots: { vol: number; price: number; fee: number; openedAt: Date }[] }>();
   for (const r of rows) {
-    const dir = r.type === "buy" ? 1 : -1;
+    const dir: 1 | -1 = r.type === "buy" ? 1 : -1;
     let rem = r.vol;
     let feeRem = r.fee;
-    const st = book.get(r.pair) ?? { sv: 0, avg: 0, feePool: 0, openedAt: r.time };
-    if (st.sv !== 0 && Math.sign(st.sv) !== dir) {
-      const cv = Math.min(Math.abs(st.sv), rem);
-      const side: "long" | "short" = st.sv > 0 ? "long" : "short";
-      const gross = side === "long" ? (r.price - st.avg) * cv : (st.avg - r.price) * cv;
-      const ef = st.feePool * (cv / Math.abs(st.sv));
-      const xf = r.vol > 0 ? feeRem * (cv / r.vol) : 0;
-      const notional = st.avg * cv;
-      trips.push({
-        pair: r.pair, side, openedAt: st.openedAt, closedAt: r.time,
-        holdMin: (r.time.getTime() - st.openedAt.getTime()) / 60000,
-        entry: st.avg, exit: r.price, vol: cv, gross, fees: ef + xf, net: gross - ef - xf,
-        notional, retOnNotional: notional > 0 ? (gross - ef - xf) / notional : 0,
-      });
-      st.feePool -= ef; feeRem -= xf; st.sv += dir * cv; rem -= cv;
-      if (Math.abs(st.sv) < 1e-12) { st.sv = 0; st.avg = 0; st.feePool = 0; }
+    let st = book.get(r.pair);
+    if (st && st.lots.length && st.dir !== dir) {
+      while (rem > 1e-12 && st.lots.length) {
+        const lot = st.lots[0];
+        const cv = Math.min(lot.vol, rem);
+        const side: "long" | "short" = st.dir > 0 ? "long" : "short";
+        const gross = side === "long" ? (r.price - lot.price) * cv : (lot.price - r.price) * cv;
+        const ef = lot.fee * (cv / lot.vol);
+        const xf = r.vol > 0 ? feeRem * (cv / r.vol) : 0;
+        const notional = lot.price * cv;
+        trips.push({
+          pair: r.pair, side, openedAt: lot.openedAt, closedAt: r.time,
+          holdMin: (r.time.getTime() - lot.openedAt.getTime()) / 60000,
+          entry: lot.price, exit: r.price, vol: cv, gross, fees: ef + xf, net: gross - ef - xf,
+          notional, retOnNotional: notional > 0 ? (gross - ef - xf) / notional : 0,
+        });
+        lot.vol -= cv; lot.fee -= ef; feeRem -= xf; rem -= cv;
+        if (lot.vol <= 1e-12) st.lots.shift();
+      }
+      if (!st.lots.length) st = undefined;
     }
     if (rem > 1e-12) {
-      if (st.sv === 0) { st.avg = r.price; st.sv = dir * rem; st.feePool = feeRem; st.openedAt = r.time; }
-      else {
-        const pa = Math.abs(st.sv);
-        st.avg = (st.avg * pa + r.price * rem) / (pa + rem);
-        st.sv += dir * rem; st.feePool += feeRem;
-      }
+      if (!st || st.dir !== dir) st = { dir, lots: [] };
+      st.lots.push({ vol: rem, price: r.price, fee: feeRem, openedAt: r.time });
     }
-    book.set(r.pair, st);
+    if (st) book.set(r.pair, st); else book.delete(r.pair);
   }
   return trips;
 }
@@ -75,12 +77,21 @@ function mulberry32(seed: number) {
 }
 
 async function main() {
+  // Opening fills post margin > 0; closing fills post margin 0 but carry posstatus.
   const rows = await prisma.$queryRawUnsafe<Row[]>(
     `SELECT txid, pair, time, type, price, cost, fee, vol, margin
-     FROM kraken_my_trades WHERE margin > 0 ORDER BY time ASC`,
+     FROM kraken_my_trades
+     WHERE margin > 0 OR COALESCE(posstatus, '') <> ''
+     ORDER BY time ASC`,
   );
   const [{ rollover }] = await prisma.$queryRawUnsafe<{ rollover: number }[]>(
-    `SELECT COALESCE(sum(fee),0)::float AS rollover FROM kraken_my_rollovers`,
+    `SELECT COALESCE(sum(fee),0)::float AS rollover FROM kraken_my_ledger
+     WHERE ltype = 'rollover' AND asset IN ('ZUSD','USD')`,
+  );
+  // Kraken's own canonical margin P&L postings — the cross-check for our reconstruction.
+  const [{ ledgerNet }] = await prisma.$queryRawUnsafe<{ ledgerNet: number }[]>(
+    `SELECT COALESCE(sum(amount),0)::float AS "ledgerNet" FROM kraken_my_ledger
+     WHERE ltype = 'margin' AND asset IN ('ZUSD','USD')`,
   );
   if (!rows.length) {
     console.log("No margin trades synced yet. Wait for the first margin-watch cron run after deploy, then re-run.");
@@ -107,6 +118,7 @@ async function main() {
   console.log(`fills: ${rows.length}   round trips: ${trips.length}   span: ${spanDays.toFixed(0)} days   pace: ${tradesPerMonth.toFixed(1)} trades/month`);
   console.log(`hit rate: ${(hit * 100).toFixed(1)}%   avg hold: ${avgHoldHours.toFixed(1)}h   avg notional: $${avgNotional.toFixed(0)}`);
   console.log(`net P&L after trade fees: $${netTotal.toFixed(2)}   rollover paid: $${rollover.toFixed(2)}   AFTER ALL COSTS: $${afterRollover.toFixed(2)}`);
+  console.log(`cross-check — Kraken's own margin-ledger P&L postings: $${ledgerNet.toFixed(2)} (should be near our reconstructed gross; investigate if far off)`);
   console.log(`per-trade return on notional: mean ${(avgRet * 100).toFixed(3)}%  sd ${(sdRet * 100).toFixed(2)}%`);
   const tStat = sdRet > 0 ? (avgRet / (sdRet / Math.sqrt(Math.max(1, trips.length)))) : 0;
   console.log(`edge t-stat: ${tStat.toFixed(2)}  (${Math.abs(tStat) < 2 ? "NOT statistically distinguishable from zero yet" : "statistically real at this sample"})`);

@@ -8,6 +8,8 @@ import {
   liquidationEstimate,
   syncKrakenTrades,
 } from "@/lib/kraken-margin";
+import { pairBase } from "@/lib/kraken-pairs";
+import { macroEventWindows } from "@/lib/macro-events";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -35,6 +37,12 @@ async function loadState(): Promise<WatchState> {
 }
 
 async function saveState(state: WatchState): Promise<void> {
+  // Prune throttle entries older than 7 days so per-position keys don't accumulate
+  // forever inside one AgentConfig row.
+  const cutoff = Date.now() - 7 * 24 * 3600_000;
+  for (const [k, v] of Object.entries(state.alerts)) {
+    if (new Date(v).getTime() < cutoff) delete state.alerts[k];
+  }
   const value = JSON.stringify(state);
   await prisma.agentConfig.upsert({
     where: { key: STATE_KEY },
@@ -116,8 +124,9 @@ export async function GET(request: Request) {
     errors.push(`health: ${e}`);
   }
 
-  // 3) Per-position liquidation distance. Alert when half the cushion is gone; nag
-  //    every run when three quarters of it is gone.
+  // 3) Per-position liquidation distance (an ESTIMATE — account margin level above is
+  //    the authoritative trigger). Warns hourly at half the cushion gone and again at
+  //    three quarters; a position we cannot price is an ERROR, not a silent skip.
   try {
     const positions = await getKrakenMarginPositions();
     flat = flat && positions.length === 0;
@@ -126,20 +135,17 @@ export async function GET(request: Request) {
       let tick: Record<string, unknown> = {};
       try { tick = await krakenPublic("Ticker", { pair: positions.map((p) => p.pair).join(",") }); } catch { tick = {}; }
       for (const p of positions) {
-        const t = Object.entries(tick).find(([k]) => {
-          const base = p.pair.replace(/USD$/, "").replace(/^X/, "");
-          return k === p.pair || k.replace(/^X/, "").replace(/Z?USD$/, "") === base;
-        })?.[1] as { c?: string[] } | undefined;
+        const t = Object.entries(tick).find(([k]) => k === p.pair || pairBase(k) === pairBase(p.pair))?.[1] as { c?: string[] } | undefined;
         const px = t?.c?.[0] ? parseFloat(t.c[0]) : null;
-        if (!px) continue;
+        if (!px) { errors.push(`unable to price position ${p.pair} (${p.id})`); continue; }
         const { liqPrice, pctAway } = liquidationEstimate(p, px);
         const cushion = 0.6 / Math.max(1, p.leverage);   // full cushion at entry
         const used = 1 - pctAway / cushion;              // fraction of cushion consumed
         if (used >= 0.75) {
           const key = `liq-urgent-${p.id}`;
-          if (shouldFire(state, key, true)) {
+          if (shouldFire(state, key)) {
             await sendNotification(
-              `🚨 ${p.pair} ${p.side.toUpperCase()} ${p.leverage.toFixed(0)}x — ${(pctAway * 100).toFixed(1)}% from LIQUIDATION at $${liqPrice.toFixed(2)} (now $${px.toFixed(2)}).`,
+              `🚨 ${p.pair} ${p.side.toUpperCase()} ${p.leverage.toFixed(0)}x — est. ${(pctAway * 100).toFixed(1)}% from liquidation (~$${liqPrice.toFixed(2)}, now $${px.toFixed(2)}). Account margin level is the hard number — check the cockpit.`,
               "kraken",
             );
             state.alerts[key] = new Date().toISOString();
@@ -189,12 +195,12 @@ export async function GET(request: Request) {
   }
 
   // 5) Event guardrail: levered into a high-impact macro print within 24h → one warning.
+  //    Imported directly — an HTTP round-trip to our own API would be rejected by the
+  //    auth proxy and fail silently forever.
   if (!flat) {
     try {
-      const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
-      const r = await fetch(`${base}/api/margin/news`, { signal: AbortSignal.timeout(8000) });
-      const news = await r.json() as { imminent?: { name: string; date: string; time: string }[] };
-      for (const e of news.imminent ?? []) {
+      const { imminent } = macroEventWindows(new Date());
+      for (const e of imminent) {
         const key = `event-${e.name}-${e.date}`;
         if (shouldFire(state, key)) {
           await sendNotification(
@@ -205,7 +211,9 @@ export async function GET(request: Request) {
           sent.push(key);
         }
       }
-    } catch { /* event feed is best-effort */ }
+    } catch (e) {
+      errors.push(`event guardrail: ${e}`);
+    }
   }
 
   await saveState(state);

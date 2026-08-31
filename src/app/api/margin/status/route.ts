@@ -1,5 +1,6 @@
 import { krakenConfigured, krakenPublic } from "@/lib/kraken";
 import { getKrakenMarginHealth, getKrakenMarginPositions, liquidationEstimate } from "@/lib/kraken-margin";
+import { pairBase } from "@/lib/kraken-pairs";
 
 // Live margin state for the cockpit: account health (margin level vs the 80%/40%
 // call/liquidation lines), open positions with exact liquidation prices, and the
@@ -29,10 +30,9 @@ export async function GET() {
     }
     const priceFor = (pair: string): number | null => {
       if (prices[pair]) return prices[pair];
-      // Kraken echoes canonical names (XXBTZUSD for XBTUSD) — match loosely on the base.
-      const base = pair.replace(/USD$/, "").replace(/^X/, "");
+      // Kraken echoes canonical names (XXBTZUSD for XBTUSD) — match on the shared base.
       for (const [k, px] of Object.entries(prices)) {
-        if (k.replace(/^X/, "").replace(/Z?USD$/, "") === base) return px;
+        if (pairBase(k) === pairBase(pair)) return px;
       }
       return null;
     };

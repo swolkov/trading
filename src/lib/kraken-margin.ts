@@ -97,17 +97,21 @@ export async function getKrakenMarginPositions(): Promise<KrakenMarginPosition[]
   const out: KrakenMarginPosition[] = [];
   for (const [id, p0] of Object.entries(res)) {
     const p = p0 as Record<string, string | number | undefined>;
-    const vol = parseFloat(String(p.vol ?? "0")) - parseFloat(String(p.vol_closed ?? "0"));
+    // cost/fee/margin describe the FULL original position; vol_closed is what's been
+    // peeled off. Entry price must divide by the ORIGINAL volume — dividing by the
+    // remaining volume made a half-closed position show double its entry price.
+    const volTotal = parseFloat(String(p.vol ?? "0")) || 0;
+    const volOpen = volTotal - (parseFloat(String(p.vol_closed ?? "0")) || 0);
     const cost = parseFloat(String(p.cost ?? "0")) || 0;
     const margin = parseFloat(String(p.margin ?? "0")) || 0;
-    if (!(vol > 0)) continue;
+    if (!(volOpen > 0)) continue;
     out.push({
       id,
       pair: String(p.pair ?? ""),
       side: p.type === "sell" ? "short" : "long",
-      vol,
+      vol: volOpen,
       cost,
-      entryPrice: vol > 0 ? cost / vol : 0,
+      entryPrice: volTotal > 0 ? cost / volTotal : 0,
       fee: parseFloat(String(p.fee ?? "0")) || 0,
       margin,
       value: p.value != null ? parseFloat(String(p.value)) : null,
@@ -120,9 +124,14 @@ export async function getKrakenMarginPositions(): Promise<KrakenMarginPosition[]
   return out;
 }
 
-// Liquidation math for one position, from Kraken's documented mechanics: margin call at
-// margin level 80%, forced liquidation at 40%. Losing 60% of posted margin ends it, so
-// the adverse move that kills a position is 0.6/leverage (3% at 20x, 6% at 10x).
+// Liquidation ESTIMATE for one position, from Kraken's documented mechanics: margin
+// call at margin level 80%, forced liquidation at 40%. Losing 60% of posted margin ends
+// it, so the adverse move is ~0.6/leverage (3% at 20x, 6% at 10x).
+//
+// ⚠️ This is per-position math. Kraken actually liquidates on the ACCOUNT-level margin
+// level, so other positions and spare equity move the real line in either direction.
+// The account margin level (TradeBalance.ml) is the authoritative danger number; this
+// estimate exists to make the per-position stakes visible and is labeled "est." in UI.
 export function liquidationEstimate(pos: KrakenMarginPosition, currentPrice: number): {
   liqPrice: number;
   pctAway: number;   // signed: positive = cushion remaining, negative = past the line
@@ -152,24 +161,41 @@ const TRADES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS kraken_my_trades (
   fee double precision,
   vol double precision,
   margin double precision,
+  posstatus text DEFAULT '',
+  net double precision,
   misc text
 )`;
 
-const ROLLOVER_TABLE_SQL = `CREATE TABLE IF NOT EXISTS kraken_my_rollovers (
+// One table for the margin-relevant ledger rows: 'rollover' (the 4-hourly financing
+// charge) and 'margin' (Kraken's own canonical P&L/fee postings on position closes).
+const LEDGER_TABLE_SQL = `CREATE TABLE IF NOT EXISTS kraken_my_ledger (
   id text PRIMARY KEY,
   refid text,
   time timestamptz NOT NULL,
+  ltype text,
+  asset text,
+  amount double precision,
   fee double precision
 )`;
 
 export async function ensureMarginTables(): Promise<void> {
   await prisma.$executeRawUnsafe(TRADES_TABLE_SQL);
-  await prisma.$executeRawUnsafe(ROLLOVER_TABLE_SQL);
+  await prisma.$executeRawUnsafe(LEDGER_TABLE_SQL);
 }
 
-interface RawTrade {
-  txid: string; ordertxid: string; pair: string; time: number; type: string; ordertype: string;
-  price: number; cost: number; fee: number; vol: number; margin: number; misc: string;
+// Kraken's private-API rate limiter: ~15-20 counter points, TradesHistory/Ledgers cost
+// 2 each, decay ~0.5/s. A full backfill must pace itself or it 500s after ~8 pages.
+const PAGE_DELAY_MS = 1200;
+async function pagedPrivate(method: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+  try {
+    return await krakenPrivate(method, params);
+  } catch (e) {
+    if (String(e).includes("Rate limit")) {
+      await new Promise((r) => setTimeout(r, 6000));
+      return await krakenPrivate(method, params);
+    }
+    throw e;
+  }
 }
 
 // Pull the COMPLETE trade history (newest first, 50/page) and upsert. Idempotent: txid
@@ -179,7 +205,8 @@ export async function syncKrakenTrades(full: boolean): Promise<{ fetched: number
   await ensureMarginTables();
   let fetched = 0;
   for (let ofs = 0; ofs < 10000; ofs += 50) {
-    const res = await krakenPrivate("TradesHistory", { ofs: String(ofs) });
+    if (ofs > 0) await new Promise((r) => setTimeout(r, PAGE_DELAY_MS));
+    const res = await pagedPrivate("TradesHistory", { ofs: String(ofs) });
     const trades = (res.trades ?? {}) as Record<string, Record<string, unknown>>;
     const entries = Object.entries(trades);
     if (!entries.length) break;
@@ -187,8 +214,8 @@ export async function syncKrakenTrades(full: boolean): Promise<{ fetched: number
     let newInPage = 0;
     for (const [txid, t] of entries) {
       const inserted = await prisma.$executeRawUnsafe(
-        `INSERT INTO kraken_my_trades (txid, ordertxid, pair, time, type, ordertype, price, cost, fee, vol, margin, misc)
-         VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,$9,$10,$11,$12)
+        `INSERT INTO kraken_my_trades (txid, ordertxid, pair, time, type, ordertype, price, cost, fee, vol, margin, posstatus, net, misc)
+         VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ON CONFLICT (txid) DO NOTHING`,
         txid,
         String(t.ordertxid ?? ""),
@@ -201,6 +228,10 @@ export async function syncKrakenTrades(full: boolean): Promise<{ fetched: number
         parseFloat(String(t.fee ?? "0")) || 0,
         parseFloat(String(t.vol ?? "0")) || 0,
         parseFloat(String(t.margin ?? "0")) || 0,
+        // Present on position-closing fills; the tell that a fill belongs to the
+        // margin book even when `margin` is 0 on the close.
+        String(t.posstatus ?? ""),
+        t.net != null ? parseFloat(String(t.net)) || 0 : null,
         String(t.misc ?? ""),
       );
       newInPage += Number(inserted) || 0;
@@ -212,29 +243,34 @@ export async function syncKrakenTrades(full: boolean): Promise<{ fetched: number
     if (!full && newInPage === 0) break;   // incremental: everything past here is already stored
   }
 
-  // Rollover fees live in the Ledgers, not TradesHistory. They are the 4-hourly financing
-  // charge on margin positions — without them expectancy is overstated.
-  for (let ofs = 0; ofs < 10000; ofs += 50) {
-    const res = await krakenPrivate("Ledgers", { type: "rollover", ofs: String(ofs) });
-    const ledger = (res.ledger ?? {}) as Record<string, Record<string, unknown>>;
-    const entries = Object.entries(ledger);
-    if (!entries.length) break;
-    let newInPage = 0;
-    for (const [id, e] of entries) {
-      const inserted = await prisma.$executeRawUnsafe(
-        `INSERT INTO kraken_my_rollovers (id, refid, time, fee)
-         VALUES ($1,$2,to_timestamp($3),$4)
-         ON CONFLICT (id) DO NOTHING`,
-        id,
-        String(e.refid ?? ""),
-        Number(e.time ?? 0),
-        Math.abs(parseFloat(String(e.fee ?? "0")) || 0),
-      );
-      newInPage += Number(inserted) || 0;
+  // Rollover (financing) and margin (Kraken's canonical close P&L) ledger rows.
+  for (const ltype of ["rollover", "margin"]) {
+    for (let ofs = 0; ofs < 10000; ofs += 50) {
+      await new Promise((r) => setTimeout(r, PAGE_DELAY_MS));
+      const res = await pagedPrivate("Ledgers", { type: ltype, ofs: String(ofs) });
+      const ledger = (res.ledger ?? {}) as Record<string, Record<string, unknown>>;
+      const entries = Object.entries(ledger);
+      if (!entries.length) break;
+      let newInPage = 0;
+      for (const [id, e] of entries) {
+        const inserted = await prisma.$executeRawUnsafe(
+          `INSERT INTO kraken_my_ledger (id, refid, time, ltype, asset, amount, fee)
+           VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7)
+           ON CONFLICT (id) DO NOTHING`,
+          id,
+          String(e.refid ?? ""),
+          Number(e.time ?? 0),
+          ltype,
+          String(e.asset ?? ""),
+          parseFloat(String(e.amount ?? "0")) || 0,
+          Math.abs(parseFloat(String(e.fee ?? "0")) || 0),
+        );
+        newInPage += Number(inserted) || 0;
+      }
+      const count = Number(res.count ?? 0);
+      if (ofs + 50 >= count) break;
+      if (!full && newInPage === 0) break;
     }
-    const count = Number(res.count ?? 0);
-    if (ofs + 50 >= count) break;
-    if (!full && newInPage === 0) break;
   }
 
   const [{ total }] = await prisma.$queryRawUnsafe<{ total: bigint }[]>(
@@ -294,87 +330,98 @@ function holdBucket(minutes: number): string {
   return "weeks+";
 }
 
-// Rebuild round trips from raw fills. Shared by the scoreboard and the analysis
-// script so the two can never disagree about what a "trade" was.
+// Rebuild round trips from raw fills using FIFO LOTS — Kraken closes margin positions
+// first-in-first-out, so an average-cost book would report different per-trip P&L than
+// the exchange did (total P&L over a flat-to-flat cycle matches either way, but the
+// per-trip hit rate feeding the automation gate would be wrong). Shared by the
+// scoreboard and the analysis script so the two can never disagree.
+interface Lot { vol: number; price: number; fee: number; openedAt: Date }
+
 function reconstructTrips(rows: DbTradeRow[]): { trips: RoundTrip[]; openPositions: number } {
   const trips: RoundTrip[] = [];
-  // Per-pair open position state. signedVol > 0 = long, < 0 = short.
-  const book = new Map<string, { signedVol: number; avgPrice: number; feePool: number; openedAt: Date }>();
+  // Per-pair FIFO queue of open lots. dir: +1 = long lots, -1 = short lots.
+  const book = new Map<string, { dir: 1 | -1; lots: Lot[] }>();
 
   for (const r of rows) {
-    const dir = r.type === "buy" ? 1 : -1;
+    const dir: 1 | -1 = r.type === "buy" ? 1 : -1;
     let remaining = r.vol;
     let feeRemaining = r.fee;
-    const st = book.get(r.pair) ?? { signedVol: 0, avgPrice: 0, feePool: 0, openedAt: r.time };
+    let st = book.get(r.pair);
 
-    // If this trade reduces an opposite-direction position, realize P&L first.
-    if (st.signedVol !== 0 && Math.sign(st.signedVol) !== dir) {
-      const closeVol = Math.min(Math.abs(st.signedVol), remaining);
-      const side: "long" | "short" = st.signedVol > 0 ? "long" : "short";
-      const gross = side === "long"
-        ? (r.price - st.avgPrice) * closeVol
-        : (st.avgPrice - r.price) * closeVol;
-      // Allocate entry fees pro-rata and this trade's fee pro-rata to the closed portion.
-      const entryFeeShare = st.feePool * (closeVol / Math.abs(st.signedVol));
-      const exitFeeShare = r.vol > 0 ? feeRemaining * (closeVol / r.vol) : 0;
-      const fees = entryFeeShare + exitFeeShare;
-      trips.push({
-        pair: r.pair,
-        side,
-        openedAt: st.openedAt.toISOString(),
-        closedAt: r.time.toISOString(),
-        holdMinutes: (r.time.getTime() - st.openedAt.getTime()) / 60000,
-        entryPrice: st.avgPrice,
-        exitPrice: r.price,
-        volume: closeVol,
-        grossPnl: gross,
-        fees,
-        netPnl: gross - fees,
-      });
-      st.feePool -= entryFeeShare;
-      feeRemaining -= exitFeeShare;
-      st.signedVol += dir * closeVol;
-      remaining -= closeVol;
-      if (Math.abs(st.signedVol) < 1e-12) { st.signedVol = 0; st.avgPrice = 0; st.feePool = 0; }
+    // Reduce opposite-direction lots FIFO, realizing one trip per lot consumed.
+    if (st && st.lots.length && st.dir !== dir) {
+      while (remaining > 1e-12 && st.lots.length) {
+        const lot = st.lots[0];
+        const closeVol = Math.min(lot.vol, remaining);
+        const side: "long" | "short" = st.dir > 0 ? "long" : "short";
+        const gross = side === "long"
+          ? (r.price - lot.price) * closeVol
+          : (lot.price - r.price) * closeVol;
+        const entryFeeShare = lot.fee * (closeVol / lot.vol);
+        const exitFeeShare = r.vol > 0 ? feeRemaining * (closeVol / r.vol) : 0;
+        trips.push({
+          pair: r.pair,
+          side,
+          openedAt: lot.openedAt.toISOString(),
+          closedAt: r.time.toISOString(),
+          holdMinutes: (r.time.getTime() - lot.openedAt.getTime()) / 60000,
+          entryPrice: lot.price,
+          exitPrice: r.price,
+          volume: closeVol,
+          grossPnl: gross,
+          fees: entryFeeShare + exitFeeShare,
+          netPnl: gross - entryFeeShare - exitFeeShare,
+        });
+        lot.vol -= closeVol;
+        lot.fee -= entryFeeShare;
+        feeRemaining -= exitFeeShare;
+        remaining -= closeVol;
+        if (lot.vol <= 1e-12) st.lots.shift();
+      }
+      if (!st.lots.length) st = undefined;
     }
 
     // Whatever volume is left opens/extends a position in this trade's direction.
     if (remaining > 1e-12) {
-      if (st.signedVol === 0) {
-        st.avgPrice = r.price;
-        st.signedVol = dir * remaining;
-        st.feePool = feeRemaining;
-        st.openedAt = r.time;
-      } else {
-        const prevAbs = Math.abs(st.signedVol);
-        st.avgPrice = (st.avgPrice * prevAbs + r.price * remaining) / (prevAbs + remaining);
-        st.signedVol += dir * remaining;
-        st.feePool += feeRemaining;
+      if (!st || st.dir !== dir) {
+        st = { dir, lots: [] };
       }
+      st.lots.push({ vol: remaining, price: r.price, fee: feeRemaining, openedAt: r.time });
     }
-    book.set(r.pair, st);
+    if (st) book.set(r.pair, st); else book.delete(r.pair);
   }
-  const openPositions = [...book.values()].filter((s) => s.signedVol !== 0).length;
+  const openPositions = [...book.values()].filter((s) => s.lots.length > 0).length;
   return { trips, openPositions };
 }
 
 async function loadMarginFills(): Promise<DbTradeRow[]> {
   await ensureMarginTables();
+  // Margin-book membership: opening fills post `margin` > 0; CLOSING fills post
+  // margin 0 but carry `posstatus` — filtering on margin alone would drop every exit
+  // and fabricate trips out of unrelated entries.
   return prisma.$queryRawUnsafe<DbTradeRow[]>(
     `SELECT txid, pair, time, type, price, cost, fee, vol, margin
-     FROM kraken_my_trades WHERE margin > 0 ORDER BY time ASC`,
+     FROM kraken_my_trades
+     WHERE margin > 0 OR COALESCE(posstatus, '') <> ''
+     ORDER BY time ASC`,
   );
 }
 
 export async function computeMarginScoreboard(): Promise<MarginScoreboard> {
   const rows = await loadMarginFills();
+  // Rollover total: USD-denominated fee postings only — a fee charged in another asset
+  // must not be summed as if it were dollars.
   const [{ rollover }] = await prisma.$queryRawUnsafe<{ rollover: number | null }[]>(
-    `SELECT COALESCE(sum(fee), 0)::float AS rollover FROM kraken_my_rollovers`,
+    `SELECT COALESCE(sum(fee), 0)::float AS rollover FROM kraken_my_ledger
+     WHERE ltype = 'rollover' AND asset IN ('ZUSD', 'USD')`,
   );
   const { trips, openPositions } = reconstructTrips(rows);
 
-  const wins = trips.filter((t) => t.netPnl > 0);
-  const losses = trips.filter((t) => t.netPnl <= 0);
+  // A scratch (|net| < 1 cent) is neither a win nor a loss — counting scratches as
+  // losses would drag the hit rate that gates automation.
+  const wins = trips.filter((t) => t.netPnl > 0.01);
+  const losses = trips.filter((t) => t.netPnl < -0.01);
+  const decided = wins.length + losses.length;
   const grossWin = wins.reduce((s, t) => s + t.netPnl, 0);
   const grossLoss = Math.abs(losses.reduce((s, t) => s + t.netPnl, 0));
   const totalNetPnl = trips.reduce((s, t) => s + t.netPnl, 0);
@@ -395,7 +442,7 @@ export async function computeMarginScoreboard(): Promise<MarginScoreboard> {
   return {
     trades: trips.length,
     wins: wins.length,
-    hitRate: trips.length > 0 ? wins.length / trips.length : null,
+    hitRate: decided > 0 ? wins.length / decided : null,
     avgWin: wins.length ? grossWin / wins.length : 0,
     avgLoss: losses.length ? -grossLoss / losses.length : 0,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
@@ -412,7 +459,7 @@ export async function computeMarginScoreboard(): Promise<MarginScoreboard> {
     gate: {
       target: GATE_TRADES,
       required: GATE_HITRATE,
-      progress: `${trips.length}/${GATE_TRADES} round trips at ${trips.length > 0 ? ((wins.length / trips.length) * 100).toFixed(0) : "—"}% (needs ≥${GATE_HITRATE * 100}%)`,
+      progress: `${trips.length}/${GATE_TRADES} round trips at ${decided > 0 ? ((wins.length / decided) * 100).toFixed(0) : "—"}% (needs ≥${GATE_HITRATE * 100}%)`,
     },
   };
 }
