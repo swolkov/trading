@@ -46,7 +46,7 @@ export interface ScanSignal {
   symbol: string;
   timeframe: string;
   kind: "oversold" | "overbought" | "breakout" | "breakdown" | "move-up" | "move-down"
-      | "volume-spike" | "vol-expansion" | "near-high" | "near-low";
+      | "volume-spike" | "vol-expansion" | "near-high" | "near-low" | "compression";
   detail: string;
   price: number;
   realertMs: number;   // how long before this exact signal may fire again
@@ -119,6 +119,20 @@ function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: Krak
   const lastClosed = prev[prev.length - 1];
   if (avgVol > 0 && lastClosed && lastClosed.v >= 3 * avgVol) {
     out.push(mk("volume-spike", `volume ${(lastClosed.v / avgVol).toFixed(1)}x average`));
+  }
+
+  // COIL / COMPRESSION — the pre-breakout setup: volatility has contracted into a tight
+  // range, energy building for a move. On 1h+, if ATR now is well below its own 30-bar
+  // average, the coin is coiling. Awareness only — the trade is the BREAK out of the coil
+  // (the breakout detector above catches it); this just says "watch this one."
+  if (tf.interval >= 60 && bars.length >= 45) {
+    const catr = atr14(bars);
+    const atrNow = catr[catr.length - 1];
+    const win = catr.slice(-31, -1).filter((x) => !isNaN(x));
+    const atrAvg = win.length ? win.reduce((s, x) => s + x, 0) / win.length : NaN;
+    if (atrNow > 0 && atrAvg > 0 && atrNow <= 0.55 * atrAvg) {
+      out.push(mk("compression", `coiling — volatility compressed (${(atrNow / atrAvg).toFixed(2)}x normal), watch for the break`));
+    }
   }
 
   // BIG-MOVE EARLY WARNING — only on the slower frames (4h+), where these mean a regime

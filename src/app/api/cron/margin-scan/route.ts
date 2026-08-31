@@ -115,23 +115,33 @@ export async function GET(request: Request) {
       for (const s of fresh) {
         const side = s.kind === "breakout" ? "buy" : s.kind === "breakdown" ? "sell" : null;
         if (!side || !(s.price > 0)) continue;
-        // Skip if this coin already has an open auto-shadow trade so entries can't stack.
-        const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
-          `SELECT count(*)::bigint AS n FROM tradingview_alerts
-           WHERE symbol=$1 AND note LIKE 'auto:%' AND COALESCE(shadow_status,'open')='open'`,
-          s.symbol,
-        );
-        if (Number(n) > 0) continue;
-        // Conviction from confluence across ALL signals this run (not just the fresh ones)
-        // — how many independent things agree behind this break. Tested, not assumed.
+        // Route by timeframe. Intraday breaks (5m/15m/1h) → the FAST strategy (leverage,
+        // ≤2-day hold). Higher-timeframe breaks (4h/1d) are slower, bigger moves → open TWO
+        // swings to compare: leveraged (rides a few days) and spot (1x, no carry, holds for
+        // weeks). The evaluator applies each strategy's own stop/hold/carry profile.
+        const higher = s.timeframe === "4h" || s.timeframe === "1d";
+        const plans = higher
+          ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
+          : [{ source: "scanner", lev }];
+        // Conviction from confluence across ALL signals this run (not just fresh) — how many
+        // independent things agree behind this break. Tested, not assumed. Same for each plan.
         const conv = scoreConviction(s, signals);
-        const note = `auto: scanner ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source)
-           VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,'scanner')`,
-          s.symbol, side, lev, note, s.price, conv.tier, conv.score,
-        );
-        opened.push({ symbol: s.symbol, side, tier: conv.tier });
+        for (const plan of plans) {
+          // One open trade per (strategy, coin) so entries can't stack within a strategy.
+          const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
+            `SELECT count(*)::bigint AS n FROM tradingview_alerts
+             WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open'`,
+            s.symbol, plan.source,
+          );
+          if (Number(n) > 0) continue;
+          const note = `auto: ${plan.source} ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source)
+             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8)`,
+            s.symbol, side, plan.lev, note, s.price, conv.tier, conv.score, plan.source,
+          );
+          opened.push({ symbol: s.symbol, side, tier: conv.tier });
+        }
       }
     }
   } catch (e) {
