@@ -1,20 +1,19 @@
 import { krakenPublic } from "@/lib/kraken";
+import { usRetailMaxLeverage } from "@/lib/kraken-pairs";
 
 // The tradeable margin universe for the cockpit's pair picker: every USD pair with
-// margin enabled, its max leverage tier, and the LIVE spread. Spread is the gate that
-// makes most of the 3x long-tail uninvestable — surfacing it stops a bad pair being
-// picked by accident. Cached 5 minutes in module scope (public data, no key).
+// margin enabled, its max US-RETAIL leverage, and the LIVE spread. Spread is the gate
+// that makes most of the 3x long-tail uninvestable. Cached 5 minutes (public data, no key).
 //
-// ⚠️ AssetPairs reports the INTERNATIONAL tiers. US retail (Kraken Derivatives US) has
-// ~25 pairs and BTC goes to 20x, not the [2..10] this endpoint claims — the UI labels
-// the number "intl tier" and the true per-pair US access is confirmed by the account's
-// own orders, never by this endpoint.
+// ⚠️ AssetPairs reports the INTERNATIONAL tiers, which understate US retail (Kraken
+// Derivatives US) — BTC is 20x there, not 10x. usRetailMaxLeverage() overrides the known
+// differences (BTC→20) and falls back to AssetPairs for the correctly-reported majors.
 export const dynamic = "force-dynamic";
 
 interface UniverseRow {
   pair: string;         // Kraken pair code (XBTUSD style where applicable)
   wsname: string;       // display name e.g. XBT/USD
-  maxLeverage: number;  // international tier from leverage_buy (see caveat above)
+  maxLeverage: number;  // US-retail max (BTC corrected to 20x; majors from AssetPairs)
   spreadPct: number | null;
   bid: number | null;
   ask: number | null;
@@ -35,8 +34,10 @@ export async function GET() {
       const v = v0 as { wsname?: string; quote?: string; leverage_buy?: number[]; status?: string };
       if (!v.wsname?.endsWith("/USD")) continue;
       if (v.status && v.status !== "online") continue;
-      const maxLev = v.leverage_buy?.length ? Math.max(...v.leverage_buy) : 0;
-      if (maxLev < 2) continue;
+      const intlMax = v.leverage_buy?.length ? Math.max(...v.leverage_buy) : 0;
+      if (intlMax < 2) continue;
+      // Correct to the US-retail max (BTC 10x→20x); majors are unchanged.
+      const maxLev = usRetailMaxLeverage(key, intlMax);
       marginPairs.push({ key, wsname: v.wsname, maxLev });
     }
 

@@ -25,6 +25,17 @@ export function publicPairFor(pair: string): string {
   return `${base}USD`;
 }
 
+// ⚠️ Kraken's public AssetPairs endpoint reports the INTERNATIONAL leverage tiers, which
+// UNDERSTATE the US-retail product (Kraken Derivatives US). BTC US retail is 20x, but
+// AssetPairs says 10x. These are the confirmed US-retail maxes; anything not listed
+// falls back to the AssetPairs value (correct for the 10x-tier majors).
+const US_RETAIL_MAX_LEVERAGE: Record<string, number> = {
+  BTC: 20,
+};
+export function usRetailMaxLeverage(pair: string, fallback: number): number {
+  return US_RETAIL_MAX_LEVERAGE[pairBase(pair)] ?? fallback;
+}
+
 // True when a Kraken pair (any spelling) refers to the same market as an app symbol
 // like "BTC/USD".
 export function pairMatchesSymbol(krakenPair: string, symbol: string): boolean {
