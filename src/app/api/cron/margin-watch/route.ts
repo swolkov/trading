@@ -131,14 +131,14 @@ export async function GET(request: Request) {
         }).catch(() => {});
         await sendNotification(
           `🛑 DRAWDOWN CIRCUIT BREAKER — equity $${health.equity.toFixed(0)} is ${(dd * 100).toFixed(1)}% below peak $${peak.toFixed(0)} (limit ${(ddPct * 100).toFixed(0)}%). Auto-entries HALTED. Closes still allowed. Re-arms when recovered.`,
-          "kraken",
+          "margin_urgent",
         );
         sent.push("dd-breaker-tripped");
       } else if (disarmed && dd < ddPct / 2) {
         await prisma.agentConfig.upsert({
           where: { key: "kraken_margin_disarmed_dd" }, update: { value: "false" }, create: { key: "kraken_margin_disarmed_dd", value: "false" },
         }).catch(() => {});
-        await sendNotification(`✅ Drawdown recovered — equity $${health.equity.toFixed(0)}, ${(dd * 100).toFixed(1)}% below peak. Auto-entries RE-ARMED.`, "kraken");
+        await sendNotification(`✅ Drawdown recovered — equity $${health.equity.toFixed(0)}, ${(dd * 100).toFixed(1)}% below peak. Auto-entries RE-ARMED.`, "margin_urgent");
         sent.push("dd-breaker-rearmed");
       }
     }
@@ -153,7 +153,7 @@ export async function GET(request: Request) {
           await sendNotification(
             `🚨 MARGIN URGENT — margin level ${ml.toFixed(0)}% (Kraken calls at 80%, LIQUIDATES at 40%). ` +
             `Equity $${health.equity.toFixed(0)}, margin used $${health.marginUsed.toFixed(0)}. Reduce now.`,
-            "kraken",
+            "margin_urgent",
           );
           state.alerts[key] = new Date().toISOString();
           sent.push(key);
@@ -164,7 +164,7 @@ export async function GET(request: Request) {
           await sendNotification(
             `⚠️ Margin level ${ml.toFixed(0)}% — getting close to the 80% margin-call line. ` +
             `Equity $${health.equity.toFixed(0)}, free margin $${health.freeMargin.toFixed(0)}.`,
-            "kraken",
+            "margin_urgent",
           );
           state.alerts[key] = new Date().toISOString();
           sent.push(key);
@@ -199,7 +199,7 @@ export async function GET(request: Request) {
           if (shouldFire(state, key)) {
             await sendNotification(
               `🚨 ${p.pair} ${p.side.toUpperCase()} ${p.leverage.toFixed(0)}x — est. ${(pctAway * 100).toFixed(1)}% from liquidation (~$${liqPrice.toFixed(2)}, now $${px.toFixed(2)}). Account margin level is the hard number — check the cockpit.`,
-              "kraken",
+              "margin_urgent",
             );
             state.alerts[key] = new Date().toISOString();
             sent.push(key);
@@ -209,7 +209,7 @@ export async function GET(request: Request) {
           if (shouldFire(state, key)) {
             await sendNotification(
               `⚠️ ${p.pair} ${p.side.toUpperCase()} ${p.leverage.toFixed(0)}x has used ${(used * 100).toFixed(0)}% of its cushion — liquidation $${liqPrice.toFixed(2)}, price $${px.toFixed(2)} (${(pctAway * 100).toFixed(1)}% away).`,
-              "kraken",
+              "margin_urgent",
             );
             state.alerts[key] = new Date().toISOString();
             sent.push(key);
@@ -271,7 +271,7 @@ export async function GET(request: Request) {
         if (shouldFire(state, key)) {
           await sendNotification(
             `${move > 0 ? "📈" : "📉"} ${symbol} ${dir} ${(move * 100).toFixed(1)}% in the last hour ($${now.toLocaleString()}).`,
-            "kraken",
+            "margin_signals",
           );
           state.alerts[key] = new Date().toISOString();
           sent.push(key);
@@ -293,7 +293,7 @@ export async function GET(request: Request) {
         if (shouldFire(state, key)) {
           await sendNotification(
             `📅 Heads up: ${e.name} lands ${e.date} ${e.time} and you have margin positions open. That print can move more than a 20x cushion.`,
-            "kraken",
+            "margin_urgent",
           );
           state.alerts[key] = new Date().toISOString();
           sent.push(key);
@@ -311,7 +311,7 @@ export async function GET(request: Request) {
     console.error("[/api/cron/margin-watch]", errors);
     const key = "watch-errors";
     if (shouldFire(state, key)) {
-      await sendNotification(`⚠️ margin-watch errors: ${errors.join(" | ").slice(0, 400)}`, "kraken");
+      await sendNotification(`⚠️ margin-watch errors: ${errors.join(" | ").slice(0, 400)}`, "margin_urgent");
       state.alerts[key] = new Date().toISOString();
       await saveState(state);
     }

@@ -1,36 +1,51 @@
 import { prisma } from "./db";
 
-export type NotifyChannel = "futures" | "futures_demo" | "kraken" | "general";
+// Three margin lanes keep the must-not-miss alerts from drowning in scanner noise:
+//   margin_urgent  — margin level, liquidation distance, drawdown breaker (never mute this)
+//   margin_signals — scanner output + fast-move/event heads-ups (browse when you want)
+//   margin_results — shadow P&L outcomes + TradingView alert receipts (the scoreboard feed)
+// Each falls back to the single kraken channel → general, so everything still lands today
+// in one place until Spencer creates the separate Slack channels + webhooks.
+export type NotifyChannel =
+  | "futures" | "futures_demo" | "kraken" | "general"
+  | "margin_urgent" | "margin_signals" | "margin_results";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
   futures_demo: "webhook_futures_demo",
   kraken: "webhook_kraken",
   general: "webhook_general",
+  margin_urgent: "webhook_margin_urgent",
+  margin_signals: "webhook_margin_signals",
+  margin_results: "webhook_margin_results",
 };
 
-async function getWebhook(channel: NotifyChannel): Promise<string | null> {
-  // Try channel-specific webhook first, fall back to legacy notification_webhook
-  const config = await prisma.agentConfig.findUnique({
-    where: { key: CHANNEL_KEYS[channel] },
-  });
-  if (config?.value) return config.value;
+// The margin lanes fall back to the main kraken channel if their own webhook isn't set.
+const FALLS_BACK_TO_KRAKEN: NotifyChannel[] = ["margin_urgent", "margin_signals", "margin_results"];
 
-  // Demo alerts NEVER fall back to the live webhook — if no demo webhook is configured they are
-  // dropped. Demo 🚨 messages in the real-money channel read as emergencies and train alert fatigue.
+async function webhookFor(key: string): Promise<string | null> {
+  const row = await prisma.agentConfig.findUnique({ where: { key } });
+  return row?.value || null;
+}
+
+async function getWebhook(channel: NotifyChannel): Promise<string | null> {
+  const own = await webhookFor(CHANNEL_KEYS[channel]);
+  if (own) return own;
+
+  // Demo alerts NEVER fall back to the live webhook — a 🚨 in the real-money channel reads
+  // as an emergency and trains alert fatigue.
   if (channel === "futures_demo") return null;
 
-  // Kraken falls back to #general until its own webhook is configured, so no alert is lost
-  // during setup (its prior behavior was to post to #general directly).
-  if (channel === "kraken") {
-    const gen = await prisma.agentConfig.findUnique({ where: { key: "webhook_general" } });
-    if (gen?.value) return gen.value;
+  // Margin lanes and the kraken channel fall back to the kraken webhook, then general, so
+  // no alert is lost before the dedicated channels are configured.
+  if (channel === "kraken" || FALLS_BACK_TO_KRAKEN.includes(channel)) {
+    const krk = await webhookFor("webhook_kraken");
+    if (krk) return krk;
+    const gen = await webhookFor("webhook_general");
+    if (gen) return gen;
   }
 
-  const legacy = await prisma.agentConfig.findUnique({
-    where: { key: "notification_webhook" },
-  });
-  return legacy?.value || null;
+  return webhookFor("notification_webhook");
 }
 
 export async function sendNotification(

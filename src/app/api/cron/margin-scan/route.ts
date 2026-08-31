@@ -93,7 +93,7 @@ export async function GET(request: Request) {
       .map((s) => `• ${s.coin} ${s.timeframe}: ${s.detail} ($${s.price.toLocaleString()})`)
       .join("\n");
     const more = fresh.length > 20 ? `\n…and ${fresh.length - 20} more` : "";
-    await sendNotification(`🔎 Margin scan — ${fresh.length} new signal${fresh.length > 1 ? "s" : ""}:\n${lines}${more}`, "kraken");
+    await sendNotification(`🔎 Margin scan — ${fresh.length} new signal${fresh.length > 1 ? "s" : ""}:\n${lines}${more}`, "margin_signals");
   }
 
   await saveState(state);
@@ -112,7 +112,7 @@ export async function GET(request: Request) {
         `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x from $${r.entry.toLocaleString()} → ` +
         `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
         `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
-        "kraken",
+        "margin_results",
       );
     }
   } catch (e) {
