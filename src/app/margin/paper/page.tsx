@@ -27,13 +27,27 @@ interface PaperTradeRow {
   leverage: number | null; conviction: string | null; entry: number | null;
   exit: number | null; pnl: number | null; status: string; reason: string | null;
 }
+interface EdgeStat {
+  key: string; label: string; resolved: number; wins: number; hitRate: number | null;
+  expectancy: number | null; totalPnl: number; open: number;
+}
+interface EdgeBreakdowns { byDirection: EdgeStat[]; byCoin: EdgeStat[] }
+
+// Sample-size gate: thin slices find fake edges. Nothing is a verdict until ~20 resolved.
+const MIN_EDGE_SAMPLE = 20;
+function edgeVerdict(e: EdgeStat): { label: string; cls: string } {
+  if (e.resolved < MIN_EDGE_SAMPLE) return { label: `watching · ${e.resolved}/${MIN_EDGE_SAMPLE}`, cls: "text-muted-foreground/40" };
+  if (e.expectancy == null) return { label: "—", cls: "text-muted-foreground/40" };
+  if (e.expectancy > 0) return { label: "promising", cls: "text-emerald-400" };
+  return { label: "not paying", cls: "text-red-400" };
+}
 
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 const money2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; log: PaperTradeRow[] }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; log: PaperTradeRow[]; edges: EdgeBreakdowns }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
 
@@ -167,6 +181,65 @@ export default function PaperTradesPage() {
           </div>
           <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
             The row with positive <span className="text-foreground/60">expectancy</span> over enough trades is the one worth real money. A high hit rate with tiny wins and big losses still loses — watch expectancy, not just win rate.
+          </p>
+        </div>
+      )}
+
+      {/* ── Edges: where's the money coming from? ── */}
+      {score?.edges && (score.edges.byDirection.some((e) => e.resolved > 0 || e.open > 0) || score.edges.byCoin.some((e) => e.resolved > 0 || e.open > 0)) && (
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+            <p className="text-xs font-bold">🔬 Edges — where&apos;s the money coming from?</p>
+            <p className="text-[10px] text-muted-foreground/45">the paper record, sliced by factor</p>
+          </div>
+          <div className="px-4 py-2 border-b border-border/50 bg-amber-500/[0.04]">
+            <p className="text-[10px] text-amber-400/70">
+              ⚠️ Thin slices lie. A bucket with a handful of trades can look brilliant by pure luck — that&apos;s data-mining, and it&apos;s how you talk yourself into betting on noise. Nothing here counts as an edge until it has a real sample ({MIN_EDGE_SAMPLE}+ resolved). Watch the count, not the color.
+            </p>
+          </div>
+          {([
+            { title: "By direction — do longs or shorts pay?", rows: score.edges.byDirection },
+            { title: "By coin — which coins are worth trading?", rows: score.edges.byCoin.filter((e) => e.resolved > 0 || e.open > 0) },
+          ] as { title: string; rows: EdgeStat[] }[]).map((grp) => (
+            <div key={grp.title} className="border-b border-border/30 last:border-0">
+              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider px-4 pt-3 pb-1">{grp.title}</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/40">
+                      <th className="text-left font-medium px-4 py-1">Slice</th>
+                      <th className="text-right font-medium px-2 py-1">Resolved</th>
+                      <th className="text-right font-medium px-2 py-1">Open</th>
+                      <th className="text-right font-medium px-2 py-1">Hit rate</th>
+                      <th className="text-right font-medium px-2 py-1">Expectancy</th>
+                      <th className="text-right font-medium px-2 py-1">Total P&amp;L</th>
+                      <th className="text-right font-medium px-4 py-1">Verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {grp.rows.map((e) => {
+                      const v = edgeVerdict(e);
+                      return (
+                        <tr key={e.key} className="border-t border-border/20">
+                          <td className="text-left px-4 py-1.5 font-semibold text-foreground/80">{e.label}</td>
+                          <td className="text-right px-2 py-1.5 tabular-nums">{e.resolved}</td>
+                          <td className="text-right px-2 py-1.5 tabular-nums text-muted-foreground/50">{e.open}</td>
+                          <td className="text-right px-2 py-1.5 tabular-nums">{e.hitRate != null ? `${(e.hitRate * 100).toFixed(0)}%` : "—"}</td>
+                          <td className={`text-right px-2 py-1.5 tabular-nums font-bold ${e.expectancy != null && e.resolved >= MIN_EDGE_SAMPLE ? col(e.expectancy) : "text-muted-foreground/40"}`}>
+                            {e.expectancy != null ? money2(e.expectancy) : "—"}
+                          </td>
+                          <td className={`text-right px-2 py-1.5 tabular-nums ${e.resolved >= MIN_EDGE_SAMPLE ? col(e.totalPnl) : "text-muted-foreground/40"}`}>{money(e.totalPnl)}</td>
+                          <td className={`text-right px-4 py-1.5 font-semibold ${v.cls}`}>{v.label}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+          <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
+            Expectancy = avg $/trade after fees. A real edge is a slice with positive expectancy over a <span className="text-foreground/60">large</span> sample — the profitable setup is usually a combination of these factors, not one alone. Grayed numbers haven&apos;t earned a verdict yet.
           </p>
         </div>
       )}
