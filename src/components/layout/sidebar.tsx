@@ -9,7 +9,7 @@ import {
   LayoutDashboard,
   CandlestickChart,
   ClipboardList,
-  Bitcoin,
+  FlaskConical,
   Activity,
 } from "lucide-react";
 
@@ -28,7 +28,7 @@ const sections = [
     label: "TRADING",
     links: [
       { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart, broker: "Kraken" },
-      { href: "/kraken", label: "Trend Bot", icon: Bitcoin, broker: "Kraken" },
+      { href: "/margin/paper", label: "Paper Trades", icon: FlaskConical, broker: "Kraken" },
       { href: "/orders", label: "Orders", icon: ClipboardList },
     ],
   },

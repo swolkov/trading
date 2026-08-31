@@ -7,6 +7,7 @@ import { isPublicPath } from "@/lib/route-access";
 // for reversibility, but they are unlinked from the nav and redirect home.
 const RETIRED_PREFIXES = [
   "/futures",
+  "/kraken",          // old BTC/ETH trend bot — disabled Aug 31 2026, capital parked in coins
   "/demo-vs-live",
   "/connect",
   "/performance",
