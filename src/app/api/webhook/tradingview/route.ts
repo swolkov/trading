@@ -136,7 +136,7 @@ export async function POST(request: Request) {
     `📡 TradingView: ${side.toUpperCase()} ${symbol}${leverage ? ` ${leverage}x` : ""}` +
     `${markPrice ? ` @ $${markPrice.toLocaleString()}` : ""}${note ? ` — ${note}` : ""}\n` +
     `→ ${result.executed ? "✅ EXECUTED" : result.validated ? "🧪 validated (no money moved)" : "👁 tracked"}: ${result.note}`,
-    "kraken",
+    "margin_results",
   );
 
   return Response.json({ ok: true, tracked: !result.executed, ...result });
