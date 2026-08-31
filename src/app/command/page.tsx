@@ -1,97 +1,36 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 
-// ============ COMMAND CENTER ============
-// Operational control panel for all meta-agents.
-// The Agent Hub controls WHAT trades. This monitors EVERYTHING ELSE.
+// ============ SYSTEM HEALTH ============
+// Kraken-only since the Aug 2026 futures retirement. One job: prove the machinery
+// is alive, and go amber/red the moment any piece stops writing its heartbeat.
 
 interface CommandData {
-  watchdog: { lastRun: string | null; recentRuns: { summary: string; errors: number; createdAt: string }[] };
-  portfolioRisk: {
-    timestamp: string;
-    equity: number;
-    cash: number;
-    cashPct: number;
-    dayPnl: number;
-    dayPnlPct: number;
-    totalPositions: number;
-    equityPositions: number;
-    optionsPositions: number;
-    futuresPositions: number;
-    longExposure: number;
-    shortExposure: number;
-    netExposure: number;
-    grossExposure: number;
-    leverageRatio: number;
-    greeks: { totalDelta: number; totalGamma: number; totalTheta: number; totalVega: number; betaWeightedDelta: number };
-    sectorExposures: { sector: string; symbols: string[]; notional: number; pctOfPortfolio: number }[];
-    topConcentration: { symbol: string; pct: number };
-    historicalVaR95: number;
-    maxDrawdownPct: number;
-    alerts: { severity: string; category: string; message: string }[];
-  } | null;
-  regimeTransition: {
-    transition: string;
-    confidence: number;
-    description: string;
-    actionableAdvice: string;
-    agentAdjustments: { positionSizeMultiplier: number; preferredStrategies: string[]; avoidStrategies: string[]; urgency: string };
-    metrics: { volatilityCompression: number; adLine5d: number; vixChange1d: number; vixChange5d: number; atrExpansion: number; priceVs20sma: number; volumeSurge: number };
-  } | null;
-  regimeSizeOverride: number;
-  eventCalendar: {
-    lastRun: string;
-    eventsToday: string[];
-    eventsTomorrow: string[];
-    upcoming: number;
-    effectiveMultiplier: number;
-    newsAlerts: number;
-  } | null;
-  eventSizeOverride: number;
-  executionQuality: {
-    lastRun: string;
-    totalFills: number;
-    avgSlippageBps: string;
-    totalSlippageDollars: string;
-    grades: Record<string, number>;
-    worstSymbols?: string[];
-    recommendations: string[];
-  } | null;
-  effectiveMultiplier: number;
-  preferredStrategies: string[];
-  avoidStrategies: string[];
-  heartbeats: Record<string, string | null>;
-  recentRuns: { type: string; summary: string; errors: number; duration: number; time: string }[];
-  // New systems
-  benchmark: {
-    lastRun: string; period: string; portfolioReturn: string; benchmarkReturn: string;
-    alpha: string; beta: string; sharpe: string; informationRatio: string;
-    beatingBenchmark: boolean; verdict: string;
-  } | null;
-  drawdownState: {
-    mode: string; currentDrawdownPct: number; peakEquity: number; currentEquity: number;
-    consecutiveLosses: number; recentWinRate: number; reason: string;
-    overrides: { sizeMultiplier: number; minScoreOverride: number; maxPositions: number; allowedStrategies: string[] };
-  } | null;
-  drawdownMode: string;
-  stressTest: {
-    timestamp: string; equity: number; portfolioResilience: string;
-    worstCase: { scenario: string; loss: number; lossPct: number };
-    scenarios: { name: string; estimatedPnl: number; estimatedPnlPct: number; severity: string; advice: string }[];
-  } | null;
-  pnlAttribution: {
-    period: string; totalPnl: number; stockSelectionPnl: number; timingPnl: number; sizingPnl: number;
-    bestSource: string; worstSource: string; insights: string[];
-    strategyRanking: { strategy: string; pnl: number; trades: number; winRate: number; grade: string }[];
-  } | null;
-  walkForward: {
-    timestamp: string; overallHealth: string;
-    strategies: { strategy: string; grade: string; recommendation: string; recentWinRate: number; recentPnl: number; edgeDecaying: boolean }[];
-    insights: string[];
-  } | null;
+  heartbeats: {
+    krakenCron: string | null;
+    krakenAgent: string | null;
+    marginWatch: string | null;
+    tradeSync: string | null;
+    tradingViewAlert: string | null;
+  };
+  flowsAsOf: string | null;
+  runLock: { held: boolean; since: string | null };
+  makerMisses: Record<string, number>;
+  config: { enabled: boolean; validateOnly: boolean; makerOrders: boolean; marginAuto: boolean };
+  recentOrders: { symbol: string; action: string; usd: number | null; reason: string | null; time: string }[];
+  error?: string;
+}
+
+const fetcher = (u: string) => fetch(u).then((r) => r.json());
+
+function ageInfo(isoDate: string | null, warnMin: number, critMin: number): { text: string; status: "ok" | "warning" | "critical" | "unknown" } {
+  if (!isoDate) return { text: "never", status: "unknown" };
+  const age = (Date.now() - new Date(isoDate).getTime()) / 60000;
+  const text = age < 1 ? "just now" : age < 60 ? `${age.toFixed(0)}m ago` : age < 1440 ? `${(age / 60).toFixed(1)}h ago` : `${(age / 1440).toFixed(0)}d ago`;
+  const status = age < warnMin ? "ok" : age < critMin ? "warning" : "critical";
+  return { text, status };
 }
 
 function StatusDot({ status }: { status: "ok" | "warning" | "critical" | "unknown" }) {
@@ -104,59 +43,10 @@ function StatusDot({ status }: { status: "ok" | "warning" | "critical" | "unknow
   return <span className={`inline-block w-2 h-2 rounded-full ${colors[status]}`} />;
 }
 
-function formatAge(isoDate: string | null): { text: string; status: "ok" | "warning" | "critical" | "unknown" } {
-  if (!isoDate) return { text: "Never", status: "unknown" };
-  const age = (Date.now() - new Date(isoDate).getTime()) / 60000;
-  if (age < 0) return { text: "Just now", status: "ok" };
-  if (age < 10) return { text: `${age.toFixed(0)}m ago`, status: "ok" };
-  if (age < 30) return { text: `${age.toFixed(0)}m ago`, status: "warning" };
-  if (age < 60) return { text: `${age.toFixed(0)}m ago`, status: "warning" };
-  if (age < 1440) return { text: `${(age / 60).toFixed(1)}h ago`, status: "critical" };
-  return { text: `${(age / 1440).toFixed(0)}d ago`, status: "critical" };
-}
+export default function SystemHealthPage() {
+  const { data, isLoading } = useSWR<CommandData>("/api/command", fetcher, { refreshInterval: 30000 });
 
-function pnlColor(val: number) {
-  return val > 0 ? "text-emerald-500" : val < 0 ? "text-red-500" : "text-muted-foreground";
-}
-
-function gradeColor(grade: string) {
-  if (grade === "A") return "text-emerald-500";
-  if (grade === "B") return "text-blue-400";
-  if (grade === "C") return "text-yellow-500";
-  if (grade === "D") return "text-orange-500";
-  return "text-red-500";
-}
-
-export default function CommandCenterPage() {
-  const [data, setData] = useState<CommandData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [runningAgent, setRunningAgent] = useState<string | null>(null);
-
-  const loadData = useCallback(async () => {
-    try {
-      const res = await fetch("/api/command");
-      const json = await res.json();
-      setData(json);
-    } catch { /* ignore */ }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 30000); // 30s refresh
-    return () => clearInterval(interval);
-  }, [loadData]);
-
-  const runAgent = async (endpoint: string, id: string) => {
-    setRunningAgent(id);
-    try {
-      await fetch(endpoint, { method: "POST" });
-    } catch { /* ignore */ }
-    setRunningAgent(null);
-    loadData();
-  };
-
-  if (loading) {
+  if (isLoading || !data) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full" />
@@ -164,819 +54,134 @@ export default function CommandCenterPage() {
     );
   }
 
-  const risk = data?.portfolioRisk;
-  const regime = data?.regimeTransition;
-  const events = data?.eventCalendar;
-  const exec = data?.executionQuality;
-  const heartbeats = data?.heartbeats || {};
+  const hb = data.heartbeats;
+  // Thresholds follow each job's real cadence: cron */30 → amber at 90m; watch */5 → amber at 20m.
+  const rows: { label: string; sub: string; age: ReturnType<typeof ageInfo> }[] = [
+    { label: "Kraken cron", sub: "runs every 30 min", age: ageInfo(hb.krakenCron, 90, 180) },
+    { label: "Trend agent", sub: "last full run", age: ageInfo(hb.krakenAgent, 90, 180) },
+    { label: "Margin watch", sub: "runs every 5 min", age: ageInfo(hb.marginWatch, 20, 60) },
+    { label: "Trade sync", sub: "margin trade history from ledger", age: ageInfo(hb.tradeSync, 90, 360) },
+    { label: "Deposits read", sub: "capital flows from Kraken ledger", age: ageInfo(data.flowsAsOf, 180, 720) },
+  ];
 
-  // Count critical alerts
-  const criticalAlerts = risk?.alerts?.filter((a) => a.severity === "critical") || [];
-  const warningAlerts = risk?.alerts?.filter((a) => a.severity === "warning") || [];
+  // A held lock is only alarming when it outlives its 5-minute TTL.
+  const lockAgeMin = data.runLock.since ? (Date.now() - new Date(data.runLock.since).getTime()) / 60000 : 0;
+  const lockStuck = data.runLock.held && lockAgeMin > 6;
+
+  const missEntries = Object.entries(data.makerMisses || {}).filter(([, n]) => n > 0);
 
   return (
     <div className="space-y-6 animate-fade-up">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold">Command Center</h1>
-          <p className="text-sm text-muted-foreground">
-            System health, risk, regime, events — auto-refreshes every 30s
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {/* Effective sizing */}
-          <div className={`text-right px-3 py-1.5 rounded-lg border ${data?.effectiveMultiplier === 1.0 ? "border-zinc-700 bg-zinc-900" : data?.effectiveMultiplier && data.effectiveMultiplier < 0.7 ? "border-red-500/30 bg-red-500/10" : "border-yellow-500/30 bg-yellow-500/10"}`}>
-            <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Size Override</p>
-            <p className={`text-lg font-bold ${data?.effectiveMultiplier === 1.0 ? "text-muted-foreground" : data?.effectiveMultiplier && data.effectiveMultiplier < 0.7 ? "text-red-500" : "text-yellow-500"}`}>
-              {((data?.effectiveMultiplier || 1) * 100).toFixed(0)}%
-            </p>
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="text-xs"
-            disabled={runningAgent !== null}
-            onClick={() => runAgent("/api/cron/watchdog", "watchdog")}
-          >
-            {runningAgent === "watchdog" ? "Running..." : "Run Watchdog"}
-          </Button>
-        </div>
+      <div>
+        <h1 className="text-xl font-bold">System Health</h1>
+        <p className="text-sm text-muted-foreground">Kraken machinery heartbeats — auto-refreshes every 30s</p>
       </div>
 
-      {/* Critical Alerts Banner */}
-      {criticalAlerts.length > 0 && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 space-y-2">
-          <p className="text-sm font-bold text-red-500">CRITICAL ALERTS ({criticalAlerts.length})</p>
-          {criticalAlerts.map((a, i) => (
-            <p key={i} className="text-xs text-red-400">[{a.category}] {a.message}</p>
-          ))}
+      {lockStuck && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+          <p className="text-sm font-bold text-red-500">RUN LOCK STUCK</p>
+          <p className="text-xs text-red-400 mt-1">
+            Held since {data.runLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 5m). A run likely died mid-flight; the next cron should recover it, but check Vercel logs if this persists.
+          </p>
         </div>
       )}
 
-      {/* Row 1: System Health + Portfolio Risk Overview */}
-      <div className="grid lg:grid-cols-3 gap-4">
-        {/* System Health */}
+      <div className="grid lg:grid-cols-2 gap-4">
+        {/* Heartbeats */}
         <Card className="border-zinc-800">
           <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">System Health</CardTitle>
-              <div className="flex items-center gap-1.5">
-                <StatusDot status={formatAge(heartbeats.watchdog).status} />
-                <span className="text-[10px] text-muted-foreground">{formatAge(heartbeats.watchdog).text}</span>
-              </div>
-            </div>
+            <CardTitle className="text-sm font-bold">Heartbeats</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {Object.entries(heartbeats).map(([key, val]) => {
-              const age = formatAge(val);
-              const label = key.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase()).replace("Cron", "");
-              return (
-                <div key={key} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <StatusDot status={age.status} />
-                    <span className="text-[11px]">{label}</span>
-                  </div>
-                  <span className="text-[10px] text-muted-foreground">{age.text}</span>
+          <CardContent className="space-y-2.5">
+            {rows.map((r) => (
+              <div key={r.label} className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <StatusDot status={r.age.status} />
+                  <span className="text-[12px]">{r.label}</span>
+                  <span className="text-[10px] text-muted-foreground/40">{r.sub}</span>
                 </div>
-              );
-            })}
-          </CardContent>
-        </Card>
-
-        {/* Portfolio Risk Summary */}
-        <Card className="lg:col-span-2 border-zinc-800">
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Portfolio Risk</CardTitle>
+                <span className="text-[11px] text-muted-foreground tabular-nums">{r.age.text}</span>
+              </div>
+            ))}
+            <div className="flex items-center justify-between border-t border-zinc-800 pt-2.5">
               <div className="flex items-center gap-2">
-                {warningAlerts.length > 0 && (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-500 font-medium">
-                    {warningAlerts.length} warning{warningAlerts.length > 1 ? "s" : ""}
+                <StatusDot status={hb.tradingViewAlert ? "ok" : "unknown"} />
+                <span className="text-[12px]">TradingView alert</span>
+                <span className="text-[10px] text-muted-foreground/40">last webhook received</span>
+              </div>
+              <span className="text-[11px] text-muted-foreground tabular-nums">
+                {hb.tradingViewAlert ? ageInfo(hb.tradingViewAlert, 1e9, 1e9).text : "none yet"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Config state */}
+        <Card className="border-zinc-800">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-bold">Switches</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2.5">
+            {[
+              { label: "Trend bot enabled", on: data.config.enabled, onText: "on", offText: "off" },
+              { label: "Real orders", on: !data.config.validateOnly, onText: "LIVE", offText: "validate-only" },
+              { label: "Maker-first buying", on: data.config.makerOrders, onText: "on", offText: "off (taker)" },
+              { label: "Margin auto-trade", on: data.config.marginAuto, onText: "ARMED", offText: "tracked only" },
+            ].map((s) => (
+              <div key={s.label} className="flex items-center justify-between">
+                <span className="text-[12px]">{s.label}</span>
+                <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
+                  s.on ? "bg-red-500/15 text-red-400" : "bg-emerald-500/15 text-emerald-400"
+                }`}>
+                  {s.on ? s.onText : s.offText}
+                </span>
+              </div>
+            ))}
+            {missEntries.length > 0 && (
+              <div className="border-t border-zinc-800 pt-2.5">
+                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider mb-1">Maker misses (falls back to market at 4)</p>
+                {missEntries.map(([coin, n]) => (
+                  <p key={coin} className="text-[11px] text-amber-400">{coin}: {n} consecutive unfilled</p>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center justify-between border-t border-zinc-800 pt-2.5">
+              <span className="text-[12px]">Run lock</span>
+              <span className={`text-[11px] tabular-nums ${lockStuck ? "text-red-400" : "text-muted-foreground"}`}>
+                {data.runLock.held ? `held ${lockAgeMin.toFixed(0)}m` : "released"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Recent orders */}
+      <Card className="border-zinc-800">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-bold">Recent Bot Orders</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {data.recentOrders.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No bot orders yet.</p>
+          ) : (
+            <div className="space-y-1.5">
+              {data.recentOrders.map((o, i) => (
+                <div key={i} className="flex items-center gap-3 text-[11px]">
+                  <span className="text-muted-foreground/50 tabular-nums whitespace-nowrap min-w-[110px]">
+                    {new Date(o.time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
                   </span>
-                )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-[10px] h-6 px-2"
-                  disabled={runningAgent !== null}
-                  onClick={() => runAgent("/api/cron/risk", "risk")}
-                >
-                  {runningAgent === "risk" ? "..." : "Refresh"}
-                </Button>
-              </div>
+                  <span className="font-semibold min-w-[60px]">{o.symbol}</span>
+                  <span className={o.action === "kraken_buy" ? "text-emerald-400" : "text-red-400"}>
+                    {o.action === "kraken_buy" ? "buy" : "sell"}
+                  </span>
+                  <span className="tabular-nums text-muted-foreground">{o.usd != null ? `$${o.usd}` : "—"}</span>
+                  <span className="text-muted-foreground/50 truncate">{o.reason}</span>
+                </div>
+              ))}
             </div>
-          </CardHeader>
-          <CardContent>
-            {risk ? (
-              <div className="space-y-3">
-                {/* Top metrics */}
-                <div className="grid grid-cols-4 gap-3">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Equity</p>
-                    <p className="text-lg font-bold">${(risk.equity / 1000).toFixed(1)}k</p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Day P&L</p>
-                    <p className={`text-lg font-bold ${pnlColor(risk.dayPnl)}`}>
-                      {risk.dayPnl >= 0 ? "+" : ""}${risk.dayPnl.toFixed(0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Leverage</p>
-                    <p className={`text-lg font-bold ${risk.leverageRatio > 1.5 ? "text-red-500" : risk.leverageRatio > 1 ? "text-yellow-500" : ""}`}>
-                      {risk.leverageRatio.toFixed(1)}x
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">VaR 95%</p>
-                    <p className={`text-lg font-bold ${risk.historicalVaR95 > risk.equity * 0.02 ? "text-red-500" : ""}`}>
-                      ${risk.historicalVaR95.toFixed(0)}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Greeks */}
-                <div className="grid grid-cols-4 gap-3 border-t border-zinc-800 pt-3">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Delta</p>
-                    <p className="text-sm font-medium">{risk.greeks.totalDelta.toFixed(0)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Gamma</p>
-                    <p className="text-sm font-medium">{risk.greeks.totalGamma.toFixed(1)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Theta</p>
-                    <p className={`text-sm font-medium ${risk.greeks.totalTheta < -100 ? "text-red-500" : ""}`}>
-                      ${risk.greeks.totalTheta.toFixed(0)}/d
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Vega</p>
-                    <p className="text-sm font-medium">${risk.greeks.totalVega.toFixed(0)}</p>
-                  </div>
-                </div>
-
-                {/* Exposure bar */}
-                <div className="border-t border-zinc-800 pt-3">
-                  <div className="flex items-center justify-between text-[10px] text-muted-foreground mb-1">
-                    <span>Long ${(risk.longExposure / 1000).toFixed(1)}k</span>
-                    <span>Cash {risk.cashPct.toFixed(0)}%</span>
-                    <span>Short ${(risk.shortExposure / 1000).toFixed(1)}k</span>
-                  </div>
-                  <div className="h-2 bg-zinc-800 rounded-full overflow-hidden flex">
-                    <div
-                      className="bg-emerald-500 h-full"
-                      style={{ width: `${Math.min(100, (risk.longExposure / (risk.longExposure + risk.shortExposure + risk.cash || 1)) * 100)}%` }}
-                    />
-                    <div
-                      className="bg-zinc-600 h-full"
-                      style={{ width: `${Math.min(100, (risk.cash / (risk.longExposure + risk.shortExposure + risk.cash || 1)) * 100)}%` }}
-                    />
-                    <div
-                      className="bg-red-500 h-full"
-                      style={{ width: `${Math.min(100, (risk.shortExposure / (risk.longExposure + risk.shortExposure + risk.cash || 1)) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-
-                {/* Sector concentration */}
-                {risk.sectorExposures.length > 0 && (
-                  <div className="border-t border-zinc-800 pt-3">
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-2">Sector Exposure</p>
-                    <div className="space-y-1.5">
-                      {risk.sectorExposures.slice(0, 5).map((s) => (
-                        <div key={s.sector} className="flex items-center gap-2">
-                          <span className="text-[11px] min-w-[80px]">{s.sector}</span>
-                          <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                            <div
-                              className={`h-full rounded-full ${s.pctOfPortfolio > 30 ? "bg-red-500" : s.pctOfPortfolio > 20 ? "bg-yellow-500" : "bg-emerald-500"}`}
-                              style={{ width: `${Math.min(100, s.pctOfPortfolio)}%` }}
-                            />
-                          </div>
-                          <span className={`text-[10px] min-w-[40px] text-right ${s.pctOfPortfolio > 30 ? "text-red-500" : "text-muted-foreground"}`}>
-                            {s.pctOfPortfolio.toFixed(0)}%
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Positions breakdown */}
-                <div className="flex items-center gap-4 text-[10px] text-muted-foreground border-t border-zinc-800 pt-3">
-                  <span>Equity: {risk.equityPositions}</span>
-                  <span>Futures: {risk.futuresPositions}</span>
-                  <span>Top: {risk.topConcentration.symbol} ({risk.topConcentration.pct.toFixed(0)}%)</span>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">No risk data yet — run the risk agent to populate</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Row 2: Regime + Events + Execution */}
-      <div className="grid lg:grid-cols-3 gap-4">
-        {/* Regime Transition */}
-        <Card className={`border-zinc-800 ${regime?.transition !== "none" && regime?.transition ? "border-yellow-500/30" : ""}`}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Regime State</CardTitle>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-[10px] h-6 px-2"
-                disabled={runningAgent !== null}
-                onClick={() => runAgent("/api/cron/regime-transition", "regime")}
-              >
-                {runningAgent === "regime" ? "..." : "Check"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {regime ? (
-              <>
-                {/* Current transition */}
-                <div className={`px-3 py-2 rounded-lg ${regime.transition !== "none" ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-zinc-900 border border-zinc-800"}`}>
-                  <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Transition</p>
-                  <p className={`text-sm font-bold ${regime.transition !== "none" ? "text-yellow-500" : "text-muted-foreground"}`}>
-                    {regime.transition === "none" ? "Stable — No transition" : regime.transition.replace(/_/g, " ").toUpperCase()}
-                  </p>
-                  {regime.confidence > 0 && (
-                    <p className="text-[10px] text-muted-foreground mt-1">{regime.confidence}% confidence</p>
-                  )}
-                </div>
-
-                {regime.transition !== "none" && (
-                  <p className="text-[11px] text-muted-foreground">{regime.description}</p>
-                )}
-
-                {/* Metrics */}
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Vol Compression</p>
-                    <p className="text-xs font-medium">{(regime.metrics.volatilityCompression * 100).toFixed(0)}%</p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">ATR Expansion</p>
-                    <p className="text-xs font-medium">{(regime.metrics.atrExpansion * 100).toFixed(0)}%</p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">VIX 1d</p>
-                    <p className={`text-xs font-medium ${regime.metrics.vixChange1d > 10 ? "text-red-500" : regime.metrics.vixChange1d < -10 ? "text-emerald-500" : ""}`}>
-                      {regime.metrics.vixChange1d >= 0 ? "+" : ""}{regime.metrics.vixChange1d.toFixed(1)}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Vol Surge</p>
-                    <p className="text-xs font-medium">{(regime.metrics.volumeSurge * 100).toFixed(0)}%</p>
-                  </div>
-                </div>
-
-                {/* Override */}
-                {data?.regimeSizeOverride !== 1.0 && (
-                  <div className="flex items-center justify-between bg-yellow-500/10 px-3 py-2 rounded-lg">
-                    <span className="text-[10px]">Size Override</span>
-                    <span className="text-sm font-bold text-yellow-500">{(data!.regimeSizeOverride * 100).toFixed(0)}%</span>
-                  </div>
-                )}
-
-                {/* Strategy guidance */}
-                {(data?.preferredStrategies?.length || 0) > 0 && (
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Preferred</p>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {data!.preferredStrategies.map((s) => (
-                        <span key={s} className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500">{s.replace(/_/g, " ")}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {(data?.avoidStrategies?.length || 0) > 0 && (
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Avoid</p>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {data!.avoidStrategies.map((s) => (
-                        <span key={s} className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-500">{s.replace(/_/g, " ")}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No regime data — run check to populate</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Event Calendar */}
-        <Card className={`border-zinc-800 ${events?.eventsToday?.length ? "border-orange-500/30" : ""}`}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Event Calendar</CardTitle>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-[10px] h-6 px-2"
-                disabled={runningAgent !== null}
-                onClick={() => runAgent("/api/cron/events", "events")}
-              >
-                {runningAgent === "events" ? "..." : "Scan"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {events ? (
-              <>
-                {/* Override status */}
-                {data?.eventSizeOverride !== 1.0 && (
-                  <div className="flex items-center justify-between bg-orange-500/10 px-3 py-2 rounded-lg border border-orange-500/20">
-                    <span className="text-[10px]">Event Size Override</span>
-                    <span className="text-sm font-bold text-orange-500">{(data!.eventSizeOverride * 100).toFixed(0)}%</span>
-                  </div>
-                )}
-
-                {/* Today */}
-                <div>
-                  <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1">Today</p>
-                  {events.eventsToday.length > 0 ? (
-                    <div className="space-y-1">
-                      {events.eventsToday.map((e, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                          <span className="text-[11px]">{e}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-muted-foreground">No events today</p>
-                  )}
-                </div>
-
-                {/* Tomorrow */}
-                <div>
-                  <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1">Tomorrow</p>
-                  {events.eventsTomorrow.length > 0 ? (
-                    <div className="space-y-1">
-                      {events.eventsTomorrow.map((e, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
-                          <span className="text-[11px]">{e}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-muted-foreground">No events tomorrow</p>
-                  )}
-                </div>
-
-                {/* Stats */}
-                <div className="flex items-center gap-4 text-[10px] text-muted-foreground border-t border-zinc-800 pt-3">
-                  <span>{events.upcoming} events this week</span>
-                  {events.newsAlerts > 0 && (
-                    <span className="text-orange-500">{events.newsAlerts} news alerts</span>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No event data — run scan to populate</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Execution Quality */}
-        <Card className="border-zinc-800">
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Execution Quality</CardTitle>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-[10px] h-6 px-2"
-                disabled={runningAgent !== null}
-                onClick={() => runAgent("/api/cron/execution-review", "exec")}
-              >
-                {runningAgent === "exec" ? "..." : "Review"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {exec ? (
-              <>
-                {/* Key metrics */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Avg Slippage</p>
-                    <p className={`text-lg font-bold ${parseFloat(exec.avgSlippageBps) > 15 ? "text-red-500" : parseFloat(exec.avgSlippageBps) > 5 ? "text-yellow-500" : "text-emerald-500"}`}>
-                      {exec.avgSlippageBps}bps
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Total Cost</p>
-                    <p className={`text-lg font-bold ${parseFloat(exec.totalSlippageDollars) > 50 ? "text-red-500" : ""}`}>
-                      ${exec.totalSlippageDollars}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Grade distribution */}
-                <div>
-                  <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-2">Grades ({exec.totalFills} fills)</p>
-                  <div className="flex gap-2">
-                    {Object.entries(exec.grades).map(([grade, count]) => (
-                      <div key={grade} className="flex-1 text-center">
-                        <p className={`text-lg font-bold ${gradeColor(grade)}`}>{count}</p>
-                        <p className={`text-[10px] ${gradeColor(grade)}`}>{grade}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Worst fills */}
-                {exec.worstSymbols && exec.worstSymbols.length > 0 && (
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1">Worst Fills</p>
-                    {exec.worstSymbols.slice(0, 3).map((w, i) => (
-                      <p key={i} className="text-[10px] text-red-400">{w}</p>
-                    ))}
-                  </div>
-                )}
-
-                {/* Recommendations */}
-                {exec.recommendations.length > 0 && (
-                  <div className="border-t border-zinc-800 pt-3">
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1">Recommendations</p>
-                    {exec.recommendations.map((r, i) => (
-                      <p key={i} className="text-[10px] text-blue-400 mt-1">{r}</p>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No execution data — run review to populate</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Row 3: Benchmark + Drawdown + Stress Test */}
-      <div className="grid lg:grid-cols-3 gap-4">
-        {/* Benchmark */}
-        <Card className={`border-zinc-800 ${data?.benchmark?.beatingBenchmark === false ? "border-red-500/20" : data?.benchmark?.beatingBenchmark ? "border-emerald-500/20" : ""}`}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">vs SPY Benchmark</CardTitle>
-              <Button size="sm" variant="ghost" className="text-[10px] h-6 px-2" disabled={runningAgent !== null} onClick={() => runAgent("/api/benchmark", "bench")}>
-                {runningAgent === "bench" ? "..." : "Refresh"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data?.benchmark ? (
-              <>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Portfolio</p>
-                    <p className={`text-lg font-bold ${parseFloat(data.benchmark.portfolioReturn) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                      {parseFloat(data.benchmark.portfolioReturn) >= 0 ? "+" : ""}{data.benchmark.portfolioReturn}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">SPY</p>
-                    <p className={`text-lg font-bold ${parseFloat(data.benchmark.benchmarkReturn) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                      {parseFloat(data.benchmark.benchmarkReturn) >= 0 ? "+" : ""}{data.benchmark.benchmarkReturn}%
-                    </p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Alpha</p>
-                    <p className={`text-sm font-bold ${parseFloat(data.benchmark.alpha) > 0 ? "text-emerald-500" : "text-red-500"}`}>
-                      {parseFloat(data.benchmark.alpha) >= 0 ? "+" : ""}{data.benchmark.alpha}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Sharpe</p>
-                    <p className="text-sm font-medium">{data.benchmark.sharpe}</p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Beta</p>
-                    <p className="text-sm font-medium">{data.benchmark.beta}</p>
-                  </div>
-                </div>
-                <p className="text-[10px] text-muted-foreground border-t border-zinc-800 pt-2">{data.benchmark.verdict}</p>
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No benchmark data — click Refresh to generate</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Drawdown Protocol */}
-        <Card className={`border-zinc-800 ${data?.drawdownMode === "LOCKDOWN" ? "border-red-500/40 bg-red-500/5" : data?.drawdownMode === "RECOVERY" ? "border-orange-500/30" : data?.drawdownMode === "CAUTION" ? "border-yellow-500/20" : ""}`}>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-bold">Drawdown Protocol</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className={`px-3 py-2 rounded-lg text-center ${
-              data?.drawdownMode === "NORMAL" ? "bg-emerald-500/10 border border-emerald-500/20" :
-              data?.drawdownMode === "CAUTION" ? "bg-yellow-500/10 border border-yellow-500/20" :
-              data?.drawdownMode === "RECOVERY" ? "bg-orange-500/10 border border-orange-500/20" :
-              data?.drawdownMode === "LOCKDOWN" ? "bg-red-500/10 border border-red-500/20" :
-              "bg-zinc-900 border border-zinc-800"
-            }`}>
-              <p className={`text-lg font-black ${
-                data?.drawdownMode === "NORMAL" ? "text-emerald-500" :
-                data?.drawdownMode === "CAUTION" ? "text-yellow-500" :
-                data?.drawdownMode === "RECOVERY" ? "text-orange-500" :
-                data?.drawdownMode === "LOCKDOWN" ? "text-red-500" : ""
-              }`}>
-                {data?.drawdownMode || "UNKNOWN"}
-              </p>
-            </div>
-            {data?.drawdownState && (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Drawdown</p>
-                    <p className={`text-sm font-medium ${data.drawdownState.currentDrawdownPct > 3 ? "text-red-500" : ""}`}>
-                      {data.drawdownState.currentDrawdownPct.toFixed(1)}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Consec. Losses</p>
-                    <p className={`text-sm font-medium ${data.drawdownState.consecutiveLosses >= 3 ? "text-red-500" : ""}`}>
-                      {data.drawdownState.consecutiveLosses}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Win Rate</p>
-                    <p className={`text-sm font-medium ${data.drawdownState.recentWinRate < 40 ? "text-red-500" : ""}`}>
-                      {data.drawdownState.recentWinRate.toFixed(0)}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Sizing</p>
-                    <p className="text-sm font-medium">{(data.drawdownState.overrides.sizeMultiplier * 100).toFixed(0)}%</p>
-                  </div>
-                </div>
-                <p className="text-[10px] text-muted-foreground border-t border-zinc-800 pt-2">{data.drawdownState.reason}</p>
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Stress Test */}
-        <Card className={`border-zinc-800 ${data?.stressTest?.portfolioResilience === "fragile" ? "border-red-500/20" : data?.stressTest?.portfolioResilience === "weak" ? "border-orange-500/20" : ""}`}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Stress Test</CardTitle>
-              <Button size="sm" variant="ghost" className="text-[10px] h-6 px-2" disabled={runningAgent !== null} onClick={() => runAgent("/api/stress-test", "stress")}>
-                {runningAgent === "stress" ? "..." : "Run"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data?.stressTest ? (
-              <>
-                <div className={`px-3 py-2 rounded-lg text-center border ${
-                  data.stressTest.portfolioResilience === "strong" ? "bg-emerald-500/10 border-emerald-500/20" :
-                  data.stressTest.portfolioResilience === "moderate" ? "bg-yellow-500/10 border-yellow-500/20" :
-                  data.stressTest.portfolioResilience === "weak" ? "bg-orange-500/10 border-orange-500/20" :
-                  "bg-red-500/10 border-red-500/20"
-                }`}>
-                  <p className="text-[9px] text-muted-foreground/60">Resilience</p>
-                  <p className="text-sm font-bold uppercase">{data.stressTest.portfolioResilience}</p>
-                </div>
-                <div className="space-y-1.5">
-                  {data.stressTest.scenarios.map((s) => (
-                    <div key={s.name} className="flex items-center justify-between">
-                      <span className="text-[10px] truncate max-w-[120px]">{s.name}</span>
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[10px] font-medium ${s.estimatedPnl < 0 ? "text-red-500" : "text-emerald-500"}`}>
-                          {s.estimatedPnl >= 0 ? "+" : ""}${(s.estimatedPnl / 1000).toFixed(1)}k
-                        </span>
-                        <span className={`text-[8px] px-1.5 py-0.5 rounded ${
-                          s.severity === "survivable" ? "bg-emerald-500/15 text-emerald-500" :
-                          s.severity === "painful" ? "bg-yellow-500/15 text-yellow-500" :
-                          s.severity === "critical" ? "bg-orange-500/15 text-orange-500" :
-                          "bg-red-500/15 text-red-500"
-                        }`}>{s.severity}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No stress test data — click Run to analyze</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Row 4: P&L Attribution + Walk-Forward */}
-      <div className="grid lg:grid-cols-2 gap-4">
-        {/* P&L Attribution */}
-        <Card className="border-zinc-800">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-bold">P&L Attribution</CardTitle>
-            <p className="text-[9px] text-muted-foreground/50" title="Sum of strategy trade-log rows across demo+live — a relative comparison of where signal came from, NOT the real account balance. For real money see the dashboard / Orders / Track Record.">
-              Relative strategy signal — not account P&L
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data?.pnlAttribution ? (
-              <>
-                <div className="grid grid-cols-4 gap-2">
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Total P&L</p>
-                    <p className={`text-sm font-bold ${pnlColor(data.pnlAttribution.totalPnl)}`}>
-                      ${data.pnlAttribution.totalPnl.toFixed(0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Selection</p>
-                    <p className={`text-sm font-medium ${pnlColor(data.pnlAttribution.stockSelectionPnl)}`}>
-                      ${data.pnlAttribution.stockSelectionPnl.toFixed(0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Timing</p>
-                    <p className={`text-sm font-medium ${pnlColor(data.pnlAttribution.timingPnl)}`}>
-                      ${data.pnlAttribution.timingPnl.toFixed(0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[9px] text-muted-foreground/60">Sizing</p>
-                    <p className={`text-sm font-medium ${pnlColor(data.pnlAttribution.sizingPnl)}`}>
-                      ${data.pnlAttribution.sizingPnl.toFixed(0)}
-                    </p>
-                  </div>
-                </div>
-                {/* Strategy ranking */}
-                {data.pnlAttribution.strategyRanking.length > 0 && (
-                  <div className="border-t border-zinc-800 pt-2 space-y-1">
-                    <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">By Strategy</p>
-                    {data.pnlAttribution.strategyRanking.slice(0, 5).map((s) => (
-                      <div key={s.strategy} className="flex items-center justify-between text-[10px]">
-                        <div className="flex items-center gap-2">
-                          <span className={`font-bold ${gradeColor(s.grade)}`}>{s.grade}</span>
-                          <span>{s.strategy.replace(/_/g, " ")}</span>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <span className="text-muted-foreground">{s.trades}t {s.winRate.toFixed(0)}%</span>
-                          <span className={`font-medium ${pnlColor(s.pnl)}`}>${s.pnl.toFixed(0)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {/* Insights */}
-                {data.pnlAttribution.insights.length > 0 && (
-                  <div className="border-t border-zinc-800 pt-2">
-                    {data.pnlAttribution.insights.slice(0, 3).map((insight, i) => (
-                      <p key={i} className="text-[10px] text-blue-400 mt-1">{insight}</p>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No attribution data — runs during post-market review</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Walk-Forward Optimization */}
-        <Card className={`border-zinc-800 ${data?.walkForward?.overallHealth === "critical" ? "border-red-500/20" : data?.walkForward?.overallHealth === "declining" ? "border-orange-500/20" : ""}`}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Strategy Health</CardTitle>
-              <Button size="sm" variant="ghost" className="text-[10px] h-6 px-2" disabled={runningAgent !== null} onClick={() => runAgent("/api/cron/walk-forward", "wf")}>
-                {runningAgent === "wf" ? "..." : "Analyze"}
-              </Button>
-            </div>
-            <p className="text-[9px] text-muted-foreground/50" title="Recent P&L here is a sum of strategy trade-log rows (demo+live) — a relative health signal, NOT the real account balance. For real money see the dashboard / Orders / Track Record.">
-              Recent P&L = relative strategy signal — not account P&L
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data?.walkForward ? (
-              <>
-                <div className={`px-3 py-1 rounded-lg text-center border ${
-                  data.walkForward.overallHealth === "healthy" ? "bg-emerald-500/10 border-emerald-500/20" :
-                  data.walkForward.overallHealth === "mixed" ? "bg-yellow-500/10 border-yellow-500/20" :
-                  data.walkForward.overallHealth === "declining" ? "bg-orange-500/10 border-orange-500/20" :
-                  "bg-red-500/10 border-red-500/20"
-                }`}>
-                  <p className="text-xs font-bold uppercase">{data.walkForward.overallHealth}</p>
-                </div>
-                <div className="space-y-1.5">
-                  {data.walkForward.strategies.map((s) => (
-                    <div key={s.strategy} className="flex items-center justify-between text-[10px]">
-                      <div className="flex items-center gap-2">
-                        <span className={`font-bold ${gradeColor(s.grade)}`}>{s.grade}</span>
-                        <span>{s.strategy.replace(/_/g, " ")}</span>
-                        {s.edgeDecaying && <span className="text-[8px] px-1 py-0.5 rounded bg-red-500/15 text-red-500">DECAY</span>}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground">{s.recentWinRate.toFixed(0)}%</span>
-                        <span className={`font-medium ${pnlColor(s.recentPnl)}`}>${s.recentPnl.toFixed(0)}</span>
-                        <span className={`text-[8px] px-1.5 py-0.5 rounded ${
-                          s.recommendation === "keep" ? "bg-emerald-500/15 text-emerald-500" :
-                          s.recommendation === "optimize" ? "bg-blue-500/15 text-blue-400" :
-                          s.recommendation === "reduce" ? "bg-yellow-500/15 text-yellow-500" :
-                          "bg-red-500/15 text-red-500"
-                        }`}>{s.recommendation}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {data.walkForward.insights.length > 0 && (
-                  <div className="border-t border-zinc-800 pt-2">
-                    {data.walkForward.insights.slice(0, 2).map((insight, i) => (
-                      <p key={i} className="text-[10px] text-blue-400 mt-1">{insight}</p>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">No walk-forward data — runs weekly Sunday night</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Row 5: Risk Alerts + Recent Agent Runs */}
-      <div className="grid lg:grid-cols-2 gap-4">
-        {/* Active Risk Alerts */}
-        <Card className="border-zinc-800">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-bold">
-              Risk Alerts ({(criticalAlerts.length + warningAlerts.length) || 0})
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {(criticalAlerts.length + warningAlerts.length) > 0 ? (
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {criticalAlerts.map((a, i) => (
-                  <div key={`c-${i}`} className="flex items-start gap-2 text-xs border-l-2 border-red-500 pl-3 py-1">
-                    <span className="text-red-500 font-bold min-w-[70px]">{a.category}</span>
-                    <span className="text-red-400">{a.message}</span>
-                  </div>
-                ))}
-                {warningAlerts.map((a, i) => (
-                  <div key={`w-${i}`} className="flex items-start gap-2 text-xs border-l-2 border-yellow-500 pl-3 py-1">
-                    <span className="text-yellow-500 font-bold min-w-[70px]">{a.category}</span>
-                    <span className="text-yellow-400">{a.message}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-emerald-500">All clear — no active risk alerts</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Recent Meta-Agent Runs */}
-        <Card className="border-zinc-800">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-bold">Recent Agent Runs</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2 max-h-64 overflow-y-auto">
-              {(data?.recentRuns || []).length === 0 && (
-                <p className="text-xs text-muted-foreground">No meta-agent runs in last 24h</p>
-              )}
-              {(data?.recentRuns || []).slice(0, 15).map((run, i) => {
-                const typeColors: Record<string, string> = {
-                  watchdog: "border-blue-500",
-                  portfolio_risk: "border-purple-500",
-                  regime_transition: "border-yellow-500",
-                  event_catalyst: "border-orange-500",
-                  execution_quality: "border-teal-500",
-                };
-                return (
-                  <div key={i} className={`flex items-start gap-3 text-xs border-l-2 pl-3 py-1 ${typeColors[run.type] || "border-zinc-600"}`}>
-                    <span className="text-muted-foreground/50 whitespace-nowrap min-w-[50px]">
-                      {new Date(run.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <span className="font-medium text-muted-foreground/80">{run.type.replace(/_/g, " ")}</span>
-                      <p className="text-muted-foreground truncate">{run.summary}</p>
-                    </div>
-                    {run.errors > 0 && (
-                      <span className="text-red-500 text-[10px] font-medium">{run.errors} err</span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

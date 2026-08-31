@@ -3,8 +3,29 @@ import type { NextFetchEvent, NextRequest } from "next/server";
 import { evaluateOwnerAuthorization } from "@/auth/owner-policy";
 import { isPublicPath } from "@/lib/route-access";
 
+// Pages retired with futures trading (Aug 2026). Their code remains in the repo
+// for reversibility, but they are unlinked from the nav and redirect home.
+const RETIRED_PREFIXES = [
+  "/futures",
+  "/demo-vs-live",
+  "/connect",
+  "/performance",
+  "/backtest",
+  "/agents",
+  "/admin",
+  "/edges",
+  "/journal",
+  "/fund",
+  "/proof",
+];
+
 export default async function proxy(request: NextRequest, event: NextFetchEvent) {
-  if (isPublicPath(request.nextUrl.pathname)) {
+  const { pathname } = request.nextUrl;
+  if (RETIRED_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
+    return NextResponse.redirect(new URL("/", request.url));
+  }
+
+  if (isPublicPath(pathname)) {
     return NextResponse.next();
   }
 
