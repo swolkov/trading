@@ -420,12 +420,17 @@ export async function krakenBuyLimitPostOnly(
   return { placed: !validate, volume, price, txid: res.txid as string[] | undefined, descr };
 }
 
-type OpenOrder = { txid: string; userref?: number; opentm: number; pair: string; vol: number; volExec: number };
+type OpenOrder = {
+  txid: string; userref?: number; opentm: number; pair: string; vol: number; volExec: number;
+  ordertype: string;   // "limit" | "stop-loss" | "trailing-stop" | "market" | …
+  side: string;        // "buy" | "sell"
+};
 
 export async function krakenOpenOrders(): Promise<OpenOrder[]> {
   const res = await krakenPrivate("OpenOrders");
   const open = (res.open ?? {}) as Record<string, {
-    userref?: number; opentm?: number; vol?: string; vol_exec?: string; descr?: { pair?: string };
+    userref?: number; opentm?: number; vol?: string; vol_exec?: string;
+    descr?: { pair?: string; ordertype?: string; type?: string };
   }>;
   return Object.entries(open).map(([txid, o]) => ({
     txid,
@@ -434,6 +439,8 @@ export async function krakenOpenOrders(): Promise<OpenOrder[]> {
     pair: o.descr?.pair ?? "",
     vol: parseFloat(o.vol ?? "0") || 0,
     volExec: parseFloat(o.vol_exec ?? "0") || 0,
+    ordertype: o.descr?.ordertype ?? "",
+    side: o.descr?.type ?? "",
   }));
 }
 

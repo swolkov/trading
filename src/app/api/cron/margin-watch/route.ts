@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { krakenConfigured } from "@/lib/kraken";
+import { krakenConfigured, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
 import {
   getKrakenMarginHealth,
   getKrakenMarginPositions,
@@ -10,13 +10,15 @@ import {
 } from "@/lib/kraken-margin";
 import { pairBase } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
+import { MARGIN_USERREF } from "@/lib/margin-executor";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
 // Spencer margin-trades by hand at up to 20x, where the liquidation line sits 3% away.
-// This cron is the thing that watches that line while he sleeps. It never places or
-// cancels orders; it only reads state and alerts. Kraken margin-calls at margin level
-// 80% and force-liquidates at 40%.
+// This cron watches that line while he sleeps: it reads state and alerts, tracks the
+// account drawdown circuit breaker, and reconciles the executor's OWN orders (cancels
+// orphaned stops and stale unfilled entries — scoped strictly to MARGIN_USERREF, so it
+// never touches a manual order). Kraken margin-calls at margin level 80%, liquidates at 40%.
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
@@ -27,6 +29,17 @@ const REALERT_MS = 60 * 60 * 1000;
 const STATE_KEY = "margin_watch_state";
 
 type WatchState = { alerts: Record<string, string> };
+
+async function cfg(key: string): Promise<string | null> {
+  const row = await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null);
+  return row?.value ?? null;
+}
+async function cfgNum(key: string, fallback: number): Promise<number> {
+  const raw = await cfg(key);
+  if (raw == null || raw.trim() === "") return fallback;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 async function loadState(): Promise<WatchState> {
   try {
@@ -88,10 +101,48 @@ export async function GET(request: Request) {
     errors.push(`trade sync: ${e}`);
   }
 
-  // 2) Margin level vs the call/liquidation lines.
+  // 2) Margin level vs the call/liquidation lines, + the account drawdown circuit breaker.
   let flat = true;
   try {
     const health = await getKrakenMarginHealth();
+
+    // Drawdown circuit breaker: track peak equity; if equity falls more than
+    // kraken_margin_max_drawdown_pct from the peak, DISARM new entries (the executor
+    // reads kraken_margin_disarmed_dd). Re-arm automatically once equity recovers to
+    // within half the threshold. This is the account-level stop that prevents a bad run
+    // from compounding — the single most important "not lose" guard.
+    if (health.equity > 0) {
+      const ddPct = Math.max(1, await cfgNum("kraken_margin_max_drawdown_pct", 15)) / 100;
+      const peakRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_equity_peak" } }).catch(() => null);
+      let peak = peakRow?.value ? parseFloat(peakRow.value) : 0;
+      if (health.equity > peak) {
+        peak = health.equity;
+        await prisma.agentConfig.upsert({
+          where: { key: "kraken_margin_equity_peak" },
+          update: { value: String(peak) },
+          create: { key: "kraken_margin_equity_peak", value: String(peak) },
+        }).catch(() => {});
+      }
+      const dd = peak > 0 ? (peak - health.equity) / peak : 0;
+      const disarmed = (await cfg("kraken_margin_disarmed_dd")) === "true";
+      if (!disarmed && dd >= ddPct) {
+        await prisma.agentConfig.upsert({
+          where: { key: "kraken_margin_disarmed_dd" }, update: { value: "true" }, create: { key: "kraken_margin_disarmed_dd", value: "true" },
+        }).catch(() => {});
+        await sendNotification(
+          `🛑 DRAWDOWN CIRCUIT BREAKER — equity $${health.equity.toFixed(0)} is ${(dd * 100).toFixed(1)}% below peak $${peak.toFixed(0)} (limit ${(ddPct * 100).toFixed(0)}%). Auto-entries HALTED. Closes still allowed. Re-arms when recovered.`,
+          "kraken",
+        );
+        sent.push("dd-breaker-tripped");
+      } else if (disarmed && dd < ddPct / 2) {
+        await prisma.agentConfig.upsert({
+          where: { key: "kraken_margin_disarmed_dd" }, update: { value: "false" }, create: { key: "kraken_margin_disarmed_dd", value: "false" },
+        }).catch(() => {});
+        await sendNotification(`✅ Drawdown recovered — equity $${health.equity.toFixed(0)}, ${(dd * 100).toFixed(1)}% below peak. Auto-entries RE-ARMED.`, "kraken");
+        sent.push("dd-breaker-rearmed");
+      }
+    }
+
     if (health.marginLevel != null) {
       flat = false;
       const ml = health.marginLevel;
@@ -168,6 +219,41 @@ export async function GET(request: Request) {
     }
   } catch (e) {
     errors.push(`positions: ${e}`);
+  }
+
+  // 3b) Reconcile the EXECUTOR's own orders (scoped strictly to MARGIN_USERREF — manual
+  //     orders are never touched). Two hazards this closes:
+  //       • ORPHAN STOP — Spencer closes a position by hand; its attached stop lingers as
+  //         a live order that could OPEN a fresh opposite position when triggered. Cancel
+  //         any of our stop orders with no matching open position.
+  //       • STALE ENTRY — a post-only limit entry that never filled. Cancel ours older
+  //         than kraken_margin_stale_entry_min so cash/intent isn't left dangling.
+  try {
+    const orders = await krakenOpenOrders();
+    const mine = orders.filter((o) => o.userref === MARGIN_USERREF);
+    if (mine.length) {
+      const positions = await getKrakenMarginPositions();
+      // A protective stop is only valid if it CLOSES a live position: a sell-stop
+      // protects a long, a buy-stop protects a short. Matching on pair alone would keep
+      // an old long's sell-stop alive after a manual close even when a NEW short exists —
+      // and that stray sell-stop would then ADD to the short if it triggered.
+      const stopProtectsLive = (o: { pair: string; side: string }) => positions.some((p) =>
+        pairBase(p.pair) === pairBase(o.pair) &&
+        ((o.side === "sell" && p.side === "long") || (o.side === "buy" && p.side === "short")));
+      const staleMin = Math.max(5, await cfgNum("kraken_margin_stale_entry_min", 30));
+      const nowSec = Date.now() / 1000;
+      for (const o of mine) {
+        const isStop = o.ordertype.includes("stop");
+        const isEntry = o.ordertype === "limit" || o.ordertype === "market";
+        if (isStop && !stopProtectsLive(o)) {
+          try { await krakenCancelOrder(o.txid); sent.push(`orphan-stop-cancelled-${o.pair}`); } catch { /* already gone */ }
+        } else if (isEntry && (nowSec - o.opentm) > staleMin * 60) {
+          try { await krakenCancelOrder(o.txid); sent.push(`stale-entry-cancelled-${o.pair}`); } catch { /* already gone */ }
+        }
+      }
+    }
+  } catch (e) {
+    errors.push(`order reconcile: ${e}`);
   }
 
   // 4) Fast-move heads-up on the majors (±3% in an hour) — only worth checking when
