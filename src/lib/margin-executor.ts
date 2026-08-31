@@ -31,7 +31,7 @@
 // Close orders are reduce_only so a stale read can never flip us into an opposite position.
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch } from "@/lib/kraken";
+import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders } from "@/lib/kraken";
 import { pairMatchesSymbol } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 
@@ -92,6 +92,27 @@ async function bumpDayState(prev: DayState): Promise<void> {
   }).catch(() => {});
 }
 
+// Execution lock — serializes the ENTRY path so two webhook invocations landing at once
+// can't both read the same day-state, both pass the cap, and both place an order. Atomic
+// compare-and-swap (ISO strings compare in time order). Fails CLOSED: if it can't be
+// acquired, the alert is refused rather than risking a concurrent double-entry.
+const EXEC_LOCK_KEY = "kraken_margin_exec_lock";
+const EXEC_LOCK_TTL_MS = 30_000;
+async function acquireExecLock(): Promise<boolean> {
+  await prisma.agentConfig.upsert({
+    where: { key: EXEC_LOCK_KEY }, update: {}, create: { key: EXEC_LOCK_KEY, value: "" },
+  }).catch(() => {});
+  const cutoff = new Date(Date.now() - EXEC_LOCK_TTL_MS).toISOString();
+  const r = await prisma.agentConfig.updateMany({
+    where: { key: EXEC_LOCK_KEY, OR: [{ value: "" }, { value: { lt: cutoff } }] },
+    data: { value: new Date().toISOString() },
+  }).catch(() => ({ count: 0 }));
+  return r.count === 1;
+}
+async function releaseExecLock(): Promise<void> {
+  await prisma.agentConfig.update({ where: { key: EXEC_LOCK_KEY }, data: { value: "" } }).catch(() => {});
+}
+
 export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // Layer 1: armed at all?
   const auto = (await cfg("kraken_margin_auto")) === "true";
@@ -146,32 +167,35 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     return { executed: false, validated: false, note: "entries halted — account drawdown circuit breaker tripped" };
   }
 
-  // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
-  const dayState = await loadDayState();
-  const maxPerDay = Math.max(1, await cfgNum("kraken_margin_max_trades_per_day", 6));
-  if (dayState.entries >= maxPerDay) {
-    return { executed: false, validated: false, note: `entry refused: ${dayState.entries}/${maxPerDay} trades already today` };
+  // Serialize entries: without this, two alerts landing together both read the same
+  // day-state and both place an order. Fails closed — a lock we can't get = no entry.
+  if (!(await acquireExecLock())) {
+    return { executed: false, validated: false, note: "another entry is in progress — skipped (no concurrent entries)" };
   }
-  const cooldownMin = Math.max(0, await cfgNum("kraken_margin_cooldown_min", 30));
-  if (dayState.lastEntryIso && Date.now() - new Date(dayState.lastEntryIso).getTime() < cooldownMin * 60_000) {
-    const waited = Math.round((Date.now() - new Date(dayState.lastEntryIso).getTime()) / 60_000);
-    return { executed: false, validated: false, note: `entry refused: cooldown (${waited}/${cooldownMin} min since last entry)` };
-  }
-
-  // Layer 3: leverage. Kraken margin minimum is 2; a cap below that means "no entries".
-  const maxLev = await cfgNum("kraken_margin_max_leverage", 2);
-  if (maxLev < 2) {
-    return { executed: false, validated: false, note: `entries disabled (max leverage ${maxLev} < Kraken minimum 2)` };
-  }
-  const leverage = Math.min(Math.min(20, maxLev), Math.max(2, alert.leverage ?? 2));
-  const perTrade = Math.max(10, await cfgNum("kraken_margin_per_trade_usd", 100));
-  const lossCap = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 200));
-  let equity = 0;   // account equity, captured in the loss-cap block for risk sizing
-
-  // Layer 5: daily loss kill switch — realized round trips closed today plus open P&L.
-  // Fails closed on ANY read problem, including a stale trade sync: stale data
-  // understates losses, which is exactly when the cap must not be trusted.
   try {
+    // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
+    const dayState = await loadDayState();
+    const maxPerDay = Math.max(1, await cfgNum("kraken_margin_max_trades_per_day", 6));
+    if (dayState.entries >= maxPerDay) {
+      return { executed: false, validated: false, note: `entry refused: ${dayState.entries}/${maxPerDay} trades already today` };
+    }
+    const cooldownMin = Math.max(0, await cfgNum("kraken_margin_cooldown_min", 30));
+    if (dayState.lastEntryIso && Date.now() - new Date(dayState.lastEntryIso).getTime() < cooldownMin * 60_000) {
+      const waited = Math.round((Date.now() - new Date(dayState.lastEntryIso).getTime()) / 60_000);
+      return { executed: false, validated: false, note: `entry refused: cooldown (${waited}/${cooldownMin} min since last entry)` };
+    }
+
+    // Layer 3: leverage. Kraken margin minimum is 2; a cap below that means "no entries".
+    const maxLev = await cfgNum("kraken_margin_max_leverage", 2);
+    if (maxLev < 2) {
+      return { executed: false, validated: false, note: `entries disabled (max leverage ${maxLev} < Kraken minimum 2)` };
+    }
+    const leverage = Math.min(Math.min(20, maxLev), Math.max(2, alert.leverage ?? 2));
+    const perTrade = Math.max(10, await cfgNum("kraken_margin_per_trade_usd", 100));
+    const lossCap = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 200));
+
+    // Layer 5: daily loss kill switch — realized round trips closed today plus open P&L.
+    // Fails closed on ANY read problem, including a stale trade sync.
     const syncedAt = await cfg("margin_trades_synced_at");
     if (!syncedAt || Date.now() - new Date(syncedAt).getTime() > 15 * 60 * 1000) {
       return { executed: false, validated: false, note: "trade sync stale (>15m) — cannot trust loss cap, failing closed" };
@@ -183,7 +207,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       .filter((t) => new Date(t.closedAt) >= dayStart)
       .reduce((s, t) => s + t.netPnl, 0);
     const health = await getKrakenMarginHealth();
-    equity = health.equity;
+    const equity = health.equity;
+    // Fail closed if equity reads 0/unreadable — otherwise risk-based sizing below would
+    // silently skip its cap and place a full-size order.
+    if (!(equity > 0)) {
+      return { executed: false, validated: false, note: "equity reads 0/unreadable — failing closed" };
+    }
     const todayPnl = realizedToday + (health.unrealized || 0);
     if (todayPnl < -lossCap) {
       await sendNotification(
@@ -192,56 +221,61 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       );
       return { executed: false, validated: false, note: `daily loss cap hit (${todayPnl.toFixed(0)} < -${lossCap})` };
     }
-  } catch (e) {
-    return { executed: false, validated: false, note: `P&L unreadable — failing closed (${e})` };
-  }
 
-  try {
-    // Layer 6: anti-stacking. A misconfigured once-per-bar alert must not build a tower.
-    const open = await getKrakenMarginPositions();
+    // Layer 6: anti-stacking — count BOTH open positions AND our resting orders toward
+    // the cap. Counting resting orders means an entry whose HTTP response timed out (but
+    // that Kraken accepted) still counts on the next alert, so a timeout can't sneak a
+    // second position past the limit.
+    const openPositions = await getKrakenMarginPositions();
+    const ourOrders = (await krakenOpenOrders()).filter((o) => o.userref === MARGIN_USERREF);
+    const ourEntryOrders = ourOrders.filter((o) => !o.ordertype.includes("stop"));
+    const exposureCount = openPositions.length + ourEntryOrders.length;
     const maxPositions = Math.max(1, await cfgNum("kraken_margin_max_positions", 3));
-    if (open.length >= maxPositions) {
-      return { executed: false, validated: false, note: `entry refused: ${open.length} positions already open (max ${maxPositions})` };
+    if (exposureCount >= maxPositions) {
+      return { executed: false, validated: false, note: `entry refused: ${exposureCount} positions+resting orders already (max ${maxPositions})` };
     }
     const allowStacking = (await cfg("kraken_margin_allow_stacking")) === "true";
     const wantSide = alert.side === "buy" ? "long" : "short";
-    if (!allowStacking && open.some((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === wantSide)) {
-      return { executed: false, validated: false, note: `entry refused: already ${wantSide} ${alert.symbol} (stacking off)` };
+    if (!allowStacking && (
+      openPositions.some((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === wantSide) ||
+      ourEntryOrders.some((o) => pairMatchesSymbol(o.pair, alert.symbol) && (o.side === "buy" ? "long" : "short") === wantSide)
+    )) {
+      return { executed: false, validated: false, note: `entry refused: already ${wantSide} ${alert.symbol} (position or resting order; stacking off)` };
     }
 
-    // Layer 7: attached protective exit. Static stop at half the liquidation cushion
-    // (0.3/leverage) by default; a NATIVE Kraken trailing stop if kraken_margin_trail_pct
-    // > 0 (the exchange ratchets it behind the best price, locking profit even if our
-    // infra is down).
+    // Attached protective exit + risk-based sizing, both computed from the ACTUAL entry
+    // price. For a maker order that price is the resting limit (bid/ask), NOT the last
+    // trade — sizing the stop from a different price than the entry would make the real
+    // stop distance (and risk) wrong.
     const stopPct = Math.min(0.5, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", (0.3 / leverage) * 100)) / 100));
     const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
-
-    // Layer 8c: RISK-BASED SIZING. The stop can lose at most stopPct × notional; cap
-    // notional so that loss never exceeds max_risk_pct of equity. Size shrinks
-    // automatically when leverage or stop width would risk too much — this, not a fixed
-    // dollar amount, is how a levered book avoids a single trade doing real damage.
-    const price = await getKrakenPrice(alert.symbol);
+    const makerEntries = (await cfg("kraken_margin_maker_entries")) !== "false";
     const meta = await getPairMeta(pair);
+
+    // The entry reference price: the resting limit for a maker order, else the last trade.
+    let entryPx: number;
+    if (makerEntries) {
+      const { bid, ask } = await krakenTouch(alert.symbol);
+      entryPx = alert.side === "buy" ? bid : ask;
+    } else {
+      entryPx = await getKrakenPrice(alert.symbol);
+    }
+    if (!(entryPx > 0)) return { executed: false, validated: false, note: "no entry price available — skipped" };
+
+    // RISK-BASED SIZING: notional capped so a stop-out loses ≤ max_risk_pct of equity.
     let notional = perTrade * leverage;
     const maxRiskPct = Math.max(0.1, await cfgNum("kraken_margin_max_risk_pct", 1.5)) / 100;
-    // Trailing stops have no fixed distance; use the trail % as the risk proxy.
-    const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;
+    const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     if (equity > 0 && riskDist > 0) {
       const notionalCap = (maxRiskPct * equity) / riskDist;
       if (notional > notionalCap) notional = notionalCap;
     }
-    const rawVol = notional / price;
-    const volume = rawVol.toFixed(meta.lotDecimals);
+    const rawVol = notional / entryPx;
     if (meta.orderMin > 0 && rawVol < meta.orderMin) {
       return { executed: false, validated: false, note: `size ${rawVol} below Kraken minimum ${meta.orderMin} after risk cap — skipped` };
     }
-
-    // Layer 9: maker-first entry. Rest a post-only limit at the bid (buy) / ask (sell)
-    // so we pay the maker fee, not taker. `post` makes Kraken REJECT rather than cross,
-    // so we can never accidentally pay taker; a resting unfilled entry is swept by the
-    // guardian. Market fallback only when maker entries are explicitly disabled.
-    const makerEntries = (await cfg("kraken_margin_maker_entries")) !== "false";
-    const stopPrice = alert.side === "buy" ? price * (1 - stopPct) : price * (1 + stopPct);
+    const volume = rawVol.toFixed(meta.lotDecimals);
+    const stopPrice = alert.side === "buy" ? entryPx * (1 - stopPct) : entryPx * (1 + stopPct);
     const closeParams: Record<string, string> = trailPct > 0
       ? { "close[ordertype]": "trailing-stop", "close[price]": `+${trailPct.toFixed(2)}%` }
       : { "close[ordertype]": "stop-loss", "close[price]": stopPrice.toFixed(meta.priceDecimals) };
@@ -255,12 +289,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       ...closeParams,
     };
     if (makerEntries) {
-      const { bid, ask } = await krakenTouch(alert.symbol);
-      const limitPx = alert.side === "buy" ? bid : ask;
-      if (!(limitPx > 0)) return { executed: false, validated: false, note: "no touch price — skipped" };
       params.ordertype = "limit";
-      params.price = limitPx.toFixed(meta.priceDecimals);
-      params.oflags = "post";
+      params.price = entryPx.toFixed(meta.priceDecimals);
+      params.oflags = "post";   // post-only: Kraken rejects rather than crossing → never taker
     } else {
       params.ordertype = "market";
     }
@@ -270,8 +301,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     try {
       res = await krakenPrivate("AddOrder", params);
     } catch (e) {
-      // Post-only rejection = price already moved through our limit. Do not chase (one
-      // order per invocation, no fallback); report and let the next alert re-price.
       if (makerEntries && /post|would|cross/i.test(String(e))) {
         return { executed: false, validated: false, note: "maker entry would cross — price moved, skipped (no chase)" };
       }
@@ -280,7 +309,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const txid = (res.txid as string[] | undefined)?.[0];
     const descr = (res.descr as { order?: string } | undefined)?.order;
 
-    // Count only real executions against the daily governor (validate never trades).
+    // Count on acceptance (conservative — an unfilled maker rest still consumes a slot,
+    // which caps churn; the guardian sweeps unfilled entries). Real executions only.
     if (!validate) await bumpDayState(dayState);
 
     const stopDesc = trailPct > 0 ? `trailing stop ${trailPct.toFixed(1)}%` : `stop ${(stopPct * 100).toFixed(1)}%`;
@@ -292,5 +322,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     };
   } catch (e) {
     return { executed: false, validated: validate, note: `order failed: ${e}` };
+  } finally {
+    await releaseExecLock();
   }
 }

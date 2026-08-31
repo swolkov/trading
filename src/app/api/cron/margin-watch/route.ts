@@ -233,13 +233,19 @@ export async function GET(request: Request) {
     const mine = orders.filter((o) => o.userref === MARGIN_USERREF);
     if (mine.length) {
       const positions = await getKrakenMarginPositions();
-      const hasPosition = (pair: string) => positions.some((p) => pairBase(p.pair) === pairBase(pair));
+      // A protective stop is only valid if it CLOSES a live position: a sell-stop
+      // protects a long, a buy-stop protects a short. Matching on pair alone would keep
+      // an old long's sell-stop alive after a manual close even when a NEW short exists —
+      // and that stray sell-stop would then ADD to the short if it triggered.
+      const stopProtectsLive = (o: { pair: string; side: string }) => positions.some((p) =>
+        pairBase(p.pair) === pairBase(o.pair) &&
+        ((o.side === "sell" && p.side === "long") || (o.side === "buy" && p.side === "short")));
       const staleMin = Math.max(5, await cfgNum("kraken_margin_stale_entry_min", 30));
       const nowSec = Date.now() / 1000;
       for (const o of mine) {
         const isStop = o.ordertype.includes("stop");
         const isEntry = o.ordertype === "limit" || o.ordertype === "market";
-        if (isStop && !hasPosition(o.pair)) {
+        if (isStop && !stopProtectsLive(o)) {
           try { await krakenCancelOrder(o.txid); sent.push(`orphan-stop-cancelled-${o.pair}`); } catch { /* already gone */ }
         } else if (isEntry && (nowSec - o.opentm) > staleMin * 60) {
           try { await krakenCancelOrder(o.txid); sent.push(`stale-entry-cancelled-${o.pair}`); } catch { /* already gone */ }
