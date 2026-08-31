@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, type ScanSignal } from "@/lib/margin-scanner";
+import { evaluateShadowSignals } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -97,6 +98,27 @@ export async function GET(request: Request) {
 
   await saveState(state);
 
+  // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
+  // notify the would-be result — "that ETH long would have made +$X / stopped −$Y".
+  let shadowResolved = 0;
+  try {
+    const perTrade = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_per_trade_usd" } })
+      .then((r) => (r?.value ? parseFloat(r.value) : 100)).catch(() => 100);
+    const resolutions = await evaluateShadowSignals(Number.isFinite(perTrade) ? perTrade : 100);
+    shadowResolved = resolutions.length;
+    for (const r of resolutions) {
+      const win = r.pnl >= 0;
+      await sendNotification(
+        `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x from $${r.entry.toLocaleString()} → ` +
+        `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
+        `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
+        "kraken",
+      );
+    }
+  } catch (e) {
+    errors.push(`shadow: ${String(e).slice(0, 80)}`);
+  }
+
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
-  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, errors: errors.slice(0, 5) });
+  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, shadowResolved, errors: errors.slice(0, 5) });
 }
