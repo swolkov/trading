@@ -45,10 +45,28 @@ export interface ScanSignal {
   coin: string;
   symbol: string;
   timeframe: string;
-  kind: "oversold" | "overbought" | "breakout" | "breakdown" | "move-up" | "move-down" | "volume-spike";
+  kind: "oversold" | "overbought" | "breakout" | "breakdown" | "move-up" | "move-down"
+      | "volume-spike" | "vol-expansion" | "near-high" | "near-low";
   detail: string;
   price: number;
   realertMs: number;   // how long before this exact signal may fire again
+}
+
+// Wilder ATR(14) series — used to detect a volatility regime shift (big moves starting).
+function atr14(bars: KrakenBar[]): number[] {
+  const tr: number[] = [];
+  for (let i = 0; i < bars.length; i++) {
+    if (i === 0) { tr.push(bars[i].h - bars[i].l); continue; }
+    const p = bars[i - 1].c;
+    tr.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - p), Math.abs(bars[i].l - p)));
+  }
+  const out = new Array(bars.length).fill(NaN);
+  let a = 0;
+  for (let i = 0; i < tr.length; i++) {
+    if (i < 14) { a += tr[i]; if (i === 13) out[i] = a / 14; }
+    else out[i] = (out[i - 1] * 13 + tr[i]) / 14;
+  }
+  return out;
 }
 
 function rsi14(closes: number[]): number {
@@ -101,6 +119,27 @@ function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: Krak
   const lastClosed = prev[prev.length - 1];
   if (avgVol > 0 && lastClosed && lastClosed.v >= 3 * avgVol) {
     out.push(mk("volume-spike", `volume ${(lastClosed.v / avgVol).toFixed(1)}x average`));
+  }
+
+  // BIG-MOVE EARLY WARNING — only on the slower frames (4h+), where these mean a regime
+  // shift rather than noise. These don't predict direction; they flag that conditions for
+  // a large move are HERE (act as it breaks, don't forecast the top/bottom).
+  if (tf.interval >= 240 && bars.length >= 60) {
+    // Volatility expansion: ATR now vs its own 30-bar average. A sharp jump = the market
+    // just woke up — the environment where 78k→120k-type moves actually happen.
+    const atr = atr14(bars);
+    const atrNow = atr[atr.length - 1];
+    const atrAvg = atr.slice(-31, -1).filter((x) => !isNaN(x)).reduce((s, x, _, arr) => s + x / arr.length, 0);
+    if (atrNow > 0 && atrAvg > 0 && atrNow >= 1.8 * atrAvg) {
+      out.push(mk("vol-expansion", `volatility expanding (${(atrNow / atrAvg).toFixed(1)}x normal) — big-move conditions`));
+    }
+    // Near a multi-period extreme: within 2% of the highest high / lowest low of the last
+    // 90 bars (≈3 months on the daily). A decision zone — breaks from here tend to run.
+    const win = bars.slice(-90);
+    const hh = Math.max(...win.map((b) => b.h));
+    const ll = Math.min(...win.map((b) => b.l));
+    if (hh > 0 && last.c >= hh * 0.98) out.push(mk("near-high", `within 2% of its ${tf.label === "1d" ? "3-month" : "recent"} high $${hh.toLocaleString()}`));
+    else if (ll > 0 && last.c <= ll * 1.02) out.push(mk("near-low", `within 2% of its ${tf.label === "1d" ? "3-month" : "recent"} low $${ll.toLocaleString()}`));
   }
   return out;
 }

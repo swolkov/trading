@@ -39,6 +39,8 @@ export async function ensureShadowColumns(): Promise<void> {
     "shadow_pnl double precision",
     "shadow_reason text",
     "shadow_resolved_at timestamptz",
+    "shadow_peak double precision",   // best favorable price reached (for the trailing stop)
+    "shadow_stop double precision",   // current trailing stop level (ratchets, never loosens)
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -50,14 +52,25 @@ export interface ShadowResolution {
 }
 
 interface OpenRow {
-  id: number; time: Date; symbol: string; side: string; leverage: number | null; mark_price: number;
+  id: number; time: Date; symbol: string; side: string; leverage: number | null;
+  mark_price: number; shadow_peak: number | null; shadow_stop: number | null;
 }
 
-// Resolve every open tracked entry that has hit its stop, target, or time limit.
+// Follow every open tracked entry with a MANAGED exit — the "stay in the trade, profit
+// more, get out when it turns" discipline Spencer's give-back problem needs:
+//   • Initial stop 1R below entry (0.3/leverage).
+//   • Once up +1R, the stop jumps to BREAKEVEN (the trade can no longer lose).
+//   • Beyond +1R, the stop TRAILS 1R behind the best price reached — locking in more as
+//     the move extends, and cutting the trade when it pulls back 1R from the peak.
+//   • 48h time stop as a backstop.
+// Peak/stop are persisted per signal, so trailing works across 5-min evaluations.
+// Conservative by design: 5-min granularity misses intra-run spikes, so it UNDER-counts
+// trailing capture (a real Kraken trailing stop would do at least this well).
 export async function evaluateShadowSignals(perTradeUsd: number): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
-    `SELECT id, time, symbol, side, leverage, mark_price FROM tradingview_alerts
+    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop
+     FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 200`,
   );
@@ -79,35 +92,57 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
   for (const r of rows) {
     const now = price[r.symbol];
     if (!(now > 0)) continue;
+    const entry = r.mark_price;
     const lev = Math.max(2, Math.min(20, r.leverage || 2));
     const dir = r.side === "buy" ? 1 : -1;
-    const stopFrac = 0.3 / lev;        // matches the executor's default stop
-    const targetFrac = 2 * stopFrac;   // 2R
-    const stopPx = r.mark_price * (1 - dir * stopFrac);
-    const targetPx = r.mark_price * (1 + dir * targetFrac);
+    const oneR = entry * (0.3 / lev);          // 1R in price terms
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
 
+    // Peak favorable price + trailing stop, carried across runs.
+    let peak = r.shadow_peak ?? entry;
+    peak = dir > 0 ? Math.max(peak, now) : Math.min(peak, now);
+    let stopPx = r.shadow_stop ?? entry - dir * oneR;
+    const peakR = (dir * (peak - entry)) / oneR;    // best profit reached, in R
+    if (peakR >= 1) {
+      // Breakeven once +1R, then trail 1R behind the peak — ratchet only (never loosen).
+      const trail = peak - dir * oneR;
+      const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
+      stopPx = dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
+    }
+
+    // Exit checks.
+    const hitStop = dir > 0 ? now <= stopPx : now >= stopPx;
     let exit: number | null = null;
     let reason = "";
-    // Direction-aware level checks against the current price.
-    if (dir > 0 ? now <= stopPx : now >= stopPx) { exit = stopPx; reason = "stop hit"; }
-    else if (dir > 0 ? now >= targetPx : now <= targetPx) { exit = targetPx; reason = "target hit (2R)"; }
-    else if (ageH >= MAX_HOLD_H) { exit = now; reason = "48h time stop"; }
-    if (exit == null) continue;
+    if (hitStop) {
+      exit = stopPx;
+      reason = peakR >= 1 ? "trailing stop (locked profit)" : "stop hit";
+    } else if (ageH >= MAX_HOLD_H) {
+      exit = now;
+      reason = "48h time stop";
+    }
 
-    const grossPct = dir * (exit - r.mark_price) / r.mark_price;
+    if (exit == null) {
+      // Still open — persist the updated peak/stop so trailing continues next run.
+      await prisma.$executeRawUnsafe(
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2 WHERE id=$3`,
+        peak, stopPx, r.id,
+      );
+      continue;
+    }
+
+    const grossPct = (dir * (exit - entry)) / entry;
     const rollPeriods = Math.ceil(ageH / 4);
-    // Net of maker entry + taker exit + per-coin rollover on notional (all leverage-scaled
-    // because they apply to notional = perTrade × leverage).
+    // Net of maker entry + taker exit + per-coin rollover on notional (leverage-scaled).
     const netPct = grossPct - MAKER - TAKER - rollPeriods * rollover4h(r.symbol);
     const notional = perTradeUsd * lev;
     const pnl = netPct * notional;
 
     await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now() WHERE id=$4`,
-      exit, pnl, reason, r.id,
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5 WHERE id=$6`,
+      exit, pnl, reason, peak, stopPx, r.id,
     );
-    resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry: r.mark_price, exit, pnl, pnlPct: netPct, reason, leverage: lev });
+    resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev });
   }
   return resolved;
 }
