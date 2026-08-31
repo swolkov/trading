@@ -167,3 +167,38 @@ export async function scanUniverse(): Promise<{ signals: ScanSignal[]; errors: s
 export function signalKey(s: ScanSignal): string {
   return `${s.coin}:${s.timeframe}:${s.kind}`;
 }
+
+// CONVICTION SCORE — the automated stand-in for "how confident are we in this one".
+// A human's gut isn't in the loop when the machine places every trade, so conviction has
+// to be something measurable: how many INDEPENDENT things line up behind the break. More
+// confluence = higher conviction. This is a hypothesis to TEST, not a proven edge — the
+// shadow buckets results by tier so we can see whether high-conviction breaks actually win
+// more than weak ones. If they do, that's the edge worth sizing into; if not, we learn it free.
+//
+//   +2  each ADDITIONAL timeframe of the same coin breaking the same way (multi-TF agreement)
+//   +2  a volume spike on the coin (real participation behind the move)
+//   +1  momentum in the same direction (move-up for a breakout, move-down for a breakdown)
+//   +1  at a decision zone — near a multi-month high/low, where breaks tend to run
+//   +1  volatility expanding — a regime shift, the environment big moves happen in
+//   −2  stretched against the trade (overbought on a long / oversold on a short) — less room
+//   tiers: high ≥4, med ≥2, else low.
+export interface Conviction { tier: "low" | "med" | "high"; score: number; factors: string[] }
+export function scoreConviction(sig: ScanSignal, all: ScanSignal[]): Conviction {
+  const bull = sig.kind === "breakout";
+  const same = all.filter((s) => s.coin === sig.coin);
+  const has = (k: ScanSignal["kind"]) => same.some((s) => s.kind === k);
+  const factors: string[] = [];
+  let score = 0;
+
+  const agreeKind: ScanSignal["kind"] = bull ? "breakout" : "breakdown";
+  const tfAgree = new Set(same.filter((s) => s.kind === agreeKind).map((s) => s.timeframe));
+  if (tfAgree.size > 1) { const n = tfAgree.size - 1; score += n * 2; factors.push(`${tfAgree.size} timeframes breaking`); }
+  if (has("volume-spike")) { score += 2; factors.push("volume confirms"); }
+  if (has(bull ? "move-up" : "move-down")) { score += 1; factors.push("momentum aligned"); }
+  if (has(bull ? "near-high" : "near-low")) { score += 1; factors.push("at decision zone"); }
+  if (has("vol-expansion")) { score += 1; factors.push("volatility expanding"); }
+  if (has(bull ? "overbought" : "oversold")) { score -= 2; factors.push("stretched (−)"); }
+
+  const tier = score >= 4 ? "high" : score >= 2 ? "med" : "low";
+  return { tier, score, factors };
+}
