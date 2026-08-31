@@ -97,7 +97,11 @@ async function bumpDayState(prev: DayState): Promise<void> {
 // compare-and-swap (ISO strings compare in time order). Fails CLOSED: if it can't be
 // acquired, the alert is refused rather than risking a concurrent double-entry.
 const EXEC_LOCK_KEY = "kraken_margin_exec_lock";
-const EXEC_LOCK_TTL_MS = 30_000;
+// The entry critical section makes ~8 sequential Kraken calls (each up to 15s) under this
+// lock, so the TTL must comfortably exceed the worst-case section time — otherwise the lock
+// could be stolen while an invocation still holds it, defeating the only guard against a
+// truly concurrent double-entry. 120s clears the summed call timeouts with headroom.
+const EXEC_LOCK_TTL_MS = 120_000;
 async function acquireExecLock(): Promise<boolean> {
   await prisma.agentConfig.upsert({
     where: { key: EXEC_LOCK_KEY }, update: {}, create: { key: EXEC_LOCK_KEY, value: "" },
@@ -130,13 +134,17 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       const positions = (await getKrakenMarginPositions())
         .filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
       if (!positions.length) return { executed: false, validated: false, note: "close alert but no open position" };
+      // Round close volume to the pair's lot precision — same as the entry path. Hardcoding 8
+      // decimals gets a close REJECTED by Kraken on any pair with fewer lot decimals, leaving the
+      // risk-reducing close silently un-done (the same class of bug the entry path already guards).
+      const closeMeta = await getPairMeta(pair);
       const txids: string[] = [];
       for (const p of positions) {
         const params: Record<string, string> = {
           pair,
           type: p.side === "long" ? "sell" : "buy",
           ordertype: "market",
-          volume: p.vol.toFixed(8),
+          volume: p.vol.toFixed(closeMeta.lotDecimals),
           leverage: String(Math.max(2, Math.round(p.leverage))),
           // reduce_only: if the position shrank between our read and this order (manual
           // close, partial liquidation, duplicate alert), Kraken reduces to flat instead

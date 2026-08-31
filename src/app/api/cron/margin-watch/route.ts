@@ -28,7 +28,14 @@ export const dynamic = "force-dynamic";
 const REALERT_MS = 60 * 60 * 1000;
 const STATE_KEY = "margin_watch_state";
 
-type WatchState = { alerts: Record<string, string> };
+type WatchState = {
+  alerts: Record<string, string>;
+  // txid → consecutive runs seen orphaned. A stop is only cancelled after TWO consecutive
+  // sightings, so a single bad positions read can never strip protection off a live position.
+  orphans?: Record<string, number>;
+  // Last run's equity, to spot a capital flow (deposit/withdrawal) vs a trading drawdown.
+  lastEquity?: number;
+};
 
 async function cfg(key: string): Promise<string | null> {
   const row = await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null);
@@ -103,8 +110,10 @@ export async function GET(request: Request) {
 
   // 2) Margin level vs the call/liquidation lines, + the account drawdown circuit breaker.
   let flat = true;
+  let marginUsedNow: number | null = null;   // hoisted so 3b can sanity-check an empty positions read
   try {
     const health = await getKrakenMarginHealth();
+    marginUsedNow = health.marginUsed;
 
     // Drawdown circuit breaker: track peak equity; if equity falls more than
     // kraken_margin_max_drawdown_pct from the peak, DISARM new entries (the executor
@@ -115,6 +124,26 @@ export async function GET(request: Request) {
       const ddPct = Math.max(1, await cfgNum("kraken_margin_max_drawdown_pct", 15)) / 100;
       const peakRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_equity_peak" } }).catch(() => null);
       let peak = peakRow?.value ? parseFloat(peakRow.value) : 0;
+      // Capital-flow guard: a deposit/withdrawal moves equity without any trading P&L. Without
+      // this, a withdrawal reads as a huge "drawdown" and disarms the breaker permanently (the
+      // peak still includes the withdrawn cash, so it can never recover). REBASELINE the peak on
+      // a >30% single-run equity swing — but ONLY when FLAT (marginUsed≈0). While holding a
+      // position a swing that large is trading P&L, not a flow (1.5% adverse at 20x = 30% equity
+      // in one run); masking THAT would defeat the breaker mid-crash and could even re-arm it.
+      // marginUsedNow == null (health unreadable) → don't rebaseline, can't tell.
+      const flatNow = marginUsedNow != null && marginUsedNow < 1;
+      if (flatNow && state.lastEquity && state.lastEquity > 0) {
+        const jump = Math.abs(health.equity - state.lastEquity) / state.lastEquity;
+        if (jump > 0.30) {
+          peak = health.equity;
+          await prisma.agentConfig.upsert({
+            where: { key: "kraken_margin_equity_peak" },
+            update: { value: String(peak) }, create: { key: "kraken_margin_equity_peak", value: String(peak) },
+          }).catch(() => {});
+          sent.push("dd-peak-rebaselined (capital flow)");
+        }
+      }
+      state.lastEquity = health.equity;
       if (health.equity > peak) {
         peak = health.equity;
         await prisma.agentConfig.upsert({
@@ -233,6 +262,19 @@ export async function GET(request: Request) {
     const mine = orders.filter((o) => o.userref === MARGIN_USERREF);
     if (mine.length) {
       const positions = await getKrakenMarginPositions();
+      // SAFETY: getKrakenMarginPositions returns [] for an empty result, and Kraken can return
+      // an empty OpenPositions during degradation — indistinguishable from a genuinely flat
+      // account. If we treated that as flat, EVERY stop would look orphaned and get cancelled,
+      // leaving a live 20x position naked ~3% from liquidation. So if positions came back empty
+      // but we still hold margin (marginUsed > 0), the read is unreliable — skip STOP
+      // reconciliation entirely this run (stale-entry cleanup keys off order age, not positions,
+      // so it's still safe). Belt-and-suspenders below: a stop is only cancelled after being
+      // seen orphaned on TWO consecutive runs.
+      // If margin health couldn't be read at all (marginUsedNow == null — a correlated Kraken
+      // outage that empties OpenPositions will often also break TradeBalance), don't trust an
+      // empty positions read either: fail closed. A genuinely-flat account just waits one run.
+      const positionsUnreliable = positions.length === 0 && (marginUsedNow == null || marginUsedNow > 0);
+      if (positionsUnreliable) errors.push("orphan reconcile: positions empty but margin in use — skipping stop cleanup (unreliable read)");
       // A protective stop is only valid if it CLOSES a live position: a sell-stop
       // protects a long, a buy-stop protects a short. Matching on pair alone would keep
       // an old long's sell-stop alive after a manual close even when a NEW short exists —
@@ -242,15 +284,29 @@ export async function GET(request: Request) {
         ((o.side === "sell" && p.side === "long") || (o.side === "buy" && p.side === "short")));
       const staleMin = Math.max(5, await cfgNum("kraken_margin_stale_entry_min", 30));
       const nowSec = Date.now() / 1000;
+      const priorOrphans = state.orphans ?? {};
+      const nextOrphans: Record<string, number> = {};
       for (const o of mine) {
         const isStop = o.ordertype.includes("stop");
         const isEntry = o.ordertype === "limit" || o.ordertype === "market";
-        if (isStop && !stopProtectsLive(o)) {
-          try { await krakenCancelOrder(o.txid); sent.push(`orphan-stop-cancelled-${o.pair}`); } catch { /* already gone */ }
+        if (isStop) {
+          if (positionsUnreliable) continue;              // never touch stops on a bad read
+          if (!stopProtectsLive(o)) {
+            const seen = (priorOrphans[o.txid] ?? 0) + 1;  // this run's sighting
+            if (seen >= 2) {
+              try { await krakenCancelOrder(o.txid); sent.push(`orphan-stop-cancelled-${o.pair}`); } catch { /* already gone */ }
+            } else {
+              nextOrphans[o.txid] = seen;                  // first sighting — wait for confirmation next run
+            }
+          }
+          // a stop that protects a live position is not orphaned → its count resets (dropped from nextOrphans)
         } else if (isEntry && (nowSec - o.opentm) > staleMin * 60) {
           try { await krakenCancelOrder(o.txid); sent.push(`stale-entry-cancelled-${o.pair}`); } catch { /* already gone */ }
         }
       }
+      state.orphans = nextOrphans;
+    } else {
+      state.orphans = {};   // no orders of ours → nothing pending
     }
   } catch (e) {
     errors.push(`order reconcile: ${e}`);
