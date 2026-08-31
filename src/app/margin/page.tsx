@@ -32,6 +32,10 @@ interface Trip {
   pair: string; side: string; openedAt: string; closedAt: string; holdMinutes: number;
   entryPrice: number; exitPrice: number; netPnl: number;
 }
+interface ShadowScore {
+  resolved: number; wins: number; hitRate: number | null; totalPnl: number;
+  avgWin: number; avgLoss: number; open: number;
+}
 
 const TIMEFRAMES = [3, 5, 15, 60, 240, 1440];
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
@@ -80,7 +84,7 @@ export default function MarginCockpitPage() {
   const { data: status } = useSWR<{ connected: boolean; health: Health | null; positions: Position[] }>(
     "/api/margin/status", fetcher, { refreshInterval: 30_000 },
   );
-  const { data: score } = useSWR<{ scoreboard: Scoreboard; recentTrips: Trip[] }>(
+  const { data: score } = useSWR<{ scoreboard: Scoreboard; recentTrips: Trip[]; shadow: ShadowScore | null }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 },
   );
   const { data: news } = useSWR<{
@@ -398,6 +402,43 @@ export default function MarginCockpitPage() {
           </div>
         </div>
       </div>
+
+      {/* ── Tracked-signal paper record ── */}
+      {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0) && (
+        <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-4">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-bold">📊 Tracked-Signal Paper Record — would your alerts have made money?</p>
+            <p className="text-[10px] text-muted-foreground/45">{score.shadow.open} still open · no real money</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Resolved</p>
+              <p className="text-lg font-black tabular-nums">{score.shadow.resolved}</p>
+            </div>
+            <div>
+              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Hit rate</p>
+              <p className={`text-lg font-black tabular-nums ${score.shadow.hitRate != null && score.shadow.hitRate >= 0.5 ? "text-emerald-400" : "text-amber-400"}`}>
+                {score.shadow.hitRate != null ? `${(score.shadow.hitRate * 100).toFixed(0)}%` : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Avg win / loss</p>
+              <p className="text-lg font-black tabular-nums">
+                <span className="text-emerald-400">{money(score.shadow.avgWin)}</span>
+                <span className="text-muted-foreground/40 mx-1">/</span>
+                <span className="text-red-400">{money(score.shadow.avgLoss)}</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Would-be P&L</p>
+              <p className={`text-lg font-black tabular-nums ${col(score.shadow.totalPnl)}`}>{money(score.shadow.totalPnl)}</p>
+            </div>
+          </div>
+          <p className="text-[10px] text-muted-foreground/40 mt-2">
+            Estimate — each alert followed to a stop/target/48h outcome, net of modeled maker+taker fees and per-coin 4h rollover (all scaled by leverage). Your <span className="text-foreground/60">real</span> completed trades below are exact (from Kraken&apos;s ledger). This is the record that earns real-money automation.
+          </p>
+        </div>
+      )}
 
       {/* ── Scoreboard ── */}
       <div className="rounded-xl border border-border bg-card overflow-hidden">
