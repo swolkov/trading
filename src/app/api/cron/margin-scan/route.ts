@@ -120,9 +120,11 @@ export async function GET(request: Request) {
         // swings to compare: leveraged (rides a few days) and spot (1x, no carry, holds for
         // weeks). The evaluator applies each strategy's own stop/hold/carry profile.
         const higher = s.timeframe === "4h" || s.timeframe === "1d";
+        // Intraday breaks run the fast A/B (wide 6% vs tight 2% stop) so the scoreboard can
+        // pick the more profitable exit. Higher-TF breaks run the two swings (lev vs spot).
         const plans = higher
           ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
-          : [{ source: "scanner", lev }];
+          : [{ source: "scanner", lev }, { source: "fast-tight", lev }];
         // Conviction from confluence across ALL signals this run (not just fresh) — how many
         // independent things agree behind this break. Tested, not assumed. Same for each plan.
         const conv = scoreConviction(s, signals);

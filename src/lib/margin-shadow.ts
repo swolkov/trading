@@ -72,6 +72,10 @@ interface OpenRow {
 function exitParams(source: string | null, lev: number, entry: number): { maxHoldH: number; oneR: number; carry: boolean } {
   if (source === "swing-spot") return { maxHoldH: 24 * 14, oneR: entry * 0.06, carry: false };
   if (source === "swing-lev") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
+  // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
+  // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
+  // the wide 6% control. Winner keeps trading, loser gets retired once the record is clear.
+  if (source === "fast-tight") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.02, carry: lev > 1 };
   return { maxHoldH: MAX_HOLD_H, oneR: entry * (0.3 / lev), carry: lev > 1 };
 }
 
@@ -255,7 +259,8 @@ export interface StrategyStat {
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
 }
 const STRATEGY_LABELS: Record<string, string> = {
-  scanner: "Fast breakouts (5x, ≤2d)",
+  scanner: "Fast — wide 6% stop (5x)",
+  "fast-tight": "Fast — tight 2% stop (5x)",
   "swing-lev": "Leveraged swing (5x, ≤4d)",
   "swing-spot": "Spot swing (1x, ≤2w)",
   manual: "Manual alerts (yours)",
