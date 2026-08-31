@@ -90,13 +90,29 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
 
   const resolved: ShadowResolution[] = [];
   for (const r of rows) {
-    const now = price[r.symbol];
-    if (!(now > 0)) continue;
     const entry = r.mark_price;
     const lev = Math.max(2, Math.min(20, r.leverage || 2));
     const dir = r.side === "buy" ? 1 : -1;
     const oneR = entry * (0.3 / lev);          // 1R in price terms
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
+
+    const now = price[r.symbol];
+    // No fresh price this run: normally skip — but still honor the 48h time stop so a
+    // persistently-unpriceable signal can't sit "open" forever. Resolve flat (at entry),
+    // which after fees is a small loss.
+    if (!(now > 0)) {
+      if (ageH >= MAX_HOLD_H) {
+        const rollPeriods = Math.ceil(ageH / 4);
+        const netPct = -MAKER - TAKER - rollPeriods * rollover4h(r.symbol);
+        const pnl = netPct * perTradeUsd * lev;
+        await prisma.$executeRawUnsafe(
+          `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now() WHERE id=$4`,
+          entry, pnl, "48h time stop (no price)", r.id,
+        );
+        resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: "48h time stop (no price)", leverage: lev });
+      }
+      continue;
+    }
 
     // Peak favorable price + trailing stop, carried across runs.
     let peak = r.shadow_peak ?? entry;
@@ -116,7 +132,10 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
     let reason = "";
     if (hitStop) {
       exit = stopPx;
-      reason = peakR >= 1 ? "trailing stop (locked profit)" : "stop hit";
+      // Mechanism only — the P&L number carries whether it was actually a profit; at
+      // exact breakeven the round-trip fees still make it a small loss, so don't claim
+      // "profit" in the label.
+      reason = peakR >= 1 ? "trailing stop" : "initial stop";
     } else if (ageH >= MAX_HOLD_H) {
       exit = now;
       reason = "48h time stop";
