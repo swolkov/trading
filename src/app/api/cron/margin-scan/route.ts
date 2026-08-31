@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -96,6 +96,44 @@ export async function GET(request: Request) {
     await sendNotification(`🔎 Margin scan — ${fresh.length} new signal${fresh.length > 1 ? "s" : ""}:\n${lines}${more}`, "margin_signals");
   }
 
+  // AUTO-SHADOW: turn the scanner's DIRECTIONAL breakouts into paper trades so the
+  // scoreboard fills itself — a defined, consistent strategy ("trade scanner breakouts
+  // with managed exits") scored on real prices + honest fees, no manual alerts needed.
+  // Only breakout→buy / breakdown→sell (a coherent momentum thesis); RSI/volume/near-
+  // extreme signals are context, not entries. One open auto-trade per coin at a time so
+  // it can't stack. Awareness/paper only — nothing here places a real order; these rows
+  // land with executed=false and are scored by evaluateShadowSignals exactly like a
+  // tracked TradingView alert. Toggle off with kraken_shadow_autotrack="false".
+  let autoOpened = 0;
+  try {
+    const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
+    if (flag?.value !== "false") {
+      const levRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_lev" } }).catch(() => null);
+      const lev = Math.max(2, Math.min(20, levRow?.value ? parseFloat(levRow.value) : 5));
+      // ensureShadowColumns creates the table AND the shadow_* columns the next query reads.
+      await ensureShadowColumns();
+      for (const s of fresh) {
+        const side = s.kind === "breakout" ? "buy" : s.kind === "breakdown" ? "sell" : null;
+        if (!side || !(s.price > 0)) continue;
+        // Skip if this coin already has an open auto-shadow trade so entries can't stack.
+        const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
+          `SELECT count(*)::bigint AS n FROM tradingview_alerts
+           WHERE symbol=$1 AND note LIKE 'auto:%' AND COALESCE(shadow_status,'open')='open'`,
+          s.symbol,
+        );
+        if (Number(n) > 0) continue;
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated)
+           VALUES ($1,$2,$3,$4,$5,false,false)`,
+          s.symbol, side, lev, `auto: scanner ${s.kind} ${s.timeframe}`, s.price,
+        );
+        autoOpened++;
+      }
+    }
+  } catch (e) {
+    errors.push(`autoshadow: ${String(e).slice(0, 80)}`);
+  }
+
   await saveState(state);
 
   // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
@@ -119,6 +157,14 @@ export async function GET(request: Request) {
     errors.push(`shadow: ${String(e).slice(0, 80)}`);
   }
 
+  if (autoOpened) {
+    await sendNotification(
+      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from scanner breakouts — ` +
+      `scored to a win/loss automatically. Paper only, no money moved.`,
+      "margin_results",
+    );
+  }
+
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
-  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, shadowResolved, errors: errors.slice(0, 5) });
+  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, autoOpened, shadowResolved, errors: errors.slice(0, 5) });
 }
