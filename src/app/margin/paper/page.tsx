@@ -16,7 +16,7 @@ interface ConvictionTier {
 }
 interface ShadowScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number;
-  avgWin: number; avgLoss: number; open: number; byConviction?: ConvictionTier[];
+  avgWin: number; avgLoss: number; open: number; openUnrealized?: number; byConviction?: ConvictionTier[];
 }
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -25,7 +25,7 @@ interface StrategyStat {
 interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
   leverage: number | null; conviction: string | null; entry: number | null;
-  exit: number | null; pnl: number | null; status: string; reason: string | null;
+  exit: number | null; pnl: number | null; unrealized: number | null; status: string; reason: string | null;
 }
 interface EdgeStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -82,7 +82,13 @@ export default function PaperTradesPage() {
         <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-xs font-bold">📊 Tracked-Signal Paper Record — would these have made money?</p>
-            <p className="text-[10px] text-muted-foreground/45">{score.shadow.open} still open · no real money</p>
+            <p className="text-[10px] text-muted-foreground/45">
+              {score.shadow.open} open
+              {score.shadow.open > 0 && score.shadow.openUnrealized != null && (
+                <> · floating <span className={`font-bold ${col(score.shadow.openUnrealized)}`}>{money2(score.shadow.openUnrealized)}</span></>
+              )}
+              {" "}· no real money
+            </p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div>
@@ -282,8 +288,13 @@ export default function PaperTradesPage() {
                       <td className="text-left px-2 py-1.5 text-muted-foreground/60 capitalize">{t.conviction ?? "—"}</td>
                       <td className="text-right px-2 py-1.5 tabular-nums">{t.entry != null ? `$${t.entry.toLocaleString()}` : "—"}</td>
                       <td className="text-right px-2 py-1.5 tabular-nums">{t.exit != null ? `$${t.exit.toLocaleString()}` : "—"}</td>
-                      <td className={`text-right px-2 py-1.5 tabular-nums font-bold ${t.pnl != null ? col(t.pnl) : "text-muted-foreground/40"}`}>
-                        {t.pnl != null ? money2(t.pnl) : "—"}
+                      <td className="text-right px-2 py-1.5 tabular-nums font-bold">
+                        {(() => {
+                          const val = open ? t.unrealized : t.pnl;
+                          return val != null
+                            ? <span className={col(val)}>{money2(val)}{open ? <span className="text-[8px] font-normal opacity-50 ml-0.5">live</span> : null}</span>
+                            : <span className="text-muted-foreground/40">—</span>;
+                        })()}
                       </td>
                       <td className="text-left px-3 py-1.5 whitespace-nowrap">
                         {open
