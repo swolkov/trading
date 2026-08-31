@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { formatCurrency, pnlColor } from "@/lib/utils";
 import useSWR from "swr";
-import { AccumulatorPanel } from "@/components/kraken/accumulator-panel";
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
@@ -44,22 +43,13 @@ export default function DashboardPage() {
   const pnl = krk?.strategyPnl ?? 0;
   const pnlPct = (krk?.strategyCapital || 0) > 0 ? pnl / (krk!.strategyCapital || 1) : 0;
   const holdings = krk?.holdings || [];
-  const armed = Boolean(krk?.connected && krk?.enabled && !krk?.validateOnly);
 
   return (
     <div className="space-y-5">
       {/* ── Header ── */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
-          <p className="text-[11px] text-muted-foreground/50">Kraken crypto — trend bot + margin trading</p>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className={`w-1.5 h-1.5 rounded-full ${armed ? "bg-red-400 animate-pulse" : "bg-emerald-400"}`} />
-          <span className={`text-[10px] ${armed ? "text-red-400/60" : "text-muted-foreground/40"}`}>
-            {armed ? "Bot Live" : "Validate Mode"}
-          </span>
-        </div>
+      <div>
+        <h2 className="text-xl font-bold tracking-tight">Dashboard</h2>
+        <p className="text-[11px] text-muted-foreground/50">Kraken crypto — margin trading</p>
       </div>
 
       {/* ── Hero Metrics ── */}
@@ -86,7 +76,7 @@ export default function DashboardPage() {
                 ? "border-emerald-500/20 bg-gradient-to-br from-emerald-500/[0.04] to-transparent"
                 : "border-red-500/20 bg-gradient-to-br from-red-500/[0.04] to-transparent"
             }`}>
-              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Strategy P&L</p>
+              <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider font-medium">Holdings P&L</p>
               <p className={`text-2xl font-black mt-1 tabular-nums ${pnlColor(pnl)}`}>
                 {pnl >= 0 ? "+" : ""}{formatCurrency(pnl)}
               </p>
@@ -114,18 +104,15 @@ export default function DashboardPage() {
           <p className="text-xs font-bold">Margin Cockpit</p>
           <p className="text-[11px] text-muted-foreground/50 mt-1">Multi-timeframe charts, positions, liquidation distance, break-even math</p>
         </Link>
-        <Link href="/kraken" className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/[0.05] to-transparent p-4 hover:border-emerald-500/40 transition-colors">
-          <p className="text-xs font-bold">Trend Bot</p>
-          <p className="text-[11px] text-muted-foreground/50 mt-1">50-day trend follower — holdings, exit levels, health</p>
+        <Link href="/margin/paper" className="rounded-xl border border-purple-500/20 bg-gradient-to-br from-purple-500/[0.05] to-transparent p-4 hover:border-purple-500/40 transition-colors">
+          <p className="text-xs font-bold">Paper Trades</p>
+          <p className="text-[11px] text-muted-foreground/50 mt-1">The shadow experiment — strategy scoreboard + trade log, scored on paper</p>
         </Link>
         <Link href="/orders" className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 hover:border-white/[0.16] transition-colors">
           <p className="text-xs font-bold">Orders</p>
           <p className="text-[11px] text-muted-foreground/50 mt-1">Every order the system has placed</p>
         </Link>
       </div>
-
-      {/* ── Full Kraken status (holdings, exit levels, health strip) ── */}
-      <AccumulatorPanel />
     </div>
   );
 }
