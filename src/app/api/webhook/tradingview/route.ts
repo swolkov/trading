@@ -39,6 +39,10 @@ let tableReady = false;
 async function ensureAlertsTable(): Promise<void> {
   if (tableReady) return;
   await prisma.$executeRawUnsafe(ALERTS_TABLE_SQL);
+  // The shadow evaluator owns the rest of the shadow_* columns; the webhook only writes
+  // `source`, so ensure just that one exists here (idempotent) rather than relying on the
+  // scan cron having run first on a fresh instance.
+  await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS source text`);
   tableReady = true;
 }
 
@@ -119,8 +123,8 @@ export async function POST(request: Request) {
   try {
     await ensureAlertsTable();
     await prisma.$executeRawUnsafe(
-      `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual')`,
       symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note,
     );
     await prisma.agentConfig.upsert({

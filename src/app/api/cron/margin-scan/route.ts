@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { scanUniverse, signalKey, type ScanSignal } from "@/lib/margin-scanner";
+import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
 import { evaluateShadowSignals, ensureShadowColumns } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
@@ -104,13 +104,13 @@ export async function GET(request: Request) {
   // it can't stack. Awareness/paper only — nothing here places a real order; these rows
   // land with executed=false and are scored by evaluateShadowSignals exactly like a
   // tracked TradingView alert. Toggle off with kraken_shadow_autotrack="false".
-  let autoOpened = 0;
+  const opened: { symbol: string; side: string; tier: string }[] = [];
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
     if (flag?.value !== "false") {
       const levRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_lev" } }).catch(() => null);
       const lev = Math.max(2, Math.min(20, levRow?.value ? parseFloat(levRow.value) : 5));
-      // ensureShadowColumns creates the table AND the shadow_* columns the next query reads.
+      // ensureShadowColumns creates the table AND the shadow_*/conviction columns read below.
       await ensureShadowColumns();
       for (const s of fresh) {
         const side = s.kind === "breakout" ? "buy" : s.kind === "breakdown" ? "sell" : null;
@@ -122,17 +122,22 @@ export async function GET(request: Request) {
           s.symbol,
         );
         if (Number(n) > 0) continue;
+        // Conviction from confluence across ALL signals this run (not just the fresh ones)
+        // — how many independent things agree behind this break. Tested, not assumed.
+        const conv = scoreConviction(s, signals);
+        const note = `auto: scanner ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
         await prisma.$executeRawUnsafe(
-          `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated)
-           VALUES ($1,$2,$3,$4,$5,false,false)`,
-          s.symbol, side, lev, `auto: scanner ${s.kind} ${s.timeframe}`, s.price,
+          `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source)
+           VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,'scanner')`,
+          s.symbol, side, lev, note, s.price, conv.tier, conv.score,
         );
-        autoOpened++;
+        opened.push({ symbol: s.symbol, side, tier: conv.tier });
       }
     }
   } catch (e) {
     errors.push(`autoshadow: ${String(e).slice(0, 80)}`);
   }
+  const autoOpened = opened.length;
 
   await saveState(state);
 
@@ -146,8 +151,9 @@ export async function GET(request: Request) {
     shadowResolved = resolutions.length;
     for (const r of resolutions) {
       const win = r.pnl >= 0;
+      const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
       await sendNotification(
-        `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x from $${r.entry.toLocaleString()} → ` +
+        `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
         `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
         `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
         "margin_results",
@@ -158,9 +164,12 @@ export async function GET(request: Request) {
   }
 
   if (autoOpened) {
+    const lines = opened
+      .map((o) => `• ${o.symbol} ${o.side.toUpperCase()} — ${o.tier} conviction`)
+      .join("\n");
     await sendNotification(
-      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from scanner breakouts — ` +
-      `scored to a win/loss automatically. Paper only, no money moved.`,
+      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from scanner breakouts:\n${lines}\n` +
+      `Scored to a win/loss automatically — conviction = how many signals agree. Paper only, no money moved.`,
       "margin_results",
     );
   }
