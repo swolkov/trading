@@ -223,10 +223,10 @@ export default function MarginCockpitPage() {
       <div className="rounded-xl border border-border bg-card overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
           <p className="text-xs font-bold">🔎 Live Signals — all margin coins, all timeframes</p>
-          <p className="text-[10px] text-muted-foreground/45">awareness only · scans every 15 min · not trade advice</p>
+          <p className="text-[10px] text-muted-foreground/45">awareness only · scans every 5 min · not trade advice</p>
         </div>
         {(sig?.signals?.length ?? 0) === 0 ? (
-          <p className="px-4 py-4 text-sm text-muted-foreground/40">No notable signals in the last 24h. The scanner is watching {`{`}BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK, LTC, DOT, SUI, AAVE, HYPE{`}`} on 15m/1h/4h/daily.</p>
+          <p className="px-4 py-4 text-sm text-muted-foreground/40">No notable signals in the last 24h. The scanner is watching {`{`}BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK, LTC, DOT, SUI, AAVE, HYPE{`}`} on 5m/15m/1h/4h/daily.</p>
         ) : (
           <div className="max-h-56 overflow-y-auto divide-y divide-border/40">
             {sig!.signals.map((s, i) => {
