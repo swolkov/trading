@@ -305,6 +305,47 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
     .sort((a, b) => b.resolved - a.resolved);
 }
 
+// EDGES — the paper record sliced by FACTOR (not strategy), to find WHERE profit comes from:
+// direction (long vs short) and coin. This is the microscope on the edge — but thin slices
+// find FAKE edges (data mining), so the UI gates every bucket on sample size and calls
+// nothing an edge until it has a real count. Expectancy (avg $/trade after fees) is the number.
+export interface EdgeStat {
+  key: string; label: string; resolved: number; wins: number; hitRate: number | null;
+  expectancy: number | null; totalPnl: number; open: number;
+}
+// groupExpr is a FIXED column name ("side" / "symbol") chosen by edgeBreakdowns — never user
+// input, so the interpolation is injection-safe (same pattern as ensureShadowColumns).
+async function edgeBy(groupExpr: string, labelFn: (k: string) => string): Promise<EdgeStat[]> {
+  const rows = await prisma.$queryRawUnsafe<{ k: string; resolved: bigint; wins: bigint; total: number | null; open: bigint }[]>(
+    `SELECT ${groupExpr} AS k,
+       count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
+       count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
+       COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
+       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open
+     FROM tradingview_alerts
+     WHERE side IN ('buy','sell')
+     GROUP BY ${groupExpr}`,
+  );
+  return rows
+    .map((r) => {
+      const resolved = Number(r.resolved);
+      return {
+        key: r.k, label: labelFn(r.k), resolved, wins: Number(r.wins),
+        hitRate: resolved > 0 ? Number(r.wins) / resolved : null,
+        expectancy: resolved > 0 ? (r.total || 0) / resolved : null,
+        totalPnl: r.total || 0, open: Number(r.open),
+      };
+    })
+    .sort((a, b) => b.resolved - a.resolved);
+}
+export interface EdgeBreakdowns { byDirection: EdgeStat[]; byCoin: EdgeStat[] }
+export async function edgeBreakdowns(): Promise<EdgeBreakdowns> {
+  await ensureShadowColumns();
+  const byDirection = await edgeBy("side", (k) => (k === "buy" ? "Long" : "Short"));
+  const byCoin = await edgeBy("symbol", (k) => k.replace("/USD", ""));
+  return { byDirection, byCoin };
+}
+
 // The full trade log — every tracked paper trade, newest first, for the admin trade log.
 export interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;

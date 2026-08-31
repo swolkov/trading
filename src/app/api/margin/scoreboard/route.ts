@@ -1,5 +1,5 @@
 import { computeMarginScoreboard, listRoundTrips } from "@/lib/kraken-margin";
-import { shadowScore, strategyBreakdown, recentPaperTrades } from "@/lib/margin-shadow";
+import { shadowScore, strategyBreakdown, recentPaperTrades, edgeBreakdowns } from "@/lib/margin-shadow";
 
 // The "was I winning" scoreboard: Spencer's real margin round trips, hit rate,
 // expectancy after fees + rollover, and progress toward the automation gate. Plus the
@@ -8,12 +8,13 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const [scoreboard, trips, shadow, strategies, log] = await Promise.all([
+    const [scoreboard, trips, shadow, strategies, log, edges] = await Promise.all([
       computeMarginScoreboard(),
       listRoundTrips(),
       shadowScore().catch(() => null),
       strategyBreakdown().catch(() => []),
       recentPaperTrades(100).catch(() => []),
+      edgeBreakdowns().catch(() => ({ byDirection: [], byCoin: [] })),
     ]);
     return Response.json({
       scoreboard,
@@ -25,6 +26,8 @@ export async function GET() {
       strategies,
       // Full trade log — every tracked paper trade, newest first.
       log,
+      // Edges: the paper record sliced by factor (direction, coin) — where's the edge.
+      edges,
     });
   } catch (error) {
     console.error("[/api/margin/scoreboard]", error);
