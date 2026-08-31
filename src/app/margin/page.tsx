@@ -262,7 +262,7 @@ export default function MarginCockpitPage() {
       <div className="rounded-xl border border-border bg-card p-3">
         <div className="flex items-center justify-between mb-2">
           <p className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-wider">
-            Margin pairs — leverage is the international tier; US retail differs (BTC is 20x)
+            Margin pairs — max US-retail leverage (BTC 20x, majors 10x)
           </p>
           <button onClick={() => setShowAllPairs(!showAllPairs)} className="text-[10px] text-purple-400 hover:underline">
             {showAllPairs ? "show tradeable only" : `show all ${universe?.rows?.length ?? "…"}`}
