@@ -62,7 +62,17 @@ export interface ShadowResolution {
 interface OpenRow {
   id: number; time: Date; symbol: string; side: string; leverage: number | null;
   mark_price: number; shadow_peak: number | null; shadow_stop: number | null;
-  conviction: string | null;
+  conviction: string | null; source: string | null;
+}
+
+// Per-strategy exit profile. Fast breakouts cut quickly (tight, leverage-scaled stop, 2-day
+// cap). Swings hold longer with a WIDER fixed stop so a multi-day move can breathe. Spot swings
+// carry NO rollover — holding the coin outright borrows nothing; leveraged trades pay rollover
+// on notional. This is what lets the scoreboard show where leverage stops being worth it.
+function exitParams(source: string | null, lev: number, entry: number): { maxHoldH: number; oneR: number; carry: boolean } {
+  if (source === "swing-spot") return { maxHoldH: 24 * 14, oneR: entry * 0.06, carry: false };
+  if (source === "swing-lev") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
+  return { maxHoldH: MAX_HOLD_H, oneR: entry * (0.3 / lev), carry: lev > 1 };
 }
 
 // Follow every open tracked entry with a MANAGED exit — the "stay in the trade, profit
@@ -78,7 +88,7 @@ interface OpenRow {
 export async function evaluateShadowSignals(perTradeUsd: number): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
-    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, conviction
+    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, conviction, source
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 200`,
@@ -100,25 +110,26 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
   const resolved: ShadowResolution[] = [];
   for (const r of rows) {
     const entry = r.mark_price;
-    const lev = Math.max(2, Math.min(20, r.leverage || 2));
+    const lev = Math.max(1, Math.min(20, r.leverage || 2));
     const dir = r.side === "buy" ? 1 : -1;
-    const oneR = entry * (0.3 / lev);          // 1R in price terms
+    const { maxHoldH, oneR, carry } = exitParams(r.source, lev, entry);   // per-strategy exit profile
+    const timeStopLabel = `${Math.round(maxHoldH)}h time stop`;
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
 
     const now = price[r.symbol];
-    // No fresh price this run: normally skip — but still honor the 48h time stop so a
+    // No fresh price this run: normally skip — but still honor the time stop so a
     // persistently-unpriceable signal can't sit "open" forever. Resolve flat (at entry),
     // which after fees is a small loss.
     if (!(now > 0)) {
-      if (ageH >= MAX_HOLD_H) {
+      if (ageH >= maxHoldH) {
         const rollPeriods = Math.ceil(ageH / 4);
-        const netPct = -MAKER - TAKER - rollPeriods * rollover4h(r.symbol);
+        const netPct = -MAKER - TAKER - (carry ? rollPeriods * rollover4h(r.symbol) : 0);
         const pnl = netPct * perTradeUsd * lev;
         await prisma.$executeRawUnsafe(
           `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now() WHERE id=$4`,
-          entry, pnl, "48h time stop (no price)", r.id,
+          entry, pnl, `${timeStopLabel} (no price)`, r.id,
         );
-        resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: "48h time stop (no price)", leverage: lev, conviction: r.conviction });
+        resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: `${timeStopLabel} (no price)`, leverage: lev, conviction: r.conviction });
       }
       continue;
     }
@@ -145,9 +156,9 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
       // exact breakeven the round-trip fees still make it a small loss, so don't claim
       // "profit" in the label.
       reason = peakR >= 1 ? "trailing stop" : "initial stop";
-    } else if (ageH >= MAX_HOLD_H) {
+    } else if (ageH >= maxHoldH) {
       exit = now;
-      reason = "48h time stop";
+      reason = timeStopLabel;
     }
 
     if (exit == null) {
@@ -162,7 +173,8 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
     const grossPct = (dir * (exit - entry)) / entry;
     const rollPeriods = Math.ceil(ageH / 4);
     // Net of maker entry + taker exit + per-coin rollover on notional (leverage-scaled).
-    const netPct = grossPct - MAKER - TAKER - rollPeriods * rollover4h(r.symbol);
+    // Spot swings (carry=false) pay NO rollover — nothing is borrowed.
+    const netPct = grossPct - MAKER - TAKER - (carry ? rollPeriods * rollover4h(r.symbol) : 0);
     const notional = perTradeUsd * lev;
     const pnl = netPct * notional;
 
@@ -243,7 +255,9 @@ export interface StrategyStat {
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
 }
 const STRATEGY_LABELS: Record<string, string> = {
-  scanner: "Scanner breakouts (auto)",
+  scanner: "Fast breakouts (5x, ≤2d)",
+  "swing-lev": "Leveraged swing (5x, ≤4d)",
+  "swing-spot": "Spot swing (1x, ≤2w)",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
