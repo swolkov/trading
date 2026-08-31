@@ -88,10 +88,12 @@ async function main() {
     `SELECT COALESCE(sum(fee),0)::float AS rollover FROM kraken_my_ledger
      WHERE ltype = 'rollover' AND asset IN ('ZUSD','USD')`,
   );
-  // Kraken's own canonical margin P&L postings — the cross-check for our reconstruction.
-  const [{ ledgerNet }] = await prisma.$queryRawUnsafe<{ ledgerNet: number }[]>(
-    `SELECT COALESCE(sum(amount),0)::float AS "ledgerNet" FROM kraken_my_ledger
-     WHERE ltype = 'margin' AND asset IN ('ZUSD','USD')`,
+  // Kraken's own canonical margin postings — the cross-check for our reconstruction.
+  // `amount` = gross realized P&L; `fee` = the trade fee billed on that fill. Compare
+  // LIKE FOR LIKE: (ledger gross − ledger fees − rollover) vs our net after all costs.
+  const [{ ledgerGross, ledgerFees }] = await prisma.$queryRawUnsafe<{ ledgerGross: number; ledgerFees: number }[]>(
+    `SELECT COALESCE(sum(amount),0)::float AS "ledgerGross", COALESCE(sum(fee),0)::float AS "ledgerFees"
+     FROM kraken_my_ledger WHERE ltype = 'margin' AND asset IN ('ZUSD','USD')`,
   );
   if (!rows.length) {
     console.log("No margin trades synced yet. Wait for the first margin-watch cron run after deploy, then re-run.");
@@ -118,7 +120,11 @@ async function main() {
   console.log(`fills: ${rows.length}   round trips: ${trips.length}   span: ${spanDays.toFixed(0)} days   pace: ${tradesPerMonth.toFixed(1)} trades/month`);
   console.log(`hit rate: ${(hit * 100).toFixed(1)}%   avg hold: ${avgHoldHours.toFixed(1)}h   avg notional: $${avgNotional.toFixed(0)}`);
   console.log(`net P&L after trade fees: $${netTotal.toFixed(2)}   rollover paid: $${rollover.toFixed(2)}   AFTER ALL COSTS: $${afterRollover.toFixed(2)}`);
-  console.log(`cross-check — Kraken's own margin-ledger P&L postings: $${ledgerNet.toFixed(2)} (should be near our reconstructed gross; investigate if far off)`);
+  console.log(`LEDGER DECOMPOSITION (Kraken's own books — authoritative):`);
+  console.log(`  price-picking (gross realized): $${ledgerGross.toFixed(2)}`);
+  console.log(`  trade fees:                    -$${ledgerFees.toFixed(2)}`);
+  console.log(`  rollover financing:            -$${rollover.toFixed(2)}`);
+  console.log(`  TOTAL (ledger):                $${(ledgerGross - ledgerFees - rollover).toFixed(2)}   vs our reconstruction $${afterRollover.toFixed(2)} (should be close)`);
   console.log(`per-trade return on notional: mean ${(avgRet * 100).toFixed(3)}%  sd ${(sdRet * 100).toFixed(2)}%`);
   const tStat = sdRet > 0 ? (avgRet / (sdRet / Math.sqrt(Math.max(1, trips.length)))) : 0;
   console.log(`edge t-stat: ${tStat.toFixed(2)}  (${Math.abs(tStat) < 2 ? "NOT statistically distinguishable from zero yet" : "statistically real at this sample"})`);
