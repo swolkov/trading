@@ -17,8 +17,13 @@ import { publicPairFor, pairBase } from "@/lib/kraken-pairs";
 // leverage pays proportionally more (2x on $100 = $200 notional; 10x = $1,000), which is
 // exactly how Kraken bills it. Rollover is per-coin (BTC cheaper than alts). These rates
 // are Spencer's current US-margin tier; they drift if his fee tier or Kraken's rates change.
-const MAKER = 0.001;    // ~0.10% entry (post-only limit)
-const TAKER = 0.0018;   // ~0.18% exit (stop/target = market)
+// Calibrated to Spencer's REAL fills: 115 trades, $3,031 fees on $1.76M notional =
+// 0.172%/side (~0.34% round trip) measured from kraken_my_trades. Exits here are always
+// market (taker, higher); entries are post-only (maker, lower). Set slightly conservative
+// (0.40% round trip) so the paper record never flatters a strategy on understated cost —
+// the one bias that could wrongly green-light going live. Re-check if his fee tier changes.
+const MAKER = 0.0015;   // ~0.15% entry (post-only limit / maker)
+const TAKER = 0.0025;   // ~0.25% exit (stop/target = market / taker)
 const MAX_HOLD_H = 48;
 // Per-4h rollover on notional, by coin (from measured Kraken funding: BTC lowest).
 const ROLLOVER_4H: Record<string, number> = { BTC: 0.00015, ETH: 0.0003, SOL: 0.0003 };

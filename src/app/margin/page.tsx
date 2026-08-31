@@ -128,11 +128,12 @@ export default function MarginCockpitPage() {
   const [beLev, setBeLev] = useState(10);
   const [beHours, setBeHours] = useState(6);
   const [beMaker, setBeMaker] = useState(false);
-  // Fees are charged on NOTIONAL. His tier ($2.5k+ assets-on-platform): 0.30% maker / 0.60% taker
-  // per side. Rollover ≈ 0.02% per 4h on notional. A price move of m yields m×notional, so the
+  // Fees are charged on NOTIONAL. Calibrated to Spencer's REAL fills (kraken_my_trades):
+  // 0.172%/side measured — so ~0.15% maker / ~0.25% taker, NOT the 0.30/0.60 an older note
+  // assumed. Rollover ≈ 0.02% per 4h on notional. A price move of m yields m×notional, so the
   // break-even move equals total costs as a % of notional — leverage cancels out of the move but
   // multiplies what that move does to your margin.
-  const feeSide = beMaker ? 0.003 : 0.006;
+  const feeSide = beMaker ? 0.0015 : 0.0025;
   const rollover = 0.0002 * Math.ceil(beHours / 4);
   const beMovePct = (feeSide * 2 + rollover) * 100;
   const beNotional = beSize * beLev;
@@ -469,7 +470,7 @@ export default function MarginCockpitPage() {
             </div>
           )}
           <p className="text-[10px] text-muted-foreground/40 mt-2">
-            Estimate — each alert followed to a stop/target/48h outcome, net of modeled maker+taker fees and per-coin 4h rollover (all scaled by leverage). Your <span className="text-foreground/60">real</span> completed trades below are exact (from Kraken&apos;s ledger). This is the record that earns real-money automation.
+            Estimate — each alert followed to a stop/target/48h outcome, net of fees calibrated to your real fills (<span className="text-foreground/60">~0.15% maker in + 0.25% taker out</span>) and per-coin 4h rollover (<span className="text-foreground/60">BTC ~0.015%, alts ~0.03% per 4h</span>), all on notional so they scale with leverage. Spot swings pay no rollover. Your <span className="text-foreground/60">real</span> completed trades below are exact (from Kraken&apos;s ledger). This is the record that earns real-money automation.
           </p>
         </div>
       )}
