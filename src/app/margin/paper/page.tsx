@@ -21,7 +21,13 @@ interface ShadowScore {
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
-  grossPnl: number; fees: number;
+  grossPnl: number; fees: number; tStat: number | null; verdict: string;
+}
+function verdictCls(v: string): string {
+  if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
+  if (v.startsWith("promising")) return "text-amber-400";
+  if (v.startsWith("not paying")) return "text-red-400";
+  return "text-muted-foreground/50"; // gathering
 }
 interface EdgeStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -155,7 +161,8 @@ export default function PaperTradesPage() {
                   <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
                   <th className="text-right font-medium px-2 py-1.5" title="P&L before fees — the raw edge">Gross</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Fee + rollover drag">Fees</th>
-                  <th className="text-right font-medium px-4 py-1.5" title="Gross − fees — what you actually keep">Net</th>
+                  <th className="text-right font-medium px-2 py-1.5" title="Gross − fees — what you actually keep">Net</th>
+                  <th className="text-right font-medium px-4 py-1.5" title="Rule-based call: needs 30+ trades, positive net, and statistical significance (t≥2) before 'REAL EDGE'">Verdict</th>
                 </tr>
               </thead>
               <tbody>
@@ -169,7 +176,8 @@ export default function PaperTradesPage() {
                     </td>
                     <td className={`text-right px-2 py-2 tabular-nums ${col(s.grossPnl)}`}>{money(s.grossPnl)}</td>
                     <td className="text-right px-2 py-2 tabular-nums text-red-400/70">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</td>
-                    <td className={`text-right px-4 py-2 tabular-nums font-bold ${col(s.totalPnl)}`}>{money(s.totalPnl)}</td>
+                    <td className={`text-right px-2 py-2 tabular-nums font-bold ${col(s.totalPnl)}`}>{money(s.totalPnl)}</td>
+                    <td className={`text-right px-4 py-2 ${verdictCls(s.verdict)}`}>{s.verdict}{s.tStat != null && s.resolved >= 30 ? <span className="text-[9px] font-normal opacity-50 ml-1">t={s.tStat.toFixed(1)}</span> : null}</td>
                   </tr>
                 ))}
               </tbody>

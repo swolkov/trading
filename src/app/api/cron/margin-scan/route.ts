@@ -210,14 +210,13 @@ export async function GET(request: Request) {
       if (flag?.value === "true") continue;
       const strats = await strategyBreakdown();
       const lines = strats.filter((s) => s.resolved > 0).map((s) => {
-        const gross = s.grossPnl, net = s.totalPnl, fees = s.fees;
-        const beats = gross > fees ? "✅" : "❌";
-        return `${beats} ${s.label}: ${s.resolved} res, ${s.hitRate != null ? (s.hitRate * 100).toFixed(0) : "—"}% win · GROSS ${gross >= 0 ? "+" : ""}$${gross.toFixed(0)} − fees $${fees.toFixed(0)} = NET ${net >= 0 ? "+" : ""}$${net.toFixed(0)}`;
+        const net = s.totalPnl;
+        return `${s.label}: ${s.resolved} res, ${s.hitRate != null ? (s.hitRate * 100).toFixed(0) : "—"}% win · GROSS ${s.grossPnl >= 0 ? "+" : ""}$${s.grossPnl.toFixed(0)} − fees $${s.fees.toFixed(0)} = NET ${net >= 0 ? "+" : ""}$${net.toFixed(0)} → *${s.verdict}*`;
       }).join("\n");
       await sendNotification(
-        `📊 *MILESTONE — ${score.resolved} resolved paper trades.* First real read on what's working (net of fees):\n${lines}\n\n` +
-        `✅ = that strategy's GROSS is beating its FEES (the go-live signal). Overall net $${score.totalPnl.toFixed(0)}. ` +
-        `Still 100% paper — no real money. Arming stays off until a strategy clearly beats its fees over enough trades.`,
+        `📊 *MILESTONE — ${score.resolved} resolved paper trades.* Verdict per strategy (net of fees, statistically judged):\n${lines}\n\n` +
+        `Verdicts: "REAL EDGE" = positive net + statistically significant (t≥2, not luck). "promising" = positive but could be luck — needs more. ` +
+        `Overall net $${score.totalPnl.toFixed(0)}. Still 100% paper. Arming only when a strategy hits REAL EDGE over a large sample — never on luck.`,
         "margin_results",
       );
       await prisma.agentConfig.upsert({ where: { key: flagKey }, update: { value: "true" }, create: { key: flagKey, value: "true" } }).catch(() => {});
