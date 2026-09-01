@@ -9,7 +9,7 @@ interface Fill {
 interface Data { orders: Fill[]; summary?: { total: number; totalFees: number; totalNotional: number } }
 interface RoundTrip {
   pair: string; side: string; openedAt: string; closedAt: string; holdMinutes: number;
-  entryPrice: number; exitPrice: number; netPnl: number;
+  entryPrice: number; exitPrice: number; netPnl: number; fees: number;
 }
 interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
@@ -69,7 +69,7 @@ function LiveView({ data, krk, trips, tripsLoading }: {
             ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} in → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} now`
             : krk === undefined ? "loading…" : "account unreachable"} />
         <Stat label="Round trips" value={`${trips.length}`} sub="completed margin trades" />
-        <Stat label="Real fills" value={`${data?.orders?.length ?? 0}`} sub="individual executions" />
+        <Stat label="Fees paid" value={`−$${(data?.summary?.totalFees ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`} cls="text-red-400/80" sub="real fees, lifetime" />
       </div>
 
       <div className="flex items-center gap-1">
@@ -100,7 +100,8 @@ function TripsTable({ trips, loading }: { trips: RoundTrip[]; loading: boolean }
               <th className="text-left font-medium px-2 py-2">Side</th>
               <th className="text-right font-medium px-2 py-2">Entry → Exit</th>
               <th className="text-right font-medium px-2 py-2">Hold</th>
-              <th className="text-right font-medium px-3 py-2">P&amp;L</th>
+              <th className="text-right font-medium px-2 py-2">Fee</th>
+              <th className="text-right font-medium px-3 py-2">P&amp;L (net)</th>
             </tr>
           </thead>
           <tbody>
@@ -113,6 +114,7 @@ function TripsTable({ trips, loading }: { trips: RoundTrip[]; loading: boolean }
                 <td className={`px-2 py-1.5 font-medium capitalize ${t.side === "long" ? "text-emerald-400" : "text-red-400"}`}>{t.side}</td>
                 <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{usd(t.entryPrice)} → {usd(t.exitPrice)}</td>
                 <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/50">{hold(t.holdMinutes)}</td>
+                <td className="px-2 py-1.5 text-right tabular-nums text-red-400/60">{t.fees ? `−${usd(t.fees)}` : "—"}</td>
                 <td className={`px-3 py-1.5 text-right tabular-nums font-bold ${col(t.netPnl)}`}>{money2(t.netPnl)}</td>
               </tr>
             ))}
@@ -177,7 +179,7 @@ function PaperLogTable({ log, loading }: { log: PaperTradeRow[]; loading: boolea
   return (
     <div className="space-y-3">
       <p className="text-[10px] text-purple-300/60">
-        🧪 Paper trades — hypothetical, <span className="text-foreground/60">no real money moved</span>. Size = per-trade stake × leverage. Open trades show a live &ldquo;if closed now&rdquo; P&amp;L. Full scoreboard &amp; edges are on the <span className="text-foreground/60">Paper Trades</span> tab.
+        🧪 Paper trades — hypothetical, <span className="text-foreground/60">no real money moved</span>. Size = per-trade stake × leverage. P&amp;L is <span className="text-foreground/60">net of fees</span> (0.15% maker + 0.25% taker + 4h rollover, matched to your real rate). Open trades show a live &ldquo;if closed now&rdquo; P&amp;L. Full scoreboard &amp; edges on the <span className="text-foreground/60">Paper Trades</span> tab.
       </p>
       {log.length === 0 ? <p className="text-sm text-muted-foreground/55 py-6">No paper trades yet — they open automatically as breakouts fire.</p> : (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
