@@ -88,7 +88,36 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
   // the wide 6% control. Winner keeps trading, loser gets retired once the record is clear.
   if (source === "fast-tight") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.02, carry: lev > 1 };
+  // Liquidity-sweep fade — mean-reversion: stop just beyond the swept wick (2.5%), quick
+  // resolution (a real reversal moves fast; if it doesn't revert, the "sweep" was a true break).
+  if (source === "sweep-fade") return { maxHoldH: 24, oneR: entry * 0.025, carry: lev > 1 };
   return { maxHoldH: MAX_HOLD_H, oneR: entry * (0.3 / lev), carry: lev > 1 };
+}
+
+// RISK-BASED SIZING — mirrors the LIVE executor (margin-executor.ts:273-280): size the position
+// so the INITIAL stop loses at most maxRiskPct of a reference account = a hard MAX LOSS per
+// trade. A tighter stop → a BIGGER position for the SAME dollar risk (the real lever). Capped by
+// leverage (can't hold more than lev × equity). This makes paper P&L read like real risk-managed
+// trading — realistic size, fixed downside — instead of an arbitrary fixed stake.
+export function positionNotional(source: string | null, lev: number, entry: number, refEquity: number, maxRiskPct: number): number {
+  const { oneR } = exitParams(source, lev, entry);
+  const stopDistPct = entry > 0 ? oneR / entry : 0;
+  const levCap = refEquity * Math.max(1, lev);
+  if (!(stopDistPct > 0) || !(maxRiskPct > 0)) return Math.min(refEquity, levCap);
+  return Math.min((maxRiskPct * refEquity) / stopDistPct, levCap);
+}
+
+// Reference account + max-risk for paper sizing (config-driven; defaults ≈ Spencer's account so
+// the paper dollars are realistic). kraken_shadow_ref_equity and kraken_margin_max_risk_pct.
+async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }> {
+  const eq = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_ref_equity" } })
+    .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
+  const risk = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_max_risk_pct" } })
+    .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
+  return {
+    refEquity: Number.isFinite(eq) && eq > 0 ? eq : 5000,
+    maxRiskPct: (Number.isFinite(risk) && risk > 0 ? risk : 3) / 100,
+  };
 }
 
 // Follow every open tracked entry with a MANAGED exit — the "stay in the trade, profit
@@ -101,8 +130,9 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
 // Peak/stop are persisted per signal, so trailing works across 5-min evaluations.
 // Conservative by design: 5-min granularity misses intra-run spikes, so it UNDER-counts
 // trailing capture (a real Kraken trailing stop would do at least this well).
-export async function evaluateShadowSignals(perTradeUsd: number): Promise<ShadowResolution[]> {
+export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
+  const { refEquity, maxRiskPct } = await sizingParams();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, conviction, source
      FROM tradingview_alerts
@@ -129,6 +159,7 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
     const lev = Math.max(1, Math.min(20, r.leverage || 2));
     const dir = r.side === "buy" ? 1 : -1;
     const { maxHoldH, oneR, carry } = exitParams(r.source, lev, entry);   // per-strategy exit profile
+    const notional = positionNotional(r.source, lev, entry, refEquity, maxRiskPct);   // risk-based size
     const timeStopLabel = `${Math.round(maxHoldH)}h time stop`;
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
 
@@ -140,7 +171,7 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
       if (ageH >= maxHoldH) {
         const rollPeriods = Math.ceil(ageH / 4);
         const netPct = -MAKER - TAKER - (carry ? rollPeriods * rollover4h(r.symbol) : 0);
-        const pnl = netPct * perTradeUsd * lev;
+        const pnl = netPct * notional;
         await prisma.$executeRawUnsafe(
           `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now() WHERE id=$4`,
           entry, pnl, `${timeStopLabel} (no price)`, r.id,
@@ -184,7 +215,7 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
       const uGross = (dir * (now - entry)) / entry;
       const uRoll = Math.ceil(ageH / 4);
       const uNet = uGross - MAKER - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
-      const unrealized = uNet * perTradeUsd * lev;
+      const unrealized = uNet * notional;
       await prisma.$executeRawUnsafe(
         `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3 WHERE id=$4`,
         peak, stopPx, unrealized, r.id,
@@ -197,7 +228,6 @@ export async function evaluateShadowSignals(perTradeUsd: number): Promise<Shadow
     // Net of maker entry + taker exit + per-coin rollover on notional (leverage-scaled).
     // Spot swings (carry=false) pay NO rollover — nothing is borrowed.
     const netPct = grossPct - MAKER - TAKER - (carry ? rollPeriods * rollover4h(r.symbol) : 0);
-    const notional = perTradeUsd * lev;
     const pnl = netPct * notional;
 
     await prisma.$executeRawUnsafe(
@@ -283,6 +313,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "fast-tight": "Fast — tight 2% stop (5x)",
   "swing-lev": "Leveraged swing (5x, ≤4d)",
   "swing-spot": "Spot swing (1x, ≤2w)",
+  "sweep-fade": "Liquidity-sweep fade (5x)",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
@@ -369,11 +400,9 @@ export interface PaperTradeRow {
 }
 export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
   await ensureShadowColumns();
-  // Paper trades are sized at per-trade USD × leverage (the same notional the executor would
-  // use). Read the per-trade base once so the log can show each trade's size.
-  const perTrade = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_per_trade_usd" } })
-    .then((r) => (r?.value ? parseFloat(r.value) : 100)).catch(() => 100);
-  const perTradeUsd = Number.isFinite(perTrade) ? perTrade : 100;
+  // Size the log the SAME risk-based way the P&L is computed (max-loss ÷ stop distance, capped
+  // by leverage), so the Size column matches what actually drives each trade's dollar P&L.
+  const { refEquity, maxRiskPct } = await sizingParams();
   const rows = await prisma.$queryRawUnsafe<{
     id: number; time: Date; source: string | null; symbol: string; side: string;
     leverage: number | null; conviction: string | null; mark_price: number | null;
@@ -399,7 +428,7 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     exit: r.shadow_exit,
     unrealized: r.shadow_status === "resolved" ? null : r.shadow_unrealized,
     pnl: r.shadow_pnl,
-    notional: perTradeUsd * Math.max(1, r.leverage ?? 1),
+    notional: r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, maxRiskPct) : null,
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
   }));
