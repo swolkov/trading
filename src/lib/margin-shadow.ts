@@ -92,6 +92,9 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // Liquidity-sweep fade — mean-reversion: stop just beyond the swept wick (2.5%), quick
   // resolution (a real reversal moves fast; if it doesn't revert, the "sweep" was a true break).
   if (source === "sweep-fade") return { maxHoldH: 24, oneR: entry * 0.025, carry: lev > 1 };
+  // Selective (high-conviction only): a better setup earns a bit more room (3% stop) + the
+  // managed exit banks the green (breakeven at +1R, then trails). Fewer of these = tiny fee drag.
+  if (source === "selective") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
   return { maxHoldH: MAX_HOLD_H, oneR: entry * (0.3 / lev), carry: lev > 1 };
 }
 
@@ -319,6 +322,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "swing-lev": "Leveraged swing (5x, ≤4d)",
   "swing-spot": "Spot swing (1x, ≤2w)",
   "sweep-fade": "Liquidity-sweep fade (5x)",
+  selective: "Selective — high-conviction only (5x)",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
