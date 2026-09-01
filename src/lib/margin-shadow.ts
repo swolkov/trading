@@ -111,6 +111,17 @@ export function positionNotional(source: string | null, lev: number, entry: numb
   return Math.min((maxRiskPct * refEquity) / stopDistPct, levCap);
 }
 
+// CONVICTION-SCALED RISK — "bet bigger on the ones you know" (Spencer's instinct), done safely:
+// high-conviction trades risk MORE (bigger position), low-conviction risk LESS — but every trade
+// still has a HARD-capped max loss (never the 30%-of-account gamble). high=2×, low=0.5×, else 1×,
+// applied to the base max_risk_pct and clamped to a 6% ceiling. This is the pro version of
+// "size up on your best calls," and the fee-drag/scoreboard shows whether it pays.
+const RISK_CEILING = 0.06;
+function convictionRisk(conviction: string | null, baseRiskPct: number): number {
+  const mult = conviction === "high" ? 2 : conviction === "low" ? 0.5 : 1;
+  return Math.min(RISK_CEILING, baseRiskPct * mult);
+}
+
 // Reference account + max-risk for paper sizing (config-driven; defaults ≈ Spencer's account so
 // the paper dollars are realistic). kraken_shadow_ref_equity and kraken_margin_max_risk_pct.
 async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }> {
@@ -163,7 +174,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const lev = Math.max(1, Math.min(20, r.leverage || 2));
     const dir = r.side === "buy" ? 1 : -1;
     const { maxHoldH, oneR, carry } = exitParams(r.source, lev, entry);   // per-strategy exit profile
-    const notional = positionNotional(r.source, lev, entry, refEquity, maxRiskPct);   // risk-based size
+    const notional = positionNotional(r.source, lev, entry, refEquity, convictionRisk(r.conviction, maxRiskPct));   // risk-based, bigger on high-conviction
     const timeStopLabel = `${Math.round(maxHoldH)}h time stop`;
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
 
@@ -440,7 +451,7 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     exit: r.shadow_exit,
     unrealized: r.shadow_status === "resolved" ? null : r.shadow_unrealized,
     pnl: r.shadow_pnl,
-    notional: r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, maxRiskPct) : null,
+    notional: r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, convictionRisk(r.conviction, maxRiskPct)) : null,
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
   }));
