@@ -21,6 +21,7 @@ interface ShadowScore {
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
+  grossPnl: number; fees: number;
 }
 interface EdgeStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -152,9 +153,10 @@ export default function PaperTradesPage() {
                   <th className="text-right font-medium px-2 py-1.5">Resolved</th>
                   <th className="text-right font-medium px-2 py-1.5">Open</th>
                   <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
-                  <th className="text-right font-medium px-2 py-1.5">Avg win / loss</th>
-                  <th className="text-right font-medium px-2 py-1.5">Expectancy</th>
-                  <th className="text-right font-medium px-4 py-1.5">Total P&amp;L</th>
+                  <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
+                  <th className="text-right font-medium px-2 py-1.5" title="P&L before fees — the raw edge">Gross</th>
+                  <th className="text-right font-medium px-2 py-1.5" title="Fee + rollover drag">Fees</th>
+                  <th className="text-right font-medium px-4 py-1.5" title="Gross − fees — what you actually keep">Net</th>
                 </tr>
               </thead>
               <tbody>
@@ -166,14 +168,8 @@ export default function PaperTradesPage() {
                     <td className={`text-right px-2 py-2 tabular-nums font-bold ${s.hitRate != null && s.hitRate >= 0.5 ? "text-emerald-400" : "text-amber-400"}`}>
                       {s.hitRate != null ? `${(s.hitRate * 100).toFixed(0)}%` : "—"}
                     </td>
-                    <td className="text-right px-2 py-2 tabular-nums">
-                      <span className="text-emerald-400">{money(s.avgWin)}</span>
-                      <span className="text-muted-foreground/40 mx-0.5">/</span>
-                      <span className="text-red-400">{money(s.avgLoss)}</span>
-                    </td>
-                    <td className={`text-right px-2 py-2 tabular-nums font-bold ${s.expectancy != null ? col(s.expectancy) : ""}`}>
-                      {s.expectancy != null ? money2(s.expectancy) : "—"}
-                    </td>
+                    <td className={`text-right px-2 py-2 tabular-nums ${col(s.grossPnl)}`}>{money(s.grossPnl)}</td>
+                    <td className="text-right px-2 py-2 tabular-nums text-red-400/70">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</td>
                     <td className={`text-right px-4 py-2 tabular-nums font-bold ${col(s.totalPnl)}`}>{money(s.totalPnl)}</td>
                   </tr>
                 ))}
@@ -181,7 +177,7 @@ export default function PaperTradesPage() {
             </table>
           </div>
           <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
-            The row with positive <span className="text-foreground/60">expectancy</span> over enough trades is the one worth real money. A high hit rate with tiny wins and big losses still loses — watch expectancy, not just win rate.
+            <span className="text-foreground/60">Gross</span> is the raw edge (before fees); <span className="text-red-400/70">Fees</span> is the drag; <span className="text-foreground/60">Net</span> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if <span className="text-foreground/60">Gross beats Fees</span>. Maker entries + fewer/bigger trades shrink the Fees column.
           </p>
         </div>
       )}
