@@ -134,6 +134,13 @@ export async function GET(request: Request) {
         // Conviction from confluence across ALL signals this run (not just fresh) — how many
         // independent things agree. Tested, not assumed. Same for each plan.
         const conv = scoreConviction(s, signals);
+        // SELECTIVE — only the HIGHEST-conviction breakouts (the "really good ones"). Far fewer
+        // entries → far less fee drag, so the small greens survive. The fee-drag view will show
+        // whether trading ONLY the best beats trading everything, at Spencer's real fees — the
+        // exact "fewer, better trades vs 20-30/day" question. Momentum only, not sweeps.
+        if ((s.kind === "breakout" || s.kind === "breakdown") && conv.tier === "high") {
+          plans.push({ source: "selective", lev });
+        }
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.
           const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
