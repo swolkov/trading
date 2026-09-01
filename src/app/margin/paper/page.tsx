@@ -22,11 +22,6 @@ interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
 }
-interface PaperTradeRow {
-  id: number; time: string; source: string; symbol: string; side: string;
-  leverage: number | null; conviction: string | null; entry: number | null;
-  exit: number | null; pnl: number | null; unrealized: number | null; status: string; reason: string | null;
-}
 interface EdgeStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   expectancy: number | null; totalPnl: number; open: number;
@@ -47,13 +42,13 @@ const money2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; log: PaperTradeRow[]; edges: EdgeBreakdowns }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
 
   const hasAny = !!score && (
-    (score.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0)) ||
-    (score.log && score.log.length > 0)
+    (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0)) ||
+    (score.strategies != null && score.strategies.some((s) => s.resolved > 0 || s.open > 0))
   );
 
   return (
@@ -250,67 +245,10 @@ export default function PaperTradesPage() {
         </div>
       )}
 
-      {/* ── Trade log: every tracked trade ── */}
-      {score?.log && score.log.length > 0 && (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-            <p className="text-xs font-bold">📒 Trade Log — every tracked trade</p>
-            <p className="text-[10px] text-muted-foreground/45">newest first · paper · last {score.log.length}</p>
-          </div>
-          <div className="overflow-auto max-h-[32rem]">
-            <table className="w-full text-[11px]">
-              <thead className="sticky top-0 bg-card">
-                <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50 border-b border-border/50">
-                  <th className="text-left font-medium px-3 py-1.5">Time</th>
-                  <th className="text-left font-medium px-2 py-1.5">Strategy</th>
-                  <th className="text-left font-medium px-2 py-1.5">Coin</th>
-                  <th className="text-left font-medium px-2 py-1.5">Side</th>
-                  <th className="text-left font-medium px-2 py-1.5">Conv.</th>
-                  <th className="text-right font-medium px-2 py-1.5">Entry</th>
-                  <th className="text-right font-medium px-2 py-1.5">Exit</th>
-                  <th className="text-right font-medium px-2 py-1.5">P&amp;L</th>
-                  <th className="text-left font-medium px-3 py-1.5">Outcome</th>
-                </tr>
-              </thead>
-              <tbody>
-                {score.log.map((t) => {
-                  const open = t.status !== "resolved";
-                  return (
-                    <tr key={t.id} className="border-b border-border/20 last:border-0">
-                      <td className="text-left px-3 py-1.5 tabular-nums text-muted-foreground/60 whitespace-nowrap">
-                        {new Date(t.time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                      </td>
-                      <td className="text-left px-2 py-1.5 text-muted-foreground/70">{t.source}</td>
-                      <td className="text-left px-2 py-1.5 font-semibold">{t.symbol.replace("/USD", "")}</td>
-                      <td className={`text-left px-2 py-1.5 font-medium ${t.side === "buy" ? "text-emerald-400" : "text-red-400"}`}>
-                        {t.side.toUpperCase()}{t.leverage ? ` ${t.leverage}x` : ""}
-                      </td>
-                      <td className="text-left px-2 py-1.5 text-muted-foreground/60 capitalize">{t.conviction ?? "—"}</td>
-                      <td className="text-right px-2 py-1.5 tabular-nums">{t.entry != null ? `$${t.entry.toLocaleString()}` : "—"}</td>
-                      <td className="text-right px-2 py-1.5 tabular-nums">{t.exit != null ? `$${t.exit.toLocaleString()}` : "—"}</td>
-                      <td className="text-right px-2 py-1.5 tabular-nums font-bold">
-                        {(() => {
-                          const val = open ? t.unrealized : t.pnl;
-                          return val != null
-                            ? <span className={col(val)}>{money2(val)}{open ? <span className="text-[8px] font-normal opacity-50 ml-0.5">live</span> : null}</span>
-                            : <span className="text-muted-foreground/40">—</span>;
-                        })()}
-                      </td>
-                      <td className="text-left px-3 py-1.5 whitespace-nowrap">
-                        {open
-                          ? <span className="text-amber-400/80">● open</span>
-                          : <span className="text-muted-foreground/60">{t.reason ?? "closed"}</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
-            Every paper trade the system tracked, labeled by strategy and conviction. Nothing here moved real money. Your <span className="text-foreground/60">real</span> completed trades are on the <Link href="/margin" className="underline hover:text-foreground/70">Margin Cockpit</Link>.
-          </p>
-        </div>
+      {hasAny && (
+        <p className="text-[11px] text-muted-foreground/40">
+          Every individual paper trade (with live P&amp;L) is in the full log on the <Link href="/orders" className="underline hover:text-foreground/70">Orders</Link> tab → Paper.
+        </p>
       )}
     </div>
   );
