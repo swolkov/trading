@@ -132,7 +132,7 @@ export default function PaperTradesPage() {
             </div>
           )}
           <p className="text-[10px] text-muted-foreground/40 mt-2">
-            Estimate — each trade followed to a stop/target/48h outcome, net of fees calibrated to your real fills (<span className="text-foreground/60">~0.15% maker in + 0.25% taker out</span>) and per-coin 4h rollover (<span className="text-foreground/60">BTC ~0.015%, alts ~0.03% per 4h</span>), all on notional so they scale with leverage. Spot swings pay no rollover.
+            Estimate — each trade followed to a stop/target/48h outcome, net of fees: trade fee (<span className="text-foreground/60">~0.15% maker in + 0.25% taker out</span>) matched to your real 0.17%/side; 4h rollover (<span className="text-foreground/60">BTC 0.015% verified, ETH ~0.02%, alts ~0.03%</span>) on notional. Kraken&apos;s live rollover fluctuates — real fills are exact, these are conservative estimates. Spot swings pay no rollover.
           </p>
         </div>
       )}

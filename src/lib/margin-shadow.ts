@@ -25,8 +25,14 @@ import { publicPairFor, pairBase } from "@/lib/kraken-pairs";
 const MAKER = 0.0015;   // ~0.15% entry (post-only limit / maker)
 const TAKER = 0.0025;   // ~0.25% exit (stop/target = market / taker)
 const MAX_HOLD_H = 48;
-// Per-4h rollover on notional, by coin (from measured Kraken funding: BTC lowest).
-const ROLLOVER_4H: Record<string, number> = { BTC: 0.00015, ETH: 0.0003, SOL: 0.0003 };
+// Per-4h rollover on notional, by coin. Kraken's US-margin rates FLUCTUATE with market
+// conditions (locked at execution, shown on the order form) — no static number is exact, so
+// these are best estimates. BTC 0.015% is MEASURED from Spencer's real ledger (verified). ETH
+// is a major (borrow ≈ BTC), estimated 0.02%. Other alts default 0.03% — within Kraken's
+// published 0.01–0.05%/4h range and deliberately on the HIGH side, so paper overstates cost
+// slightly (safe: never flatters a strategy). Only the LIVE view (real fills) is exact. As
+// Spencer trades a coin on margin, recalibrate its rate here from the real kraken_my_ledger.
+const ROLLOVER_4H: Record<string, number> = { BTC: 0.00015, ETH: 0.0002, SOL: 0.0003 };
 const ROLLOVER_DEFAULT = 0.0003;
 function rollover4h(symbol: string): number {
   return ROLLOVER_4H[pairBase(symbol)] ?? ROLLOVER_DEFAULT;
