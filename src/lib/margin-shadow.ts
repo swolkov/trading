@@ -56,6 +56,7 @@ export async function ensureShadowColumns(): Promise<void> {
     "conviction_score double precision",
     "source text",                    // which strategy generated it: 'scanner' | 'manual'
     "shadow_unrealized double precision",  // live mark-to-market P&L while open ("if closed now")
+    "shadow_fees double precision",        // fee+rollover $ deducted on resolve (for gross-vs-net)
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -170,11 +171,12 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     if (!(now > 0)) {
       if (ageH >= maxHoldH) {
         const rollPeriods = Math.ceil(ageH / 4);
-        const netPct = -MAKER - TAKER - (carry ? rollPeriods * rollover4h(r.symbol) : 0);
+        const feeFrac = MAKER + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
+        const netPct = -feeFrac;
         const pnl = netPct * notional;
         await prisma.$executeRawUnsafe(
-          `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now() WHERE id=$4`,
-          entry, pnl, `${timeStopLabel} (no price)`, r.id,
+          `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_fees=$5 WHERE id=$4`,
+          entry, pnl, `${timeStopLabel} (no price)`, r.id, feeFrac * notional,
         );
         resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: `${timeStopLabel} (no price)`, leverage: lev, conviction: r.conviction });
       }
@@ -227,12 +229,14 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const rollPeriods = Math.ceil(ageH / 4);
     // Net of maker entry + taker exit + per-coin rollover on notional (leverage-scaled).
     // Spot swings (carry=false) pay NO rollover — nothing is borrowed.
-    const netPct = grossPct - MAKER - TAKER - (carry ? rollPeriods * rollover4h(r.symbol) : 0);
+    const feeFrac = MAKER + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
+    const netPct = grossPct - feeFrac;
     const pnl = netPct * notional;
+    const feeDollars = feeFrac * notional;   // the fee drag on this trade (for gross-vs-net)
 
     await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL WHERE id=$6`,
-      exit, pnl, reason, peak, stopPx, r.id,
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7 WHERE id=$6`,
+      exit, pnl, reason, peak, stopPx, r.id, feeDollars,
     );
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction });
   }
@@ -307,6 +311,7 @@ export async function shadowScore(): Promise<ShadowScore> {
 export interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
+  grossPnl: number; fees: number;   // gross (before fees) and the fee drag — net = gross − fees
 }
 const STRATEGY_LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop (5x)",
@@ -320,7 +325,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
   await ensureShadowColumns();
   const rows = await prisma.$queryRawUnsafe<{
     source: string; resolved: bigint; wins: bigint; total: number | null;
-    avgwin: number | null; avgloss: number | null; open: bigint;
+    avgwin: number | null; avgloss: number | null; open: bigint; fees: number | null;
   }[]>(
     `SELECT COALESCE(source,'manual') AS source,
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
@@ -328,7 +333,8 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss,
-       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open
+       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
+       COALESCE(sum(shadow_fees) FILTER (WHERE shadow_status='resolved'),0)::float AS fees
      FROM tradingview_alerts
      GROUP BY COALESCE(source,'manual')`,
   );
@@ -346,6 +352,8 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         expectancy: resolved > 0 ? (r.total || 0) / resolved : null,
         totalPnl: r.total || 0,
         open: Number(r.open),
+        fees: r.fees || 0,
+        grossPnl: (r.total || 0) + (r.fees || 0),   // net + fees = gross (before-fee P&L)
       };
     })
     .sort((a, b) => b.resolved - a.resolved);
