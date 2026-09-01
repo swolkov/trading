@@ -1,67 +1,48 @@
 import { prisma } from "@/lib/db";
 
-// System-health API for the Kraken-only era (futures meta-agents retired Aug 2026).
-// Reads live DB state every call — must never be statically cached.
+// System-health API for the Kraken MARGIN era. The spot trend bot was retired Aug 31 2026, so
+// this monitors the machinery that's actually live: the margin scanner + guardian crons, trade
+// sync, the TradingView webhook, and the margin executor's arm-state + drawdown breaker + lock.
+// Reads live DB state every call — never statically cached. Returns a fully-shaped body even on
+// error so the page never white-screens.
 export const dynamic = "force-dynamic";
+
+const EMPTY = {
+  heartbeats: { marginScan: null, marginWatch: null, tradeSync: null, tradingViewAlert: null },
+  config: { marginAuto: false, marginValidateOnly: true, shadowAutotrack: true, drawdownDisarmed: false },
+  execLock: { held: false, since: null as string | null },
+};
 
 export async function GET() {
   try {
     const configs = await prisma.agentConfig.findMany();
-    const configMap: Record<string, string> = {};
-    for (const c of configs) configMap[c.key] = c.value;
+    const c: Record<string, string> = {};
+    for (const row of configs) c[row.key] = row.value;
 
-    // Capital-flows freshness read DIRECTLY from the stored row — the resolver's own
-    // asOf is absent on its fallback path, which would report "fresh" during exactly
-    // the failure this exists to catch.
-    let flowsAsOf: string | null = null;
-    try {
-      const flows = configMap.kraken_capital_flows ? JSON.parse(configMap.kraken_capital_flows) : null;
-      flowsAsOf = flows?.asOf || null;
-    } catch { /* leave null */ }
-
-    // Run lock: "" = released (healthy); a timestamp = held since then. A held lock
-    // older than its 5-minute TTL means a run died mid-flight.
-    const lockRow = configMap.kraken_run_lock;
-    const lockHeldSince = lockRow ? lockRow : null;
-
-    const recentOrders = await prisma.autoTradeLog.findMany({
-      where: { symbol: { startsWith: "KRK:" } },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-    });
+    // Margin executor lock: "" = released (healthy); a timestamp = held since then (only while
+    // placing a real order). A held lock older than its 120s TTL means a run died mid-flight.
+    const lock = c["kraken_margin_exec_lock"];
+    const lockHeld = Boolean(lock && lock !== "");
 
     return Response.json({
       heartbeats: {
-        krakenCron: configMap.kraken_cron_last_run || null,
-        krakenAgent: configMap.kraken_last_run || null,
-        marginWatch: configMap.margin_watch_last_run || null,
-        tradeSync: configMap.margin_trades_synced_at || null,
-        tradingViewAlert: configMap.tradingview_last_alert || null,
+        marginScan: c["margin_scan_last_run"] || null,
+        marginWatch: c["margin_watch_last_run"] || null,
+        tradeSync: c["margin_trades_synced_at"] || null,
+        tradingViewAlert: c["tradingview_last_alert"] || null,
       },
-      flowsAsOf,
-      runLock: {
-        held: Boolean(lockHeldSince),
-        since: lockHeldSince,
-      },
-      makerMisses: (() => {
-        try { return configMap.kraken_maker_misses ? JSON.parse(configMap.kraken_maker_misses) : {}; } catch { return {}; }
-      })(),
       config: {
-        enabled: configMap.kraken_enabled !== "false",
-        validateOnly: configMap.kraken_validate_only !== "false",
-        makerOrders: configMap.kraken_maker_orders !== "false",
-        marginAuto: configMap.kraken_margin_auto === "true",
+        // Fail-closed reads, matching the executor's own gating (unset/garbage → safe).
+        marginAuto: c["kraken_margin_auto"] === "true",
+        marginValidateOnly: c["kraken_margin_validate_only"] !== "false", // default ON (safe)
+        shadowAutotrack: c["kraken_shadow_autotrack"] !== "false",        // default ON
+        drawdownDisarmed: c["kraken_margin_disarmed_dd"] === "true",
       },
-      recentOrders: recentOrders.map((t) => ({
-        symbol: t.symbol.replace("KRK:", ""),
-        action: t.action,
-        usd: t.price,
-        reason: t.reason,
-        time: t.createdAt.toISOString(),
-      })),
+      execLock: { held: lockHeld, since: lockHeld ? lock : null },
     });
   } catch (error) {
     console.error("[/api/command]", error);
-    return Response.json({ error: String(error) }, { status: 500 });
+    // Shaped default + error flag: the page shows a banner instead of crashing on undefined.
+    return Response.json({ ...EMPTY, error: String(error) }, { status: 200 });
   }
 }

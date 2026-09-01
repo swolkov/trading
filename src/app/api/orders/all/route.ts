@@ -20,9 +20,9 @@ interface Fill {
 export async function GET() {
   try {
     const rows = await prisma.$queryRawUnsafe<{
-      time: Date; pair: string; type: string; price: number; vol: number; cost: number; fee: number; margin: number;
+      time: Date; pair: string; type: string; price: number; vol: number; cost: number; fee: number; margin: number; posstatus: string;
     }[]>(
-      `SELECT time, pair, type, price, vol, cost, fee, COALESCE(margin, 0) AS margin
+      `SELECT time, pair, type, price, vol, cost, fee, COALESCE(margin, 0) AS margin, COALESCE(posstatus, '') AS posstatus
        FROM kraken_my_trades ORDER BY time DESC LIMIT 500`,
     );
 
@@ -33,7 +33,10 @@ export async function GET() {
       vol: r.vol,
       notional: r.cost,
       fee: r.fee,
-      leveraged: (r.margin || 0) > 0,
+      // Margin-book membership: OPENING fills post margin>0; CLOSING fills post margin=0 but
+      // carry posstatus. Checking margin alone mislabels every margin EXIT as spot (same
+      // convention as loadMarginFills in kraken-margin.ts).
+      leveraged: (r.margin || 0) > 0 || (r.posstatus ?? "") !== "",
       time: r.time.toISOString(),
     }));
 

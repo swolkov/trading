@@ -43,10 +43,12 @@ const sections = [
 export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  // Live = the Kraken bot is armed for real orders (validate-only off). The old
-  // /api/trading-mode source only ever flipped for futures, which is retired.
-  const { data: krkData } = useSWR<{ connected?: boolean; enabled?: boolean; validateOnly?: boolean }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
-  const isLiveView = Boolean(krkData?.connected && krkData?.enabled && !krkData?.validateOnly);
+  // Live = the MARGIN EXECUTOR is armed for real orders — the only live-money path now (the
+  // spot trend bot is retired). Reads /api/margin/mode so the badge accurately warns when real
+  // money is armed; fails safe to "paper" if unreadable. (The old /api/kraken-agent source
+  // tracked the dead bot and would show "paper" even with margin auto-trading armed.)
+  const { data: mode } = useSWR<{ armed?: boolean }>("/api/margin/mode", fetcher, { refreshInterval: 60000 });
+  const isLiveView = Boolean(mode?.armed);
 
   useEffect(() => {
     setMobileOpen(false);
@@ -77,7 +79,7 @@ export function Sidebar() {
                 <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isLiveView ? "bg-red-400" : "bg-emerald-400"}`} />
               </span>
               <span className={`text-[9px] font-semibold tracking-[0.15em] uppercase ${isLiveView ? "text-red-400/80" : "text-emerald-400/80"}`}>
-                {isLiveView ? "Live" : "Demo"}
+                {isLiveView ? "Live" : "Paper"}
               </span>
             </div>
           </div>
