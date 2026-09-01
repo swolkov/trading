@@ -113,20 +113,26 @@ export async function GET(request: Request) {
       // ensureShadowColumns creates the table AND the shadow_*/conviction columns read below.
       await ensureShadowColumns();
       for (const s of fresh) {
-        const side = s.kind === "breakout" ? "buy" : s.kind === "breakdown" ? "sell" : null;
-        if (!side || !(s.price > 0)) continue;
-        // Route by timeframe. Intraday breaks (5m/15m/1h) → the FAST strategy (leverage,
-        // ≤2-day hold). Higher-timeframe breaks (4h/1d) are slower, bigger moves → open TWO
-        // swings to compare: leveraged (rides a few days) and spot (1x, no carry, holds for
-        // weeks). The evaluator applies each strategy's own stop/hold/carry profile.
+        let side: "buy" | "sell" | null = null;
+        let plans: { source: string; lev: number }[] = [];
         const higher = s.timeframe === "4h" || s.timeframe === "1d";
-        // Intraday breaks run the fast A/B (wide 6% vs tight 2% stop) so the scoreboard can
-        // pick the more profitable exit. Higher-TF breaks run the two swings (lev vs spot).
-        const plans = higher
-          ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
-          : [{ source: "scanner", lev }, { source: "fast-tight", lev }];
+        if (s.kind === "breakout" || s.kind === "breakdown") {
+          // Momentum. Intraday breaks → fast A/B (wide 6% vs tight 2% stop). Higher-TF breaks
+          // → the two swings (leveraged vs spot). Each strategy applies its own exit profile.
+          side = s.kind === "breakout" ? "buy" : "sell";
+          plans = higher
+            ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
+            : [{ source: "scanner", lev }, { source: "fast-tight", lev }];
+        } else if (s.kind === "liq-sweep-high" || s.kind === "liq-sweep-low") {
+          // Liquidity-sweep FADE (the ICT/SMC test): a pierce that rejected. Fade it — swept
+          // high & rejected → SHORT, swept low & reclaimed → LONG. The scoreboard measures
+          // whether fading sweeps pays (prior: SMC was a coin flip on futures; crypto untested).
+          side = s.kind === "liq-sweep-low" ? "buy" : "sell";
+          plans = [{ source: "sweep-fade", lev }];
+        }
+        if (!side || plans.length === 0 || !(s.price > 0)) continue;
         // Conviction from confluence across ALL signals this run (not just fresh) — how many
-        // independent things agree behind this break. Tested, not assumed. Same for each plan.
+        // independent things agree. Tested, not assumed. Same for each plan.
         const conv = scoreConviction(s, signals);
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.
@@ -157,9 +163,7 @@ export async function GET(request: Request) {
   // notify the would-be result — "that ETH long would have made +$X / stopped −$Y".
   let shadowResolved = 0;
   try {
-    const perTrade = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_per_trade_usd" } })
-      .then((r) => (r?.value ? parseFloat(r.value) : 100)).catch(() => 100);
-    const resolutions = await evaluateShadowSignals(Number.isFinite(perTrade) ? perTrade : 100);
+    const resolutions = await evaluateShadowSignals();   // risk-based sizing read from config inside
     shadowResolved = resolutions.length;
     for (const r of resolutions) {
       const win = r.pnl >= 0;

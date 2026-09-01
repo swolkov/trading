@@ -46,7 +46,8 @@ export interface ScanSignal {
   symbol: string;
   timeframe: string;
   kind: "oversold" | "overbought" | "breakout" | "breakdown" | "move-up" | "move-down"
-      | "volume-spike" | "vol-expansion" | "near-high" | "near-low" | "compression";
+      | "volume-spike" | "vol-expansion" | "near-high" | "near-low" | "compression"
+      | "liq-sweep-high" | "liq-sweep-low";
   detail: string;
   price: number;
   realertMs: number;   // how long before this exact signal may fire again
@@ -106,6 +107,14 @@ function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: Krak
   const ll = Math.min(...window.map((b) => b.l));
   if (last.h > hh) out.push(mk("breakout", `pierced 20-bar high $${hh.toLocaleString()}`));
   else if (last.l < ll) out.push(mk("breakdown", `pierced 20-bar low $${ll.toLocaleString()}`));
+
+  // LIQUIDITY SWEEP (the ICT/SMC "stop hunt"): price wicked BEYOND the 20-bar extreme but
+  // the live price is back INSIDE it — a FAILED break that grabbed the stops resting there.
+  // The claim is to FADE it (swept high → short, swept low → long). Separate from breakout on
+  // purpose: on the SAME pierce, breakout bets it holds, sweep bets it reverses — the
+  // scoreboard settles which pays. (Fires alongside breakout when a pierce rejects.)
+  if (last.h > hh && last.c < hh) out.push(mk("liq-sweep-high", `swept 20-bar high $${hh.toLocaleString()} and rejected`));
+  else if (last.l < ll && last.c > ll) out.push(mk("liq-sweep-low", `swept 20-bar low $${ll.toLocaleString()} and reclaimed`));
 
   // Recent move over ~3 bars, timeframe-scaled.
   const back = bars[Math.max(0, bars.length - 4)].c;

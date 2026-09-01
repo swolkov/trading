@@ -179,7 +179,7 @@ function PaperLogTable({ log, loading }: { log: PaperTradeRow[]; loading: boolea
   return (
     <div className="space-y-3">
       <p className="text-[10px] text-purple-300/60">
-        🧪 Paper trades — hypothetical, <span className="text-foreground/60">no real money moved</span>. Size = per-trade stake × leverage. P&amp;L is <span className="text-foreground/60">net of estimated fees</span>: trade fee matched to your real 0.17%/side; 4h rollover BTC-verified, alts conservative. Kraken&apos;s live rate fluctuates — only the <span className="text-foreground/60">Live</span> view shows your exact real fees. Open trades show a live &ldquo;if closed now&rdquo; P&amp;L.
+        🧪 Paper trades — hypothetical, <span className="text-foreground/60">no real money moved</span>. <span className="text-foreground/60">Risk-based sizing</span>: each trade is sized so its stop loses a fixed <span className="text-foreground/60">max loss</span> (~3% of the reference account) — a tighter stop means a bigger position for the same risk — then the stop trails up as it goes right. P&amp;L is net of estimated fees (trade fee at your real 0.17%/side; rollover BTC-verified, alts conservative). Open trades show a live &ldquo;if closed now&rdquo; P&amp;L.
       </p>
       {log.length === 0 ? <p className="text-sm text-muted-foreground/55 py-6">No paper trades yet — they open automatically as breakouts fire.</p> : (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
