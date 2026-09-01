@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -195,6 +195,35 @@ export async function GET(request: Request) {
       `Scored to a win/loss automatically — conviction = how many signals agree. Paper only, no money moved.`,
       "margin_results",
     );
+  }
+
+  // MILESTONE CHECK-IN: when the resolved count crosses a threshold (30 = first readable
+  // signal, 100 = the arming-gate sample), post the Gross-vs-Fees-vs-Net scoreboard to Slack
+  // ONCE per milestone (flagged in agentConfig so it never repeats). This is the "report it to
+  // me when there's real data" — the answer comes to Spencer instead of him having to check.
+  try {
+    const score = await shadowScore();
+    for (const milestone of [30, 100]) {
+      if (score.resolved < milestone) continue;
+      const flagKey = `margin_milestone_${milestone}_reported`;
+      const flag = await prisma.agentConfig.findUnique({ where: { key: flagKey } }).catch(() => null);
+      if (flag?.value === "true") continue;
+      const strats = await strategyBreakdown();
+      const lines = strats.filter((s) => s.resolved > 0).map((s) => {
+        const gross = s.grossPnl, net = s.totalPnl, fees = s.fees;
+        const beats = gross > fees ? "✅" : "❌";
+        return `${beats} ${s.label}: ${s.resolved} res, ${s.hitRate != null ? (s.hitRate * 100).toFixed(0) : "—"}% win · GROSS ${gross >= 0 ? "+" : ""}$${gross.toFixed(0)} − fees $${fees.toFixed(0)} = NET ${net >= 0 ? "+" : ""}$${net.toFixed(0)}`;
+      }).join("\n");
+      await sendNotification(
+        `📊 *MILESTONE — ${score.resolved} resolved paper trades.* First real read on what's working (net of fees):\n${lines}\n\n` +
+        `✅ = that strategy's GROSS is beating its FEES (the go-live signal). Overall net $${score.totalPnl.toFixed(0)}. ` +
+        `Still 100% paper — no real money. Arming stays off until a strategy clearly beats its fees over enough trades.`,
+        "margin_results",
+      );
+      await prisma.agentConfig.upsert({ where: { key: flagKey }, update: { value: "true" }, create: { key: flagKey, value: "true" } }).catch(() => {});
+    }
+  } catch (e) {
+    errors.push(`milestone: ${String(e).slice(0, 60)}`);
   }
 
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
