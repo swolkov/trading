@@ -43,11 +43,6 @@ function wsnameToSymbol(wsname: string): string {
   return wsname.replace("XBT/", "BTC/");
 }
 
-function holdLabel(minutes: number): string {
-  if (minutes < 60) return `${minutes.toFixed(0)}m`;
-  if (minutes < 24 * 60) return `${(minutes / 60).toFixed(1)}h`;
-  return `${(minutes / 1440).toFixed(1)}d`;
-}
 
 function TfTile({ symbol, interval, active, onClick }: { symbol: string; interval: number; active: boolean; onClick: () => void }) {
   const { changePct, rsi } = useTimeframeStats(symbol, interval);
@@ -472,22 +467,9 @@ export default function MarginCockpitPage() {
               </div>
             </div>
             {(score?.recentTrips?.length ?? 0) > 0 && (
-              <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1.5">Recent round trips</p>
-                <div className="max-h-56 overflow-y-auto space-y-0.5">
-                  {score!.recentTrips.map((t, i) => (
-                    <div key={i} className="flex items-center gap-3 text-[11px]">
-                      <span className="text-muted-foreground/50 tabular-nums whitespace-nowrap min-w-[90px]">
-                        {new Date(t.closedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                      </span>
-                      <span className="font-semibold min-w-[70px]">{t.pair}</span>
-                      <span className={t.side === "long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
-                      <span className="text-muted-foreground/50 tabular-nums min-w-[50px]">{holdLabel(t.holdMinutes)}</span>
-                      <span className={`font-bold tabular-nums ml-auto ${col(t.netPnl)}`}>{money2(t.netPnl)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <p className="text-[10px] text-muted-foreground/45">
+                This is the performance summary. Every individual round trip with its P&amp;L is on the <Link href="/orders" className="underline hover:text-foreground/70">Orders</Link> tab → Live → Round trips.
+              </p>
             )}
           </div>
         )}

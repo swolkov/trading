@@ -359,10 +359,15 @@ export async function edgeBreakdowns(): Promise<EdgeBreakdowns> {
 export interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
   leverage: number | null; conviction: string | null; entry: number | null;
-  exit: number | null; pnl: number | null; unrealized: number | null; status: string; reason: string | null;
+  exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
 }
 export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
   await ensureShadowColumns();
+  // Paper trades are sized at per-trade USD × leverage (the same notional the executor would
+  // use). Read the per-trade base once so the log can show each trade's size.
+  const perTrade = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_per_trade_usd" } })
+    .then((r) => (r?.value ? parseFloat(r.value) : 100)).catch(() => 100);
+  const perTradeUsd = Number.isFinite(perTrade) ? perTrade : 100;
   const rows = await prisma.$queryRawUnsafe<{
     id: number; time: Date; source: string | null; symbol: string; side: string;
     leverage: number | null; conviction: string | null; mark_price: number | null;
@@ -388,6 +393,7 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     exit: r.shadow_exit,
     unrealized: r.shadow_status === "resolved" ? null : r.shadow_unrealized,
     pnl: r.shadow_pnl,
+    notional: perTradeUsd * Math.max(1, r.leverage ?? 1),
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
   }));
