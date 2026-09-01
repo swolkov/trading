@@ -153,7 +153,6 @@ export default function PaperTradesPage() {
                   <th className="text-right font-medium px-2 py-1.5">Resolved</th>
                   <th className="text-right font-medium px-2 py-1.5">Open</th>
                   <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
-                  <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
                   <th className="text-right font-medium px-2 py-1.5" title="P&L before fees — the raw edge">Gross</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Fee + rollover drag">Fees</th>
                   <th className="text-right font-medium px-4 py-1.5" title="Gross − fees — what you actually keep">Net</th>
