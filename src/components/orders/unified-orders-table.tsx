@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { useState } from "react";
 
 interface Fill {
   symbol: string;
@@ -25,22 +26,41 @@ export function UnifiedOrdersTable() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
   // Kraken account value AND deposited capital — same source the dashboard uses.
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
+  // Filter: your leveraged MARGIN trades vs SPOT (the old trend bot's DCA + hand-buys). Lets
+  // you isolate your actual margin trading from the retired bot's noise. Default all.
+  const [filter, setFilter] = useState<"all" | "margin" | "spot">("all");
 
   if (!data?.orders) return <div className="text-sm text-muted-foreground/60 py-6">Loading fills…</div>;
 
-  const rows = data.orders;
+  const allRows = data.orders;
+  const rows = filter === "all" ? allRows : allRows.filter((o) => (filter === "margin" ? o.leveraged : !o.leveraged));
   const krkVal = krk?.connected ? krk?.totalValue ?? null : null;
   // P&L must be balance-based (value − deposits), never a sum of the row log.
   const krkPnl = krkVal != null && krk?.totalInvested != null ? krkVal - krk.totalInvested : null;
-  const totalFees = data.summary?.totalFees ?? 0;
+  const totalFees = rows.reduce((s, o) => s + (o.fee || 0), 0);
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded text-red-400/80 bg-red-500/[0.08]">
           🔴 Live · real money
         </span>
-        <span className="text-[10px] text-muted-foreground/45">{rows.length} fills · lifetime</span>
+        <span className="text-[10px] text-muted-foreground/45">{rows.length} fills</span>
+        <div className="flex items-center gap-1 ml-auto">
+          {([
+            { k: "all", label: "All" },
+            { k: "margin", label: "My margin" },
+            { k: "spot", label: "Spot / bot" },
+          ] as { k: "all" | "margin" | "spot"; label: string }[]).map((f) => (
+            <button
+              key={f.k}
+              onClick={() => setFilter(f.k)}
+              className={`text-[10px] px-2 py-1 rounded transition-colors ${filter === f.k ? "bg-white/[0.10] text-foreground font-semibold" : "text-muted-foreground/50 hover:text-foreground/70"}`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -55,6 +75,10 @@ export function UnifiedOrdersTable() {
         <Stat label="Fills" value={`${rows.length}`} sub="real Kraken executions" />
         <Stat label="Fees paid" value={`−$${totalFees.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} cls="text-red-400/80" sub="on these fills" />
       </div>
+
+      <p className="text-[10px] text-muted-foreground/45 -mt-1">
+        This is the raw execution log — a single fill has no profit/loss on its own. Your <span className="text-foreground/60">up/down</span> is the <span className="text-foreground/60">Kraken account P&amp;L</span> above (real overall), and per-trade round-trip P&amp;L is on the <span className="text-foreground/60">Margin Cockpit</span>.
+      </p>
 
       {rows.length === 0 ? (
         <p className="text-sm text-muted-foreground/55 py-6">No fills yet.</p>
