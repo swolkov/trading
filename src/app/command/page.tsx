@@ -4,22 +4,19 @@ import useSWR from "swr";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 // ============ SYSTEM HEALTH ============
-// Kraken-only since the Aug 2026 futures retirement. One job: prove the machinery
-// is alive, and go amber/red the moment any piece stops writing its heartbeat.
+// Kraken MARGIN era (spot trend bot retired Aug 2026). One job: prove the LIVE machinery is
+// alive — the margin scanner + guardian crons, trade sync, the webhook — and go amber/red the
+// moment any piece stops writing its heartbeat. Plus the executor's real-money arm-state.
 
 interface CommandData {
   heartbeats: {
-    krakenCron: string | null;
-    krakenAgent: string | null;
+    marginScan: string | null;
     marginWatch: string | null;
     tradeSync: string | null;
     tradingViewAlert: string | null;
   };
-  flowsAsOf: string | null;
-  runLock: { held: boolean; since: string | null };
-  makerMisses: Record<string, number>;
-  config: { enabled: boolean; validateOnly: boolean; makerOrders: boolean; marginAuto: boolean };
-  recentOrders: { symbol: string; action: string; usd: number | null; reason: string | null; time: string }[];
+  config: { marginAuto: boolean; marginValidateOnly: boolean; shadowAutotrack: boolean; drawdownDisarmed: boolean };
+  execLock: { held: boolean; since: string | null };
   error?: string;
 }
 
@@ -27,7 +24,9 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
 function ageInfo(isoDate: string | null, warnMin: number, critMin: number): { text: string; status: "ok" | "warning" | "critical" | "unknown" } {
   if (!isoDate) return { text: "never", status: "unknown" };
-  const age = (Date.now() - new Date(isoDate).getTime()) / 60000;
+  const t = new Date(isoDate).getTime();
+  if (!Number.isFinite(t)) return { text: "—", status: "unknown" };
+  const age = (Date.now() - t) / 60000;
   const text = age < 1 ? "just now" : age < 60 ? `${age.toFixed(0)}m ago` : age < 1440 ? `${(age / 60).toFixed(1)}h ago` : `${(age / 1440).toFixed(0)}d ago`;
   const status = age < warnMin ? "ok" : age < critMin ? "warning" : "critical";
   return { text, status };
@@ -54,34 +53,52 @@ export default function SystemHealthPage() {
     );
   }
 
+  if (data.error) {
+    return (
+      <div className="space-y-6 animate-fade-up">
+        <div>
+          <h1 className="text-xl font-bold">System Health</h1>
+          <p className="text-sm text-muted-foreground">Kraken machinery heartbeats — auto-refreshes every 30s</p>
+        </div>
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+          <p className="text-sm font-bold text-red-500">Health check failed to read state</p>
+          <p className="text-xs text-red-400 mt-1 break-words">{data.error}</p>
+        </div>
+      </div>
+    );
+  }
+
   const hb = data.heartbeats;
-  // Thresholds follow each job's real cadence: cron */30 → amber at 90m; watch */5 → amber at 20m.
+  // Thresholds follow each job's real cadence: scan/watch */5 → amber 20m/red 60m.
   const rows: { label: string; sub: string; age: ReturnType<typeof ageInfo> }[] = [
-    { label: "Kraken cron", sub: "runs every 30 min", age: ageInfo(hb.krakenCron, 90, 180) },
-    { label: "Trend agent", sub: "last full run", age: ageInfo(hb.krakenAgent, 90, 180) },
-    { label: "Margin watch", sub: "runs every 5 min", age: ageInfo(hb.marginWatch, 20, 60) },
-    { label: "Trade sync", sub: "margin trade history from ledger", age: ageInfo(hb.tradeSync, 90, 360) },
-    { label: "Deposits read", sub: "capital flows from Kraken ledger", age: ageInfo(data.flowsAsOf, 180, 720) },
+    { label: "Margin scanner", sub: "runs every 5 min", age: ageInfo(hb.marginScan, 20, 60) },
+    { label: "Margin guardian", sub: "runs every 5 min", age: ageInfo(hb.marginWatch, 20, 60) },
+    { label: "Trade sync", sub: "fills from Kraken ledger", age: ageInfo(hb.tradeSync, 90, 360) },
   ];
 
-  // A held lock is only alarming when it outlives its 5-minute TTL.
-  const lockAgeMin = data.runLock.since ? (Date.now() - new Date(data.runLock.since).getTime()) / 60000 : 0;
-  const lockStuck = data.runLock.held && lockAgeMin > 6;
+  // The margin exec lock is only held while placing a real order; alarming if it outlives 120s TTL.
+  const lockAgeMin = data.execLock.since ? (Date.now() - new Date(data.execLock.since).getTime()) / 60000 : 0;
+  const lockStuck = data.execLock.held && lockAgeMin > 3;
 
-  const missEntries = Object.entries(data.makerMisses || {}).filter(([, n]) => n > 0);
+  const switches = [
+    { label: "Margin auto-trade", on: data.config.marginAuto, onText: "ARMED", offText: "tracked only" },
+    { label: "Real orders", on: !data.config.marginValidateOnly, onText: "LIVE", offText: "validate-only" },
+    { label: "Shadow auto-track", on: data.config.shadowAutotrack, onText: "on", offText: "off", neutral: true },
+    { label: "Drawdown breaker", on: data.config.drawdownDisarmed, onText: "TRIPPED", offText: "clear" },
+  ];
 
   return (
     <div className="space-y-6 animate-fade-up">
       <div>
         <h1 className="text-xl font-bold">System Health</h1>
-        <p className="text-sm text-muted-foreground">Kraken machinery heartbeats — auto-refreshes every 30s</p>
+        <p className="text-sm text-muted-foreground">Kraken margin machinery heartbeats — auto-refreshes every 30s</p>
       </div>
 
       {lockStuck && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-          <p className="text-sm font-bold text-red-500">RUN LOCK STUCK</p>
+          <p className="text-sm font-bold text-red-500">EXEC LOCK STUCK</p>
           <p className="text-xs text-red-400 mt-1">
-            Held since {data.runLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 5m). A run likely died mid-flight; the next cron should recover it, but check Vercel logs if this persists.
+            Held since {data.execLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 2m). A real-order run likely died mid-flight; the next call recovers it, but check Vercel logs if this persists.
           </p>
         </div>
       )}
@@ -116,72 +133,38 @@ export default function SystemHealthPage() {
           </CardContent>
         </Card>
 
-        {/* Config state */}
+        {/* Switches */}
         <Card className="border-zinc-800">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-bold">Switches</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2.5">
-            {[
-              { label: "Trend bot enabled", on: data.config.enabled, onText: "on", offText: "off" },
-              { label: "Real orders", on: !data.config.validateOnly, onText: "LIVE", offText: "validate-only" },
-              { label: "Maker-first buying", on: data.config.makerOrders, onText: "on", offText: "off (taker)" },
-              { label: "Margin auto-trade", on: data.config.marginAuto, onText: "ARMED", offText: "tracked only" },
-            ].map((s) => (
+            {switches.map((s) => (
               <div key={s.label} className="flex items-center justify-between">
                 <span className="text-[12px]">{s.label}</span>
                 <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
-                  s.on ? "bg-red-500/15 text-red-400" : "bg-emerald-500/15 text-emerald-400"
+                  s.on
+                    ? (s.neutral ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400")
+                    : (s.neutral ? "bg-zinc-500/15 text-zinc-400" : "bg-emerald-500/15 text-emerald-400")
                 }`}>
                   {s.on ? s.onText : s.offText}
                 </span>
               </div>
             ))}
-            {missEntries.length > 0 && (
-              <div className="border-t border-zinc-800 pt-2.5">
-                <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider mb-1">Maker misses (falls back to market at 4)</p>
-                {missEntries.map(([coin, n]) => (
-                  <p key={coin} className="text-[11px] text-amber-400">{coin}: {n} consecutive unfilled</p>
-                ))}
-              </div>
-            )}
             <div className="flex items-center justify-between border-t border-zinc-800 pt-2.5">
-              <span className="text-[12px]">Run lock</span>
+              <span className="text-[12px]">Margin exec lock</span>
               <span className={`text-[11px] tabular-nums ${lockStuck ? "text-red-400" : "text-muted-foreground"}`}>
-                {data.runLock.held ? `held ${lockAgeMin.toFixed(0)}m` : "released"}
+                {data.execLock.held ? `held ${lockAgeMin.toFixed(0)}m` : "released"}
               </span>
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Recent orders */}
-      <Card className="border-zinc-800">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-bold">Recent Bot Orders</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {data.recentOrders.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No bot orders yet.</p>
-          ) : (
-            <div className="space-y-1.5">
-              {data.recentOrders.map((o, i) => (
-                <div key={i} className="flex items-center gap-3 text-[11px]">
-                  <span className="text-muted-foreground/50 tabular-nums whitespace-nowrap min-w-[110px]">
-                    {new Date(o.time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-                  </span>
-                  <span className="font-semibold min-w-[60px]">{o.symbol}</span>
-                  <span className={o.action === "kraken_buy" ? "text-emerald-400" : "text-red-400"}>
-                    {o.action === "kraken_buy" ? "buy" : "sell"}
-                  </span>
-                  <span className="tabular-nums text-muted-foreground">{o.usd != null ? `$${o.usd}` : "—"}</span>
-                  <span className="text-muted-foreground/50 truncate">{o.reason}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <p className="text-[11px] text-muted-foreground/40">
+        The margin executor is <span className="text-foreground/60">{data.config.marginAuto && !data.config.marginValidateOnly ? "ARMED — placing real orders" : "in paper/tracked mode — no real money"}</span>.
+        The spot trend bot was retired; its machinery is no longer monitored here.
+      </p>
     </div>
   );
 }

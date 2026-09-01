@@ -70,7 +70,7 @@ export function UnifiedOrdersTable() {
           cls={krkPnl != null ? col(krkPnl) : ""}
           sub={krkVal != null && krk?.totalInvested != null
             ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} in → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} now`
-            : "account unreachable"}
+            : krk === undefined ? "loading…" : "account unreachable"}
         />
         <Stat label="Fills" value={`${rows.length}`} sub="real Kraken executions" />
         <Stat label="Fees paid" value={`−$${totalFees.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} cls="text-red-400/80" sub="on these fills" />
