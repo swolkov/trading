@@ -11,20 +11,26 @@ import { getKrakenOHLC, type KrakenBar } from "@/lib/kraken-margin";
 // Curated liquid margin universe (Kraken public pair codes). The 10x tier plus the most
 // liquid 5x names; HYPE included because Spencer trades it. Kept as a fixed list so the
 // scan is deterministic and fast rather than re-deriving the universe every run.
+// The liquid US-margin universe — curated from live Kraken data (Sep 2026): every USD margin
+// pair with a tight spread (<~0.15%), EXCLUDING stablecoins & gold (USDT/USDC/DAI/PAXG/XAUT —
+// they don't move) and the wide-spread long tail (spread eats the edge). Watching broadly is
+// free; the DISCIPLINE is in trading selectively (high-conviction, risk-managed), not in
+// narrowing what we watch. ~37 coins × 5 timeframes = the real tradeable field.
 export const SCAN_COINS: { name: string; symbol: string }[] = [
-  { name: "BTC", symbol: "BTC/USD" },
-  { name: "ETH", symbol: "ETH/USD" },
-  { name: "SOL", symbol: "SOL/USD" },
-  { name: "XRP", symbol: "XRP/USD" },
-  { name: "DOGE", symbol: "DOGE/USD" },
-  { name: "ADA", symbol: "ADA/USD" },
-  { name: "AVAX", symbol: "AVAX/USD" },
-  { name: "LINK", symbol: "LINK/USD" },
-  { name: "LTC", symbol: "LTC/USD" },
-  { name: "DOT", symbol: "DOT/USD" },
-  { name: "SUI", symbol: "SUI/USD" },
-  { name: "AAVE", symbol: "AAVE/USD" },
+  { name: "BTC", symbol: "BTC/USD" }, { name: "ETH", symbol: "ETH/USD" }, { name: "SOL", symbol: "SOL/USD" },
+  { name: "XRP", symbol: "XRP/USD" }, { name: "DOGE", symbol: "DOGE/USD" }, { name: "ADA", symbol: "ADA/USD" },
+  { name: "AVAX", symbol: "AVAX/USD" }, { name: "LINK", symbol: "LINK/USD" }, { name: "LTC", symbol: "LTC/USD" },
+  { name: "DOT", symbol: "DOT/USD" }, { name: "SUI", symbol: "SUI/USD" }, { name: "AAVE", symbol: "AAVE/USD" },
   { name: "HYPE", symbol: "HYPE/USD" },
+  // Added Sep 2026 from the live tradeable-universe scan (liquid, tight-spread margin coins):
+  { name: "BNB", symbol: "BNB/USD" }, { name: "XMR", symbol: "XMR/USD" }, { name: "TRX", symbol: "TRX/USD" },
+  { name: "XLM", symbol: "XLM/USD" }, { name: "HBAR", symbol: "HBAR/USD" }, { name: "TIA", symbol: "TIA/USD" },
+  { name: "TON", symbol: "TON/USD" }, { name: "APT", symbol: "APT/USD" }, { name: "ICP", symbol: "ICP/USD" },
+  { name: "INJ", symbol: "INJ/USD" }, { name: "ARB", symbol: "ARB/USD" }, { name: "OP", symbol: "OP/USD" },
+  { name: "ATOM", symbol: "ATOM/USD" }, { name: "ETC", symbol: "ETC/USD" }, { name: "FIL", symbol: "FIL/USD" },
+  { name: "POL", symbol: "POL/USD" }, { name: "ONDO", symbol: "ONDO/USD" }, { name: "PEPE", symbol: "PEPE/USD" },
+  { name: "BONK", symbol: "BONK/USD" }, { name: "WLD", symbol: "WLD/USD" }, { name: "JUP", symbol: "JUP/USD" },
+  { name: "STX", symbol: "STX/USD" }, { name: "CRV", symbol: "CRV/USD" }, { name: "PYTH", symbol: "PYTH/USD" },
 ];
 
 // Timeframes scanned for awareness. 5m is the fastest — it's where intraday breakouts
@@ -168,8 +174,8 @@ function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: Krak
 }
 
 // Scan the whole universe. Paced ~150ms/call to stay well under Kraken's public limit
-// (13 coins × 4 timeframes = 52 calls ≈ 8s). A coin/timeframe that errors is skipped,
-// not fatal.
+// (~37 coins × 5 timeframes ≈ 185 calls ≈ 28s, comfortably inside the 300s cron budget).
+// A coin/timeframe that errors (bad pair, thin history) is skipped, not fatal.
 export async function scanUniverse(): Promise<{ signals: ScanSignal[]; errors: string[] }> {
   const signals: ScanSignal[] = [];
   const errors: string[] = [];
