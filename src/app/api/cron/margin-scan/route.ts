@@ -117,12 +117,16 @@ export async function GET(request: Request) {
         let plans: { source: string; lev: number }[] = [];
         const higher = s.timeframe === "4h" || s.timeframe === "1d";
         if (s.kind === "breakout" || s.kind === "breakdown") {
-          // Momentum. Intraday breaks → fast A/B (wide 6% vs tight 2% stop). Higher-TF breaks
-          // → the two swings (leveraged vs spot). Each strategy applies its own exit profile.
+          // Momentum. Intraday breaks → fast (wide 6% stop). Higher-TF breaks → the two
+          // swings (leveraged vs spot). Each strategy applies its own exit profile.
+          // 'fast-tight' (2% stop) RETIRED Sep 1 2026 by verdict: 32 resolved, net −$4.1k,
+          // t=−4.2 — statistically a loser (tight stops + high frequency = fee/whipsaw bleed).
+          // Its exit profile stays in exitParams so already-open trades resolve and its
+          // record remains on the scoreboard as evidence. Do not re-add without a new thesis.
           side = s.kind === "breakout" ? "buy" : "sell";
           plans = higher
             ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
-            : [{ source: "scanner", lev }, { source: "fast-tight", lev }];
+            : [{ source: "scanner", lev }];
         } else if (s.kind === "liq-sweep-high" || s.kind === "liq-sweep-low") {
           // Liquidity-sweep FADE (the ICT/SMC test): a pierce that rejected. Fade it — swept
           // high & rejected → SHORT, swept low & reclaimed → LONG. The scoreboard measures

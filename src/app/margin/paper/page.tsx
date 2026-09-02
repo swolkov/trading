@@ -21,7 +21,7 @@ interface ShadowScore {
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
-  grossPnl: number; fees: number; tStat: number | null; verdict: string;
+  grossPnl: number; fees: number; peakedGreen: number; tStat: number | null; verdict: string;
 }
 function verdictCls(v: string): string {
   if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
@@ -162,6 +162,7 @@ export default function PaperTradesPage() {
                   <th className="text-right font-medium px-2 py-1.5" title="P&L before fees — the raw edge">Gross</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Fee + rollover drag">Fees</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Gross − fees — what you actually keep">Net</th>
+                  <th className="text-right font-medium px-2 py-1.5" title="Went green at peak → finished green. The gap between the two numbers is the give-back — green that appeared but wasn't banked">Green banked</th>
                   <th className="text-right font-medium px-4 py-1.5" title="Rule-based call: needs 30+ trades, positive net, and statistical significance (t≥2) before 'REAL EDGE'">Verdict</th>
                 </tr>
               </thead>
@@ -177,6 +178,9 @@ export default function PaperTradesPage() {
                     <td className={`text-right px-2 py-2 tabular-nums ${col(s.grossPnl)}`}>{money(s.grossPnl)}</td>
                     <td className="text-right px-2 py-2 tabular-nums text-red-400/70">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</td>
                     <td className={`text-right px-2 py-2 tabular-nums font-bold ${col(s.totalPnl)}`}>{money(s.totalPnl)}</td>
+                    <td className="text-right px-2 py-2 tabular-nums text-muted-foreground/70" title="peaked green → finished green">
+                      {s.resolved > 0 ? `${Math.round((s.peakedGreen / s.resolved) * 100)}% → ${Math.round((s.wins / s.resolved) * 100)}%` : "—"}
+                    </td>
                     <td className={`text-right px-4 py-2 ${verdictCls(s.verdict)}`}>{s.verdict}{s.tStat != null && s.resolved >= 30 ? <span className="text-[9px] font-normal opacity-50 ml-1">t={s.tStat.toFixed(1)}</span> : null}</td>
                   </tr>
                 ))}
@@ -184,7 +188,7 @@ export default function PaperTradesPage() {
             </table>
           </div>
           <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
-            <span className="text-foreground/60">Gross</span> is the raw edge (before fees); <span className="text-red-400/70">Fees</span> is the drag; <span className="text-foreground/60">Net</span> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if <span className="text-foreground/60">Gross beats Fees</span>. Maker entries + fewer/bigger trades shrink the Fees column.
+            <span className="text-foreground/60">Gross</span> is the raw edge (before fees); <span className="text-red-400/70">Fees</span> is the drag; <span className="text-foreground/60">Net</span> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if <span className="text-foreground/60">Gross beats Fees</span>. Maker entries + fewer/bigger trades shrink the Fees column. <span className="text-foreground/60">Green banked</span> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
           </p>
         </div>
       )}
