@@ -15,6 +15,7 @@ interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
   leverage: number | null; conviction: string | null; entry: number | null;
   exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
+  simVersion?: string;
 }
 interface ScoreData { log?: PaperTradeRow[]; recentTrips?: RoundTrip[] }
 
@@ -208,7 +209,12 @@ function PaperLogTable({ log, loading }: { log: PaperTradeRow[]; loading: boolea
                       <td className="px-3 py-1.5 text-muted-foreground/60 tabular-nums whitespace-nowrap">
                         {new Date(t.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(t.time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
                       </td>
-                      <td className="px-2 py-1.5 text-muted-foreground/70">{t.source}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground/70">
+                        {t.source}
+                        {t.simVersion === "v1" && (
+                          <span className="ml-1 text-[9px] text-muted-foreground/40" title="Scored under the pre-Sep-2 measurement model — excluded from the scoreboard statistics">v1</span>
+                        )}
+                      </td>
                       <td className="px-2 py-1.5 font-semibold">{t.symbol.replace("/USD", "")}</td>
                       <td className={`px-2 py-1.5 font-medium ${t.side === "buy" ? "text-emerald-400" : "text-red-400"}`}>{t.side.toUpperCase()}{t.leverage ? ` ${t.leverage}x` : ""}</td>
                       <td className="px-2 py-1.5 text-muted-foreground/60 capitalize">{t.conviction ?? "—"}</td>

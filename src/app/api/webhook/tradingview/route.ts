@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { getKrakenPrice } from "@/lib/kraken";
 import { executeAlert, type AlertOrder } from "@/lib/margin-executor";
+import { SIM_VERSION, ensureShadowColumns } from "@/lib/margin-shadow";
 
 // TradingView alert webhook. TradingView fires a POST with whatever JSON template the
 // alert was configured with; ours is:
@@ -122,10 +123,13 @@ export async function POST(request: Request) {
 
   try {
     await ensureAlertsTable();
+    // ensureShadowColumns owns the sim_version column — run it too so an alert landing
+    // right after a deploy (before the first cron) can't hit a missing column.
+    await ensureShadowColumns();
     await prisma.$executeRawUnsafe(
-      `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual')`,
-      symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note,
+      `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source, sim_version)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',$9)`,
+      symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note, SIM_VERSION,
     );
     await prisma.agentConfig.upsert({
       where: { key: "tradingview_last_alert" },

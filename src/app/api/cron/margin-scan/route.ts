@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -147,17 +147,30 @@ export async function GET(request: Request) {
         }
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.
+          // Cohort-scoped: a winding-down v1 trade must not block the v2 cohort's first
+          // entry on that coin for days — that would seed the new sample in a non-random
+          // order (whichever v1 trades resolve first, which correlates with volatility).
+          // The two simulations share no state; coexisting paper trades are harmless.
           const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
             `SELECT count(*)::bigint AS n FROM tradingview_alerts
-             WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open'`,
+             WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open' AND ${SIM_COHORT_SQL}`,
             s.symbol, plan.source,
           );
           if (Number(n) > 0) continue;
           const note = `auto: ${plan.source} ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
+          // ENTRY CHASE (realism): a 5-min scan spots a break late, and a live order
+          // chases it — so every paper entry pays 0.1% of adverse price, instead of
+          // pretending to fill instantly at the signal price (the classic paper-trading
+          // flattery). Sweep-fades pay it too: a passive limit into a rejection has the
+          // opposite problem (adverse selection — it fills most reliably when the fade
+          // is failing), and exempting one strategy from the cost would bias the exact
+          // head-to-head comparison the scoreboard exists to make.
+          const chase = 0.001;
+          const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
           await prisma.$executeRawUnsafe(
-            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source)
-             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8)`,
-            s.symbol, side, plan.lev, note, s.price, conv.tier, conv.score, plan.source,
+            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version)
+             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9)`,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
           );
           opened.push({ symbol: s.symbol, side, tier: conv.tier });
         }
@@ -176,15 +189,31 @@ export async function GET(request: Request) {
   try {
     const resolutions = await evaluateShadowSignals();   // risk-based sizing read from config inside
     shadowResolved = resolutions.length;
-    for (const r of resolutions) {
-      const win = r.pnl >= 0;
-      const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
+    if (resolutions.length > 10) {
+      // A burst (market-wide move stopping many trades at once) becomes ONE message —
+      // per-trade posts at this volume risk Slack rate limits and eat the cron's budget.
+      const total = resolutions.reduce((s, r) => s + r.pnl, 0);
+      const wins = resolutions.filter((r) => r.pnl >= 0).length;
+      const lines = resolutions.slice(0, 12).map((r) =>
+        `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`,
+      ).join("\n");
+      const more = resolutions.length > 12 ? `\n…and ${resolutions.length - 12} more` : "";
       await sendNotification(
-        `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
-        `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
-        `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
+        `📊 ${resolutions.length} paper trades resolved this run — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}\n` +
+        `Estimate — fees+rollover modeled; no real money moved.`,
         "margin_results",
       );
+    } else {
+      for (const r of resolutions) {
+        const win = r.pnl >= 0;
+        const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
+        await sendNotification(
+          `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
+          `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
+          `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
+          "margin_results",
+        );
+      }
     }
   } catch (e) {
     errors.push(`shadow: ${String(e).slice(0, 80)}`);
@@ -209,7 +238,9 @@ export async function GET(request: Request) {
     const score = await shadowScore();
     for (const milestone of [30, 100]) {
       if (score.resolved < milestone) continue;
-      const flagKey = `margin_milestone_${milestone}_reported`;
+      // Keyed per measurement cohort: v2 restarted the counters, so it earns its own
+      // 30/100 check-ins instead of inheriting v1's already-fired flags.
+      const flagKey = `margin_milestone_${SIM_VERSION}_${milestone}_reported`;
       const flag = await prisma.agentConfig.findUnique({ where: { key: flagKey } }).catch(() => null);
       if (flag?.value === "true") continue;
       const strats = await strategyBreakdown();

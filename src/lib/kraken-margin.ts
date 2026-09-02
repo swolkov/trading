@@ -16,10 +16,12 @@ export type KrakenInterval = (typeof KRAKEN_INTERVALS)[number];
 
 export interface KrakenBar { t: number; o: number; h: number; l: number; c: number; v: number }
 
-export async function getKrakenOHLC(symbol: string, interval: KrakenInterval): Promise<KrakenBar[]> {
+export async function getKrakenOHLC(symbol: string, interval: KrakenInterval, since?: number): Promise<KrakenBar[]> {
   const pair = krakenPair(symbol);
   const native = interval === 3 ? 1 : interval;
-  const res = await krakenPublic("OHLC", { pair, interval: String(native) });
+  // `since` (epoch secs, exclusive) trims the response server-side — Kraken otherwise
+  // returns up to 720 bars when a caller may only need the last few minutes.
+  const res = await krakenPublic("OHLC", { pair, interval: String(native), ...(since ? { since: String(Math.floor(since)) } : {}) });
   const rows = Object.entries(res).find(([k]) => k !== "last")?.[1] as unknown[][] | undefined;
   if (!rows?.length) throw new Error(`Kraken OHLC empty for ${symbol}@${interval}m`);
   const bars: KrakenBar[] = rows.map((r) => ({
