@@ -335,10 +335,16 @@ export interface StrategyStat {
 // Rule-based verdict — the honest "does this work" call. Guards against reading luck as edge:
 // needs a real sample (30+) AND positive net AND statistical significance (t≥2, ~95% it's not
 // zero) before it says "REAL EDGE". Below t=2 a positive result could easily be luck — say so.
-function strategyVerdict(resolved: number, net: number, tStat: number | null): string {
+// The t-stat assumes independent trades, but crypto coins move together — 30 wins resolved in
+// one correlated day are closer to ONE bet than thirty. So REAL EDGE additionally requires the
+// resolutions to span 7+ distinct days; until then a significant result stays "promising".
+function strategyVerdict(resolved: number, net: number, tStat: number | null, days: number): string {
   if (resolved < 30) return `gathering (${resolved}/30)`;
   if (net <= 0) return "not paying";
-  if (tStat != null && tStat >= 2) return "REAL EDGE — significant";
+  if (tStat != null && tStat >= 2) {
+    if (days < 7) return `promising — significant, needs ${7 - days} more day${7 - days === 1 ? "" : "s"} of data`;
+    return "REAL EDGE — significant";
+  }
   return "promising (could be luck)";
 }
 const STRATEGY_LABELS: Record<string, string> = {
@@ -355,13 +361,14 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
   const rows = await prisma.$queryRawUnsafe<{
     source: string; resolved: bigint; wins: bigint; total: number | null;
     avgwin: number | null; avgloss: number | null; open: bigint; fees: number | null;
-    meanpnl: number | null; stdpnl: number | null; peaked: bigint;
+    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint;
   }[]>(
     `SELECT COALESCE(source,'manual') AS source,
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_peak IS NOT NULL AND mark_price > 0
          AND ((side='buy' AND shadow_peak > mark_price) OR (side='sell' AND shadow_peak < mark_price)))::bigint AS peaked,
+       count(DISTINCT date_trunc('day', shadow_resolved_at)) FILTER (WHERE shadow_status='resolved')::bigint AS days,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss,
@@ -395,7 +402,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         fees: r.fees || 0,
         grossPnl: net + (r.fees || 0),   // net + fees = gross (before-fee P&L)
         tStat,
-        verdict: strategyVerdict(resolved, net, tStat),
+        verdict: strategyVerdict(resolved, net, tStat, Number(r.days)),
       };
     })
     .sort((a, b) => b.resolved - a.resolved);
