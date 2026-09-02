@@ -8,8 +8,8 @@
 // evaluator marks each open signal against the live market and resolves it the moment a
 // level is hit. Awareness only — it places nothing.
 import { prisma } from "@/lib/db";
-import { krakenPublic } from "@/lib/kraken";
-import { publicPairFor, pairBase } from "@/lib/kraken-pairs";
+import { pairBase } from "@/lib/kraken-pairs";
+import { getKrakenOHLC } from "@/lib/kraken-margin";
 
 // FEE MODEL — an honest ESTIMATE, not exact truth (that's the real scoreboard, which
 // reads actual fills+fees from Kraken's ledger). Modeled: maker entry + taker exit on
@@ -143,8 +143,14 @@ async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }
 //     the move extends, and cutting the trade when it pulls back 1R from the peak.
 //   • 48h time stop as a backstop.
 // Peak/stop are persisted per signal, so trailing works across 5-min evaluations.
-// Conservative by design: 5-min granularity misses intra-run spikes, so it UNDER-counts
-// trailing capture (a real Kraken trailing stop would do at least this well).
+// CANDLE-BASED (not snapshot): each run reads the last ~10 minutes of 1-min OHLC per
+// symbol and checks the carried-in stop against the window's LOW/HIGH — so a wick that
+// hits the stop between runs actually stops the paper trade, exactly as a resting live
+// stop order would. Snapshot checking (the old way) silently skipped those stop-outs,
+// which flattered every strategy — the one bias that could wrongly green-light go-live.
+// Fills are gap-aware: if the window OPENED beyond the stop, the fill is the (worse)
+// open, not the stop price. Peaks also come from candle extremes, so trailing capture
+// is measured fairly rather than under-counted.
 export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
   const { refEquity, maxRiskPct } = await sizingParams();
@@ -152,18 +158,26 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, conviction, source
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
-     ORDER BY time ASC LIMIT 200`,
+     ORDER BY time ASC LIMIT 500`,
   );
   if (!rows.length) return [];
 
-  // One price lookup per distinct symbol.
+  // One OHLC lookup per distinct symbol: the last ~10 min of 1-min candles (covers the
+  // 5-min cron cadence with headroom for drift; a longer window would retro-apply newly
+  // ratcheted stops to old wicks). win = {lo, hi, open of window, latest close}.
   const symbols = [...new Set(rows.map((r) => r.symbol))];
   const price: Record<string, number> = {};
+  const barsBySym: Record<string, { t: number; o: number; h: number; l: number; c: number }[]> = {};
+  const cutoff = Date.now() / 1000 - 10 * 60;
   for (const sym of symbols) {
     try {
-      const res = await krakenPublic("Ticker", { pair: publicPairFor(sym.replace("XBT", "BTC")) });
-      const c = (Object.values(res)[0] as { c?: string[] })?.c?.[0];
-      if (c) price[sym] = parseFloat(c);
+      // krakenPair() inside handles both scanner symbols ("BTC/USD" → XBTUSD) and manual
+      // alert formats ("XBTUSD" passes through unchanged).
+      const bars = (await getKrakenOHLC(sym, 1)).filter((b) => b.t >= cutoff);
+      if (bars.length) {
+        price[sym] = bars[bars.length - 1].c;
+        barsBySym[sym] = bars;
+      }
     } catch { /* skip this symbol this run */ }
     await new Promise((r) => setTimeout(r, 120));
   }
@@ -197,10 +211,31 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       continue;
     }
 
-    // Peak favorable price + trailing stop, carried across runs.
-    let peak = r.shadow_peak ?? entry;
-    peak = dir > 0 ? Math.max(peak, now) : Math.min(peak, now);
-    let stopPx = r.shadow_stop ?? entry - dir * oneR;
+    // Per-trade window: only candles from AFTER this trade opened — judging a trade
+    // against a wick that happened before it existed would stop it out falsely (every
+    // trade's first evaluation lands mid-window). A bar counts if any part of its minute
+    // overlaps the trade's lifetime. No overlapping bars yet (seconds-old trade) → the
+    // latest close is the whole window.
+    const tOpen = r.time.getTime() / 1000;
+    const tb = (barsBySym[r.symbol] ?? []).filter((b) => b.t + 60 > tOpen);
+    const w = tb.length
+      ? { lo: Math.min(...tb.map((b) => b.l)), hi: Math.max(...tb.map((b) => b.h)), open: tb[0].o }
+      : { lo: now, hi: now, open: now };
+
+    // 1) The CARRIED-IN stop is checked first, against the window's extremes — a wick
+    // through it between runs stops the trade, as a resting live stop order would. The
+    // candle can't tell us whether its high or low came first, so stop-first is the
+    // conservative reading. Gap-aware fill: if the window opened beyond the stop, fill
+    // at the (worse) open.
+    const stopPrev = r.shadow_stop ?? entry - dir * oneR;
+    const prevPeak = r.shadow_peak ?? entry;
+    const prevPeakR = (dir * (prevPeak - entry)) / oneR;
+    const touchedPrev = dir > 0 ? w.lo <= stopPrev : w.hi >= stopPrev;
+
+    // 2) Only if the old stop survived: credit this window's peak and ratchet the trail.
+    let peak = prevPeak;
+    peak = dir > 0 ? Math.max(peak, w.hi) : Math.min(peak, w.lo);
+    let stopPx = stopPrev;
     const peakR = (dir * (peak - entry)) / oneR;    // best profit reached, in R
     if (peakR >= 1) {
       // Breakeven once +1R, then trail 1R behind the peak — ratchet only (never loosen).
@@ -210,14 +245,18 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     }
 
     // Exit checks.
-    const hitStop = dir > 0 ? now <= stopPx : now >= stopPx;
     let exit: number | null = null;
     let reason = "";
-    if (hitStop) {
-      exit = stopPx;
+    if (touchedPrev) {
+      exit = dir > 0 ? Math.min(stopPrev, w.open) : Math.max(stopPrev, w.open);
       // Mechanism only — the P&L number carries whether it was actually a profit; at
       // exact breakeven the round-trip fees still make it a small loss, so don't claim
       // "profit" in the label.
+      reason = prevPeakR >= 1 ? "trailing stop" : "initial stop";
+    } else if (dir > 0 ? now <= stopPx : now >= stopPx) {
+      // The stop ratcheted THIS window (peak first, then reversal to the close) and the
+      // close sits beyond it — a live trail would have triggered on the way back down.
+      exit = stopPx;
       reason = peakR >= 1 ? "trailing stop" : "initial stop";
     } else if (ageH >= maxHoldH) {
       exit = now;
@@ -250,7 +289,9 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
 
     await prisma.$executeRawUnsafe(
       `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7 WHERE id=$6`,
-      exit, pnl, reason, peak, stopPx, r.id, feeDollars,
+      // A trade stopped on the carried-in stop gets its PRE-window peak persisted — the
+      // give-back metric must not credit green that only appeared after the stop-out.
+      exit, pnl, reason, touchedPrev ? prevPeak : peak, touchedPrev ? stopPrev : stopPx, r.id, feeDollars,
     );
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction });
   }

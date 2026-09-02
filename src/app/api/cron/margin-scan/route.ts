@@ -154,10 +154,16 @@ export async function GET(request: Request) {
           );
           if (Number(n) > 0) continue;
           const note = `auto: ${plan.source} ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
+          // ENTRY CHASE (realism): a 5-min scan spots a break late, and a live order
+          // chases it — so momentum paper entries pay 0.1% of adverse price, instead of
+          // pretending to fill instantly at the signal price (the classic paper-trading
+          // flattery). Sweep-fades enter passively INTO the rejection — no chase.
+          const chase = plan.source === "sweep-fade" ? 0 : 0.001;
+          const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
           await prisma.$executeRawUnsafe(
             `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source)
              VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8)`,
-            s.symbol, side, plan.lev, note, s.price, conv.tier, conv.score, plan.source,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source,
           );
           opened.push({ symbol: s.symbol, side, tier: conv.tier });
         }
