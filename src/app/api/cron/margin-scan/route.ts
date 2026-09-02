@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -147,9 +147,13 @@ export async function GET(request: Request) {
         }
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.
+          // Cohort-scoped: a winding-down v1 trade must not block the v2 cohort's first
+          // entry on that coin for days — that would seed the new sample in a non-random
+          // order (whichever v1 trades resolve first, which correlates with volatility).
+          // The two simulations share no state; coexisting paper trades are harmless.
           const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
             `SELECT count(*)::bigint AS n FROM tradingview_alerts
-             WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open'`,
+             WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open' AND ${SIM_COHORT_SQL}`,
             s.symbol, plan.source,
           );
           if (Number(n) > 0) continue;
@@ -191,7 +195,7 @@ export async function GET(request: Request) {
       const total = resolutions.reduce((s, r) => s + r.pnl, 0);
       const wins = resolutions.filter((r) => r.pnl >= 0).length;
       const lines = resolutions.slice(0, 12).map((r) =>
-        `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${r.reason})`,
+        `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`,
       ).join("\n");
       const more = resolutions.length > 12 ? `\n…and ${resolutions.length - 12} more` : "";
       await sendNotification(

@@ -398,8 +398,11 @@ export async function shadowScore(): Promise<ShadowScore> {
      GROUP BY COALESCE(conviction,'untagged')`,
   );
   const [legacy] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
+    // COALESCE, not NOT(...): a NULL sim_version row would vanish from BOTH cohorts
+    // under NULL-unsafe negation. Unreachable today (the backfill runs first), but a
+    // future insert path that forgets the stamp should show up here, not disappear.
     `SELECT count(*)::bigint AS n FROM tradingview_alerts
-     WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open' AND NOT (${SIM_COHORT_SQL})`,
+     WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open' AND COALESCE(sim_version,'v1') <> '${SIM_VERSION}'`,
   );
   const order: Record<string, number> = { high: 0, med: 1, low: 2, untagged: 3 };
   const byConviction: ConvictionTier[] = tiers
