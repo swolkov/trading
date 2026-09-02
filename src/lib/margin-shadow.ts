@@ -326,6 +326,8 @@ export interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
   grossPnl: number; fees: number;   // gross (before fees) and the fee drag — net = gross − fees
+  peakedGreen: number;    // resolved trades that were in profit at their PEAK — the give-back
+                          // numerator: peakedGreen vs wins is "green that appeared vs green banked"
   tStat: number | null;   // t = mean × √n / std — is the net expectancy distinguishable from luck?
   verdict: string;        // rule-based: gathering / not paying / promising (could be luck) / REAL EDGE
 }
@@ -341,7 +343,7 @@ function strategyVerdict(resolved: number, net: number, tStat: number | null): s
 }
 const STRATEGY_LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop (5x)",
-  "fast-tight": "Fast — tight 2% stop (5x)",
+  "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
   "swing-lev": "Leveraged swing (5x, ≤4d)",
   "swing-spot": "Spot swing (1x, ≤2w)",
   "sweep-fade": "Liquidity-sweep fade (5x)",
@@ -353,11 +355,13 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
   const rows = await prisma.$queryRawUnsafe<{
     source: string; resolved: bigint; wins: bigint; total: number | null;
     avgwin: number | null; avgloss: number | null; open: bigint; fees: number | null;
-    meanpnl: number | null; stdpnl: number | null;
+    meanpnl: number | null; stdpnl: number | null; peaked: bigint;
   }[]>(
     `SELECT COALESCE(source,'manual') AS source,
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
+       count(*) FILTER (WHERE shadow_status='resolved' AND shadow_peak IS NOT NULL AND mark_price > 0
+         AND ((side='buy' AND shadow_peak > mark_price) OR (side='sell' AND shadow_peak < mark_price)))::bigint AS peaked,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss,
@@ -387,6 +391,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         expectancy: resolved > 0 ? net / resolved : null,
         totalPnl: net,
         open: Number(r.open),
+        peakedGreen: Number(r.peaked),
         fees: r.fees || 0,
         grossPnl: net + (r.fees || 0),   // net + fees = gross (before-fee P&L)
         tStat,
