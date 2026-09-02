@@ -69,22 +69,34 @@ export async function ensureShadowColumns(): Promise<void> {
   await prisma.$executeRawUnsafe(
     `UPDATE tradingview_alerts SET source = CASE WHEN note LIKE 'auto:%' THEN 'scanner' ELSE 'manual' END WHERE source IS NULL`,
   );
-  // MEASUREMENT COHORTS: v1 rows (before Sep 2 2026) were scored with snapshot stops,
-  // instant-fill entries, and snapshot peaks; v2 uses candle-based stops, gap-aware fills,
-  // and a 0.1% entry chase. Pooling the two would make every verdict uninterpretable — a
-  // t-stat over a mixture of two simulators gates nothing — so the scoreboard, edges, and
-  // milestones read ONLY the current cohort. Old rows stay in the DB for the log.
+  // MEASUREMENT COHORTS: v1 rows were scored with snapshot stops, instant-fill entries,
+  // and snapshot peaks; v2 uses candle-based stops, gap-aware fills, and a 0.1% entry
+  // chase. Pooling the two would make every verdict uninterpretable — a t-stat over a
+  // mixture of two simulators gates nothing — so the scoreboard, edges, and milestones
+  // read ONLY the current cohort. Old rows stay in the DB for the log.
+  //
+  // No time predicate: every v2-code insert supplies sim_version in the INSERT itself,
+  // so an unstamped row can only have been written by pre-cohort code, whenever the
+  // deploy actually lands. (A timestamp cutoff here once mislabeled 9 hours of rows.)
   await prisma.$executeRawUnsafe(
-    `UPDATE tradingview_alerts SET sim_version='v1' WHERE sim_version IS NULL AND time < '2026-09-02T06:00:00Z'`,
+    `UPDATE tradingview_alerts SET sim_version='v1' WHERE sim_version IS NULL`,
+  );
+  // Pre-cohort OPEN rows resume candle evaluation from NOW rather than replaying an
+  // hour of bars against stops that were only ever snapshot-checked — without this seed,
+  // the first post-deploy run would mass-resolve the old book in one arbitrary sweep.
+  await prisma.$executeRawUnsafe(
+    `UPDATE tradingview_alerts SET shadow_seen_t = extract(epoch from now())
+     WHERE shadow_seen_t IS NULL AND sim_version='v1' AND side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open'`,
   );
 }
 
 // Bump when the measurement model changes materially (fills, fees, entries, stops).
 // Inserts stamp it; every aggregate filters to it. See the cohort note in ensureShadowColumns.
 export const SIM_VERSION = "v2";
-// Rows whose insert path predates the version stamp (or missed it) count as current —
-// the backfill above has already quarantined everything from before the cutover.
-export const SIM_COHORT_SQL = `COALESCE(sim_version,'${SIM_VERSION}')='${SIM_VERSION}'`;
+// FAIL CLOSED: only explicitly stamped rows count as current. An insert path that
+// forgets the stamp quarantines its rows (they read as pre-cohort via the backfill)
+// instead of silently polluting the statistics that gate real money.
+export const SIM_COHORT_SQL = `sim_version='${SIM_VERSION}'`;
 
 export interface ShadowResolution {
   id: number; symbol: string; side: string; entry: number; exit: number;
@@ -192,7 +204,10 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     try {
       // krakenPair() inside handles both scanner symbols ("BTC/USD" → XBTUSD) and manual
       // alert formats ("XBTUSD" passes through unchanged).
-      const bars = (await getKrakenOHLC(sym, 1, cutoff - 60)).filter((b) => b.t >= cutoff);
+      const raw = (await getKrakenOHLC(sym, 1, cutoff - 60)).filter((b) => b.t >= cutoff);
+      // Kraken can return the in-progress bar twice when `since` falls inside the current
+      // minute; dedupe by timestamp keeping the LAST (most complete) copy.
+      const bars = raw.filter((b, i) => i === raw.length - 1 || raw[i + 1].t !== b.t);
       if (bars.length) {
         price[sym] = bars[bars.length - 1].c;
         barsBySym[sym] = bars;
@@ -240,9 +255,14 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const tOpen = r.time.getTime() / 1000;
     const seenT = r.shadow_seen_t ?? 0;
     const tb = (barsBySym[r.symbol] ?? []).filter((b) => b.t >= tOpen && b.t >= seenT);
-    // The newest bar is in-progress — its extremes can still grow, so it is NOT marked
-    // seen; the next run re-scores it complete. Everything before it is final.
-    const nextSeenT = tb.length ? tb[tb.length - 1].t : seenT;
+    // The newest fetched bar is Kraken's IN-PROGRESS bar: its extremes can still grow,
+    // so it is walked for a stop TOUCH only — it must not ratchet the trail (a stop
+    // derived from its high would be retro-tested against its own low next run) and its
+    // peak is not persisted. It stays unmarked as seen; the next run re-walks it
+    // complete, and only then does it ratchet.
+    const doneBars = tb.slice(0, -1);
+    const liveBar = tb.length ? tb[tb.length - 1] : null;
+    const nextSeenT = liveBar ? liveBar.t : seenT;
 
     // SEQUENTIAL WALK, oldest bar first — the stop is tested AS IT STOOD at each bar's
     // open, then that bar's extreme ratchets the trail for the NEXT bar. This is how a
@@ -264,7 +284,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
         stopPx = dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
       }
     };
-    for (const b of tb) {
+    for (const b of doneBars) {
       if (dir > 0 ? b.l <= stopPx : b.h >= stopPx) {
         exit = dir > 0 ? Math.min(stopPx, b.o) : Math.max(stopPx, b.o);
         // Mechanism only — the P&L number carries whether it was actually a profit; at
@@ -276,8 +296,16 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       peak = dir > 0 ? Math.max(peak, b.h) : Math.min(peak, b.l);
       ratchet();
     }
+    if (exit == null && liveBar) {
+      // In-progress bar: stop touch only, against the stop as it stood after the last
+      // COMPLETE bar. No ratchet, no peak credit — see the note above doneBars.
+      if (dir > 0 ? liveBar.l <= stopPx : liveBar.h >= stopPx) {
+        exit = dir > 0 ? Math.min(stopPx, liveBar.o) : Math.max(stopPx, liveBar.o);
+        reason = (dir * (peak - entry)) / oneR >= 1 ? "trailing stop" : "initial stop";
+      }
+    }
     if (exit == null && tb.length === 0) {
-      // Seconds-old trade with no full bar yet: the latest close is all we know.
+      // Seconds-old trade with no bar yet: the latest close is all we know.
       peak = dir > 0 ? Math.max(peak, now) : Math.min(peak, now);
       ratchet();
       if (dir > 0 ? now <= stopPx : now >= stopPx) {
@@ -298,8 +326,11 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       const uRoll = Math.ceil(ageH / 4);
       const uNet = uGross - MAKER - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
       const unrealized = uNet * notional;
+      // Still-open guard: an overlapping cron run working from an older SELECT must not
+      // overwrite peak/stop on a row the other run has since resolved — shadow_peak
+      // feeds the give-back metric and must freeze at resolution.
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5 WHERE id=$4`,
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5 WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
         peak, stopPx, unrealized, r.id, nextSeenT,
       );
       continue;
@@ -337,6 +368,9 @@ export interface ConvictionTier {
 export interface ShadowScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number;
   avgWin: number; avgLoss: number; open: number; openUnrealized: number; byConviction: ConvictionTier[];
+  legacyOpen: number;   // open trades from a PRIOR measurement cohort, still winding down —
+                        // shown so the live book never looks empty while they exist, but
+                        // excluded from every statistic above
 }
 export async function shadowScore(): Promise<ShadowScore> {
   await ensureShadowColumns();
@@ -363,6 +397,10 @@ export async function shadowScore(): Promise<ShadowScore> {
      FROM tradingview_alerts WHERE shadow_status='resolved' AND ${SIM_COHORT_SQL}
      GROUP BY COALESCE(conviction,'untagged')`,
   );
+  const [legacy] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
+    `SELECT count(*)::bigint AS n FROM tradingview_alerts
+     WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open' AND NOT (${SIM_COHORT_SQL})`,
+  );
   const order: Record<string, number> = { high: 0, med: 1, low: 2, untagged: 3 };
   const byConviction: ConvictionTier[] = tiers
     .map((t) => ({
@@ -384,6 +422,7 @@ export async function shadowScore(): Promise<ShadowScore> {
     avgLoss: wl.avgloss || 0,
     open: Number(agg.open),
     openUnrealized: agg.openfloat || 0,
+    legacyOpen: Number(legacy.n),
     byConviction,
   };
 }
@@ -526,6 +565,7 @@ export interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
   leverage: number | null; conviction: string | null; entry: number | null;
   exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
+  simVersion: string;   // measurement cohort — the log shows all cohorts, labeled
 }
 export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
   await ensureShadowColumns();
@@ -536,10 +576,10 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     id: number; time: Date; source: string | null; symbol: string; side: string;
     leverage: number | null; conviction: string | null; mark_price: number | null;
     shadow_exit: number | null; shadow_pnl: number | null; shadow_unrealized: number | null;
-    shadow_status: string | null; shadow_reason: string | null;
+    shadow_status: string | null; shadow_reason: string | null; sim_version: string | null;
   }[]>(
     `SELECT id, time, source, symbol, side, leverage, conviction, mark_price,
-            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason
+            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason, sim_version
      FROM tradingview_alerts
      WHERE side IN ('buy','sell')
      ORDER BY time DESC LIMIT $1`,
@@ -560,5 +600,6 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     notional: r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, convictionRisk(r.conviction, maxRiskPct)) : null,
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
+    simVersion: r.sim_version ?? SIM_VERSION,
   }));
 }

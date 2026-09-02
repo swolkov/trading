@@ -16,7 +16,7 @@ interface ConvictionTier {
 }
 interface ShadowScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number;
-  avgWin: number; avgLoss: number; open: number; openUnrealized?: number; byConviction?: ConvictionTier[];
+  avgWin: number; avgLoss: number; open: number; openUnrealized?: number; legacyOpen?: number; byConviction?: ConvictionTier[];
 }
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -54,7 +54,7 @@ export default function PaperTradesPage() {
   );
 
   const hasAny = !!score && (
-    (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0)) ||
+    (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0)) ||
     (score.strategies != null && score.strategies.some((s) => s.resolved > 0 || s.open > 0))
   );
 
@@ -80,7 +80,7 @@ export default function PaperTradesPage() {
       )}
 
       {/* ── Tracked-signal paper record ── */}
-      {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0) && (
+      {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0) && (
         <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-xs font-bold">📊 Tracked-Signal Paper Record — would these have made money?</p>
@@ -88,6 +88,9 @@ export default function PaperTradesPage() {
               {score.shadow.open} open
               {score.shadow.open > 0 && score.shadow.openUnrealized != null && (
                 <> · floating <span className={`font-bold ${col(score.shadow.openUnrealized)}`}>{money2(score.shadow.openUnrealized)}</span></>
+              )}
+              {(score.shadow.legacyOpen ?? 0) > 0 && (
+                <> · <span title="Opened before the Sep 2 measurement upgrade — still tracked to their finish, but excluded from every statistic on this page">+{score.shadow.legacyOpen} winding down (old measurement)</span></>
               )}
               {" "}· no real money
             </p>

@@ -185,15 +185,31 @@ export async function GET(request: Request) {
   try {
     const resolutions = await evaluateShadowSignals();   // risk-based sizing read from config inside
     shadowResolved = resolutions.length;
-    for (const r of resolutions) {
-      const win = r.pnl >= 0;
-      const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
+    if (resolutions.length > 10) {
+      // A burst (market-wide move stopping many trades at once) becomes ONE message —
+      // per-trade posts at this volume risk Slack rate limits and eat the cron's budget.
+      const total = resolutions.reduce((s, r) => s + r.pnl, 0);
+      const wins = resolutions.filter((r) => r.pnl >= 0).length;
+      const lines = resolutions.slice(0, 12).map((r) =>
+        `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${r.reason})`,
+      ).join("\n");
+      const more = resolutions.length > 12 ? `\n…and ${resolutions.length - 12} more` : "";
       await sendNotification(
-        `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
-        `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
-        `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
+        `📊 ${resolutions.length} paper trades resolved this run — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}\n` +
+        `Estimate — fees+rollover modeled; no real money moved.`,
         "margin_results",
       );
+    } else {
+      for (const r of resolutions) {
+        const win = r.pnl >= 0;
+        const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
+        await sendNotification(
+          `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
+          `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
+          `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
+          "margin_results",
+        );
+      }
     }
   } catch (e) {
     errors.push(`shadow: ${String(e).slice(0, 80)}`);
