@@ -3,10 +3,10 @@
 // risk. This is what makes tracked mode meaningful: a real, scored paper record built
 // from his own alerts, at honest sizing and fees.
 //
-// Each tracked entry is treated exactly as the executor would place it: sized at
-// per-trade × leverage, a stop at 0.3/leverage, a 2R target, and a 48h time stop. The
-// evaluator marks each open signal against the live market and resolves it the moment a
-// level is hit. Awareness only — it places nothing.
+// Each tracked entry is treated exactly as the executor would place it: risk-based
+// sizing, a per-strategy initial stop, a breakeven-then-trailing stop once +1R, and a
+// per-strategy time stop. The evaluator walks each open signal across 1-min candles and
+// resolves it the moment a level is hit. Awareness only — it places nothing.
 import { prisma } from "@/lib/db";
 import { pairBase } from "@/lib/kraken-pairs";
 import { getKrakenOHLC } from "@/lib/kraken-margin";
@@ -57,6 +57,10 @@ export async function ensureShadowColumns(): Promise<void> {
     "source text",                    // which strategy generated it: 'scanner' | 'manual'
     "shadow_unrealized double precision",  // live mark-to-market P&L while open ("if closed now")
     "shadow_fees double precision",        // fee+rollover $ deducted on resolve (for gross-vs-net)
+    "shadow_seen_t double precision",      // epoch secs of the last 1-min bar already evaluated —
+                                           // bars are never scored twice, so a ratcheted stop
+                                           // can't be retro-applied to wicks it didn't exist for
+    "sim_version text",                    // measurement-model cohort (see SIM_VERSION)
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
   }
@@ -65,7 +69,22 @@ export async function ensureShadowColumns(): Promise<void> {
   await prisma.$executeRawUnsafe(
     `UPDATE tradingview_alerts SET source = CASE WHEN note LIKE 'auto:%' THEN 'scanner' ELSE 'manual' END WHERE source IS NULL`,
   );
+  // MEASUREMENT COHORTS: v1 rows (before Sep 2 2026) were scored with snapshot stops,
+  // instant-fill entries, and snapshot peaks; v2 uses candle-based stops, gap-aware fills,
+  // and a 0.1% entry chase. Pooling the two would make every verdict uninterpretable — a
+  // t-stat over a mixture of two simulators gates nothing — so the scoreboard, edges, and
+  // milestones read ONLY the current cohort. Old rows stay in the DB for the log.
+  await prisma.$executeRawUnsafe(
+    `UPDATE tradingview_alerts SET sim_version='v1' WHERE sim_version IS NULL AND time < '2026-09-02T06:00:00Z'`,
+  );
 }
+
+// Bump when the measurement model changes materially (fills, fees, entries, stops).
+// Inserts stamp it; every aggregate filters to it. See the cohort note in ensureShadowColumns.
+export const SIM_VERSION = "v2";
+// Rows whose insert path predates the version stamp (or missed it) count as current —
+// the backfill above has already quarantined everything from before the cutover.
+export const SIM_COHORT_SQL = `COALESCE(sim_version,'${SIM_VERSION}')='${SIM_VERSION}'`;
 
 export interface ShadowResolution {
   id: number; symbol: string; side: string; entry: number; exit: number;
@@ -75,7 +94,7 @@ export interface ShadowResolution {
 interface OpenRow {
   id: number; time: Date; symbol: string; side: string; leverage: number | null;
   mark_price: number; shadow_peak: number | null; shadow_stop: number | null;
-  conviction: string | null; source: string | null;
+  shadow_seen_t: number | null; conviction: string | null; source: string | null;
 }
 
 // Per-strategy exit profile. Fast breakouts cut quickly (tight, leverage-scaled stop, 2-day
@@ -155,25 +174,25 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
   const { refEquity, maxRiskPct } = await sizingParams();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
-    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, conviction, source
+    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 500`,
   );
   if (!rows.length) return [];
 
-  // One OHLC lookup per distinct symbol: the last ~10 min of 1-min candles (covers the
-  // 5-min cron cadence with headroom for drift; a longer window would retro-apply newly
-  // ratcheted stops to old wicks). win = {lo, hi, open of window, latest close}.
+  // One OHLC lookup per distinct symbol: the last hour of 1-min candles. An hour (not
+  // one cron interval) so a skipped or timed-out run leaves no unwatched hole; per-trade
+  // shadow_seen_t guarantees no bar is ever scored twice regardless of window size.
   const symbols = [...new Set(rows.map((r) => r.symbol))];
   const price: Record<string, number> = {};
   const barsBySym: Record<string, { t: number; o: number; h: number; l: number; c: number }[]> = {};
-  const cutoff = Date.now() / 1000 - 10 * 60;
+  const cutoff = Date.now() / 1000 - 60 * 60;
   for (const sym of symbols) {
     try {
       // krakenPair() inside handles both scanner symbols ("BTC/USD" → XBTUSD) and manual
       // alert formats ("XBTUSD" passes through unchanged).
-      const bars = (await getKrakenOHLC(sym, 1)).filter((b) => b.t >= cutoff);
+      const bars = (await getKrakenOHLC(sym, 1, cutoff - 60)).filter((b) => b.t >= cutoff);
       if (bars.length) {
         price[sym] = bars[bars.length - 1].c;
         barsBySym[sym] = bars;
@@ -202,63 +221,71 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
         const feeFrac = MAKER + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
         const netPct = -feeFrac;
         const pnl = netPct * notional;
-        await prisma.$executeRawUnsafe(
-          `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_fees=$5 WHERE id=$4`,
+        const affected = await prisma.$executeRawUnsafe(
+          `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_fees=$5 WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
           entry, pnl, `${timeStopLabel} (no price)`, r.id, feeFrac * notional,
         );
+        if (affected === 0) continue;
         resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: `${timeStopLabel} (no price)`, leverage: lev, conviction: r.conviction });
       }
       continue;
     }
 
-    // Per-trade window: only candles from AFTER this trade opened — judging a trade
-    // against a wick that happened before it existed would stop it out falsely (every
-    // trade's first evaluation lands mid-window). A bar counts if any part of its minute
-    // overlaps the trade's lifetime. No overlapping bars yet (seconds-old trade) → the
-    // latest close is the whole window.
+    // Per-trade window: only 1-min bars this trade has actually LIVED through and that
+    // have not been scored before. b.t >= tOpen drops the bar containing the entry (its
+    // extremes include pre-entry price — a breakout's entry bar low is by construction
+    // the pre-spike price); the first full bar arrives within a minute, and `now` covers
+    // the trade until then. b.t >= seenT means no bar is ever scored twice, so a stop
+    // ratcheted later can never be retro-applied to a wick it didn't exist for.
     const tOpen = r.time.getTime() / 1000;
-    const tb = (barsBySym[r.symbol] ?? []).filter((b) => b.t + 60 > tOpen);
-    const w = tb.length
-      ? { lo: Math.min(...tb.map((b) => b.l)), hi: Math.max(...tb.map((b) => b.h)), open: tb[0].o }
-      : { lo: now, hi: now, open: now };
+    const seenT = r.shadow_seen_t ?? 0;
+    const tb = (barsBySym[r.symbol] ?? []).filter((b) => b.t >= tOpen && b.t >= seenT);
+    // The newest bar is in-progress — its extremes can still grow, so it is NOT marked
+    // seen; the next run re-scores it complete. Everything before it is final.
+    const nextSeenT = tb.length ? tb[tb.length - 1].t : seenT;
 
-    // 1) The CARRIED-IN stop is checked first, against the window's extremes — a wick
-    // through it between runs stops the trade, as a resting live stop order would. The
-    // candle can't tell us whether its high or low came first, so stop-first is the
-    // conservative reading. Gap-aware fill: if the window opened beyond the stop, fill
-    // at the (worse) open.
-    const stopPrev = r.shadow_stop ?? entry - dir * oneR;
-    const prevPeak = r.shadow_peak ?? entry;
-    const prevPeakR = (dir * (prevPeak - entry)) / oneR;
-    const touchedPrev = dir > 0 ? w.lo <= stopPrev : w.hi >= stopPrev;
-
-    // 2) Only if the old stop survived: credit this window's peak and ratchet the trail.
-    let peak = prevPeak;
-    peak = dir > 0 ? Math.max(peak, w.hi) : Math.min(peak, w.lo);
-    let stopPx = stopPrev;
-    const peakR = (dir * (peak - entry)) / oneR;    // best profit reached, in R
-    if (peakR >= 1) {
-      // Breakeven once +1R, then trail 1R behind the peak — ratchet only (never loosen).
-      const trail = peak - dir * oneR;
-      const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
-      stopPx = dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
-    }
-
-    // Exit checks.
+    // SEQUENTIAL WALK, oldest bar first — the stop is tested AS IT STOOD at each bar's
+    // open, then that bar's extreme ratchets the trail for the NEXT bar. This is how a
+    // live resting stop behaves: a peak-then-retrace inside the window triggers the
+    // ratcheted trail; a wick through the initial stop ends the trade before later bars
+    // can credit a peak. Within a single bar high/low order is unknowable, so stop-first
+    // is the conservative reading. Gap-aware fill: a bar OPENING beyond the stop fills
+    // at its (worse) open.
+    let peak = r.shadow_peak ?? entry;
+    let stopPx = r.shadow_stop ?? entry - dir * oneR;
     let exit: number | null = null;
     let reason = "";
-    if (touchedPrev) {
-      exit = dir > 0 ? Math.min(stopPrev, w.open) : Math.max(stopPrev, w.open);
-      // Mechanism only — the P&L number carries whether it was actually a profit; at
-      // exact breakeven the round-trip fees still make it a small loss, so don't claim
-      // "profit" in the label.
-      reason = prevPeakR >= 1 ? "trailing stop" : "initial stop";
-    } else if (dir > 0 ? now <= stopPx : now >= stopPx) {
-      // The stop ratcheted THIS window (peak first, then reversal to the close) and the
-      // close sits beyond it — a live trail would have triggered on the way back down.
-      exit = stopPx;
-      reason = peakR >= 1 ? "trailing stop" : "initial stop";
-    } else if (ageH >= maxHoldH) {
+    const ratchet = () => {
+      const peakR = (dir * (peak - entry)) / oneR;   // best profit reached, in R
+      if (peakR >= 1) {
+        // Breakeven once +1R, then trail 1R behind the peak — ratchet only (never loosen).
+        const trail = peak - dir * oneR;
+        const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
+        stopPx = dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
+      }
+    };
+    for (const b of tb) {
+      if (dir > 0 ? b.l <= stopPx : b.h >= stopPx) {
+        exit = dir > 0 ? Math.min(stopPx, b.o) : Math.max(stopPx, b.o);
+        // Mechanism only — the P&L number carries whether it was actually a profit; at
+        // exact breakeven the round-trip fees still make it a small loss, so don't claim
+        // "profit" in the label.
+        reason = (dir * (peak - entry)) / oneR >= 1 ? "trailing stop" : "initial stop";
+        break;
+      }
+      peak = dir > 0 ? Math.max(peak, b.h) : Math.min(peak, b.l);
+      ratchet();
+    }
+    if (exit == null && tb.length === 0) {
+      // Seconds-old trade with no full bar yet: the latest close is all we know.
+      peak = dir > 0 ? Math.max(peak, now) : Math.min(peak, now);
+      ratchet();
+      if (dir > 0 ? now <= stopPx : now >= stopPx) {
+        exit = dir > 0 ? Math.min(stopPx, now) : Math.max(stopPx, now);
+        reason = (dir * (peak - entry)) / oneR >= 1 ? "trailing stop" : "initial stop";
+      }
+    }
+    if (exit == null && ageH >= maxHoldH) {
       exit = now;
       reason = timeStopLabel;
     }
@@ -272,8 +299,8 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       const uNet = uGross - MAKER - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
       const unrealized = uNet * notional;
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3 WHERE id=$4`,
-        peak, stopPx, unrealized, r.id,
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5 WHERE id=$4`,
+        peak, stopPx, unrealized, r.id, nextSeenT,
       );
       continue;
     }
@@ -287,12 +314,15 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const pnl = netPct * notional;
     const feeDollars = feeFrac * notional;   // the fee drag on this trade (for gross-vs-net)
 
-    await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7 WHERE id=$6`,
-      // A trade stopped on the carried-in stop gets its PRE-window peak persisted — the
-      // give-back metric must not credit green that only appeared after the stop-out.
-      exit, pnl, reason, touchedPrev ? prevPeak : peak, touchedPrev ? stopPrev : stopPx, r.id, feeDollars,
+    // The walk stops crediting peak/stop at the fatal bar, so the persisted peak is the
+    // PRE-stop-out peak — the give-back metric can't credit green that appeared after
+    // death. The still-open guard makes overlapping cron runs harmless: whichever run
+    // resolves the row first wins, the loser affects 0 rows and reports nothing.
+    const affected = await prisma.$executeRawUnsafe(
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7 WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
+      exit, pnl, reason, peak, stopPx, r.id, feeDollars,
     );
+    if (affected === 0) continue;
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction });
   }
   return resolved;
@@ -317,20 +347,20 @@ export async function shadowScore(): Promise<ShadowScore> {
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
        COALESCE(sum(shadow_unrealized) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open'),0)::float AS openfloat
-     FROM tradingview_alerts`,
+     FROM tradingview_alerts WHERE ${SIM_COHORT_SQL}`,
   );
   const [wl] = await prisma.$queryRawUnsafe<{ avgwin: number | null; avgloss: number | null }[]>(
     `SELECT
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss
-     FROM tradingview_alerts`,
+     FROM tradingview_alerts WHERE ${SIM_COHORT_SQL}`,
   );
   const tiers = await prisma.$queryRawUnsafe<{ tier: string; resolved: bigint; wins: bigint; total: number | null }[]>(
     `SELECT COALESCE(conviction,'untagged') AS tier,
        count(*)::bigint AS resolved,
        count(*) FILTER (WHERE shadow_pnl > 0)::bigint AS wins,
        COALESCE(sum(shadow_pnl),0)::float AS total
-     FROM tradingview_alerts WHERE shadow_status='resolved'
+     FROM tradingview_alerts WHERE shadow_status='resolved' AND ${SIM_COHORT_SQL}
      GROUP BY COALESCE(conviction,'untagged')`,
   );
   const order: Record<string, number> = { high: 0, med: 1, low: 2, untagged: 3 };
@@ -418,6 +448,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
        stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl
      FROM tradingview_alerts
+     WHERE ${SIM_COHORT_SQL}
      GROUP BY COALESCE(source,'manual')`,
   );
   return rows
@@ -467,7 +498,7 @@ async function edgeBy(groupExpr: string, labelFn: (k: string) => string): Promis
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open
      FROM tradingview_alerts
-     WHERE side IN ('buy','sell')
+     WHERE side IN ('buy','sell') AND ${SIM_COHORT_SQL}
      GROUP BY ${groupExpr}`,
   );
   return rows

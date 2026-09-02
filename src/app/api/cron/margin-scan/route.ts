@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION } from "@/lib/margin-shadow";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -155,15 +155,18 @@ export async function GET(request: Request) {
           if (Number(n) > 0) continue;
           const note = `auto: ${plan.source} ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
           // ENTRY CHASE (realism): a 5-min scan spots a break late, and a live order
-          // chases it — so momentum paper entries pay 0.1% of adverse price, instead of
+          // chases it — so every paper entry pays 0.1% of adverse price, instead of
           // pretending to fill instantly at the signal price (the classic paper-trading
-          // flattery). Sweep-fades enter passively INTO the rejection — no chase.
-          const chase = plan.source === "sweep-fade" ? 0 : 0.001;
+          // flattery). Sweep-fades pay it too: a passive limit into a rejection has the
+          // opposite problem (adverse selection — it fills most reliably when the fade
+          // is failing), and exempting one strategy from the cost would bias the exact
+          // head-to-head comparison the scoreboard exists to make.
+          const chase = 0.001;
           const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
           await prisma.$executeRawUnsafe(
-            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source)
-             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8)`,
-            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source,
+            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version)
+             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9)`,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
           );
           opened.push({ symbol: s.symbol, side, tier: conv.tier });
         }
@@ -215,7 +218,9 @@ export async function GET(request: Request) {
     const score = await shadowScore();
     for (const milestone of [30, 100]) {
       if (score.resolved < milestone) continue;
-      const flagKey = `margin_milestone_${milestone}_reported`;
+      // Keyed per measurement cohort: v2 restarted the counters, so it earns its own
+      // 30/100 check-ins instead of inheriting v1's already-fired flags.
+      const flagKey = `margin_milestone_${SIM_VERSION}_${milestone}_reported`;
       const flag = await prisma.agentConfig.findUnique({ where: { key: flagKey } }).catch(() => null);
       if (flag?.value === "true") continue;
       const strats = await strategyBreakdown();
