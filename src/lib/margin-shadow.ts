@@ -163,6 +163,9 @@ function convictionRisk(conviction: string | null, baseRiskPct: number): number 
 
 // Reference account + max-risk for paper sizing (config-driven; defaults ≈ Spencer's account so
 // the paper dollars are realistic). kraken_shadow_ref_equity and kraken_margin_max_risk_pct.
+// ⚠️ PAPER ONLY. The live executor reads kraken_margin_live_max_risk_pct (default 0.5%)
+// precisely so this research setting — 3%, doubled to 6% on high conviction — can never
+// become the live risk budget by accident on the day the executor is armed.
 async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }> {
   const eq = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_ref_equity" } })
     .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
