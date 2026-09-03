@@ -127,13 +127,14 @@ export async function GET(request: Request) {
           plans = higher
             ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
             : [{ source: "scanner", lev }];
-        } else if (s.kind === "liq-sweep-high" || s.kind === "liq-sweep-low") {
-          // Liquidity-sweep FADE (the ICT/SMC test): a pierce that rejected. Fade it — swept
-          // high & rejected → SHORT, swept low & reclaimed → LONG. The scoreboard measures
-          // whether fading sweeps pays (prior: SMC was a coin flip on futures; crypto untested).
-          side = s.kind === "liq-sweep-low" ? "buy" : "sell";
-          plans = [{ source: "sweep-fade", lev }];
         }
+        // 'sweep-fade' (the ICT/SMC liquidity-sweep test) RETIRED Sep 3 2026 by verdict,
+        // on BOTH measurement cohorts independently: v1 78 resolved, net −$3.9k, t=−3.4;
+        // v2 44 resolved, net −$4.2k, t=−6.0. 122 trades, two simulators, same answer —
+        // fading swept levels does not pay on crypto margin either. This closes the SMC
+        // question that futures already answered (see the SMC-is-a-coin-flip finding):
+        // liq-sweep signals are still SCANNED and logged as context, they just no longer
+        // open paper trades. Do not re-add without a genuinely new thesis, not a reskin.
         if (!side || plans.length === 0 || !(s.price > 0)) continue;
         // Conviction from confluence across ALL signals this run (not just fresh) — how many
         // independent things agree. Tested, not assumed. Same for each plan.
