@@ -18,9 +18,12 @@
 //   5. kraken_margin_daily_loss_cap — today's margin loss beyond this blocks NEW ENTRIES
 //      (default $200). It never blocks a close — a kill switch must not stop a
 //      flattening order.
-//   6. Anti-stacking: an entry is refused when a position already exists on that pair in
-//      that direction (unless kraken_margin_allow_stacking="true"), and when
-//      kraken_margin_max_positions (default 3) are already open.
+//   6. Anti-stacking: an entry is refused when ANY position exists on that pair — either
+//      direction — and when kraken_margin_max_positions (default 3) are already open.
+//      Either direction matters because Kraken spot margin NETS FIFO: an opposing order
+//      does not open a second position, it reduces the existing one, which on a manual
+//      position means closing part of Spencer's book. ⚠️ kraken_margin_allow_stacking
+//      ="true" disables this, and therefore disables the manual-book boundary too.
 //   7. Every entry carries an attached stop-loss (conditional close) at half the
 //      liquidation cushion — and the guardian's naked-position guard (margin-watch step
 //      3c) VERIFIES that every bot position actually has one, placing it and paging if
@@ -47,7 +50,7 @@
 // Close orders are reduce_only so a stale read can never flip us into an opposite position.
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders } from "@/lib/kraken";
+import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
 import { pairMatchesSymbol, pairBase } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 
@@ -212,7 +215,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // wrong one silently matches nothing and turns every close into a no-op — which is
       // more dangerous than the over-closing it was meant to prevent.
       const ours = await botTxids();
+      // ONE-SHOT: the override is cleared the moment it is used. Left sticky, an emergency
+      // flag set once would silently flatten Spencer's manual book on every later close
+      // alert for that pair — and because `skipped` is then empty, without even saying so.
       const closeAll = (await cfg("kraken_margin_close_all_positions")) === "true";
+      if (closeAll) {
+        await prisma.agentConfig.update({ where: { key: "kraken_margin_close_all_positions" }, data: { value: "false" } }).catch(() => {});
+      }
       const adoptRaw = (await cfg("kraken_margin_adopt_txids")) ?? "";
       const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
       const isOurs = (p: { ordertxid: string; id: string }) =>
@@ -232,6 +241,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       }
       if (skipped.length > 0) {
         pending.push(`⚠️ Close on ${pair}: flattened ${positions.length} bot position(s), LEFT ${skipped.length} manual position(s) alone (ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}).`);
+      }
+      if (closeAll) {
+        const notOurs = all.filter((p) => !isOurs(p)).length;
+        pending.push(`⚠️ close_all_positions was ON: flattened ALL ${positions.length} position(s) on ${pair}${notOurs ? `, INCLUDING ${notOurs} that were NOT the bot's` : ""}. The flag has been cleared — set it again if you need it.`);
       }
       // A real position gets a REAL close even in validate-only mode: validate exists to
       // stop us opening risk, not to stop us shedding it. Announce it so it is never a
@@ -263,6 +276,30 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         const res = await krakenPrivate("AddOrder", params);
         const txid = (res.txid as string[] | undefined)?.[0];
         if (txid) txids.push(txid);
+      }
+      // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY. Kraken's attached close[] cannot be
+      // reduce_only (the API has no such parameter), so a stop left resting after the
+      // position is gone will, if it triggers, open a BRAND NEW leveraged position in the
+      // opposite direction — unowned (its ordertxid is the stop's, not in the ledger),
+      // therefore invisible to this close path and to the naked-position guard, and with
+      // no stop of its own. The guardian's orphan sweep needs two consecutive runs, so it
+      // would leave a 5-10 minute window in which an ordinary 1.5% move flips a closed
+      // trade into an unmonitored short. Scoped to our userref, so manual orders are safe.
+      try {
+        const resting = (await krakenOpenOrders()).filter((o) =>
+          o.userref === MARGIN_USERREF &&
+          o.ordertype.includes("stop") &&
+          pairBase(o.pair) === pairBase(pair) &&
+          positions.some((p) => (p.side === "long" ? "sell" : "buy") === o.side));
+        for (const o of resting) {
+          await krakenCancelOrder(o.txid).catch(() => {});
+        }
+        if (resting.length) pending.push(`🧹 Cancelled ${resting.length} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
+      } catch (err) {
+        await sendNotification(
+          `⚠️ Closed ${pair} but could NOT sweep its resting stops — a stranded stop can open a new position if it triggers. Check Kraken. ${String(err).slice(0, 140)}`,
+          "margin_urgent",
+        ).catch(() => {});
       }
       for (const msg of pending) await sendNotification(msg, "margin_urgent").catch(() => {});
       return {
@@ -377,11 +414,27 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
     const allowStacking = (await cfg("kraken_margin_allow_stacking")) === "true";
     const wantSide = alert.side === "buy" ? "long" : "short";
+    // ⚠️ EITHER DIRECTION, not just the same one. Kraken spot margin nets FIFO — it does
+    // not hold a long and a short on one pair. So an OPPOSING order does not open a new
+    // position: it REDUCES the existing one. If that existing position is Spencer's
+    // hand-opened long, a bot `sell` alert closes part of HIS position at the bot's size,
+    // realising his P&L on a trade he never authorised — the manual-book boundary breached
+    // through the entry path rather than the close path. It also leaves the entry's
+    // attached stop protecting nothing, and no position ever appears under our ordertxid.
+    // A genuine reversal must be an explicit close followed by an entry, never netting.
+    const conflicting = openPositions.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
     if (!allowStacking && (
-      openPositions.some((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === wantSide) ||
-      ourEntryOrders.some((o) => pairMatchesSymbol(o.pair, alert.symbol) && (o.side === "buy" ? "long" : "short") === wantSide)
+      conflicting.length > 0 ||
+      ourEntryOrders.some((o) => pairMatchesSymbol(o.pair, alert.symbol))
     )) {
-      return { executed: false, validated: false, note: `entry refused: already ${wantSide} ${alert.symbol} (position or resting order; stacking off)` };
+      const owned = await botTxids();
+      const dirs = conflicting.map((p) => p.side).join("/") || "resting order";
+      const theirs = conflicting.filter((p) => !owned.has(p.ordertxid)).length;
+      return {
+        executed: false,
+        validated: false,
+        note: `entry refused: ${alert.symbol} already has exposure (${dirs}${theirs ? `, ${theirs} NOT the bot's` : ""}) — an opposing order would net against it, not open a new position`,
+      };
     }
 
     // Attached protective exit + risk-based sizing, both computed from the ACTUAL entry
