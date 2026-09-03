@@ -34,12 +34,13 @@
 //      • kraken_margin_max_trades_per_day (default 6) — hard cap on entries/day.
 //      • kraken_margin_cooldown_min (default 30) — minimum minutes between entries, so
 //        a once-per-bar alert can't churn 280 trades/month.
-//      • kraken_margin_live_max_risk_pct (default 0.5, hard ceiling 2.0) — SIZE is capped
-//        so the stop-loss can never lose more than this % of equity; notional shrinks
-//        automatically. NOTE the `live_` in the name: this is deliberately NOT the paper
-//        experiment's kraken_margin_max_risk_pct (3%, ×2 on conviction), so arming can
-//        never silently inherit a research setting. Observed paper losing streak is 13 in
-//        a row: 0.5% costs 6% of the account, 3% costs 33%, 6% costs 55%.
+//      • kraken_margin_live_max_risk_pct (default 3, hard ceiling 6) — SIZE is capped so
+//        the stop-loss can never lose more than this % of equity; notional shrinks
+//        automatically. The `live_` prefix exists so live and paper are INDEPENDENTLY
+//        settable, not to force a different number — it defaults to the same 3% the paper
+//        sizer uses, which is the agreed policy. Total damage from a losing run is bounded
+//        by the drawdown breaker (layer 8a), not by this number; risk % sets how fast that
+//        bound is reached (6 losses at 3%, 33 at 0.5%).
 //      • kraken_margin_disarmed_dd — account drawdown circuit breaker (set by the
 //        guardian); while true, NO new entries (closes still allowed).
 //   9. MAKER ENTRIES — kraken_margin_maker_entries (default true) rests a post-only
@@ -524,16 +525,23 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
     // RISK-BASED SIZING: notional capped so a stop-out loses ≤ max_risk_pct of equity.
     //
-    // ⚠️ LIVE RISK HAS ITS OWN KEY, deliberately separate from the paper experiment's.
-    // `kraken_margin_max_risk_pct` is read by the PAPER sizer too, and it is set high (3%,
-    // doubled to 6% on high conviction) so paper dollars look like real trading. Sharing
-    // one key would mean the day this is armed, live silently inherits the paper research
-    // setting. The observed paper losing streak is 13 in a row — at 3% that is a −33%
-    // account, at 6% a −55% account (which needs +124% to recover). So live reads
-    // `kraken_margin_live_max_risk_pct` and defaults to 0.5%: a 13-loss streak costs 6%.
-    // Raise it deliberately, in steps, only after live fills have proven out.
+    // LIVE RISK HAS ITS OWN KEY so paper and live can be tuned independently — but it
+    // DEFAULTS TO THE SAME 3% the paper sizer uses, because that is the agreed policy:
+    // the paper sizer was built to mirror the live executor, and 3% is the level this
+    // operation has run for a long time (futures used 3-8%).
+    //
+    // The separate key exists to prevent a silent COUPLING, not to impose a lower number.
+    // ⚠️ An earlier version of this comment argued for 0.5% off a "13 consecutive losses"
+    // figure. That figure was wrong twice over: it pooled six strategies including the two
+    // that were retired (the strategy we would actually arm shows 0-3), and it ignored the
+    // drawdown breaker entirely. The guardian halts entries at
+    // kraken_margin_max_drawdown_pct (15%) and now stays halted pending review, so the
+    // damage from ANY streak is bounded near 15-17% at every risk level in this range —
+    // 3% simply reaches that bound in 6 losses instead of 33. Risk level sets the SPEED of
+    // the stop, not the size of the loss. Choosing it is Spencer's call, not the code's.
+    // Ceiling 6% mirrors the paper conviction ceiling: it blocks catastrophe, not policy.
     let notional = perTrade * leverage;
-    const maxRiskPct = Math.min(2, Math.max(0.1, await cfgNum("kraken_margin_live_max_risk_pct", 0.5))) / 100;
+    const maxRiskPct = Math.min(6, Math.max(0.1, await cfgNum("kraken_margin_live_max_risk_pct", 3))) / 100;
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     if (equity > 0 && riskDist > 0) {
       const notionalCap = (maxRiskPct * equity) / riskDist;
