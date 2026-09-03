@@ -56,10 +56,14 @@ export async function sendNotification(
     const webhook = await getWebhook(channel);
     if (!webhook) return;
 
+    // 5s timeout: every Kraken call has one, this did not. A hung Slack webhook on a
+    // trading path would otherwise stall the request until the function is killed — and on
+    // the margin close path that turns a Slack outage into a CLOSE outage.
     await fetch(webhook, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: message }),
+      signal: AbortSignal.timeout(5000),
     });
   } catch {
     // notifications are best-effort

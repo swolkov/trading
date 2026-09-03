@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { krakenConfigured, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
+import { krakenConfigured, krakenOpenOrders, krakenCancelOrder, krakenPrivate, krakenPublic, getPairMeta } from "@/lib/kraken";
 import {
   getKrakenMarginHealth,
   getKrakenMarginPositions,
@@ -8,9 +8,9 @@ import {
   liquidationEstimate,
   syncKrakenTrades,
 } from "@/lib/kraken-margin";
-import { pairBase } from "@/lib/kraken-pairs";
+import { pairBase, publicPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
-import { MARGIN_USERREF } from "@/lib/margin-executor";
+import { MARGIN_USERREF, botTxids } from "@/lib/margin-executor";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -35,6 +35,10 @@ type WatchState = {
   orphans?: Record<string, number>;
   // Last run's equity, to spot a capital flow (deposit/withdrawal) vs a trading drawdown.
   lastEquity?: number;
+  // ordertxid → consecutive runs a naked position has been seen PAST its stop level. The
+  // rescue stop goes on immediately; the market flatten waits for two sightings, so a
+  // degraded read cannot realize a loss on a position that was actually fine.
+  nakedBreached?: Record<string, number>;
 };
 
 async function cfg(key: string): Promise<string | null> {
@@ -113,7 +117,9 @@ export async function GET(request: Request) {
   let marginUsedNow: number | null = null;   // hoisted so 3b can sanity-check an empty positions read
   try {
     const health = await getKrakenMarginHealth();
-    marginUsedNow = health.marginUsed;
+    // marginUsedRaw, not marginUsed: null means Kraken omitted the field (a degraded 200),
+    // which must NOT read as "flat" — see the reconciler's unreliable-read guard below.
+    marginUsedNow = health.marginUsedRaw;
 
     // Drawdown circuit breaker: track peak equity; if equity falls more than
     // kraken_margin_max_drawdown_pct from the peak, DISARM new entries (the executor
@@ -164,11 +170,25 @@ export async function GET(request: Request) {
         );
         sent.push("dd-breaker-tripped");
       } else if (disarmed && dd < ddPct / 2) {
-        await prisma.agentConfig.upsert({
-          where: { key: "kraken_margin_disarmed_dd" }, update: { value: "false" }, create: { key: "kraken_margin_disarmed_dd", value: "false" },
-        }).catch(() => {});
-        await sendNotification(`✅ Drawdown recovered — equity $${health.equity.toFixed(0)}, ${(dd * 100).toFixed(1)}% below peak. Auto-entries RE-ARMED.`, "margin_urgent");
-        sent.push("dd-breaker-rearmed");
+        // AUTO-RE-ARM IS OPT-IN. A breaker trip means the account lost 15% — the one moment
+        // that most deserves a human asking "why". Silently resuming once equity drifts
+        // back to −7.5% resumes trading a strategy that may simply be broken, with no one
+        // having looked. Default is to stay disarmed and tell Spencer it is his call.
+        const autoRearm = (await cfg("kraken_margin_dd_auto_rearm")) === "true";
+        if (autoRearm) {
+          await prisma.agentConfig.upsert({
+            where: { key: "kraken_margin_disarmed_dd" }, update: { value: "false" }, create: { key: "kraken_margin_disarmed_dd", value: "false" },
+          }).catch(() => {});
+          await sendNotification(`✅ Drawdown recovered — equity $${health.equity.toFixed(0)}, ${(dd * 100).toFixed(1)}% below peak. Auto-entries RE-ARMED (auto_rearm on).`, "margin_urgent");
+          sent.push("dd-breaker-rearmed");
+        } else if (shouldFire(state, "dd-rearm-ready")) {
+          await sendNotification(
+            `🟡 Drawdown recovered — equity $${health.equity.toFixed(0)}, ${(dd * 100).toFixed(1)}% below peak. Entries stay HALTED pending your review: work out why the breaker tripped, then set kraken_margin_disarmed_dd=false to resume.`,
+            "margin_urgent",
+          );
+          state.alerts["dd-rearm-ready"] = new Date().toISOString();
+          sent.push("dd-rearm-ready-notified");
+        }
       }
     }
 
@@ -310,6 +330,119 @@ export async function GET(request: Request) {
     }
   } catch (e) {
     errors.push(`order reconcile: ${e}`);
+  }
+
+  // 3c) NAKED-POSITION GUARD — the reverse direction of 3b, and the one that actually
+  // protects money. 3b walks stop → position (cancel orphaned stops). Nothing walked
+  // position → stop, so the promise that "no armed position is ever naked" rested entirely
+  // on Kraken's conditional-close having been accepted — unverified, with real break paths:
+  // a post-only entry that partially filled before the stale sweep cancelled it, or a
+  // close[] rejected at fill time (price already through the trigger, decimals, margin).
+  // Either leaves a live levered position running to LIQUIDATION instead of a stop.
+  // So: for every position WE opened, assert a stop exists that closes it. Scoped to the
+  // bot's own txids — Spencer's hand-opened positions are his to manage and we must never
+  // attach orders to them.
+  try {
+    const ours = await botTxids();
+    if (ours.size > 0) {
+      const positions = await getKrakenMarginPositions();
+      // Join on ordertxid ("O…"), the OPENING ORDER's id — NOT the OpenPositions key,
+      // which is the TRADE txid ("T…"). Verified against the real account: 115 fills from
+      // 72 orders, zero where the two ids matched. Getting this wrong makes the whole
+      // guard silently inert while the safety docs claim it runs.
+      const botPositions = positions.filter((p) => ours.has(p.ordertxid));
+      if (botPositions.length) {
+        const orders = await krakenOpenOrders();
+        // UNRELIABLE-READ GUARD, mirroring 3b: Kraken can return an empty collection during
+        // degradation. If we hold bot positions but see NO orders at all, every one of them
+        // reads as naked — and the flatten branch below would market-close fully-protected
+        // positions on a read hiccup. A genuinely stop-less book just waits one run.
+        if (orders.length === 0) {
+          errors.push("naked-position guard: zero open orders while holding bot positions — skipping (unreliable read)");
+          throw new Error("skip-3c-unreliable");
+        }
+        const myStops = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop"));
+        const priorBreached = state.nakedBreached ?? {};
+        const nextBreached: Record<string, number> = {};
+        for (const p of botPositions) {
+          // GRACE PERIOD: Kraken submits the attached close[] only after the primary
+          // fills, so a position opened seconds ago may legitimately have no visible stop
+          // yet. Placing one now would race the conditional close and could leave two.
+          // One guardian cycle (5 min) is enough for it to appear.
+          const ageMs = p.openedAt ? Date.now() - new Date(p.openedAt).getTime() : Infinity;
+          if (ageMs < 6 * 60_000) continue;
+          const covering = myStops.filter((o) =>
+            pairBase(o.pair) === pairBase(p.pair) &&
+            ((p.side === "long" && o.side === "sell") || (p.side === "short" && o.side === "buy")));
+          const covered = covering.reduce((s, o) => s + (o.vol ?? 0), 0);
+          // 1% tolerance for lot rounding between the position and its stop.
+          if (covered >= p.vol * 0.99) continue;
+          const naked = p.vol - covered;
+          await sendNotification(
+            `🚨 NAKED POSITION — ${p.pair} ${p.side} ${p.vol} has only ${covered} covered by a stop (${naked.toFixed(8)} unprotected). Placing a protective stop now.`,
+            "margin_urgent",
+          ).catch(() => {});
+          try {
+            // ⚠️ p.pair is VENUE-SUFFIXED on real margin fills ("XBTUSD:BTNL" — confirmed
+            // on every one of Spencer's 115 margin fills). AssetPairs and Ticker both
+            // reject that form, so route through publicPairFor() exactly as step 3 does.
+            const publicPair = publicPairFor(p.pair);
+            const meta = await getPairMeta(publicPair);
+            const tick = await krakenPublic("Ticker", { pair: publicPair });
+            const px = parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0");
+            if (!(px > 0)) throw new Error(`no price for ${publicPair}`);
+            // Anchor the rescue stop to the position's ENTRY, not the current price — the
+            // entry-relative distance is the risk that was actually authorised. If price
+            // has already run past that level the position is beyond its budget, so the
+            // correct action is to flatten now rather than set a stop it already breached.
+            const stopPct = Math.max(0.005, Math.min(0.5, 0.3 / Math.max(1, p.leverage)));
+            const anchor = p.entryPrice > 0 ? p.entryPrice : px;
+            const stopPx = p.side === "long" ? anchor * (1 - stopPct) : anchor * (1 + stopPct);
+            // TWO-STRIKE RULE ON THE FLATTEN ONLY. Placing a reduce_only stop is cheap and
+            // reversible, so it happens on the first sighting. MARKET-CLOSING realizes P&L,
+            // so a false positive costs real money — it must be confirmed across two
+            // consecutive runs, exactly like 3b's orphan rule. The protective stop is still
+            // placed on strike one, so the position is covered while we confirm.
+            const breachedNow = p.side === "long" ? px <= stopPx : px >= stopPx;
+            const strikes = breachedNow ? (priorBreached[p.ordertxid] ?? 0) + 1 : 0;
+            if (breachedNow) nextBreached[p.ordertxid] = strikes;
+            const alreadyBreached = breachedNow && strikes >= 2;
+            await krakenPrivate("AddOrder", alreadyBreached ? {
+              pair: publicPair,
+              type: p.side === "long" ? "sell" : "buy",
+              ordertype: "market",
+              volume: naked.toFixed(meta.lotDecimals),
+              leverage: String(Math.max(2, Math.round(p.leverage))),
+              reduce_only: "true",
+              userref: String(MARGIN_USERREF),
+            } : {
+              pair: publicPair,
+              type: p.side === "long" ? "sell" : "buy",
+              ordertype: "stop-loss",
+              price: stopPx.toFixed(meta.priceDecimals),
+              volume: naked.toFixed(meta.lotDecimals),
+              leverage: String(Math.max(2, Math.round(p.leverage))),
+              reduce_only: "true",
+              userref: String(MARGIN_USERREF),
+            });
+            sent.push(alreadyBreached ? `naked-position-flattened-${p.pair}` : `naked-stop-placed-${p.pair}`);
+          } catch (err) {
+            // Could not protect it — this is the loudest thing the system can say.
+            await sendNotification(
+              `🚨🚨 COULD NOT PLACE PROTECTIVE STOP on ${p.pair} ${p.side}. THE POSITION IS UNPROTECTED — act manually on Kraken now. ${String(err).slice(0, 160)}`,
+              "margin_urgent",
+            ).catch(() => {});
+            errors.push(`naked-stop placement failed ${p.pair}: ${err}`);
+          }
+        }
+        state.nakedBreached = nextBreached;
+      }
+    }
+  } catch (e) {
+    if (String(e).includes("skip-3c-unreliable")) {
+      // Deliberate skip, already recorded in errors — not a failure of the guard.
+    } else
+    errors.push(`naked-position guard: ${e}`);
   }
 
   // 4) Fast-move heads-up on the majors (±3% in an hour) — only worth checking when

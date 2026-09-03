@@ -57,7 +57,10 @@ export async function getKrakenOHLC(symbol: string, interval: KrakenInterval, si
 export interface KrakenMarginHealth {
   equity: number;        // e  — equity (balance + unrealized)
   tradeBalance: number;  // tb — balance available for trading
-  marginUsed: number;    // m  — initial margin of open positions
+  marginUsed: number;    // m  — initial margin of open positions (0 when genuinely flat)
+  marginUsedRaw: number | null;  // same, but NULL when Kraken omitted the field entirely —
+                                 // callers that must distinguish "flat" from "unreadable"
+                                 // (stop reconciliation) have to use this one
   freeMargin: number;    // mf — usable margin
   unrealized: number;    // n  — unrealized net P&L of open positions
   marginLevel: number | null; // ml — percent; null when flat
@@ -66,11 +69,17 @@ export interface KrakenMarginHealth {
 export async function getKrakenMarginHealth(): Promise<KrakenMarginHealth> {
   const res = await krakenPrivate("TradeBalance", { asset: "ZUSD" });
   const f = (k: string) => parseFloat((res[k] as string) ?? "0") || 0;
+  // A degraded Kraken 200 can return a partial body. Coercing every missing field to 0
+  // makes "we could not read your margin" look identical to "you hold nothing" — and the
+  // stop reconciler, seeing a flat account, would cancel every stop off a LIVE position.
+  // So preserve absence for the one field that decision depends on.
+  const mRaw = res.m != null && String(res.m).trim() !== "" ? parseFloat(String(res.m)) : NaN;
   const ml = res.ml != null ? parseFloat(res.ml as string) : NaN;
   return {
     equity: f("e"),
     tradeBalance: f("tb"),
     marginUsed: f("m"),
+    marginUsedRaw: Number.isFinite(mRaw) ? mRaw : null,
     freeMargin: f("mf"),
     unrealized: f("n"),
     marginLevel: isFinite(ml) && ml > 0 ? ml : null,
@@ -79,7 +88,12 @@ export async function getKrakenMarginHealth(): Promise<KrakenMarginHealth> {
 
 // ---- open margin positions ----
 export interface KrakenMarginPosition {
-  id: string;
+  id: string;           // the position/TRADE txid ("T…") — NOT the order txid
+  ordertxid: string;    // the OPENING ORDER's txid ("O…") — this is what AddOrder returns,
+                        // so it is the only field that can attribute a position to the bot.
+                        // One order can fill in several tranches sharing one ordertxid
+                        // (verified on the real account: 115 fills from 72 orders, and
+                        // ZERO of them had txid === ordertxid).
   pair: string;
   side: "long" | "short";
   vol: number;          // position size in base units (remaining open)
@@ -107,8 +121,19 @@ export async function getKrakenMarginPositions(): Promise<KrakenMarginPosition[]
     const cost = parseFloat(String(p.cost ?? "0")) || 0;
     const margin = parseFloat(String(p.margin ?? "0")) || 0;
     if (!(volOpen > 0)) continue;
+    // ⚠️ ordertxid is the ONLY field that attributes a position to the bot. If Kraken ever
+    // stops returning it, String(undefined ?? "") yields "" — which silently matches
+    // nothing, turning every close into a no-op and switching off the naked-position guard,
+    // exactly the failure this field was added to fix. Never let that be quiet.
+    if (!p.ordertxid) {
+      void import("@/lib/notifications").then((n) => n.sendNotification(
+        `🚨 Kraken OpenPositions returned a position (${id}, ${String(p.pair ?? "?")}) with NO ordertxid. Bot-position attribution is broken: closes and the naked-stop guard will skip it. Do not arm until this is understood.`,
+        "margin_urgent",
+      )).catch(() => {});
+    }
     out.push({
       id,
+      ordertxid: String(p.ordertxid ?? ""),
       pair: String(p.pair ?? ""),
       side: p.type === "sell" ? "short" : "long",
       vol: volOpen,
