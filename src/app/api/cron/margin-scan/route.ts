@@ -143,8 +143,13 @@ export async function GET(request: Request) {
         // entries → far less fee drag, so the small greens survive. The fee-drag view will show
         // whether trading ONLY the best beats trading everything, at Spencer's real fees — the
         // exact "fewer, better trades vs 20-30/day" question. Momentum only, not sweeps.
+        // Both run on the SAME high-conviction entries — an A/B on the exit container, not
+        // the signal. 'selective' is the 3%-stop/48h original; 'selective-swing' gives the
+        // identical setup swing room (5%/4d) because the Sep 3 conviction data showed these
+        // setups average a +9.4% PEAK move while the tight version was still losing money.
         if ((s.kind === "breakout" || s.kind === "breakdown") && conv.tier === "high") {
           plans.push({ source: "selective", lev });
+          plans.push({ source: "selective-swing", lev });
         }
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.

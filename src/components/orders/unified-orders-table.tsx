@@ -22,7 +22,14 @@ interface ScoreData { log?: PaperTradeRow[]; recentTrips?: RoundTrip[] }
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
 const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 const money2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
-const usd = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+// Crypto prices span PEPE at $0.0000094 to BTC at $100k, so a fixed 2-decimal format
+// renders every sub-cent coin as "$0" — the price column looked broken on meme coins.
+// Scale precision to magnitude instead: enough significant digits to see the price move.
+const usd = (n: number) => {
+  const a = Math.abs(n);
+  const digits = a === 0 ? 2 : a >= 1 ? 2 : a >= 0.01 ? 4 : a >= 0.0001 ? 6 : 8;
+  return `$${n.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: a > 0 && a < 1 ? Math.min(digits, 4) : 2 })}`;
+};
 const usd0 = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 const hold = (m: number) => (m < 60 ? `${Math.round(m)}m` : m < 1440 ? `${(m / 60).toFixed(1)}h` : `${(m / 1440).toFixed(1)}d`);
