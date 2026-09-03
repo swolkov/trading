@@ -161,16 +161,15 @@ function convictionRisk(conviction: string | null, baseRiskPct: number): number 
   return Math.min(RISK_CEILING, baseRiskPct * mult);
 }
 
-// ⭐ THE PAPER DOLLARS ARE NOT THE LIVE DOLLARS — and at the agreed 3% risk the gap is
-// NOT about risk level at all. Both size at 3%. The difference is that paper scales risk
-// by CONVICTION (2x high, 0.5x low) while the live executor has no conviction concept and
-// bets flat, so a high-conviction paper trade is twice the live position and a
-// low-conviction one is half. Measured across the surviving strategies that is the whole
-// apparent edge: +$1,779 paper versus −$137 live on the same 48 trades.
-// Showing only the paper column would credit the live system with an edge it structurally
-// cannot capture, so the scoreboard reports both and gates the verdict on the live one.
-// Fees scale with notional and are already inside shadow_pnl, so the per-trade rescale is
-// exact rather than an approximation.
+// ⭐ WHAT THESE TRADES WOULD BE WORTH AS THE LIVE EXECUTOR WOULD SIZE THEM.
+// Both sizers now risk 3% base and both scale it by conviction (2x high, 0.5x low, 6%
+// ceiling), so the live column currently equals the paper one — and that agreement IS the
+// result: it is the check that the executor reproduces the record. It was not always so.
+// While live bet a flat 3%, the same 48 surviving trades were worth +$1,779 on paper and
+// −$137 live, because flat sizing halved the winners (high conviction averages +$73/trade)
+// and doubled the losers (low averages −$74). Keep this column even while it agrees: it is
+// what surfaces the next divergence between the record and the executor.
+// Fees scale with notional and are already inside shadow_pnl, so the rescale is exact.
 async function liveRiskParams(): Promise<number> {
   const v = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_max_risk_pct" } })
     .then((r: { value?: string | null } | null) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
@@ -519,11 +518,14 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_peak IS NOT NULL AND mark_price > 0
          AND ((side='buy' AND shadow_peak > mark_price) OR (side='sell' AND shadow_peak < mark_price)))::bigint AS peaked,
        count(DISTINCT date_trunc('day', shadow_resolved_at)) FILTER (WHERE shadow_status='resolved')::bigint AS days,
-       -- Each trade re-priced at the live risk budget. The divisor is the risk THAT trade
-       -- actually used (conviction scales it: high 2x, low 0.5x, capped at the 6% ceiling),
-       -- so this is a per-trade rescale, not a blanket one.
-       COALESCE(sum(shadow_pnl * ($1::float / LEAST(6.0, $2::float *
-         CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+       -- Each trade re-priced from the risk the PAPER sizer used to the risk the LIVE
+       -- executor would use. Both scale by conviction (high 2x, low 0.5x, 6% ceiling), so
+       -- with the two base rates equal this ratio is 1 and live == paper — which is the
+       -- point: the columns agreeing is the evidence that live now sizes like paper.
+       -- They diverge the moment kraken_margin_live_max_risk_pct differs from the paper
+       -- base, which is exactly when the distinction matters again.
+       COALESCE(sum(shadow_pnl * (LEAST(6.0, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
+         / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
          FILTER (WHERE shadow_status='resolved'),0)::float AS livenet,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
@@ -532,15 +534,16 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        COALESCE(sum(shadow_fees) FILTER (WHERE shadow_status='resolved'),0)::float AS fees,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
        stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl,
-       -- The SAME statistics on the live-priced series. This is NOT cosmetic: paper sizes
-       -- 2x on high conviction while the live executor has no conviction concept and bets
-       -- flat, so the rescale is not a uniform multiple and the t-stat genuinely moves.
-       -- The verdict must judge the sizing scheme we would actually TRADE.
-       avg(shadow_pnl * ($1::float / LEAST(6.0, $2::float *
-         CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+       -- The SAME statistics on the live-priced series, because the VERDICT is gated on
+       -- them. While live bet flat and paper bet by conviction these moved materially
+       -- (all-v2 t went -0.72 -> -2.51); now that live is conviction-scaled they coincide.
+       -- Keep the separate computation: it is what will catch the next divergence between
+       -- what the record measures and what the executor would actually do.
+       avg(shadow_pnl * (LEAST(6.0, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
+         / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
          FILTER (WHERE shadow_status='resolved') AS livemean,
-       stddev_samp(shadow_pnl * ($1::float / LEAST(6.0, $2::float *
-         CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+       stddev_samp(shadow_pnl * (LEAST(6.0, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
+         / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
          FILTER (WHERE shadow_status='resolved') AS livestd
      FROM tradingview_alerts
      WHERE ${SIM_COHORT_SQL}
