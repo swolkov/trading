@@ -1,6 +1,14 @@
 // TradingView-alert → Kraken margin order executor.
 //
-// SAFETY MODEL (every layer must be crossed before real money moves):
+// CLOSES ARE NEVER GATED. The close path runs FIRST — above the arm switch, above
+// validate-only, above every risk layer — because a close only reduces risk. This was
+// once false: `kraken_margin_auto=false` returned before the close block, so the
+// operator's instinctive reaction to trouble ("turn the bot off") also disabled the only
+// command that flattens the position it left behind. Closes are also scoped to positions
+// THIS BOT OPENED (see the ownership ledger below); Kraken margin positions carry no
+// userref, so an unfiltered close would market-flatten Spencer's own hand-opened book.
+//
+// SAFETY MODEL (every layer must be crossed before real money moves — ENTRIES only):
 //   1. kraken_margin_auto         — default OFF: alerts are logged + scored, never traded.
 //   2. kraken_margin_validate_only — default ON: even when armed, orders go out with
 //      validate=true (Kraken checks but does not execute) until this is explicitly "false".
@@ -14,7 +22,11 @@
 //      that direction (unless kraken_margin_allow_stacking="true"), and when
 //      kraken_margin_max_positions (default 3) are already open.
 //   7. Every entry carries an attached stop-loss (conditional close) at half the
-//      liquidation cushion, so no armed position is ever naked.
+//      liquidation cushion — and the guardian's naked-position guard (margin-watch step
+//      3c) VERIFIES that every bot position actually has one, placing it and paging if
+//      not. The attachment alone was never enough: a partially-filled post-only entry, or
+//      a close[] rejected at fill time, leaves a live levered position running to
+//      liquidation. Nothing checked the position→stop direction until that guard existed.
 //   8. RISK GOVERNOR — the structural fix for the fee-bleed that cost the real money:
 //      • kraken_margin_max_trades_per_day (default 6) — hard cap on entries/day.
 //      • kraken_margin_cooldown_min (default 30) — minimum minutes between entries, so
@@ -36,7 +48,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders } from "@/lib/kraken";
-import { pairMatchesSymbol } from "@/lib/kraken-pairs";
+import { pairMatchesSymbol, pairBase } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
@@ -59,6 +71,53 @@ export interface ExecResult {
 async function cfg(key: string): Promise<string | null> {
   const row = await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null);
   return row?.value ?? null;
+}
+
+// Same read, but a DB failure THROWS instead of reading as "unset". Use this for any flag
+// whose safe state is "stop" — cfg() collapses "read failed" and "not configured" into
+// null, which for a kill switch means a transient query error reads as "not disarmed".
+async function cfgStrict(key: string): Promise<string | null> {
+  const row = await prisma.agentConfig.findUnique({ where: { key } });
+  return row?.value ?? null;
+}
+
+// OWNERSHIP LEDGER — which margin positions belong to this bot.
+// Kraken margin positions carry NO userref, so OpenPositions cannot tell our position from
+// one Spencer opened by hand. Without this, a `close` alert would market-flatten his own
+// discretionary book on the same pair. We therefore record the txid of every entry we place;
+// a position's key in OpenPositions is its opening order's txid, so that is the join.
+const BOT_TXIDS_KEY = "kraken_margin_bot_txids";
+const BOT_TXID_TTL_MS = 30 * 24 * 3600_000;   // prune after 30 days — positions never live that long
+
+async function recordBotEntry(txid: string, pair: string): Promise<void> {
+  try {
+    const raw = await cfg(BOT_TXIDS_KEY);
+    const cutoff = Date.now() - BOT_TXID_TTL_MS;
+    const prev: { txid: string; pair: string; ts: number }[] = raw ? JSON.parse(raw) : [];
+    const next = prev.filter((e) => e && e.ts > cutoff && e.txid !== txid);
+    next.push({ txid, pair, ts: Date.now() });
+    await prisma.agentConfig.upsert({
+      where: { key: BOT_TXIDS_KEY },
+      update: { value: JSON.stringify(next.slice(-200)) },
+      create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-200)) },
+    });
+  } catch { /* ledger write is best-effort; a miss makes a close SKIP that position, never over-close */ }
+}
+
+export async function botTxids(): Promise<Set<string>> {
+  const raw = await cfg(BOT_TXIDS_KEY);
+  if (!raw) return new Set();
+  try {
+    return new Set((JSON.parse(raw) as { txid: string }[]).map((e) => e.txid).filter(Boolean));
+  } catch { return new Set(); }
+}
+
+// A position is OURS if its OpenPositions key (the opening order's txid) is in the ledger.
+// Fails CLOSED by design: an unrecognised position is treated as Spencer's and left alone.
+// `kraken_margin_close_all_positions=true` is the deliberate escape hatch for a real
+// emergency where the ledger is known to be incomplete.
+export async function isBotPosition(positionId: string, ours: Set<string>): Promise<boolean> {
+  return ours.has(positionId);
 }
 
 // parseFloat(...) || default treats an EXPLICIT "0" as unset — which turned
@@ -122,22 +181,50 @@ async function releaseExecLock(): Promise<void> {
 }
 
 export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
-  // Layer 1: armed at all?
-  const auto = (await cfg("kraken_margin_auto")) === "true";
-  if (!auto) return { executed: false, validated: false, note: "tracked only (kraken_margin_auto off)" };
-
-  // Layer 2: validate-only unless explicitly disabled.
-  const validate = (await cfg("kraken_margin_validate_only")) !== "false";
   const pair = krakenPair(alert.symbol);
 
   // ---- CLOSE PATH ----
-  // Runs before every other guard: a close reduces risk and must never be blocked by
-  // the loss cap, leverage config, or position limits.
+  // FIRST, above every other guard — including the arm switch and validate-only. A close
+  // only ever REDUCES risk, so nothing may block it. This used to sit below the
+  // kraken_margin_auto check, which meant the operator's most natural panic reaction
+  // ("turn the bot off") also disabled the one command that flattens the position it
+  // left open. Disarming must stop new risk, never trap existing risk.
   if (alert.side === "close") {
+    const validateClose = (await cfg("kraken_margin_validate_only")) !== "false";
     try {
-      const positions = (await getKrakenMarginPositions())
+      const all = (await getKrakenMarginPositions())
         .filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
-      if (!positions.length) return { executed: false, validated: false, note: "close alert but no open position" };
+      // OWNERSHIP FILTER: only flatten positions this bot opened. Kraken margin positions
+      // carry no userref, so without this a close alert market-closes Spencer's own
+      // hand-opened position on the same pair — his second book, destroyed by a trade he
+      // never authorised. Unknown positions are left alone (fail closed).
+      const ours = await botTxids();
+      const closeAll = (await cfg("kraken_margin_close_all_positions")) === "true";
+      const positions = closeAll ? all : all.filter((p) => ours.has(p.id));
+      const skipped = all.length - positions.length;
+      if (!positions.length) {
+        const note = skipped > 0
+          ? `close alert: ${skipped} position(s) on ${pair} are NOT the bot's — left untouched (set kraken_margin_close_all_positions=true to override)`
+          : "close alert but no open position";
+        if (skipped > 0) await sendNotification(`⚠️ ${note}`, "margin_urgent");
+        return { executed: false, validated: false, note };
+      }
+      if (skipped > 0) {
+        await sendNotification(
+          `⚠️ Close on ${pair}: flattening ${positions.length} bot position(s), LEAVING ${skipped} manual position(s) alone.`,
+          "margin_urgent",
+        );
+      }
+      // A real position gets a REAL close even in validate-only mode: validate exists to
+      // stop us opening risk, not to stop us shedding it. Announce it so it is never a
+      // surprise.
+      if (validateClose) {
+        await sendNotification(
+          `⚠️ validate_only is ON but a REAL position exists on ${pair} — executing the close for real (a close only reduces risk).`,
+          "margin_urgent",
+        );
+      }
+      const validate = false;
       // Round close volume to the pair's lot precision — same as the entry path. Hardcoding 8
       // decimals gets a close REJECTED by Kraken on any pair with fewer lot decimals, leaving the
       // risk-reducing close silently un-done (the same class of bug the entry path already guards).
@@ -165,18 +252,37 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         executed: !validate,
         validated: validate,
         txid: txids[0],
-        note: `closed ${positions.length} position(s) on ${pair}${validate ? " (validate)" : ""}`,
+        note: `closed ${positions.length} position(s) on ${pair}`,
       };
     } catch (e) {
-      return { executed: false, validated: validate, note: `close failed: ${e}` };
+      // A close that did not close is the most urgent event this system can produce —
+      // it means risk is still on and the operator believes it is off. Page, don't log.
+      await sendNotification(
+        `🚨 CLOSE FAILED on ${pair} — the position may STILL BE OPEN. Check Kraken now. Error: ${String(e).slice(0, 200)}`,
+        "margin_urgent",
+      ).catch(() => {});
+      return { executed: false, validated: false, note: `close failed: ${e}` };
     }
   }
 
   // ---- ENTRY PATH ----
+  // Layer 1: armed at all? (Entries only — the close path above deliberately runs first.)
+  const auto = (await cfg("kraken_margin_auto")) === "true";
+  if (!auto) return { executed: false, validated: false, note: "tracked only (kraken_margin_auto off)" };
+
+  // Layer 2: validate-only unless explicitly disabled.
+  const validate = (await cfg("kraken_margin_validate_only")) !== "false";
+
   // Layer 8a: account drawdown circuit breaker. The guardian sets this when equity
   // falls too far from its peak; while tripped, no new risk (closes still allowed above).
-  if ((await cfg("kraken_margin_disarmed_dd")) === "true") {
-    return { executed: false, validated: false, note: "entries halted — account drawdown circuit breaker tripped" };
+  // cfgStrict, not cfg: a transient DB error must not read as "not disarmed" and let an
+  // entry through the account-level kill switch. Every other flag already fails safe.
+  try {
+    if ((await cfgStrict("kraken_margin_disarmed_dd")) === "true") {
+      return { executed: false, validated: false, note: "entries halted — account drawdown circuit breaker tripped" };
+    }
+  } catch {
+    return { executed: false, validated: false, note: "could not read the drawdown breaker — failing closed" };
   }
 
   // Serialize entries: without this, two alerts landing together both read the same
@@ -225,13 +331,19 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (!(equity > 0)) {
       return { executed: false, validated: false, note: "equity reads 0/unreadable — failing closed" };
     }
+    // The cap trips on EITHER measure, never on their sum. health.unrealized is TradeBalance
+    // 'n' — the whole account, including positions Spencer opened by hand. Netting them
+    // meant one profitable manual long could mask a bot that had already realised past the
+    // cap, and the bot would keep entering. Realized-only is the bot-attributable number;
+    // the combined figure is kept as an ADDITIONAL trigger, never as an offset.
     const todayPnl = realizedToday + (health.unrealized || 0);
-    if (todayPnl < -lossCap) {
+    if (realizedToday < -lossCap || todayPnl < -lossCap) {
+      const which = realizedToday < -lossCap ? `realized $${realizedToday.toFixed(0)}` : `realized+unrealized $${todayPnl.toFixed(0)}`;
       await sendNotification(
-        `🛑 Margin auto-trade BLOCKED — today's margin P&L $${todayPnl.toFixed(0)} is past the $${lossCap} daily loss cap. No new entries until tomorrow (closes still go through).`,
+        `🛑 Margin auto-trade BLOCKED — today's margin P&L (${which}) is past the $${lossCap} daily loss cap. No new entries until tomorrow (closes still go through).`,
         "kraken",
       );
-      return { executed: false, validated: false, note: `daily loss cap hit (${todayPnl.toFixed(0)} < -${lossCap})` };
+      return { executed: false, validated: false, note: `daily loss cap hit (${which} < -${lossCap})` };
     }
 
     // Layer 6: anti-stacking — count BOTH open positions AND our resting orders toward
@@ -259,7 +371,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // price. For a maker order that price is the resting limit (bid/ask), NOT the last
     // trade — sizing the stop from a different price than the entry would make the real
     // stop distance (and risk) wrong.
-    const stopPct = Math.min(0.5, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", (0.3 / leverage) * 100)) / 100));
+    // The DEFAULT (0.3/leverage) is half the liquidation cushion and self-adjusts. An
+    // EXPLICIT kraken_margin_stop_pct does not, so it is clamped to 60% of the cushion
+    // here: a stop set wider than liquidation can never trigger — the position would
+    // always liquidate first, and risk sizing would understate the real max loss by
+    // several multiples while reporting a stop that is pure decoration.
+    const liqCushion = 1 / Math.max(1, leverage);
+    const stopPct = Math.min(0.5, 0.6 * liqCushion, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", (0.3 / leverage) * 100)) / 100));
     const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
     const makerEntries = (await cfg("kraken_margin_maker_entries")) !== "false";
     const meta = await getPairMeta(pair);
@@ -330,6 +448,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const txid = (res.txid as string[] | undefined)?.[0];
     const descr = (res.descr as { order?: string } | undefined)?.order;
 
+    // Record ownership BEFORE anything else can fail: this txid is how the close path and
+    // the guardian's naked-position check know the resulting position is ours rather than
+    // Spencer's. A missing entry here makes a close skip that position (safe); it can
+    // never cause us to close one that is not ours.
+    if (!validate && txid) await recordBotEntry(txid, pair);
+
     // Count on acceptance (conservative — an unfilled maker rest still consumes a slot,
     // which caps churn; the guardian sweeps unfilled entries). Real executions only.
     if (!validate) await bumpDayState(dayState);
@@ -342,6 +466,24 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""} — ${descr ?? ""}`,
     };
   } catch (e) {
+    // An AddOrder that times out may still have been ACCEPTED — the request succeeded and
+    // only the response was lost. Reporting "order failed" would leave Spencer believing
+    // nothing happened while a real levered position exists. Look before we say that.
+    try {
+      const [pos, ords] = await Promise.all([
+        getKrakenMarginPositions().catch(() => []),
+        krakenOpenOrders().catch(() => []),
+      ]);
+      const livePos = pos.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
+      const liveOrd = ords.filter((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair));
+      if (livePos.length || liveOrd.length) {
+        await sendNotification(
+          `🚨 Order errored but Kraken shows ${livePos.length} position(s) and ${liveOrd.length} order(s) on ${pair} — the order may have been ACCEPTED. Verify on Kraken. Error: ${String(e).slice(0, 160)}`,
+          "margin_urgent",
+        ).catch(() => {});
+        return { executed: false, validated: validate, note: `order errored BUT live exposure detected on ${pair} — verify manually: ${e}` };
+      }
+    } catch { /* best-effort confirmation only */ }
     return { executed: false, validated: validate, note: `order failed: ${e}` };
   } finally {
     await releaseExecLock();

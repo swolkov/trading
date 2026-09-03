@@ -57,7 +57,10 @@ export async function getKrakenOHLC(symbol: string, interval: KrakenInterval, si
 export interface KrakenMarginHealth {
   equity: number;        // e  — equity (balance + unrealized)
   tradeBalance: number;  // tb — balance available for trading
-  marginUsed: number;    // m  — initial margin of open positions
+  marginUsed: number;    // m  — initial margin of open positions (0 when genuinely flat)
+  marginUsedRaw: number | null;  // same, but NULL when Kraken omitted the field entirely —
+                                 // callers that must distinguish "flat" from "unreadable"
+                                 // (stop reconciliation) have to use this one
   freeMargin: number;    // mf — usable margin
   unrealized: number;    // n  — unrealized net P&L of open positions
   marginLevel: number | null; // ml — percent; null when flat
@@ -66,11 +69,17 @@ export interface KrakenMarginHealth {
 export async function getKrakenMarginHealth(): Promise<KrakenMarginHealth> {
   const res = await krakenPrivate("TradeBalance", { asset: "ZUSD" });
   const f = (k: string) => parseFloat((res[k] as string) ?? "0") || 0;
+  // A degraded Kraken 200 can return a partial body. Coercing every missing field to 0
+  // makes "we could not read your margin" look identical to "you hold nothing" — and the
+  // stop reconciler, seeing a flat account, would cancel every stop off a LIVE position.
+  // So preserve absence for the one field that decision depends on.
+  const mRaw = res.m != null && String(res.m).trim() !== "" ? parseFloat(String(res.m)) : NaN;
   const ml = res.ml != null ? parseFloat(res.ml as string) : NaN;
   return {
     equity: f("e"),
     tradeBalance: f("tb"),
     marginUsed: f("m"),
+    marginUsedRaw: Number.isFinite(mRaw) ? mRaw : null,
     freeMargin: f("mf"),
     unrealized: f("n"),
     marginLevel: isFinite(ml) && ml > 0 ? ml : null,

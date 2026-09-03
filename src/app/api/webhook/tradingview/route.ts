@@ -82,6 +82,19 @@ export async function POST(request: Request) {
   if (!/^[A-Z0-9]{2,10}\/USD$/.test(symbol) || !["buy", "sell", "close"].includes(side)) {
     return Response.json({ error: "symbol must be XXX/USD and side buy|sell|close" }, { status: 400 });
   }
+  // ALLOWLIST for anything that can place an order. The shape check above accepts any
+  // ticker, and krakenPair() falls back to stripping the slash — so one mistyped symbol in
+  // a TradingView alert could put a levered order on a market nobody intended. Closes are
+  // exempt: a close only reduces risk, and refusing one could strand a position.
+  // kraken_margin_symbols overrides (comma-separated); default is the three majors.
+  if (side !== "close") {
+    const raw = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_symbols" } })
+      .then((r) => r?.value).catch(() => null);
+    const allowed = (raw ? raw.split(",") : ["BTC/USD", "ETH/USD", "SOL/USD"]).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    if (!allowed.includes(symbol)) {
+      return Response.json({ error: `symbol ${symbol} is not on the margin allowlist (${allowed.join(", ")})` }, { status: 400 });
+    }
+  }
   const leverage = Number(b.leverage) || undefined;
   const note = String(b.note ?? "").slice(0, 300);
 
