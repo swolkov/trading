@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { krakenConfigured, krakenOpenOrders, krakenCancelOrder, krakenPrivate, getPairMeta, getKrakenPrice } from "@/lib/kraken";
+import { krakenConfigured, krakenOpenOrders, krakenCancelOrder, krakenPrivate, krakenPublic, getPairMeta } from "@/lib/kraken";
 import {
   getKrakenMarginHealth,
   getKrakenMarginPositions,
@@ -8,7 +8,7 @@ import {
   liquidationEstimate,
   syncKrakenTrades,
 } from "@/lib/kraken-margin";
-import { pairBase } from "@/lib/kraken-pairs";
+import { pairBase, publicPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, botTxids } from "@/lib/margin-executor";
 
@@ -342,11 +342,21 @@ export async function GET(request: Request) {
     const ours = await botTxids();
     if (ours.size > 0) {
       const positions = await getKrakenMarginPositions();
-      const botPositions = positions.filter((p) => ours.has(p.id));
+      // Join on ordertxid ("O…"), the OPENING ORDER's id — NOT the OpenPositions key,
+      // which is the TRADE txid ("T…"). Verified against the real account: 115 fills from
+      // 72 orders, zero where the two ids matched. Getting this wrong makes the whole
+      // guard silently inert while the safety docs claim it runs.
+      const botPositions = positions.filter((p) => ours.has(p.ordertxid));
       if (botPositions.length) {
         const orders = await krakenOpenOrders();
         const myStops = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop"));
         for (const p of botPositions) {
+          // GRACE PERIOD: Kraken submits the attached close[] only after the primary
+          // fills, so a position opened seconds ago may legitimately have no visible stop
+          // yet. Placing one now would race the conditional close and could leave two.
+          // One guardian cycle (5 min) is enough for it to appear.
+          const ageMs = p.openedAt ? Date.now() - new Date(p.openedAt).getTime() : Infinity;
+          if (ageMs < 6 * 60_000) continue;
           const covering = myStops.filter((o) =>
             pairBase(o.pair) === pairBase(p.pair) &&
             ((p.side === "long" && o.side === "sell") || (p.side === "short" && o.side === "buy")));
@@ -359,12 +369,32 @@ export async function GET(request: Request) {
             "margin_urgent",
           ).catch(() => {});
           try {
-            const meta = await getPairMeta(p.pair);
-            const px = await getKrakenPrice(p.pair);
-            const stopPct = Math.max(0.005, Math.min(0.5, (0.3 / Math.max(1, p.leverage))));
-            const stopPx = p.side === "long" ? px * (1 - stopPct) : px * (1 + stopPct);
-            await krakenPrivate("AddOrder", {
-              pair: p.pair,
+            // ⚠️ p.pair is VENUE-SUFFIXED on real margin fills ("XBTUSD:BTNL" — confirmed
+            // on every one of Spencer's 115 margin fills). AssetPairs and Ticker both
+            // reject that form, so route through publicPairFor() exactly as step 3 does.
+            const publicPair = publicPairFor(p.pair);
+            const meta = await getPairMeta(publicPair);
+            const tick = await krakenPublic("Ticker", { pair: publicPair });
+            const px = parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0");
+            if (!(px > 0)) throw new Error(`no price for ${publicPair}`);
+            // Anchor the rescue stop to the position's ENTRY, not the current price — the
+            // entry-relative distance is the risk that was actually authorised. If price
+            // has already run past that level the position is beyond its budget, so the
+            // correct action is to flatten now rather than set a stop it already breached.
+            const stopPct = Math.max(0.005, Math.min(0.5, 0.3 / Math.max(1, p.leverage)));
+            const anchor = p.entryPrice > 0 ? p.entryPrice : px;
+            const stopPx = p.side === "long" ? anchor * (1 - stopPct) : anchor * (1 + stopPct);
+            const alreadyBreached = p.side === "long" ? px <= stopPx : px >= stopPx;
+            await krakenPrivate("AddOrder", alreadyBreached ? {
+              pair: publicPair,
+              type: p.side === "long" ? "sell" : "buy",
+              ordertype: "market",
+              volume: naked.toFixed(meta.lotDecimals),
+              leverage: String(Math.max(2, Math.round(p.leverage))),
+              reduce_only: "true",
+              userref: String(MARGIN_USERREF),
+            } : {
+              pair: publicPair,
               type: p.side === "long" ? "sell" : "buy",
               ordertype: "stop-loss",
               price: stopPx.toFixed(meta.priceDecimals),
@@ -373,7 +403,7 @@ export async function GET(request: Request) {
               reduce_only: "true",
               userref: String(MARGIN_USERREF),
             });
-            sent.push(`naked-stop-placed-${p.pair}`);
+            sent.push(alreadyBreached ? `naked-position-flattened-${p.pair}` : `naked-stop-placed-${p.pair}`);
           } catch (err) {
             // Could not protect it — this is the loudest thing the system can say.
             await sendNotification(

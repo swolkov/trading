@@ -88,7 +88,12 @@ export async function getKrakenMarginHealth(): Promise<KrakenMarginHealth> {
 
 // ---- open margin positions ----
 export interface KrakenMarginPosition {
-  id: string;
+  id: string;           // the position/TRADE txid ("T…") — NOT the order txid
+  ordertxid: string;    // the OPENING ORDER's txid ("O…") — this is what AddOrder returns,
+                        // so it is the only field that can attribute a position to the bot.
+                        // One order can fill in several tranches sharing one ordertxid
+                        // (verified on the real account: 115 fills from 72 orders, and
+                        // ZERO of them had txid === ordertxid).
   pair: string;
   side: "long" | "short";
   vol: number;          // position size in base units (remaining open)
@@ -118,6 +123,7 @@ export async function getKrakenMarginPositions(): Promise<KrakenMarginPosition[]
     if (!(volOpen > 0)) continue;
     out.push({
       id,
+      ordertxid: String(p.ordertxid ?? ""),
       pair: String(p.pair ?? ""),
       side: p.type === "sell" ? "short" : "long",
       vol: volOpen,

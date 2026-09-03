@@ -101,7 +101,15 @@ async function recordBotEntry(txid: string, pair: string): Promise<void> {
       update: { value: JSON.stringify(next.slice(-200)) },
       create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-200)) },
     });
-  } catch { /* ledger write is best-effort; a miss makes a close SKIP that position, never over-close */ }
+  } catch (e) {
+    // NOT best-effort in consequence: an unrecorded position is invisible to BOTH the close
+    // path and the guardian's naked-position guard, so it is unclosable by alert AND
+    // unprotected. Page immediately with the id needed to adopt it.
+    await sendNotification(
+      `🚨 Could not record bot position ${txid} on ${pair}. It will NOT be recognised by close alerts or the naked-position guard. Add it to kraken_margin_adopt_txids now. ${String(e).slice(0, 120)}`,
+      "margin_urgent",
+    ).catch(() => {});
+  }
 }
 
 export async function botTxids(): Promise<Set<string>> {
@@ -198,31 +206,39 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // carry no userref, so without this a close alert market-closes Spencer's own
       // hand-opened position on the same pair — his second book, destroyed by a trade he
       // never authorised. Unknown positions are left alone (fail closed).
+      // Join on ordertxid ("O…"), NOT the position key ("T…"). AddOrder returns an ORDER
+      // txid; OpenPositions is keyed by the TRADE txid. Verified on the real account:
+      // 115 fills, 72 distinct orders, ZERO where the two ids matched. Joining on the
+      // wrong one silently matches nothing and turns every close into a no-op — which is
+      // more dangerous than the over-closing it was meant to prevent.
       const ours = await botTxids();
       const closeAll = (await cfg("kraken_margin_close_all_positions")) === "true";
-      const positions = closeAll ? all : all.filter((p) => ours.has(p.id));
-      const skipped = all.length - positions.length;
+      const adoptRaw = (await cfg("kraken_margin_adopt_txids")) ?? "";
+      const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
+      const isOurs = (p: { ordertxid: string; id: string }) =>
+        ours.has(p.ordertxid) || adopted.has(p.ordertxid) || adopted.has(p.id);
+      const positions = closeAll ? all : all.filter(isOurs);
+      const skipped = all.filter((p) => !closeAll && !isOurs(p));
+      // Notifications are deliberately deferred until AFTER the orders are placed:
+      // sendNotification's fetch has no timeout, and a hung Slack webhook must never sit
+      // between a close alert and the close itself.
+      const pending: string[] = [];
       if (!positions.length) {
-        const note = skipped > 0
-          ? `close alert: ${skipped} position(s) on ${pair} are NOT the bot's — left untouched (set kraken_margin_close_all_positions=true to override)`
+        const note = skipped.length > 0
+          ? `close alert: ${skipped.length} position(s) on ${pair} are NOT the bot's — left untouched. Position ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}. To flatten one deliberately, add its id to kraken_margin_adopt_txids (or kraken_margin_close_all_positions=true for all).`
           : "close alert but no open position";
-        if (skipped > 0) await sendNotification(`⚠️ ${note}`, "margin_urgent");
+        if (skipped.length > 0) await sendNotification(`⚠️ ${note}`, "margin_urgent");
         return { executed: false, validated: false, note };
       }
-      if (skipped > 0) {
-        await sendNotification(
-          `⚠️ Close on ${pair}: flattening ${positions.length} bot position(s), LEAVING ${skipped} manual position(s) alone.`,
-          "margin_urgent",
-        );
+      if (skipped.length > 0) {
+        pending.push(`⚠️ Close on ${pair}: flattened ${positions.length} bot position(s), LEFT ${skipped.length} manual position(s) alone (ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}).`);
       }
       // A real position gets a REAL close even in validate-only mode: validate exists to
       // stop us opening risk, not to stop us shedding it. Announce it so it is never a
-      // surprise.
+      // surprise. ⚠️ This means a close alert moves real money even in validate mode —
+      // test closes are no longer safe.
       if (validateClose) {
-        await sendNotification(
-          `⚠️ validate_only is ON but a REAL position exists on ${pair} — executing the close for real (a close only reduces risk).`,
-          "margin_urgent",
-        );
+        pending.push(`⚠️ validate_only is ON but a REAL position existed on ${pair} — the close was executed for real (a close only reduces risk).`);
       }
       const validate = false;
       // Round close volume to the pair's lot precision — same as the entry path. Hardcoding 8
@@ -248,6 +264,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         const txid = (res.txid as string[] | undefined)?.[0];
         if (txid) txids.push(txid);
       }
+      for (const msg of pending) await sendNotification(msg, "margin_urgent").catch(() => {});
       return {
         executed: !validate,
         validated: validate,
@@ -376,8 +393,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // here: a stop set wider than liquidation can never trigger — the position would
     // always liquidate first, and risk sizing would understate the real max loss by
     // several multiples while reporting a stop that is pure decoration.
-    const liqCushion = 1 / Math.max(1, leverage);
-    const stopPct = Math.min(0.5, 0.6 * liqCushion, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", (0.3 / leverage) * 100)) / 100));
+    // liquidationEstimate models the killing move as 0.6/leverage, so THAT is the cushion —
+    // not 1/leverage. The clamp must leave real headroom inside it (Kraken liquidates off
+    // the account margin level, which degrades before any single stop would fire), so an
+    // explicit stop is held to 60% of the true distance: 0.6 × (0.6/L) = 0.36/L.
+    const liqDistance = 0.6 / Math.max(1, leverage);
+    const stopPct = Math.min(0.5, 0.6 * liqDistance, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", (0.3 / leverage) * 100)) / 100));
     const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
     const makerEntries = (await cfg("kraken_margin_maker_entries")) !== "false";
     const meta = await getPairMeta(pair);
@@ -477,8 +498,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       const livePos = pos.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
       const liveOrd = ords.filter((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair));
       if (livePos.length || liveOrd.length) {
+        // The txid is unknown on this path (that IS the failure), so the position cannot be
+        // recorded in the ownership ledger — meaning it is currently unclosable by alert and
+        // outside the naked-position guard. Hand over the ids needed to adopt it.
+        const ids = livePos.map((p) => p.ordertxid || p.id).filter(Boolean).join(", ");
         await sendNotification(
-          `🚨 Order errored but Kraken shows ${livePos.length} position(s) and ${liveOrd.length} order(s) on ${pair} — the order may have been ACCEPTED. Verify on Kraken. Error: ${String(e).slice(0, 160)}`,
+          `🚨 Order errored but Kraken shows ${livePos.length} position(s) and ${liveOrd.length} order(s) on ${pair} — it may have been ACCEPTED. It is NOT in the ownership ledger, so closes and the naked-stop guard will skip it. Adopt it: set kraken_margin_adopt_txids=${ids || "<position id from Kraken>"}. Error: ${String(e).slice(0, 140)}`,
           "margin_urgent",
         ).catch(() => {});
         return { executed: false, validated: validate, note: `order errored BUT live exposure detected on ${pair} — verify manually: ${e}` };
