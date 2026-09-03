@@ -161,19 +161,20 @@ function convictionRisk(conviction: string | null, baseRiskPct: number): number 
   return Math.min(RISK_CEILING, baseRiskPct * mult);
 }
 
-// ⭐ THE PAPER DOLLARS ARE NOT THE LIVE DOLLARS, and the difference is 6-12x.
-// Paper sizes at kraken_margin_max_risk_pct (3% base, doubled to 6% on high conviction)
-// so the record reads like real trading. The LIVE plan risks 0.5% per trade, because the
-// observed losing streak is 13 in a row and 3% of that is a −33% account. P&L scales
-// linearly with position size, and position size scales linearly with the risk budget, so
-// the same trades at 0.5% earn one sixth to one twelfth of the paper figure. Showing only
-// the paper number invites exactly the wrong expectation ("+$990!" when the answer is
-// +$83), so the scoreboard reports both. Fees scale with notional too and are already
-// inside shadow_pnl, so the linear translation is exact rather than an approximation.
+// ⭐ THE PAPER DOLLARS ARE NOT THE LIVE DOLLARS — and at the agreed 3% risk the gap is
+// NOT about risk level at all. Both size at 3%. The difference is that paper scales risk
+// by CONVICTION (2x high, 0.5x low) while the live executor has no conviction concept and
+// bets flat, so a high-conviction paper trade is twice the live position and a
+// low-conviction one is half. Measured across the surviving strategies that is the whole
+// apparent edge: +$1,779 paper versus −$137 live on the same 48 trades.
+// Showing only the paper column would credit the live system with an edge it structurally
+// cannot capture, so the scoreboard reports both and gates the verdict on the live one.
+// Fees scale with notional and are already inside shadow_pnl, so the per-trade rescale is
+// exact rather than an approximation.
 async function liveRiskParams(): Promise<number> {
   const v = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_max_risk_pct" } })
     .then((r: { value?: string | null } | null) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
-  return Number.isFinite(v) && v > 0 ? Math.min(2, v) : 0.5;   // mirrors the executor's default + ceiling
+  return Number.isFinite(v) && v > 0 ? Math.min(6, v) : 3;   // mirrors the executor's default + ceiling
 }
 
 // Reference account + max-risk for paper sizing (config-driven; defaults ≈ Spencer's account so
