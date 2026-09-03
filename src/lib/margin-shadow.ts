@@ -465,7 +465,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
   "swing-lev": "Leveraged swing (5x, ≤4d)",
   "swing-spot": "Spot swing (1x, ≤2w)",
-  "sweep-fade": "Liquidity-sweep fade (5x)",
+  "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction only (5x)",
   manual: "Manual alerts (yours)",
 };
