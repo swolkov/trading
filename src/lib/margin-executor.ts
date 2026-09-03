@@ -19,8 +19,12 @@
 //      • kraken_margin_max_trades_per_day (default 6) — hard cap on entries/day.
 //      • kraken_margin_cooldown_min (default 30) — minimum minutes between entries, so
 //        a once-per-bar alert can't churn 280 trades/month.
-//      • kraken_margin_max_risk_pct (default 1.5) — SIZE is capped so the stop-loss can
-//        never lose more than this % of equity; notional shrinks automatically.
+//      • kraken_margin_live_max_risk_pct (default 0.5, hard ceiling 2.0) — SIZE is capped
+//        so the stop-loss can never lose more than this % of equity; notional shrinks
+//        automatically. NOTE the `live_` in the name: this is deliberately NOT the paper
+//        experiment's kraken_margin_max_risk_pct (3%, ×2 on conviction), so arming can
+//        never silently inherit a research setting. Observed paper losing streak is 13 in
+//        a row: 0.5% costs 6% of the account, 3% costs 33%, 6% costs 55%.
 //      • kraken_margin_disarmed_dd — account drawdown circuit breaker (set by the
 //        guardian); while true, NO new entries (closes still allowed).
 //   9. MAKER ENTRIES — kraken_margin_maker_entries (default true) rests a post-only
@@ -271,8 +275,17 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (!(entryPx > 0)) return { executed: false, validated: false, note: "no entry price available — skipped" };
 
     // RISK-BASED SIZING: notional capped so a stop-out loses ≤ max_risk_pct of equity.
+    //
+    // ⚠️ LIVE RISK HAS ITS OWN KEY, deliberately separate from the paper experiment's.
+    // `kraken_margin_max_risk_pct` is read by the PAPER sizer too, and it is set high (3%,
+    // doubled to 6% on high conviction) so paper dollars look like real trading. Sharing
+    // one key would mean the day this is armed, live silently inherits the paper research
+    // setting. The observed paper losing streak is 13 in a row — at 3% that is a −33%
+    // account, at 6% a −55% account (which needs +124% to recover). So live reads
+    // `kraken_margin_live_max_risk_pct` and defaults to 0.5%: a 13-loss streak costs 6%.
+    // Raise it deliberately, in steps, only after live fills have proven out.
     let notional = perTrade * leverage;
-    const maxRiskPct = Math.max(0.1, await cfgNum("kraken_margin_max_risk_pct", 1.5)) / 100;
+    const maxRiskPct = Math.min(2, Math.max(0.1, await cfgNum("kraken_margin_live_max_risk_pct", 0.5))) / 100;
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     if (equity > 0 && riskDist > 0) {
       const notionalCap = (maxRiskPct * equity) / riskDist;
