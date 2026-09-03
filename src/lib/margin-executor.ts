@@ -90,7 +90,13 @@ async function cfgStrict(key: string): Promise<string | null> {
 // discretionary book on the same pair. We therefore record the txid of every entry we place;
 // a position's key in OpenPositions is its opening order's txid, so that is the join.
 const BOT_TXIDS_KEY = "kraken_margin_bot_txids";
-const BOT_TXID_TTL_MS = 30 * 24 * 3600_000;   // prune after 30 days — positions never live that long
+// Prune generously. A pruned entry does not merely mean "closes skip this position" — the
+// close path's stop sweep would still match its stop by userref and cancel it, while 3c no
+// longer recognises the position to re-protect it. Forgetting an entry therefore STRIPS a
+// live position's stop. Rollover economics make a 30-day margin hold implausible, but the
+// cost of being wrong is unbounded and the cost of a longer window is a few hundred bytes.
+const BOT_TXID_TTL_MS = 180 * 24 * 3600_000;
+const BOT_TXID_MAX = 2000;
 
 async function recordBotEntry(txid: string, pair: string): Promise<void> {
   try {
@@ -101,8 +107,8 @@ async function recordBotEntry(txid: string, pair: string): Promise<void> {
     next.push({ txid, pair, ts: Date.now() });
     await prisma.agentConfig.upsert({
       where: { key: BOT_TXIDS_KEY },
-      update: { value: JSON.stringify(next.slice(-200)) },
-      create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-200)) },
+      update: { value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
+      create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
     });
   } catch (e) {
     // NOT best-effort in consequence: an unrecorded position is invisible to BOTH the close
@@ -171,24 +177,38 @@ async function bumpDayState(prev: DayState): Promise<void> {
 // compare-and-swap (ISO strings compare in time order). Fails CLOSED: if it can't be
 // acquired, the alert is refused rather than risking a concurrent double-entry.
 const EXEC_LOCK_KEY = "kraken_margin_exec_lock";
-// The entry critical section makes ~8 sequential Kraken calls (each up to 15s) under this
-// lock, so the TTL must comfortably exceed the worst-case section time — otherwise the lock
-// could be stolen while an invocation still holds it, defeating the only guard against a
-// truly concurrent double-entry. 120s clears the summed call timeouts with headroom.
-const EXEC_LOCK_TTL_MS = 120_000;
-async function acquireExecLock(): Promise<boolean> {
+// ⚠️ THE TTL MUST EXCEED THE ROUTE'S maxDuration, or the invariant inverts. The lock's
+// whole job is that a holder is provably dead before its lock can be stolen. The webhook's
+// maxDuration is 300s (raised so a slow Kraken run can't be killed mid-AddOrder), so a
+// holder can legitimately still be alive at 120s — at which point a second alert steals the
+// lock, reads the same day-state, sees no position yet, and both place. Two entries, double
+// the intended risk. 330s > 300s restores "expired means dead".
+const EXEC_LOCK_TTL_MS = 330_000;
+// Each holder writes a unique token, so release can only clear ITS OWN lock. With a plain
+// blank-on-release, a holder that overran would wipe the lock a later invocation legitimately
+// holds, and the next alert would walk straight in.
+function lockToken(): string {
+  return `${new Date().toISOString()}#${Math.random().toString(36).slice(2, 10)}`;
+}
+async function acquireExecLock(): Promise<string | null> {
   await prisma.agentConfig.upsert({
     where: { key: EXEC_LOCK_KEY }, update: {}, create: { key: EXEC_LOCK_KEY, value: "" },
   }).catch(() => {});
   const cutoff = new Date(Date.now() - EXEC_LOCK_TTL_MS).toISOString();
+  const token = lockToken();
   const r = await prisma.agentConfig.updateMany({
     where: { key: EXEC_LOCK_KEY, OR: [{ value: "" }, { value: { lt: cutoff } }] },
-    data: { value: new Date().toISOString() },
+    data: { value: token },
   }).catch(() => ({ count: 0 }));
-  return r.count === 1;
+  return r.count === 1 ? token : null;
 }
-async function releaseExecLock(): Promise<void> {
-  await prisma.agentConfig.update({ where: { key: EXEC_LOCK_KEY }, data: { value: "" } }).catch(() => {});
+async function releaseExecLock(token: string | null): Promise<void> {
+  if (!token) return;
+  // CAS release: only clears the lock if we still hold it.
+  await prisma.agentConfig.updateMany({
+    where: { key: EXEC_LOCK_KEY, value: token },
+    data: { value: "" },
+  }).catch(() => {});
 }
 
 export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
@@ -215,12 +235,29 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // wrong one silently matches nothing and turns every close into a no-op — which is
       // more dangerous than the over-closing it was meant to prevent.
       const ours = await botTxids();
-      // ONE-SHOT: the override is cleared the moment it is used. Left sticky, an emergency
-      // flag set once would silently flatten Spencer's manual book on every later close
-      // alert for that pair — and because `skipped` is then empty, without even saying so.
-      const closeAll = (await cfg("kraken_margin_close_all_positions")) === "true";
+      // ONE-SHOT AND PAIR-SCOPED. Sticky, an emergency flag set once would silently flatten
+      // Spencer's manual book on every later close for that pair. Global, it would be burned
+      // by whichever close alert happened to land first — he sets it to free a stuck ETH
+      // position, a routine BTC close consumes it, and ETH is still open while his manual
+      // BTC book just got flattened. So the value names the symbol it authorises
+      // ("ETH/USD", or "ALL"), and it is consumed ONLY on a matching pair that actually has
+      // something to close.
+      const closeAllRaw = (await cfg("kraken_margin_close_all_positions")) ?? "";
+      const closeAllTarget = closeAllRaw.trim().toUpperCase();
+      const closeAll = all.length > 0 && (closeAllTarget === "ALL" || closeAllTarget === alert.symbol.toUpperCase()
+        // "true" kept for backward compatibility, but it is pair-scoped like the rest.
+        || (closeAllTarget === "TRUE"));
       if (closeAll) {
-        await prisma.agentConfig.update({ where: { key: "kraken_margin_close_all_positions" }, data: { value: "false" } }).catch(() => {});
+        const cleared = await prisma.agentConfig.updateMany({
+          where: { key: "kraken_margin_close_all_positions", value: closeAllRaw },
+          data: { value: "" },
+        }).catch(() => ({ count: 0 }));
+        if (cleared.count !== 1) {
+          await sendNotification(
+            `⚠️ Could not clear kraken_margin_close_all_positions after using it on ${pair} — it is STILL ARMED and will flatten manual positions on the next close. Clear it by hand.`,
+            "margin_urgent",
+          ).catch(() => {});
+        }
       }
       const adoptRaw = (await cfg("kraken_margin_adopt_txids")) ?? "";
       const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
@@ -291,10 +328,20 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           o.ordertype.includes("stop") &&
           pairBase(o.pair) === pairBase(pair) &&
           positions.some((p) => (p.side === "long" ? "sell" : "buy") === o.side));
+        // Count real successes: a swallowed cancel failure would report "cancelled" while
+        // the stop still rests, carrying the exact flip risk this sweep exists to remove.
+        const failed: string[] = [];
+        let cancelled = 0;
         for (const o of resting) {
-          await krakenCancelOrder(o.txid).catch(() => {});
+          try { await krakenCancelOrder(o.txid); cancelled++; } catch { failed.push(o.txid); }
         }
-        if (resting.length) pending.push(`🧹 Cancelled ${resting.length} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
+        if (cancelled) pending.push(`🧹 Cancelled ${cancelled} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
+        if (failed.length) {
+          await sendNotification(
+            `🚨 Could NOT cancel ${failed.length} stop(s) on ${pair} after closing (${failed.join(", ")}). A stranded stop can OPEN a new leveraged position if it triggers. Cancel them on Kraken now.`,
+            "margin_urgent",
+          ).catch(() => {});
+        }
       } catch (err) {
         await sendNotification(
           `⚠️ Closed ${pair} but could NOT sweep its resting stops — a stranded stop can open a new position if it triggers. Check Kraken. ${String(err).slice(0, 140)}`,
@@ -341,7 +388,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
   // Serialize entries: without this, two alerts landing together both read the same
   // day-state and both place an order. Fails closed — a lock we can't get = no entry.
-  if (!(await acquireExecLock())) {
+  const lockToken_ = await acquireExecLock();
+  if (!lockToken_) {
     return { executed: false, validated: false, note: "another entry is in progress — skipped (no concurrent entries)" };
   }
   try {
@@ -422,6 +470,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // through the entry path rather than the close path. It also leaves the entry's
     // attached stop protecting nothing, and no position ever appears under our ordertxid.
     // A genuine reversal must be an explicit close followed by an entry, never netting.
+    // The netting guard below is only as good as this read. 3b in the guardian refuses to
+    // act on an empty OpenPositions when margin is in use, because Kraken returns an empty
+    // collection during degradation — and here an empty read means "no conflict", which
+    // waves through the exact opposing entry that would net against Spencer's position.
+    // Fail closed on the same signal.
+    if (openPositions.length === 0 && (health.marginUsedRaw == null || health.marginUsedRaw > 0)) {
+      return { executed: false, validated: false, note: "positions read empty while margin is in use (or unreadable) — failing closed rather than risk netting against an existing position" };
+    }
     const conflicting = openPositions.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
     if (!allowStacking && (
       conflicting.length > 0 ||
@@ -564,6 +620,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     } catch { /* best-effort confirmation only */ }
     return { executed: false, validated: validate, note: `order failed: ${e}` };
   } finally {
-    await releaseExecLock();
+    await releaseExecLock(lockToken_);
   }
 }

@@ -21,7 +21,7 @@ interface ShadowScore {
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
-  grossPnl: number; fees: number; peakedGreen: number; tStat: number | null; verdict: string;
+  grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; verdict: string;
 }
 function verdictCls(v: string): string {
   if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
@@ -164,7 +164,8 @@ export default function PaperTradesPage() {
                   <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
                   <th className="text-right font-medium px-2 py-1.5" title="P&L before fees — the raw edge">Gross</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Fee + rollover drag">Fees</th>
-                  <th className="text-right font-medium px-2 py-1.5" title="Gross − fees — what you actually keep">Net</th>
+                  <th className="text-right font-medium px-2 py-1.5" title="Gross − fees — what you actually keep, at the paper experiment's 3–6% research risk">Net (paper risk)</th>
+                  <th className="text-right font-medium px-2 py-1.5 text-foreground/70" title="The SAME trades priced at the live risk budget of 0.5% per trade — this is what you would actually have made">At LIVE risk</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Went green at peak → finished green. The gap between the two numbers is the give-back — green that appeared but wasn't banked">Green banked</th>
                   <th className="text-right font-medium px-4 py-1.5" title="Rule-based call: needs 30+ trades, positive net, statistical significance (t≥2), AND resolutions spanning 7+ days before 'REAL EDGE' — crypto trades resolved the same day are correlated, so one hot day can't fake an edge">Verdict</th>
                 </tr>
@@ -180,7 +181,8 @@ export default function PaperTradesPage() {
                     </td>
                     <td className={`text-right px-2 py-2 tabular-nums ${col(s.grossPnl)}`}>{money(s.grossPnl)}</td>
                     <td className="text-right px-2 py-2 tabular-nums text-red-400/70">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</td>
-                    <td className={`text-right px-2 py-2 tabular-nums font-bold ${col(s.totalPnl)}`}>{money(s.totalPnl)}</td>
+                    <td className={`text-right px-2 py-2 tabular-nums ${col(s.totalPnl)} opacity-70`}>{money(s.totalPnl)}</td>
+                    <td className={`text-right px-2 py-2 tabular-nums font-bold ${col(s.liveNet ?? 0)}`}>{money(s.liveNet ?? 0)}</td>
                     <td className="text-right px-2 py-2 tabular-nums text-muted-foreground/70" title="peaked green → finished green">
                       {s.resolved > 0 ? `${Math.round((s.peakedGreen / s.resolved) * 100)}% → ${Math.round((s.wins / s.resolved) * 100)}%` : "—"}
                     </td>
@@ -191,7 +193,7 @@ export default function PaperTradesPage() {
             </table>
           </div>
           <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
-            <span className="text-foreground/60">Gross</span> is the raw edge (before fees); <span className="text-red-400/70">Fees</span> is the drag; <span className="text-foreground/60">Net</span> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if <span className="text-foreground/60">Gross beats Fees</span>. Maker entries + fewer/bigger trades shrink the Fees column. <span className="text-foreground/60">Green banked</span> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
+            <span className="text-foreground/60">Gross</span> is the raw edge (before fees); <span className="text-red-400/70">Fees</span> is the drag; <span className="text-foreground/60">Net</span> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if <span className="text-foreground/60">Gross beats Fees</span>. Maker entries + fewer/bigger trades shrink the Fees column. <span className="text-foreground/60">At LIVE risk</span> is the number that matters for a real decision: the paper record is sized at the experiment&apos;s 3–6% research risk so the dollars read like real trading, but the live plan risks <span className="text-foreground/60">0.5% per trade</span> — because the worst losing streak in this very record is 13 in a row, which costs 6% of the account at 0.5% and 55% at 6%. Same trades, one sixth to one twelfth the dollars. <span className="text-foreground/60">Green banked</span> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
           </p>
         </div>
       )}
