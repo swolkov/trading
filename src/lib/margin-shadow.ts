@@ -161,6 +161,21 @@ function convictionRisk(conviction: string | null, baseRiskPct: number): number 
   return Math.min(RISK_CEILING, baseRiskPct * mult);
 }
 
+// ⭐ THE PAPER DOLLARS ARE NOT THE LIVE DOLLARS, and the difference is 6-12x.
+// Paper sizes at kraken_margin_max_risk_pct (3% base, doubled to 6% on high conviction)
+// so the record reads like real trading. The LIVE plan risks 0.5% per trade, because the
+// observed losing streak is 13 in a row and 3% of that is a −33% account. P&L scales
+// linearly with position size, and position size scales linearly with the risk budget, so
+// the same trades at 0.5% earn one sixth to one twelfth of the paper figure. Showing only
+// the paper number invites exactly the wrong expectation ("+$990!" when the answer is
+// +$83), so the scoreboard reports both. Fees scale with notional too and are already
+// inside shadow_pnl, so the linear translation is exact rather than an approximation.
+async function liveRiskParams(): Promise<number> {
+  const v = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_max_risk_pct" } })
+    .then((r: { value?: string | null } | null) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
+  return Number.isFinite(v) && v > 0 ? Math.min(2, v) : 0.5;   // mirrors the executor's default + ceiling
+}
+
 // Reference account + max-risk for paper sizing (config-driven; defaults ≈ Spencer's account so
 // the paper dollars are realistic). kraken_shadow_ref_equity and kraken_margin_max_risk_pct.
 // ⚠️ PAPER ONLY. The live executor reads kraken_margin_live_max_risk_pct (default 0.5%)
@@ -452,6 +467,9 @@ export interface StrategyStat {
   grossPnl: number; fees: number;   // gross (before fees) and the fee drag — net = gross − fees
   peakedGreen: number;    // resolved trades that were in profit at their PEAK — the give-back
                           // numerator: peakedGreen vs wins is "green that appeared vs green banked"
+  liveNet: number;        // the SAME trades priced at the LIVE risk budget instead of the
+                          // paper research budget — i.e. what this strategy would actually
+                          // have earned. See the note above liveRiskParams().
   tStat: number | null;   // t = mean × √n / std — is the net expectancy distinguishable from luck?
   verdict: string;        // rule-based: gathering / not paying / promising (could be luck) / REAL EDGE
 }
@@ -483,10 +501,13 @@ const STRATEGY_LABELS: Record<string, string> = {
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
   await ensureShadowColumns();
+  const liveRiskPct = await liveRiskParams();
+  const { maxRiskPct: paperRiskFrac } = await sizingParams();
+  const paperRiskPct = paperRiskFrac * 100;
   const rows = await prisma.$queryRawUnsafe<{
     source: string; resolved: bigint; wins: bigint; total: number | null;
     avgwin: number | null; avgloss: number | null; open: bigint; fees: number | null;
-    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint;
+    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint; livenet: number | null;
   }[]>(
     `SELECT COALESCE(source,'manual') AS source,
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
@@ -494,6 +515,12 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_peak IS NOT NULL AND mark_price > 0
          AND ((side='buy' AND shadow_peak > mark_price) OR (side='sell' AND shadow_peak < mark_price)))::bigint AS peaked,
        count(DISTINCT date_trunc('day', shadow_resolved_at)) FILTER (WHERE shadow_status='resolved')::bigint AS days,
+       -- Each trade re-priced at the live risk budget. The divisor is the risk THAT trade
+       -- actually used (conviction scales it: high 2x, low 0.5x, capped at the 6% ceiling),
+       -- so this is a per-trade rescale, not a blanket one.
+       COALESCE(sum(shadow_pnl * ($1::float / LEAST(6.0, $2::float *
+         CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+         FILTER (WHERE shadow_status='resolved'),0)::float AS livenet,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss,
@@ -504,6 +531,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
      FROM tradingview_alerts
      WHERE ${SIM_COHORT_SQL}
      GROUP BY COALESCE(source,'manual')`,
+    liveRiskPct, paperRiskPct,
   );
   return rows
     .map((r) => {
@@ -525,6 +553,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         totalPnl: net,
         open: Number(r.open),
         peakedGreen: Number(r.peaked),
+        liveNet: r.livenet || 0,
         fees: r.fees || 0,
         grossPnl: net + (r.fees || 0),   // net + fees = gross (before-fee P&L)
         tStat,
