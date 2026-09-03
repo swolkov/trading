@@ -126,6 +126,14 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // Selective (high-conviction only): a better setup earns a bit more room (3% stop) + the
   // managed exit banks the green (breakeven at +1R, then trails). Fewer of these = tiny fee drag.
   if (source === "selective") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  // SELECTIVE-SWING — the direct test of the Sep 3 conviction finding. Across 71 v2 trades
+  // conviction was monotonically predictive on a size-neutral basis (high +1.58% avg gross
+  // move and +9.4% avg PEAK, med −1.39%, low −2.05%), yet `selective` still lost money. The
+  // hypothesis: the SIGNAL is good and the CONTAINER is wrong — a 3% stop and a 48h clock
+  // cage a setup whose average peak is 9%. So: same high-conviction entries, swing room and
+  // time (5% stop, 4 days). Its own `source`, so it starts at zero and contaminates no
+  // existing sample; if it beats `selective` head-to-head, the finding is real.
+  if (source === "selective-swing") return { maxHoldH: 24 * 4, oneR: entry * 0.05, carry: lev > 1 };
   return { maxHoldH: MAX_HOLD_H, oneR: entry * (0.3 / lev), carry: lev > 1 };
 }
 
@@ -466,7 +474,8 @@ const STRATEGY_LABELS: Record<string, string> = {
   "swing-lev": "Leveraged swing (5x, ≤4d)",
   "swing-spot": "Spot swing (1x, ≤2w)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
-  selective: "Selective — high-conviction only (5x)",
+  selective: "Selective — high-conviction, 3% stop / 48h (5x)",
+  "selective-swing": "Selective SWING — high-conviction, 5% stop / 4d (5x)",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
