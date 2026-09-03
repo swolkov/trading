@@ -21,7 +21,7 @@ interface ShadowScore {
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
-  grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; verdict: string;
+  grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; paperTStat?: number | null; verdict: string;
 }
 function verdictCls(v: string): string {
   if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
@@ -167,7 +167,7 @@ export default function PaperTradesPage() {
                   <th className="text-right font-medium px-2 py-1.5" title="Gross − fees — what you actually keep, at the paper experiment's 3–6% research risk">Net (paper risk)</th>
                   <th className="text-right font-medium px-2 py-1.5 text-foreground/70" title="The SAME trades priced at the live risk budget of 0.5% per trade — this is what you would actually have made">At LIVE risk</th>
                   <th className="text-right font-medium px-2 py-1.5" title="Went green at peak → finished green. The gap between the two numbers is the give-back — green that appeared but wasn't banked">Green banked</th>
-                  <th className="text-right font-medium px-4 py-1.5" title="Rule-based call: needs 30+ trades, positive net, statistical significance (t≥2), AND resolutions spanning 7+ days before 'REAL EDGE' — crypto trades resolved the same day are correlated, so one hot day can't fake an edge">Verdict</th>
+                  <th className="text-right font-medium px-4 py-1.5" title="Judged on the LIVE sizing, not the paper sizing: 30+ trades, positive net AT LIVE RISK, t≥2 on the live-priced series, and resolutions spanning 7+ days. Paper bets 2x on high conviction while the live executor has no conviction concept and bets flat, so the two genuinely disagree — and the gate must describe the money that would actually be risked.">Verdict <span className="opacity-40 font-normal">(at live sizing)</span></th>
                 </tr>
               </thead>
               <tbody>

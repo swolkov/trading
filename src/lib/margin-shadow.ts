@@ -470,6 +470,8 @@ export interface StrategyStat {
   liveNet: number;        // the SAME trades priced at the LIVE risk budget instead of the
                           // paper research budget — i.e. what this strategy would actually
                           // have earned. See the note above liveRiskParams().
+  paperTStat: number | null;  // t on the paper-sized series, for reference only. `tStat`
+                              // and `verdict` are computed on the LIVE-sized series.
   tStat: number | null;   // t = mean × √n / std — is the net expectancy distinguishable from luck?
   verdict: string;        // rule-based: gathering / not paying / promising (could be luck) / REAL EDGE
 }
@@ -507,7 +509,8 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
   const rows = await prisma.$queryRawUnsafe<{
     source: string; resolved: bigint; wins: bigint; total: number | null;
     avgwin: number | null; avgloss: number | null; open: bigint; fees: number | null;
-    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint; livenet: number | null;
+    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint;
+    livenet: number | null; livemean: number | null; livestd: number | null;
   }[]>(
     `SELECT COALESCE(source,'manual') AS source,
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
@@ -527,7 +530,17 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
        COALESCE(sum(shadow_fees) FILTER (WHERE shadow_status='resolved'),0)::float AS fees,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
-       stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl
+       stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl,
+       -- The SAME statistics on the live-priced series. This is NOT cosmetic: paper sizes
+       -- 2x on high conviction while the live executor has no conviction concept and bets
+       -- flat, so the rescale is not a uniform multiple and the t-stat genuinely moves.
+       -- The verdict must judge the sizing scheme we would actually TRADE.
+       avg(shadow_pnl * ($1::float / LEAST(6.0, $2::float *
+         CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+         FILTER (WHERE shadow_status='resolved') AS livemean,
+       stddev_samp(shadow_pnl * ($1::float / LEAST(6.0, $2::float *
+         CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+         FILTER (WHERE shadow_status='resolved') AS livestd
      FROM tradingview_alerts
      WHERE ${SIM_COHORT_SQL}
      GROUP BY COALESCE(source,'manual')`,
@@ -537,8 +550,20 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
     .map((r) => {
       const resolved = Number(r.resolved);
       const net = r.total || 0;
-      // t-stat of net per-trade P&L: mean × √n / std. |t|≥2 ≈ 95% confident it's not zero.
-      const tStat = resolved > 1 && r.meanpnl != null && r.stdpnl != null && r.stdpnl > 0
+      const liveNet = r.livenet || 0;
+      // ⚠️ THE VERDICT IS JUDGED ON THE LIVE-PRICED SERIES, not the paper one.
+      // Paper risks 2x on high conviction; the live executor has no conviction concept and
+      // bets flat. That is a different bet-SIZING scheme, not merely a different scale, so
+      // the t-stat genuinely differs between them (uniform scaling would leave t untouched
+      // — and does, for single-conviction-tier strategies like `selective`). Since the
+      // verdict is the gate for risking real money, it must describe the sizing that money
+      // would actually be risked under. Judging on paper's conviction-weighted sizing
+      // would credit a strategy for an edge the live path cannot capture.
+      const tStat = resolved > 1 && r.livemean != null && r.livestd != null && r.livestd > 0
+        ? (r.livemean * Math.sqrt(resolved)) / r.livestd
+        : null;
+      // Kept for reference/debugging: what the paper sizing would have claimed.
+      const paperTStat = resolved > 1 && r.meanpnl != null && r.stdpnl != null && r.stdpnl > 0
         ? (r.meanpnl * Math.sqrt(resolved)) / r.stdpnl
         : null;
       return {
@@ -553,11 +578,14 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         totalPnl: net,
         open: Number(r.open),
         peakedGreen: Number(r.peaked),
-        liveNet: r.livenet || 0,
+        liveNet,
         fees: r.fees || 0,
         grossPnl: net + (r.fees || 0),   // net + fees = gross (before-fee P&L)
         tStat,
-        verdict: strategyVerdict(resolved, net, tStat, Number(r.days)),
+        paperTStat,
+        // Gate on the LIVE net and the LIVE t-stat — the money that would actually be made,
+        // judged at the significance the live sizing would actually achieve.
+        verdict: strategyVerdict(resolved, liveNet, tStat, Number(r.days)),
       };
     })
     .sort((a, b) => b.resolved - a.resolved);
