@@ -121,6 +121,16 @@ export async function getKrakenMarginPositions(): Promise<KrakenMarginPosition[]
     const cost = parseFloat(String(p.cost ?? "0")) || 0;
     const margin = parseFloat(String(p.margin ?? "0")) || 0;
     if (!(volOpen > 0)) continue;
+    // ⚠️ ordertxid is the ONLY field that attributes a position to the bot. If Kraken ever
+    // stops returning it, String(undefined ?? "") yields "" — which silently matches
+    // nothing, turning every close into a no-op and switching off the naked-position guard,
+    // exactly the failure this field was added to fix. Never let that be quiet.
+    if (!p.ordertxid) {
+      void import("@/lib/notifications").then((n) => n.sendNotification(
+        `🚨 Kraken OpenPositions returned a position (${id}, ${String(p.pair ?? "?")}) with NO ordertxid. Bot-position attribution is broken: closes and the naked-stop guard will skip it. Do not arm until this is understood.`,
+        "margin_urgent",
+      )).catch(() => {});
+    }
     out.push({
       id,
       ordertxid: String(p.ordertxid ?? ""),

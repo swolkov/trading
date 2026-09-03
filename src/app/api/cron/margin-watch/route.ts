@@ -35,6 +35,10 @@ type WatchState = {
   orphans?: Record<string, number>;
   // Last run's equity, to spot a capital flow (deposit/withdrawal) vs a trading drawdown.
   lastEquity?: number;
+  // ordertxid → consecutive runs a naked position has been seen PAST its stop level. The
+  // rescue stop goes on immediately; the market flatten waits for two sightings, so a
+  // degraded read cannot realize a loss on a position that was actually fine.
+  nakedBreached?: Record<string, number>;
 };
 
 async function cfg(key: string): Promise<string | null> {
@@ -349,7 +353,17 @@ export async function GET(request: Request) {
       const botPositions = positions.filter((p) => ours.has(p.ordertxid));
       if (botPositions.length) {
         const orders = await krakenOpenOrders();
+        // UNRELIABLE-READ GUARD, mirroring 3b: Kraken can return an empty collection during
+        // degradation. If we hold bot positions but see NO orders at all, every one of them
+        // reads as naked — and the flatten branch below would market-close fully-protected
+        // positions on a read hiccup. A genuinely stop-less book just waits one run.
+        if (orders.length === 0) {
+          errors.push("naked-position guard: zero open orders while holding bot positions — skipping (unreliable read)");
+          throw new Error("skip-3c-unreliable");
+        }
         const myStops = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop"));
+        const priorBreached = state.nakedBreached ?? {};
+        const nextBreached: Record<string, number> = {};
         for (const p of botPositions) {
           // GRACE PERIOD: Kraken submits the attached close[] only after the primary
           // fills, so a position opened seconds ago may legitimately have no visible stop
@@ -384,7 +398,15 @@ export async function GET(request: Request) {
             const stopPct = Math.max(0.005, Math.min(0.5, 0.3 / Math.max(1, p.leverage)));
             const anchor = p.entryPrice > 0 ? p.entryPrice : px;
             const stopPx = p.side === "long" ? anchor * (1 - stopPct) : anchor * (1 + stopPct);
-            const alreadyBreached = p.side === "long" ? px <= stopPx : px >= stopPx;
+            // TWO-STRIKE RULE ON THE FLATTEN ONLY. Placing a reduce_only stop is cheap and
+            // reversible, so it happens on the first sighting. MARKET-CLOSING realizes P&L,
+            // so a false positive costs real money — it must be confirmed across two
+            // consecutive runs, exactly like 3b's orphan rule. The protective stop is still
+            // placed on strike one, so the position is covered while we confirm.
+            const breachedNow = p.side === "long" ? px <= stopPx : px >= stopPx;
+            const strikes = breachedNow ? (priorBreached[p.ordertxid] ?? 0) + 1 : 0;
+            if (breachedNow) nextBreached[p.ordertxid] = strikes;
+            const alreadyBreached = breachedNow && strikes >= 2;
             await krakenPrivate("AddOrder", alreadyBreached ? {
               pair: publicPair,
               type: p.side === "long" ? "sell" : "buy",
@@ -413,9 +435,13 @@ export async function GET(request: Request) {
             errors.push(`naked-stop placement failed ${p.pair}: ${err}`);
           }
         }
+        state.nakedBreached = nextBreached;
       }
     }
   } catch (e) {
+    if (String(e).includes("skip-3c-unreliable")) {
+      // Deliberate skip, already recorded in errors — not a failure of the guard.
+    } else
     errors.push(`naked-position guard: ${e}`);
   }
 
