@@ -193,6 +193,46 @@ export async function scanUniverse(): Promise<{ signals: ScanSignal[]; errors: s
   return { signals, errors };
 }
 
+// Scan ONE coin across every timeframe — the live path's entry point into the same
+// analysis the paper experiment runs. A live alert names a coin and a direction but carries
+// no conviction, and conviction is what decides position size; computing it here means a
+// live trade is sized off exactly the signals paper would have seen, rather than off a
+// number Spencer would otherwise have to hand-type into a TradingView alert.
+// ~5 OHLC calls, under a second — trivial inside the webhook's budget.
+export async function scanCoin(symbol: string): Promise<{ signals: ScanSignal[]; errors: string[] }> {
+  const coin = SCAN_COINS.find((c) => c.symbol.toUpperCase() === symbol.toUpperCase())
+    ?? { name: symbol.split("/")[0], symbol };
+  const signals: ScanSignal[] = [];
+  const errors: string[] = [];
+  for (const tf of TIMEFRAMES) {
+    try {
+      const bars = await getKrakenOHLC(coin.symbol, tf.interval);
+      signals.push(...evaluate(coin, tf, bars));
+    } catch (e) {
+      errors.push(`${coin.name}@${tf.label}: ${String(e).slice(0, 60)}`);
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return { signals, errors };
+}
+
+// Conviction for a LIVE alert, scored by the SAME scoreConviction the paper record is
+// built from, so a live trade and its paper twin get the same tier in the same market.
+// Returns null when the coin shows no signal in the alert's direction — an alert with
+// nothing behind it. The caller MUST treat null as "no bonus", never as high.
+export async function convictionForAlert(symbol: string, side: "buy" | "sell"): Promise<Conviction | null> {
+  const { signals } = await scanCoin(symbol);
+  if (!signals.length) return null;
+  const want: ScanSignal["kind"] = side === "buy" ? "breakout" : "breakdown";
+  const matches = signals.filter((s) => s.kind === want);
+  if (!matches.length) return null;
+  // Prefer the highest timeframe agreeing with the alert — the same preference the
+  // scanner's own plan selection makes, and the most meaningful one to score.
+  const order = ["1d", "4h", "1h", "15m", "5m"];
+  matches.sort((a, b) => order.indexOf(a.timeframe) - order.indexOf(b.timeframe));
+  return scoreConviction(matches[0], signals);
+}
+
 export function signalKey(s: ScanSignal): string {
   return `${s.coin}:${s.timeframe}:${s.kind}`;
 }

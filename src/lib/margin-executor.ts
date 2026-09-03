@@ -41,6 +41,10 @@
 //        sizer uses, which is the agreed policy. Total damage from a losing run is bounded
 //        by the drawdown breaker (layer 8a), not by this number; risk % sets how fast that
 //        bound is reached (6 losses at 3%, 33 at 0.5%).
+//        ⚠️ CONVICTION-SCALED, mirroring the paper record: high 2×, low 0.5×, clamped at
+//        6%. So a HIGH-conviction entry risks 6% and three consecutive such losses trip
+//        the 15% drawdown breaker. That is deliberate — flat sizing was measured to throw
+//        away the entire edge — but it is the fastest path to the breaker, by design.
 //      • kraken_margin_disarmed_dd — account drawdown circuit breaker (set by the
 //        guardian); while true, NO new entries (closes still allowed).
 //   9. MAKER ENTRIES — kraken_margin_maker_entries (default true) rests a post-only
@@ -54,6 +58,7 @@ import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
 import { pairMatchesSymbol, pairBase } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
+import { convictionForAlert } from "@/lib/margin-scanner";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -63,6 +68,10 @@ export interface AlertOrder {
   side: "buy" | "sell" | "close";
   leverage?: number;
   note?: string;
+  // Conviction tier for this setup. Supply it to override; leave it undefined and the
+  // executor scores the coin itself with the SAME scorer the paper record uses. Sizing
+  // scales with it exactly as paper does — see convictionRiskLive().
+  conviction?: "low" | "med" | "high";
 }
 
 export interface ExecResult {
@@ -541,7 +550,24 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // the stop, not the size of the loss. Choosing it is Spencer's call, not the code's.
     // Ceiling 6% mirrors the paper conviction ceiling: it blocks catastrophe, not policy.
     let notional = perTrade * leverage;
-    const maxRiskPct = Math.min(6, Math.max(0.1, await cfgNum("kraken_margin_live_max_risk_pct", 3))) / 100;
+    const baseRiskPct = Math.min(6, Math.max(0.1, await cfgNum("kraken_margin_live_max_risk_pct", 3)));
+    // CONVICTION-SCALED, exactly as the paper record is. Without this the live executor
+    // bets flat and throws away the only edge the experiment has found: across 48
+    // surviving paper trades, high-conviction setups averaged +$73 and low-conviction
+    // −$74, so flat sizing halved the winners and doubled the losers — turning +$1,779
+    // into −$137 on identical trades. Multipliers and the 6% ceiling mirror
+    // convictionRisk() in margin-shadow.ts; the two must stay in step or the paper record
+    // stops predicting the live one.
+    let convTier: "low" | "med" | "high" | null = alert.conviction ?? null;
+    if (!convTier && (alert.side === "buy" || alert.side === "sell")) {
+      try {
+        convTier = (await convictionForAlert(alert.symbol, alert.side))?.tier ?? null;
+      } catch { convTier = null; }   // unscoreable → no bonus, never an assumed high
+    }
+    // A null tier means we could not see a signal behind this alert. Treat it as MED (the
+    // 1× base), never as high: an unverifiable alert must not earn a doubled position.
+    const convMult = convTier === "high" ? 2 : convTier === "low" ? 0.5 : 1;
+    const maxRiskPct = Math.min(6, baseRiskPct * convMult) / 100;
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     if (equity > 0 && riskDist > 0) {
       const notionalCap = (maxRiskPct * equity) / riskDist;
@@ -601,7 +627,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""} — ${descr ?? ""}`,
+      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""} — ${descr ?? ""}`,
     };
   } catch (e) {
     // An AddOrder that times out may still have been ACCEPTED — the request succeeded and

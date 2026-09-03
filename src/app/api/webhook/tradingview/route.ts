@@ -138,7 +138,14 @@ export async function POST(request: Request) {
   let markPrice: number | null = null;
   try { markPrice = await getKrakenPrice(symbol); } catch { markPrice = null; }
 
-  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note };
+  // Optional conviction override. Omitted (the normal case for a hand-drawn TradingView
+  // alert) the executor scores the coin itself with the same scorer the paper record uses.
+  // Anything unrecognised is dropped rather than guessed — an unknown string must not
+  // become "high" and double the position.
+  const convRaw = String(b.conviction ?? "").toLowerCase().trim();
+  const conviction = convRaw === "high" || convRaw === "med" || convRaw === "low"
+    ? (convRaw as "high" | "med" | "low") : undefined;
+  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note, conviction };
   const result = duplicate
     ? { executed: false, validated: false, note: "duplicate alert within 2m — logged, not executed" }
     : await executeAlert(alert);
