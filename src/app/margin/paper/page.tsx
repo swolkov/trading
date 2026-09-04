@@ -76,10 +76,9 @@ export default function PaperTradesPage() {
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           Live goes off the real Kraken account (~$5k), not a fantasy size. Dollar risk is always
           {" "}<span className="text-foreground/80">equity × 3%</span> (high conviction 2×, hard ceiling 6%).
-          A $5k book risking 3% six times a day has a theoretical full-win ceiling around
-          {" "}<span className="text-foreground/80">$900</span> — and only if every trade is a full win, which they are not.
-          Selective&apos;s current expectancy is tens of dollars per trade at this size. Thousands a day is a
-          {" "}<span className="text-foreground/80">larger account</span> problem (~$50k+ at the same 3%), not a reason to crank risk on $5k.
+          The quality long cut on paper is ~$300/trade at this size — that is thousands a week IF it holds
+          for 30+ trades and 7+ days, which is exactly what this page is measuring. Thousands a day at 3%
+          still needs a larger account (~$50k+). Do not crank risk on $5k to fake the daily number.
         </p>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           What grows is leverage cap, not risk %: <span className="text-foreground/80">2× below $10k</span> (now),
@@ -88,9 +87,10 @@ export default function PaperTradesPage() {
           Live stays unarmed until a sleeve prints <span className="text-foreground/80">REAL EDGE</span> (30+ resolved, net&gt;0 at live sizing, t≥2, 7+ days).
         </p>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          Auto paper now opens <span className="text-foreground/80">high-conviction breakouts only</span>.
-          Retired (no new entries; open trades still resolve): fast-tight, sweep-fade, scanner spray, selective-swing (the 5%/4d A/B handed the peak back).
-          Still running: selective, plus the two swing sleeves on 4h/1d as a gathering A/B on the same high setups.
+          Auto paper is the live-candidate sleeve only: <span className="text-foreground/80">high-conviction 5m/15m longs, not stretched</span>.
+          Shorts on this sleeve hit 17% and lost $3.2k — they no longer open. Stretched longs were a coin-flip — skipped.
+          1h/4h and both swing containers are paused (not the 3%/48h game). Retired: fast-tight, sweep-fade, scanner spray, selective-swing.
+          This is not &quot;always profitable.&quot; The quality long cut so far is 19 trades, 79% hit, ~$300 avg at $5k sizing — still one stop in five, and too few days to arm live.
         </p>
       </div>
 
@@ -99,7 +99,7 @@ export default function PaperTradesPage() {
         <div className="rounded-xl border border-border bg-card p-8 text-center">
           <p className="text-sm text-muted-foreground/60">No paper trades yet.</p>
           <p className="text-[11px] text-muted-foreground/40 mt-1">
-            The scanner still watches every coin. Paper opens only on high-conviction breakouts (selective, and the two swings on 4h/1d). They&apos;ll appear here and score themselves — check back soon.
+            The scanner still watches every coin. Paper opens only high-conviction 5m/15m longs that are not stretched. They&apos;ll appear here and score themselves — check back soon.
           </p>
         </div>
       )}
@@ -162,7 +162,7 @@ export default function PaperTradesPage() {
                 ))}
               </div>
               <p className="text-[10px] text-muted-foreground/40 mt-1.5">
-                If <span className="text-foreground/60">high</span> beats <span className="text-foreground/60">low</span> here over enough trades, conviction is a real edge worth sizing into. Auto paper now opens high only — this table still includes historical med/low from retired sleeves, which is why pooled high is not yet the whole story.
+                Auto paper now opens the quality long cut only (high, 5m/15m, not stretched). This table still includes historical shorts, stretched names, and retired sleeves — that drag is why pooled high is not the live candidate.
               </p>
             </div>
           )}

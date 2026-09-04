@@ -501,10 +501,10 @@ function strategyVerdict(source: string, resolved: number, net: number, tStat: n
 const STRATEGY_LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop — RETIRED Sep 4 (spray, not paying)",
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
-  "swing-lev": "Leveraged swing — high-conviction only from Sep 4 (5x, ≤4d)",
-  "swing-spot": "Spot swing — high-conviction only from Sep 4 (1x, ≤2w)",
+  "swing-lev": "Leveraged swing — PAUSED Sep 4 (not the live candidate)",
+  "swing-spot": "Spot swing — PAUSED Sep 4 (not the live candidate)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
-  selective: "Selective — high-conviction, 3% stop / 48h (5x)",
+  selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",
   "selective-swing": "Selective SWING — RETIRED Sep 4 (5%/4d give-back)",
   manual: "Manual alerts (yours)",
 };

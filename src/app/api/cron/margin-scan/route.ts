@@ -101,20 +101,23 @@ export async function GET(request: Request) {
   // fees. Awareness/paper only — nothing here places a real order. Toggle off with
   // kraken_shadow_autotrack="false".
   //
-  // Sep 4 2026 policy: HIGH CONVICTION ONLY. Med/low auto-paper is the fee-spray that
-  // sank scanner (45 res, t=−1.9, −$2.3k). The conviction FORMULA is unchanged (rewriting
-  // it would mix the only paying sample). The filter is who gets opened.
+  // Sep 4 2026 policy, tightened after the selective autopsy (59 resolved):
+  // HIGH CONVICTION LONGS on 5m/15m, not stretched. Med/low, shorts, 1h/4h/1d, and
+  // the retired sleeves do not auto-open. The conviction FORMULA is unchanged.
   //
-  // RETIRED — stop opening; exitParams stay so open trades resolve; scoreboard keeps the
-  // record as evidence. Do not re-add without a new thesis, not a reskin:
+  // Why longs only: selective buys 47 / 68% / +$6,595; sells 12 / 17% / −$3,187.
+  // Why skip stretched: 20 trades, 50%, −$54 — buying the RSI extreme is a coin-flip.
+  // Why 5m/15m: that's +$3,754 of the sleeve; 1h+4h is 12 trades −$346.
+  // Why not "always profitable": the quality long cut is 19 trades, 79%, +$302 avg —
+  // still one stop in five. Paper has to hold for 30+ trades and 7+ days before live.
+  //
+  // RETIRED — stop opening; exitParams stay so open trades resolve:
   //   'fast-tight'      Sep 1 — 2% stop, t=−4.2
   //   'sweep-fade'      Sep 3 — ICT/SMC fade, two cohorts, both losers
-  //   'scanner'         Sep 4 — wide 6% spray, 45 res, t=−1.9, −$2.3k (same pattern)
-  //   'selective-swing' Sep 4 — "give high-conviction more room" (5%/4d) A/B failed:
-  //                             22 res, t=−3.8, −$4.1k. Peak was real; the container
-  //                             handed it back. Don't wait for 30 on a t that bad.
-  // KEEP: 'selective' (only paying sleeve — not REAL EDGE yet). 'swing-lev' / 'swing-spot'
-  // still gathering; new entries are high-conviction-only so those samples get smarter.
+  //   'scanner'         Sep 4 — wide 6% spray, t=−2.0
+  //   'selective-swing' Sep 4 — 5%/4d A/B, t=−3.8, give-back
+  // PAUSED (not retired — sample too thin to call a loser, not the live candidate):
+  //   'swing-lev' / 'swing-spot' — gathering, slightly negative; 4h is not this container.
   const opened: { symbol: string; side: string; tier: string }[] = [];
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
@@ -127,7 +130,7 @@ export async function GET(request: Request) {
         if (!(s.price > 0)) continue;
         if (s.kind !== "breakout" && s.kind !== "breakdown") continue;
         const conv = scoreConviction(s, signals);
-        const plans = autoShadowPlans(s.kind, s.timeframe, conv.tier, lev);
+        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev);
         if (plans.length === 0) continue;
         const side: "buy" | "sell" = s.kind === "breakout" ? "buy" : "sell";
         for (const plan of plans) {
@@ -209,8 +212,8 @@ export async function GET(request: Request) {
       .map((o) => `• ${o.symbol} ${o.side.toUpperCase()} — ${o.tier} conviction`)
       .join("\n");
     await sendNotification(
-      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from high-conviction breakouts:\n${lines}\n` +
-      `High only — med/low no longer auto-open. Scored to a win/loss automatically. Paper only, no money moved.`,
+      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from high-conviction 5m/15m longs:\n${lines}\n` +
+      `Longs only, not stretched. Paper only, no money moved.`,
       "margin_results",
     );
   }

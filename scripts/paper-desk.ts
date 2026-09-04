@@ -7,10 +7,10 @@ const SIM_VERSION = "v2";
 const LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop — RETIRED Sep 4",
   "fast-tight": "Fast — tight 2% stop — RETIRED",
-  "swing-lev": "Leveraged swing — HC only from Sep 4",
-  "swing-spot": "Spot swing — HC only from Sep 4",
+  "swing-lev": "Leveraged swing — PAUSED Sep 4",
+  "swing-spot": "Spot swing — PAUSED Sep 4",
   "sweep-fade": "Liquidity-sweep fade — RETIRED",
-  selective: "Selective — high-conviction, 3% / 48h",
+  selective: "Selective — HC 5m/15m longs, 3%/48h",
   "selective-swing": "Selective SWING — RETIRED Sep 4",
   manual: "Manual alerts",
 };
@@ -130,7 +130,7 @@ async function main() {
      FROM tradingview_alerts WHERE shadow_status='resolved' AND sim_version='${SIM_VERSION}'
      GROUP BY COALESCE(conviction,'untagged')`,
   );
-  console.log("\nCONVICTION (resolved v2)");
+  console.log("\nCONVICTION (resolved v2, all sleeves — includes retired losers)");
   for (const t of tiers.sort((a, b) => Number(b.total) - Number(a.total))) {
     const n = Number(t.resolved);
     const wr = n ? `${((Number(t.wins) / n) * 100).toFixed(0)}%` : "—";
