@@ -76,9 +76,9 @@ export default function SystemHealthPage() {
     { label: "Trade sync", sub: "fills from Kraken ledger", age: ageInfo(hb.tradeSync, 90, 360) },
   ];
 
-  // The margin exec lock is only held while placing a real order; alarming if it outlives 120s TTL.
+  // The margin exec lock is only held while placing a real order; alarming if it outlives 330s TTL.
   const lockAgeMin = data.execLock.since ? (Date.now() - new Date(data.execLock.since).getTime()) / 60000 : 0;
-  const lockStuck = data.execLock.held && lockAgeMin > 3;
+  const lockStuck = data.execLock.held && lockAgeMin > 6;
 
   const switches = [
     { label: "Margin auto-trade", on: data.config.marginAuto, onText: "ARMED", offText: "tracked only" },
@@ -98,7 +98,7 @@ export default function SystemHealthPage() {
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
           <p className="text-sm font-bold text-red-500">EXEC LOCK STUCK</p>
           <p className="text-xs text-red-400 mt-1">
-            Held since {data.execLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 2m). A real-order run likely died mid-flight; the next call recovers it, but check Vercel logs if this persists.
+            Held since {data.execLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 5.5m). A real-order run likely died mid-flight; the next call recovers it, but check Vercel logs if this persists.
           </p>
         </div>
       )}

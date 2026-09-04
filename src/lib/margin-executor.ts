@@ -18,9 +18,12 @@
 //   5. kraken_margin_daily_loss_cap — today's margin loss beyond this blocks NEW ENTRIES
 //      (default $200). It never blocks a close — a kill switch must not stop a
 //      flattening order.
-//   6. Anti-stacking: an entry is refused when a position already exists on that pair in
-//      that direction (unless kraken_margin_allow_stacking="true"), and when
-//      kraken_margin_max_positions (default 3) are already open.
+//   6. Anti-stacking: an entry is refused when ANY position exists on that pair — either
+//      direction — and when kraken_margin_max_positions (default 3) are already open.
+//      Either direction matters because Kraken spot margin NETS FIFO: an opposing order
+//      does not open a second position, it reduces the existing one, which on a manual
+//      position means closing part of Spencer's book. ⚠️ kraken_margin_allow_stacking
+//      ="true" disables this, and therefore disables the manual-book boundary too.
 //   7. Every entry carries an attached stop-loss (conditional close) at half the
 //      liquidation cushion — and the guardian's naked-position guard (margin-watch step
 //      3c) VERIFIES that every bot position actually has one, placing it and paging if
@@ -31,12 +34,17 @@
 //      • kraken_margin_max_trades_per_day (default 6) — hard cap on entries/day.
 //      • kraken_margin_cooldown_min (default 30) — minimum minutes between entries, so
 //        a once-per-bar alert can't churn 280 trades/month.
-//      • kraken_margin_live_max_risk_pct (default 0.5, hard ceiling 2.0) — SIZE is capped
-//        so the stop-loss can never lose more than this % of equity; notional shrinks
-//        automatically. NOTE the `live_` in the name: this is deliberately NOT the paper
-//        experiment's kraken_margin_max_risk_pct (3%, ×2 on conviction), so arming can
-//        never silently inherit a research setting. Observed paper losing streak is 13 in
-//        a row: 0.5% costs 6% of the account, 3% costs 33%, 6% costs 55%.
+//      • kraken_margin_live_max_risk_pct (default 3, hard ceiling 6) — SIZE is capped so
+//        the stop-loss can never lose more than this % of equity; notional shrinks
+//        automatically. The `live_` prefix exists so live and paper are INDEPENDENTLY
+//        settable, not to force a different number — it defaults to the same 3% the paper
+//        sizer uses, which is the agreed policy. Total damage from a losing run is bounded
+//        by the drawdown breaker (layer 8a), not by this number; risk % sets how fast that
+//        bound is reached (6 losses at 3%, 33 at 0.5%).
+//        ⚠️ CONVICTION-SCALED, mirroring the paper record: high 2×, low 0.5×, clamped at
+//        6%. So a HIGH-conviction entry risks 6% and three consecutive such losses trip
+//        the 15% drawdown breaker. That is deliberate — flat sizing was measured to throw
+//        away the entire edge — but it is the fastest path to the breaker, by design.
 //      • kraken_margin_disarmed_dd — account drawdown circuit breaker (set by the
 //        guardian); while true, NO new entries (closes still allowed).
 //   9. MAKER ENTRIES — kraken_margin_maker_entries (default true) rests a post-only
@@ -47,9 +55,17 @@
 // Close orders are reduce_only so a stale read can never flip us into an opposite position.
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders } from "@/lib/kraken";
+import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
 import { pairMatchesSymbol, pairBase } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
+import { convictionForAlert } from "@/lib/margin-scanner";
+import {
+  EXEC_LOCK_TTL_MS,
+  failClosedOnEmptyPositions,
+  liveRiskFraction,
+  parseLiveRiskBasePct,
+  pairHasExposure,
+} from "@/lib/margin-live-risk";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -59,6 +75,10 @@ export interface AlertOrder {
   side: "buy" | "sell" | "close";
   leverage?: number;
   note?: string;
+  // Conviction tier for this setup. Supply it to override; leave it undefined and the
+  // executor scores the coin itself with the SAME scorer the paper record uses. Sizing
+  // scales with it exactly as paper does — see convictionRiskLive().
+  conviction?: "low" | "med" | "high";
 }
 
 export interface ExecResult {
@@ -87,7 +107,13 @@ async function cfgStrict(key: string): Promise<string | null> {
 // discretionary book on the same pair. We therefore record the txid of every entry we place;
 // a position's key in OpenPositions is its opening order's txid, so that is the join.
 const BOT_TXIDS_KEY = "kraken_margin_bot_txids";
-const BOT_TXID_TTL_MS = 30 * 24 * 3600_000;   // prune after 30 days — positions never live that long
+// Prune generously. A pruned entry does not merely mean "closes skip this position" — the
+// close path's stop sweep would still match its stop by userref and cancel it, while 3c no
+// longer recognises the position to re-protect it. Forgetting an entry therefore STRIPS a
+// live position's stop. Rollover economics make a 30-day margin hold implausible, but the
+// cost of being wrong is unbounded and the cost of a longer window is a few hundred bytes.
+const BOT_TXID_TTL_MS = 180 * 24 * 3600_000;
+const BOT_TXID_MAX = 2000;
 
 async function recordBotEntry(txid: string, pair: string): Promise<void> {
   try {
@@ -98,8 +124,8 @@ async function recordBotEntry(txid: string, pair: string): Promise<void> {
     next.push({ txid, pair, ts: Date.now() });
     await prisma.agentConfig.upsert({
       where: { key: BOT_TXIDS_KEY },
-      update: { value: JSON.stringify(next.slice(-200)) },
-      create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-200)) },
+      update: { value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
+      create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
     });
   } catch (e) {
     // NOT best-effort in consequence: an unrecorded position is invisible to BOTH the close
@@ -168,24 +194,37 @@ async function bumpDayState(prev: DayState): Promise<void> {
 // compare-and-swap (ISO strings compare in time order). Fails CLOSED: if it can't be
 // acquired, the alert is refused rather than risking a concurrent double-entry.
 const EXEC_LOCK_KEY = "kraken_margin_exec_lock";
-// The entry critical section makes ~8 sequential Kraken calls (each up to 15s) under this
-// lock, so the TTL must comfortably exceed the worst-case section time — otherwise the lock
-// could be stolen while an invocation still holds it, defeating the only guard against a
-// truly concurrent double-entry. 120s clears the summed call timeouts with headroom.
-const EXEC_LOCK_TTL_MS = 120_000;
-async function acquireExecLock(): Promise<boolean> {
+// ⚠️ THE TTL MUST EXCEED THE ROUTE'S maxDuration, or the invariant inverts. The lock's
+// whole job is that a holder is provably dead before its lock can be stolen. The webhook's
+// maxDuration is 300s (raised so a slow Kraken run can't be killed mid-AddOrder), so a
+// holder can legitimately still be alive at 120s — at which point a second alert steals the
+// lock, reads the same day-state, sees no position yet, and both place. Two entries, double
+// the intended risk. 330s > 300s restores "expired means dead".
+// Each holder writes a unique token, so release can only clear ITS OWN lock. With a plain
+// blank-on-release, a holder that overran would wipe the lock a later invocation legitimately
+// holds, and the next alert would walk straight in.
+function lockToken(): string {
+  return `${new Date().toISOString()}#${Math.random().toString(36).slice(2, 10)}`;
+}
+async function acquireExecLock(): Promise<string | null> {
   await prisma.agentConfig.upsert({
     where: { key: EXEC_LOCK_KEY }, update: {}, create: { key: EXEC_LOCK_KEY, value: "" },
   }).catch(() => {});
   const cutoff = new Date(Date.now() - EXEC_LOCK_TTL_MS).toISOString();
+  const token = lockToken();
   const r = await prisma.agentConfig.updateMany({
     where: { key: EXEC_LOCK_KEY, OR: [{ value: "" }, { value: { lt: cutoff } }] },
-    data: { value: new Date().toISOString() },
+    data: { value: token },
   }).catch(() => ({ count: 0 }));
-  return r.count === 1;
+  return r.count === 1 ? token : null;
 }
-async function releaseExecLock(): Promise<void> {
-  await prisma.agentConfig.update({ where: { key: EXEC_LOCK_KEY }, data: { value: "" } }).catch(() => {});
+async function releaseExecLock(token: string | null): Promise<void> {
+  if (!token) return;
+  // CAS release: only clears the lock if we still hold it.
+  await prisma.agentConfig.updateMany({
+    where: { key: EXEC_LOCK_KEY, value: token },
+    data: { value: "" },
+  }).catch(() => {});
 }
 
 export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
@@ -212,7 +251,30 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // wrong one silently matches nothing and turns every close into a no-op — which is
       // more dangerous than the over-closing it was meant to prevent.
       const ours = await botTxids();
-      const closeAll = (await cfg("kraken_margin_close_all_positions")) === "true";
+      // ONE-SHOT AND PAIR-SCOPED. Sticky, an emergency flag set once would silently flatten
+      // Spencer's manual book on every later close for that pair. Global, it would be burned
+      // by whichever close alert happened to land first — he sets it to free a stuck ETH
+      // position, a routine BTC close consumes it, and ETH is still open while his manual
+      // BTC book just got flattened. So the value names the symbol it authorises
+      // ("ETH/USD", or "ALL"), and it is consumed ONLY on a matching pair that actually has
+      // something to close.
+      const closeAllRaw = (await cfg("kraken_margin_close_all_positions")) ?? "";
+      const closeAllTarget = closeAllRaw.trim().toUpperCase();
+      const closeAll = all.length > 0 && (closeAllTarget === "ALL" || closeAllTarget === alert.symbol.toUpperCase()
+        // "true" kept for backward compatibility, but it is pair-scoped like the rest.
+        || (closeAllTarget === "TRUE"));
+      if (closeAll) {
+        const cleared = await prisma.agentConfig.updateMany({
+          where: { key: "kraken_margin_close_all_positions", value: closeAllRaw },
+          data: { value: "" },
+        }).catch(() => ({ count: 0 }));
+        if (cleared.count !== 1) {
+          await sendNotification(
+            `⚠️ Could not clear kraken_margin_close_all_positions after using it on ${pair} — it is STILL ARMED and will flatten manual positions on the next close. Clear it by hand.`,
+            "margin_urgent",
+          ).catch(() => {});
+        }
+      }
       const adoptRaw = (await cfg("kraken_margin_adopt_txids")) ?? "";
       const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
       const isOurs = (p: { ordertxid: string; id: string }) =>
@@ -232,6 +294,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       }
       if (skipped.length > 0) {
         pending.push(`⚠️ Close on ${pair}: flattened ${positions.length} bot position(s), LEFT ${skipped.length} manual position(s) alone (ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}).`);
+      }
+      if (closeAll) {
+        const notOurs = all.filter((p) => !isOurs(p)).length;
+        pending.push(`⚠️ close_all_positions was ON: flattened ALL ${positions.length} position(s) on ${pair}${notOurs ? `, INCLUDING ${notOurs} that were NOT the bot's` : ""}. The flag has been cleared — set it again if you need it.`);
       }
       // A real position gets a REAL close even in validate-only mode: validate exists to
       // stop us opening risk, not to stop us shedding it. Announce it so it is never a
@@ -263,6 +329,40 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         const res = await krakenPrivate("AddOrder", params);
         const txid = (res.txid as string[] | undefined)?.[0];
         if (txid) txids.push(txid);
+      }
+      // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY. Kraken's attached close[] cannot be
+      // reduce_only (the API has no such parameter), so a stop left resting after the
+      // position is gone will, if it triggers, open a BRAND NEW leveraged position in the
+      // opposite direction — unowned (its ordertxid is the stop's, not in the ledger),
+      // therefore invisible to this close path and to the naked-position guard, and with
+      // no stop of its own. The guardian's orphan sweep needs two consecutive runs, so it
+      // would leave a 5-10 minute window in which an ordinary 1.5% move flips a closed
+      // trade into an unmonitored short. Scoped to our userref, so manual orders are safe.
+      try {
+        const resting = (await krakenOpenOrders()).filter((o) =>
+          o.userref === MARGIN_USERREF &&
+          o.ordertype.includes("stop") &&
+          pairBase(o.pair) === pairBase(pair) &&
+          positions.some((p) => (p.side === "long" ? "sell" : "buy") === o.side));
+        // Count real successes: a swallowed cancel failure would report "cancelled" while
+        // the stop still rests, carrying the exact flip risk this sweep exists to remove.
+        const failed: string[] = [];
+        let cancelled = 0;
+        for (const o of resting) {
+          try { await krakenCancelOrder(o.txid); cancelled++; } catch { failed.push(o.txid); }
+        }
+        if (cancelled) pending.push(`🧹 Cancelled ${cancelled} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
+        if (failed.length) {
+          await sendNotification(
+            `🚨 Could NOT cancel ${failed.length} stop(s) on ${pair} after closing (${failed.join(", ")}). A stranded stop can OPEN a new leveraged position if it triggers. Cancel them on Kraken now.`,
+            "margin_urgent",
+          ).catch(() => {});
+        }
+      } catch (err) {
+        await sendNotification(
+          `⚠️ Closed ${pair} but could NOT sweep its resting stops — a stranded stop can open a new position if it triggers. Check Kraken. ${String(err).slice(0, 140)}`,
+          "margin_urgent",
+        ).catch(() => {});
       }
       for (const msg of pending) await sendNotification(msg, "margin_urgent").catch(() => {});
       return {
@@ -304,7 +404,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
   // Serialize entries: without this, two alerts landing together both read the same
   // day-state and both place an order. Fails closed — a lock we can't get = no entry.
-  if (!(await acquireExecLock())) {
+  const lockToken_ = await acquireExecLock();
+  if (!lockToken_) {
     return { executed: false, validated: false, note: "another entry is in progress — skipped (no concurrent entries)" };
   }
   try {
@@ -376,12 +477,37 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       return { executed: false, validated: false, note: `entry refused: ${exposureCount} positions+resting orders already (max ${maxPositions})` };
     }
     const allowStacking = (await cfg("kraken_margin_allow_stacking")) === "true";
-    const wantSide = alert.side === "buy" ? "long" : "short";
-    if (!allowStacking && (
-      openPositions.some((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === wantSide) ||
-      ourEntryOrders.some((o) => pairMatchesSymbol(o.pair, alert.symbol) && (o.side === "buy" ? "long" : "short") === wantSide)
+    // ⚠️ EITHER DIRECTION, not just the same one. Kraken spot margin nets FIFO — it does
+    // not hold a long and a short on one pair. So an OPPOSING order does not open a new
+    // position: it REDUCES the existing one. If that existing position is Spencer's
+    // hand-opened long, a bot `sell` alert closes part of HIS position at the bot's size,
+    // realising his P&L on a trade he never authorised — the manual-book boundary breached
+    // through the entry path rather than the close path. It also leaves the entry's
+    // attached stop protecting nothing, and no position ever appears under our ordertxid.
+    // A genuine reversal must be an explicit close followed by an entry, never netting.
+    // The netting guard below is only as good as this read. 3b in the guardian refuses to
+    // act on an empty OpenPositions when margin is in use, because Kraken returns an empty
+    // collection during degradation — and here an empty read means "no conflict", which
+    // waves through the exact opposing entry that would net against Spencer's position.
+    // Fail closed on the same signal.
+    if (failClosedOnEmptyPositions(openPositions.length, health.marginUsedRaw)) {
+      return { executed: false, validated: false, note: "positions read empty while margin is in use (or unreadable) — failing closed rather than risk netting against an existing position" };
+    }
+    const conflicting = openPositions.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
+    if (!allowStacking && pairHasExposure(
+      alert.symbol,
+      openPositions.map((p) => p.pair),
+      ourEntryOrders.map((o) => o.pair),
+      pairMatchesSymbol,
     )) {
-      return { executed: false, validated: false, note: `entry refused: already ${wantSide} ${alert.symbol} (position or resting order; stacking off)` };
+      const owned = await botTxids();
+      const dirs = conflicting.map((p) => p.side).join("/") || "resting order";
+      const theirs = conflicting.filter((p) => !owned.has(p.ordertxid)).length;
+      return {
+        executed: false,
+        validated: false,
+        note: `entry refused: ${alert.symbol} already has exposure (${dirs}${theirs ? `, ${theirs} NOT the bot's` : ""}) — an opposing order would net against it, not open a new position`,
+      };
     }
 
     // Attached protective exit + risk-based sizing, both computed from the ACTUAL entry
@@ -415,16 +541,32 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
     // RISK-BASED SIZING: notional capped so a stop-out loses ≤ max_risk_pct of equity.
     //
-    // ⚠️ LIVE RISK HAS ITS OWN KEY, deliberately separate from the paper experiment's.
-    // `kraken_margin_max_risk_pct` is read by the PAPER sizer too, and it is set high (3%,
-    // doubled to 6% on high conviction) so paper dollars look like real trading. Sharing
-    // one key would mean the day this is armed, live silently inherits the paper research
-    // setting. The observed paper losing streak is 13 in a row — at 3% that is a −33%
-    // account, at 6% a −55% account (which needs +124% to recover). So live reads
-    // `kraken_margin_live_max_risk_pct` and defaults to 0.5%: a 13-loss streak costs 6%.
-    // Raise it deliberately, in steps, only after live fills have proven out.
+    // LIVE RISK HAS ITS OWN KEY so paper and live can be tuned independently — but it
+    // DEFAULTS TO THE SAME 3% the paper sizer uses, because that is the agreed policy:
+    // the paper sizer was built to mirror the live executor, and 3% is the level this
+    // operation has run for a long time (futures used 3-8%).
+    //
+    // The separate key exists to prevent a silent COUPLING, not to impose a lower number.
+    // ⚠️ An earlier version of this comment argued for 0.5% off a "13 consecutive losses"
+    // figure. That figure was wrong twice over: it pooled six strategies including the two
+    // that were retired (the strategy we would actually arm shows 0-3), and it ignored the
+    // drawdown breaker entirely. The guardian halts entries at
+    // kraken_margin_max_drawdown_pct (15%) and now stays halted pending review, so the
+    // damage from ANY streak is bounded near 15-17% at every risk level in this range —
+    // 3% simply reaches that bound in 6 losses instead of 33. Risk level sets the SPEED of
+    // the stop, not the size of the loss. Choosing it is Spencer's call, not the code's.
+    // Ceiling 6% mirrors the paper conviction ceiling: it blocks catastrophe, not policy.
     let notional = perTrade * leverage;
-    const maxRiskPct = Math.min(2, Math.max(0.1, await cfgNum("kraken_margin_live_max_risk_pct", 0.5))) / 100;
+    const baseRiskPct = parseLiveRiskBasePct(await cfgNum("kraken_margin_live_max_risk_pct", 3));
+    // CONVICTION-SCALED, exactly as the paper record is. Shared with the scoreboard via
+    // margin-live-risk.ts so the two cannot drift. Unscoreable → 1× (med), never high.
+    let convTier: "low" | "med" | "high" | null = alert.conviction ?? null;
+    if (!convTier && (alert.side === "buy" || alert.side === "sell")) {
+      try {
+        convTier = (await convictionForAlert(alert.symbol, alert.side))?.tier ?? null;
+      } catch { convTier = null; }
+    }
+    const maxRiskPct = liveRiskFraction(baseRiskPct, convTier);
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     if (equity > 0 && riskDist > 0) {
       const notionalCap = (maxRiskPct * equity) / riskDist;
@@ -484,7 +626,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""} — ${descr ?? ""}`,
+      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""} — ${descr ?? ""}`,
     };
   } catch (e) {
     // An AddOrder that times out may still have been ACCEPTED — the request succeeded and
@@ -511,6 +653,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     } catch { /* best-effort confirmation only */ }
     return { executed: false, validated: validate, note: `order failed: ${e}` };
   } finally {
-    await releaseExecLock();
+    await releaseExecLock(lockToken_);
   }
 }

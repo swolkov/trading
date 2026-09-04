@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { execLockHeldSince } from "@/lib/margin-live-risk";
 
 // System-health API for the Kraken MARGIN era. The spot trend bot was retired Aug 31 2026, so
 // this monitors the machinery that's actually live: the margin scanner + guardian crons, trade
@@ -19,9 +20,10 @@ export async function GET() {
     const c: Record<string, string> = {};
     for (const row of configs) c[row.key] = row.value;
 
-    // Margin executor lock: "" = released (healthy); a timestamp = held since then (only while
-    // placing a real order). A held lock older than its 120s TTL means a run died mid-flight.
+    // Margin executor lock: "" = released; `${iso}#token` = held. Older than 330s TTL
+    // means a run died mid-flight (webhook maxDuration is 300s; lock must outlive it).
     const lock = c["kraken_margin_exec_lock"];
+    const lockSince = execLockHeldSince(lock);
     const lockHeld = Boolean(lock && lock !== "");
 
     return Response.json({
@@ -38,7 +40,7 @@ export async function GET() {
         shadowAutotrack: c["kraken_shadow_autotrack"] !== "false",        // default ON
         drawdownDisarmed: c["kraken_margin_disarmed_dd"] === "true",
       },
-      execLock: { held: lockHeld, since: lockHeld ? lock : null },
+      execLock: { held: lockHeld, since: lockHeld ? lockSince : null },
     });
   } catch (error) {
     console.error("[/api/command]", error);

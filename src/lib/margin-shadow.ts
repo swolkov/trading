@@ -10,6 +10,12 @@
 import { prisma } from "@/lib/db";
 import { pairBase } from "@/lib/kraken-pairs";
 import { getKrakenOHLC } from "@/lib/kraken-margin";
+import {
+  LIVE_RISK_CEILING_PCT,
+  LIVE_RISK_DEFAULT_PCT,
+  convictionMultiplier,
+  parseLiveRiskBasePct,
+} from "@/lib/margin-live-risk";
 
 // FEE MODEL — an honest ESTIMATE, not exact truth (that's the real scoreboard, which
 // reads actual fills+fees from Kraken's ledger). Modeled: maker entry + taker exit on
@@ -155,10 +161,9 @@ export function positionNotional(source: string | null, lev: number, entry: numb
 // still has a HARD-capped max loss (never the 30%-of-account gamble). high=2×, low=0.5×, else 1×,
 // applied to the base max_risk_pct and clamped to a 6% ceiling. This is the pro version of
 // "size up on your best calls," and the fee-drag/scoreboard shows whether it pays.
-const RISK_CEILING = 0.06;
+const RISK_CEILING = LIVE_RISK_CEILING_PCT / 100;
 function convictionRisk(conviction: string | null, baseRiskPct: number): number {
-  const mult = conviction === "high" ? 2 : conviction === "low" ? 0.5 : 1;
-  return Math.min(RISK_CEILING, baseRiskPct * mult);
+  return Math.min(RISK_CEILING, baseRiskPct * convictionMultiplier(conviction));
 }
 
 // ⭐ WHAT THESE TRADES WOULD BE WORTH AS THE LIVE EXECUTOR WOULD SIZE THEM.
@@ -173,14 +178,15 @@ function convictionRisk(conviction: string | null, baseRiskPct: number): number 
 async function liveRiskParams(): Promise<number> {
   const v = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_max_risk_pct" } })
     .then((r: { value?: string | null } | null) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
-  return Number.isFinite(v) && v > 0 ? Math.min(6, v) : 3;   // mirrors the executor's default + ceiling
+  return parseLiveRiskBasePct(Number.isFinite(v) ? v : LIVE_RISK_DEFAULT_PCT);
 }
 
 // Reference account + max-risk for paper sizing (config-driven; defaults ≈ Spencer's account so
 // the paper dollars are realistic). kraken_shadow_ref_equity and kraken_margin_max_risk_pct.
-// ⚠️ PAPER ONLY. The live executor reads kraken_margin_live_max_risk_pct (default 0.5%)
-// precisely so this research setting — 3%, doubled to 6% on high conviction — can never
-// become the live risk budget by accident on the day the executor is armed.
+// ⚠️ PAPER ONLY. The live executor reads kraken_margin_live_max_risk_pct (default 3%,
+// conviction-scaled, 6% ceiling) via the same margin-live-risk.ts helpers so paper and
+// live cannot silently disagree. The separate key still exists so the two can be tuned
+// independently if you ever want a different live budget.
 async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }> {
   const eq = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_ref_equity" } })
     .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);

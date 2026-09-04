@@ -20,7 +20,13 @@ import { SIM_VERSION, ensureShadowColumns } from "@/lib/margin-shadow";
 // DB-backed rate limit (survives serverless scale-out) → replay dedupe (an identical
 // alert within 2 minutes is logged but NOT executed — TradingView retries on timeout,
 // and a retry must never become a second real order).
-export const maxDuration = 60;
+// 300, not 60: executeAlert makes up to ~8 sequential Kraken calls (15s timeout each) plus
+// this route's own price read, and the exec lock budgets 330s for that. At 60s a slow
+// Kraken run could be killed with AddOrder already sent — leaving a REAL position that was
+// never recorded in the ownership ledger, never counted against the daily cap, and never
+// paged, because the recording, the counter and the catch-block exposure check all run
+// after AddOrder returns.
+export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 const ALERTS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS tradingview_alerts (
@@ -120,16 +126,26 @@ export async function POST(request: Request) {
     duplicate = Number(dupes) > 0;
   } catch (e) {
     // If the guard itself is unreadable, treat the alert as a duplicate: log it, do
-    // not trade on it. Fail closed.
+    // not trade on it. Fail closed — but NEVER for a close. "Fail closed" means "add no
+    // risk", and dropping a close does the opposite: it strands a live position while
+    // Slack reports the harmless-sounding "duplicate alert". A repeated close is safe
+    // anyway (reduce_only makes it idempotent), so closes ride through a DB hiccup.
     console.error("[/api/webhook/tradingview] guard failed", e);
-    duplicate = true;
+    duplicate = side !== "close";
   }
 
   // Price the alert at the live market so tracked-mode alerts can be scored honestly.
   let markPrice: number | null = null;
   try { markPrice = await getKrakenPrice(symbol); } catch { markPrice = null; }
 
-  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note };
+  // Optional conviction override. Omitted (the normal case for a hand-drawn TradingView
+  // alert) the executor scores the coin itself with the same scorer the paper record uses.
+  // Anything unrecognised is dropped rather than guessed — an unknown string must not
+  // become "high" and double the position.
+  const convRaw = String(b.conviction ?? "").toLowerCase().trim();
+  const conviction = convRaw === "high" || convRaw === "med" || convRaw === "low"
+    ? (convRaw as "high" | "med" | "low") : undefined;
+  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note, conviction };
   const result = duplicate
     ? { executed: false, validated: false, note: "duplicate alert within 2m — logged, not executed" }
     : await executeAlert(alert);
