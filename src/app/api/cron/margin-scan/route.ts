@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
 import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
+import { autoShadowPlans } from "@/lib/margin-auto-plans";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -96,14 +97,24 @@ export async function GET(request: Request) {
     await sendNotification(`🔎 Margin scan — ${fresh.length} new signal${fresh.length > 1 ? "s" : ""}:\n${lines}${more}`, "margin_signals");
   }
 
-  // AUTO-SHADOW: turn the scanner's DIRECTIONAL breakouts into paper trades so the
-  // scoreboard fills itself — a defined, consistent strategy ("trade scanner breakouts
-  // with managed exits") scored on real prices + honest fees, no manual alerts needed.
-  // Only breakout→buy / breakdown→sell (a coherent momentum thesis); RSI/volume/near-
-  // extreme signals are context, not entries. One open auto-trade per coin at a time so
-  // it can't stack. Awareness/paper only — nothing here places a real order; these rows
-  // land with executed=false and are scored by evaluateShadowSignals exactly like a
-  // tracked TradingView alert. Toggle off with kraken_shadow_autotrack="false".
+  // AUTO-SHADOW: directional breakouts → paper trades, scored on real prices + honest
+  // fees. Awareness/paper only — nothing here places a real order. Toggle off with
+  // kraken_shadow_autotrack="false".
+  //
+  // Sep 4 2026 policy: HIGH CONVICTION ONLY. Med/low auto-paper is the fee-spray that
+  // sank scanner (45 res, t=−1.9, −$2.3k). The conviction FORMULA is unchanged (rewriting
+  // it would mix the only paying sample). The filter is who gets opened.
+  //
+  // RETIRED — stop opening; exitParams stay so open trades resolve; scoreboard keeps the
+  // record as evidence. Do not re-add without a new thesis, not a reskin:
+  //   'fast-tight'      Sep 1 — 2% stop, t=−4.2
+  //   'sweep-fade'      Sep 3 — ICT/SMC fade, two cohorts, both losers
+  //   'scanner'         Sep 4 — wide 6% spray, 45 res, t=−1.9, −$2.3k (same pattern)
+  //   'selective-swing' Sep 4 — "give high-conviction more room" (5%/4d) A/B failed:
+  //                             22 res, t=−3.8, −$4.1k. Peak was real; the container
+  //                             handed it back. Don't wait for 30 on a t that bad.
+  // KEEP: 'selective' (only paying sleeve — not REAL EDGE yet). 'swing-lev' / 'swing-spot'
+  // still gathering; new entries are high-conviction-only so those samples get smarter.
   const opened: { symbol: string; side: string; tier: string }[] = [];
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
@@ -113,44 +124,12 @@ export async function GET(request: Request) {
       // ensureShadowColumns creates the table AND the shadow_*/conviction columns read below.
       await ensureShadowColumns();
       for (const s of fresh) {
-        let side: "buy" | "sell" | null = null;
-        let plans: { source: string; lev: number }[] = [];
-        const higher = s.timeframe === "4h" || s.timeframe === "1d";
-        if (s.kind === "breakout" || s.kind === "breakdown") {
-          // Momentum. Intraday breaks → fast (wide 6% stop). Higher-TF breaks → the two
-          // swings (leveraged vs spot). Each strategy applies its own exit profile.
-          // 'fast-tight' (2% stop) RETIRED Sep 1 2026 by verdict: 32 resolved, net −$4.1k,
-          // t=−4.2 — statistically a loser (tight stops + high frequency = fee/whipsaw bleed).
-          // Its exit profile stays in exitParams so already-open trades resolve and its
-          // record remains on the scoreboard as evidence. Do not re-add without a new thesis.
-          side = s.kind === "breakout" ? "buy" : "sell";
-          plans = higher
-            ? [{ source: "swing-lev", lev }, { source: "swing-spot", lev: 1 }]
-            : [{ source: "scanner", lev }];
-        }
-        // 'sweep-fade' (the ICT/SMC liquidity-sweep test) RETIRED Sep 3 2026 by verdict,
-        // on BOTH measurement cohorts independently: v1 78 resolved, net −$3.9k, t=−3.4;
-        // v2 44 resolved, net −$4.2k, t=−6.0. 122 trades, two simulators, same answer —
-        // fading swept levels does not pay on crypto margin either. This closes the SMC
-        // question that futures already answered (see the SMC-is-a-coin-flip finding):
-        // liq-sweep signals are still SCANNED and logged as context, they just no longer
-        // open paper trades. Do not re-add without a genuinely new thesis, not a reskin.
-        if (!side || plans.length === 0 || !(s.price > 0)) continue;
-        // Conviction from confluence across ALL signals this run (not just fresh) — how many
-        // independent things agree. Tested, not assumed. Same for each plan.
+        if (!(s.price > 0)) continue;
+        if (s.kind !== "breakout" && s.kind !== "breakdown") continue;
         const conv = scoreConviction(s, signals);
-        // SELECTIVE — only the HIGHEST-conviction breakouts (the "really good ones"). Far fewer
-        // entries → far less fee drag, so the small greens survive. The fee-drag view will show
-        // whether trading ONLY the best beats trading everything, at Spencer's real fees — the
-        // exact "fewer, better trades vs 20-30/day" question. Momentum only, not sweeps.
-        // Both run on the SAME high-conviction entries — an A/B on the exit container, not
-        // the signal. 'selective' is the 3%-stop/48h original; 'selective-swing' gives the
-        // identical setup swing room (5%/4d) because the Sep 3 conviction data showed these
-        // setups average a +9.4% PEAK move while the tight version was still losing money.
-        if ((s.kind === "breakout" || s.kind === "breakdown") && conv.tier === "high") {
-          plans.push({ source: "selective", lev });
-          plans.push({ source: "selective-swing", lev });
-        }
+        const plans = autoShadowPlans(s.kind, s.timeframe, conv.tier, lev);
+        if (plans.length === 0) continue;
+        const side: "buy" | "sell" = s.kind === "breakout" ? "buy" : "sell";
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.
           // Cohort-scoped: a winding-down v1 trade must not block the v2 cohort's first
@@ -230,8 +209,8 @@ export async function GET(request: Request) {
       .map((o) => `• ${o.symbol} ${o.side.toUpperCase()} — ${o.tier} conviction`)
       .join("\n");
     await sendNotification(
-      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from scanner breakouts:\n${lines}\n` +
-      `Scored to a win/loss automatically — conviction = how many signals agree. Paper only, no money moved.`,
+      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from high-conviction breakouts:\n${lines}\n` +
+      `High only — med/low no longer auto-open. Scored to a win/loss automatically. Paper only, no money moved.`,
       "margin_results",
     );
   }

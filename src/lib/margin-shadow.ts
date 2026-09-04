@@ -15,6 +15,7 @@ import {
   liveRiskFraction,
   parseLiveRiskBasePct,
 } from "@/lib/margin-live-risk";
+import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 
 // FEE MODEL — an honest ESTIMATE, not exact truth (that's the real scoreboard, which
 // reads actual fills+fees from Kraken's ledger). Modeled: maker entry + taker exit on
@@ -123,7 +124,8 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   if (source === "swing-lev") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
-  // the wide 6% control. Winner keeps trading, loser gets retired once the record is clear.
+  // the wide 6% control. BOTH RETIRED (Sep 1 / Sep 4). Exit profiles stay so already-open
+  // trades resolve and the record remains on the scoreboard as evidence.
   if (source === "fast-tight") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.02, carry: lev > 1 };
   // Liquidity-sweep fade — mean-reversion: stop just beyond the swept wick (2.5%), quick
   // resolution (a real reversal moves fast; if it doesn't revert, the "sweep" was a true break).
@@ -131,13 +133,10 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // Selective (high-conviction only): a better setup earns a bit more room (3% stop) + the
   // managed exit banks the green (breakeven at +1R, then trails). Fewer of these = tiny fee drag.
   if (source === "selective") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
-  // SELECTIVE-SWING — the direct test of the Sep 3 conviction finding. Across 71 v2 trades
-  // conviction was monotonically predictive on a size-neutral basis (high +1.58% avg gross
-  // move and +9.4% avg PEAK, med −1.39%, low −2.05%), yet `selective` still lost money. The
-  // hypothesis: the SIGNAL is good and the CONTAINER is wrong — a 3% stop and a 48h clock
-  // cage a setup whose average peak is 9%. So: same high-conviction entries, swing room and
-  // time (5% stop, 4 days). Its own `source`, so it starts at zero and contaminates no
-  // existing sample; if it beats `selective` head-to-head, the finding is real.
+  // SELECTIVE-SWING — RETIRED Sep 4 2026. Direct test of the Sep 3 conviction finding
+  // (high setups average a +9.4% peak). Same high-conviction entries as `selective`,
+  // swing room (5% stop / 4d). Result: 22 resolved, t=−3.8, −$4.1k — the peak was real
+  // and the container handed it back. Exit profile stays for open trades.
   if (source === "selective-swing") return { maxHoldH: 24 * 4, oneR: entry * 0.05, carry: lev > 1 };
   return { maxHoldH: MAX_HOLD_H, oneR: entry * (0.3 / lev), carry: lev > 1 };
 }
@@ -487,7 +486,10 @@ export interface StrategyStat {
 // The t-stat assumes independent trades, but crypto coins move together — 30 wins resolved in
 // one correlated day are closer to ONE bet than thirty. So REAL EDGE additionally requires the
 // resolutions to span 7+ distinct days; until then a significant result stays "promising".
-function strategyVerdict(resolved: number, net: number, tStat: number | null, days: number): string {
+function strategyVerdict(source: string, resolved: number, net: number, tStat: number | null, days: number): string {
+  if (RETIRED_AUTO_SOURCES.has(source)) {
+    return net <= 0 ? "retired — not paying" : "retired — no new entries";
+  }
   if (resolved < 30) return `gathering (${resolved}/30)`;
   if (net <= 0) return "not paying";
   if (tStat != null && tStat >= 2) {
@@ -497,13 +499,13 @@ function strategyVerdict(resolved: number, net: number, tStat: number | null, da
   return "promising (could be luck)";
 }
 const STRATEGY_LABELS: Record<string, string> = {
-  scanner: "Fast — wide 6% stop (5x)",
+  scanner: "Fast — wide 6% stop — RETIRED Sep 4 (spray, not paying)",
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
-  "swing-lev": "Leveraged swing (5x, ≤4d)",
-  "swing-spot": "Spot swing (1x, ≤2w)",
+  "swing-lev": "Leveraged swing — high-conviction only from Sep 4 (5x, ≤4d)",
+  "swing-spot": "Spot swing — high-conviction only from Sep 4 (1x, ≤2w)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction, 3% stop / 48h (5x)",
-  "selective-swing": "Selective SWING — high-conviction, 5% stop / 4d (5x)",
+  "selective-swing": "Selective SWING — RETIRED Sep 4 (5%/4d give-back)",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
@@ -592,7 +594,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         paperTStat,
         // Gate on the LIVE net and the LIVE t-stat — the money that would actually be made,
         // judged at the significance the live sizing would actually achieve.
-        verdict: strategyVerdict(resolved, liveNet, tStat, Number(r.days)),
+        verdict: strategyVerdict(r.source, resolved, liveNet, tStat, Number(r.days)),
       };
     })
     .sort((a, b) => b.resolved - a.resolved);

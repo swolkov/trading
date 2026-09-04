@@ -2,10 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pairMatchesSymbol } from "../src/lib/kraken-pairs";
 import {
+  DEFAULT_MAX_LEVERAGE,
   EXEC_LOCK_TTL_MS,
+  LEV_CAP_AT_5K,
+  LEV_CAP_AT_10K,
+  LEV_CAP_AT_20K,
   convictionMultiplier,
+  effectiveMaxLeverage,
   execLockHeldSince,
   failClosedOnEmptyPositions,
+  leverageCapForEquity,
   liveRiskFraction,
   liveRiskPct,
   pairHasExposure,
@@ -66,4 +72,31 @@ test("paper fraction path equals executor percent path (no silent drift)", () =>
   assert.equal(liveRiskFraction(0.03 * 100, "low"), 0.015);
   assert.equal(liveRiskFraction(0.03 * 100, null), 0.03);
   assert.equal(liveRiskFraction(9, "high"), 0.06); // ceiling on the base, then on the product
+});
+
+test("leverage cap grows with equity; risk % is a different knob", () => {
+  assert.equal(leverageCapForEquity(5_000), LEV_CAP_AT_5K);
+  assert.equal(leverageCapForEquity(9_999), LEV_CAP_AT_5K);
+  assert.equal(leverageCapForEquity(10_000), LEV_CAP_AT_10K);
+  assert.equal(leverageCapForEquity(19_999), LEV_CAP_AT_10K);
+  assert.equal(leverageCapForEquity(20_000), LEV_CAP_AT_20K);
+  assert.equal(leverageCapForEquity(50_000), LEV_CAP_AT_20K);
+  // Missing/garbage equity fails closed to the $5k rung, never "treat as large".
+  assert.equal(leverageCapForEquity(0), LEV_CAP_AT_5K);
+  assert.equal(leverageCapForEquity(-1), LEV_CAP_AT_5K);
+  assert.equal(leverageCapForEquity(NaN), LEV_CAP_AT_5K);
+  assert.equal(DEFAULT_MAX_LEVERAGE, 5);
+});
+
+test("operator ceiling cannot be exceeded by the ladder; ladder cannot be exceeded by the ceiling", () => {
+  // $5k live book: even with ceiling 5, actual cap is 2.
+  assert.equal(effectiveMaxLeverage(5, 5_000), 2);
+  assert.equal(effectiveMaxLeverage(DEFAULT_MAX_LEVERAGE, 5_000), 2);
+  // Grown book, ceiling 5 → 3× then 5×.
+  assert.equal(effectiveMaxLeverage(5, 10_000), 3);
+  assert.equal(effectiveMaxLeverage(5, 20_000), 5);
+  // Operator who wants to stay at 2× forever still can.
+  assert.equal(effectiveMaxLeverage(2, 50_000), 2);
+  // cfg < 2 means entries disabled — returned as-is so the executor can refuse.
+  assert.equal(effectiveMaxLeverage(1, 50_000), 1);
 });

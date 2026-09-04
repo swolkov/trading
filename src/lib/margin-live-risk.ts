@@ -30,6 +30,44 @@ export function liveRiskFraction(basePct: number, tier: string | null | undefine
 }
 
 /**
+ * Leverage CAP grows with the account. Risk % does not.
+ *
+ * Dollar risk is always equity × 3% (6% high-conviction ceiling). A larger book
+ * therefore takes larger dollar bets at the same percentage — that is how a $5k
+ * account becomes a $50k account without changing the risk model. The cap only
+ * decides how much notional that dollar-risk is allowed to buy (tighter stops
+ * need more leverage to spend the same risk budget).
+ *
+ *   ~$5k  → 2×   US-retail margin, the live book
+ *   ~$10k → 3×   after the account has actually grown
+ *   ~$20k → 5×   still well inside Kraken's 5–20× pair limits
+ *
+ * Unreadable / non-positive equity fails closed to 2× — never "treat missing
+ * as large." The operator key kraken_margin_max_leverage is a CEILING on this
+ * ladder (default 5 so growth is possible); it cannot raise leverage above
+ * the rung the equity has earned.
+ */
+export const LEV_CAP_AT_5K = 2;
+export const LEV_CAP_AT_10K = 3;
+export const LEV_CAP_AT_20K = 5;
+export const LEV_EQUITY_10K = 10_000;
+export const LEV_EQUITY_20K = 20_000;
+export const DEFAULT_MAX_LEVERAGE = 5; // operator ceiling; ladder still holds $5k at 2×
+
+export function leverageCapForEquity(equity: number): number {
+  if (!Number.isFinite(equity) || equity <= 0) return LEV_CAP_AT_5K;
+  if (equity < LEV_EQUITY_10K) return LEV_CAP_AT_5K;
+  if (equity < LEV_EQUITY_20K) return LEV_CAP_AT_10K;
+  return LEV_CAP_AT_20K;
+}
+
+/** min(operator ceiling, equity ladder). cfgMax < 2 means "entries disabled" — returned as-is. */
+export function effectiveMaxLeverage(cfgMax: number, equity: number): number {
+  if (!(cfgMax >= 2)) return cfgMax;
+  return Math.min(20, cfgMax, leverageCapForEquity(equity));
+}
+
+/**
  * Kraken OpenPositions can return [] during degradation while margin is still in use.
  * Treating that as "no conflict" would wave through an opposing entry that nets against
  * a hidden manual position. Fail closed.

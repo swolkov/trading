@@ -26,6 +26,7 @@ interface StrategyStat {
 function verdictCls(v: string): string {
   if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
   if (v.startsWith("promising")) return "text-amber-400";
+  if (v.startsWith("retired")) return "text-muted-foreground/55";
   if (v.startsWith("not paying")) return "text-red-400";
   return "text-muted-foreground/50"; // gathering
 }
@@ -65,7 +66,31 @@ export default function PaperTradesPage() {
         <h2 className="text-xl font-bold tracking-tight">Paper Trades</h2>
         <p className="text-[11px] text-muted-foreground/50">
           The shadow experiment — every strategy scored on real prices with your real fees + rollover, no money at risk.
-          This is the record that has to prove an edge before anything goes live.
+          This is the record that has to prove an edge before the $5k live book is armed. Risk stays 3% (6% high-conviction ceiling);
+          leverage is allowed to grow only as that account actually grows.
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+        <p className="text-xs font-bold">The $5k live book — how this gets to thousands a day without blowing up</p>
+        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+          Live goes off the real Kraken account (~$5k), not a fantasy size. Dollar risk is always
+          {" "}<span className="text-foreground/80">equity × 3%</span> (high conviction 2×, hard ceiling 6%).
+          A $5k book risking 3% six times a day has a theoretical full-win ceiling around
+          {" "}<span className="text-foreground/80">$900</span> — and only if every trade is a full win, which they are not.
+          Selective&apos;s current expectancy is tens of dollars per trade at this size. Thousands a day is a
+          {" "}<span className="text-foreground/80">larger account</span> problem (~$50k+ at the same 3%), not a reason to crank risk on $5k.
+        </p>
+        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+          What grows is leverage cap, not risk %: <span className="text-foreground/80">2× below $10k</span> (now),
+          {" "}<span className="text-foreground/80">3× from $10k</span>, <span className="text-foreground/80">5× from $20k</span>.
+          Paper stays scored at a fixed $5k so the t-stats stay comparable — compounding paper equity into the verdict would fake an edge.
+          Live stays unarmed until a sleeve prints <span className="text-foreground/80">REAL EDGE</span> (30+ resolved, net&gt;0 at live sizing, t≥2, 7+ days).
+        </p>
+        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+          Auto paper now opens <span className="text-foreground/80">high-conviction breakouts only</span>.
+          Retired (no new entries; open trades still resolve): fast-tight, sweep-fade, scanner spray, selective-swing (the 5%/4d A/B handed the peak back).
+          Still running: selective, plus the two swing sleeves on 4h/1d as a gathering A/B on the same high setups.
         </p>
       </div>
 
@@ -74,7 +99,7 @@ export default function PaperTradesPage() {
         <div className="rounded-xl border border-border bg-card p-8 text-center">
           <p className="text-sm text-muted-foreground/60">No paper trades yet.</p>
           <p className="text-[11px] text-muted-foreground/40 mt-1">
-            The scanner opens them automatically as breakouts fire (a few times an hour). They&apos;ll appear here and score themselves to a win or loss — check back soon.
+            The scanner still watches every coin. Paper opens only on high-conviction breakouts (selective, and the two swings on 4h/1d). They&apos;ll appear here and score themselves — check back soon.
           </p>
         </div>
       )}
@@ -137,7 +162,7 @@ export default function PaperTradesPage() {
                 ))}
               </div>
               <p className="text-[10px] text-muted-foreground/40 mt-1.5">
-                If <span className="text-foreground/60">high</span> beats <span className="text-foreground/60">low</span> here over enough trades, conviction is a real edge worth sizing into. If not, it&apos;s a feeling — and this is how we&apos;d know.
+                If <span className="text-foreground/60">high</span> beats <span className="text-foreground/60">low</span> here over enough trades, conviction is a real edge worth sizing into. Auto paper now opens high only — this table still includes historical med/low from retired sleeves, which is why pooled high is not yet the whole story.
               </p>
             </div>
           )}
@@ -186,7 +211,7 @@ export default function PaperTradesPage() {
                     <td className="text-right px-2 py-2 tabular-nums text-muted-foreground/70" title="peaked green → finished green">
                       {s.resolved > 0 ? `${Math.round((s.peakedGreen / s.resolved) * 100)}% → ${Math.round((s.wins / s.resolved) * 100)}%` : "—"}
                     </td>
-                    <td className={`text-right px-4 py-2 ${verdictCls(s.verdict)}`}>{s.verdict}{s.tStat != null && s.resolved >= 30 ? <span className="text-[9px] font-normal opacity-50 ml-1">t={s.tStat.toFixed(1)}</span> : null}</td>
+                    <td className={`text-right px-4 py-2 ${verdictCls(s.verdict)}`}>{s.verdict}{s.tStat != null && (s.resolved >= 30 || s.verdict.startsWith("retired")) ? <span className="text-[9px] font-normal opacity-50 ml-1">t={s.tStat.toFixed(1)}</span> : null}</td>
                   </tr>
                 ))}
               </tbody>

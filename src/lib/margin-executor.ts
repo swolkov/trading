@@ -12,8 +12,11 @@
 //   1. kraken_margin_auto         — default OFF: alerts are logged + scored, never traded.
 //   2. kraken_margin_validate_only — default ON: even when armed, orders go out with
 //      validate=true (Kraken checks but does not execute) until this is explicitly "false".
-//   3. kraken_margin_max_leverage — hard cap (default 2). Values below Kraken's margin
-//      minimum of 2 REFUSE entries rather than silently rounding up.
+//   3. kraken_margin_max_leverage — operator CEILING (default 5 so the account can
+//      grow into 3×/5×). Actual leverage is min(ceiling, equity ladder): 2× below
+//      $10k (the $5k live book), 3× from $10k, 5× from $20k. Risk % does not change.
+//      Values below Kraken's margin minimum of 2 REFUSE entries rather than silently
+//      rounding up.
 //   4. kraken_margin_per_trade_usd — margin committed per entry (default $100).
 //   5. kraken_margin_daily_loss_cap — today's margin loss beyond this blocks NEW ENTRIES
 //      (default $200). It never blocks a close — a kill switch must not stop a
@@ -60,7 +63,9 @@ import { pairMatchesSymbol, pairBase } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
 import {
+  DEFAULT_MAX_LEVERAGE,
   EXEC_LOCK_TTL_MS,
+  effectiveMaxLeverage,
   failClosedOnEmptyPositions,
   liveRiskFraction,
   parseLiveRiskBasePct,
@@ -441,11 +446,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
 
     // Layer 3: leverage. Kraken margin minimum is 2; a cap below that means "no entries".
-    const maxLev = await cfgNum("kraken_margin_max_leverage", 2);
-    if (maxLev < 2) {
-      return { executed: false, validated: false, note: `entries disabled (max leverage ${maxLev} < Kraken minimum 2)` };
+    // The actual cap is applied AFTER equity is known (ladder below). This check only
+    // refuses a misconfigured operator ceiling.
+    const cfgMaxLev = await cfgNum("kraken_margin_max_leverage", DEFAULT_MAX_LEVERAGE);
+    if (cfgMaxLev < 2) {
+      return { executed: false, validated: false, note: `entries disabled (max leverage ${cfgMaxLev} < Kraken minimum 2)` };
     }
-    const leverage = Math.min(Math.min(20, maxLev), Math.max(2, alert.leverage ?? 2));
     const perTrade = Math.max(10, await cfgNum("kraken_margin_per_trade_usd", 100));
     const lossCap = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 200));
 
@@ -468,6 +474,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (!(equity > 0)) {
       return { executed: false, validated: false, note: "equity reads 0/unreadable — failing closed" };
     }
+    // Equity ladder: $5k book stays 2× even if the operator ceiling is 5. Risk % is
+    // unchanged — larger equity just means larger dollar bets at the same 3%/6%.
+    const maxLev = effectiveMaxLeverage(cfgMaxLev, equity);
+    const leverage = Math.min(maxLev, Math.max(2, alert.leverage ?? 2));
     // The cap trips on EITHER measure, never on their sum. health.unrealized is TradeBalance
     // 'n' — the whole account, including positions Spencer opened by hand. Netting them
     // meant one profitable manual long could mask a bot that had already realised past the
