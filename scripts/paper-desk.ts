@@ -2,6 +2,7 @@
 // Needs DATABASE_URL (or POSTGRES_URL) — the production Postgres URL from Vercel.
 import { PrismaClient } from "../src/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
 
 const SIM_VERSION = "v2";
 const LABELS: Record<string, string> = {
@@ -15,7 +16,7 @@ const LABELS: Record<string, string> = {
   manual: "Manual alerts",
 };
 
-const RETIRED = new Set(["fast-tight", "sweep-fade", "scanner", "selective-swing"]);
+const RETIRED = RETIRED_AUTO_SOURCES;
 
 function verdict(source: string, resolved: number, net: number, tStat: number | null, days: number): string {
   if (RETIRED.has(source)) return net <= 0 ? "retired — not paying" : "retired — no new entries";

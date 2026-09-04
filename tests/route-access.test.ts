@@ -4,9 +4,21 @@ import test from "node:test";
 import { isPublicPath } from "../src/lib/route-access";
 
 test("only sign-in, cron, and webhook paths are public", () => {
-  for (const pathname of ["/sign-in", "/api/cron/kraken", "/api/cron/margin-watch", "/api/webhook/tradingview"]) {
+  for (const pathname of [
+    "/sign-in",
+    "/api/cron/kraken",
+    "/api/cron/margin-watch",
+    "/api/cron/margin-scan",
+    "/api/webhook/tradingview",
+  ]) {
     assert.equal(isPublicPath(pathname), true, pathname);
   }
+});
+
+test("paper scoreboard and the paper page are owner-only", () => {
+  assert.equal(isPublicPath("/margin/paper"), false);
+  assert.equal(isPublicPath("/api/margin/scoreboard"), false);
+  assert.equal(isPublicPath("/api/margin/mode"), false);
 });
 
 test("the retired public futures track record is no longer public", () => {
