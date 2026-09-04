@@ -11,9 +11,8 @@ import { prisma } from "@/lib/db";
 import { pairBase } from "@/lib/kraken-pairs";
 import { getKrakenOHLC } from "@/lib/kraken-margin";
 import {
-  LIVE_RISK_CEILING_PCT,
   LIVE_RISK_DEFAULT_PCT,
-  convictionMultiplier,
+  liveRiskFraction,
   parseLiveRiskBasePct,
 } from "@/lib/margin-live-risk";
 
@@ -161,9 +160,9 @@ export function positionNotional(source: string | null, lev: number, entry: numb
 // still has a HARD-capped max loss (never the 30%-of-account gamble). high=2×, low=0.5×, else 1×,
 // applied to the base max_risk_pct and clamped to a 6% ceiling. This is the pro version of
 // "size up on your best calls," and the fee-drag/scoreboard shows whether it pays.
-const RISK_CEILING = LIVE_RISK_CEILING_PCT / 100;
 function convictionRisk(conviction: string | null, baseRiskPct: number): number {
-  return Math.min(RISK_CEILING, baseRiskPct * convictionMultiplier(conviction));
+  // baseRiskPct is a fraction (0.03). liveRiskFraction takes percent — same helper the executor uses.
+  return liveRiskFraction(baseRiskPct * 100, conviction);
 }
 
 // ⭐ WHAT THESE TRADES WOULD BE WORTH AS THE LIVE EXECUTOR WOULD SIZE THEM.
@@ -562,13 +561,11 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
       const net = r.total || 0;
       const liveNet = r.livenet || 0;
       // ⚠️ THE VERDICT IS JUDGED ON THE LIVE-PRICED SERIES, not the paper one.
-      // Paper risks 2x on high conviction; the live executor has no conviction concept and
-      // bets flat. That is a different bet-SIZING scheme, not merely a different scale, so
-      // the t-stat genuinely differs between them (uniform scaling would leave t untouched
-      // — and does, for single-conviction-tier strategies like `selective`). Since the
-      // verdict is the gate for risking real money, it must describe the sizing that money
-      // would actually be risked under. Judging on paper's conviction-weighted sizing
-      // would credit a strategy for an edge the live path cannot capture.
+      // Live now scales by conviction the same way paper does (shared margin-live-risk.ts),
+      // so with equal base rates the two series coincide and t matches. Keep the separate
+      // computation: it is what will catch the next divergence if kraken_margin_live_max_risk_pct
+      // is set differently from the paper base. Judging on paper sizing would credit a
+      // strategy for an edge the live path would not actually take.
       const tStat = resolved > 1 && r.livemean != null && r.livestd != null && r.livestd > 0
         ? (r.livemean * Math.sqrt(resolved)) / r.livestd
         : null;

@@ -77,7 +77,7 @@ export interface AlertOrder {
   note?: string;
   // Conviction tier for this setup. Supply it to override; leave it undefined and the
   // executor scores the coin itself with the SAME scorer the paper record uses. Sizing
-  // scales with it exactly as paper does — see convictionRiskLive().
+  // scales with it exactly as paper does — see liveRiskFraction().
   conviction?: "low" | "med" | "high";
 }
 
@@ -312,6 +312,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // risk-reducing close silently un-done (the same class of bug the entry path already guards).
       const closeMeta = await getPairMeta(pair);
       const txids: string[] = [];
+      const closedSides = new Set<string>();
+      let closeErr: unknown = null;
       for (const p of positions) {
         const params: Record<string, string> = {
           pair,
@@ -326,45 +328,62 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           userref: String(MARGIN_USERREF),
         };
         if (validate) params.validate = "true";
-        const res = await krakenPrivate("AddOrder", params);
-        const txid = (res.txid as string[] | undefined)?.[0];
-        if (txid) txids.push(txid);
-      }
-      // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY. Kraken's attached close[] cannot be
-      // reduce_only (the API has no such parameter), so a stop left resting after the
-      // position is gone will, if it triggers, open a BRAND NEW leveraged position in the
-      // opposite direction — unowned (its ordertxid is the stop's, not in the ledger),
-      // therefore invisible to this close path and to the naked-position guard, and with
-      // no stop of its own. The guardian's orphan sweep needs two consecutive runs, so it
-      // would leave a 5-10 minute window in which an ordinary 1.5% move flips a closed
-      // trade into an unmonitored short. Scoped to our userref, so manual orders are safe.
-      try {
-        const resting = (await krakenOpenOrders()).filter((o) =>
-          o.userref === MARGIN_USERREF &&
-          o.ordertype.includes("stop") &&
-          pairBase(o.pair) === pairBase(pair) &&
-          positions.some((p) => (p.side === "long" ? "sell" : "buy") === o.side));
-        // Count real successes: a swallowed cancel failure would report "cancelled" while
-        // the stop still rests, carrying the exact flip risk this sweep exists to remove.
-        const failed: string[] = [];
-        let cancelled = 0;
-        for (const o of resting) {
-          try { await krakenCancelOrder(o.txid); cancelled++; } catch { failed.push(o.txid); }
+        try {
+          const res = await krakenPrivate("AddOrder", params);
+          const txid = (res.txid as string[] | undefined)?.[0];
+          if (txid) txids.push(txid);
+          closedSides.add(p.side === "long" ? "sell" : "buy");
+        } catch (e) {
+          closeErr = e;
+          break;
         }
-        if (cancelled) pending.push(`🧹 Cancelled ${cancelled} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
-        if (failed.length) {
+      }
+      // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY — including after a partial flatten.
+      // If the second AddOrder throws, skipping this sweep would leave the first close's
+      // stop resting. Kraken's attached close[] cannot be reduce_only, so that stop can
+      // open a BRAND NEW leveraged position in the opposite direction — unowned (its
+      // ordertxid is the stop's, not in the ledger), therefore invisible to this close
+      // path and to the naked-position guard, and with no stop of its own. The guardian's
+      // orphan sweep needs two consecutive runs, so it would leave a 5-10 minute window
+      // in which an ordinary 1.5% move flips a closed trade into an unmonitored short.
+      // Scoped to our userref AND to sides we actually submitted a close for, so a
+      // still-open position on the other side keeps its stop, and manual orders are safe.
+      if (closedSides.size > 0) {
+        try {
+          const resting = (await krakenOpenOrders()).filter((o) =>
+            o.userref === MARGIN_USERREF &&
+            o.ordertype.includes("stop") &&
+            pairBase(o.pair) === pairBase(pair) &&
+            closedSides.has(o.side));
+          // Count real successes: a swallowed cancel failure would report "cancelled" while
+          // the stop still rests, carrying the exact flip risk this sweep exists to remove.
+          const failed: string[] = [];
+          let cancelled = 0;
+          for (const o of resting) {
+            try { await krakenCancelOrder(o.txid); cancelled++; } catch { failed.push(o.txid); }
+          }
+          if (cancelled) pending.push(`🧹 Cancelled ${cancelled} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
+          if (failed.length) {
+            await sendNotification(
+              `🚨 Could NOT cancel ${failed.length} stop(s) on ${pair} after closing (${failed.join(", ")}). A stranded stop can OPEN a new leveraged position if it triggers. Cancel them on Kraken now.`,
+              "margin_urgent",
+            ).catch(() => {});
+          }
+        } catch (err) {
           await sendNotification(
-            `🚨 Could NOT cancel ${failed.length} stop(s) on ${pair} after closing (${failed.join(", ")}). A stranded stop can OPEN a new leveraged position if it triggers. Cancel them on Kraken now.`,
+            `⚠️ Closed ${pair} but could NOT sweep its resting stops — a stranded stop can open a new position if it triggers. Check Kraken. ${String(err).slice(0, 140)}`,
             "margin_urgent",
           ).catch(() => {});
         }
-      } catch (err) {
-        await sendNotification(
-          `⚠️ Closed ${pair} but could NOT sweep its resting stops — a stranded stop can open a new position if it triggers. Check Kraken. ${String(err).slice(0, 140)}`,
-          "margin_urgent",
-        ).catch(() => {});
       }
       for (const msg of pending) await sendNotification(msg, "margin_urgent").catch(() => {});
+      if (closeErr) {
+        await sendNotification(
+          `🚨 CLOSE FAILED on ${pair} after flattening ${txids.length} of ${positions.length} — the rest may STILL BE OPEN. Check Kraken now. Error: ${String(closeErr).slice(0, 200)}`,
+          "margin_urgent",
+        ).catch(() => {});
+        return { executed: txids.length > 0, validated: false, note: `close failed after flattening ${txids.length}/${positions.length}: ${closeErr}` };
+      }
       return {
         executed: !validate,
         validated: validate,
