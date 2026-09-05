@@ -61,7 +61,8 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[]): LiveFi
     let need = vol; let exitCost = 0; let exitFee = 0; let exitAt: string | null = null;
     for (const t of byTime) {
       if (need <= vol * 1e-6) break;
-      if (t.type !== closeType || pairBase(t.pair) !== pairBase(r.symbol.replace("/", "")) && pairBase(t.pair) !== pairBase(entries[0].pair)) continue;
+      const samePair = pairBase(t.pair) === pairBase(entries[0].pair) || pairBase(t.pair) === pairBase(r.symbol.replace("/", ""));
+      if (t.type !== closeType || !samePair) continue;
       if (new Date(t.time).getTime() <= new Date(entryAt).getTime()) continue;
       if (!(t.posstatus && t.posstatus.length) && !(t.margin > 0)) continue;   // spot fills are not closes
       const left = t.vol - (consumed.get(t.txid) ?? 0);
