@@ -100,6 +100,13 @@ async function save(state: RtState): Promise<void> {
   await prisma.agentConfig.upsert({ where: { key: RT_KEY }, update: { value }, create: { key: RT_KEY, value } });
 }
 const log = (s: RtState, line: string) => { s.log.push(`${nowIso().slice(11, 19)} ${line}`); };
+/** A finished run must never keep rewriting live config: once its restore is clean, the
+ *  saved snapshot is dropped so nothing can compare against it again. */
+function finish(s: RtState, stage: "done" | "failed" | "aborted", error?: string): void {
+  s.stage = stage; s.finishedAt = nowIso();
+  if (error) s.error = error;
+  if (!s.restoreFailed?.length) delete s.savedCfg;
+}
 
 async function readCfg(keys: readonly string[]): Promise<Record<string, string | null>> {
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: [...keys] } } });
@@ -214,6 +221,7 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
   // close lock. A second start (double click, second tab) is refused, not queued.
   const lock = await acquireCloseLock(5_000);
   if (!lock) return { ok: false, note: "another close/reconcile/round trip holds the lock — try again in a minute", state: prev };
+  const lockAt = Date.now();
   try {
     const cfg0 = await readCfg(CFG_KEYS);
     if (cfg0.kraken_margin_auto === "true") return { ok: false, note: "the executor is ARMED (kraken_margin_auto=true) — the round trip is for the disarmed phase only", state: prev };
@@ -252,7 +260,13 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
       state.checks.validate_accepted = check(vOk, v.note.slice(0, 200));
       log(state, `validate pass: ${v.note.slice(0, 160)}`);
       if (!vOk) {
-        state.stage = "failed"; state.error = `validate pass did not reach Kraken cleanly: ${v.note}`; state.finishedAt = nowIso();
+        finish(state, "failed", `validate pass did not reach Kraken cleanly: ${v.note}`);
+        return { ok: false, note: state.error, state };
+      }
+      // The real pass must finish inside the close lock's lease (the guardian could otherwise
+      // take the lock mid-entry) and inside the route: a slow Kraken means "not today".
+      if (Date.now() - lockAt > 120_000) {
+        finish(state, "failed", "Kraken too slow today: the validate pass alone took over 2 minutes — nothing sent");
         return { ok: false, note: state.error, state };
       }
 
@@ -263,8 +277,8 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
       if (r.executed && /UNLEDGERED/.test(r.note)) {
         // Filled but NOT ours in the ledger: the close path would refuse it and the guardian
         // would not manage it. Stop here and say exactly what to do.
-        state.stage = "failed"; state.error = `entry filled but could not be ledgered — adopt it via kraken_margin_adopt_txids, then close it: ${r.note.slice(0, 160)}`; state.finishedAt = nowIso();
-        state.checks.entry_accepted = check(false, state.error);
+        finish(state, "failed", `entry filled but could not be ledgered — adopt it via kraken_margin_adopt_txids, then close it: ${r.note.slice(0, 160)}`);
+        state.checks.entry_accepted = check(false, state.error ?? "");
         log(state, state.error);
       } else if (r.executed && r.txid) {
         state.entryTxid = r.txid;
@@ -276,8 +290,8 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
         // Leave the stage at "entering": the guardian's recovery below adopts a ledgered fill.
         state.checks.entry_accepted = check(false, r.note.slice(0, 200));
         log(state, `entry not confirmed: ${r.note.slice(0, 160)}`);
-        if (/refused|skipped|nothing placed|not attempted|cooldown|already today/i.test(r.note)) {
-          state.stage = "failed"; state.error = `entry not sent: ${r.note}`; state.finishedAt = nowIso();
+        if (/refused|skipped|nothing placed|not attempted|cooldown|already today|tracked only/i.test(r.note)) {
+          finish(state, "failed", `entry not sent: ${r.note}`);
         }
       }
     } catch (e) {
@@ -286,6 +300,7 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
       // stage stays "entering" → recovery decides whether a fill exists
     } finally {
       state.restoreFailed = await restoreCfg(state.savedCfg);
+      if (!state.restoreFailed.length && (state.stage === "failed" || state.stage === "done" || state.stage === "aborted")) delete state.savedCfg;
       if (state.restoreFailed.length) {
         log(state, `⚠️ could not restore ${state.restoreFailed.join(", ")} — the guardian retries every tick`);
         await sendNotification(`🚨 Round trip: could not restore ${state.restoreFailed.join(", ")} after the entry. The guardian retries the restore every 5 min; until then check /margin/paper.`, "margin_urgent").catch(() => {});
@@ -320,14 +335,26 @@ async function recoverEntering(state: RtState): Promise<void> {
     const ledger = raw ? (JSON.parse(raw) as LedgerEntry[]) : [];
     const mine = ledger.filter((e) => e && pairBase(e.pair) === pairBase(pair) && e.ts >= startedMs - 5_000).sort((a, b) => a.ts - b.ts);
     if (mine.length) found = { txid: mine[0].txid, ts: mine[0].ts };
-  } catch { /* fall through to OpenPositions */ }
+  } catch { /* fall through */ }
   if (!found) {
+    // Ownership must be PROVEN, never inferred from a pair and a timestamp (Spencer may
+    // have opened his own BTC position in that window): our userref on a filled buy order
+    // in ClosedOrders since the start is the proof; the position is then matched by ordertxid.
     try {
-      const [positions, health] = await Promise.all([getKrakenMarginPositions(), getKrakenMarginHealth().catch(() => null)]);
-      if (!failClosedOnEmptyPositions(positions.length, health?.marginUsedRaw ?? null)) {
-        const p = positions.find((q) => pairBase(q.pair) === pairBase(pair) && new Date(q.openedAt).getTime() >= startedMs - 5_000);
-        if (p) found = { txid: p.ordertxid, ts: new Date(p.openedAt).getTime() };
-      } else { log(state, "recovery: positions read unreliable — retry next tick"); return; }
+      const closed = await krakenClosedOrders(MARGIN_USERREF, Math.floor(startedMs / 1000) - 5);
+      const ours = closed.filter((o) => o.type === "buy" && o.volExec > 0 && (!o.pair || pairBase(o.pair) === pairBase(pair))).sort((a, b) => a.opentm - b.opentm);
+      if (ours.length) {
+        const [positions, health] = await Promise.all([getKrakenMarginPositions(), getKrakenMarginHealth().catch(() => null)]);
+        if (failClosedOnEmptyPositions(positions.length, health?.marginUsedRaw ?? null)) { log(state, "recovery: positions read unreliable — retry next tick"); return; }
+        const p = positions.find((q) => ours.some((o) => o.txid === q.ordertxid));
+        const o = ours[0];
+        found = { txid: p?.ordertxid ?? o.txid, ts: o.opentm * 1000 };
+        // Adopt it so the close path and the guardian recognise it as ours.
+        const adoptRaw = (await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_adopt_txids" } }))?.value ?? "";
+        const list = adoptRaw.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!list.includes(found.txid)) { list.push(found.txid); await setCfg("kraken_margin_adopt_txids", list.join(",")); }
+        log(state, `recovery: our filled order ${found.txid} found via ClosedOrders (userref) — adopted`);
+      }
     } catch (e) { log(state, `recovery read failed: ${String(e).slice(0, 80)}`); return; }
   }
   if (found) {
@@ -337,9 +364,9 @@ async function recoverEntering(state: RtState): Promise<void> {
     state.checks.entry_accepted = check(true, `recovered after an interrupted start: ${found.txid}`);
     log(state, `recovered entry ${found.txid} — continuing as OPEN`);
     await sendNotification(`🧪 Round trip on ${state.symbol}: the interrupted entry WAS accepted (${found.txid}) — adopted, will be closed on schedule.`, "margin_results").catch(() => {});
-  } else if (Date.now() - startedMs > 5 * 60_000) {
-    state.stage = "failed"; state.error = state.error ?? "start did not complete and no fill was found in the ledger or OpenPositions"; state.finishedAt = nowIso();
-    log(state, "recovery: nothing found after 5 min — failed");
+  } else if (Date.now() - startedMs > 8 * 60_000) {
+    finish(state, "failed", state.error ?? "start did not complete and no filled order of ours was found (ledger, ClosedOrders)");
+    log(state, "recovery: nothing found after 8 min — failed");
     await sendNotification(`⚠️ Round trip on ${state.symbol} failed to start (${state.error}). Nothing is open.`, "margin_urgent").catch(() => {});
   }
 }
@@ -351,7 +378,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
   if (!state) return null;
   // Any restore debt is paid first, every tick, until clean — a crash between arming and
   // restore, or a DB hiccup during restore, must never leave the executor armed.
-  if (state.savedCfg && state.stage !== "entering") {
+  if (state.savedCfg && (state.stage === "open" || state.stage === "closing" || (state.restoreFailed?.length ?? 0) > 0)) {
     const cur = await readCfg(CFG_KEYS).catch(() => null);
     const debt = new Set(state.restoreFailed ?? []);
     if (cur) for (const k of CFG_KEYS) if ((cur[k] ?? null) !== (state.savedCfg[k] ?? null) && (k === "kraken_margin_auto" || k === "kraken_margin_validate_only" || cur.kraken_margin_live_sources === RT_SOURCE || debt.size)) debt.add(k);
@@ -359,11 +386,14 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
       const failed = await restoreCfg(state.savedCfg, [...debt]);
       state.restoreFailed = failed;
       log(state, failed.length ? `restore retry failed: ${failed.join(", ")}` : `restored ${[...debt].join(", ")}`);
+      if (!failed.length && (state.stage === "done" || state.stage === "failed" || state.stage === "aborted")) delete state.savedCfg;
       await save(state);
     }
   }
   if (state.stage === "entering") {
-    if (Date.now() - new Date(state.startedAt).getTime() > 90_000) {   // the start route is dead by now
+    // The start route (maxDuration 300s) may still be alive; only after that can "entering"
+    // mean abandoned — restoring earlier could disarm the real pass mid-flight.
+    if (Date.now() - new Date(state.startedAt).getTime() > 330_000) {
       state.restoreFailed = await restoreCfg(state.savedCfg);
       await recoverEntering(state);
       await save(state);
@@ -421,7 +451,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
     if (state.stage === "closing") {
       // Through the executor's real close path (lock, ownership, FIFO guard, sweep). Retried
       // on later ticks while it has not been accepted, up to RT_MAX_CLOSE_ATTEMPTS.
-      if (!state.checks.close_accepted?.ok && (state.closeAttempts ?? 0) < RT_MAX_CLOSE_ATTEMPTS) {
+      if ((!state.checks.close_accepted?.ok || state.checks.position_gone?.ok === false) && (state.closeAttempts ?? 0) < RT_MAX_CLOSE_ATTEMPTS) {
         state.closeAttempts = (state.closeAttempts ?? 0) + 1;
         const r = await executeAlert({ symbol: state.symbol, side: "close", note: `$20 round trip close (attempt ${state.closeAttempts})`, source: RT_SOURCE });
         const accepted = r.executed || /nothing sent|no open position/.test(r.note);
@@ -463,7 +493,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
         } catch (e) { state.checks.fees_read_back = check(null, `history read failed: ${String(e).slice(0, 80)}`); }
         if (state.checks.fees_read_back?.ok || Date.now() - new Date(state.startedAt).getTime() > RT_MAX_OPEN_MS + 10 * 60_000) {
           if (!state.checks.fees_read_back?.ok) state.checks.fees_read_back = check(false, "fees not found in the trade history after 10 min — run the trade sync and read them by hand");
-          state.stage = state.abortRequested ? "aborted" : "done"; state.finishedAt = nowIso();
+          finish(state, state.abortRequested ? "aborted" : "done");
           const v = roundTripVerdict(state.checks);
           log(state, `${state.stage} — ${v.allOk ? "ALL CHECKS PASSED" : `failed: ${v.failed.join(", ") || "incomplete"}`}`);
           await sendNotification(`🧪 $20 round trip on ${state.symbol} ${state.stage}: ${v.allOk ? "✅ every measured Kraken behaviour matched the code's assumptions" : `❌ failed: ${v.failed.join(", ") || "(incomplete)"}`}. Net after fees: ${state.fees?.net != null ? `$${state.fees.net.toFixed(2)}` : "?"}. Details on /margin/paper.`, v.allOk ? "margin_results" : "margin_urgent").catch(() => {});
@@ -471,7 +501,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
       } else if (state.checks.position_gone.ok === false && Date.now() - new Date(state.startedAt).getTime() > RT_MAX_OPEN_MS + 30 * 60_000) {
         // Still open half an hour past the deadline: stop ticking here — the guardian owns the
         // position (managed stop + 48h time stop). Say so, loudly, once.
-        state.stage = "failed"; state.error = "position still open 30 min after the close attempts — the guardian manages it (48h time stop); close by hand if needed"; state.finishedAt = nowIso();
+        finish(state, "failed", "position still open 30 min after the close attempts — the guardian manages it (48h time stop); close by hand if needed");
         await sendNotification(`🚨 Round trip: ${state.symbol} position still open after the close attempts. It is ledgered and under the guardian; close it by hand if you want it flat now.`, "margin_urgent").catch(() => {});
       }
     }
@@ -487,6 +517,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
 export async function abortRoundTrip(): Promise<RtState | null> {
   const state = await readRoundTrip();
   if (!state) return null;
+  if (!["entering", "open", "closing"].includes(state.stage) && !state.restoreFailed?.length) return state;   // finished: nothing to abort, config untouched
   state.restoreFailed = await restoreCfg(state.savedCfg);
   if (state.stage === "entering") { await recoverEntering(state); }
   if (state.stage === "open" || state.stage === "closing") {
