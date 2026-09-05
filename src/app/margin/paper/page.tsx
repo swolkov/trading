@@ -326,6 +326,7 @@ interface RtView {
   state: { stage: string; symbol: string; startedAt: string; updatedAt: string; entryTxid?: string; closeTxid?: string; fillVol?: number; log: string[]; error?: string; finishedAt?: string; fees?: { entry: number; exit: number; net: number | null } } | null;
   checklist: { key: string; label: string; result: { ok: boolean | null; note: string; at: string } | null }[];
   verdict: { complete: boolean; allOk: boolean; failed: string[] } | null;
+  dryRun?: { at: string; symbol: string; ok: boolean; note: string; restoreFailed: string[] } | null;
 }
 // The $20 round trip: one real trade through the real executor, to prove the Kraken
 // behaviours the code assumes. Two clicks to start (arm the button, then send), because
@@ -363,7 +364,8 @@ function RoundTripCard() {
         empty. Cost: two market fees on $20 (a few cents) plus spread. This is plumbing validation, not a strategy test — it does not move the paper gate.
       </p>
       <div className="flex items-center gap-2 flex-wrap">
-        {!running && !armed && <button onClick={() => setArmed(true)} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted">Arm the $20 round trip…</button>}
+        {!running && <button disabled={busy != null} onClick={() => post("dryrun")} className="rounded-md border border-emerald-500/60 bg-emerald-500/10 px-2 py-1 text-[11px] font-bold text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50">{busy === "dryrun" ? "asking Kraken…" : "1 · Dry run (free — Kraken checks the order, places nothing)"}</button>}
+        {!running && !armed && <button disabled={busy != null || !data?.dryRun?.ok} title={data?.dryRun?.ok ? "" : "run a clean dry run first"} onClick={() => setArmed(true)} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-40">2 · Arm the $20 round trip…</button>}
         {!running && armed && (
           <>
             <button disabled={busy != null} onClick={() => post("start")} className="rounded-md border border-red-500/60 bg-red-500/10 px-2 py-1 text-[11px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-50">{busy === "start" ? "sending…" : "SEND the real $20 buy on BTC/USD"}</button>
@@ -375,6 +377,12 @@ function RoundTripCard() {
         {msg && <span className="text-[11px] text-muted-foreground/70">{msg}</span>}
         {st?.error && <span className="text-[11px] text-red-400">{st.error}</span>}
       </div>
+      {data?.dryRun && (
+        <p className="text-[11px]">
+          <span className={data.dryRun.ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>{data.dryRun.ok ? "Dry run passed" : "Dry run failed"}</span>
+          <span className="text-muted-foreground/60"> · {new Date(data.dryRun.at).toLocaleTimeString()} · {data.dryRun.note}</span>
+        </p>
+      )}
       {data?.checklist && st && (
         <div className="overflow-x-auto">
           <table className="w-full text-[11px]">
