@@ -261,13 +261,13 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
       log(state, `validate pass: ${v.note.slice(0, 160)}`);
       if (!vOk) {
         finish(state, "failed", `validate pass did not reach Kraken cleanly: ${v.note}`);
-        return { ok: false, note: state.error, state };
+        return { ok: false, note: state.error ?? "failed", state };
       }
       // The real pass must finish inside the close lock's lease (the guardian could otherwise
       // take the lock mid-entry) and inside the route: a slow Kraken means "not today".
       if (Date.now() - lockAt > 120_000) {
         finish(state, "failed", "Kraken too slow today: the validate pass alone took over 2 minutes — nothing sent");
-        return { ok: false, note: state.error, state };
+        return { ok: false, note: state.error ?? "failed", state };
       }
 
       await setCfg("kraken_margin_validate_only", "false");
@@ -279,7 +279,7 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
         // would not manage it. Stop here and say exactly what to do.
         finish(state, "failed", `entry filled but could not be ledgered — adopt it via kraken_margin_adopt_txids, then close it: ${r.note.slice(0, 160)}`);
         state.checks.entry_accepted = check(false, state.error ?? "");
-        log(state, state.error);
+        log(state, state.error ?? "");
       } else if (r.executed && r.txid) {
         state.entryTxid = r.txid;
         state.stage = "open";
