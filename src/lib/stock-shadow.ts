@@ -10,7 +10,7 @@ import { prisma } from "@/lib/db";
 import { getStockBars } from "@/lib/stock-bars";
 import {
   STOCK_COHORT_SQL, STOCK_SIM_VERSION, STOCK_SOURCE_LABELS,
-  stockCostFrac, stockEntryPrice, stockExitParams, stockNotional, stockRiskFraction, stockTimeStopHit, stockVerdict, tStatOf,
+  bookHasRoom, stockCostFrac, stockEntryPrice, stockExitParams, stockNotional, stockRiskFraction, stockTimeStopHit, stockVerdict, tStatOf,
 } from "@/lib/stock-paper-model";
 
 // Raw-SQL table (like tradingview_alerts / kraken_my_trades): NEVER prisma-managed, so a
@@ -72,19 +72,25 @@ export async function stockSizingParams(): Promise<{ refEquity: number; baseRisk
 }
 
 // Open ONE paper trade per (source, symbol) at a time — entries can't stack within a
-// sleeve. Returns false when one is already open. Entry pays the 0.05% chase.
+// sleeve — and never past the BOOK cap (open notional + this one ≤ 2× equity), so the
+// headline P&L stays one a $5k margin account could actually have earned. Returns the
+// reason when it declines. Entry pays the 0.05% chase.
+export type OpenResult = { opened: true; notional: number } | { opened: false; reason: "already open" | "book full" | "unsized" };
 export async function openStockPaperTrade(p: {
   symbol: string; source: string; timeframe: string; conviction: string; score: number; signalPrice: number;
-}): Promise<boolean> {
-  const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
-    `SELECT count(*)::bigint AS n FROM stock_paper_trades WHERE symbol=$1 AND source=$2 AND status='open' AND ${STOCK_COHORT_SQL}`,
+}): Promise<OpenResult> {
+  await ensureStockPaperTable();
+  const [{ n, book }] = await prisma.$queryRawUnsafe<{ n: bigint; book: number | null }[]>(
+    `SELECT count(*) FILTER (WHERE symbol=$1 AND source=$2)::bigint AS n, COALESCE(sum(notional),0)::float AS book
+     FROM stock_paper_trades WHERE status='open' AND ${STOCK_COHORT_SQL}`,
     p.symbol, p.source,
   );
-  if (Number(n) > 0) return false;
+  if (Number(n) > 0) return { opened: false, reason: "already open" };
   const { refEquity, baseRiskPct } = await stockSizingParams();
   const entry = stockEntryPrice(p.signalPrice);
   const notional = stockNotional(p.source, refEquity, stockRiskFraction(baseRiskPct, p.conviction));
-  if (!(entry > 0) || !(notional > 0)) return false;
+  if (!(entry > 0) || !(notional > 0)) return { opened: false, reason: "unsized" };
+  if (!bookHasRoom(book || 0, notional, refEquity)) return { opened: false, reason: "book full" };
   const { oneRPct } = stockExitParams(p.source);
   try {
     await prisma.$executeRawUnsafe(
@@ -94,10 +100,10 @@ export async function openStockPaperTrade(p: {
     );
   } catch (e) {
     // Unique-index race (see ensureStockPaperTable): another run opened it first.
-    if (/stock_paper_one_open_idx|unique/i.test(String(e))) return false;
+    if (/stock_paper_one_open_idx|unique/i.test(String(e))) return { opened: false, reason: "already open" };
     throw e;
   }
-  return true;
+  return { opened: true, notional };
 }
 
 export interface StockResolution {
@@ -112,7 +118,6 @@ interface OpenRow {
 // run and resolve the ones that hit a stop or the time limit. Long-only, so dir = +1.
 export async function evaluateStockPaper(): Promise<StockResolution[]> {
   await ensureStockPaperTable();
-  const { refEquity } = await stockSizingParams();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, source, entry, notional, stop, peak, seen_t, conviction
      FROM stock_paper_trades WHERE status='open' AND entry > 0 ORDER BY time ASC LIMIT 300`,
@@ -166,7 +171,7 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
     if (!(now > 0)) {
       // Unpriceable this run: still honor the time stop so nothing sits open forever.
       if (timeStopHit) {
-        const feeFrac = stockCostFrac(r.notional, refEquity, ageH);
+        const feeFrac = stockCostFrac(ageH);
         const pnl = -feeFrac * r.notional;
         const affected = await prisma.$executeRawUnsafe(
           `UPDATE stock_paper_trades SET status='resolved', exit=$1, pnl=$2, fees=$3, reason=$4, resolved_at=now(), unrealized=NULL WHERE id=$5 AND status='open'`,
@@ -184,7 +189,9 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
     const tb = (barsBySym[r.symbol] ?? []).filter((b) => b.t >= tOpen && b.t >= seenT);
     const doneBars = tb.slice(0, -1);
     const liveBar = tb.length ? tb[tb.length - 1] : null;
-    const nextSeenT = liveBar ? liveBar.t : seenT;
+    // Never persist 0: a seconds-old trade with no bar yet would otherwise make the next
+    // run fetch the whole 7-day window for its symbol. Its own open time is the floor.
+    const nextSeenT = liveBar ? liveBar.t : Math.max(seenT, tOpen);
 
     let peak = r.peak ?? entry;
     let stopPx = r.stop ?? entry - oneR;
@@ -216,7 +223,7 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
     if (exit == null && timeStopHit) { exit = now; reason = timeStopLabel; }
 
     if (exit == null) {
-      const uNet = (now - entry) / entry - stockCostFrac(r.notional, refEquity, ageH);
+      const uNet = (now - entry) / entry - stockCostFrac(ageH);
       await prisma.$executeRawUnsafe(
         `UPDATE stock_paper_trades SET peak=$1, stop=$2, unrealized=$3, seen_t=$4 WHERE id=$5 AND status='open'`,
         peak, stopPx, uNet * r.notional, nextSeenT, r.id,
@@ -225,7 +232,7 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
     }
 
     const grossPct = (exit - entry) / entry;
-    const feeFrac = stockCostFrac(r.notional, refEquity, ageH);
+    const feeFrac = stockCostFrac(ageH);
     const netPct = grossPct - feeFrac;
     const pnl = netPct * r.notional;
     const affected = await prisma.$executeRawUnsafe(
@@ -318,15 +325,16 @@ export interface StockPaperRow {
   id: number; time: string; symbol: string; source: string; timeframe: string | null; conviction: string | null;
   entry: number; notional: number; exit: number | null; pnl: number | null; unrealized: number | null;
   fees: number | null; status: string; reason: string | null; stop: number | null; peak: number | null;
+  simVersion: string;   // the log shows every cohort, labeled; the scoreboard counts only the current one
 }
 export async function recentStockPaperTrades(limit = 100): Promise<StockPaperRow[]> {
   await ensureStockPaperTable();
   const rows = await prisma.$queryRawUnsafe<{
     id: number; time: Date; symbol: string; source: string; timeframe: string | null; conviction: string | null;
     entry: number; notional: number; exit: number | null; pnl: number | null; unrealized: number | null;
-    fees: number | null; status: string | null; reason: string | null; stop: number | null; peak: number | null;
+    fees: number | null; status: string | null; reason: string | null; stop: number | null; peak: number | null; sim_version: string | null;
   }[]>(
-    `SELECT id, time, symbol, source, timeframe, conviction, entry, notional, exit, pnl, unrealized, fees, status, reason, stop, peak
+    `SELECT id, time, symbol, source, timeframe, conviction, entry, notional, exit, pnl, unrealized, fees, status, reason, stop, peak, sim_version
      FROM stock_paper_trades ORDER BY time DESC LIMIT $1`,
     Math.max(1, Math.min(500, limit)),
   );
@@ -335,5 +343,6 @@ export async function recentStockPaperTrades(limit = 100): Promise<StockPaperRow
     entry: r.entry, notional: r.notional, exit: r.exit, pnl: r.pnl,
     unrealized: r.status === "resolved" ? null : r.unrealized, fees: r.fees,
     status: r.status ?? "open", reason: r.reason, stop: r.stop, peak: r.peak,
+    simVersion: r.sim_version ?? STOCK_SIM_VERSION,
   }));
 }

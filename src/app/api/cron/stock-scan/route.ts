@@ -101,6 +101,7 @@ export async function GET(request: Request) {
   // Paper entries: high-conviction breakouts, longs only, not stretched — the sleeve is
   // chosen by the timeframe that fired. One open trade per (sleeve, symbol).
   const opened: { symbol: string; source: string; tier: string; tf: string }[] = [];
+  const skipped: string[] = [];
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "stock_paper_autotrack" } }).catch(() => null);
     if (flag?.value !== "false") {
@@ -108,8 +109,9 @@ export async function GET(request: Request) {
         if (!(s.price > 0) || s.kind !== "breakout") continue;
         const conv = scoreConviction(s, signals);
         for (const source of stockPaperPlans(s.kind, s.timeframe, conv)) {
-          const ok = await openStockPaperTrade({ symbol: s.coin, source, timeframe: s.timeframe, conviction: conv.tier, score: conv.score, signalPrice: s.price });
-          if (ok) opened.push({ symbol: s.coin, source, tier: conv.tier, tf: s.timeframe });
+          const res = await openStockPaperTrade({ symbol: s.coin, source, timeframe: s.timeframe, conviction: conv.tier, score: conv.score, signalPrice: s.price });
+          if (res.opened) opened.push({ symbol: s.coin, source, tier: conv.tier, tf: s.timeframe });
+          else if (res.reason === "book full") skipped.push(`${s.coin} ${source} (book at its 2× cap)`);
         }
       }
     }
@@ -123,8 +125,9 @@ export async function GET(request: Request) {
     const openedLines = opened.map((o) => `▶ PAPER LONG ${o.symbol} (${o.source}, ${o.tf}, ${o.tier} conviction)`).join("\n");
     const lines = fresh.slice(0, 20).map((s) => `• ${s.coin} ${s.timeframe}: ${s.detail} ($${s.price.toLocaleString()})`).join("\n");
     const more = fresh.length > 20 ? `\n…and ${fresh.length - 20} more` : "";
+    const skippedLine = skipped.length ? `\n_Skipped, book full: ${skipped.join(", ")}_` : "";
     await sendNotification(
-      `📈 Stock scan — ${fresh.length} new signal${fresh.length === 1 ? "" : "s"}${opened.length ? `, ${opened.length} paper entr${opened.length === 1 ? "y" : "ies"}` : ""}:\n${openedLines ? openedLines + "\n" : ""}${lines}${more}\n_Paper only — nothing is placed at Robinhood. Awareness for your own margin account._`,
+      `📈 Stock scan — ${fresh.length} new signal${fresh.length === 1 ? "" : "s"}${opened.length ? `, ${opened.length} paper entr${opened.length === 1 ? "y" : "ies"}` : ""}:\n${openedLines ? openedLines + "\n" : ""}${lines}${more}${skippedLine}\n_Paper only — nothing is placed at Robinhood. Awareness for your own margin account._`,
       "stocks",
     );
   }
@@ -149,5 +152,5 @@ export async function GET(request: Request) {
   } catch (e) { errors.push(`milestone: ${String(e).slice(0, 60)}`); }
 
   if (errors.length) console.error("[/api/cron/stock-scan]", errors.slice(0, 5));
-  return Response.json({ ok: errors.length === 0, universe: STOCK_UNIVERSE.length, scannedSymbols, scanned: signals.length, fresh: fresh.length, opened: opened.length, resolved: resolvedCount, errors: errors.slice(0, 5) });
+  return Response.json({ ok: errors.length === 0, universe: STOCK_UNIVERSE.length, scannedSymbols, scanned: signals.length, fresh: fresh.length, opened: opened.length, skippedBookFull: skipped.length, resolved: resolvedCount, errors: errors.slice(0, 5) });
 }

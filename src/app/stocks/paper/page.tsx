@@ -22,7 +22,7 @@ interface Strat {
 interface Row {
   id: number; time: string; symbol: string; source: string; timeframe: string | null; conviction: string | null;
   entry: number; notional: number; exit: number | null; pnl: number | null; unrealized: number | null;
-  fees: number | null; status: string; reason: string | null; stop: number | null; peak: number | null;
+  fees: number | null; status: string; reason: string | null; stop: number | null; peak: number | null; simVersion?: string;
 }
 interface Signal { ts: string; symbol: string; timeframe: string; kind: string; detail: string; price: number }
 interface Payload { score: Score | null; strategies: Strat[]; log: Row[]; lastRun: string | null; universe: string[]; signals: Signal[] }
@@ -71,7 +71,7 @@ export default function StockPaperPage() {
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           Two long-only sleeves, same entry rule (high conviction, not stretched), split by the timeframe that fired: <span className="text-foreground/80">Fast</span> (5m/15m, 2% stop, out by the next close)
           and <span className="text-foreground/80">Swing</span> (1h/1d, 5% stop, up to ~10 sessions). Sizing is risk-based like crypto: 3% of a $5k reference account per trade (6% on high conviction), capped at
-          2× equity, which is Robinhood&apos;s overnight margin. Costs: 0.05% chase in, 0.05% slippage out, 5% APR on anything borrowed above equity. No commission.
+          2× equity book-wide, which is Robinhood&apos;s overnight margin — an entry that would push the book past that is skipped, not shrunk. Costs: 0.05% chase in, 0.05% slippage out, 5% APR on the financed half of every position. No commission.
           Verdict rules are identical to the crypto desk: 30+ resolved, positive net, t≥2, 7+ distinct days before anything is called an edge.
         </p>
         <p className="text-[11px] text-muted-foreground/50">
@@ -194,7 +194,7 @@ export default function StockPaperPage() {
                         {new Date(t.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(t.time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
                       </td>
                       <td className="px-2 py-1.5 text-muted-foreground/70">{t.source.replace("stock-", "")}{t.timeframe ? <span className="text-muted-foreground/40 ml-1">{t.timeframe}</span> : null}</td>
-                      <td className="px-2 py-1.5 font-semibold">{t.symbol}</td>
+                      <td className="px-2 py-1.5 font-semibold">{t.symbol}{t.simVersion && t.simVersion !== "s1" && <span className="ml-1 text-[9px] text-muted-foreground/40" title="Older measurement cohort — excluded from the scoreboard">{t.simVersion}</span>}</td>
                       <td className="px-2 py-1.5 text-muted-foreground/60 capitalize">{t.conviction ?? "—"}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{money(t.notional)}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{usd(t.entry)}</td>
@@ -227,7 +227,7 @@ export default function StockPaperPage() {
                   <span className="font-bold text-[12px] w-14 shrink-0">{s.symbol}</span>
                   <span className="text-[10px] text-muted-foreground/50 w-8 shrink-0">{s.timeframe}</span>
                   <span className={`text-[12px] flex-1 ${bullish ? "text-emerald-400" : bearish ? "text-red-400" : "text-muted-foreground/80"}`}>{s.detail}</span>
-                  <span className="text-[10px] text-muted-foreground/40 tabular-nums">${s.price.toLocaleString()}</span>
+                  <span className="text-[10px] text-muted-foreground/40 tabular-nums">${(s.price ?? 0).toLocaleString()}</span>
                 </div>
               );
             })}

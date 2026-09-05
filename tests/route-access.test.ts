@@ -20,6 +20,8 @@ test("paper scoreboard and the paper page are owner-only", () => {
   assert.equal(isPublicPath("/margin/paper"), false);
   assert.equal(isPublicPath("/api/margin/scoreboard"), false);
   assert.equal(isPublicPath("/api/margin/mode"), false);
+  assert.equal(isPublicPath("/stocks/paper"), false);
+  assert.equal(isPublicPath("/api/stocks/paper"), false);
 });
 
 test("the retired public futures track record is no longer public", () => {

@@ -89,25 +89,39 @@ export function stockNotional(source: string | null, refEquity: number, riskFrac
   return Math.min((riskFrac * refEquity) / oneRPct, cap);
 }
 
+// BOOK-LEVEL CAP — the constraint a real $5k margin account actually has. Per-trade
+// sizing alone lets ten concurrent high-conviction trades stack $100k of notional on a
+// book Reg T caps at $10k (stocks move together, so breakout clusters are exactly when
+// that happens). An entry that would push open notional past refEquity × 2 is SKIPPED,
+// not scaled: a scaled position changes the max loss the risk model promised. The crypto
+// desk has no such cap (its pooled P&L is explicitly "not a portfolio number"); this
+// book's headline P&L is meant to be one.
+export function bookHasRoom(openNotional: number, newNotional: number, refEquity: number): boolean {
+  return openNotional + newNotional <= refEquity * STOCK_MAX_LEVERAGE + 1e-6;
+}
+
 // COSTS — the honest stock version of the crypto fee model. Robinhood charges no
 // commission; what a stock trade actually pays is the spread/slippage on each side and
-// margin interest on anything borrowed above equity. Entry: a 0.05% chase applied to the
-// fill price at open time (a 15-minute scan sees a break late, like the crypto 0.1%
-// chase, but large-cap spreads are ~5× tighter). Exit: 0.05% slippage. Interest: 5% APR
-// (Robinhood's tier under $50k, Sep 2026; Gold's first $1k free is ignored — conservative)
-// on the borrowed portion, pro-rated by calendar hold time. Long-only means no borrow fee.
+// margin interest on what is borrowed. Entry: a 0.05% chase applied to the fill price at
+// open time (a 15-minute scan sees a break late, like the crypto 0.1% chase, but
+// large-cap spreads are ~5× tighter). Exit: 0.05% slippage. Interest: 5% APR (Robinhood's
+// tier under $50k, Sep 2026; Gold's first $1k free is ignored — conservative), pro-rated
+// by calendar hold time, charged on HALF of every position: with the book capped at 2×
+// equity, a full book finances exactly half of each position, and charging that share
+// always — rather than "notional minus equity" per trade, which under-charges the moment
+// two positions coexist — errs conservative when the book is below its cap. Long-only
+// means no borrow fee.
 export const STOCK_ENTRY_CHASE = 0.0005;
 export const STOCK_EXIT_SLIP = 0.0005;
 export const STOCK_MARGIN_APR = 0.05;
+export const STOCK_FINANCED_SHARE = 1 - 1 / STOCK_MAX_LEVERAGE;   // 0.5 at 2×
 export function stockEntryPrice(signalPrice: number): number {
   return signalPrice * (1 + STOCK_ENTRY_CHASE);
 }
 /** Total cost as a FRACTION of notional: exit slippage + margin interest accrued. */
-export function stockCostFrac(notional: number, refEquity: number, holdHours: number): number {
-  if (!(notional > 0)) return 0;
-  const borrowed = Math.max(0, notional - refEquity);
-  const interest = borrowed * STOCK_MARGIN_APR * (Math.max(0, holdHours) / (365 * 24));
-  return STOCK_EXIT_SLIP + interest / notional;
+export function stockCostFrac(holdHours: number): number {
+  const interestFrac = STOCK_FINANCED_SHARE * STOCK_MARGIN_APR * (Math.max(0, holdHours) / (365 * 24));
+  return STOCK_EXIT_SLIP + interestFrac;
 }
 
 // VERDICT LADDER — identical rules to the crypto scoreboard so "REAL EDGE" means the

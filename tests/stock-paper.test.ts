@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   STOCK_ENTRY_CHASE, STOCK_EXIT_SLIP, STOCK_MARGIN_APR, STOCK_MAX_LEVERAGE, STOCK_SOURCES, STOCK_UNIVERSE,
-  isStockRthAt, stockCostFrac, stockEntryPrice, stockExitParams, stockNotional, stockPaperPlans,
+  bookHasRoom, isStockRthAt, stockCostFrac, stockEntryPrice, stockExitParams, stockNotional, stockPaperPlans,
   stockRiskFraction, stockVerdict, tStatOf,
 } from "../src/lib/stock-paper-model";
 
@@ -40,17 +40,24 @@ test("sizing: risk-based, conviction-scaled, capped at 2× equity (Reg T)", () =
   assert.equal(stockNotional("stock-fast", 5000, 0), 0);
 });
 
-test("costs: chase on entry, slippage on exit, 5% APR on the borrowed part only", () => {
+test("costs: chase on entry, slippage on exit, 5% APR on the financed half", () => {
   assert.equal(stockEntryPrice(100), 100 * (1 + STOCK_ENTRY_CHASE));
-  // Nothing borrowed → exit slippage only, regardless of hold time.
-  assert.equal(stockCostFrac(4000, 5000, 24 * 30), STOCK_EXIT_SLIP);
-  // $10,000 notional on $5,000 equity held 1 year → $5,000 × 5% = $250 interest = 2.5% of notional.
-  const yr = stockCostFrac(10_000, 5000, 365 * 24);
+  // A full 2x book finances half of every position: one year → 2.5% of notional.
+  const yr = stockCostFrac(365 * 24);
   assert.ok(Math.abs(yr - (STOCK_EXIT_SLIP + 0.025)) < 1e-9, String(yr));
+  // A 2-session fast hold (~30h) costs ~0.017% — the stop, not the interest, is the risk.
+  assert.ok(stockCostFrac(30) - STOCK_EXIT_SLIP < 0.0002);
   // Held 0h → no interest; negative hold clamps to 0.
-  assert.equal(stockCostFrac(10_000, 5000, 0), STOCK_EXIT_SLIP);
-  assert.equal(stockCostFrac(10_000, 5000, -5), STOCK_EXIT_SLIP);
+  assert.equal(stockCostFrac(0), STOCK_EXIT_SLIP);
+  assert.equal(stockCostFrac(-5), STOCK_EXIT_SLIP);
   assert.equal(STOCK_MARGIN_APR, 0.05);
+});
+
+test("book cap: open notional plus the new trade may not exceed 2x equity", () => {
+  assert.equal(bookHasRoom(0, 10_000, 5000), true);
+  assert.equal(bookHasRoom(5000, 5000, 5000), true);
+  assert.equal(bookHasRoom(5000, 5001, 5000), false);
+  assert.equal(bookHasRoom(10_000, 1, 5000), false);
 });
 
 test("verdict ladder matches the crypto desk's rules", () => {
