@@ -110,7 +110,7 @@ async function main() {
     livePct, paperPct,
   );
 
-  console.log("\nPAPER STRATEGIES (v2, judged at live sizing)");
+  console.log("\nPAPER STRATEGIES (v2, US-tradeable pairs only, judged at live sizing)");
   console.log("  strategy                         res  open  net(paper)  live-size  days  t     verdict");
   for (const r of strategies) {
     const resolved = Number(r.resolved);

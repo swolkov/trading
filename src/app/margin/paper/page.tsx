@@ -23,6 +23,7 @@ interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
   grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; paperTStat?: number | null; verdict: string;
+  forwardResolved?: number;
 }
 function verdictCls(v: string): string {
   if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
@@ -99,6 +100,7 @@ export default function PaperTradesPage() {
           they produced most of the resolved trades and every dollar of the loss. Those trades are now excluded from every statistic on this page
           {(score?.shadow?.nonUsResolved ?? 0) > 0 && <> (<span className="text-foreground/80">{score?.shadow?.nonUsResolved} resolved</span> set aside)</>}
           {" "}and their open positions are winding down, badged <span className="text-amber-400/70">non-US</span> in the log. Paper measures what live can take, nothing else.
+          The surviving trades were kept because Kraken&apos;s list excluded coins, not outcomes — but they were re-qualified after the fact, so the scoreboard also shows how many of each sleeve&apos;s resolved trades were entered <span className="text-foreground/80">after</span> the fix (&quot;fwd&quot;). Read the arming gate with that split in mind.
         </p>
       </div>
 
@@ -210,7 +212,12 @@ export default function PaperTradesPage() {
                 {score.strategies.map((s) => (
                   <tr key={s.key} className="border-b border-border/30 last:border-0">
                     <td className="text-left px-4 py-2 font-semibold text-foreground/80">{s.label}</td>
-                    <td className="text-right px-2 py-2 tabular-nums">{s.resolved}</td>
+                    <td className="text-right px-2 py-2 tabular-nums">
+                      {s.resolved}
+                      {s.forwardResolved != null && s.resolved > 0 && !s.verdict.startsWith("retired") && (
+                        <span className="text-[9px] text-muted-foreground/45 ml-1" title="Of these, how many were ENTERED after the Sep 5 universe fix — the forward-only part of the sample. The rest are valid (the fix excluded coins by Kraken's list, not by outcome) but were re-qualified after the fact.">{s.forwardResolved} fwd</span>
+                      )}
+                    </td>
                     <td className="text-right px-2 py-2 tabular-nums text-muted-foreground/50">{s.open}</td>
                     <td className={`text-right px-2 py-2 tabular-nums font-bold ${s.hitRate != null && s.hitRate >= 0.5 ? "text-emerald-400" : "text-amber-400"}`}>
                       {s.hitRate != null ? `${(s.hitRate * 100).toFixed(0)}%` : "—"}

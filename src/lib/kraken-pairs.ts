@@ -6,6 +6,11 @@
 // produced a real bug (XXBTZUSD → "BTZ" ≠ "BTC"), so every comparison goes through
 // this one function.
 export function pairBase(pair: string): string {
+  // ⚠️ Two known traps, both currently fail-SAFE (neither coin is US-margin-tradeable, so
+  // both classify as non-US): "XTZUSD" → "XT" (the ZUSD strip eats Tezos's trailing Z) and
+  // "XAUTUSD" → "AUT" (the X-prefix rule fires on a 4+ letter code). If Kraken ever adds
+  // XTZ or XAUT to US margin, fix THIS function before adding them to the table — the
+  // SQL/JS agreement test in tests/us-margin-universe.test.ts will fail loudly until then.
   // Kraken's US margin product suffixes a clearing-venue tag: "XBTUSD:BTNL"
   // (Bitnomial). Spencer's real margin fills ALL carry it — strip it first.
   let base = pair.toUpperCase().replace(/:[A-Z0-9]+$/, "").replace(/ZUSD$/, "").replace(/USD$/, "");
@@ -60,12 +65,20 @@ export function isUsMarginSymbol(symbolOrPair: string): boolean {
 // The universe as app symbols ("BTC/USD" …), the spelling every paper trade is stored under.
 export const US_MARGIN_SYMBOLS: string[] = Object.keys(US_MARGIN_MAX_LEVERAGE).map((b) => `${b}/USD`);
 
+// What the scanner WATCHES: the US list minus the two that do not move (USDC stablecoin,
+// PAXG gold). Lives here (no imports) so client components can show the list truthfully.
+export const SCAN_UNIVERSE: string[] = Object.keys(US_MARGIN_MAX_LEVERAGE).filter((b) => b !== "USDC" && b !== "PAXG");
+
 // SQL predicate selecting paper trades on US-tradeable pairs. Built from the table above
-// (constants only — no user input reaches this string), plus Kraken's legacy aliases so a
-// manual alert spelled XBT/USD or XDG/USD is still recognised as BTC/DOGE. Kept in step
-// with isUsMarginSymbol() by a unit test, so SQL and JS can never disagree on a symbol.
+// (constants only — no user input reaches this string). Accepts every spelling a row could
+// plausibly be stored under — NAME/USD (the webhook and scanner form), NAMEUSD (raw Kraken
+// code), and Kraken's legacy XBT/XDG aliases — so a future insert path that stores a raw
+// pair code cannot be silently excluded by SQL while the JS badge calls it tradeable. Kept
+// in step with isUsMarginSymbol() by a unit test, so SQL and JS can never disagree.
 export const US_MARGIN_SYMBOLS_SQL: string = `upper(COALESCE(symbol,'')) IN (${[
-  ...US_MARGIN_SYMBOLS, "XBT/USD", "XDG/USD",
+  ...US_MARGIN_SYMBOLS,
+  ...Object.keys(US_MARGIN_MAX_LEVERAGE).map((b) => `${b}USD`),
+  "XBT/USD", "XBTUSD", "XXBTZUSD", "XDG/USD", "XDGUSD", "XXDGZUSD",
 ].map((s) => `'${s}'`).join(",")})`;
 
 // Max US-retail leverage for a pair; anything not in the table falls back to the caller's

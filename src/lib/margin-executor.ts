@@ -59,7 +59,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
-import { pairMatchesSymbol, pairBase, isUsMarginSymbol } from "@/lib/kraken-pairs";
+import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
 import {
@@ -487,7 +487,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Equity ladder: $5k book stays 2× even if the operator ceiling is 5. Risk % is
     // unchanged — larger equity just means larger dollar bets at the same 3%/6%.
     const maxLev = effectiveMaxLeverage(cfgMaxLev, equity);
-    const leverage = Math.min(maxLev, Math.max(2, alert.leverage ?? 2));
+    // Also capped at the pair's own US-retail maximum (ALGO/XLM are 2×, PENGU/NEAR/RENDER
+    // 3×): once the ladder allows 3×+ an order above the pair cap would be rejected by
+    // Kraken — fail-safe, but a silent "this pair can never enter". Cap it here instead.
+    const leverage = Math.min(maxLev, usRetailMaxLeverage(alert.symbol, maxLev), Math.max(2, alert.leverage ?? 2));
     // The cap trips on EITHER measure, never on their sum. health.unrealized is TradeBalance
     // 'n' — the whole account, including positions Spencer opened by hand. Netting them
     // meant one profitable manual long could mask a bot that had already realised past the

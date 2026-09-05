@@ -7,10 +7,11 @@
 // trading these would just automate losing. The scanner's job is to put Spencer's eyes
 // on the right chart at the right moment and to build a scored record — not to trade.
 import { getKrakenOHLC, type KrakenBar } from "@/lib/kraken-margin";
+import { SCAN_UNIVERSE } from "@/lib/kraken-pairs";
 
 // THE SCAN UNIVERSE = the US-retail margin list (kraken-pairs.ts US_MARGIN_MAX_LEVERAGE),
-// minus the two that don't move (USDC stablecoin, PAXG gold). Every coin here is one the
-// live book can actually margin-trade, and a unit test enforces that.
+// minus the two that don't move (USDC stablecoin, PAXG gold) — derived from that one
+// table (SCAN_UNIVERSE), so the scanner cannot drift from what the live book can trade.
 //
 // ⚠️ HISTORY, do not repeat: from Sep 1–5 2026 this list held 37 coins curated from
 // Kraken's public AssetPairs (the INTERNATIONAL product). 19 of them — BNB XMR TIA TON APT
@@ -20,21 +21,9 @@ import { getKrakenOHLC, type KrakenBar } from "@/lib/kraken-margin";
 // could never run. Watching what you cannot trade is not "free": it fills the sample with
 // the wrong population. Spreads re-checked Sep 5 (all < 0.10%); candles verified for
 // every new name.
-export const SCAN_COINS: { name: string; symbol: string }[] = [
-  // 20× / 10× tier
-  { name: "BTC", symbol: "BTC/USD" }, { name: "ETH", symbol: "ETH/USD" }, { name: "SOL", symbol: "SOL/USD" },
-  { name: "XRP", symbol: "XRP/USD" }, { name: "DOGE", symbol: "DOGE/USD" }, { name: "ADA", symbol: "ADA/USD" },
-  { name: "AVAX", symbol: "AVAX/USD" }, { name: "LINK", symbol: "LINK/USD" }, { name: "LTC", symbol: "LTC/USD" },
-  { name: "SUI", symbol: "SUI/USD" },
-  // 5× tier
-  { name: "AAVE", symbol: "AAVE/USD" }, { name: "BCH", symbol: "BCH/USD" }, { name: "CRV", symbol: "CRV/USD" },
-  { name: "DOT", symbol: "DOT/USD" }, { name: "HBAR", symbol: "HBAR/USD" }, { name: "HYPE", symbol: "HYPE/USD" },
-  { name: "PEPE", symbol: "PEPE/USD" }, { name: "SHIB", symbol: "SHIB/USD" }, { name: "TRX", symbol: "TRX/USD" },
-  { name: "UNI", symbol: "UNI/USD" }, { name: "ZEC", symbol: "ZEC/USD" },
-  // 3× / 2× tier
-  { name: "PENGU", symbol: "PENGU/USD" }, { name: "NEAR", symbol: "NEAR/USD" }, { name: "RENDER", symbol: "RENDER/USD" },
-  { name: "ALGO", symbol: "ALGO/USD" }, { name: "XLM", symbol: "XLM/USD" },
-];
+// 26 coins (Sep 5 2026): BTC ETH SOL XRP DOGE ADA AVAX LINK LTC SUI · AAVE BCH CRV DOT HBAR
+// HYPE PEPE SHIB TRX UNI ZEC · PENGU NEAR RENDER ALGO XLM.
+export const SCAN_COINS: { name: string; symbol: string }[] = SCAN_UNIVERSE.map((name) => ({ name, symbol: `${name}/USD` }));
 
 // Timeframes scanned for awareness. 5m is the fastest — it's where intraday breakouts
 // live, and the cron runs every 5 min so a break is caught within one bar. 1m/3m are
@@ -177,7 +166,7 @@ function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: Krak
 }
 
 // Scan the whole universe. Paced ~150ms/call to stay well under Kraken's public limit
-// (~37 coins × 5 timeframes ≈ 185 calls ≈ 28s, comfortably inside the 300s cron budget).
+// (26 coins × 5 timeframes = 130 calls ≈ 20s, comfortably inside the 300s cron budget).
 // A coin/timeframe that errors (bad pair, thin history) is skipped, not fatal.
 export async function scanUniverse(): Promise<{ signals: ScanSignal[]; errors: string[] }> {
   const signals: ScanSignal[] = [];

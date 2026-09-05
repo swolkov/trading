@@ -113,6 +113,12 @@ export const SIM_COHORT_SQL = `sim_version='${SIM_VERSION}'`;
 // 19 of 37 scanned coins were untradeable and carried every dollar of the loss.
 export const RECORD_SQL = `${SIM_COHORT_SQL} AND ${US_MARGIN_SYMBOLS_SQL}`;
 
+// When the universe fix shipped. The exclusion above is exogenous (Kraken's list, not
+// P&L), so the surviving pre-fix trades are valid — but they were re-qualified after the
+// fact, and the arming gate should be read knowing how much of the sample is forward-only.
+// strategyBreakdown reports the count of resolved trades ENTERED after this moment.
+export const UNIVERSE_FIX_AT = "2026-09-05T17:00:00Z";
+
 export interface ShadowResolution {
   id: number; symbol: string; side: string; entry: number; exit: number;
   pnl: number; pnlPct: number; reason: string; leverage: number; conviction: string | null;
@@ -489,6 +495,7 @@ export async function shadowScore(): Promise<ShadowScore> {
 // hit rate with tiny wins and big losses still loses.
 export interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
+  forwardResolved: number;   // of `resolved`, how many were ENTERED after UNIVERSE_FIX_AT
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
   grossPnl: number; fees: number;   // gross (before fees) and the fee drag — net = gross − fees
   peakedGreen: number;    // resolved trades that were in profit at their PEAK — the give-back
@@ -538,7 +545,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
   const rows = await prisma.$queryRawUnsafe<{
     source: string; resolved: bigint; wins: bigint; total: number | null;
     avgwin: number | null; avgloss: number | null; open: bigint; fees: number | null;
-    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint;
+    meanpnl: number | null; stdpnl: number | null; peaked: bigint; days: bigint; fwd: bigint;
     livenet: number | null; livemean: number | null; livestd: number | null;
   }[]>(
     `SELECT COALESCE(source,'manual') AS source,
@@ -547,6 +554,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_peak IS NOT NULL AND mark_price > 0
          AND ((side='buy' AND shadow_peak > mark_price) OR (side='sell' AND shadow_peak < mark_price)))::bigint AS peaked,
        count(DISTINCT date_trunc('day', shadow_resolved_at)) FILTER (WHERE shadow_status='resolved')::bigint AS days,
+       count(*) FILTER (WHERE shadow_status='resolved' AND time > '${UNIVERSE_FIX_AT}'::timestamptz)::bigint AS fwd,
        -- Each trade re-priced from the risk the PAPER sizer used to the risk the LIVE
        -- executor would use. Both scale by conviction (high 2x, low 0.5x, 6% ceiling), so
        -- with the two base rates equal this ratio is 1 and live == paper — which is the
@@ -609,6 +617,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         totalPnl: net,
         open: Number(r.open),
         peakedGreen: Number(r.peaked),
+        forwardResolved: Number(r.fwd),
         liveNet,
         fees: r.fees || 0,
         grossPnl: net + (r.fees || 0),   // net + fees = gross (before-fee P&L)
