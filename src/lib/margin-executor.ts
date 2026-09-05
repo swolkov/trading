@@ -295,7 +295,28 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // left open. Disarming must stop new risk, never trap existing risk.
   if (alert.side === "close") {
     const validateClose = (await cfg("kraken_margin_validate_only")) !== "false";
+    // SERIALISE closes — wait for a concurrent close to finish, never refuse. Two closes
+    // reading the same snapshot would both pass the FIFO guard and the second would reduce
+    // a NEWER manual position after the first consumed the bot's. reduce_only is not
+    // idempotency. A lock that could trap a close is worse than no lock, so after 20s we
+    // proceed regardless; the fresh positions read below is what makes the retry harmless.
+    const closeToken = `${new Date().toISOString()}#${Math.random().toString(36).slice(2, 10)}`;
+    let closeLockHeld = false;
+    for (let i = 0; i < 20; i++) {
+      const cutoff = new Date(Date.now() - 60_000).toISOString();
+      await prisma.agentConfig.upsert({ where: { key: "kraken_margin_close_lock" }, update: {}, create: { key: "kraken_margin_close_lock", value: "" } }).catch(() => {});
+      const r = await prisma.agentConfig.updateMany({ where: { key: "kraken_margin_close_lock", OR: [{ value: "" }, { value: { lt: cutoff } }] }, data: { value: closeToken } }).catch(() => ({ count: 0 }));
+      if (r.count === 1) { closeLockHeld = true; break; }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
     try {
+      // Our RESTING ENTRY orders on the pair go first: a partially filled maker entry could
+      // otherwise keep filling after the flatten and leave a fresh bot tranche behind a
+      // "closed" result. Then the positions are read, so the volume to flatten is current.
+      try {
+        const restingEntries = (await krakenOpenOrders()).filter((o) => o.userref === MARGIN_USERREF && !o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair));
+        for (const o of restingEntries) { try { await krakenCancelOrder(o.txid); } catch { await sendNotification(`⚠️ Could not cancel resting entry ${o.txid} on ${pair} before the close — cancel it on Kraken.`, "margin_urgent").catch(() => {}); } }
+      } catch { /* the post-close sweep re-reads orders and reports its own failures */ }
       const all = (await getKrakenMarginPositions())
         .filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
       // OWNERSHIP FILTER: only flatten positions this bot opened. Kraken margin positions
@@ -413,9 +434,30 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           break;
         }
       }
+      // Confirm what actually closed with a RELIABLE re-read (positions gone AND margin not
+      // in use). A tranche that still shows keeps its side's stops; a read we cannot trust
+      // sweeps nothing and says so LOUDLY — a stranded non-reduce-only stop is the one thing
+      // this path must never leave silently (the guardian sweeps it in ≤10 min regardless).
+      let survivingSides = new Set<string>();
+      let confirmedGone = false;
+      try {
+        const health = await getKrakenMarginHealth().catch(() => null);
+        const after = await getKrakenMarginPositions();
+        const unreliable = failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null);
+        if (unreliable) throw new Error("positions read unreliable after close");
+        const targeted = new Set(positions.map((p) => p.id));
+        const survivors = after.filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && targeted.has(p.id));
+        survivingSides = new Set(survivors.map((p) => (p.side === "long" ? "sell" : "buy")));
+        confirmedGone = survivors.length === 0;
+        if (survivors.length && closeErr == null) pending.push(`🚨 ${survivors.length} targeted position(s) on ${pair} still show open after the close orders were accepted — stops on that side left in place. Check Kraken.`);
+      } catch (e) {
+        survivingSides = new Set(closedSides);   // unreadable → sweep nothing
+        pending.push(`🚨 Could not confirm the close on ${pair} (${String(e).slice(0, 80)}) — resting stop(s) LEFT IN PLACE; the guardian sweeps stranded stops within ~10 min. Check Kraken now.`);
+      }
+      for (const side of survivingSides) closedSides.delete(side);
       // Consume the one-shot authorisation now that a close actually went through. A failed
       // consume is paged: the flag would flatten manual positions on the NEXT close too.
-      if (closeAll && txids.length > 0) {
+      if (closeAll && (txids.length > 0 || confirmedGone)) {
         const cleared = await prisma.agentConfig.updateMany({
           where: { key: "kraken_margin_close_all_positions", value: closeAllRaw },
           data: { value: "" },
@@ -424,20 +466,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           await sendNotification(`⚠️ Could not clear kraken_margin_close_all_positions after using it on ${pair} — it is STILL ARMED and will flatten manual positions on the next close. Clear it by hand.`, "margin_urgent").catch(() => {});
         }
       }
-      // A partially filled MAKER entry can keep filling after the close — cancel our resting
-      // entry orders on the pair as part of the same operation.
-      try {
-        const restingEntries = (await krakenOpenOrders()).filter((o) => o.userref === MARGIN_USERREF && !o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair));
-        for (const o of restingEntries) { try { await krakenCancelOrder(o.txid); } catch { pending.push(`⚠️ Could not cancel resting entry ${o.txid} on ${pair} after the close — cancel it on Kraken.`); } }
-      } catch { /* the stop sweep below re-reads orders and reports its own failures */ }
-      // A tranche that did NOT close (second AddOrder threw) must keep its stop: only sweep
-      // a side once no bot position remains on it.
-      let survivingSides = new Set<string>();
-      try {
-        const after = (await getKrakenMarginPositions()).filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && (closeAll || isOurs(p)));
-        survivingSides = new Set(after.map((p) => (p.side === "long" ? "sell" : "buy")));
-      } catch { survivingSides = new Set(closedSides); }   // unreadable → sweep nothing
-      for (const side of survivingSides) closedSides.delete(side);
       // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY — including after a partial flatten.
       // If the second AddOrder throws, skipping this sweep would leave the first close's
       // stop resting. Kraken's attached close[] cannot be reduce_only, so that stop can
@@ -498,6 +526,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         "margin_urgent",
       ).catch(() => {});
       return { executed: false, validated: false, note: `close failed: ${e}` };
+    } finally {
+      if (closeLockHeld) {
+        await prisma.agentConfig.updateMany({ where: { key: "kraken_margin_close_lock", value: closeToken }, data: { value: "" } }).catch(() => {});
+      }
     }
   }
 
@@ -570,12 +602,17 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const perTrade = Math.max(0, await cfgNum("kraken_margin_per_trade_usd", 0));
     const lossCap = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 200));
 
-    // Layer 5a: the guardian must be alive. The container's exit (ratchet, time stop) and
-    // the naked-position rescue live there; entering while it is down would open a trade
-    // nothing manages. Same staleness bar as the trade sync.
-    const watchRun = await cfg("margin_watch_last_run");
-    if (!watchRun || Date.now() - new Date(watchRun).getTime() > 15 * 60 * 1000) {
-      return { executed: false, validated: false, note: "guardian has not run in 15m — no new entries while nothing would manage them (failing closed)" };
+    // Layer 5a: the guardian's PROTECTION must have actually run recently (the stamp is
+    // written only after step 3c completed without a failure — not at route start). The
+    // container's exit and the naked-position rescue live there; entering while it is down
+    // would open a trade nothing manages. Re-checked immediately before AddOrder.
+    const guardianFresh = async (): Promise<boolean> => {
+      const v = await cfg("margin_watch_protect_ok");
+      const t = v ? Date.parse(v) : NaN;
+      return Number.isFinite(t) && Date.now() - t <= 15 * 60 * 1000;
+    };
+    if (!(await guardianFresh())) {
+      return { executed: false, validated: false, note: "guardian protection has not completed in 15m — no new entries while nothing would manage them (failing closed)" };
     }
 
     // Layer 5: daily loss kill switch — realized round trips closed today plus open P&L.
@@ -764,6 +801,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
     if (validate) params.validate = "true";
 
+    if (!(await guardianFresh())) {
+      return { executed: false, validated: false, note: "guardian protection went stale during entry checks — not sent (failing closed)" };
+    }
     let res;
     sentAtSec = Math.floor(Date.now() / 1000);
     addOrderSent = true;   // from here on, an exception may mean an ACCEPTED order
@@ -813,11 +853,21 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       const liveOrd = ords.filter((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair));
       // Our RESTING entry orders carry our userref: their identity is known, so ledger
       // them now and a later fill is a recognised position (closable, protected).
-      const restingEntries = liveOrd.filter((o) => !o.ordertype.includes("stop"));
-      for (const o of restingEntries) await recordBotEntry(o.txid, pair, { stopFrac: stopPctSent || undefined });
+      // Only THIS order: our direction, opened at/after the send. Ledger success is checked
+      // (a failed write must not be reported as "ledgered"), the acceptance counts toward
+      // the day's entries, and none of this runs on a validate pass.
+      const restingEntries = validate ? [] : liveOrd.filter((o) => !o.ordertype.includes("stop") && o.side === alert.side && o.opentm >= sentAtSec - 2);
       if (restingEntries.length) {
-        await sendNotification(`⚠️ Entry on ${pair} errored after sending, but our resting order ${restingEntries.map((o) => o.txid).join(", ")} was found and ledgered — nothing to adopt. Error: ${String(e).slice(0, 120)}`, "margin_urgent").catch(() => {});
-        return { executed: false, validated: validate, note: `order errored but our resting entry was found and ledgered on ${pair}: ${e}` };
+        const ok: string[] = [];
+        const bad: string[] = [];
+        for (const o of restingEntries) { if (await recordBotEntry(o.txid, pair, { stopFrac: stopPctSent || undefined })) ok.push(o.txid); else bad.push(o.txid); }
+        if (dayStateRef) await bumpDayState(dayStateRef);
+        await sendNotification(
+          bad.length
+            ? `🚨 Entry on ${pair} errored after sending; our resting order ${bad.join(", ")} was found but could NOT be ledgered — adopt it via kraken_margin_adopt_txids now. Error: ${String(e).slice(0, 120)}`
+            : `⚠️ Entry on ${pair} errored after sending, but our resting order ${ok.join(", ")} was found and ledgered — nothing to adopt. Error: ${String(e).slice(0, 120)}`,
+          "margin_urgent").catch(() => {});
+        return { executed: false, validated: validate, note: `order errored but our resting entry was found${bad.length ? " (UNLEDGERED — adopt it)" : " and ledgered"} on ${pair}: ${e}` };
       }
       // No resting order: the accepted order may have FILLED. Its txid is still ours to
       // recover — ClosedOrders filtered by our userref in the last few minutes — and that,

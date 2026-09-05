@@ -123,7 +123,9 @@ export async function POST(request: Request) {
     // Neither guard applies to a CLOSE: a close only reduces risk, reduce_only makes a
     // repeat idempotent, and a failed close re-sent inside two minutes must be RETRIED,
     // not logged as a duplicate.
-    if (side !== "close" && Number(recent) >= 30) {
+    // Closes keep their own, generous cap — a leaked secret must not be able to flood
+    // Kraken's per-key limit with closes and starve the guardian's protective calls.
+    if (Number(recent) >= (side === "close" ? 60 : 30)) {
       return Response.json({ error: "rate limited" }, { status: 429 });
     }
     duplicate = side !== "close" && Number(dupes) > 0;

@@ -170,7 +170,7 @@ export function groupPositionsByOrder<T extends PositionLike>(positions: T[]): P
     const key = `${p.ordertxid}|${p.pair}|${p.side}`;
     const g = byOrder.get(key);
     if (!g) {
-      byOrder.set(key, { ordertxid: p.ordertxid, pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, openedAt: p.openedAt, newestOpenedAt: p.openedAt, leverage: p.leverage, ids: [p.id] });
+      byOrder.set(key, { ordertxid: p.ordertxid, pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, openedAt: p.openedAt, newestOpenedAt: Number.isFinite(new Date(p.openedAt || "").getTime()) ? p.openedAt : "", leverage: p.leverage, ids: [p.id] });
       continue;
     }
     const vol = g.vol + p.vol;
@@ -181,7 +181,12 @@ export function groupPositionsByOrder<T extends PositionLike>(positions: T[]): P
     // FIFO is per tranche: a manual fill that landed BETWEEN two of ours is older than the
     // second, so the group's close would hit it. The newest tranche's time is what the
     // FIFO guard must compare against.
-    if (p.openedAt && (!g.newestOpenedAt || new Date(p.openedAt).getTime() > new Date(g.newestOpenedAt).getTime())) g.newestOpenedAt = p.openedAt;
+    // Any tranche with an UNKNOWN time makes the group's ordering unknown ("" fails closed
+    // in fifoWouldHitManual) — a silently dropped timestamp would defeat the FIFO guard.
+    const pt = new Date(p.openedAt || "").getTime();
+    const gt = new Date(g.newestOpenedAt || "").getTime();
+    if (!Number.isFinite(pt) || !Number.isFinite(gt)) g.newestOpenedAt = "";
+    else if (pt > gt) g.newestOpenedAt = p.openedAt;
     g.ids.push(p.id);
   }
   return [...byOrder.values()];

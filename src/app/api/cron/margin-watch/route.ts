@@ -11,7 +11,7 @@ import {
 import { pairBase, publicPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, botOwnership } from "@/lib/margin-executor";
-import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, clampLiveStopFrac, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget, roundedStopIsSafe, stopNeedsRatchet } from "@/lib/margin-live-risk";
+import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget, roundedStopIsSafe, stopNeedsRatchet } from "@/lib/margin-live-risk";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -75,7 +75,9 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
   }
   if (!row?.value) return { state: { alerts: {} }, unreliable: false, corrupt: false };
   try {
-    return { state: JSON.parse(row.value) as WatchState, unreliable: false, corrupt: false };
+    const parsed = JSON.parse(row.value) as WatchState;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.alerts !== "object") throw new Error("bad shape");
+    return { state: { ...parsed, alerts: parsed.alerts ?? {} }, unreliable: false, corrupt: false };
   } catch {
     // Corrupt JSON is NOT an outage: treating it as one would disable reconciliation and
     // the managed exit forever. Back the raw value up, start fresh, and shout.
@@ -177,9 +179,10 @@ export async function GET(request: Request) {
       if (flatNow && state.lastEquity && state.lastEquity > 0) {
         const jump = (health.equity - state.lastEquity) / state.lastEquity;
         if (jump > 0.30) {
-          // A large UPWARD step while flat is a deposit: rebaseline so the breaker measures
-          // trading, not cash flow.
-          peak = health.equity;
+          // A large UPWARD step while flat is a deposit: SHIFT the peak by the same dollars so
+          // the breaker keeps measuring trading, not cash flow — and never forgets an
+          // existing drawdown (a deposit under the peak does not make the loss go away).
+          peak = Math.max(peak + (health.equity - state.lastEquity), health.equity);
           await prisma.agentConfig.upsert({
             where: { key: "kraken_margin_equity_peak" },
             update: { value: String(peak) }, create: { key: "kraken_margin_equity_peak", value: String(peak) },
@@ -381,23 +384,29 @@ export async function GET(request: Request) {
 
   // 3c) PROTECT + MANAGED EXIT — position → stop, the direction that actually protects
   // money, applied to every position WE opened (ledger ∪ adopted; Spencer's hand-opened
-  // positions are never touched). Per ORDER (one order can fill in several tranches that
-  // Kraken lists as separate positions sharing one ordertxid — treated as one), each run:
-  //   0. DEDUPE — more than one of our stops covering the order: keep the best-priced (tie →
-  //      newest), cancel the rest. The attached close[] stop is NOT reduce-only; left beside a
-  //      reduce-only one it can fire second and OPEN a reverse position.
-  //   1. TIME STOP — paper's 48h rule: reduce-only market close, then sweep its stops.
-  //   2. PAST THE MANAGED STOP — price is beyond where paper's exit would sit: the trade is
-  //      over; close it on two consecutive sightings (a bad read can never realize a loss),
-  //      covered by a stop just beyond the market while confirming.
-  //   3. NAKED — no resting stop covers the volume: place a reduce-only rescue stop at the
-  //      managed level, checked after rounding so it can never fire on acceptance.
-  //   4. RATCHET — paper's exit: once +1R the stop is at least breakeven and trails 1R
-  //      behind the peak (from COMPLETED 1-minute bars). New reduce-only stop first, old
-  //      cancelled after (one retry); if the cancel still fails the NEW stop is withdrawn
-  //      so the book returns to exactly its prior state.
-  // Every close order is refused when an OLDER manual position sits on the same pair and
-  // side — Kraken nets FIFO and the order would hit Spencer's book, not the bot's.
+  // positions are never touched). Kraken attaches stops to a PAIR and SIDE, not to a
+  // position, and nets closes FIFO — so all bot exposure on one pair+side is managed as
+  // ONE BOOK: one full-volume reduce-only stop is the invariant, coverage is measured
+  // against the summed volume, and a close flattens the summed volume. Each run:
+  //   0. DEDUPE — more than one of our fixed stops on the book, the best of which covers the
+  //      whole volume: keep the best-priced (tie → newest), cancel the rest. The attached
+  //      close[] stop is NOT reduce-only; left beside a reduce-only one it can fire second
+  //      and OPEN a reverse position.
+  //   1. TIME STOP — paper's 48h rule on the OLDEST tranche: reduce-only market close, sweep.
+  //   2. PAST THE MANAGED STOP — price is beyond where paper's exit would sit: close on two
+  //      consecutive sightings (a bad read can never realize a loss), covered meanwhile.
+  //   3. NAKED — a shortfall in stop cover: place a reduce-only rescue stop, rounding-safe.
+  //   4. RATCHET — paper's exit (once +1R: breakeven, then trail 1R behind the peak) —
+  //      ONLY for a single-order book. A book stacked from several bot orders (adoption or
+  //      allow_stacking) has no single 1R, so it is protected and time-stopped, never
+  //      ratcheted, and that is paged. New reduce-only stop first, old cancelled after (one
+  //      retry); the new stop is withdrawn only if NO old stop could be cancelled.
+  // FIFO: when an OLDER manual position sits on the same pair+side, a close would reduce it
+  // first — closes are refused and paged. Protective stops are still placed (the account
+  // is protected; when such a stop fires Kraken reduces the manual position first, and the
+  // page says so). The executor's anti-stacking rule keeps this state from arising on its
+  // own; it can only be reached by adoption or by a manual entry beside a bot position.
+  let protectRanClean = false;
   try {
     if (stateUnreliable) throw new Error("skip: state unreadable");
     const ownership = await botOwnership();
@@ -410,79 +419,84 @@ export async function GET(request: Request) {
     const managedPrev = state.managed ?? {};
     const managedNext: NonNullable<WatchState["managed"]> = {};
     const priorBreached = state.nakedBreached ?? {};
-    const nextBreached: Record<string, number> = {};
+    const nextBreached: Record<string, number> = { ...priorBreached };
     if (positionsUnreliable) {
       Object.assign(managedNext, managedPrev);
-      Object.assign(nextBreached, priorBreached);
       errors.push("protect/exit: positions empty but margin in use — skipping (unreliable read)");
     } else {
-      const groups = groupPositionsByOrder(positionsAll.filter(ownership.isOurs));
-      const orders = groups.length ? await krakenOpenOrders() : [];
-      // An account with no resting orders is this account's NORMAL state, and a bot
-      // position that lost its stop is exactly what produces "positions, no orders" — so
-      // an empty read never skips protection (it did until Sep 5 2026). It withholds the
-      // actions a BAD read must never trigger (market closes), and places the rescue stop
-      // only on the SECOND consecutive empty read (see emptyOrdersStreak).
-      const ordersUnreliable = groups.length > 0 && orders.length === 0;
+      const isOursLoose = (p: { pair: string; side: string; openedAt: string }) => ownership.isOurs(p as unknown as { ordertxid: string; id: string });
+      const samePair = (a: string, b: string) => pairBase(a) === pairBase(b);
+      // Per-ORDER groups (1R lives per order), then per-BOOK (pair+side) aggregation.
+      const orderGroups = groupPositionsByOrder(positionsAll.filter(ownership.isOurs));
+      const books = new Map<string, typeof orderGroups>();
+      for (const g of orderGroups) { const k = `${pairBase(g.pair)}|${g.side}`; (books.get(k) ?? books.set(k, []).get(k)!).push(g); }
+      let orders = books.size ? await krakenOpenOrders() : [];
+      // An account with no resting orders is this account's NORMAL state, and a bot position
+      // that lost its stop is exactly what produces "positions, no orders" — so an empty read
+      // never skips protection (it did until Sep 5 2026). It withholds the actions a BAD
+      // read must never trigger (market closes) and places the rescue stop only on the
+      // SECOND consecutive empty read (see emptyOrdersStreak).
+      const ordersUnreliable = books.size > 0 && orders.length === 0;
       state.emptyOrdersStreak = ordersUnreliable ? (state.emptyOrdersStreak ?? 0) + 1 : 0;
-      if (ordersUnreliable) errors.push(`protect/exit: zero open orders while holding bot positions (streak ${state.emptyOrdersStreak}) — withholding closes${state.emptyOrdersStreak < 2 ? " and rescue stops until confirmed" : ""}`);
+      const bookConfirmedEmpty = ordersUnreliable && (state.emptyOrdersStreak ?? 0) >= 2;
+      if (ordersUnreliable) errors.push(`protect/exit: zero open orders while holding bot positions (streak ${state.emptyOrdersStreak}) — ${bookConfirmedEmpty ? "book confirmed empty, protecting" : "withholding orders until confirmed"}`);
       const stopCfgPct = await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT);
       const maxHoldH = Math.max(1, await cfgNum("kraken_margin_max_hold_h", LIVE_MAX_HOLD_H));
-      const samePair = (a: string, b: string) => pairBase(a) === pairBase(b);
-      const isOursLoose = (p: { pair: string; side: string; openedAt: string }) => ownership.isOurs(p as unknown as { ordertxid: string; id: string });
-      for (const g of groups) {
-        const openedMs = g.openedAt ? new Date(g.openedAt).getTime() : NaN;
+      let anyGroupFailed = false;
+
+      for (const [bookKey, grp] of books) {
+        try {
+        const side = grp[0].side;
+        const pairRaw = grp[0].pair;
+        const vol = grp.reduce((s, g) => s + g.vol, 0);
+        const entryPrice = vol > 0 ? grp.reduce((s, g) => s + g.entryPrice * g.vol, 0) / vol : grp[0].entryPrice;
+        const leverage = Math.max(...grp.map((g) => g.leverage));
+        const stacked = grp.length > 1;
+        const openedTimes = grp.map((g) => new Date(g.openedAt).getTime());
+        const oldestMs = openedTimes.every(Number.isFinite) ? Math.min(...openedTimes) : NaN;
+        const newestOpenedAt = grp.every((g) => g.newestOpenedAt) ? grp.map((g) => g.newestOpenedAt).sort()[grp.length - 1] : "";
         // Unknown open time: past the grace period (protect it), but never time-stopped.
-        const ageMs = Number.isFinite(openedMs) ? Date.now() - openedMs : Infinity;
+        const ageMs = Number.isFinite(oldestMs) ? Date.now() - oldestMs : Infinity;
+        const youngestAgeMs = openedTimes.every(Number.isFinite) ? Date.now() - Math.max(...openedTimes) : Infinity;
         // GRACE: Kraken submits the attached close[] only after the fill; a position opened
         // seconds ago legitimately has no visible stop yet.
-        if (ageMs < 6 * 60_000) { if (managedPrev[g.ordertxid]) managedNext[g.ordertxid] = managedPrev[g.ordertxid]; continue; }
-        try {
-        // g.pair is VENUE-SUFFIXED on real margin fills ("XBTUSD:BTNL"); market data and
-        // orders go through the public pair.
-        const publicPair = publicPairFor(g.pair);
+        if (youngestAgeMs < 6 * 60_000) { if (managedPrev[bookKey]) managedNext[bookKey] = managedPrev[bookKey]; continue; }
+        const publicPair = publicPairFor(pairRaw);
         const meta = await getPairMeta(publicPair);
-        const closeSide = g.side === "long" ? "sell" : "buy";
-        const lev = String(Math.max(2, Math.round(g.leverage)));
-        const closeVol = g.vol.toFixed(meta.lotDecimals);
-        const coveringAll0 = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && samePair(o.pair, g.pair) && o.side === closeSide);
-        // A Kraken trailing-stop reports its OFFSET ("+3%") in descr.price, not a level; the
-        // ratchet cannot reason about it. Only fixed stop-loss orders are managed here.
-        const hasTrailing = coveringAll0.some((o) => o.ordertype !== "stop-loss");
-        const covering0 = coveringAll0.filter((o) => o.ordertype === "stop-loss" && o.price > 0);
-        const cancelledTxids = new Set<string>();
-        if (coveringAll0.some((o) => o.ordertype === "stop-loss" && !(o.price > 0))) {
-          // A fixed stop whose trigger we cannot read is an UNKNOWN, not a zero. Acting on it
-          // either way (counting it as cover, or placing a rescue beside it) is a guess.
-          errors.push(`${g.pair}: a resting stop has no readable trigger price — not managing this run`);
-          if (managedPrev[g.ordertxid]) managedNext[g.ordertxid] = managedPrev[g.ordertxid];
+        const closeSide = side === "long" ? "sell" : "buy";
+        const lev = String(Math.max(2, Math.round(leverage)));
+        const closeVol = vol.toFixed(meta.lotDecimals);
+        const ourStopsOnBook = () => orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && samePair(o.pair, pairRaw) && o.side === closeSide);
+        let coveringAll = ourStopsOnBook();
+        const hasTrailing = coveringAll.some((o) => o.ordertype !== "stop-loss");
+        if (coveringAll.some((o) => o.ordertype === "stop-loss" && !(o.price > 0))) {
+          errors.push(`${pairRaw}: a resting stop has no readable trigger price — not managing this run (time stop deferred too)`);
+          if (managedPrev[bookKey]) managedNext[bookKey] = managedPrev[bookKey];
           continue;
         }
-        const fifoBlocked = fifoWouldHitManual({ pair: g.pair, side: g.side, openedAt: g.newestOpenedAt }, positionsAll, isOursLoose, samePair);
+        let covering = coveringAll.filter((o) => o.ordertype === "stop-loss" && o.price > 0);
+        const byBest = (a: { price: number; opentm: number }, b: { price: number; opentm: number }) => (side === "long" ? b.price - a.price : a.price - b.price) || b.opentm - a.opentm;
+        const fifoBlocked = fifoWouldHitManual({ pair: pairRaw, side, openedAt: newestOpenedAt }, positionsAll, isOursLoose, samePair);
+        const fifoNote = fifoBlocked ? " ⚠️ an OLDER manual position sits on this pair+side: Kraken reduces it FIRST when any of these orders fire — close it by hand." : "";
 
-        // 0) DEDUPE our stops on this order — ONLY when the best one covers the whole volume
-        // (partial stops from the naked branch are complementary, not duplicates): keep the
-        // best-priced (tie → newest), cancel the rest, and DROP the cancelled from both lists
-        // so nothing below acts on an order that no longer rests.
-        const byBest = (a: { price: number; opentm: number }, b: { price: number; opentm: number }) => (g.side === "long" ? b.price - a.price : a.price - b.price) || b.opentm - a.opentm;
-        if (covering0.length > 1 && [...covering0].sort(byBest)[0].vol >= g.vol * 0.99) {
-          const best = [...covering0].sort(byBest)[0];
-          for (const o of covering0) {
+        // 0) DEDUPE — only when the best stop alone covers the whole book.
+        if (covering.length > 1 && [...covering].sort(byBest)[0].vol >= vol * 0.99) {
+          const best = [...covering].sort(byBest)[0];
+          for (const o of covering) {
             if (o.txid === best.txid) continue;
             let gone = false;
             try { await krakenCancelOrder(o.txid); gone = true; }
-            catch { try { await krakenCancelOrder(o.txid); gone = true; } catch { errors.push(`could not cancel duplicate stop ${o.txid} on ${g.pair}`); } }
-            if (gone) { sent.push(`duplicate-stop-cancelled-${g.pair}`); cancelledTxids.add(o.txid); }
+            catch { try { await krakenCancelOrder(o.txid); gone = true; } catch { errors.push(`could not cancel duplicate stop ${o.txid} on ${pairRaw}`); } }
+            if (gone) { sent.push(`duplicate-stop-cancelled-${pairRaw}`); orders = orders.filter((x) => x.txid !== o.txid); }
           }
+          coveringAll = ourStopsOnBook();
+          covering = coveringAll.filter((o) => o.ordertype === "stop-loss" && o.price > 0);
         }
-        const coveringAll = coveringAll0.filter((o) => !cancelledTxids.has(o.txid));
-        const covering = covering0.filter((o) => !cancelledTxids.has(o.txid));
         const bestStop = covering.length ? [...covering].sort(byBest)[0] : null;
 
         // Price + peak from COMPLETED 1-minute bars since the last scored bar (paper's walk).
-        // Kraken returns ≤720 bars per call, so a gap longer than 12h is paged through.
-        const prev = managedPrev[g.ordertxid];
-        const sinceS = Math.max(prev?.seenT ?? 0, Number.isFinite(openedMs) ? Math.floor(openedMs / 1000) : 0);
+        const prev = managedPrev[bookKey];
+        const sinceS = Math.max(prev?.seenT ?? 0, Number.isFinite(oldestMs) ? Math.floor(oldestMs / 1000) : 0);
         let bars: { t: number; h: number; l: number; c: number }[] = [];
         try {
           let cursor = sinceS - 60;
@@ -494,14 +508,11 @@ export async function GET(request: Request) {
           }
         } catch { bars = []; }
         bars = bars.filter((b) => b.t >= sinceS).sort((a, b) => a.t - b.t);
-        // Kraken cannot return bars older than its most recent 720 regardless of `since`: a
-        // gap longer than 12h loses peak history. The stop is never loosened, so principal
-        // protection is intact — but the trail may sit lower than paper's would. Say so.
-        if (bars.length && bars[0].t > sinceS + 180 && sinceS > 0) errors.push(`${g.pair}: 1-min history gap ${((bars[0].t - sinceS) / 3600).toFixed(1)}h — peak may be under-counted`);
-        bars = bars.filter((b, i) => i === bars.length - 1 || bars[i + 1].t !== b.t);   // Kraken can repeat the live bar
+        bars = bars.filter((b, i) => i === bars.length - 1 || bars[i + 1].t !== b.t);
+        if (bars.length && sinceS > 0 && bars[0].t > sinceS + 180) errors.push(`${pairRaw}: 1-min history gap ${((bars[0].t - sinceS) / 3600).toFixed(1)}h — peak may be under-counted`);
         const done = bars.slice(0, -1);   // the newest bar is in progress — it does not ratchet
-        let peak = prev?.peak ?? g.entryPrice;
-        for (const b of done) peak = g.side === "long" ? Math.max(peak, b.h) : Math.min(peak, b.l);
+        let peak = prev?.peak ?? entryPrice;
+        for (const b of done) peak = side === "long" ? Math.max(peak, b.h) : Math.min(peak, b.l);
         const seenT = done.length ? done[done.length - 1].t : (prev?.seenT ?? sinceS);
         let px = bars.length ? bars[bars.length - 1].c : 0;
         if (!(px > 0)) {
@@ -510,155 +521,191 @@ export async function GET(request: Request) {
             px = parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0");
           } catch { px = 0; }
         }
-        // 1R is fixed at entry: the distance the sizing assumed. Best source is the stop the
-        // entry attached (entry − trigger, before any ratchet); else the same clamp the
-        // executor applied. Persisted, so a later config change cannot re-price R.
-        const clampFrac = clampLiveStopFrac(stopCfgPct, g.leverage);
+        // 1R: the ledger's authorised stop distance per order (the one source that cannot
+        // have been ratcheted), else the signed resting distance, else the shared clamp. For
+        // a stacked book the smallest 1R is used — conservative.
         let oneR = prev?.oneR ?? 0;
         if (!(oneR > 0)) {
-          // The entry wrote its authorised stop distance into the ledger — the one source that
-          // cannot have been ratcheted.
-          const ledgerFrac = ownership.stopFracOf(g.ordertxid);
-          if (ledgerFrac && ledgerFrac > 0) oneR = g.entryPrice * ledgerFrac;
+          const perOrder = grp.map((g) => { const f = ownership.stopFracOf(g.ordertxid); return f && f > 0 ? g.entryPrice * f : 0; }).filter((x) => x > 0);
+          if (perOrder.length === grp.length) oneR = Math.min(...perOrder);
         }
-        if (!(oneR > 0)) {
-          // SIGNED: a stop already trailed beyond entry (state lost mid-trade) must not seed
-          // R with the trail gap; only a stop on the loss side of entry is the original 1R.
-          const restingDist = covering.length ? (g.side === "long" ? g.entryPrice - Math.min(...covering.map((o) => o.price)) : Math.max(...covering.map((o) => o.price)) - g.entryPrice) : 0;
-          const sane = restingDist > 0 && restingDist / g.entryPrice >= 0.001 && restingDist / g.entryPrice <= 0.5;
-          oneR = sane ? restingDist : g.entryPrice * clampFrac;
+        if (!(oneR > 0) && !stacked) {
+          const restingDist = covering.length ? (side === "long" ? entryPrice - Math.min(...covering.map((o) => o.price)) : Math.max(...covering.map((o) => o.price)) - entryPrice) : 0;
+          const sane = restingDist > 0 && restingDist / entryPrice >= 0.001 && restingDist / entryPrice <= 0.5;
+          if (sane) oneR = restingDist;
         }
-        managedNext[g.ordertxid] = { oneR, peak, seenT };
-        const initialStop = g.side === "long" ? g.entryPrice - oneR : g.entryPrice + oneR;
+        if (!(oneR > 0)) oneR = entryPrice * clampLiveStopFrac(stopCfgPct, leverage);
+        managedNext[bookKey] = { oneR, peak, seenT };
+        const initialStop = side === "long" ? entryPrice - oneR : entryPrice + oneR;
         const currentStop = bestStop ? bestStop.price : null;
-        const target = managedStopTarget(g.side, g.entryPrice, peak, currentStop ?? initialStop, oneR);
-
-        const closeGroup = async (why: string): Promise<boolean> => {
-          if (fifoBlocked) {
-            if (shouldFire(state, `fifo-${g.ordertxid}`)) {
-              await sendNotification(`🚨 ${why} on ${g.pair} ${g.side} NOT executed — an OLDER manual position on the same side would be reduced first (Kraken nets FIFO). Close it by hand, or close the bot's ${closeVol} yourself. Its stop stays in place.`, "margin_urgent").catch(() => {});
-              state.alerts[`fifo-${g.ordertxid}`] = new Date().toISOString();
-            }
-            return false;
-          }
-          try {
-            await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "market", volume: closeVol, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
-          } catch (err) {
-            // The response may have been lost after Kraken accepted the close. Re-read: if the
-            // group is gone the close happened and its stops must still be swept; otherwise
-            // leave everything in place (the stop still protects it) and report.
-            const stillOpen = (await getKrakenMarginPositions()).some((p) => p.ordertxid === g.ordertxid && p.side === g.side);
-            if (stillOpen) throw err;
-          }
-          const failed: string[] = [];
-          for (const o of coveringAll) {
-            try { await krakenCancelOrder(o.txid); }
-            catch { try { await krakenCancelOrder(o.txid); } catch { failed.push(o.txid); } }
-          }
-          if (failed.length) await sendNotification(`🚨 Closed ${g.pair} (${why}) but could NOT cancel stop(s) ${failed.join(", ")} — a stranded stop can OPEN a new position if it triggers. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
-          delete managedNext[g.ordertxid];
-          await sendNotification(`⏱ ${why} — closed ${g.pair} ${g.side} ${closeVol} (entry $${g.entryPrice.toFixed(meta.priceDecimals)}, now $${px > 0 ? px.toFixed(meta.priceDecimals) : "?"}, held ${(ageMs / 3600_000).toFixed(0)}h).`, "margin_results").catch(() => {});
-          sent.push(`${why.toLowerCase().replace(/[^a-z]+/g, "-")}-${g.pair}`);
-          return true;
-        };
-
-        // 1) TIME STOP (only with a known open time).
-        if (Number.isFinite(openedMs) && ageMs >= maxHoldH * 3600_000) {
-          // An empty book that has now been seen twice is a real empty book: the position has
-          // no stop AND is overdue — closing is the only protective action left.
-          if (ordersUnreliable && (state.emptyOrdersStreak ?? 0) < 2) { errors.push(`time stop due on ${g.pair} but orders read empty — confirming next run`); continue; }
-          await closeGroup("Time stop");
-          continue;
+        const target = stacked ? (currentStop ?? initialStop) : managedStopTarget(side, entryPrice, peak, currentStop ?? initialStop, oneR);
+        if (stacked && shouldFire(state, `stacked-${bookKey}`)) {
+          await sendNotification(`⚠️ ${pairRaw} ${side}: ${grp.length} bot orders stacked on one pair+side — protected and time-stopped as one book, but NOT ratcheted (no single 1R). Avoid adopting or stacking on a pair the bot holds.`, "margin_urgent").catch(() => {});
+          state.alerts[`stacked-${bookKey}`] = new Date().toISOString();
         }
-        // A position covered by a Kraken TRAILING stop is protected by Kraken's own rule; the
-        // managed exit does not second-guess it (and a second stop beside a non-reduce-only
-        // trailing one could fire first and strand it). The time stop above still applies.
-        if (hasTrailing) continue;
         // A stop just beyond the market, checked AFTER rounding — widened until it is safe.
         const guardLevelFor = (): string | null => {
           for (const off of [0.002, 0.005, 0.01]) {
-            const cand = g.side === "long" ? px * (1 - off) : px * (1 + off);
-            const chk = roundedStopIsSafe(g.side, cand, px, meta.priceDecimals);
+            const cand = side === "long" ? px * (1 - off) : px * (1 + off);
+            const chk = roundedStopIsSafe(side, cand, px, meta.priceDecimals);
             if (chk.ok) return chk.priceStr;
           }
           return null;
         };
+        const placeStop = async (level: string, volumeStr: string): Promise<string | undefined> => {
+          const res = await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "stop-loss", price: level, volume: volumeStr, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
+          return (res.txid as string[] | undefined)?.[0];
+        };
+        const closeBook = async (why: string): Promise<boolean> => {
+          if (fifoBlocked) {
+            if (shouldFire(state, `fifo-${bookKey}`)) {
+              await sendNotification(`🚨 ${why} on ${pairRaw} ${side} NOT executed — an OLDER manual position on the same side would be reduced first (Kraken nets FIFO). Close it by hand, or close the bot's ${closeVol} yourself.${fifoNote}`, "margin_urgent").catch(() => {});
+              state.alerts[`fifo-${bookKey}`] = new Date().toISOString();
+            }
+            return false;
+          }
+          let closed = false;
+          try {
+            await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "market", volume: closeVol, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
+            closed = true;
+          } catch (err) {
+            // The response may have been lost after Kraken accepted the close. Confirm with a
+            // RELIABLE read (positions gone AND margin not in use); anything less leaves the
+            // stops in place and reports.
+            const health = await getKrakenMarginHealth().catch(() => null);
+            const after = await getKrakenMarginPositions().catch(() => null);
+            const gone = after != null && !after.some((p) => grp.some((g) => g.ordertxid === p.ordertxid) && p.side === side)
+              && !failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null);
+            if (!gone) throw err;
+            closed = true;
+          }
+          if (!closed) return false;
+          const failed: string[] = [];
+          for (const o of ourStopsOnBook()) {
+            try { await krakenCancelOrder(o.txid); }
+            catch { try { await krakenCancelOrder(o.txid); } catch { failed.push(o.txid); } }
+          }
+          if (failed.length) await sendNotification(`🚨 Closed ${pairRaw} (${why}) but could NOT cancel stop(s) ${failed.join(", ")} — a stranded stop can OPEN a new position if it triggers. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
+          delete managedNext[bookKey];
+          delete nextBreached[bookKey];
+          await sendNotification(`⏱ ${why} — closed ${pairRaw} ${side} ${closeVol} (entry $${entryPrice.toFixed(meta.priceDecimals)}, now $${px > 0 ? px.toFixed(meta.priceDecimals) : "?"}, held ${Number.isFinite(ageMs) ? (ageMs / 3600_000).toFixed(0) : "?"}h).`, "margin_results").catch(() => {});
+          sent.push(`${why.toLowerCase().replace(/[^a-z]+/g, "-")}-${pairRaw}`);
+          return true;
+        };
+        const ensureCovered = async (): Promise<void> => {
+          // 3) NAKED — the volume a resting stop does not cover (1% lot-rounding tolerance).
+          const covered = coveringAll.reduce((s, o) => s + (o.vol ?? 0), 0);
+          if (covered >= vol * 0.99) return;
+          if (ordersUnreliable && !bookConfirmedEmpty) return;   // confirm the empty read first
+          if (!(px > 0)) { errors.push(`naked ${pairRaw} but no price — cannot place a safe stop this run`); return; }
+          const naked = (vol - covered).toFixed(meta.lotDecimals);
+          const safe = roundedStopIsSafe(side, target, px, meta.priceDecimals);
+          const level = safe.ok ? safe.priceStr : guardLevelFor();
+          if (!level) { errors.push(`naked ${pairRaw}: no safe stop level after rounding — retry next run`); return; }
+          try {
+            await placeStop(level, naked);
+            sent.push(`naked-stop-placed-${pairRaw}`);
+            await sendNotification(`🚨 NAKED POSITION — ${pairRaw} ${side} ${vol} had only ${covered} covered by a stop; placed a protective stop for ${naked} at $${level}.${fifoNote}`, "margin_urgent").catch(() => {});
+          } catch (err) {
+            await sendNotification(`🚨🚨 COULD NOT PLACE PROTECTIVE STOP on ${pairRaw} ${side}. THE POSITION IS UNPROTECTED — act manually on Kraken now. ${String(err).slice(0, 160)}`, "margin_urgent").catch(() => {});
+            errors.push(`naked-stop placement failed ${pairRaw}: ${err}`);
+          }
+        };
+
+        // 1) TIME STOP (oldest tranche; only with a known open time).
+        if (Number.isFinite(oldestMs) && ageMs >= maxHoldH * 3600_000) {
+          if (ordersUnreliable && !bookConfirmedEmpty) { errors.push(`time stop due on ${pairRaw} but orders read empty — confirming next run`); continue; }
+          if (await closeBook("Time stop")) continue;
+          await ensureCovered();   // refused (FIFO): at least keep it protected
+          continue;
+        }
+        // A book covered by a Kraken TRAILING stop is protected by Kraken's own rule; the
+        // managed exit does not second-guess it (a second stop beside a non-reduce-only
+        // trailing one could fire first and strand it). The time stop above still applies.
+        if (hasTrailing) continue;
 
         // 2) PAST THE MANAGED STOP — the exit paper would already have taken. Two sightings.
-        const beyond = px > 0 && (g.side === "long" ? px <= target : px >= target);
+        const beyond = px > 0 && (side === "long" ? px <= target : px >= target);
         if (beyond) {
-          const strikes = (priorBreached[g.ordertxid] ?? 0) + 1;
-          nextBreached[g.ordertxid] = strikes;
-          if (strikes >= 2 && (!ordersUnreliable || (state.emptyOrdersStreak ?? 0) >= 2)) { await closeGroup("Managed stop breached"); continue; }
-          // Strike one: make sure something protects it while we confirm — a stop just
-          // beyond the market, never one that fires the instant it is accepted.
-          if (coveringAll.length === 0 && (!ordersUnreliable || (state.emptyOrdersStreak ?? 0) >= 2)) {
+          const strikes = (priorBreached[bookKey] ?? 0) + 1;
+          nextBreached[bookKey] = strikes;
+          if (strikes >= 2 && (!ordersUnreliable || bookConfirmedEmpty)) {
+            if (await closeBook("Managed stop breached")) continue;
+          }
+          // Cover it while confirming (or when the close was refused): a stop just beyond the
+          // market, never one that fires the instant it is accepted.
+          if (coveringAll.length === 0 && (!ordersUnreliable || bookConfirmedEmpty)) {
             const guardLevel = guardLevelFor();
-            if (guardLevel) {
-              await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "stop-loss", price: guardLevel, volume: closeVol, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
-              sent.push(`naked-stop-placed-${g.pair}`);
-            }
+            if (guardLevel) { await placeStop(guardLevel, closeVol); sent.push(`naked-stop-placed-${pairRaw}`); }
           }
           continue;
         }
+        delete nextBreached[bookKey];
 
-        // 3) NAKED — the volume a resting stop does not cover (1% lot-rounding tolerance).
-        const covered = coveringAll.reduce((s, o) => s + (o.vol ?? 0), 0);
-        if (covered < g.vol * 0.99) {
-          if (ordersUnreliable && (state.emptyOrdersStreak ?? 0) < 2) continue;   // confirm the empty read first
-          const naked = (g.vol - covered).toFixed(meta.lotDecimals);
-          if (!(px > 0)) { errors.push(`naked ${g.pair} but no price — cannot place a safe stop this run`); continue; }
-          const safe = roundedStopIsSafe(g.side, target, px, meta.priceDecimals);
-          const level = safe.ok ? safe.priceStr : guardLevelFor();
-          if (!level) { errors.push(`naked ${g.pair}: no safe stop level after rounding — retry next run`); continue; }
-          await sendNotification(`🚨 NAKED POSITION — ${g.pair} ${g.side} ${g.vol} has only ${covered} covered by a stop (${naked} unprotected). Placing a protective stop at $${level} now.`, "margin_urgent").catch(() => {});
-          try {
-            await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "stop-loss", price: level, volume: naked, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
-            sent.push(`naked-stop-placed-${g.pair}`);
-          } catch (err) {
-            await sendNotification(`🚨🚨 COULD NOT PLACE PROTECTIVE STOP on ${g.pair} ${g.side}. THE POSITION IS UNPROTECTED — act manually on Kraken now. ${String(err).slice(0, 160)}`, "margin_urgent").catch(() => {});
-            errors.push(`naked-stop placement failed ${g.pair}: ${err}`);
-          }
-          continue;
-        }
+        // 3) NAKED.
+        const coveredBefore = coveringAll.reduce((s, o) => s + (o.vol ?? 0), 0);
+        if (coveredBefore < vol * 0.99) { await ensureCovered(); continue; }
 
-        // 4) RATCHET — needs a fixed resting stop's trigger price and a price; never a trailing order.
-        if (hasTrailing || !bestStop || !(px > 0)) continue;
-        if (!stopNeedsRatchet(g.side, bestStop.price, target, px)) continue;
-        const safe = roundedStopIsSafe(g.side, target, px, meta.priceDecimals);
+        // 4) RATCHET — single-order books only; needs the resting stop's trigger and a price.
+        if (stacked || !bestStop || !(px > 0)) continue;
+        if (!stopNeedsRatchet(side, bestStop.price, target, px)) continue;
+        const safe = roundedStopIsSafe(side, target, px, meta.priceDecimals);
         if (!safe.ok) continue;
-        const res = await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "stop-loss", price: safe.priceStr, volume: closeVol, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
-        const newTxid = (res.txid as string[] | undefined)?.[0];
+        let newTxid: string | undefined;
+        try {
+          newTxid = await placeStop(safe.priceStr, closeVol);
+        } catch (err) {
+          // Kraken may have accepted the new stop and lost the response. Re-read: if two
+          // full-volume stops now rest, finish the ratchet (cancel the old); else report.
+          const now = (await krakenOpenOrders().catch(() => null));
+          if (now == null) throw err;
+          orders = now;
+          const fresh = ourStopsOnBook().filter((o) => o.ordertype === "stop-loss" && o.price > 0 && o.vol >= vol * 0.99).sort(byBest);
+          if (fresh.length < 2) throw err;
+          newTxid = fresh[0].txid;
+          covering = covering.filter((o) => o.txid !== newTxid);
+        }
+        const cancelled: string[] = [];
         const failed: string[] = [];
         for (const o of covering) {
-          try { await krakenCancelOrder(o.txid); }
-          catch { try { await krakenCancelOrder(o.txid); } catch { failed.push(o.txid); } }   // one retry
+          if (o.txid === newTxid) continue;
+          try { await krakenCancelOrder(o.txid); cancelled.push(o.txid); }
+          catch { try { await krakenCancelOrder(o.txid); cancelled.push(o.txid); } catch { failed.push(o.txid); } }
         }
-        if (failed.length) {
-          // The old attached close[] stop is NOT reduce-only: with the new stop above it, a
-          // fall through both would close on the new one and OPEN a reverse position on the
-          // old. Withdraw the new stop instead — the book returns to exactly its prior state.
+        if (failed.length && cancelled.length === 0 && newTxid) {
+          // NOTHING old could be cancelled: withdraw the new stop so the book returns to
+          // exactly its prior state (the old attached stop is not reduce-only; two stops at
+          // different levels could close on the new and OPEN a reverse on the old).
           let rolledBack = false;
-          if (newTxid) { try { await krakenCancelOrder(newTxid); rolledBack = true; } catch { rolledBack = false; } }
+          try { await krakenCancelOrder(newTxid); rolledBack = true; } catch { rolledBack = false; }
           await sendNotification(rolledBack
-            ? `⚠️ Ratchet on ${g.pair} ABORTED: old stop ${failed.join(", ")} could not be cancelled, so the new stop was withdrawn; the old stop still protects the position. Will retry next run.`
-            : `🚨 ${g.pair} has TWO stops resting (new reduce-only at $${safe.priceStr}, old ${failed.join(", ")} NOT reduce-only). If price moves through both, the old one OPENS a reverse position. Cancel the old stop on Kraken now.`,
+            ? `⚠️ Ratchet on ${pairRaw} ABORTED: old stop ${failed.join(", ")} could not be cancelled, so the new stop was withdrawn; the old stop still protects the position. Will retry next run.`
+            : `🚨 ${pairRaw} has TWO stops resting (new reduce-only at $${safe.priceStr}, old ${failed.join(", ")} NOT reduce-only). If price moves through both, the old one OPENS a reverse position. Cancel the old stop on Kraken now.`,
             "margin_urgent").catch(() => {});
           continue;
         }
-        sent.push(`stop-ratcheted-${g.pair}`);
+        if (failed.length) {
+          // Some old stops cancelled, one did not: the NEW stop is the protection now — keep
+          // it, and page about the leftover (the guardian's dedupe retries next run).
+          await sendNotification(`🚨 ${pairRaw}: ratcheted to $${safe.priceStr} but old stop ${failed.join(", ")} could not be cancelled (not reduce-only). Cancel it on Kraken now; the guardian retries in 5 min.`, "margin_urgent").catch(() => {});
+        }
+        sent.push(`stop-ratcheted-${pairRaw}`);
         } catch (err) {
-          // One order's failure must not abandon the others or discard this run's state.
-          errors.push(`protect/exit ${g.pair}: ${String(err).slice(0, 120)}`);
-          if (managedPrev[g.ordertxid] && !managedNext[g.ordertxid]) managedNext[g.ordertxid] = managedPrev[g.ordertxid];
+          anyGroupFailed = true;
+          errors.push(`protect/exit ${bookKey}: ${String(err).slice(0, 120)}`);
+          if (managedPrev[bookKey] && !managedNext[bookKey]) managedNext[bookKey] = managedPrev[bookKey];
         }
       }
+      protectRanClean = !anyGroupFailed;
     }
     state.nakedBreached = nextBreached;
     state.managed = managedNext;
   } catch (e) {
     if (!String(e).includes("skip: state unreadable")) errors.push(`protect/exit: ${e}`);
   }
+  // The executor gates NEW entries on this stamp — proof that protection actually RAN, not
+  // merely that the route was invoked (margin_watch_last_run is stamped at the top).
+  if (protectRanClean) await stamp("margin_watch_protect_ok");
 
   // 4) Fast-move heads-up on the majors (±3% in an hour) — only worth checking when
   //    positions are open or Spencer is actively trading; cheap either way (public data).
