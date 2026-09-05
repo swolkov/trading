@@ -295,7 +295,10 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
         // Leave the stage at "entering": the guardian's recovery below adopts a ledgered fill.
         state.checks.entry_accepted = check(false, r.note.slice(0, 200));
         log(state, `entry not confirmed: ${r.note.slice(0, 160)}`);
-        if (/refused|skipped|nothing placed|not attempted|cooldown|already today|tracked only|order failed/i.test(r.note)) {
+        // Fail fast ONLY on a rejection Kraken itself reported (E… codes: nothing was placed).
+        // A transport error after a possibly-accepted send keeps the stage at "entering" so
+        // the guardian's recovery (ClosedOrders by our userref) can adopt a real fill.
+        if (/refused|skipped|nothing placed|not attempted|cooldown|already today|tracked only/i.test(r.note) || /order failed: .*\bE(?:Order|Query|General|Service|API|Auth)\b/.test(r.note)) {
           finish(state, "failed", `entry not sent: ${r.note}`);
         }
       }
