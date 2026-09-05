@@ -579,7 +579,7 @@ export async function GET(request: Request) {
 
         const io = {
           placeStop: async (level: string, volStr: string) => {
-            const res = await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "stop-loss", price: level, volume: volStr, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
+            const res = await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "stop-loss", price: level, volume: volStr, leverage: lev, reduce_only: "true", trigger: "index", userref: String(MARGIN_USERREF) });
             return (res.txid as string[] | undefined)?.[0];
           },
           cancel: async (txid: string) => { await krakenCancelOrder(txid); orders = orders.filter((o) => o.txid !== txid); },

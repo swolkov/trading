@@ -586,7 +586,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           }
           const out = await applyReconcile(plan, {
             placeStop: async (lvl, v) => {
-              const res = await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "stop-loss", price: lvl, volume: v, leverage: String(Math.round(levMax)), reduce_only: "true", userref: String(MARGIN_USERREF) });
+              const res = await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "stop-loss", price: lvl, volume: v, leverage: String(Math.round(levMax)), reduce_only: "true", trigger: "index", userref: String(MARGIN_USERREF) });
               return (res.txid as string[] | undefined)?.[0];
             },
             cancel: (txid) => krakenCancelOrder(txid),
@@ -915,6 +915,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       volume,
       leverage: String(leverage),
       userref: String(MARGIN_USERREF),
+      // The US retail venue (:BTNL) triggers stops on the INDEX price, not last trade
+      // ("EOrder:This market doesn't support Last Trade price. Choose Index." — found by the
+      // round trip's second press, Sep 5). Per Kraken's docs the entry's trigger also
+      // applies to its attached close[] stop.
+      trigger: "index",
       ...closeParams,
     };
     if (makerEntries) {
