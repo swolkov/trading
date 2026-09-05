@@ -15,7 +15,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
-import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, type StrategyStat, type ShadowScore, type EdgeBreakdowns } from "@/lib/margin-shadow";
+import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, type StrategyStat, type ShadowScore, type EdgeBreakdowns } from "@/lib/margin-shadow";
 import { pairBase } from "@/lib/kraken-pairs";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
@@ -30,6 +30,7 @@ export interface PaperLiveRow {
   id: number; time: string; symbol: string; side: string; source: string | null; leverage: number | null;
   markPrice: number | null; shadowStatus: string | null; shadowExit: number | null; shadowPnl: number | null;
   shadowFees: number | null; shadowReason: string | null; shadowResolvedAt: string | null; liveTxid: string;
+  paperNotional?: number | null;   // the paper model's position size for this row (ref equity × risk ÷ stop)
 }
 export interface TradeRow { txid: string; ordertxid: string; pair: string; time: string; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string }
 export interface LiveFill {
@@ -37,6 +38,7 @@ export interface LiveFill {
   signalPrice: number | null; paperEntry: number | null; paperExit: number | null; paperPnl: number | null; paperFees: number | null; paperReason: string | null;
   realEntry: number; realVol: number; realEntryFee: number; realEntryAt: string;
   realExit: number | null; realExitFee: number; realExitAt: string | null; realNet: number | null;
+  paperPnlAtLiveSize: number | null;   // paper P&L rescaled to the live notional — the like-for-like number
   entrySlipBp: number | null; feePctSide: number | null; closed: boolean;
 }
 
@@ -78,11 +80,12 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[]): LiveFi
     const realNet = realExit != null ? (side === "long" ? (realExit - realEntry) : (realEntry - realExit)) * vol - entryFee - exitFee : null;
     const signal = r.markPrice != null && r.markPrice > 0 ? (r.side === "buy" ? r.markPrice / (1 + MODEL_CHASE_BP / 1e4) : r.markPrice / (1 - MODEL_CHASE_BP / 1e4)) : null;
     const entrySlipBp = signal ? (side === "long" ? realEntry / signal - 1 : 1 - realEntry / signal) * 1e4 : null;
+    const paperPnlAtLiveSize = r.shadowPnl != null && r.paperNotional != null && r.paperNotional > 0 ? r.shadowPnl * (cost / r.paperNotional) : null;
     out.push({
       rowId: r.id, source: r.source ?? "manual", symbol: r.symbol, side, liveTxid: r.liveTxid,
       signalPrice: signal, paperEntry: r.markPrice, paperExit: r.shadowExit, paperPnl: r.shadowPnl, paperFees: r.shadowFees, paperReason: r.shadowReason,
       realEntry, realVol: vol, realEntryFee: entryFee, realEntryAt: entryAt,
-      realExit, realExitFee: closed ? exitFee : 0, realExitAt: closed ? exitAt : null, realNet,
+      realExit, realExitFee: closed ? exitFee : 0, realExitAt: closed ? exitAt : null, realNet, paperPnlAtLiveSize,
       entrySlipBp, feePctSide: cost > 0 ? (entryFee / cost) * 100 : null, closed,
     });
   }
@@ -100,14 +103,16 @@ export function divergenceSummary(fills: LiveFill[]): Divergence {
   const closed = measured.filter((f) => f.closed);
   const avg = (a: number[]) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
   const realNet = closed.reduce((s, f) => s + (f.realNet ?? 0), 0);
-  const paperNet = closed.reduce((s, f) => s + (f.paperPnl ?? 0), 0);
+  // Paper is sized off a fixed reference equity; live off the real account (and, early on, a
+  // per-entry cap). Compare paper RESCALED to each trade's live size, never raw dollars.
+  const paperNet = closed.reduce((s, f) => s + (f.paperPnlAtLiveSize ?? 0), 0);
   const avgSlip = avg(slips); const avgFee = avg(fees);
   let verdict = "no live fills yet";
   if (measured.length) {
     const bad: string[] = [];
     if (avgSlip != null && avgSlip > MODEL_CHASE_BP * 2) bad.push(`entry slippage ${avgSlip.toFixed(0)}bp vs ${MODEL_CHASE_BP}bp modelled`);
     if (avgFee != null && avgFee > MODEL_TAKER_FEE_PCT * 1.2) bad.push(`fee ${avgFee.toFixed(3)}%/side vs ${MODEL_TAKER_FEE_PCT}% modelled`);
-    if (closed.length >= 5 && paperNet > 0 && realNet < paperNet * 0.5) bad.push(`real net $${realNet.toFixed(0)} vs paper $${paperNet.toFixed(0)} on the same trades`);
+    if (closed.length >= 5 && paperNet > 0 && realNet < paperNet * 0.5) bad.push(`real net $${realNet.toFixed(0)} vs paper $${paperNet.toFixed(0)} (paper rescaled to live size) on the same trades`);
     verdict = bad.length ? `LIVE DIVERGES FROM PAPER — ${bad.join("; ")}. Stop and recalibrate the paper model before scaling.` : closed.length >= 20 ? "live matches paper on 20+ trades — stage 3 reconciliation passed" : `live tracking paper so far (${closed.length}/20 closed trades reconciled)`;
   }
   return { fills: measured.length, closed: closed.length, avgEntrySlipBp: avgSlip, modelChaseBp: MODEL_CHASE_BP, avgFeePctSide: avgFee, modelFeePct: MODEL_TAKER_FEE_PCT, realNet, paperNet, verdict };
@@ -129,9 +134,9 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
   lines.push(`- Live vs paper: **${input.div.verdict}**`);
   lines.push(`- Fills matched: ${input.div.fills} (${input.div.closed} closed) · avg entry slippage ${input.div.avgEntrySlipBp != null ? `${input.div.avgEntrySlipBp.toFixed(1)}bp` : "—"} (model ${input.div.modelChaseBp}bp) · avg fee/side ${input.div.avgFeePctSide != null ? `${input.div.avgFeePctSide.toFixed(3)}%` : "—"} (model ${input.div.modelFeePct}%) · real net ${money(input.div.realNet)} vs paper ${money(input.div.paperNet)} on the same closed trades`, "");
   if (input.fills.length) {
-    lines.push("| when | sleeve | pair | side | real entry | paper entry | slip bp | real exit | paper exit | real net | paper net |", "|---|---|---|---|---|---|---|---|---|---|---|");
+    lines.push("| when | sleeve | pair | side | real entry | paper entry | slip bp | real exit | paper exit | real net | paper net (at live size) |", "|---|---|---|---|---|---|---|---|---|---|---|");
     for (const f of input.fills.slice(-30)) {
-      lines.push(`| ${f.realEntryAt.slice(0, 16)} | ${f.source} | ${f.symbol} | ${f.side} | ${f.realEntry.toFixed(2)} | ${f.paperEntry?.toFixed(2) ?? "—"} | ${f.entrySlipBp?.toFixed(1) ?? "—"} | ${f.realExit?.toFixed(2) ?? "open"} | ${f.paperExit?.toFixed(2) ?? "open"} | ${f.realNet != null ? money(f.realNet) : "—"} | ${f.paperPnl != null ? money(f.paperPnl) : "—"} |`);
+      lines.push(`| ${f.realEntryAt.slice(0, 16)} | ${f.source} | ${f.symbol} | ${f.side} | ${f.realEntry.toFixed(2)} | ${f.paperEntry?.toFixed(2) ?? "—"} | ${f.entrySlipBp?.toFixed(1) ?? "—"} | ${f.realExit?.toFixed(2) ?? "open"} | ${f.paperExit?.toFixed(2) ?? "open"} | ${f.realNet != null ? money(f.realNet) : "—"} | ${f.paperPnlAtLiveSize != null ? money(f.paperPnlAtLiveSize) : "—"} |`);
     }
     lines.push("");
   }
@@ -157,7 +162,7 @@ export function journalBlock(f: LiveFill): string {
     `instrument: "${f.symbol}"`, `direction: "${f.side.toUpperCase()}"`, `strategy: "kraken-margin/${f.source}"`, `book: "live"`,
     `volume: ${f.realVol}`, `entry_price: ${f.realEntry.toFixed(2)}`, `exit_price: ${f.realExit?.toFixed(2) ?? 0}`,
     `fees_dollars: ${(f.realEntryFee + f.realExitFee).toFixed(4)}`, `pnl_dollars: ${f.realNet?.toFixed(2) ?? 0}`,
-    `paper_entry: ${f.paperEntry?.toFixed(2) ?? 0}`, `paper_exit: ${f.paperExit?.toFixed(2) ?? 0}`, `paper_pnl: ${f.paperPnl?.toFixed(2) ?? 0}`, `paper_reason: "${f.paperReason ?? ""}"`,
+    `paper_entry: ${f.paperEntry?.toFixed(2) ?? 0}`, `paper_exit: ${f.paperExit?.toFixed(2) ?? 0}`, `paper_pnl: ${f.paperPnl?.toFixed(2) ?? 0}`, `paper_pnl_at_live_size: ${f.paperPnlAtLiveSize?.toFixed(2) ?? 0}`, `paper_reason: "${f.paperReason ?? ""}"`,
     `entry_slippage_bp: ${f.entrySlipBp?.toFixed(1) ?? 0}`,
     "```", "",
   ].join("\n");
@@ -176,15 +181,18 @@ export async function loadLiveFills(): Promise<LiveFill[]> {
   await ensureShadowColumns();
   const rows = await prisma.$queryRawUnsafe<{ id: number; time: Date; symbol: string; side: string; source: string | null; leverage: number | null; mark_price: number | null; shadow_status: string | null; shadow_exit: number | null; shadow_pnl: number | null; shadow_fees: number | null; shadow_reason: string | null; shadow_resolved_at: Date | null; live_txid: string }[]>(
     `SELECT id, time, symbol, side, source, leverage, mark_price, shadow_status, shadow_exit, shadow_pnl, shadow_fees, shadow_reason, shadow_resolved_at, live_txid
-     FROM tradingview_alerts WHERE live_txid IS NOT NULL AND executed = true ORDER BY time`,
+     FROM tradingview_alerts WHERE live_txid IS NOT NULL AND executed = true AND side IN ('buy','sell') ORDER BY time`,
   );
   if (!rows.length) return [];
+  const refEquity = parseFloat((await cfgGet("kraken_shadow_ref_equity")) ?? "") || 5000;
+  const paperRisk = parseFloat((await cfgGet("kraken_margin_max_risk_pct")) ?? "") || 3;
   const since = new Date(Math.min(...rows.map((r) => r.time.getTime())) - 3600_000);
   const trades = await prisma.$queryRawUnsafe<{ txid: string; ordertxid: string; pair: string; time: Date; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string }[]>(
     `SELECT txid, ordertxid, pair, time, type, price, cost, fee, vol, margin, posstatus FROM kraken_my_trades WHERE time >= $1 ORDER BY time`, since,
   );
   return matchLiveFills(
-    rows.map((r) => ({ id: r.id, time: r.time.toISOString(), symbol: r.symbol, side: r.side, source: r.source, leverage: r.leverage, markPrice: r.mark_price, shadowStatus: r.shadow_status, shadowExit: r.shadow_exit, shadowPnl: r.shadow_pnl, shadowFees: r.shadow_fees, shadowReason: r.shadow_reason, shadowResolvedAt: r.shadow_resolved_at?.toISOString() ?? null, liveTxid: r.live_txid })),
+    rows.map((r) => ({ id: r.id, time: r.time.toISOString(), symbol: r.symbol, side: r.side, source: r.source, leverage: r.leverage, markPrice: r.mark_price, shadowStatus: r.shadow_status, shadowExit: r.shadow_exit, shadowPnl: r.shadow_pnl, shadowFees: r.shadow_fees, shadowReason: r.shadow_reason, shadowResolvedAt: r.shadow_resolved_at?.toISOString() ?? null, liveTxid: r.live_txid,
+      paperNotional: r.mark_price != null && r.mark_price > 0 ? positionNotional(r.source, r.leverage ?? 1, r.mark_price, refEquity, paperRisk) : null })),
     trades.map((t) => ({ ...t, time: t.time.toISOString(), price: t.price ?? 0, cost: t.cost ?? 0, fee: t.fee ?? 0, vol: t.vol ?? 0, margin: t.margin ?? 0, posstatus: t.posstatus ?? "" })),
   );
 }
