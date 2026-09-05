@@ -212,6 +212,70 @@ export function validatePassOk(r: { validated: boolean; executed: boolean; note:
   return r.validated && !r.executed && /notional \(/.test(r.note) && !/refused|failed|errored|not sent|skipped/i.test(r.note);
 }
 
+// ---- Dry run: the validate pass alone, no money -------------------------------------------
+// Same preflight, same arming (source "roundtrip" only, one symbol, $10 margin), but
+// validate_only stays TRUE for the whole call: Kraken checks the order (pair, lot, leverage,
+// trigger, close[]) and places nothing. Free, repeatable, and it catches the parameter class
+// of venue errors (it does NOT catch routing — the ":BTNL" case passed validation).
+export const RT_DRYRUN_KEY = "kraken_margin_round_trip_dryrun";
+export interface DryRunResult { at: string; symbol: string; ok: boolean; note: string; restoreFailed: string[] }
+export async function readDryRun(): Promise<DryRunResult | null> {
+  const row = await prisma.agentConfig.findUnique({ where: { key: RT_DRYRUN_KEY } }).catch(() => null);
+  if (!row?.value) return null;
+  try { return JSON.parse(row.value) as DryRunResult; } catch { return null; }
+}
+export async function dryRunRoundTrip(symbol = "BTC/USD", deadlineMs?: number): Promise<DryRunResult> {
+  symbol = symbol.toUpperCase();
+  const fail = async (note: string): Promise<DryRunResult> => {
+    const r: DryRunResult = { at: nowIso(), symbol, ok: false, note, restoreFailed: [] };
+    await prisma.agentConfig.upsert({ where: { key: RT_DRYRUN_KEY }, update: { value: JSON.stringify(r) }, create: { key: RT_DRYRUN_KEY, value: JSON.stringify(r) } }).catch(() => {});
+    return r;
+  };
+  if (!krakenConfigured()) return fail("Kraken not configured");
+  if (!isUsMarginSymbol(symbol)) return fail(`${symbol} is not a US-margin pair`);
+  const prev = await readRoundTrip();
+  if (prev && ["entering", "open", "closing"].includes(prev.stage)) return fail(`a round trip is ${prev.stage} — wait for it`);
+  if (prev?.restoreFailed?.length) return fail(`the previous round trip could not restore ${prev.restoreFailed.join(", ")} — wait for the guardian`);
+  const lock = await acquireCloseLock(5_000);
+  if (!lock) return fail("another close/reconcile/round trip holds the lock — try again in a minute");
+  let saved: Record<string, string | null> | undefined;
+  let result: DryRunResult | null = null;
+  try {
+    const cfg0 = await readCfg(CFG_KEYS);
+    if (cfg0.kraken_margin_auto === "true") return fail("the executor is ARMED — the dry run is for the disarmed phase only");
+    const pair = krakenPair(symbol);
+    const [positions, orders, health] = await Promise.all([getKrakenMarginPositions(), krakenOpenOrders(), getKrakenMarginHealth()]);
+    if (failClosedOnEmptyPositions(positions.length, health.marginUsedRaw)) return fail("positions read empty while margin is in use — unreliable read, try again");
+    if (positions.length) return fail(`${positions.length} margin position(s) open — the account must be flat`);
+    if (orders.some((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair))) return fail(`order(s) of ours already rest on ${symbol}`);
+    if ((await readCfg(["kraken_margin_disarmed_dd"])).kraken_margin_disarmed_dd === "true") return fail("the drawdown breaker is tripped");
+    saved = cfg0;
+    await setCfg("kraken_margin_live_sources", RT_SOURCE);
+    await setCfg("kraken_margin_symbols", symbol);
+    await setCfg("kraken_margin_per_trade_usd", String(RT_MARGIN_USD));
+    await setCfg("kraken_margin_max_positions", "1");
+    await setCfg("kraken_margin_maker_entries", "false");
+    await setCfg("kraken_margin_validate_only", "true");   // stays true: nothing can be placed
+    await setCfg("kraken_margin_auto", "true");
+    const v = await executeAlert({ symbol, side: "buy", note: "$20 round trip — DRY RUN (validate only)", source: RT_SOURCE, deadlineMs });
+    result = { at: nowIso(), symbol, ok: validatePassOk(v), note: v.note.slice(0, 300), restoreFailed: [] };
+  } catch (e) {
+    result = { at: nowIso(), symbol, ok: false, note: `dry run error: ${String(e).slice(0, 200)}`, restoreFailed: [] };
+  } finally {
+    if (saved) {
+      const failed = await restoreCfg(saved);
+      if (failed.length) {
+        await sendNotification(`🚨 Dry run: could not restore ${failed.join(", ")} — the executor may be armed for source "${RT_SOURCE}" only (validate-only). Fix the keys on the DB or re-run the dry run.`, "margin_urgent").catch(() => {});
+      }
+      if (result) result.restoreFailed = failed;
+    }
+    await releaseCloseLock(lock);
+  }
+  if (!result) return fail("dry run did not produce a result");
+  await prisma.agentConfig.upsert({ where: { key: RT_DRYRUN_KEY }, update: { value: JSON.stringify(result) }, create: { key: RT_DRYRUN_KEY, value: JSON.stringify(result) } }).catch(() => {});
+  return result;
+}
+
 // ---- The state machine ---------------------------------------------------------------------
 
 export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): Promise<{ ok: boolean; note: string; state: RtState | null }> {
