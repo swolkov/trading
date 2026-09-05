@@ -96,3 +96,15 @@ test("US-retail leverage caps come from the table, AssetPairs only as a fallback
   assert.equal(usRetailMaxLeverage("ETH/USD", 5), 10);
   assert.equal(usRetailMaxLeverage("ARBUSD", 3), 3);     // not US-tradeable: caller's fallback
 });
+
+test("every leveraged ORDER goes to the US retail venue pair (:BTNL); public data never does", async () => {
+  const { marginOrderPairFor, publicPairFor } = await import("../src/lib/kraken-pairs");
+  assert.equal(marginOrderPairFor("BTC/USD"), "XBTUSD:BTNL");
+  assert.equal(marginOrderPairFor("XBTUSD"), "XBTUSD:BTNL");
+  assert.equal(marginOrderPairFor("XXBTZUSD"), "XBTUSD:BTNL");
+  assert.equal(marginOrderPairFor("XBTUSD:BTNL"), "XBTUSD:BTNL");
+  assert.equal(marginOrderPairFor("ETH/USD"), "ETHUSD:BTNL");
+  assert.equal(marginOrderPairFor("SOL/USD"), "SOLUSD:BTNL");
+  assert.equal(marginOrderPairFor("DOGE/USD"), "XDGUSD:BTNL");
+  assert.equal(publicPairFor("XBTUSD:BTNL"), "XBTUSD");
+});

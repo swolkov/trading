@@ -8,7 +8,7 @@ import {
   liquidationEstimate,
   syncKrakenTrades,
 } from "@/lib/kraken-margin";
-import { pairBase, publicPairFor } from "@/lib/kraken-pairs";
+import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, releaseCloseLock } from "@/lib/margin-executor";
 import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
@@ -514,6 +514,7 @@ export async function GET(request: Request) {
           continue;
         }
         const publicPair = publicPairFor(pairRaw);
+        const orderPair = marginOrderPairFor(pairRaw);   // every leveraged ORDER: the ":BTNL" venue pair
         const meta = await getPairMeta(publicPair);
         const closeSide = side === "long" ? "sell" : "buy";
         const lev = String(Math.max(2, Math.round(leverage)));
@@ -578,7 +579,7 @@ export async function GET(request: Request) {
 
         const io = {
           placeStop: async (level: string, volStr: string) => {
-            const res = await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "stop-loss", price: level, volume: volStr, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
+            const res = await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "stop-loss", price: level, volume: volStr, leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
             return (res.txid as string[] | undefined)?.[0];
           },
           cancel: async (txid: string) => { await krakenCancelOrder(txid); orders = orders.filter((o) => o.txid !== txid); },
@@ -748,7 +749,7 @@ export async function GET(request: Request) {
           }
           sentVol = freshVol;
           try {
-            await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "market", volume: sentVol.toFixed(meta.lotDecimals), leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
+            await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "market", volume: sentVol.toFixed(meta.lotDecimals), leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
           } catch (err) { sendErr = err; }
           // Whatever the response said, the truth is the remaining exposure. A partial fill
           // keeps exact cover; zero sweeps every stop of ours; an unreadable state leaves

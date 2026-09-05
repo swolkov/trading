@@ -60,7 +60,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
-import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage } from "@/lib/kraken-pairs";
+import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
@@ -321,6 +321,9 @@ async function releaseExecLock(token: string | null): Promise<void> {
 
 export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   const pair = krakenPair(alert.symbol);
+  // Every LEVERAGED order goes to the US retail margin venue pair ("XBTUSD:BTNL"); `pair`
+  // stays the plain name for metadata, matching and public data.
+  const orderPair = marginOrderPairFor(alert.symbol);
 
   // ---- CLOSE PATH ----
   // FIRST, above every other guard — including the arm switch and validate-only. A close
@@ -506,7 +509,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         const liveVol = freshById.get(p.id);
         if (liveVol == null) { pending.push(`ℹ️ ${pair}: tranche ${p.id} was already closed — skipped.`); continue; }
         const params: Record<string, string> = {
-          pair,
+          pair: orderPair,
           type: p.side === "long" ? "sell" : "buy",
           ordertype: "market",
           volume: liveVol.toFixed(closeMeta.lotDecimals),
@@ -583,7 +586,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           }
           const out = await applyReconcile(plan, {
             placeStop: async (lvl, v) => {
-              const res = await krakenPrivate("AddOrder", { pair, type: closeSide, ordertype: "stop-loss", price: lvl, volume: v, leverage: String(Math.round(levMax)), reduce_only: "true", userref: String(MARGIN_USERREF) });
+              const res = await krakenPrivate("AddOrder", { pair: orderPair, type: closeSide, ordertype: "stop-loss", price: lvl, volume: v, leverage: String(Math.round(levMax)), reduce_only: "true", userref: String(MARGIN_USERREF) });
               return (res.txid as string[] | undefined)?.[0];
             },
             cancel: (txid) => krakenCancelOrder(txid),
@@ -907,7 +910,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       : { "close[ordertype]": "stop-loss", "close[price]": stopPrice.toFixed(meta.priceDecimals) };
 
     const params: Record<string, string> = {
-      pair,
+      pair: orderPair,
       type: alert.side,
       volume,
       leverage: String(leverage),

@@ -30,6 +30,17 @@ export function publicPairFor(pair: string): string {
   return `${base}USD`;
 }
 
+// THE ORDER pair for a US-retail MARGIN order. Kraken routes US retail leverage through
+// its Bitnomial-cleared venue and requires the ":BTNL" suffix on every leveraged order —
+// entry, close, and stop alike. Without it the API answers "EOrder:Reduce only:Non-ECP"
+// (validate=true still PASSES, which is how the $20 round trip caught it on Sep 5 2026).
+// Public endpoints (Ticker/OHLC/AssetPairs) do NOT accept the suffix — use publicPairFor.
+// Accepts "BTC/USD", "XBTUSD", "XXBTZUSD" or "XBTUSD:BTNL".
+export const US_MARGIN_VENUE_SUFFIX = ":BTNL";
+export function marginOrderPairFor(symbolOrPair: string): string {
+  return `${publicPairFor(symbolOrPair.replace("/", ""))}${US_MARGIN_VENUE_SUFFIX}`;
+}
+
 // ⭐ THE US-RETAIL MARGIN UNIVERSE — the ONLY pairs Spencer's account can margin-trade.
 // Kraken's public AssetPairs endpoint describes the INTERNATIONAL product (132 USD pairs,
 // ECP-only for US clients), which is NOT what a US retail account gets. US retail margin

@@ -28,7 +28,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { krakenConfigured, krakenOpenOrders, krakenPrivate, krakenPublic, krakenCancelOrder, krakenClosedOrders, getPairMeta, krakenPair, type OpenOrder } from "@/lib/kraken";
 import { getKrakenMarginPositions, getKrakenMarginHealth, getKrakenOHLC, type KrakenMarginPosition } from "@/lib/kraken-margin";
-import { pairBase, isUsMarginSymbol } from "@/lib/kraken-pairs";
+import { pairBase, isUsMarginSymbol, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { MARGIN_USERREF, executeAlert, acquireCloseLock, releaseCloseLock, type LedgerEntry } from "@/lib/margin-executor";
 import { failClosedOnEmptyPositions } from "@/lib/margin-live-risk";
 
@@ -295,7 +295,7 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
         // Leave the stage at "entering": the guardian's recovery below adopts a ledgered fill.
         state.checks.entry_accepted = check(false, r.note.slice(0, 200));
         log(state, `entry not confirmed: ${r.note.slice(0, 160)}`);
-        if (/refused|skipped|nothing placed|not attempted|cooldown|already today|tracked only/i.test(r.note)) {
+        if (/refused|skipped|nothing placed|not attempted|cooldown|already today|tracked only|order failed/i.test(r.note)) {
           finish(state, "failed", `entry not sent: ${r.note}`);
         }
       }
@@ -423,7 +423,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
           const px = tick ? parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0") : 0;
           const far = px > 0 ? (px * 0.7).toFixed(meta.priceDecimals) : null;
           if (far) {
-            const res = await krakenPrivate("AddOrder", { pair, type: "sell", ordertype: "stop-loss", price: far, volume: position.vol.toFixed(meta.lotDecimals), leverage: "2", reduce_only: "true", userref: String(MARGIN_USERREF) });
+            const res = await krakenPrivate("AddOrder", { pair: marginOrderPairFor(state.symbol), type: "sell", ordertype: "stop-loss", price: far, volume: position.vol.toFixed(meta.lotDecimals), leverage: "2", reduce_only: "true", userref: String(MARGIN_USERREF) });
             const txid = (res.txid as string[] | undefined)?.[0];
             if (txid) {
               try { await krakenCancelOrder(txid); state.checks.reduce_only_stop_accepted = check(true, `accepted (${txid}) at $${far}, cancelled`); }
