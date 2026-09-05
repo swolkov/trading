@@ -49,6 +49,7 @@ async function saveState(state: State): Promise<void> {
 }
 
 export async function GET(request: Request) {
+  const routeDeadlineMs = Date.now() + maxDuration * 1000;
   const authHeader = request.headers.get("authorization");
   if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -172,7 +173,7 @@ export async function GET(request: Request) {
           // the paper row above is unaffected either way — paper keeps measuring.
           if (armedSources && isSourceArmed(armedSources, plan.source)) {
             try {
-              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source });
+              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, deadlineMs: routeDeadlineMs });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
             } catch (e) { live.push(`${s.symbol} ${plan.source}: executor error ${String(e).slice(0, 100)}`); }
           }

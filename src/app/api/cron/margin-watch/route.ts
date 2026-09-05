@@ -128,6 +128,7 @@ function shouldFire(state: WatchState, key: string, always = false): boolean {
 }
 
 export async function GET(request: Request) {
+  const routeStartedAt = Date.now();
   const authHeader = request.headers.get("authorization");
   if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -384,7 +385,10 @@ export async function GET(request: Request) {
           if (positionsUnreliable) continue;              // never touch stops on a bad read
           if (!stopProtectsLive(o)) {
             const seen = (priorOrphans[o.txid] ?? 0) + 1;  // this run's sighting
-            const justFlattened = hadBookLastRun.has(`${pairBase(o.pair)}|${o.side === "sell" ? "long" : "short"}`);
+            // Only a stop OLDER than a fresh entry could belong to the flattened book: an
+            // entry's attached close[] can show in OpenOrders a beat before its position does,
+            // and a two-minute-old stop cannot be that. Younger stops wait for a second sighting.
+            const justFlattened = hadBookLastRun.has(`${pairBase(o.pair)}|${o.side === "sell" ? "long" : "short"}`) && (nowSec - o.opentm) > 120;
             if (seen >= 2 || justFlattened) {
               try { await krakenCancelOrder(o.txid); sent.push(`orphan-stop-cancelled-${o.pair}`); } catch { /* already gone */ }
             } else {
@@ -465,6 +469,15 @@ export async function GET(request: Request) {
 
       for (const [bookKey, grp] of books) {
         const stateKey = `${bookKey}|${grp.map((g) => g.ordertxid).sort().join("+")}`;
+        // Absolute budget: a book's work (30s lock wait + reads + one apply) must finish
+        // before the route is killed mid-order. Books left over are not "covered" this run.
+        if (Date.now() - routeStartedAt > 200_000) {
+          errors.push(`protect/exit: out of route time before ${bookKey} — not verified this run`);
+          allCovered = false;
+          if (managedPrev[stateKey]) managedNext[stateKey] = managedPrev[stateKey];
+          if (priorBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
+          continue;
+        }
         try {
         const side = grp[0].side;
         const pairRaw = grp[0].pair;
@@ -579,7 +592,8 @@ export async function GET(request: Request) {
             // Fresh ORDERS too: a webhook close may have re-covered or swept this book since
             // the run's order snapshot; planning against stale orders keeps phantom keepers
             // or doubles a stop that was already replaced.
-            orders = await krakenOpenOrders().catch(() => orders);
+            try { orders = await krakenOpenOrders(); }
+            catch (e) { errors.push(`${pairRaw} (${why}): could not re-read orders under the lock (${String(e).slice(0, 60)}) — not acting`); return false; }
             plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
             if (!plan.place && !plan.cancel.length) return plan.covered;
@@ -612,6 +626,7 @@ export async function GET(request: Request) {
           }
           return null;
         };
+        const guardLevel = (): number => (side === "long" ? px * (1 - 0.002) : px * (1 + 0.002));
         // "closed" | "partial" (remainder re-covered here) | "refused" | "unconfirmed"
         const closeBook = async (why: string): Promise<"closed" | "partial" | "refused" | "unconfirmed"> => {
           if (fifoBlocked) {
@@ -631,12 +646,21 @@ export async function GET(request: Request) {
           const freshVol = await remainingVol();
           if (freshVol == null) { errors.push(`${why} ${pairRaw}: could not confirm exposure before closing — not sent`); return "unconfirmed"; }
           if (freshVol <= 0) {
-            // Flattened elsewhere between the snapshot and the lock (a webhook close). Keep the
-            // book in managed state ONE more run so 3b's single-sighting rule sweeps whatever
-            // that close could not, then it drops out naturally.
-            if (prev) managedNext[stateKey] = prev;
-            delete nextBreached[stateKey];
-            return "closed";
+            // Flattened elsewhere between the snapshot and the lock (a webhook close). Sweep
+            // whatever that close left resting NOW — a stop of ours on a flat pair+side is not
+            // protection, it is an order that OPENS (or reduces someone else's position) when it
+            // fires — and only then let the book drop out of managed state.
+            let sweepOk = false;
+            try {
+              orders = await krakenOpenOrders();
+              const sweep = planReconcile({ side, vol: 0, targetLevel: 0, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+              const out = sweep.cancel.length ? await applyReconcile(sweep, io) : null;
+              sweepOk = !out || out.failedCancels.length === 0;
+              if (out?.failedCancels.length) await sendNotification(`🚨 ${pairRaw} ${side} is flat but stop(s) ${out.failedCancels.join(", ")} could NOT be cancelled — a resting non-reduce-only stop OPENS if it fires. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
+            } catch (e) { errors.push(`${why} ${pairRaw}: flat, but could not read/sweep its stops (${String(e).slice(0, 60)})`); }
+            if (sweepOk) { delete managedNext[stateKey]; delete nextBreached[stateKey]; return "closed"; }
+            if (prev) managedNext[stateKey] = prev;   // keep it managed so the next run sweeps
+            return "unconfirmed";
           }
           sentVol = freshVol;
           try {
@@ -651,9 +675,20 @@ export async function GET(request: Request) {
             errors.push(`${why} ${pairRaw}: unconfirmed`);
             return "unconfirmed";
           }
-          orders = await krakenOpenOrders().catch(() => orders);
+          try { orders = await krakenOpenOrders(); }
+          catch (e) {
+            await sendNotification(`🚨 ${why} on ${pairRaw}: close sent, ${left} remains, but the order book could not be re-read (${String(e).slice(0, 60)}) — stops LEFT AS THEY WERE. Check Kraken now.`, "margin_urgent").catch(() => {});
+            errors.push(`${why} ${pairRaw}: orders unreadable after close`);
+            return "unconfirmed";
+          }
           // Re-cover the remainder DIRECTLY (not via reconcile(): the lock is already held).
-          const plan = planReconcile({ side, vol: left, targetLevel: bestResting ?? initialStop, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+          // A breached book's managed level is through the market by definition; a partial
+          // remainder is then covered at the guard level so it is never left naked.
+          const wantLevel = bestResting ?? initialStop;
+          let plan = planReconcile({ side, vol: left, targetLevel: wantLevel, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+          if (plan.blocked && left > 0 && /through the market/.test(plan.blocked)) {
+            plan = planReconcile({ side, vol: left, targetLevel: guardLevel(), px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+          }
           let covered = false;
           if (plan.blocked) errors.push(`${why} ${pairRaw}: remainder not re-covered — ${plan.blocked}`);
           else if (!plan.place && !plan.cancel.length) covered = plan.covered;
@@ -673,7 +708,6 @@ export async function GET(request: Request) {
           return "closed";
           } finally { await releaseCloseLock(lock); }
         };
-        const guardLevel = (): number => (side === "long" ? px * (1 - 0.002) : px * (1 + 0.002));
 
         // 1) TIME STOP (oldest tranche; only with a known open time).
         if (Number.isFinite(oldestMs) && ageMs >= maxHoldH * 3600_000) {

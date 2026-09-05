@@ -68,6 +68,7 @@ function secretMatches(provided: unknown): boolean {
 }
 
 export async function POST(request: Request) {
+  const routeStartedAt = Date.now();
   // Size cap before any parsing.
   const len = Number(request.headers.get("content-length") || "0");
   if (len > 8192) return Response.json({ error: "payload too large" }, { status: 413 });
@@ -93,7 +94,13 @@ export async function POST(request: Request) {
   // A named TradingView strategy becomes its own paper sleeve ("tv:<name>") with the live
   // candidate's container; no name = "manual" (a hand-drawn alert). Neither trades live
   // unless named in kraken_margin_live_sources.
+  const strategyGiven = String(b.strategy ?? "").trim().length > 0;
   const source = tvSource(b.strategy) ?? "manual";
+  if (strategyGiven && source === "manual") {
+    // A NAMED strategy that fails validation must not fall into the "manual" sleeve — if
+    // manual happens to be armed, a typo in an alert would trade live under the wrong name.
+    return Response.json({ error: "strategy must be [a-z0-9][a-z0-9_-]{0,31}" }, { status: 400 });
+  }
   const market = String(b.market ?? "crypto").toLowerCase();
 
   // STOCK alerts feed the stock paper book only (nothing connects to Robinhood). Long-only,
@@ -201,7 +208,7 @@ export async function POST(request: Request) {
   const convRaw = String(b.conviction ?? "").toLowerCase().trim();
   const conviction = convRaw === "high" || convRaw === "med" || convRaw === "low"
     ? (convRaw as "high" | "med" | "low") : undefined;
-  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note, conviction, source };
+  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note, conviction, source, deadlineMs: routeStartedAt + maxDuration * 1000 };
   const result = duplicate
     ? { executed: false, validated: false, note: "duplicate alert within 2m — logged, not executed" }
     : await executeAlert(alert);

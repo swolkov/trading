@@ -94,6 +94,10 @@ export interface AlertOrder {
   // Where the entry came from: "manual", "tv:<strategy>", or a scanner sleeve ("selective").
   // Only sources named in kraken_margin_live_sources may place a real order.
   source?: string;
+  // Absolute wall-clock deadline (ms) of the CALLING route. An AddOrder whose ledger write
+  // could land after the route is killed is an accepted order nobody owns — so an entry is
+  // refused unless there is time to send it AND record it.
+  deadlineMs?: number;
 }
 
 export interface ExecResult {
@@ -455,6 +459,20 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         // Reserve time for the post-close reconcile: never let a long tranche list run the
         // route out before protection is re-set.
         if (Date.now() - closeStartedAt > 60_000) { pending.push(`⚠️ ${pair}: stopped after ${txids.length} tranche(s) to leave time to re-set protection — retry the close for the rest.`); break; }
+        // Every tranche after the first re-reads: a fill on Kraken's side between two of our
+        // submissions (our own stop firing, a manual close) shrinks or removes the tranche,
+        // and a reduce-only order for volume that is no longer there nets against the NEXT
+        // position under FIFO. The window that remains is a single order's flight time.
+        if (txids.length > 0) {
+          try {
+            const [rp, rh] = await Promise.all([getKrakenMarginPositions(), getKrakenMarginHealth().catch(() => null)]);
+            if (failClosedOnEmptyPositions(rp.length, rh?.marginUsedRaw ?? null)) throw new Error("degraded read");
+            freshById = new Map(rp.map((q) => [q.id, q.vol] as const));
+          } catch (e) {
+            pending.push(`⚠️ ${pair}: could not re-read positions between tranches (${String(e).slice(0, 60)}) — stopped after ${txids.length}; retry the close for the rest.`);
+            break;
+          }
+        }
         const liveVol = freshById.get(p.id);
         if (liveVol == null) { pending.push(`ℹ️ ${pair}: tranche ${p.id} was already closed — skipped.`); continue; }
         const params: Record<string, string> = {
@@ -513,6 +531,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           const plan = planReconcile({ side, vol, targetLevel: level, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, ours);
           if (plan.blocked) { pending.push(`🚨 ${pair} ${side}: could not reconcile stops after the close — ${plan.blocked}. Stops LEFT IN PLACE; the guardian retries in ≤5 min. Check Kraken.`); continue; }
           if (!plan.place && !plan.cancel.length) continue;
+          // THE MANUAL-BOOK BOUNDARY (same rule as the guardian): with an OLDER manual position
+          // on this pair+side, a stop of ours would reduce Spencer's position first when it
+          // fires — so the remaining book's cover is neither placed nor moved. (A flat book,
+          // vol 0, is still swept: a resting stop of ours there would reduce HIS position.)
+          if (vol > 0 && remainingBot.some((p) => fifoWouldHitManual(p, after, (q) => isOurs(q as unknown as { ordertxid: string; id: string }), samePair))) {
+            pending.push(`🚨 ${pair} ${side}: ${vol} of the bot's exposure remains behind an OLDER manual position — its cover was NOT changed (${plan.reason}); any stop of ours would reduce your position first (FIFO). Close the manual position by hand.`);
+            continue;
+          }
           const out = await applyReconcile(plan, {
             placeStop: async (lvl, v) => {
               const res = await krakenPrivate("AddOrder", { pair, type: closeSide, ordertype: "stop-loss", price: lvl, volume: v, leverage: String(Math.round(levMax)), reduce_only: "true", userref: String(MARGIN_USERREF) });
@@ -588,6 +614,16 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // error string. Entries only — the close path above must never be blocked.
   if (!isUsMarginSymbol(alert.symbol)) {
     return { executed: false, validated: false, note: `entry refused: ${alert.symbol} is not in the US-retail margin universe (US_MARGIN_MAX_LEVERAGE)` };
+  }
+  // Layer 1c: the OPERATOR's allowlist, enforced here so every caller (webhook, scanner,
+  // anything later) crosses it. kraken_margin_symbols unset = the whole US universe above
+  // (the scanner's sleeves trade all of it); set = ONLY those symbols may open a position.
+  {
+    const rawAllow = await cfg("kraken_margin_symbols");
+    const allow = (rawAllow ?? "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+    if (allow.length && !allow.includes(alert.symbol.toUpperCase())) {
+      return { executed: false, validated: false, note: `entry refused: ${alert.symbol} is not in kraken_margin_symbols (${allow.join(", ")})` };
+    }
   }
 
   // Layer 2: validate-only unless explicitly disabled.
@@ -845,6 +881,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
     if (!(await guardianFresh())) {
       return { executed: false, validated: false, note: "guardian protection went stale during entry checks — not sent (failing closed)" };
+    }
+    // The AddOrder round trip (≤15s) plus the ledger write plus recovery must fit before the
+    // calling route is killed; an order accepted after that point would be unowned.
+    if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 45_000) {
+      return { executed: false, validated: false, note: "entry refused: not enough route time left to send AND record ownership — next scan" };
     }
     let res;
     sentAtSec = Math.floor(Date.now() / 1000);
