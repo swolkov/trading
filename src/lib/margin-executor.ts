@@ -67,7 +67,9 @@ import {
   DEFAULT_MAX_LEVERAGE,
   EXEC_LOCK_TTL_MS,
   LIVE_STOP_DEFAULT_PCT,
+  clampLiveStopFrac,
   effectiveMaxLeverage,
+  fifoWouldHitManual,
   failClosedOnEmptyPositions,
   liveNotional,
   liveRiskFraction,
@@ -159,17 +161,23 @@ export async function botTxids(): Promise<Set<string>> {
 // and managed exit cannot disagree about which positions are the bot's. STRICT reads: a
 // DB failure THROWS rather than reading as "nothing is ours" (which made a close a silent
 // no-op with the wrong reason, and would leave adopted positions unprotected).
-export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string> }> {
+export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean }> {
   const raw = await cfgStrict(BOT_TXIDS_KEY);
-  let ledger = new Set<string>();
-  if (raw) {
-    // A corrupt ledger is an error, not an empty ledger.
-    ledger = new Set((JSON.parse(raw) as { txid: string }[]).map((e) => e.txid).filter(Boolean));
-  }
   const adoptRaw = (await cfgStrict("kraken_margin_adopt_txids")) ?? "";
   const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
+  let ledger = new Set<string>();
+  let ledgerCorrupt = false;
+  if (raw) {
+    // A corrupt ledger must not take the ADOPTION list and the emergency override down
+    // with it — those are read independently and keep working. Every caller reports the
+    // flag loudly; positions recorded only in the corrupt ledger read as NOT ours (fail
+    // closed) until the operator adopts them or repairs the ledger.
+    try {
+      ledger = new Set((JSON.parse(raw) as { txid: string }[]).map((e) => e.txid).filter(Boolean));
+    } catch { ledgerCorrupt = true; }
+  }
   return {
-    ledger, adopted,
+    ledger, adopted, ledgerCorrupt,
     isOurs: (p) => ledger.has(p.ordertxid) || adopted.has(p.ordertxid) || adopted.has(p.id),
   };
 }
@@ -319,15 +327,30 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         }
       }
       const { isOurs } = ownership;
-      const positions = closeAll ? all : all.filter(isOurs);
+      if (ownership.ledgerCorrupt) {
+        await sendNotification(`🚨 kraken_margin_bot_txids is CORRUPT (unparseable). Positions recorded only there are being treated as NOT the bot's. Repair it, or adopt them via kraken_margin_adopt_txids.`, "margin_urgent").catch(() => {});
+      }
+      // KRAKEN NETS FIFO: a reduce-only sell on the pair reduces the OLDEST long first,
+      // whoever opened it. A bot position with an OLDER manual position beside it cannot
+      // be closed by a pair-level order without hitting Spencer's book — refuse, and say so.
+      const samePair = (a: string, b: string) => pairBase(a) === pairBase(b);
+      const fifoBlocked = closeAll ? [] : all.filter((p) => isOurs(p) && fifoWouldHitManual(p, all, (q) => isOurs(q as unknown as { ordertxid: string; id: string }), samePair));
+      const positions = closeAll ? all : all.filter((p) => isOurs(p) && !fifoBlocked.includes(p));
       const skipped = all.filter((p) => !closeAll && !isOurs(p));
+      if (fifoBlocked.length) {
+        await sendNotification(
+          `🚨 Close on ${pair}: ${fifoBlocked.length} bot position(s) NOT closed — an OLDER manual position on the same side would be reduced first (Kraken nets FIFO). Close the manual one by hand first, or set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} to flatten the whole pair deliberately. The bot's stops stay in place.`,
+          "margin_urgent",
+        ).catch(() => {});
+      }
       // Notifications are deliberately deferred until AFTER the orders are placed:
       // sendNotification's fetch has no timeout, and a hung Slack webhook must never sit
       // between a close alert and the close itself.
       const pending: string[] = [];
       if (!positions.length) {
+        if (fifoBlocked.length) return { executed: false, validated: false, note: `close refused: an older manual position on ${pair} would be closed first (FIFO) — bot positions left open with their stops` };
         const note = skipped.length > 0
-          ? `close alert: ${skipped.length} position(s) on ${pair} are NOT the bot's — left untouched. Position ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}. To flatten one deliberately, add its id to kraken_margin_adopt_txids (or kraken_margin_close_all_positions=ALL / =${alert.symbol.toUpperCase()}).`
+          ? `close alert: ${skipped.length} position(s) on ${pair} are NOT the bot's — left untouched. Position ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}. To flatten the pair deliberately set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} (or ALL). ⚠️ Adopting an id via kraken_margin_adopt_txids puts that position under the bot's FULL container (3% stop, ratchet, 48h time stop) — only adopt positions the bot actually opened.`
           : "close alert but no open position";
         if (skipped.length > 0) await sendNotification(`⚠️ ${note}`, "margin_urgent");
         return { executed: false, validated: false, note };
@@ -610,11 +633,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // not 1/leverage. The clamp must leave real headroom inside it (Kraken liquidates off
     // the account margin level, which degrades before any single stop would fire), so an
     // explicit stop is held to 60% of the true distance: 0.6 × (0.6/L) = 0.36/L.
-    const liqDistance = 0.6 / Math.max(1, leverage);
     // DEFAULT = the paper record's container (3%, LIVE_STOP_DEFAULT_PCT), so the "At LIVE
     // sizing" column describes a trade with the SAME stop the paper sleeve was scored with.
     // (It was 0.3/leverage = 15% at 2× until Sep 5 2026: same signal, different container.)
-    const stopPct = Math.min(0.5, 0.6 * liqDistance, Math.max(0.001, (await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT)) / 100));
+    const stopPct = clampLiveStopFrac(await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), leverage);
     const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
     const makerEntries = (await cfg("kraken_margin_maker_entries")) !== "false";
     const meta = await getPairMeta(pair);
@@ -738,21 +760,40 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       ]);
       const livePos = pos.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
       const liveOrd = ords.filter((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair));
-      // Our resting ENTRY orders on the pair carry our userref, so their identity IS known:
-      // ledger them now, so a later fill is a recognised position (closable, protected).
-      for (const o of liveOrd.filter((o) => !o.ordertype.includes("stop"))) {
-        await recordBotEntry(o.txid, pair);
+      // Our RESTING entry orders carry our userref: their identity is known, so ledger
+      // them now and a later fill is a recognised position (closable, protected).
+      const restingEntries = liveOrd.filter((o) => !o.ordertype.includes("stop"));
+      for (const o of restingEntries) await recordBotEntry(o.txid, pair);
+      if (restingEntries.length) {
+        await sendNotification(`⚠️ Entry on ${pair} errored after sending, but our resting order ${restingEntries.map((o) => o.txid).join(", ")} was found and ledgered — nothing to adopt. Error: ${String(e).slice(0, 120)}`, "margin_urgent").catch(() => {});
+        return { executed: false, validated: validate, note: `order errored but our resting entry was found and ledgered on ${pair}: ${e}` };
       }
-      if (livePos.length || liveOrd.length) {
-        // The txid is unknown on this path (that IS the failure), so the position cannot be
-        // recorded in the ownership ledger — meaning it is currently unclosable by alert and
-        // outside the naked-position guard. Hand over the ids needed to adopt it.
+      // No resting order: the accepted order may have FILLED. Its txid is still ours to
+      // recover — ClosedOrders filtered by our userref in the last few minutes — and that,
+      // not a list of positions on the pair (which may be Spencer's), is what gets ledgered.
+      let recovered: string[] = [];
+      try {
+        const closed = await krakenPrivate("ClosedOrders", { userref: String(MARGIN_USERREF), start: String(Math.floor(Date.now() / 1000) - 600) });
+        const entries = Object.entries((closed.closed ?? {}) as Record<string, { descr?: { pair?: string; ordertype?: string }; status?: string }>);
+        recovered = entries
+          .filter(([, o]) => o.descr?.pair && pairBase(o.descr.pair) === pairBase(pair) && !(o.descr.ordertype ?? "").includes("stop") && o.status === "closed")
+          .map(([txid]) => txid);
+        for (const txid of recovered) await recordBotEntry(txid, pair);
+      } catch { recovered = []; }
+      if (recovered.length) {
+        await sendNotification(`⚠️ Entry on ${pair} errored after sending, but Kraken confirms it filled (${recovered.join(", ")}) — ledgered; the guardian will protect it. Error: ${String(e).slice(0, 120)}`, "margin_urgent").catch(() => {});
+        return { executed: !validate, validated: validate, txid: recovered[0], note: `order errored but was filled and recovered on ${pair}: ${e}` };
+      }
+      if (livePos.length) {
+        // Last resort. These positions were NOT confirmed as ours — any of them may be
+        // Spencer's own. Adoption puts a position under the bot's full container, so the
+        // instruction is to VERIFY on Kraken first, not to adopt blindly.
         const ids = livePos.map((p) => p.ordertxid || p.id).filter(Boolean).join(", ");
         await sendNotification(
-          `🚨 Order errored but Kraken shows ${livePos.length} position(s) and ${liveOrd.length} order(s) on ${pair} — it may have been ACCEPTED. It is NOT in the ownership ledger, so closes and the naked-stop guard will skip it. Adopt it: set kraken_margin_adopt_txids=${ids || "<position id from Kraken>"}. Error: ${String(e).slice(0, 140)}`,
+          `🚨 Order errored on ${pair} and could not be confirmed either way. Kraken shows ${livePos.length} position(s) on the pair (${ids}) — some or all may be YOURS. Check Kraken: if one was opened by the bot just now, adopt ONLY that id via kraken_margin_adopt_txids. Error: ${String(e).slice(0, 140)}`,
           "margin_urgent",
         ).catch(() => {});
-        return { executed: false, validated: validate, note: `order errored BUT live exposure detected on ${pair} — verify manually: ${e}` };
+        return { executed: false, validated: validate, note: `order errored, unconfirmed; positions exist on ${pair} — verify manually: ${e}` };
       }
     } catch { /* best-effort confirmation only */ }
     return { executed: false, validated: validate, note: `order failed: ${e}` };

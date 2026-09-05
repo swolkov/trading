@@ -315,7 +315,7 @@ export default function PaperTradesPage() {
 interface ExecCfg {
   live: { armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
   paper: { refEquity: number; baseRiskPct: number; stopPct: number; maxHoldH: number; exit: string };
-  equity: number | null; leverageRung: number;
+  equity: number | null; equityAt?: string | null; leverageRung: number;
   ladder: { from: number; cap: number }[];
   tiers: { tier: string; riskPct: number; riskUsd: number | null; notionalUsd: number | null }[];
   aligned: { stop: boolean; risk: boolean; hold: boolean; sizing: boolean; exit: boolean }; allAligned: boolean;
@@ -360,7 +360,7 @@ function LiveMirrorCard() {
           </div>
           <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
             <span className="text-foreground/80">Grows with the account.</span> Live sizes off the real Kraken equity
-            {cfg.equity != null ? <> (<span className="text-foreground/80">{usd0(cfg.equity)}</span> now)</> : " (unreadable right now)"}, so dollar risk and position size rise as capital does at the same 3%:
+            {cfg.equity != null ? <> (<span className="text-foreground/80">{usd0(cfg.equity)}</span> at the guardian&apos;s last run)</> : " (not read yet)"}, so dollar risk and position size rise as capital does at the same 3%:
             {" "}{cfg.tiers.map((t) => `${t.tier} conviction risks ${usd0(t.riskUsd)} on ${usd0(t.notionalUsd)}`).join(" · ")}.
             The leverage cap steps up with equity — {cfg.ladder.map((l) => `${l.cap}× from $${l.from.toLocaleString()}`).join(", ")} — and is <span className="text-foreground/80">{cfg.leverageRung}×</span> at today&apos;s equity (operator ceiling {cfg.live.maxLeverageCeiling}×).
             Paper stays scored at a fixed ${cfg.paper.refEquity.toLocaleString()} so its t-stats stay comparable — compounding paper equity into the verdict would fake an edge.

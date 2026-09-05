@@ -1,6 +1,4 @@
 import { prisma } from "@/lib/db";
-import { getKrakenMarginHealth } from "@/lib/kraken-margin";
-import { krakenConfigured } from "@/lib/kraken";
 import {
   DEFAULT_MAX_LEVERAGE, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT,
   effectiveMaxLeverage, leverageCapForEquity, liveNotional, liveRiskPct, parseLiveRiskBasePct,
@@ -9,7 +7,9 @@ import {
 // WHAT LIVE WOULD ACTUALLY DO, computed from the same config keys and the same helpers the
 // executor and guardian read — beside what PAPER does — so the admin page can show, per
 // item, whether live mirrors the record. Every number here is derived, never typed in.
-// Cached ~20s: it makes one private Kraken call (equity) and the guardian shares the key.
+// NO private Kraken call from a display route: the guardian and the executor share the
+// API key, and Kraken rejects a nonce that arrives out of order — a page refresh must never
+// be able to knock out a protective cancel. Equity comes from the guardian's last run.
 export const dynamic = "force-dynamic";
 
 let cache: { at: number; body: unknown } | null = null;
@@ -30,9 +30,16 @@ export async function GET() {
     const num = (k: string, d: number) => { const v = parseFloat(c[k] ?? ""); return Number.isFinite(v) ? v : d; };
 
     let equity: number | null = null;
-    if (krakenConfigured()) {
-      try { equity = (await getKrakenMarginHealth()).equity; } catch { equity = null; }
-    }
+    let equityAt: string | null = null;
+    try {
+      const [st, run] = await Promise.all([
+        prisma.agentConfig.findUnique({ where: { key: "margin_watch_state" } }),
+        prisma.agentConfig.findUnique({ where: { key: "margin_watch_last_run" } }),
+      ]);
+      const parsed = st?.value ? (JSON.parse(st.value) as { lastEquity?: number }) : null;
+      equity = parsed?.lastEquity != null && Number.isFinite(parsed.lastEquity) && parsed.lastEquity > 0 ? parsed.lastEquity : null;
+      equityAt = run?.value ?? null;
+    } catch { equity = null; }
 
     const live = {
       armed: c.kraken_margin_auto === "true" && c.kraken_margin_validate_only === "false",
@@ -79,7 +86,7 @@ export async function GET() {
       sizing: live.perTradeCapUsd === 0,
       exit: live.trailPct === 0,   // the guardian's managed exit is paper's; a Kraken trailing-stop would not be
     };
-    const body = { live, paper, equity, leverageRung: rung, ladder, tiers, aligned, allAligned: Object.values(aligned).every(Boolean), at: new Date().toISOString() };
+    const body = { live, paper, equity, equityAt, leverageRung: rung, ladder, tiers, aligned, allAligned: Object.values(aligned).every(Boolean), at: new Date().toISOString() };
     cache = { at: Date.now(), body };
     return Response.json(body);
   } catch (error) {

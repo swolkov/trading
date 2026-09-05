@@ -130,6 +130,76 @@ export function managedStopTarget(side: "long" | "short", entry: number, peak: n
   return dir > 0 ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
 }
 
+/**
+ * The ONE stop-distance clamp, shared by the executor (sizing + attached stop) and the
+ * guardian (rescue stops, 1R seed). An explicit stop wider than 60% of the liquidation
+ * cushion (0.6 × 0.6/leverage) could never fire — the position would liquidate first —
+ * so it is held inside it: 18% at 2×, 12% at 3×, 7.2% at 5×. Floor 0.1%. The 3% default
+ * survives every rung the ladder allows. Returns a FRACTION.
+ */
+export function clampLiveStopFrac(cfgPct: number, leverage: number): number {
+  const liqDistance = 0.6 / Math.max(1, leverage);
+  const raw = Number.isFinite(cfgPct) && cfgPct > 0 ? cfgPct / 100 : LIVE_STOP_DEFAULT_PCT / 100;
+  return Math.min(0.5, 0.6 * liqDistance, Math.max(0.001, raw));
+}
+
+/**
+ * A stop order must rest on the safe side of the CURRENT price by a real margin, AFTER
+ * rounding to the pair's price decimals — a target that passes unrounded and rounds onto
+ * the market price fires instantly as a market close. Returns the string to submit.
+ */
+export function roundedStopIsSafe(side: "long" | "short", target: number, px: number, decimals: number): { ok: boolean; priceStr: string } {
+  const priceStr = target.toFixed(Math.max(0, decimals));
+  const r = parseFloat(priceStr);
+  if (!(px > 0) || !Number.isFinite(r) || !(r > 0)) return { ok: false, priceStr };
+  const gap = side === "long" ? px - r : r - px;
+  return { ok: gap >= px * LIVE_STOP_RATCHET_MIN_FRAC, priceStr };
+}
+
+/**
+ * One order can fill in several tranches that Kraken reports as SEPARATE positions
+ * sharing one ordertxid (115 real fills came from 72 orders). The container applies to
+ * the ORDER: one stop for the whole volume, one 1R, one peak, one time stop. Volume is
+ * summed, entry is volume-weighted, the age is the oldest fill's.
+ */
+export interface PositionLike { id: string; ordertxid: string; pair: string; side: "long" | "short"; vol: number; entryPrice: number; openedAt: string; leverage: number }
+export interface PositionGroup { ordertxid: string; pair: string; side: "long" | "short"; vol: number; entryPrice: number; openedAt: string; leverage: number; ids: string[] }
+export function groupPositionsByOrder<T extends PositionLike>(positions: T[]): PositionGroup[] {
+  const byOrder = new Map<string, PositionGroup>();
+  for (const p of positions) {
+    const key = `${p.ordertxid}|${p.side}`;
+    const g = byOrder.get(key);
+    if (!g) {
+      byOrder.set(key, { ordertxid: p.ordertxid, pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, openedAt: p.openedAt, leverage: p.leverage, ids: [p.id] });
+      continue;
+    }
+    const vol = g.vol + p.vol;
+    g.entryPrice = vol > 0 ? (g.entryPrice * g.vol + p.entryPrice * p.vol) / vol : g.entryPrice;
+    g.vol = vol;
+    g.leverage = Math.max(g.leverage, p.leverage);
+    if (p.openedAt && (!g.openedAt || new Date(p.openedAt).getTime() < new Date(g.openedAt).getTime())) g.openedAt = p.openedAt;
+    g.ids.push(p.id);
+  }
+  return [...byOrder.values()];
+}
+
+/**
+ * Kraken spot margin nets FIFO: a reduce-only close on a pair reduces the OLDEST position
+ * on that side first, whoever opened it. So a bot close must be refused when a NON-bot
+ * position on the same pair and side is OLDER than the one being closed — the order would
+ * hit Spencer's book, not the bot's. (A newer manual position is safe: the bot's is oldest.)
+ */
+export function fifoWouldHitManual(
+  target: { pair: string; side: string; openedAt: string },
+  all: { pair: string; side: string; openedAt: string }[],
+  isOurs: (p: { pair: string; side: string; openedAt: string }) => boolean,
+  samePair: (a: string, b: string) => boolean,
+): boolean {
+  const t = new Date(target.openedAt).getTime();
+  return all.some((m) => !isOurs(m) && m.side === target.side && samePair(m.pair, target.pair)
+    && Number.isFinite(t) && new Date(m.openedAt).getTime() < t);
+}
+
 /** True when `target` improves on `currentStop` by at least the ratchet threshold. */
 export function stopNeedsRatchet(side: "long" | "short", currentStop: number, target: number, price: number): boolean {
   if (!(price > 0) || !Number.isFinite(target) || !Number.isFinite(currentStop)) return false;
