@@ -215,7 +215,9 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
 // expires; a live close finishes well inside it), and a caller that cannot acquire it in
 // its wait budget gets `null` — it must NOT proceed unlocked.
 export const CLOSE_LOCK_KEY = "kraken_margin_close_lock";
-export const CLOSE_LOCK_TTL_MS = 120_000;
+// TTL exceeds any holder's bounded work (executor: ≤60s of tranches + a handful of 15s-timeout
+// reads; guardian: two reads + one apply) — "expired means dead" must hold, as for the exec lock.
+export const CLOSE_LOCK_TTL_MS = 240_000;
 export async function acquireCloseLock(waitMs: number): Promise<string | null> {
   const deadline = Date.now() + waitMs;
   await prisma.agentConfig.upsert({ where: { key: CLOSE_LOCK_KEY }, update: {}, create: { key: CLOSE_LOCK_KEY, value: "" } }).catch(() => {});
@@ -327,8 +329,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // SERIALISE closes — wait for a concurrent close to finish, never refuse. Two closes
     // reading the same snapshot would both pass the FIFO guard and the second would reduce
     // a NEWER manual position after the first consumed the bot's. reduce_only is not
-    // idempotency. A lock that could trap a close is worse than no lock, so after 20s we
-    // proceed regardless; the fresh positions read below is what makes the retry harmless.
+    // idempotency. A live holder is never bypassed: the lease is minted at acquisition and
+    // expires only when the holder is provably dead; a close that cannot acquire it in 90s refuses.
     const closeToken = await acquireCloseLock(90_000);
     if (!closeToken) {
       await sendNotification(`🚨 Close on ${pair} NOT attempted — another close/reconcile has held the lock for over 90s. Retry the close; check Kraken now.`, "margin_urgent").catch(() => {});
@@ -441,7 +443,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // possibly Spencer's.
       let freshById: Map<string, number>;
       try {
-        freshById = new Map((await getKrakenMarginPositions()).map((q) => [q.id, q.vol] as const));
+        const [freshPositions, freshHealth] = await Promise.all([getKrakenMarginPositions(), getKrakenMarginHealth().catch(() => null)]);
+        if (failClosedOnEmptyPositions(freshPositions.length, freshHealth?.marginUsedRaw ?? null)) throw new Error("positions read empty while margin is in use (degraded read)");
+        freshById = new Map(freshPositions.map((q) => [q.id, q.vol] as const));
       } catch (e) {
         await sendNotification(`🚨 Close on ${pair} NOT attempted — could not re-read positions right before sending (${String(e).slice(0, 100)}). Retry.`, "margin_urgent").catch(() => {});
         return { executed: false, validated: false, note: `close not attempted: positions unreadable before sending — retry` };
@@ -450,7 +454,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       for (const p of positions) {
         // Reserve time for the post-close reconcile: never let a long tranche list run the
         // route out before protection is re-set.
-        if (Date.now() - closeStartedAt > 150_000) { pending.push(`⚠️ ${pair}: stopped after ${txids.length} tranche(s) to leave time to re-set protection — retry the close for the rest.`); break; }
+        if (Date.now() - closeStartedAt > 60_000) { pending.push(`⚠️ ${pair}: stopped after ${txids.length} tranche(s) to leave time to re-set protection — retry the close for the rest.`); break; }
         const liveVol = freshById.get(p.id);
         if (liveVol == null) { pending.push(`ℹ️ ${pair}: tranche ${p.id} was already closed — skipped.`); continue; }
         const params: Record<string, string> = {
@@ -544,10 +548,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         return { executed: txids.length > 0, validated: false, note: `close failed after flattening ${txids.length}/${positions.length}: ${closeErr}` };
       }
       return {
-        executed: !validate,
+        executed: txids.length > 0,
         validated: validate,
         txid: txids[0],
-        note: `closed ${positions.length} position(s) on ${pair}`,
+        note: txids.length > 0
+          ? `close sent for ${txids.length} of ${positions.length} position(s) on ${pair}${confirmedGone ? " — confirmed flat" : " — verify on Kraken"}`
+          : `close: nothing sent on ${pair} (targets already gone)`,
       };
     } catch (e) {
       // A close that did not close is the most urgent event this system can produce —
