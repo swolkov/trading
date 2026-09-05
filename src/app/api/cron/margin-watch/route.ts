@@ -576,10 +576,13 @@ export async function GET(request: Request) {
           try {
             const fresh = await remainingVol();
             if (fresh == null) { errors.push(`${pairRaw} (${why}): could not confirm remaining exposure — not acting`); return false; }
-            if (Math.abs(fresh - wantVol) > wantVol * 0.01) {
-              plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
-              if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
-            }
+            // Fresh ORDERS too: a webhook close may have re-covered or swept this book since
+            // the run's order snapshot; planning against stale orders keeps phantom keepers
+            // or doubles a stop that was already replaced.
+            orders = await krakenOpenOrders().catch(() => orders);
+            plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+            if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
+            if (!plan.place && !plan.cancel.length) return plan.covered;
             out = await applyReconcile(plan, io);
           } finally { await releaseCloseLock(lock); }
           if (out.placed) { sent.push(`stop-${plan.reason.replace(/[^a-z]+/gi, "-").toLowerCase()}-${pairRaw}`); }
@@ -599,13 +602,13 @@ export async function GET(request: Request) {
         // Reliable remaining exposure for this book (null = cannot tell). Retried: right
         // after a fill, OpenPositions and TradeBalance can disagree for a call or two.
         const remainingVol = async (): Promise<number | null> => {
-          for (let attempt = 0; attempt < 3; attempt++) {
+          for (let attempt = 0; attempt < 2; attempt++) {
             const health = await getKrakenMarginHealth().catch(() => null);
             const after = await getKrakenMarginPositions().catch(() => null);
             if (after != null && !failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null)) {
               return after.filter((p) => grp.some((g) => g.ordertxid === p.ordertxid) && p.side === side).reduce((s, p) => s + p.vol, 0);
             }
-            await new Promise((r) => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 1000));
           }
           return null;
         };
@@ -627,7 +630,14 @@ export async function GET(request: Request) {
           // the snapshot; a reduce-only order for a gone book would reduce the NEXT position.
           const freshVol = await remainingVol();
           if (freshVol == null) { errors.push(`${why} ${pairRaw}: could not confirm exposure before closing — not sent`); return "unconfirmed"; }
-          if (freshVol <= 0) { delete managedNext[stateKey]; delete nextBreached[stateKey]; return "closed"; }
+          if (freshVol <= 0) {
+            // Flattened elsewhere between the snapshot and the lock (a webhook close). Keep the
+            // book in managed state ONE more run so 3b's single-sighting rule sweeps whatever
+            // that close could not, then it drops out naturally.
+            if (prev) managedNext[stateKey] = prev;
+            delete nextBreached[stateKey];
+            return "closed";
+          }
           sentVol = freshVol;
           try {
             await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "market", volume: sentVol.toFixed(meta.lotDecimals), leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
