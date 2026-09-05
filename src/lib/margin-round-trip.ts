@@ -426,7 +426,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
           const px = tick ? parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0") : 0;
           const far = px > 0 ? (px * 0.7).toFixed(meta.priceDecimals) : null;
           if (far) {
-            const res = await krakenPrivate("AddOrder", { pair: marginOrderPairFor(state.symbol), type: "sell", ordertype: "stop-loss", price: far, volume: position.vol.toFixed(meta.lotDecimals), leverage: "2", reduce_only: "true", userref: String(MARGIN_USERREF) });
+            const res = await krakenPrivate("AddOrder", { pair: marginOrderPairFor(state.symbol), type: "sell", ordertype: "stop-loss", price: far, volume: position.vol.toFixed(meta.lotDecimals), leverage: "2", reduce_only: "true", trigger: "index", userref: String(MARGIN_USERREF) });
             const txid = (res.txid as string[] | undefined)?.[0];
             if (txid) {
               try { await krakenCancelOrder(txid); state.checks.reduce_only_stop_accepted = check(true, `accepted (${txid}) at $${far}, cancelled`); }
