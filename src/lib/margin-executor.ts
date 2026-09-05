@@ -558,7 +558,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           const levMax = Math.max(2, ...remainingBot.map((p) => p.leverage));
           const frac = fracs.length ? Math.min(...fracs) : clampLiveStopFrac(await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), levMax);
           const level = bestResting ?? (side === "long" ? entryPx * (1 - frac) : entryPx * (1 + frac));
-          let plan = planReconcile({ side, vol, targetLevel: level, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, ours);
+          // A flat side sweeps only stops older than two minutes (a fresh entry's attached
+          // close[] can show before its position); a live book reconciles against all of them.
+          const oursForPlan = vol > 0 ? ours : ours.filter((o) => Date.now() / 1000 - o.opentm > 120);
+          let plan = planReconcile({ side, vol, targetLevel: level, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, oursForPlan);
           if (plan.blocked && vol > 0 && px > 0 && /through the market/.test(plan.blocked)) {
             // The entry-relative level is already breached (this close came late, or partially
             // filled): cover the remainder just beyond the market rather than leave it beside an

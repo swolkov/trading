@@ -368,9 +368,23 @@ export async function GET(request: Request) {
       // protects a long, a buy-stop protects a short. Matching on pair alone would keep
       // an old long's sell-stop alive after a manual close even when a NEW short exists —
       // and that stray sell-stop would then ADD to the short if it triggered.
-      const stopProtectsLive = (o: { pair: string; side: string }) => positions.some((p) =>
-        pairBase(p.pair) === pairBase(o.pair) &&
-        ((o.side === "sell" && p.side === "long") || (o.side === "buy" && p.side === "short")));
+      // And it must protect a position that is plausibly OURS: a bot stop resting against a
+      // side that holds only Spencer's manual position is not protection — it is a reduce-only
+      // order that REDUCES HIS position when it fires. "Plausibly ours" = in the ledger, or
+      // younger than the entry grace (its ledger write may be in flight), or opened before the
+      // stop (an attached close[] is never older than its position; a lost ledger entry must
+      // not strip a bot position's only cover). An unreadable/corrupt ledger keeps everything.
+      const own3b = await botOwnership().catch(() => null);
+      const stopProtectsLive = (o: { pair: string; side: string; opentm: number }) => positions.some((p) => {
+        if (pairBase(p.pair) !== pairBase(o.pair)) return false;
+        if (!((o.side === "sell" && p.side === "long") || (o.side === "buy" && p.side === "short"))) return false;
+        if (own3b == null || own3b.ledgerCorrupt) return true;
+        if (own3b.isOurs(p as unknown as { ordertxid: string; id: string })) return true;
+        const openedMs = new Date(p.openedAt).getTime();
+        if (!Number.isFinite(openedMs)) return true;                       // unknown → keep
+        if (Date.now() - openedMs < 6 * 60_000) return true;               // entry grace
+        return openedMs / 1000 <= o.opentm + 60;                            // position predates the stop
+      });
       const staleMin = Math.max(5, await cfgNum("kraken_margin_stale_entry_min", 30));
       const nowSec = Date.now() / 1000;
       const priorOrphans = state.orphans ?? {};
@@ -502,6 +516,9 @@ export async function GET(request: Request) {
         const closeSide = side === "long" ? "sell" : "buy";
         const lev = String(Math.max(2, Math.round(leverage)));
         const ourStopsOnBook = () => orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && samePair(o.pair, pairRaw) && o.side === closeSide);
+        // For a FLAT sweep only: a stop younger than two minutes may be a fresh entry's
+        // attached close[] showing a beat before its position — never swept.
+        const ourStopsOnBookAged = () => ourStopsOnBook().filter((o) => Date.now() / 1000 - o.opentm > 120);
         const fifoBlocked = fifoWouldHitManual({ pair: pairRaw, side, openedAt: newestOpenedAt }, positionsAll, isOursLoose, samePair);
         const fifoNote = fifoBlocked ? " ⚠️ an OLDER manual position sits on this pair+side: Kraken reduces it FIRST when any of these orders fire — close it by hand." : "";
 
@@ -622,7 +639,7 @@ export async function GET(request: Request) {
             catch (e) { errors.push(`${pairRaw} (${why}): could not re-read orders under the lock (${String(e).slice(0, 60)}) — not acting`); return false; }
             if (hadStopsLocked && rereadLocked.length === 0 && fresh > 0) { errors.push(`${pairRaw} (${why}): orders re-read empty under the lock after showing stops — unreliable, not acting`); return false; }
             orders = rereadLocked;
-            plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+            plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, fresh > 0 ? ourStopsOnBook() : ourStopsOnBookAged());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
             if (!plan.place && !plan.cancel.length) return plan.covered;
             if (fresh > 0 && freshRead.fifoHit) {
@@ -718,7 +735,7 @@ export async function GET(request: Request) {
                 delete nextBreached[stateKey];
                 return "closed";
               }
-              const sweep = planReconcile({ side, vol: 0, targetLevel: 0, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+              const sweep = planReconcile({ side, vol: 0, targetLevel: 0, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBookAged());
               const out = sweep.cancel.length ? await applyReconcile(sweep, io) : null;
               sweepOk = !out || out.failedCancels.length === 0;
               if (out?.failedCancels.length) await sendNotification(`🚨 ${pairRaw} ${side} is flat but stop(s) ${out.failedCancels.join(", ")} could NOT be cancelled — a resting non-reduce-only stop OPENS if it fires. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
