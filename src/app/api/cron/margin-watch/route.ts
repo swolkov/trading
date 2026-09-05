@@ -903,15 +903,19 @@ export async function GET(request: Request) {
     }
   }
 
-  // The $20 round trip (if one is running): checks Kraken's behaviour against the code's
-  // assumptions and closes it when the window has passed. Runs AFTER protection so the
-  // position is covered first; its own errors are logged, never fatal here.
-  try {
-    const rt = await advanceRoundTrip();
-    if (rt && (rt.stage === "open" || rt.stage === "closing")) sent.push(`round-trip-${rt.stage}`);
-  } catch (e) { errors.push(`round trip: ${String(e).slice(0, 120)}`); }
-
   if (!stateUnreliable) await saveState(state);
+
+  // The $20 round trip (if one is running): checks Kraken's behaviour against the code's
+  // assumptions and closes it when the window has passed. Runs AFTER protection AND after
+  // the guardian's own state is saved; skipped when the route has no time left for it.
+  if (Date.now() - routeStartedAt < 220_000) {
+    try {
+      const rt = await advanceRoundTrip();
+      if (rt && (rt.stage === "open" || rt.stage === "closing")) sent.push(`round-trip-${rt.stage}`);
+    } catch (e) { errors.push(`round trip: ${String(e).slice(0, 120)}`); }
+  } else {
+    errors.push("round trip tick skipped — no route time left (next run)");
+  }
 
   // Fail loudly: an unhealthy guardian is worse than none, because it feels like cover.
   if (errors.length) {

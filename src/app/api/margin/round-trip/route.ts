@@ -5,7 +5,7 @@ import { readRoundTrip, startRoundTrip, advanceRoundTrip, abortRoundTrip, roundT
 // through the executor; "advance" runs a check tick now instead of waiting for the guardian;
 // "abort" closes and stops. GET reads the state for the card.
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 function view(state: Awaited<ReturnType<typeof readRoundTrip>>) {
   return {
@@ -20,11 +20,12 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const routeDeadlineMs = Date.now() + maxDuration * 1000;
   let body: { action?: string; symbol?: string } = {};
   try { body = await request.json(); } catch { /* empty */ }
   const action = String(body.action ?? "");
   if (action === "start") {
-    const r = await startRoundTrip(String(body.symbol ?? "BTC/USD"));
+    const r = await startRoundTrip(String(body.symbol ?? "BTC/USD"), routeDeadlineMs);
     return Response.json({ ok: r.ok, note: r.note, ...view(r.state) }, { status: r.ok ? 200 : 409 });
   }
   if (action === "advance") return Response.json(view(await advanceRoundTrip()));

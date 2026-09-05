@@ -83,7 +83,7 @@ export const RT_CHECKS: { key: string; label: string }[] = [
 
 // Restore order matters: DISARM first, then the source allowlist, then the limits — so no
 // instant exists where auto=true meets a restored (wider) allowlist or cap.
-const CFG_KEYS = ["kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_live_sources", "kraken_margin_symbols", "kraken_margin_per_trade_usd", "kraken_margin_max_positions"] as const;
+const CFG_KEYS = ["kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_live_sources", "kraken_margin_symbols", "kraken_margin_per_trade_usd", "kraken_margin_max_positions", "kraken_margin_maker_entries"] as const;
 
 const nowIso = () => new Date().toISOString();
 const check = (ok: boolean | null, note: string): RtCheck => ({ ok, note, at: nowIso() });
@@ -202,7 +202,7 @@ export function validatePassOk(r: { validated: boolean; executed: boolean; note:
 
 // ---- The state machine ---------------------------------------------------------------------
 
-export async function startRoundTrip(symbol = "BTC/USD"): Promise<{ ok: boolean; note: string; state: RtState | null }> {
+export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): Promise<{ ok: boolean; note: string; state: RtState | null }> {
   if (!krakenConfigured()) return { ok: false, note: "Kraken not configured", state: null };
   symbol = symbol.toUpperCase();
   if (!isUsMarginSymbol(symbol)) return { ok: false, note: `${symbol} is not a US-margin pair`, state: null };
@@ -224,6 +224,8 @@ export async function startRoundTrip(symbol = "BTC/USD"): Promise<{ ok: boolean;
     if (failClosedOnEmptyPositions(positions.length, health.marginUsedRaw)) return { ok: false, note: "positions read empty while margin is in use — unreliable read, try again", state: prev };
     const onPair = positions.filter((p) => pairBase(p.pair) === pairBase(pair));
     if (onPair.length) return { ok: false, note: `${onPair.length} position(s) already open on ${symbol} — a round trip needs an empty pair (Kraken nets FIFO)`, state: prev };
+    if (positions.length) return { ok: false, note: `${positions.length} margin position(s) open on other pairs — the round trip runs with max_positions=1, so the account must be flat`, state: prev };
+    if ((await readCfg(["kraken_margin_disarmed_dd"])).kraken_margin_disarmed_dd === "true") return { ok: false, note: "the drawdown breaker is tripped (kraken_margin_disarmed_dd) — the executor would refuse", state: prev };
     const oursResting = orders.filter((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair));
     if (oursResting.length) return { ok: false, note: `${oursResting.length} order(s) of ours already rest on ${symbol} — clear them first`, state: prev };
     if (!(health.equity > 0)) return { ok: false, note: "could not read equity", state: prev };
@@ -233,7 +235,7 @@ export async function startRoundTrip(symbol = "BTC/USD"): Promise<{ ok: boolean;
     log(state, `preflight ok: equity $${health.equity.toFixed(0)}, pair empty, nothing resting`);
     await save(state);
 
-    const meta = await getPairMeta(symbol).catch(() => null);
+    const meta = await getPairMeta(pair).catch(() => null);
     try {
       // Arm the executor for THIS source, THIS symbol, one position, $10 margin — limits first,
       // auto LAST — then run the real entry path twice: validate=true (shape), then for real.
@@ -241,10 +243,11 @@ export async function startRoundTrip(symbol = "BTC/USD"): Promise<{ ok: boolean;
       await setCfg("kraken_margin_symbols", symbol);
       await setCfg("kraken_margin_per_trade_usd", String(RT_MARGIN_USD));
       await setCfg("kraken_margin_max_positions", "1");
+      await setCfg("kraken_margin_maker_entries", "false");   // MARKET fill: the timings below are measured from a fill, not a resting limit
       await setCfg("kraken_margin_validate_only", "true");
       await setCfg("kraken_margin_auto", "true");
 
-      const v = await executeAlert({ symbol, side: "buy", note: "$20 round trip — validate pass", source: RT_SOURCE });
+      const v = await executeAlert({ symbol, side: "buy", note: "$20 round trip — validate pass", source: RT_SOURCE, deadlineMs });
       const vOk = validatePassOk(v);
       state.checks.validate_accepted = check(vOk, v.note.slice(0, 200));
       log(state, `validate pass: ${v.note.slice(0, 160)}`);
@@ -256,8 +259,14 @@ export async function startRoundTrip(symbol = "BTC/USD"): Promise<{ ok: boolean;
       await setCfg("kraken_margin_validate_only", "false");
       state.entrySentAt = Math.floor(Date.now() / 1000);
       await save(state);   // persist the send time BEFORE the send: an interrupted route can still recover
-      const r = await executeAlert({ symbol, side: "buy", note: "$20 round trip", source: RT_SOURCE });
-      if (r.executed && r.txid) {
+      const r = await executeAlert({ symbol, side: "buy", note: "$20 round trip", source: RT_SOURCE, deadlineMs });
+      if (r.executed && /UNLEDGERED/.test(r.note)) {
+        // Filled but NOT ours in the ledger: the close path would refuse it and the guardian
+        // would not manage it. Stop here and say exactly what to do.
+        state.stage = "failed"; state.error = `entry filled but could not be ledgered — adopt it via kraken_margin_adopt_txids, then close it: ${r.note.slice(0, 160)}`; state.finishedAt = nowIso();
+        state.checks.entry_accepted = check(false, state.error);
+        log(state, state.error);
+      } else if (r.executed && r.txid) {
         state.entryTxid = r.txid;
         state.stage = "open";
         state.checks.entry_accepted = check(true, `txid ${r.txid} — ${r.note.slice(0, 160)}${meta ? ` (lot decimals ${meta.lotDecimals})` : ""}`);
@@ -376,7 +385,7 @@ export async function advanceRoundTrip(): Promise<RtState | null> {
       // 7. reduce_only stop-loss accepted: far from the market, cancelled immediately.
       if (position && !state.checks.reduce_only_stop_accepted) {
         try {
-          const meta = await getPairMeta(state.symbol);
+          const meta = await getPairMeta(pair);
           const tick = await krakenPublic("Ticker", { pair }).catch(() => null);
           const px = tick ? parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0") : 0;
           const far = px > 0 ? (px * 0.7).toFixed(meta.priceDecimals) : null;
