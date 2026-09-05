@@ -239,7 +239,7 @@ export async function dryRunRoundTrip(symbol = "BTC/USD", deadlineMs?: number): 
   const lock = await acquireCloseLock(5_000);
   if (!lock) return fail("another close/reconcile/round trip holds the lock — try again in a minute");
   let saved: Record<string, string | null> | undefined;
-  let result: DryRunResult;
+  let result: DryRunResult | null = null;
   try {
     const cfg0 = await readCfg(CFG_KEYS);
     if (cfg0.kraken_margin_auto === "true") return fail("the executor is ARMED — the dry run is for the disarmed phase only");
@@ -267,10 +267,11 @@ export async function dryRunRoundTrip(symbol = "BTC/USD", deadlineMs?: number): 
       if (failed.length) {
         await sendNotification(`🚨 Dry run: could not restore ${failed.join(", ")} — the executor may be armed for source "${RT_SOURCE}" only (validate-only). Fix the keys on the DB or re-run the dry run.`, "margin_urgent").catch(() => {});
       }
-      result.restoreFailed = failed;
+      if (result) result.restoreFailed = failed;
     }
     await releaseCloseLock(lock);
   }
+  if (!result) return fail("dry run did not produce a result");
   await prisma.agentConfig.upsert({ where: { key: RT_DRYRUN_KEY }, update: { value: JSON.stringify(result) }, create: { key: RT_DRYRUN_KEY, value: JSON.stringify(result) } }).catch(() => {});
   return result;
 }
