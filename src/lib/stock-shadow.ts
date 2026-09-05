@@ -10,7 +10,7 @@ import { prisma } from "@/lib/db";
 import { getStockBars } from "@/lib/stock-bars";
 import {
   STOCK_COHORT_SQL, STOCK_SIM_VERSION, STOCK_SOURCE_LABELS,
-  stockCostFrac, stockEntryPrice, stockExitParams, stockNotional, stockRiskFraction, stockVerdict, tStatOf,
+  stockCostFrac, stockEntryPrice, stockExitParams, stockNotional, stockRiskFraction, stockTimeStopHit, stockVerdict, tStatOf,
 } from "@/lib/stock-paper-model";
 
 // Raw-SQL table (like tradingview_alerts / kraken_my_trades): NEVER prisma-managed, so a
@@ -40,6 +40,11 @@ export async function ensureStockPaperTable(): Promise<void> {
     sim_version text
   )`);
   await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS stock_paper_trades_open_idx ON stock_paper_trades (status, symbol)`);
+  // ONE open trade per (sleeve, symbol, cohort), enforced by the database — two
+  // overlapping invocations (a manual run beside the schedule) both pass the SELECT
+  // check; only one of them can win this index. The loser's insert throws and is
+  // reported as "already open", so the sample can never be inflated by duplicates.
+  await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS stock_paper_one_open_idx ON stock_paper_trades (symbol, source, sim_version) WHERE status='open'`);
   await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS stock_scan_signals (
     id serial PRIMARY KEY,
     ts timestamptz DEFAULT now(),
@@ -81,11 +86,17 @@ export async function openStockPaperTrade(p: {
   const notional = stockNotional(p.source, refEquity, stockRiskFraction(baseRiskPct, p.conviction));
   if (!(entry > 0) || !(notional > 0)) return false;
   const { oneRPct } = stockExitParams(p.source);
-  await prisma.$executeRawUnsafe(
-    `INSERT INTO stock_paper_trades (symbol, side, source, timeframe, conviction, conviction_score, entry, notional, stop, peak, status, sim_version)
-     VALUES ($1,'buy',$2,$3,$4,$5,$6,$7,$8,$6,'open',$9)`,
-    p.symbol, p.source, p.timeframe, p.conviction, p.score, entry, notional, entry * (1 - oneRPct), STOCK_SIM_VERSION,
-  );
+  try {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO stock_paper_trades (symbol, side, source, timeframe, conviction, conviction_score, entry, notional, stop, peak, status, sim_version)
+       VALUES ($1,'buy',$2,$3,$4,$5,$6,$7,$8,$6,'open',$9)`,
+      p.symbol, p.source, p.timeframe, p.conviction, p.score, entry, notional, entry * (1 - oneRPct), STOCK_SIM_VERSION,
+    );
+  } catch (e) {
+    // Unique-index race (see ensureStockPaperTable): another run opened it first.
+    if (/stock_paper_one_open_idx|unique/i.test(String(e))) return false;
+    throw e;
+  }
   return true;
 }
 
@@ -110,15 +121,23 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
 
   // One Yahoo call per symbol for 1-minute bars back to the OLDEST unscored moment among
   // that symbol's trades (a trade opened at yesterday's close needs today's open bars),
-  // floored at Yahoo's 7-day 1m limit and never less than the last 2 hours.
+  // never less than the last 2 hours. Yahoo's 1-minute history reaches back 7 days, so
+  // the request is floored there — and any trade whose unscored moment is OLDER than that
+  // floor has a COVERAGE GAP (the cron was down for a week): bars it lived through are
+  // gone, so its outcome cannot be known. Such a trade is VOIDED (excluded from every
+  // statistic, shown in the log with the reason) rather than walked from the wrong
+  // starting point and scored as if nothing happened in between.
   const nowS = Date.now() / 1000;
+  const YAHOO_1M_FLOOR_S = nowS - 6.5 * 24 * 3600;
   const bySym: Record<string, OpenRow[]> = {};
   for (const r of rows) (bySym[r.symbol] ||= []).push(r);
   const barsBySym: Record<string, { t: number; o: number; h: number; l: number; c: number }[]> = {};
   const price: Record<string, number> = {};
+  const unscoredFrom = (r: OpenRow) => r.seen_t ?? r.time.getTime() / 1000;
   for (const [sym, trades] of Object.entries(bySym)) {
-    const oldest = Math.min(...trades.map((r) => r.seen_t ?? r.time.getTime() / 1000));
-    const since = Math.max(nowS - 6.5 * 24 * 3600, Math.min(oldest - 60, nowS - 2 * 3600));
+    const oldest = Math.min(...trades.map(unscoredFrom).filter((t) => t >= YAHOO_1M_FLOOR_S));
+    if (!Number.isFinite(oldest)) continue;   // every trade on this symbol is gapped — voided below
+    const since = Math.max(YAHOO_1M_FLOOR_S, Math.min(oldest - 60, nowS - 2 * 3600));
     try {
       const bars = await getStockBars(sym, "1m", since * 1000);
       if (bars.length) { barsBySym[sym] = bars; price[sym] = bars[bars.length - 1].c; }
@@ -129,15 +148,24 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
   const resolved: StockResolution[] = [];
   for (const r of rows) {
     const entry = r.entry;
-    const { oneRPct, maxHoldH } = stockExitParams(r.source);
+    const { oneRPct } = stockExitParams(r.source);
     const oneR = entry * oneRPct;
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
     const timeStopLabel = r.source === "stock-swing" ? "time stop (~10 sessions)" : "time stop (next close)";
+    const timeStopHit = stockTimeStopHit(r.source, r.time, new Date());
     const now = price[r.symbol];
+
+    if (unscoredFrom(r) < YAHOO_1M_FLOOR_S - 60) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE stock_paper_trades SET status='void', reason=$1, resolved_at=now(), unrealized=NULL WHERE id=$2 AND status='open'`,
+        `voided — coverage gap: no evaluation for ${(ageH / 24).toFixed(0)} days, 1-minute history unavailable`, r.id,
+      );
+      continue;
+    }
 
     if (!(now > 0)) {
       // Unpriceable this run: still honor the time stop so nothing sits open forever.
-      if (ageH >= maxHoldH) {
+      if (timeStopHit) {
         const feeFrac = stockCostFrac(r.notional, refEquity, ageH);
         const pnl = -feeFrac * r.notional;
         const affected = await prisma.$executeRawUnsafe(
@@ -185,7 +213,7 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
       ratchet();
       if (now <= stopPx) { exit = Math.min(stopPx, now); reason = (peak - entry) / oneR >= 1 ? "trailing stop" : "initial stop"; }
     }
-    if (exit == null && ageH >= maxHoldH) { exit = now; reason = timeStopLabel; }
+    if (exit == null && timeStopHit) { exit = now; reason = timeStopLabel; }
 
     if (exit == null) {
       const uNet = (now - entry) / entry - stockCostFrac(r.notional, refEquity, ageH);
@@ -214,17 +242,19 @@ export async function evaluateStockPaper(): Promise<StockResolution[]> {
 export interface StockScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number; fees: number;
   avgWin: number; avgLoss: number; open: number; openUnrealized: number;
+  voided: number;   // outcome unknowable (coverage gap) — excluded from every statistic, shown so it is never silent
   byConviction: { tier: string; resolved: number; wins: number; hitRate: number | null; totalPnl: number }[];
 }
 export async function stockScore(): Promise<StockScore> {
   await ensureStockPaperTable();
-  const [agg] = await prisma.$queryRawUnsafe<{ resolved: bigint; wins: bigint; total: number | null; fees: number | null; open: bigint; openfloat: number | null; avgwin: number | null; avgloss: number | null }[]>(
+  const [agg] = await prisma.$queryRawUnsafe<{ resolved: bigint; wins: bigint; total: number | null; fees: number | null; open: bigint; voided: bigint; openfloat: number | null; avgwin: number | null; avgloss: number | null }[]>(
     `SELECT
        count(*) FILTER (WHERE status='resolved')::bigint AS resolved,
        count(*) FILTER (WHERE status='resolved' AND pnl > 0)::bigint AS wins,
        COALESCE(sum(pnl) FILTER (WHERE status='resolved'),0)::float AS total,
        COALESCE(sum(fees) FILTER (WHERE status='resolved'),0)::float AS fees,
        count(*) FILTER (WHERE status='open')::bigint AS open,
+       count(*) FILTER (WHERE status='void')::bigint AS voided,
        COALESCE(sum(unrealized) FILTER (WHERE status='open'),0)::float AS openfloat,
        avg(pnl) FILTER (WHERE status='resolved' AND pnl > 0) AS avgwin,
        avg(pnl) FILTER (WHERE status='resolved' AND pnl <= 0) AS avgloss
@@ -240,7 +270,7 @@ export async function stockScore(): Promise<StockScore> {
   return {
     resolved, wins: Number(agg.wins), hitRate: resolved > 0 ? Number(agg.wins) / resolved : null,
     totalPnl: agg.total || 0, fees: agg.fees || 0, avgWin: agg.avgwin || 0, avgLoss: agg.avgloss || 0,
-    open: Number(agg.open), openUnrealized: agg.openfloat || 0,
+    open: Number(agg.open), openUnrealized: agg.openfloat || 0, voided: Number(agg.voided),
     byConviction: tiers.map((t) => ({ tier: t.tier, resolved: Number(t.resolved), wins: Number(t.wins), hitRate: Number(t.resolved) > 0 ? Number(t.wins) / Number(t.resolved) : null, totalPnl: t.total || 0 }))
       .sort((a, b) => (order[a.tier] ?? 9) - (order[b.tier] ?? 9)),
   };

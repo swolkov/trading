@@ -75,3 +75,36 @@ test("RTH gate: 9:30–16:00 New York, weekdays, not holidays, DST-aware", () =>
   assert.equal(isStockRthAt(new Date("2026-12-15T14:30:00Z"), holidays), true);   // 9:30 EST (winter)
   assert.equal(isStockRthAt(new Date("2026-12-15T14:29:00Z"), holidays), false);
 });
+
+// ---- Sep 5 Codex-review fixes ----
+import { STOCK_EARLY_CLOSES, STOCK_HOLIDAYS, isPastNextClose, isStockSessionOpenAt, sessionCloseMinutes, stockTimeStopHit } from "../src/lib/stock-paper-model";
+
+test("session gate: weekends, listed holidays (2026 + 2027), and 1 PM early closes", () => {
+  assert.equal(isStockSessionOpenAt(new Date("2026-09-05T15:00:00Z")), false, "Saturday");
+  assert.equal(isStockSessionOpenAt(new Date("2026-09-06T15:00:00Z")), false, "Sunday");
+  assert.equal(isStockSessionOpenAt(new Date("2026-09-07T15:00:00Z")), false, "Labor Day 2026");
+  assert.equal(isStockSessionOpenAt(new Date("2027-01-18T15:00:00Z")), false, "MLK 2027");
+  assert.equal(isStockSessionOpenAt(new Date("2026-09-08T15:00:00Z")), true, "Tuesday 11:00 ET");
+  // Day after Thanksgiving 2026 closes at 13:00 EST = 18:00Z (DST ended Nov 1).
+  assert.equal(sessionCloseMinutes("2026-11-27"), 13 * 60);
+  assert.equal(isStockSessionOpenAt(new Date("2026-11-27T17:59:00Z")), true);
+  assert.equal(isStockSessionOpenAt(new Date("2026-11-27T18:00:00Z")), false);
+  assert.ok(STOCK_HOLIDAYS.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)));
+  assert.ok(STOCK_EARLY_CLOSES.every((d) => !STOCK_HOLIDAYS.includes(d)));
+});
+
+test("fast sleeve deadline is the NEXT session's close, not 30 calendar hours", () => {
+  const thu1545 = new Date("2026-09-03T19:45:00Z");   // Thursday 15:45 EDT
+  assert.equal(isPastNextClose(thu1545, new Date("2026-09-04T13:30:00Z")), false, "Friday open — not yet");
+  assert.equal(isPastNextClose(thu1545, new Date("2026-09-04T19:30:00Z")), false, "Friday 15:30 — not yet");
+  assert.equal(isPastNextClose(thu1545, new Date("2026-09-04T19:45:00Z")), true, "Friday 15:45 — the last run: out");
+  // The Friday 15:45 run was skipped: Monday's open resolves it via the calendar fallback.
+  assert.equal(isPastNextClose(thu1545, new Date("2026-09-08T13:30:00Z")), true);
+  // Same-day never counts, even late in the day.
+  assert.equal(isPastNextClose(new Date("2026-09-03T14:00:00Z"), new Date("2026-09-03T19:50:00Z")), false);
+  // Early-close day: the last run is 12:45 EST = 17:45Z.
+  assert.equal(isPastNextClose(new Date("2026-11-25T15:00:00Z"), new Date("2026-11-27T17:45:00Z")), true);
+  assert.equal(stockTimeStopHit("stock-fast", thu1545, new Date("2026-09-04T19:45:00Z")), true);
+  assert.equal(stockTimeStopHit("stock-swing", thu1545, new Date("2026-09-04T19:45:00Z")), false);
+  assert.equal(stockTimeStopHit("stock-swing", thu1545, new Date("2026-09-18T13:30:00Z")), true);
+});

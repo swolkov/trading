@@ -50,9 +50,16 @@ export const STOCK_SOURCE_LABELS: Record<StockSource, string> = {
   "stock-fast": "Fast — high-conviction 5m/15m longs, 2% / next close",
   "stock-swing": "Swing — high-conviction 1h/1d longs, 5% / ~10 sessions",
 };
+// maxHoldH is the CALENDAR backstop. The fast sleeve's real deadline is session-based
+// (isPastNextClose); the swing's 14 calendar days ≈ 10 sessions.
 export function stockExitParams(source: string | null): { oneRPct: number; maxHoldH: number } {
   if (source === "stock-swing") return { oneRPct: 0.05, maxHoldH: 24 * 14 };
   return { oneRPct: 0.02, maxHoldH: 30 };
+}
+export function stockTimeStopHit(source: string | null, entry: Date, now: Date): boolean {
+  const { maxHoldH } = stockExitParams(source);
+  if (source === "stock-fast") return isPastNextClose(entry, now, maxHoldH);
+  return (now.getTime() - entry.getTime()) / 3600_000 >= maxHoldH;
 }
 
 // Which sleeve (if any) a fresh signal opens. Long-only, high conviction only, not
@@ -119,19 +126,61 @@ export function tStatOf(mean: number | null, std: number | null, n: number): num
   return n > 1 && mean != null && std != null && std > 0 ? (mean * Math.sqrt(n)) / std : null;
 }
 
-// Pure RTH check for a given instant — 9:30–16:00 America/New_York, weekdays, minus the
-// given holidays (ISO dates). session-time.ts has the app-wide version; this one takes
-// the instant and the holiday list as inputs so it can be tested without a clock.
-export function isStockRthAt(at: Date, holidays: readonly string[]): boolean {
+// ---------- The session calendar (pure, testable) ----------
+// NYSE full closures. session-time.ts only knows 2026 and has no weekend check, so the
+// stock book keeps its own calendar. Extend each December; the gate fails SAFE on an
+// unlisted holiday only in the sense that Yahoo returns no bars, so nothing fills — but a
+// stale signal could still be opened at the previous close, so keep this current.
+export const STOCK_HOLIDAYS: readonly string[] = [
+  "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+  "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+];
+// 1:00 PM ET closes (day after Thanksgiving; Christmas Eve when it is a weekday).
+export const STOCK_EARLY_CLOSES: readonly string[] = ["2026-11-27", "2026-12-24", "2027-11-26"];
+
+export interface EtClock { weekday: string; iso: string; minutes: number }
+export function etClockOf(at: Date): EtClock {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York", hour12: false,
     weekday: "short", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   }).formatToParts(at);
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  const weekday = get("weekday");
+  return {
+    weekday: get("weekday"),
+    iso: `${get("year")}-${get("month")}-${get("day")}`,
+    minutes: (parseInt(get("hour"), 10) % 24) * 60 + parseInt(get("minute"), 10),
+  };
+}
+/** Minutes-after-midnight ET when the session closes on this ET date (16:00, or 13:00 on early-close days). */
+export function sessionCloseMinutes(isoDate: string, earlyCloses: readonly string[] = STOCK_EARLY_CLOSES): number {
+  return earlyCloses.includes(isoDate) ? 13 * 60 : 16 * 60;
+}
+
+// Pure RTH check for a given instant — 9:30 to the session close, America/New_York,
+// weekdays, minus the given holidays. Takes the instant and the calendar as inputs so it
+// can be tested without a clock. Early closes are honoured.
+export function isStockRthAt(at: Date, holidays: readonly string[], earlyCloses: readonly string[] = STOCK_EARLY_CLOSES): boolean {
+  const { weekday, iso, minutes } = etClockOf(at);
   if (weekday === "Sat" || weekday === "Sun") return false;
-  const iso = `${get("year")}-${get("month")}-${get("day")}`;
   if (holidays.includes(iso)) return false;
-  const minutes = (parseInt(get("hour"), 10) % 24) * 60 + parseInt(get("minute"), 10);
-  return minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+  return minutes >= 9 * 60 + 30 && minutes < sessionCloseMinutes(iso, earlyCloses);
+}
+/** The gate the cron uses: the book's own calendar, weekends and early closes included. */
+export function isStockSessionOpenAt(at: Date): boolean {
+  return isStockRthAt(at, STOCK_HOLIDAYS, STOCK_EARLY_CLOSES);
+}
+
+// FAST-SLEEVE DEADLINE — "out by the next session's close", in session terms rather than
+// calendar hours. The cron's last run of a session is ~15 minutes before the close, so
+// the rule is: a LATER ET session date than the entry's AND we are inside the final
+// 20 minutes of that session. A calendar fallback (30h) catches a missed final run: a
+// Thursday 15:45 entry whose Friday 15:45 run was skipped resolves at Monday's open
+// rather than surviving to Monday's close. Without this, a Thursday-afternoon entry
+// was only 24 hours old at Friday's last run and quietly took the weekend gap.
+export function isPastNextClose(entry: Date, now: Date, fallbackHours = 30, earlyCloses: readonly string[] = STOCK_EARLY_CLOSES): boolean {
+  const e = etClockOf(entry);
+  const n = etClockOf(now);
+  if (n.iso <= e.iso) return false;
+  if (n.minutes >= sessionCloseMinutes(n.iso, earlyCloses) - 20) return true;
+  return (now.getTime() - entry.getTime()) / 3600_000 >= fallbackHours;
 }

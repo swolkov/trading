@@ -1,9 +1,8 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { isRTH } from "@/lib/session-time";
 import { scanStockUniverse, scoreConviction, stockSignalKey, type ScanSignal } from "@/lib/stock-scanner";
 import { ensureStockPaperTable, evaluateStockPaper, openStockPaperTrade, stockScore, stockStrategyBreakdown } from "@/lib/stock-shadow";
-import { STOCK_SIM_VERSION, STOCK_UNIVERSE, stockPaperPlans } from "@/lib/stock-paper-model";
+import { STOCK_SIM_VERSION, STOCK_UNIVERSE, isStockSessionOpenAt, stockPaperPlans } from "@/lib/stock-paper-model";
 
 // THE STOCK PAPER BOOK — every 15 minutes during regular hours (vercel.json), Mon–Fri.
 // Scans 30 liquid, marginable US names on 5m/15m/1h/1d with the crypto desk's signal
@@ -44,14 +43,36 @@ export async function GET(request: Request) {
     create: { key: "stock_scan_last_run", value: new Date().toISOString() },
   }).catch(() => {});
 
-  // Regular session only. The cron's UTC window covers both DST offsets; this is the
-  // exact gate (9:30–16:00 ET, weekdays, not a holiday). Outside it there are no new
-  // bars, no fills, and nothing to score — a Robinhood stop rests in the session too.
-  if (!isRTH()) return Response.json({ ok: true, skipped: "market closed" });
+  // Regular session only, by the book's OWN calendar (weekends, full holidays, 1 PM
+  // early closes, 2026–2027). session-time.isRTH() has no weekend check and knows only
+  // 2026, so a manual Saturday run would have passed it. Outside the session there are
+  // no new bars, no fills, and nothing to score — a Robinhood stop rests in the session too.
+  if (!isStockSessionOpenAt(new Date())) return Response.json({ ok: true, skipped: "market closed" });
 
   const errors: string[] = [];
+
+  // RESOLVE FIRST, SCAN SECOND. The scan is 120 Yahoo calls; if Yahoo degrades to seconds
+  // per call the scan alone can exhaust the route's 300s — and an evaluator that ran
+  // after it would never run, so time stops would never fire. Open trades are the record;
+  // they get the first slice of the budget, and the scan is bounded to what remains.
+  let resolvedCount = 0;
+  try {
+    const res = await evaluateStockPaper();
+    resolvedCount = res.length;
+    if (res.length) {
+      const total = res.reduce((s, r) => s + r.pnl, 0);
+      const wins = res.filter((r) => r.pnl >= 0).length;
+      const lines = res.slice(0, 12).map((r) =>
+        `• ${r.symbol} ${r.source}${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${(r.pnlPct * 100).toFixed(1)}%, ${r.reason})`).join("\n");
+      await sendNotification(
+        `📊 ${res.length} stock paper trade${res.length === 1 ? "" : "s"} resolved — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${res.length > 12 ? `\n…and ${res.length - 12} more` : ""}\n_Estimate — slippage + margin interest modeled; no real money moved._`,
+        "stocks",
+      );
+    }
+  } catch (e) { errors.push(`evaluate: ${String(e).slice(0, 80)}`); }
+
   const state = await loadState();
-  const { signals, errors: scanErrors } = await scanStockUniverse();
+  const { signals, errors: scanErrors, scannedSymbols } = await scanStockUniverse(180_000);
   errors.push(...scanErrors);
 
   // Re-alert dedupe per (symbol, timeframe, kind), same as the crypto scan.
@@ -108,23 +129,6 @@ export async function GET(request: Request) {
     );
   }
 
-  // Resolve open paper trades and report outcomes.
-  let resolvedCount = 0;
-  try {
-    const res = await evaluateStockPaper();
-    resolvedCount = res.length;
-    if (res.length) {
-      const total = res.reduce((s, r) => s + r.pnl, 0);
-      const wins = res.filter((r) => r.pnl >= 0).length;
-      const lines = res.slice(0, 12).map((r) =>
-        `• ${r.symbol} ${r.source}${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${(r.pnlPct * 100).toFixed(1)}%, ${r.reason})`).join("\n");
-      await sendNotification(
-        `📊 ${res.length} stock paper trade${res.length === 1 ? "" : "s"} resolved — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${res.length > 12 ? `\n…and ${res.length - 12} more` : ""}\n_Estimate — slippage + margin interest modeled; no real money moved._`,
-        "stocks",
-      );
-    }
-  } catch (e) { errors.push(`evaluate: ${String(e).slice(0, 80)}`); }
-
   // Milestone check-ins at 30 and 100 resolved, once each per cohort.
   try {
     const score = await stockScore();
@@ -145,5 +149,5 @@ export async function GET(request: Request) {
   } catch (e) { errors.push(`milestone: ${String(e).slice(0, 60)}`); }
 
   if (errors.length) console.error("[/api/cron/stock-scan]", errors.slice(0, 5));
-  return Response.json({ ok: errors.length === 0, universe: STOCK_UNIVERSE.length, scanned: signals.length, fresh: fresh.length, opened: opened.length, resolved: resolvedCount, errors: errors.slice(0, 5) });
+  return Response.json({ ok: errors.length === 0, universe: STOCK_UNIVERSE.length, scannedSymbols, scanned: signals.length, fresh: fresh.length, opened: opened.length, resolved: resolvedCount, errors: errors.slice(0, 5) });
 }

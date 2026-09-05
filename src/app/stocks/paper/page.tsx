@@ -13,7 +13,7 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 interface Tier { tier: string; resolved: number; wins: number; hitRate: number | null; totalPnl: number }
 interface Score {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number; fees: number;
-  avgWin: number; avgLoss: number; open: number; openUnrealized: number; byConviction: Tier[];
+  avgWin: number; avgLoss: number; open: number; openUnrealized: number; byConviction: Tier[]; voided?: number;
 }
 interface Strat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null; expectancy: number | null;
@@ -91,7 +91,8 @@ export default function StockPaperPage() {
           <div className="flex items-center justify-between mb-2">
             <p className="text-xs font-bold">📊 Paper Record — would these have made money?</p>
             <p className="text-[10px] text-muted-foreground/45">
-              {score.open} open{score.open > 0 && <> · floating <span className={`font-bold ${col(score.openUnrealized)}`}>{money2(score.openUnrealized)}</span></>} · no real money
+              {score.open} open{score.open > 0 && <> · floating <span className={`font-bold ${col(score.openUnrealized)}`}>{money2(score.openUnrealized)}</span></>}
+              {(score.voided ?? 0) > 0 && <> · <span title="Trades whose outcome could not be known — the evaluator was down longer than Yahoo's 1-minute history reaches. Excluded from every statistic.">{score.voided} voided</span></>} · no real money
             </p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -185,7 +186,7 @@ export default function StockPaperPage() {
               </thead>
               <tbody>
                 {log.map((t) => {
-                  const open = t.status !== "resolved";
+                  const open = t.status === "open";
                   const val = open ? t.unrealized : t.pnl;
                   return (
                     <tr key={t.id} className="border-b border-border/40 hover:bg-white/[0.02]">
@@ -200,7 +201,7 @@ export default function StockPaperPage() {
                       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/50">{t.stop != null ? usd(t.stop) : "—"}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{t.exit != null ? usd(t.exit) : "—"}</td>
                       <td className={`px-2 py-1.5 text-right tabular-nums font-bold ${val != null ? col(val) : "text-muted-foreground/40"}`}>{val != null ? money2(val) : "—"}{open && <span className="text-[9px] font-normal text-muted-foreground/40 ml-1">float</span>}</td>
-                      <td className="px-3 py-1.5 text-muted-foreground/60">{open ? "open" : t.reason ?? "resolved"}</td>
+                      <td className={`px-3 py-1.5 ${t.status === "void" ? "text-amber-400/70" : "text-muted-foreground/60"}`}>{open ? "open" : t.reason ?? t.status}</td>
                     </tr>
                   );
                 })}

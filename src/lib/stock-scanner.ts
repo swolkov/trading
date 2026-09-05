@@ -24,13 +24,20 @@ export const STOCK_TIMEFRAMES: StockTf[] = [
 ];
 
 // Scan the whole universe: 30 names × 4 timeframes = 120 Yahoo calls, paced ~120ms
-// (≈15s). A symbol/timeframe that errors (Yahoo hiccup, thin history) is skipped, never
-// fatal — the scan reports what it could see.
-export async function scanStockUniverse(): Promise<{ signals: ScanSignal[]; errors: string[] }> {
+// (≈35s measured). A symbol/timeframe that errors (Yahoo hiccup, thin history) is
+// skipped, never fatal — the scan reports what it could see. `budgetMs` bounds the whole
+// scan: when Yahoo degrades to seconds per call, the scan stops early and says so, so the
+// route always finishes inside its 300s limit instead of dying before it can report.
+export async function scanStockUniverse(budgetMs = 200_000): Promise<{ signals: ScanSignal[]; errors: string[]; scannedSymbols: number }> {
   const signals: ScanSignal[] = [];
   const errors: string[] = [];
   const now = Date.now();
+  let scannedSymbols = 0;
   for (const sym of STOCK_UNIVERSE) {
+    if (Date.now() - now > budgetMs) {
+      errors.push(`scan budget exhausted after ${scannedSymbols}/${STOCK_UNIVERSE.length} symbols`);
+      break;
+    }
     const coin = { name: sym, symbol: sym };
     for (const { tf, yf, lookbackMs } of STOCK_TIMEFRAMES) {
       try {
@@ -41,8 +48,9 @@ export async function scanStockUniverse(): Promise<{ signals: ScanSignal[]; erro
       }
       await new Promise((r) => setTimeout(r, 120));
     }
+    scannedSymbols++;
   }
-  return { signals, errors };
+  return { signals, errors, scannedSymbols };
 }
 
 export function stockSignalKey(s: ScanSignal): string {
