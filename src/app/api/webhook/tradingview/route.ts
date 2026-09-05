@@ -120,10 +120,13 @@ export async function POST(request: Request) {
        FROM tradingview_alerts`,
       symbol, side, leverage ?? null, note,
     );
-    if (Number(recent) >= 30) {
+    // Neither guard applies to a CLOSE: a close only reduces risk, reduce_only makes a
+    // repeat idempotent, and a failed close re-sent inside two minutes must be RETRIED,
+    // not logged as a duplicate.
+    if (side !== "close" && Number(recent) >= 30) {
       return Response.json({ error: "rate limited" }, { status: 429 });
     }
-    duplicate = Number(dupes) > 0;
+    duplicate = side !== "close" && Number(dupes) > 0;
   } catch (e) {
     // If the guard itself is unreadable, treat the alert as a duplicate: log it, do
     // not trade on it. Fail closed — but NEVER for a close. "Fail closed" means "add no

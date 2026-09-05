@@ -181,6 +181,7 @@ test("groupPositionsByOrder merges tranches of one order: summed volume, weighte
   assert.equal(o1.vol, 4);
   assert.equal(o1.entryPrice, 103);
   assert.equal(o1.openedAt, "2026-09-05T10:00:00Z");
+  assert.equal(o1.newestOpenedAt, "2026-09-05T10:18:00Z");
   assert.deepEqual(o1.ids, ["T1", "T2"]);
 });
 
@@ -197,4 +198,8 @@ test("fifoWouldHitManual: only an OLDER manual position on the same pair and sid
   assert.equal(fifoWouldHitManual(bot, [bot, manualShort], isOurs, same), false);
   assert.equal(fifoWouldHitManual(bot, [bot, otherPair], isOurs, same), false);
   assert.equal(fifoWouldHitManual(bot, [bot], isOurs, same), false);
+  // Fails closed: equal or unparseable timestamps block.
+  const sameTime = { ...olderManual, openedAt: bot.openedAt };
+  assert.equal(fifoWouldHitManual(bot, [bot, sameTime], isOurs, same), true);
+  assert.equal(fifoWouldHitManual({ ...bot, openedAt: "" }, [bot, newerManual], isOurs, same), true);
 });

@@ -163,14 +163,14 @@ export function roundedStopIsSafe(side: "long" | "short", target: number, px: nu
  * summed, entry is volume-weighted, the age is the oldest fill's.
  */
 export interface PositionLike { id: string; ordertxid: string; pair: string; side: "long" | "short"; vol: number; entryPrice: number; openedAt: string; leverage: number }
-export interface PositionGroup { ordertxid: string; pair: string; side: "long" | "short"; vol: number; entryPrice: number; openedAt: string; leverage: number; ids: string[] }
+export interface PositionGroup { ordertxid: string; pair: string; side: "long" | "short"; vol: number; entryPrice: number; openedAt: string; newestOpenedAt: string; leverage: number; ids: string[] }
 export function groupPositionsByOrder<T extends PositionLike>(positions: T[]): PositionGroup[] {
   const byOrder = new Map<string, PositionGroup>();
   for (const p of positions) {
-    const key = `${p.ordertxid}|${p.side}`;
+    const key = `${p.ordertxid}|${p.pair}|${p.side}`;
     const g = byOrder.get(key);
     if (!g) {
-      byOrder.set(key, { ordertxid: p.ordertxid, pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, openedAt: p.openedAt, leverage: p.leverage, ids: [p.id] });
+      byOrder.set(key, { ordertxid: p.ordertxid, pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, openedAt: p.openedAt, newestOpenedAt: p.openedAt, leverage: p.leverage, ids: [p.id] });
       continue;
     }
     const vol = g.vol + p.vol;
@@ -178,6 +178,10 @@ export function groupPositionsByOrder<T extends PositionLike>(positions: T[]): P
     g.vol = vol;
     g.leverage = Math.max(g.leverage, p.leverage);
     if (p.openedAt && (!g.openedAt || new Date(p.openedAt).getTime() < new Date(g.openedAt).getTime())) g.openedAt = p.openedAt;
+    // FIFO is per tranche: a manual fill that landed BETWEEN two of ours is older than the
+    // second, so the group's close would hit it. The newest tranche's time is what the
+    // FIFO guard must compare against.
+    if (p.openedAt && (!g.newestOpenedAt || new Date(p.openedAt).getTime() > new Date(g.newestOpenedAt).getTime())) g.newestOpenedAt = p.openedAt;
     g.ids.push(p.id);
   }
   return [...byOrder.values()];
@@ -195,9 +199,14 @@ export function fifoWouldHitManual(
   isOurs: (p: { pair: string; side: string; openedAt: string }) => boolean,
   samePair: (a: string, b: string) => boolean,
 ): boolean {
+  // Fails CLOSED: an unparseable or equal timestamp on either side counts as "older" —
+  // when we cannot prove the bot's position is the oldest, we do not send the order.
   const t = new Date(target.openedAt).getTime();
-  return all.some((m) => !isOurs(m) && m.side === target.side && samePair(m.pair, target.pair)
-    && Number.isFinite(t) && new Date(m.openedAt).getTime() < t);
+  return all.some((m) => {
+    if (isOurs(m) || m.side !== target.side || !samePair(m.pair, target.pair)) return false;
+    const mt = new Date(m.openedAt).getTime();
+    return !Number.isFinite(t) || !Number.isFinite(mt) || mt <= t;
+  });
 }
 
 /** True when `target` improves on `currentStop` by at least the ratchet threshold. */

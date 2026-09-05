@@ -125,18 +125,34 @@ const BOT_TXIDS_KEY = "kraken_margin_bot_txids";
 const BOT_TXID_TTL_MS = 180 * 24 * 3600_000;
 const BOT_TXID_MAX = 2000;
 
-async function recordBotEntry(txid: string, pair: string): Promise<void> {
+export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number }
+// Returns true only when the entry is durably written. STRICT read: a failed read must
+// never be treated as an empty ledger — writing [B] over a ledger that held A would strip
+// A's ownership (unclosable by alert, unprotected by the guardian). A corrupt existing
+// ledger is backed up, then replaced. `stopFrac` is the entry's authorised 1R, stored so
+// the guardian's managed exit never has to re-derive it from a stop that may already
+// have been ratcheted.
+async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number }): Promise<boolean> {
   try {
-    const raw = await cfg(BOT_TXIDS_KEY);
+    const raw = await cfgStrict(BOT_TXIDS_KEY);
     const cutoff = Date.now() - BOT_TXID_TTL_MS;
-    const prev: { txid: string; pair: string; ts: number }[] = raw ? JSON.parse(raw) : [];
+    let prev: LedgerEntry[] = [];
+    if (raw) {
+      try { prev = JSON.parse(raw) as LedgerEntry[]; }
+      catch {
+        await prisma.agentConfig.upsert({ where: { key: `${BOT_TXIDS_KEY}_corrupt_backup` }, update: { value: raw }, create: { key: `${BOT_TXIDS_KEY}_corrupt_backup`, value: raw } }).catch(() => {});
+        await sendNotification(`🚨 kraken_margin_bot_txids was CORRUPT; backed up to kraken_margin_bot_txids_corrupt_backup and restarted. Any older bot position must be re-adopted via kraken_margin_adopt_txids.`, "margin_urgent").catch(() => {});
+        prev = [];
+      }
+    }
     const next = prev.filter((e) => e && e.ts > cutoff && e.txid !== txid);
-    next.push({ txid, pair, ts: Date.now() });
+    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}) });
     await prisma.agentConfig.upsert({
       where: { key: BOT_TXIDS_KEY },
       update: { value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
       create: { key: BOT_TXIDS_KEY, value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
     });
+    return true;
   } catch (e) {
     // NOT best-effort in consequence: an unrecorded position is invisible to BOTH the close
     // path and the guardian's naked-position guard, so it is unclosable by alert AND
@@ -145,6 +161,7 @@ async function recordBotEntry(txid: string, pair: string): Promise<void> {
       `🚨 Could not record bot position ${txid} on ${pair}. It will NOT be recognised by close alerts or the naked-position guard. Add it to kraken_margin_adopt_txids now. ${String(e).slice(0, 120)}`,
       "margin_urgent",
     ).catch(() => {});
+    return false;
   }
 }
 
@@ -161,11 +178,12 @@ export async function botTxids(): Promise<Set<string>> {
 // and managed exit cannot disagree about which positions are the bot's. STRICT reads: a
 // DB failure THROWS rather than reading as "nothing is ours" (which made a close a silent
 // no-op with the wrong reason, and would leave adopted positions unprotected).
-export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean }> {
+export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null }> {
   const raw = await cfgStrict(BOT_TXIDS_KEY);
   const adoptRaw = (await cfgStrict("kraken_margin_adopt_txids")) ?? "";
   const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
   let ledger = new Set<string>();
+  const stopFrac = new Map<string, number>();
   let ledgerCorrupt = false;
   if (raw) {
     // A corrupt ledger must not take the ADOPTION list and the emergency override down
@@ -173,12 +191,15 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
     // flag loudly; positions recorded only in the corrupt ledger read as NOT ours (fail
     // closed) until the operator adopts them or repairs the ledger.
     try {
-      ledger = new Set((JSON.parse(raw) as { txid: string }[]).map((e) => e.txid).filter(Boolean));
+      const entries = JSON.parse(raw) as LedgerEntry[];
+      ledger = new Set(entries.map((e) => e.txid).filter(Boolean));
+      for (const e of entries) if (e.txid && e.stopFrac && e.stopFrac > 0) stopFrac.set(e.txid, e.stopFrac);
     } catch { ledgerCorrupt = true; }
   }
   return {
     ledger, adopted, ledgerCorrupt,
     isOurs: (p) => ledger.has(p.ordertxid) || adopted.has(p.ordertxid) || adopted.has(p.id),
+    stopFracOf: (ordertxid) => stopFrac.get(ordertxid) ?? null,
   };
 }
 
@@ -288,15 +309,25 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // more dangerous than the over-closing it was meant to prevent.
       // Ownership is a STRICT read: if the ledger cannot be read, the close is NOT attempted
       // (a silent "not the bot's" no-op told the operator the wrong reason and left risk on).
+      // The emergency authorisation is read FIRST, so a broken ledger cannot block the one
+      // close the operator has explicitly authorised. It is CONSUMED only after a close
+      // actually went through (below) — a burned flag with nothing closed is the worst outcome.
+      const closeAllRaw = (await cfg("kraken_margin_close_all_positions")) ?? "";
+      const closeAllTarget = closeAllRaw.trim().toUpperCase();
+      const closeAllAuthorised = closeAllTarget === "ALL" || closeAllTarget === "TRUE" || closeAllTarget === alert.symbol.toUpperCase();
       let ownership: Awaited<ReturnType<typeof botOwnership>>;
       try {
         ownership = await botOwnership();
       } catch (e) {
-        await sendNotification(
-          `🚨 Close on ${pair} NOT attempted — the ownership ledger could not be read (${String(e).slice(0, 120)}). The position is still open with its stop. Retry the close.`,
-          "margin_urgent",
-        ).catch(() => {});
-        return { executed: false, validated: false, note: `close not attempted: ownership ledger unreadable — retry` };
+        if (!closeAllAuthorised) {
+          await sendNotification(
+            `🚨 Close on ${pair} NOT attempted — the ownership ledger could not be read (${String(e).slice(0, 120)}). The position is still open with its stop. Retry the close, or set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} to flatten the pair without it.`,
+            "margin_urgent",
+          ).catch(() => {});
+          return { executed: false, validated: false, note: `close not attempted: ownership ledger unreadable — retry` };
+        }
+        // Authorised to flatten the pair regardless of ownership: proceed as if nothing is ours.
+        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null };
       }
       // ONE-SHOT AND PAIR-SCOPED. Sticky, an emergency flag set once would silently flatten
       // Spencer's manual book on every later close for that pair. Global, it would be burned
@@ -305,30 +336,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // BTC book just got flattened. So the value names the symbol it authorises
       // ("ETH/USD", or "ALL"), and it is consumed ONLY on a matching pair that actually has
       // something to close.
-      const closeAllRaw = (await cfg("kraken_margin_close_all_positions")) ?? "";
-      const closeAllTarget = closeAllRaw.trim().toUpperCase();
       // "ALL" and the legacy "true" both mean EVERY pair — whichever close lands first
       // consumes it. Anything else must name the symbol it authorises.
-      let closeAll = all.length > 0 && (closeAllTarget === "ALL" || closeAllTarget === "TRUE" || closeAllTarget === alert.symbol.toUpperCase());
-      if (closeAll) {
-        const cleared = await prisma.agentConfig.updateMany({
-          where: { key: "kraken_margin_close_all_positions", value: closeAllRaw },
-          data: { value: "" },
-        }).catch(() => ({ count: 0 }));
-        if (cleared.count !== 1) {
-          // Could not prove we consumed the authorisation (DB error, or a concurrent close
-          // already used it). Proceeding to flatten manual positions on an authorisation we
-          // cannot confirm is the wrong side to err on: fall back to owned-only and say so.
-          closeAll = false;
-          await sendNotification(
-            `⚠️ kraken_margin_close_all_positions could not be consumed for ${pair} — closing the BOT's positions only, leaving manual ones. If the flag is still set, clear it by hand.`,
-            "margin_urgent",
-          ).catch(() => {});
-        }
-      }
+      const closeAll = all.length > 0 && closeAllAuthorised;
       const { isOurs } = ownership;
+      const preNotes: string[] = [];   // deferred: nothing may sit between a close alert and the close
       if (ownership.ledgerCorrupt) {
-        await sendNotification(`🚨 kraken_margin_bot_txids is CORRUPT (unparseable). Positions recorded only there are being treated as NOT the bot's. Repair it, or adopt them via kraken_margin_adopt_txids.`, "margin_urgent").catch(() => {});
+        preNotes.push(`🚨 kraken_margin_bot_txids is CORRUPT (unparseable). Positions recorded only there are being treated as NOT the bot's. Repair it, or adopt them via kraken_margin_adopt_txids.`);
       }
       // KRAKEN NETS FIFO: a reduce-only sell on the pair reduces the OLDEST long first,
       // whoever opened it. A bot position with an OLDER manual position beside it cannot
@@ -338,16 +352,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       const positions = closeAll ? all : all.filter((p) => isOurs(p) && !fifoBlocked.includes(p));
       const skipped = all.filter((p) => !closeAll && !isOurs(p));
       if (fifoBlocked.length) {
-        await sendNotification(
-          `🚨 Close on ${pair}: ${fifoBlocked.length} bot position(s) NOT closed — an OLDER manual position on the same side would be reduced first (Kraken nets FIFO). Close the manual one by hand first, or set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} to flatten the whole pair deliberately. The bot's stops stay in place.`,
-          "margin_urgent",
-        ).catch(() => {});
+        preNotes.push(`🚨 Close on ${pair}: ${fifoBlocked.length} bot position(s) NOT closed — an OLDER manual position on the same side would be reduced first (Kraken nets FIFO). Close the manual one by hand first, or set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} to flatten the whole pair deliberately. The bot's stops stay in place.`);
       }
       // Notifications are deliberately deferred until AFTER the orders are placed:
       // sendNotification's fetch has no timeout, and a hung Slack webhook must never sit
       // between a close alert and the close itself.
-      const pending: string[] = [];
+      const pending: string[] = [...preNotes];
       if (!positions.length) {
+        for (const m of preNotes) await sendNotification(m, "margin_urgent").catch(() => {});
         if (fifoBlocked.length) return { executed: false, validated: false, note: `close refused: an older manual position on ${pair} would be closed first (FIFO) — bot positions left open with their stops` };
         const note = skipped.length > 0
           ? `close alert: ${skipped.length} position(s) on ${pair} are NOT the bot's — left untouched. Position ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}. To flatten the pair deliberately set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} (or ALL). ⚠️ Adopting an id via kraken_margin_adopt_txids puts that position under the bot's FULL container (3% stop, ratchet, 48h time stop) — only adopt positions the bot actually opened.`
@@ -401,6 +413,31 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           break;
         }
       }
+      // Consume the one-shot authorisation now that a close actually went through. A failed
+      // consume is paged: the flag would flatten manual positions on the NEXT close too.
+      if (closeAll && txids.length > 0) {
+        const cleared = await prisma.agentConfig.updateMany({
+          where: { key: "kraken_margin_close_all_positions", value: closeAllRaw },
+          data: { value: "" },
+        }).catch(() => ({ count: 0 }));
+        if (cleared.count !== 1) {
+          await sendNotification(`⚠️ Could not clear kraken_margin_close_all_positions after using it on ${pair} — it is STILL ARMED and will flatten manual positions on the next close. Clear it by hand.`, "margin_urgent").catch(() => {});
+        }
+      }
+      // A partially filled MAKER entry can keep filling after the close — cancel our resting
+      // entry orders on the pair as part of the same operation.
+      try {
+        const restingEntries = (await krakenOpenOrders()).filter((o) => o.userref === MARGIN_USERREF && !o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair));
+        for (const o of restingEntries) { try { await krakenCancelOrder(o.txid); } catch { pending.push(`⚠️ Could not cancel resting entry ${o.txid} on ${pair} after the close — cancel it on Kraken.`); } }
+      } catch { /* the stop sweep below re-reads orders and reports its own failures */ }
+      // A tranche that did NOT close (second AddOrder threw) must keep its stop: only sweep
+      // a side once no bot position remains on it.
+      let survivingSides = new Set<string>();
+      try {
+        const after = (await getKrakenMarginPositions()).filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && (closeAll || isOurs(p)));
+        survivingSides = new Set(after.map((p) => (p.side === "long" ? "sell" : "buy")));
+      } catch { survivingSides = new Set(closedSides); }   // unreadable → sweep nothing
+      for (const side of survivingSides) closedSides.delete(side);
       // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY — including after a partial flatten.
       // If the second AddOrder throws, skipping this sweep would leave the first close's
       // stop resting. Kraken's attached close[] cannot be reduce_only, so that stop can
@@ -504,9 +541,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // orders) can throw on a Kraken rate limit — and the catch below must NOT then tell the
   // operator to "adopt" a position that is his own, because nothing was ever sent.
   let addOrderSent = false;
+  let sentAtSec = 0;
+  let stopPctSent = 0;                       // the stop distance this entry was sized with
+  let dayStateRef: DayState | null = null;   // so a recovered fill still counts toward the day
   try {
     // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
     const dayState = await loadDayState();
+    dayStateRef = dayState;
     const maxPerDay = Math.max(1, await cfgNum("kraken_margin_max_trades_per_day", 6));
     if (dayState.entries >= maxPerDay) {
       return { executed: false, validated: false, note: `entry refused: ${dayState.entries}/${maxPerDay} trades already today` };
@@ -528,6 +569,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // exactly like paper. (The old $100 default silently made live risk ~0.6%, not 3%.)
     const perTrade = Math.max(0, await cfgNum("kraken_margin_per_trade_usd", 0));
     const lossCap = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 200));
+
+    // Layer 5a: the guardian must be alive. The container's exit (ratchet, time stop) and
+    // the naked-position rescue live there; entering while it is down would open a trade
+    // nothing manages. Same staleness bar as the trade sync.
+    const watchRun = await cfg("margin_watch_last_run");
+    if (!watchRun || Date.now() - new Date(watchRun).getTime() > 15 * 60 * 1000) {
+      return { executed: false, validated: false, note: "guardian has not run in 15m — no new entries while nothing would manage them (failing closed)" };
+    }
 
     // Layer 5: daily loss kill switch — realized round trips closed today plus open P&L.
     // Fails closed on ANY read problem, including a stale trade sync.
@@ -637,6 +686,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // sizing" column describes a trade with the SAME stop the paper sleeve was scored with.
     // (It was 0.3/leverage = 15% at 2× until Sep 5 2026: same signal, different container.)
     const stopPct = clampLiveStopFrac(await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), leverage);
+    stopPctSent = stopPct;
     const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
     const makerEntries = (await cfg("kraken_margin_maker_entries")) !== "false";
     const meta = await getPairMeta(pair);
@@ -715,6 +765,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (validate) params.validate = "true";
 
     let res;
+    sentAtSec = Math.floor(Date.now() / 1000);
     addOrderSent = true;   // from here on, an exception may mean an ACCEPTED order
     try {
       res = await krakenPrivate("AddOrder", params);
@@ -731,7 +782,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // the guardian's naked-position check know the resulting position is ours rather than
     // Spencer's. A missing entry here makes a close skip that position (safe); it can
     // never cause us to close one that is not ours.
-    if (!validate && txid) await recordBotEntry(txid, pair);
+    const ledgered = !validate && txid ? await recordBotEntry(txid, pair, { stopFrac: stopPct }) : true;
 
     // Count on acceptance (conservative — an unfilled maker rest still consumes a slot,
     // which caps churn; the guardian sweeps unfilled entries). Real executions only.
@@ -742,7 +793,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""} — ${descr ?? ""}`,
+      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
     };
   } catch (e) {
     if (!addOrderSent) {
@@ -763,7 +814,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // Our RESTING entry orders carry our userref: their identity is known, so ledger
       // them now and a later fill is a recognised position (closable, protected).
       const restingEntries = liveOrd.filter((o) => !o.ordertype.includes("stop"));
-      for (const o of restingEntries) await recordBotEntry(o.txid, pair);
+      for (const o of restingEntries) await recordBotEntry(o.txid, pair, { stopFrac: stopPctSent || undefined });
       if (restingEntries.length) {
         await sendNotification(`⚠️ Entry on ${pair} errored after sending, but our resting order ${restingEntries.map((o) => o.txid).join(", ")} was found and ledgered — nothing to adopt. Error: ${String(e).slice(0, 120)}`, "margin_urgent").catch(() => {});
         return { executed: false, validated: validate, note: `order errored but our resting entry was found and ledgered on ${pair}: ${e}` };
@@ -771,15 +822,29 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // No resting order: the accepted order may have FILLED. Its txid is still ours to
       // recover — ClosedOrders filtered by our userref in the last few minutes — and that,
       // not a list of positions on the pair (which may be Spencer's), is what gets ledgered.
+      // Only THIS order qualifies: opened at/after the moment we sent it, on this pair, in
+      // this direction, actually executed. A reduce-only close placed minutes earlier
+      // carries the same userref and must never be ledgered as an entry. Nothing to
+      // recover on a validate run — nothing could have been placed.
       let recovered: string[] = [];
-      try {
-        const closed = await krakenPrivate("ClosedOrders", { userref: String(MARGIN_USERREF), start: String(Math.floor(Date.now() / 1000) - 600) });
-        const entries = Object.entries((closed.closed ?? {}) as Record<string, { descr?: { pair?: string; ordertype?: string }; status?: string }>);
-        recovered = entries
-          .filter(([, o]) => o.descr?.pair && pairBase(o.descr.pair) === pairBase(pair) && !(o.descr.ordertype ?? "").includes("stop") && o.status === "closed")
-          .map(([txid]) => txid);
-        for (const txid of recovered) await recordBotEntry(txid, pair);
-      } catch { recovered = []; }
+      if (!validate) {
+        try {
+          const closed = await krakenPrivate("ClosedOrders", { userref: String(MARGIN_USERREF), start: String(sentAtSec - 2) });
+          const entries = Object.entries((closed.closed ?? {}) as Record<string, { descr?: { pair?: string; ordertype?: string; type?: string }; status?: string; opentm?: number; vol_exec?: string }>);
+          recovered = entries
+            // Filled, or partially filled then cancelled — any executed volume is real exposure.
+            .filter(([, o]) => o.descr?.pair && pairBase(o.descr.pair) === pairBase(pair)
+              && !(o.descr.ordertype ?? "").includes("stop")
+              && o.descr.type === alert.side
+              && (o.opentm ?? 0) >= sentAtSec - 2
+              && parseFloat(o.vol_exec ?? "0") > 0)
+            .map(([txid]) => txid);
+          const ledgered: string[] = [];
+          for (const txid of recovered) { if (await recordBotEntry(txid, pair, { stopFrac: stopPctSent || undefined })) ledgered.push(txid); }
+          recovered = ledgered;
+          if (recovered.length && dayStateRef) await bumpDayState(dayStateRef);   // it counts as an entry
+        } catch { recovered = []; }
+      }
       if (recovered.length) {
         await sendNotification(`⚠️ Entry on ${pair} errored after sending, but Kraken confirms it filled (${recovered.join(", ")}) — ledgered; the guardian will protect it. Error: ${String(e).slice(0, 120)}`, "margin_urgent").catch(() => {});
         return { executed: !validate, validated: validate, txid: recovered[0], note: `order errored but was filled and recovered on ${pair}: ${e}` };
