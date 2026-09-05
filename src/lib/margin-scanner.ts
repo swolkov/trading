@@ -30,7 +30,7 @@ export const SCAN_COINS: { name: string; symbol: string }[] = SCAN_UNIVERSE.map(
 // deliberately excluded: at that cadence every coin trips a threshold constantly and the
 // alerts become noise; those frames are for Spencer's own eyes while actively trading.
 // `realertMs` is per-timeframe so a persistent condition pings once, not every scan.
-interface TfSpec { interval: 5 | 15 | 60 | 240 | 1440; label: string; movePct: number; realertMs: number }
+export interface TfSpec { interval: 5 | 15 | 60 | 240 | 1440; label: string; movePct: number; realertMs: number }
 const TIMEFRAMES: TfSpec[] = [
   { interval: 5, label: "5m", movePct: 0.015, realertMs: 1 * 3600_000 },
   { interval: 15, label: "15m", movePct: 0.02, realertMs: 2 * 3600_000 },
@@ -81,7 +81,7 @@ function rsi14(closes: number[]): number {
   return isFinite(r) ? r : 100;
 }
 
-function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: KrakenBar[]): ScanSignal[] {
+export function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: KrakenBar[]): ScanSignal[] {
   const out: ScanSignal[] = [];
   if (bars.length < 25) return out;
   const closes = bars.map((b) => b.c);

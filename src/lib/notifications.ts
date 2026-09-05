@@ -6,9 +6,11 @@ import { prisma } from "./db";
 //   margin_results — shadow P&L outcomes + TradingView alert receipts (the scoreboard feed)
 // Each falls back to the single kraken channel → general, so everything still lands today
 // in one place until Spencer creates the separate Slack channels + webhooks.
+// stocks — the stock paper book (Sep 2026): scanner signals + paper outcomes. Falls back
+// to general (NOT kraken — a stock signal in the crypto channel would read as a crypto one).
 export type NotifyChannel =
   | "futures" | "futures_demo" | "kraken" | "general"
-  | "margin_urgent" | "margin_signals" | "margin_results";
+  | "margin_urgent" | "margin_signals" | "margin_results" | "stocks";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
@@ -18,6 +20,7 @@ const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   margin_urgent: "webhook_margin_urgent",
   margin_signals: "webhook_margin_signals",
   margin_results: "webhook_margin_results",
+  stocks: "webhook_stocks",
 };
 
 // The margin lanes fall back to the main kraken channel if their own webhook isn't set.
@@ -41,6 +44,10 @@ async function getWebhook(channel: NotifyChannel): Promise<string | null> {
   if (channel === "kraken" || FALLS_BACK_TO_KRAKEN.includes(channel)) {
     const krk = await webhookFor("webhook_kraken");
     if (krk) return krk;
+    const gen = await webhookFor("webhook_general");
+    if (gen) return gen;
+  }
+  if (channel === "stocks") {
     const gen = await webhookFor("webhook_general");
     if (gen) return gen;
   }

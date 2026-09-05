@@ -9,6 +9,7 @@ test("only sign-in, cron, and webhook paths are public", () => {
     "/api/cron/kraken",
     "/api/cron/margin-watch",
     "/api/cron/margin-scan",
+    "/api/cron/stock-scan",
     "/api/webhook/tradingview",
   ]) {
     assert.equal(isPublicPath(pathname), true, pathname);
