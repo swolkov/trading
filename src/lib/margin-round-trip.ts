@@ -108,8 +108,9 @@ function finish(s: RtState, stage: "done" | "failed" | "aborted", error?: string
 }
 /** After a restore that reported no failures the snapshot has done its job; dropping it
  *  guarantees a finished run can never compare against it and rewrite live config again. */
-function dropSnapshotIfClean(s: RtState): void {
-  if (!s.restoreFailed?.length) delete s.savedCfg;
+export function dropSnapshotIfClean(s: RtState): void {
+  // `restoreFailed` is set ONLY by a restore that actually ran; undefined means none has.
+  if (s.restoreFailed !== undefined && s.restoreFailed.length === 0) delete s.savedCfg;
 }
 
 async function readCfg(keys: readonly string[]): Promise<Record<string, string | null>> {

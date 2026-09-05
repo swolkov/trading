@@ -69,3 +69,14 @@ test("the validate pass only counts when the executor's note describes an order 
   assert.equal(validatePassOk({ validated: true, executed: false, note: "entry refused: cooldown (3/30 min since last entry)" }), false);
   assert.equal(validatePassOk({ validated: false, executed: false, note: "tracked only (kraken_margin_auto off)" }), false);
 });
+
+test("the config snapshot is dropped ONLY after a restore that ran and was clean", async () => {
+  const { dropSnapshotIfClean } = await import("../src/lib/margin-round-trip");
+  const mk = (restoreFailed?: string[]) => ({ stage: "failed" as const, symbol: "BTC/USD", startedAt: "", updatedAt: "", checks: {}, log: [], savedCfg: { kraken_margin_auto: null }, restoreFailed });
+  const never = mk(undefined); dropSnapshotIfClean(never);
+  assert.ok(never.savedCfg, "no restore has run yet → the snapshot must survive for the finally/guardian to restore from");
+  const owed = mk(["kraken_margin_auto"]); dropSnapshotIfClean(owed);
+  assert.ok(owed.savedCfg, "a restore is still owed → keep the snapshot");
+  const clean = mk([]); dropSnapshotIfClean(clean);
+  assert.equal(clean.savedCfg, undefined, "restored cleanly → drop it so a finished run never rewrites live config");
+});
