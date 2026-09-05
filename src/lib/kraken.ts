@@ -446,6 +446,17 @@ export async function krakenOpenOrders(): Promise<OpenOrder[]> {
   }));
 }
 
+/** ClosedOrders filtered by userref and start time (epoch secs) — what the executor's
+ *  post-send recovery relies on. Returns each order's open time, executed volume and status. */
+export async function krakenClosedOrders(userref: number, startSec: number): Promise<{ txid: string; opentm: number; volExec: number; status: string; type: string; ordertype: string; pair: string }[]> {
+  const res = await krakenPrivate("ClosedOrders", { userref: String(userref), start: String(Math.floor(startSec)) });
+  const closed = (res.closed ?? {}) as Record<string, { opentm?: number; vol_exec?: string; status?: string; descr?: { type?: string; ordertype?: string; pair?: string } }>;
+  return Object.entries(closed).map(([txid, o]) => ({
+    txid, opentm: Number(o.opentm ?? 0), volExec: parseFloat(o.vol_exec ?? "0") || 0, status: o.status ?? "unknown",
+    type: o.descr?.type ?? "", ordertype: o.descr?.ordertype ?? "", pair: o.descr?.pair ?? "",
+  }));
+}
+
 export async function krakenCancelOrder(txid: string): Promise<void> {
   await krakenPrivate("CancelOrder", { txid });
 }

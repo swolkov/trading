@@ -13,6 +13,7 @@ import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, releaseCloseLock } from "@/lib/margin-executor";
 import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
+import { advanceRoundTrip } from "@/lib/margin-round-trip";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -371,9 +372,11 @@ export async function GET(request: Request) {
       // And it must protect a position that is plausibly OURS: a bot stop resting against a
       // side that holds only Spencer's manual position is not protection — it is a reduce-only
       // order that REDUCES HIS position when it fires. "Plausibly ours" = in the ledger, or
-      // younger than the entry grace (its ledger write may be in flight), or opened before the
-      // stop (an attached close[] is never older than its position; a lost ledger entry must
-      // not strip a bot position's only cover). An unreadable/corrupt ledger keeps everything.
+      // opened at/before the stop (an attached close[] is never older than its position, and a
+      // stop the guardian re-placed is minutes younger — so a fresh entry whose ledger write is
+      // still in flight, and a bot position whose ledger entry was lost, both keep their cover).
+      // A manual position opened AFTER the stop existed fails both tests and the stop is an
+      // orphan. An unreadable/corrupt ledger keeps everything.
       const own3b = await botOwnership().catch(() => null);
       const stopProtectsLive = (o: { pair: string; side: string; opentm: number }) => positions.some((p) => {
         if (pairBase(p.pair) !== pairBase(o.pair)) return false;
@@ -382,8 +385,7 @@ export async function GET(request: Request) {
         if (own3b.isOurs(p as unknown as { ordertxid: string; id: string })) return true;
         const openedMs = new Date(p.openedAt).getTime();
         if (!Number.isFinite(openedMs)) return true;                       // unknown → keep
-        if (Date.now() - openedMs < 6 * 60_000) return true;               // entry grace
-        return openedMs / 1000 <= o.opentm + 60;                            // position predates the stop
+        return openedMs / 1000 <= o.opentm + 10;                            // position predates the stop
       });
       const staleMin = Math.max(5, await cfgNum("kraken_margin_stale_entry_min", 30));
       const nowSec = Date.now() / 1000;
@@ -900,6 +902,14 @@ export async function GET(request: Request) {
       errors.push(`event guardrail: ${e}`);
     }
   }
+
+  // The $20 round trip (if one is running): checks Kraken's behaviour against the code's
+  // assumptions and closes it when the window has passed. Runs AFTER protection so the
+  // position is covered first; its own errors are logged, never fatal here.
+  try {
+    const rt = await advanceRoundTrip();
+    if (rt && (rt.stage === "open" || rt.stage === "closing")) sent.push(`round-trip-${rt.stage}`);
+  } catch (e) { errors.push(`round trip: ${String(e).slice(0, 120)}`); }
 
   if (!stateUnreliable) await saveState(state);
 
