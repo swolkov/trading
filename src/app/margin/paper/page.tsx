@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 
@@ -55,6 +56,12 @@ export default function PaperTradesPage() {
   const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
+
+  // What we trade is the default view. Retired sleeves stay in the record (their numbers
+  // are evidence, and a re-litigated kill needs them) but hide behind a toggle.
+  const [showRetired, setShowRetired] = useState(false);
+  const retired = (score?.strategies ?? []).filter((s) => s.verdict.startsWith("retired"));
+  const shownStrategies = (score?.strategies ?? []).filter((s) => showRetired || !s.verdict.startsWith("retired"));
 
   const hasAny = !!score && (
     (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0 || (score.shadow.nonUsOpen ?? 0) > 0)) ||
@@ -190,7 +197,12 @@ export default function PaperTradesPage() {
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
             <p className="text-xs font-bold">🧭 Strategy Scoreboard — what&apos;s actually working</p>
-            <p className="text-[10px] text-muted-foreground/45">paper · expectancy = avg $/trade after fees</p>
+            <p className="text-[10px] text-muted-foreground/45">
+              paper · expectancy = avg $/trade after fees
+              {retired.length > 0 && (
+                <> · <button onClick={() => setShowRetired(!showRetired)} className="text-purple-400 hover:underline">{showRetired ? "hide" : "show"} {retired.length} retired sleeve{retired.length === 1 ? "" : "s"}</button></>
+              )}
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-[11px]">
@@ -209,7 +221,7 @@ export default function PaperTradesPage() {
                 </tr>
               </thead>
               <tbody>
-                {score.strategies.map((s) => (
+                {shownStrategies.map((s) => (
                   <tr key={s.key} className="border-b border-border/30 last:border-0">
                     <td className="text-left px-4 py-2 font-semibold text-foreground/80">{s.label}</td>
                     <td className="text-right px-2 py-2 tabular-nums">

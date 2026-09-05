@@ -2,6 +2,7 @@
 
 import useSWR from "swr";
 import { useState } from "react";
+import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 
 interface Fill {
   symbol: string; action: string; price: number; vol: number; notional: number; fee: number; leveraged: boolean; time: string;
@@ -183,12 +184,22 @@ function FillsTable({ data }: { data: Data | undefined }) {
   );
 }
 
-function PaperLogTable({ log, loading }: { log: PaperTradeRow[]; loading: boolean }) {
+function PaperLogTable({ log: fullLog, loading }: { log: PaperTradeRow[]; loading: boolean }) {
+  // Default to what the desk actually trades: current cohort, US-tradeable coins, live
+  // sleeves. Set-aside rows (old measurement, non-US coins, retired sleeves) still exist
+  // and still resolve, but only show on request.
+  const [showSetAside, setShowSetAside] = useState(false);
+  const isSetAside = (t: PaperTradeRow) => t.simVersion === "v1" || t.usTradeable === false || RETIRED_AUTO_SOURCES.has(t.source);
+  const setAsideCount = fullLog.filter(isSetAside).length;
+  const log = showSetAside ? fullLog : fullLog.filter((t) => !isSetAside(t));
   if (loading) return <div className="text-sm text-muted-foreground/60 py-6">Loading paper trades…</div>;
   return (
     <div className="space-y-3">
       <p className="text-[10px] text-purple-300/60">
         🧪 Paper trades — hypothetical, <span className="text-foreground/60">no real money moved</span>. <span className="text-foreground/60">Risk-based sizing</span>: each trade is sized so its stop loses a fixed <span className="text-foreground/60">max loss</span> (~3% of the reference account) — a tighter stop means a bigger position for the same risk — then the stop trails up as it goes right. P&amp;L is net of estimated fees (trade fee at your real 0.17%/side; rollover BTC-verified, alts conservative). Open trades show a live &ldquo;if closed now&rdquo; P&amp;L.
+        {setAsideCount > 0 && (
+          <> <button onClick={() => setShowSetAside(!showSetAside)} className="text-purple-400 hover:underline">{showSetAside ? "Hide" : "Show"} {setAsideCount} set-aside</button> (non-US coins, retired sleeves, old measurement — never counted).</>
+        )}
       </p>
       {log.length === 0 ? <p className="text-sm text-muted-foreground/55 py-6">No paper trades yet — they open automatically as breakouts fire.</p> : (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
