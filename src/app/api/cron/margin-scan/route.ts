@@ -161,11 +161,12 @@ export async function GET(request: Request) {
           // head-to-head comparison the scoreboard exists to make.
           const chase = 0.001;
           const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
-          await prisma.$executeRawUnsafe(
+          const inserted = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version)
-             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9)`,
+             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9) RETURNING id`,
             s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
           );
+          const rowId = inserted[0]?.id ?? null;
           opened.push({ symbol: s.symbol, side, tier: conv.tier });
           // LIVE — only for a sleeve explicitly ARMED in kraken_margin_live_sources (the
           // go-live plan's "arm ONE strategy"). The executor applies every guard (arm
@@ -175,6 +176,14 @@ export async function GET(request: Request) {
             try {
               const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, deadlineMs: routeDeadlineMs });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
+              // Link the paper row to its live attempt: this is what the daily synthesis uses
+              // to compare REAL fills against the paper model, trade by trade.
+              if (rowId != null) {
+                await prisma.$executeRawUnsafe(
+                  `UPDATE tradingview_alerts SET executed=$1, validated=$2, live_txid=$3, live_exec_note=$4 WHERE id=$5`,
+                  r.executed, r.validated, r.txid ?? null, r.note.slice(0, 300), rowId,
+                ).catch(() => {});
+              }
             } catch (e) { live.push(`${s.symbol} ${plan.source}: executor error ${String(e).slice(0, 100)}`); }
           }
         }

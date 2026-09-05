@@ -218,8 +218,8 @@ export async function POST(request: Request) {
     await ensureShadowColumns();
     if (reservedId != null) {
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET mark_price=$1, executed=$2, validated=$3, exec_note=$4 WHERE id=$5`,
-        markPrice, result.executed, result.validated, result.note, reservedId,
+        `UPDATE tradingview_alerts SET mark_price=$1, executed=$2, validated=$3, exec_note=$4, live_txid=$5, live_exec_note=$6 WHERE id=$7`,
+        markPrice, result.executed, result.validated, result.note, result.txid ?? null, result.note.slice(0, 300), reservedId,
       );
     } else {
       await prisma.$executeRawUnsafe(

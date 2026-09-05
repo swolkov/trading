@@ -82,6 +82,8 @@ export default function PaperTradesPage() {
 
       <LiveMirrorCard />
 
+      <RoundTripCard />
+
       <div className="rounded-xl border border-border bg-card p-4 space-y-2">
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           Auto paper is the live-candidate sleeve only: <span className="text-foreground/80">high-conviction 5m/15m longs, not stretched</span>.
@@ -320,6 +322,85 @@ interface ExecCfg {
   tiers: { tier: string; riskPct: number; riskUsd: number | null; notionalUsd: number | null }[];
   aligned: { stop: boolean; risk: boolean; hold: boolean; sizing: boolean; exit: boolean }; allAligned: boolean;
 }
+interface RtView {
+  state: { stage: string; symbol: string; startedAt: string; updatedAt: string; entryTxid?: string; closeTxid?: string; fillVol?: number; log: string[]; error?: string; finishedAt?: string; fees?: { entry: number; exit: number; net: number | null } } | null;
+  checklist: { key: string; label: string; result: { ok: boolean | null; note: string; at: string } | null }[];
+  verdict: { complete: boolean; allOk: boolean; failed: string[] } | null;
+}
+// The $20 round trip: one real trade through the real executor, to prove the Kraken
+// behaviours the code assumes. Two clicks to start (arm the button, then send), because
+// the second click moves real money. The guardian closes it within ~7 minutes.
+function RoundTripCard() {
+  const { data, mutate } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 20_000 });
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const post = async (action: string) => {
+    setBusy(action); setMsg(null);
+    try {
+      const r = await fetch("/api/margin/round-trip", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, symbol: "BTC/USD" }) });
+      const j = await r.json();
+      setMsg(j.note ?? (r.ok ? "ok" : `error ${r.status}`));
+      await mutate();
+    } catch (e) { setMsg(String(e)); }
+    finally { setBusy(null); setArmed(false); }
+  };
+  const st = data?.state ?? null;
+  const running = st != null && ["entering", "open", "closing"].includes(st.stage);
+  const stageCls = st?.stage === "done" ? (data?.verdict?.allOk ? "text-emerald-400" : "text-red-400") : running ? "text-amber-400" : st?.stage === "failed" ? "text-red-400" : "text-muted-foreground/60";
+  const mark = (ok: boolean | null | undefined) => ok === true ? <span className="text-emerald-400">✓</span> : ok === false ? <span className="text-red-400 font-bold">✗</span> : <span className="text-muted-foreground/40">·</span>;
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-xs font-bold">The $20 round trip — one real trade to prove Kraken behaves the way the code assumes</p>
+        <p className={`text-[10px] font-bold ${stageCls}`}>
+          {!st ? "never run" : `${st.stage.toUpperCase()} · ${st.symbol}${st.stage === "done" && data?.verdict ? (data.verdict.allOk ? " · ALL CHECKS PASSED" : ` · FAILED: ${data.verdict.failed.join(", ") || "incomplete"}`) : ""}`}
+        </p>
+      </div>
+      <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+        Buys about $20 of BTC on 2× margin through the real executor path (every guard on), waits for the attached stop to appear, probes the
+        API behaviours the guardian relies on, then closes through the real close path. Runs only while the executor is DISARMED and the pair is
+        empty. Cost: two market fees on $20 (a few cents) plus spread. This is plumbing validation, not a strategy test — it does not move the paper gate.
+      </p>
+      <div className="flex items-center gap-2 flex-wrap">
+        {!running && !armed && <button onClick={() => setArmed(true)} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted">Arm the $20 round trip…</button>}
+        {!running && armed && (
+          <>
+            <button disabled={busy != null} onClick={() => post("start")} className="rounded-md border border-red-500/60 bg-red-500/10 px-2 py-1 text-[11px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-50">{busy === "start" ? "sending…" : "SEND the real $20 buy on BTC/USD"}</button>
+            <button onClick={() => setArmed(false)} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted">cancel</button>
+          </>
+        )}
+        {running && <button disabled={busy != null} onClick={() => post("advance")} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-50">{busy === "advance" ? "checking…" : "run the checks now"}</button>}
+        {running && <button disabled={busy != null} onClick={() => post("abort")} className="rounded-md border border-red-500/60 px-2 py-1 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50">{busy === "abort" ? "closing…" : "abort (close now)"}</button>}
+        {msg && <span className="text-[11px] text-muted-foreground/70">{msg}</span>}
+        {st?.error && <span className="text-[11px] text-red-400">{st.error}</span>}
+      </div>
+      {data?.checklist && st && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <tbody>
+              {data.checklist.map((c) => (
+                <tr key={c.key} className="border-b border-border/30">
+                  <td className="py-1 pr-2 w-4">{mark(c.result?.ok)}</td>
+                  <td className="py-1 pr-3 text-foreground/80">{c.label}</td>
+                  <td className="py-1 text-muted-foreground/60">{c.result?.note ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {st && st.log.length > 0 && (
+        <details className="text-[10px] text-muted-foreground/60">
+          <summary className="cursor-pointer">log ({st.log.length})</summary>
+          <pre className="whitespace-pre-wrap mt-1">{st.log.slice(-25).join("\n")}</pre>
+        </details>
+      )}
+      {st?.fees && <p className="text-[11px] text-muted-foreground/70">Fees: entry ${st.fees.entry.toFixed(4)} · exit ${st.fees.exit.toFixed(4)} · net after fees {st.fees.net != null ? `$${st.fees.net.toFixed(2)}` : "?"}.</p>}
+    </div>
+  );
+}
+
 function LiveMirrorCard() {
   const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
   const ok = (b: boolean) => <span className={b ? "text-emerald-400" : "text-red-400 font-bold"}>{b ? "✓" : "✗"}</span>;

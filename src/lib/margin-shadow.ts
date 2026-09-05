@@ -67,6 +67,8 @@ export async function ensureShadowColumns(): Promise<void> {
                                            // bars are never scored twice, so a ratcheted stop
                                            // can't be retro-applied to wicks it didn't exist for
     "sim_version text",                    // measurement-model cohort (see SIM_VERSION)
+    "live_txid text",                      // the Kraken ORDER txid when this row was also traded LIVE
+    "live_exec_note text",                 // the executor's note for that attempt (sent / refused why)
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
   }
