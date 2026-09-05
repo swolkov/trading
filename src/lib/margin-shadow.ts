@@ -148,6 +148,10 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // Selective (high-conviction only): a better setup earns a bit more room (3% stop) + the
   // managed exit banks the green (breakeven at +1R, then trails). Fewer of these = tiny fee drag.
   if (source === "selective") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  // TradingView strategy sleeves ("tv:<name>") are scored in the SAME container as the live
+  // candidate (3% / 48h / managed exit) so their record is directly comparable and, if one
+  // is armed, live reproduces exactly what paper measured.
+  if (source && source.startsWith("tv:")) return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
   // SELECTIVE-SWING — RETIRED Sep 4 2026. Direct test of the Sep 3 conviction finding
   // (high setups average a +9.4% peak). Same high-conviction entries as `selective`,
   // swing room (5% stop / 4d). Result: 22 resolved, t=−3.8, −$4.1k — the peak was real
@@ -229,6 +233,13 @@ async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }
 // is measured fairly rather than under-counted.
 export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
+  // A webhook reserves its alert row before executing; if that request died (or was rate
+  // limited) the row stays 'pending' with no price. It can never resolve — void it so it
+  // never lingers as a phantom open trade.
+  await prisma.$executeRawUnsafe(
+    `UPDATE tradingview_alerts SET shadow_status='void', shadow_reason='pending alert never priced'
+     WHERE exec_note IN ('pending','rate limited') AND mark_price IS NULL AND COALESCE(shadow_status,'open')='open' AND time < now() - interval '10 minutes'`,
+  ).catch(() => {});
   const { refEquity, maxRiskPct } = await sizingParams();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source
@@ -427,8 +438,8 @@ export async function shadowScore(): Promise<ShadowScore> {
        count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
        count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
-       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
-       COALESCE(sum(shadow_unrealized) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open'),0)::float AS openfloat
+       count(*) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open')::bigint AS open,
+       COALESCE(sum(shadow_unrealized) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open'),0)::float AS openfloat
      FROM tradingview_alerts WHERE ${RECORD_SQL}`,
   );
   const [wl] = await prisma.$queryRawUnsafe<{ avgwin: number | null; avgloss: number | null }[]>(
@@ -567,7 +578,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss,
-       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
+       count(*) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open')::bigint AS open,
        COALESCE(sum(shadow_fees) FILTER (WHERE shadow_status='resolved'),0)::float AS fees,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
        stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl,
@@ -607,7 +618,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         : null;
       return {
         key: r.source,
-        label: STRATEGY_LABELS[r.source] ?? r.source,
+        label: STRATEGY_LABELS[r.source] ?? (r.source.startsWith("tv:") ? `TradingView — ${r.source.slice(3)} (3% / 48h)` : r.source),
         resolved,
         wins: Number(r.wins),
         hitRate: resolved > 0 ? Number(r.wins) / resolved : null,

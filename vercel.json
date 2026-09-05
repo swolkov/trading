@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/cron/margin-scan",
-      "schedule": "*/5 * * * *"
+      "schedule": "2-57/5 * * * *"
     },
     {
       "path": "/api/cron/stock-scan",

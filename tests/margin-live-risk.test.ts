@@ -100,3 +100,127 @@ test("operator ceiling cannot be exceeded by the ladder; ladder cannot be exceed
   // cfg < 2 means entries disabled — returned as-is so the executor can refuse.
   assert.equal(effectiveMaxLeverage(1, 50_000), 1);
 });
+
+// ---- Sep 5 2026: live mirrors paper's container ----
+import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, liveNotional, managedStopTarget, stopNeedsRatchet } from "../src/lib/margin-live-risk";
+
+test("live container constants equal paper's selective sleeve (3% stop, 48h)", () => {
+  assert.equal(LIVE_STOP_DEFAULT_PCT, 3);
+  assert.equal(LIVE_MAX_HOLD_H, 48);
+});
+
+test("liveNotional is paper's positionNotional on real equity: risk ÷ stop, capped at leverage × equity", () => {
+  // $5,300 equity, 3% risk, 3% stop → $5,300 (1×); high conviction 6% → $10,600 = 2× cap.
+  assert.equal(Math.round(liveNotional(5300, 0.03, 0.03, 2)), 5300);
+  assert.equal(Math.round(liveNotional(5300, 0.06, 0.03, 2)), 10_600);
+  // Tighter stop buys a bigger position for the same dollar risk, until the leverage cap binds.
+  assert.equal(Math.round(liveNotional(5300, 0.03, 0.015, 2)), 10_600);
+  assert.equal(Math.round(liveNotional(5300, 0.03, 0.015, 3)), 10_600);   // 3× cap = $15,900; risk cap $10,600 binds
+  // Growth: double the equity, double the dollars at the same 3%.
+  assert.equal(Math.round(liveNotional(10_600, 0.03, 0.03, 3)), 10_600);
+  // The optional per-trade ceiling still works when set; 0 means none.
+  assert.equal(liveNotional(5300, 0.03, 0.03, 2, 100), 200);
+  assert.equal(liveNotional(0, 0.03, 0.03, 2), 0);
+  assert.equal(liveNotional(5300, 0.03, 0, 2), 0);
+});
+
+test("managedStopTarget reproduces paper's exit: breakeven at +1R, then trail 1R, never looser", () => {
+  const entry = 100, oneR = 3, initial = 97;
+  assert.equal(managedStopTarget("long", entry, 102.9, initial, oneR), 97, "below +1R: unchanged");
+  assert.equal(managedStopTarget("long", entry, 103, initial, oneR), 100, "at +1R: breakeven");
+  assert.equal(managedStopTarget("long", entry, 106, initial, oneR), 103, "at +2R: trails 1R behind the peak");
+  assert.equal(managedStopTarget("long", entry, 106, 104, oneR), 104, "never loosens an already-higher stop");
+  // Short mirrored.
+  assert.equal(managedStopTarget("short", entry, 97.5, 103, oneR), 103);
+  assert.equal(managedStopTarget("short", entry, 97, 103, oneR), 100);
+  assert.equal(managedStopTarget("short", entry, 94, 103, oneR), 97);
+  // Garbage fails safe (returns the current stop).
+  assert.equal(managedStopTarget("long", 0, 106, initial, oneR), initial);
+  assert.equal(managedStopTarget("long", entry, NaN, initial, oneR), initial);
+});
+
+test("stopNeedsRatchet only moves a resting order for a real improvement (≥0.05% of price)", () => {
+  assert.equal(stopNeedsRatchet("long", 97, 100, 105), true);
+  assert.equal(stopNeedsRatchet("long", 100, 100.01, 105), false);   // 0.01% — not worth an order
+  assert.equal(stopNeedsRatchet("long", 100, 99, 105), false);       // looser is never a ratchet
+  assert.equal(stopNeedsRatchet("short", 103, 100, 95), true);
+  assert.equal(stopNeedsRatchet("short", 100, 101, 95), false);
+  assert.equal(stopNeedsRatchet("long", 97, 100, 0), false);
+});
+
+import { clampLiveStopFrac, fifoWouldHitManual, groupPositionsByOrder, roundedStopIsSafe } from "../src/lib/margin-live-risk";
+
+test("clampLiveStopFrac: the 3% default survives every ladder rung; wide configs are held inside liquidation", () => {
+  assert.equal(clampLiveStopFrac(3, 2), 0.03);
+  assert.equal(clampLiveStopFrac(3, 3), 0.03);
+  assert.equal(clampLiveStopFrac(3, 5), 0.03);
+  assert.ok(Math.abs(clampLiveStopFrac(20, 2) - 0.18) < 1e-12);    // 0.6 × 0.6/2
+  assert.ok(Math.abs(clampLiveStopFrac(20, 5) - 0.072) < 1e-12);   // 0.6 × 0.6/5
+  assert.equal(clampLiveStopFrac(0.01, 2), 0.001);                 // floor
+  assert.equal(clampLiveStopFrac(NaN, 2), 0.03);                   // unreadable → default
+});
+
+test("roundedStopIsSafe checks the ROUNDED trigger against price (Codex's 100.01 / 103 case)", () => {
+  // target 102.9997 rounds to 103.00 = market → unsafe
+  assert.equal(roundedStopIsSafe("long", 102.9997, 103, 2).ok, false);
+  assert.deepEqual(roundedStopIsSafe("long", 102.9, 103, 2), { ok: true, priceStr: "102.90" });
+  assert.equal(roundedStopIsSafe("short", 97.0003, 97, 2).ok, false);
+  assert.equal(roundedStopIsSafe("short", 97.1, 97, 2).ok, true);
+  assert.equal(roundedStopIsSafe("long", 100, 0, 2).ok, false);
+  assert.equal(roundedStopIsSafe("long", 100, 100.04, 2).ok, false);  // 0.04% — inside the threshold
+});
+
+test("groupPositionsByOrder merges tranches of one order: summed volume, weighted entry, oldest age", () => {
+  const g = groupPositionsByOrder([
+    { id: "T1", ordertxid: "O1", pair: "XBTUSD:BTNL", side: "long", vol: 1, entryPrice: 100, openedAt: "2026-09-05T10:00:00Z", leverage: 2 },
+    { id: "T2", ordertxid: "O1", pair: "XBTUSD:BTNL", side: "long", vol: 3, entryPrice: 104, openedAt: "2026-09-05T10:18:00Z", leverage: 2 },
+    { id: "T3", ordertxid: "O2", pair: "XETHZUSD", side: "short", vol: 5, entryPrice: 50, openedAt: "2026-09-05T11:00:00Z", leverage: 3 },
+  ]);
+  assert.equal(g.length, 2);
+  const o1 = g.find((x) => x.ordertxid === "O1")!;
+  assert.equal(o1.vol, 4);
+  assert.equal(o1.entryPrice, 103);
+  assert.equal(o1.openedAt, "2026-09-05T10:00:00Z");
+  assert.equal(o1.newestOpenedAt, "2026-09-05T10:18:00Z");
+  assert.deepEqual(o1.ids, ["T1", "T2"]);
+});
+
+test("fifoWouldHitManual: only an OLDER manual position on the same pair and side blocks a bot close", () => {
+  const same = (a: string, b: string) => a.replace(/:.*$/, "") === b.replace(/:.*$/, "");
+  const bot = { pair: "XBTUSD:BTNL", side: "long", openedAt: "2026-09-05T12:00:00Z", ours: true };
+  const olderManual = { pair: "XBTUSD", side: "long", openedAt: "2026-09-05T09:00:00Z", ours: false };
+  const newerManual = { pair: "XBTUSD", side: "long", openedAt: "2026-09-05T13:00:00Z", ours: false };
+  const manualShort = { pair: "XBTUSD", side: "short", openedAt: "2026-09-05T09:00:00Z", ours: false };
+  const otherPair = { pair: "XETHZUSD", side: "long", openedAt: "2026-09-05T09:00:00Z", ours: false };
+  const isOurs = (p: { pair: string; side: string; openedAt: string; ours?: boolean }) => !!p.ours;
+  assert.equal(fifoWouldHitManual(bot, [bot, olderManual], isOurs, same), true);
+  assert.equal(fifoWouldHitManual(bot, [bot, newerManual], isOurs, same), false);
+  assert.equal(fifoWouldHitManual(bot, [bot, manualShort], isOurs, same), false);
+  assert.equal(fifoWouldHitManual(bot, [bot, otherPair], isOurs, same), false);
+  assert.equal(fifoWouldHitManual(bot, [bot], isOurs, same), false);
+  // Fails closed: equal or unparseable timestamps block.
+  const sameTime = { ...olderManual, openedAt: bot.openedAt };
+  assert.equal(fifoWouldHitManual(bot, [bot, sameTime], isOurs, same), true);
+  assert.equal(fifoWouldHitManual({ ...bot, openedAt: "" }, [bot, newerManual], isOurs, same), true);
+});
+
+import { isSourceArmed, tvSource } from "../src/lib/margin-live-risk";
+
+test("source arming: nothing is armed by default; only named sources trade live", () => {
+  assert.equal(isSourceArmed("", "manual"), false);
+  assert.equal(isSourceArmed(null, "selective"), false);
+  assert.equal(isSourceArmed("selective", "selective"), true);
+  assert.equal(isSourceArmed("selective, tv:esbueno", "tv:esbueno"), true);
+  assert.equal(isSourceArmed("selective", "manual"), false);
+  assert.equal(isSourceArmed("SELECTIVE", "selective"), true);
+  assert.equal(isSourceArmed("selective", undefined), false);   // undefined = manual
+});
+
+test("tvSource: a TradingView strategy name becomes a tv: sleeve, garbage becomes nothing", () => {
+  assert.equal(tvSource("Esbueno_Breakout"), "tv:esbueno_breakout");
+  assert.equal(tvSource(""), null);
+  assert.equal(tvSource(undefined), null);
+  assert.equal(tvSource("bad name"), null);
+  assert.equal(tvSource("x".repeat(40)), null);
+  assert.equal(tvSource("-lead"), null);
+});
