@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { MarginChart, INTERVAL_LABELS, useTimeframeStats, type PriceLevel } from "@/components/margin/margin-chart";
-import { pairMatchesSymbol } from "@/lib/kraken-pairs";
+import { pairMatchesSymbol, SCAN_UNIVERSE } from "@/lib/kraken-pairs";
 
 // ============ MARGIN COCKPIT ============
 // Home base for discretionary margin trading: multi-timeframe charts on any
@@ -14,7 +14,7 @@ import { pairMatchesSymbol } from "@/lib/kraken-pairs";
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
-interface UniverseRow { pair: string; wsname: string; maxLeverage: number; spreadPct: number | null; tradeable: boolean }
+interface UniverseRow { pair: string; wsname: string; maxLeverage: number; spreadPct: number | null; tradeable: boolean; usMargin?: boolean }
 interface Position {
   id: string; pair: string; side: "long" | "short"; vol: number; entryPrice: number;
   margin: number; net: number | null; leverage: number; rolloverAt: string; fee: number;
@@ -222,7 +222,7 @@ export default function MarginCockpitPage() {
           <p className="text-[10px] text-muted-foreground/45">awareness only · scans every 5 min · not trade advice</p>
         </div>
         {(sig?.signals?.length ?? 0) === 0 ? (
-          <p className="px-4 py-4 text-sm text-muted-foreground/40">No notable signals in the last 24h. The scanner is watching {`{`}BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK, LTC, DOT, SUI, AAVE, HYPE{`}`} on 5m/15m/1h/4h/daily.</p>
+          <p className="px-4 py-4 text-sm text-muted-foreground/40">No notable signals in the last 24h. The scanner is watching the {SCAN_UNIVERSE.length} US-margin coins {`{`}{SCAN_UNIVERSE.join(", ")}{`}`} on 5m/15m/1h/4h/daily.</p>
         ) : (
           <div className="max-h-56 overflow-y-auto divide-y divide-border/40">
             {sig!.signals.map((s, i) => {
@@ -254,7 +254,7 @@ export default function MarginCockpitPage() {
       <div className="rounded-xl border border-border bg-card p-3">
         <div className="flex items-center justify-between mb-2">
           <p className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-wider">
-            Margin pairs — max US-retail leverage (BTC 20x, majors 10x)
+            Margin pairs — US-retail only by default (BTC 20x, majors 10x); non-US pairs cannot be traded from this account
           </p>
           <button onClick={() => setShowAllPairs(!showAllPairs)} className="text-[10px] text-purple-400 hover:underline">
             {showAllPairs ? "show tradeable only" : `show all ${universe?.rows?.length ?? "…"}`}
@@ -276,7 +276,9 @@ export default function MarginCockpitPage() {
             >
               {r.wsname.replace("/USD", "").replace("XBT", "BTC")}
               <span className="text-[8px] text-muted-foreground/50 ml-1">{r.maxLeverage}x</span>
-              {!r.tradeable && <span className="text-[8px] text-red-400/70 ml-1">wide</span>}
+              {r.usMargin === false
+                ? <span className="text-[8px] text-amber-400/70 ml-1" title="Not on Kraken's US retail margin list — the executor refuses it">non-US</span>
+                : !r.tradeable && <span className="text-[8px] text-red-400/70 ml-1">wide</span>}
             </button>
           ))}
         </div>

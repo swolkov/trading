@@ -59,7 +59,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
-import { pairMatchesSymbol, pairBase } from "@/lib/kraken-pairs";
+import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage } from "@/lib/kraken-pairs";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
 import {
@@ -411,6 +411,16 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   const auto = (await cfg("kraken_margin_auto")) === "true";
   if (!auto) return { executed: false, validated: false, note: "tracked only (kraken_margin_auto off)" };
 
+  // Layer 1b: the pair must be one a US retail account can actually margin-trade — the
+  // same table that bounds the scanner universe and the paper record (kraken-pairs.ts).
+  // Kraken would reject the order anyway, but only after we hold the exec lock, burn the
+  // cooldown, and spend a dozen API calls; and an entry alert on an untradeable pair means
+  // the alert SOURCE is misconfigured, which deserves a clear note rather than a Kraken
+  // error string. Entries only — the close path above must never be blocked.
+  if (!isUsMarginSymbol(alert.symbol)) {
+    return { executed: false, validated: false, note: `entry refused: ${alert.symbol} is not in the US-retail margin universe (US_MARGIN_MAX_LEVERAGE)` };
+  }
+
   // Layer 2: validate-only unless explicitly disabled.
   const validate = (await cfg("kraken_margin_validate_only")) !== "false";
 
@@ -477,7 +487,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Equity ladder: $5k book stays 2× even if the operator ceiling is 5. Risk % is
     // unchanged — larger equity just means larger dollar bets at the same 3%/6%.
     const maxLev = effectiveMaxLeverage(cfgMaxLev, equity);
-    const leverage = Math.min(maxLev, Math.max(2, alert.leverage ?? 2));
+    // Also capped at the pair's own US-retail maximum (ALGO/XLM are 2×, PENGU/NEAR/RENDER
+    // 3×): once the ladder allows 3×+ an order above the pair cap would be rejected by
+    // Kraken — fail-safe, but a silent "this pair can never enter". Cap it here instead.
+    const leverage = Math.min(maxLev, usRetailMaxLeverage(alert.symbol, maxLev), Math.max(2, alert.leverage ?? 2));
     // The cap trips on EITHER measure, never on their sum. health.unrealized is TradeBalance
     // 'n' — the whole account, including positions Spencer opened by hand. Netting them
     // meant one profitable manual long could mask a bot that had already realised past the

@@ -16,6 +16,7 @@ interface PaperTradeRow {
   leverage: number | null; conviction: string | null; entry: number | null;
   exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
   simVersion?: string;
+  usTradeable?: boolean;
 }
 interface ScoreData { log?: PaperTradeRow[]; recentTrips?: RoundTrip[] }
 
@@ -220,6 +221,9 @@ function PaperLogTable({ log, loading }: { log: PaperTradeRow[]; loading: boolea
                         {t.source}
                         {t.simVersion === "v1" && (
                           <span className="ml-1 text-[9px] text-muted-foreground/40" title="Scored under the pre-Sep-2 measurement model — excluded from the scoreboard statistics">v1</span>
+                        )}
+                        {t.usTradeable === false && (
+                          <span className="ml-1 text-[9px] text-amber-400/60" title="Not a pair a US retail Kraken account can margin-trade — the live book could never take it, so it is excluded from the scoreboard statistics">non-US</span>
                         )}
                       </td>
                       <td className="px-2 py-1.5 font-semibold">{t.symbol.replace("/USD", "")}</td>

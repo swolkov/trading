@@ -6,6 +6,11 @@
 // produced a real bug (XXBTZUSD → "BTZ" ≠ "BTC"), so every comparison goes through
 // this one function.
 export function pairBase(pair: string): string {
+  // ⚠️ Two known traps, both currently fail-SAFE (neither coin is US-margin-tradeable, so
+  // both classify as non-US): "XTZUSD" → "XT" (the ZUSD strip eats Tezos's trailing Z) and
+  // "XAUTUSD" → "AUT" (the X-prefix rule fires on a 4+ letter code). If Kraken ever adds
+  // XTZ or XAUT to US margin, fix THIS function before adding them to the table — the
+  // SQL/JS agreement test in tests/us-margin-universe.test.ts will fail loudly until then.
   // Kraken's US margin product suffixes a clearing-venue tag: "XBTUSD:BTNL"
   // (Bitnomial). Spencer's real margin fills ALL carry it — strip it first.
   let base = pair.toUpperCase().replace(/:[A-Z0-9]+$/, "").replace(/ZUSD$/, "").replace(/USD$/, "");
@@ -25,15 +30,61 @@ export function publicPairFor(pair: string): string {
   return `${base}USD`;
 }
 
-// ⚠️ Kraken's public AssetPairs endpoint reports the INTERNATIONAL leverage tiers, which
-// UNDERSTATE the US-retail product (Kraken Derivatives US). BTC US retail is 20x, but
-// AssetPairs says 10x. These are the confirmed US-retail maxes; anything not listed
-// falls back to the AssetPairs value (correct for the 10x-tier majors).
-const US_RETAIL_MAX_LEVERAGE: Record<string, number> = {
+// ⭐ THE US-RETAIL MARGIN UNIVERSE — the ONLY pairs Spencer's account can margin-trade.
+// Kraken's public AssetPairs endpoint describes the INTERNATIONAL product (132 USD pairs,
+// ECP-only for US clients), which is NOT what a US retail account gets. US retail margin
+// runs through Kraken Derivatives US (Bitnomial-cleared — his real fills carry the
+// ":BTNL" suffix) and covers this list only. Source: Kraken support, "Getting started
+// with US margin trading", last updated Aug 11 2026. Verified against his own fills
+// (SOLUSD:BTNL, XBTUSD:BTNL, ETHUSD:BTNL, HYPEUSD:BTNL, PEPEUSD).
+//
+// Why this matters: on Sep 5 2026 the paper desk was found to be scanning 37 coins of
+// which 19 were NOT on this list — 64% of resolved paper trades and ALL of the losses
+// were on coins the live book could never take. Paper must measure what live can do, so
+// the scanner universe, the scoreboard, and the executor all gate on this one table.
+// Re-verify against the support page before arming; Kraken adds pairs a few at a time.
+export const US_MARGIN_MAX_LEVERAGE: Record<string, number> = {
   BTC: 20,
+  ADA: 10, AVAX: 10, DOGE: 10, ETH: 10, LINK: 10, LTC: 10, SOL: 10, SUI: 10, USDC: 10, XRP: 10,
+  AAVE: 5, BCH: 5, CRV: 5, DOT: 5, HBAR: 5, HYPE: 5, PEPE: 5, PAXG: 5, SHIB: 5, TRX: 5, UNI: 5, ZEC: 5,
+  PENGU: 3, NEAR: 3, RENDER: 3,
+  ALGO: 2, XLM: 2,
 };
+
+// Base asset of an app symbol ("BTC/USD") OR a Kraken pair (any spelling) — one function so
+// "BTC/USD", "XBTUSD", "XXBTZUSD" and "XBTUSD:BTNL" all resolve to "BTC".
+export function symbolBase(symbolOrPair: string): string {
+  return pairBase(symbolOrPair.replace("/", ""));
+}
+
+// True when a US retail account can margin-trade this symbol/pair.
+export function isUsMarginSymbol(symbolOrPair: string): boolean {
+  return symbolBase(symbolOrPair) in US_MARGIN_MAX_LEVERAGE;
+}
+
+// The universe as app symbols ("BTC/USD" …), the spelling every paper trade is stored under.
+export const US_MARGIN_SYMBOLS: string[] = Object.keys(US_MARGIN_MAX_LEVERAGE).map((b) => `${b}/USD`);
+
+// What the scanner WATCHES: the US list minus the two that do not move (USDC stablecoin,
+// PAXG gold). Lives here (no imports) so client components can show the list truthfully.
+export const SCAN_UNIVERSE: string[] = Object.keys(US_MARGIN_MAX_LEVERAGE).filter((b) => b !== "USDC" && b !== "PAXG");
+
+// SQL predicate selecting paper trades on US-tradeable pairs. Built from the table above
+// (constants only — no user input reaches this string). Accepts every spelling a row could
+// plausibly be stored under — NAME/USD (the webhook and scanner form), NAMEUSD (raw Kraken
+// code), and Kraken's legacy XBT/XDG aliases — so a future insert path that stores a raw
+// pair code cannot be silently excluded by SQL while the JS badge calls it tradeable. Kept
+// in step with isUsMarginSymbol() by a unit test, so SQL and JS can never disagree.
+export const US_MARGIN_SYMBOLS_SQL: string = `upper(COALESCE(symbol,'')) IN (${[
+  ...US_MARGIN_SYMBOLS,
+  ...Object.keys(US_MARGIN_MAX_LEVERAGE).map((b) => `${b}USD`),
+  "XBT/USD", "XBTUSD", "XXBTZUSD", "XDG/USD", "XDGUSD", "XXDGZUSD",
+].map((s) => `'${s}'`).join(",")})`;
+
+// Max US-retail leverage for a pair; anything not in the table falls back to the caller's
+// AssetPairs value (which is only ever reached for pairs a US account cannot margin anyway).
 export function usRetailMaxLeverage(pair: string, fallback: number): number {
-  return US_RETAIL_MAX_LEVERAGE[pairBase(pair)] ?? fallback;
+  return US_MARGIN_MAX_LEVERAGE[symbolBase(pair)] ?? fallback;
 }
 
 // True when a Kraken pair (any spelling) refers to the same market as an app symbol

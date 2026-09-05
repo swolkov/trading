@@ -1,23 +1,25 @@
 import { krakenPublic } from "@/lib/kraken";
-import { usRetailMaxLeverage } from "@/lib/kraken-pairs";
+import { usRetailMaxLeverage, isUsMarginSymbol } from "@/lib/kraken-pairs";
 
-// The tradeable margin universe for the cockpit's pair picker: every USD pair with
-// margin enabled, its max US-RETAIL leverage, and the LIVE spread. Spread is the gate
-// that makes most of the 3x long-tail uninvestable. Cached 5 minutes (public data, no key).
+// The margin universe for the cockpit's pair picker: every USD pair with margin enabled
+// on Kraken (international list), its max US-RETAIL leverage, the LIVE spread, and
+// whether a US retail account can margin-trade it at all. Cached 5 minutes (public data).
 //
-// ⚠️ AssetPairs reports the INTERNATIONAL tiers, which understate US retail (Kraken
-// Derivatives US) — BTC is 20x there, not 10x. usRetailMaxLeverage() overrides the known
-// differences (BTC→20) and falls back to AssetPairs for the correctly-reported majors.
+// ⚠️ AssetPairs describes the INTERNATIONAL product (~132 pairs). A US retail account
+// gets the 28 pairs in kraken-pairs.ts US_MARGIN_MAX_LEVERAGE — `usMargin` says which, and
+// `tradeable` now requires BOTH a tight spread AND US eligibility, because the executor
+// refuses everything else.
 export const dynamic = "force-dynamic";
 
 interface UniverseRow {
   pair: string;         // Kraken pair code (XBTUSD style where applicable)
   wsname: string;       // display name e.g. XBT/USD
-  maxLeverage: number;  // US-retail max (BTC corrected to 20x; majors from AssetPairs)
+  maxLeverage: number;  // US-retail max from the table; AssetPairs only for non-US pairs
   spreadPct: number | null;
   bid: number | null;
   ask: number | null;
-  tradeable: boolean;   // spread < 0.30% — beyond that a 3-day hold starts underwater
+  usMargin: boolean;    // on Kraken's US retail margin list (the only pairs live can trade)
+  tradeable: boolean;   // usMargin AND spread < 0.30% — beyond that a 3-day hold starts underwater
 }
 
 let cache: { at: number; rows: UniverseRow[] } | null = null;
@@ -52,6 +54,7 @@ export async function GET() {
       const ask = t?.a?.[0] ? parseFloat(t.a[0]) : null;
       const bid = t?.b?.[0] ? parseFloat(t.b[0]) : null;
       const spreadPct = ask && bid && ask > 0 ? ((ask - bid) / ((ask + bid) / 2)) * 100 : null;
+      const usMargin = isUsMarginSymbol(p.key);
       return {
         pair: p.key,
         wsname: p.wsname,
@@ -59,9 +62,10 @@ export async function GET() {
         spreadPct,
         bid,
         ask,
-        tradeable: spreadPct != null && spreadPct < 0.3,
+        usMargin,
+        tradeable: usMargin && spreadPct != null && spreadPct < 0.3,
       };
-    }).sort((a, b) => (b.maxLeverage - a.maxLeverage) || ((a.spreadPct ?? 99) - (b.spreadPct ?? 99)));
+    }).sort((a, b) => (Number(b.usMargin) - Number(a.usMargin)) || (b.maxLeverage - a.maxLeverage) || ((a.spreadPct ?? 99) - (b.spreadPct ?? 99)));
 
     cache = { at: Date.now(), rows };
     return Response.json({ rows, cachedAt: new Date().toISOString() });

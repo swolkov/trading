@@ -1,6 +1,9 @@
 // Read-only autopsy of the ONLY paying sleeve. Do not write.
 import { PrismaClient } from "../src/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+// Same universe predicate the page uses — an autopsy of trades live could never take
+// would steer the policy toward the wrong population (that is how the 37-coin era went).
+import { US_MARGIN_SYMBOLS_SQL } from "../src/lib/kraken-pairs";
 
 function money(n: number): string {
   return `${n < 0 ? "-" : "+"}$${Math.abs(Math.round(n)).toLocaleString()}`;
@@ -20,7 +23,7 @@ async function main() {
     `SELECT id, symbol, side, note, conviction, conviction_score,
             shadow_status, shadow_pnl, shadow_reason, time, source
      FROM tradingview_alerts
-     WHERE sim_version='v2' AND source='selective'
+     WHERE sim_version='v2' AND source='selective' AND ${US_MARGIN_SYMBOLS_SQL}
      ORDER BY time ASC`,
   );
 

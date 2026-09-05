@@ -3,6 +3,7 @@ import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
 import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
 import { autoShadowPlans } from "@/lib/margin-auto-plans";
+import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -177,17 +178,26 @@ export async function GET(request: Request) {
   try {
     const resolutions = await evaluateShadowSignals();   // risk-based sizing read from config inside
     shadowResolved = resolutions.length;
+    // Every open trade resolves (including the winding-down non-US ones), but the Slack
+    // tally must describe the RECORD the scoreboard keeps — the cloud routines read these
+    // posts as the record. So the headline counts and net cover US-tradeable pairs only;
+    // non-US results are listed separately and labelled, never folded into the total.
+    const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol));
+    const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol));
+    const fmtLine = (r: (typeof resolutions)[number]) =>
+      `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`;
     if (resolutions.length > 10) {
       // A burst (market-wide move stopping many trades at once) becomes ONE message —
       // per-trade posts at this volume risk Slack rate limits and eat the cron's budget.
-      const total = resolutions.reduce((s, r) => s + r.pnl, 0);
-      const wins = resolutions.filter((r) => r.pnl >= 0).length;
-      const lines = resolutions.slice(0, 12).map((r) =>
-        `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`,
-      ).join("\n");
-      const more = resolutions.length > 12 ? `\n…and ${resolutions.length - 12} more` : "";
+      const total = counted.reduce((s, r) => s + r.pnl, 0);
+      const wins = counted.filter((r) => r.pnl >= 0).length;
+      const lines = counted.slice(0, 12).map(fmtLine).join("\n");
+      const more = counted.length > 12 ? `\n…and ${counted.length - 12} more` : "";
+      const aside = setAside.length > 0
+        ? `\n_Set aside (non-US pairs, not in the record): ${setAside.length} resolved, net ${setAside.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(setAside.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
+        : "";
       await sendNotification(
-        `📊 ${resolutions.length} paper trades resolved this run — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}\n` +
+        `📊 ${counted.length} paper trades resolved this run (US-tradeable pairs) — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}${aside}\n` +
         `Estimate — fees+rollover modeled; no real money moved.`,
         "margin_results",
       );
@@ -195,10 +205,11 @@ export async function GET(request: Request) {
       for (const r of resolutions) {
         const win = r.pnl >= 0;
         const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
+        const tag = isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
         await sendNotification(
           `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
           `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
-          `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}). Estimate — fees+rollover modeled; no real money moved.`,
+          `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}).${tag} Estimate — fees+rollover modeled; no real money moved.`,
           "margin_results",
         );
       }
@@ -226,9 +237,11 @@ export async function GET(request: Request) {
     const score = await shadowScore();
     for (const milestone of [30, 100]) {
       if (score.resolved < milestone) continue;
-      // Keyed per measurement cohort: v2 restarted the counters, so it earns its own
-      // 30/100 check-ins instead of inheriting v1's already-fired flags.
-      const flagKey = `margin_milestone_${SIM_VERSION}_${milestone}_reported`;
+      // Keyed per measurement cohort AND per universe revision: v2 restarted the counters,
+      // and the Sep 5 US-universe fix shrank the record from 266 to 96 resolved — the old
+      // `margin_milestone_v2_100_reported` flag had already fired on the pooled count, so
+      // without the `us` revision the corrected 100-trade report could never send.
+      const flagKey = `margin_milestone_${SIM_VERSION}_us_${milestone}_reported`;
       const flag = await prisma.agentConfig.findUnique({ where: { key: flagKey } }).catch(() => null);
       if (flag?.value === "true") continue;
       const strats = await strategyBreakdown();
@@ -237,7 +250,7 @@ export async function GET(request: Request) {
         return `${s.label}: ${s.resolved} res, ${s.hitRate != null ? (s.hitRate * 100).toFixed(0) : "—"}% win · GROSS ${s.grossPnl >= 0 ? "+" : ""}$${s.grossPnl.toFixed(0)} − fees $${s.fees.toFixed(0)} = NET ${net >= 0 ? "+" : ""}$${net.toFixed(0)} → *${s.verdict}*`;
       }).join("\n");
       await sendNotification(
-        `📊 *MILESTONE — ${score.resolved} resolved paper trades.* Verdict per strategy (net of fees, statistically judged):\n${lines}\n\n` +
+        `📊 *MILESTONE — ${score.resolved} resolved paper trades* (US-tradeable pairs only — the universe live can run). Verdict per strategy (net of fees, statistically judged):\n${lines}\n\n` +
         `Verdicts: "REAL EDGE" = positive net + statistically significant (t≥2, not luck). "promising" = positive but could be luck — needs more. ` +
         `Overall net $${score.totalPnl.toFixed(0)}. Still 100% paper. Arming only when a strategy hits REAL EDGE over a large sample — never on luck.`,
         "margin_results",
