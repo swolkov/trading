@@ -61,6 +61,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
 import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage } from "@/lib/kraken-pairs";
+import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
 import {
@@ -302,7 +303,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // proceed regardless; the fresh positions read below is what makes the retry harmless.
     const closeToken = `${new Date().toISOString()}#${Math.random().toString(36).slice(2, 10)}`;
     let closeLockHeld = false;
-    for (let i = 0; i < 20; i++) {
+    // Wait up to the lock's TTL (60s): a live holder is never bypassed, a dead one expires, a
+    // close is never refused. Each tranche is also re-read right before its own order.
+    for (let i = 0; i < 60; i++) {
       const cutoff = new Date(Date.now() - 60_000).toISOString();
       await prisma.agentConfig.upsert({ where: { key: "kraken_margin_close_lock" }, update: {}, create: { key: "kraken_margin_close_lock", value: "" } }).catch(() => {});
       const r = await prisma.agentConfig.updateMany({ where: { key: "kraken_margin_close_lock", OR: [{ value: "" }, { value: { lt: cutoff } }] }, data: { value: closeToken } }).catch(() => ({ count: 0 }));
@@ -408,14 +411,23 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // risk-reducing close silently un-done (the same class of bug the entry path already guards).
       const closeMeta = await getPairMeta(pair);
       const txids: string[] = [];
-      const closedSides = new Set<string>();
       let closeErr: unknown = null;
       for (const p of positions) {
+        // Fresh check: is this exact tranche still open, at what volume? A concurrent close
+        // (or Kraken) may have taken it; a reduce-only order for a gone tranche would net
+        // against the NEXT position on the side under FIFO — possibly Spencer's.
+        let liveVol = p.vol;
+        try {
+          const now = await getKrakenMarginPositions();
+          const cur = now.find((q) => q.id === p.id);
+          if (!cur) { pending.push(`ℹ️ ${pair}: tranche ${p.id} was already closed — skipped.`); continue; }
+          liveVol = cur.vol;
+        } catch { /* keep the snapshot volume; reduce_only bounds the damage to flat */ }
         const params: Record<string, string> = {
           pair,
           type: p.side === "long" ? "sell" : "buy",
           ordertype: "market",
-          volume: p.vol.toFixed(closeMeta.lotDecimals),
+          volume: liveVol.toFixed(closeMeta.lotDecimals),
           leverage: String(Math.max(2, Math.round(p.leverage))),
           // reduce_only: if the position shrank between our read and this order (manual
           // close, partial liquidation, duplicate alert), Kraken reduces to flat instead
@@ -428,33 +440,58 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           const res = await krakenPrivate("AddOrder", params);
           const txid = (res.txid as string[] | undefined)?.[0];
           if (txid) txids.push(txid);
-          closedSides.add(p.side === "long" ? "sell" : "buy");
         } catch (e) {
           closeErr = e;
           break;
         }
       }
-      // Confirm what actually closed with a RELIABLE re-read (positions gone AND margin not
-      // in use). A tranche that still shows keeps its side's stops; a read we cannot trust
-      // sweeps nothing and says so LOUDLY — a stranded non-reduce-only stop is the one thing
-      // this path must never leave silently (the guardian sweeps it in ≤10 min regardless).
-      let survivingSides = new Set<string>();
+      // RECONCILE FROM WHAT IS ACTUALLY LEFT. Whatever the responses said (accepted, partial,
+      // lost), the truth is the remaining bot exposure on each side we touched: zero → every
+      // stop of ours on that side goes (a resting non-reduce-only stop would OPEN a position);
+      // some → exactly one full-volume reduce-only stop stays. A read we cannot trust leaves
+      // everything as it was and says so LOUDLY (the guardian retries within 5 min).
       let confirmedGone = false;
+      const touchedSides = new Set<"long" | "short">(positions.map((p) => p.side));
       try {
         const health = await getKrakenMarginHealth().catch(() => null);
         const after = await getKrakenMarginPositions();
-        const unreliable = failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null);
-        if (unreliable) throw new Error("positions read unreliable after close");
+        if (failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null)) throw new Error("positions read unreliable after close");
         const targeted = new Set(positions.map((p) => p.id));
-        const survivors = after.filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && targeted.has(p.id));
-        survivingSides = new Set(survivors.map((p) => (p.side === "long" ? "sell" : "buy")));
-        confirmedGone = survivors.length === 0;
-        if (survivors.length && closeErr == null) pending.push(`🚨 ${survivors.length} targeted position(s) on ${pair} still show open after the close orders were accepted — stops on that side left in place. Check Kraken.`);
+        confirmedGone = !after.some((p) => targeted.has(p.id));
+        const px = await getKrakenPrice(alert.symbol).catch(() => 0);
+        const orders = await krakenOpenOrders();
+        for (const side of touchedSides) {
+          // ALL remaining bot exposure on this side — including tranches this close refused
+          // (FIFO) — decides the cover, never just the ones we targeted.
+          const remainingBot = after.filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === side && (closeAll || isOurs(p)));
+          const vol = remainingBot.reduce((s, p) => s + p.vol, 0);
+          const closeSide = side === "long" ? "sell" : "buy";
+          const ours = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair) && o.side === closeSide);
+          const fixed = ours.filter((o) => o.ordertype === "stop-loss" && o.price > 0);
+          const bestResting = fixed.length ? (side === "long" ? Math.max(...fixed.map((o) => o.price)) : Math.min(...fixed.map((o) => o.price))) : null;
+          const entryPx = vol > 0 ? remainingBot.reduce((s, p) => s + p.entryPrice * p.vol, 0) / vol : 0;
+          const fracs = remainingBot.map((p) => ownership.stopFracOf(p.ordertxid) ?? 0).filter((f) => f > 0);
+          const levMax = Math.max(2, ...remainingBot.map((p) => p.leverage));
+          const frac = fracs.length ? Math.min(...fracs) : clampLiveStopFrac(await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), levMax);
+          const level = bestResting ?? (side === "long" ? entryPx * (1 - frac) : entryPx * (1 + frac));
+          const plan = planReconcile({ side, vol, targetLevel: level, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, ours);
+          if (plan.blocked) { pending.push(`🚨 ${pair} ${side}: could not reconcile stops after the close — ${plan.blocked}. Stops LEFT IN PLACE; the guardian retries in ≤5 min. Check Kraken.`); continue; }
+          if (!plan.place && !plan.cancel.length) continue;
+          const out = await applyReconcile(plan, {
+            placeStop: async (lvl, v) => {
+              const res = await krakenPrivate("AddOrder", { pair, type: closeSide, ordertype: "stop-loss", price: lvl, volume: v, leverage: String(Math.round(levMax)), reduce_only: "true", userref: String(MARGIN_USERREF) });
+              return (res.txid as string[] | undefined)?.[0];
+            },
+            cancel: (txid) => krakenCancelOrder(txid),
+          });
+          if (out.cancelled.length) pending.push(`🧹 ${pair} ${side}: ${plan.reason} — cancelled ${out.cancelled.length} stop(s)${out.placed ? `, placed one for ${plan.place?.vol}` : ""}.`);
+          if (out.placeFailed) pending.push(`🚨 ${pair} ${side}: ${vol} still open and a protective stop could NOT be placed (${out.placeFailed}) — act on Kraken now.`);
+          if (out.failedCancels.length) pending.push(`🚨 ${pair} ${side}: could NOT cancel stop(s) ${out.failedCancels.join(", ")} after the close. A stranded non-reduce-only stop can OPEN a position if it triggers. Cancel them on Kraken now.`);
+          if (vol > 0 && closeErr == null && !fifoBlocked.length) pending.push(`⚠️ ${pair} ${side}: ${vol} still open after the close orders (partial fill?) — covered by a stop; retry the close.`);
+        }
       } catch (e) {
-        survivingSides = new Set(closedSides);   // unreadable → sweep nothing
-        pending.push(`🚨 Could not confirm the close on ${pair} (${String(e).slice(0, 80)}) — resting stop(s) LEFT IN PLACE; the guardian sweeps stranded stops within ~10 min. Check Kraken now.`);
+        pending.push(`🚨 Could not confirm the close on ${pair} (${String(e).slice(0, 80)}) — resting stop(s) LEFT IN PLACE; the guardian reconciles within ~5 min. Check Kraken now.`);
       }
-      for (const side of survivingSides) closedSides.delete(side);
       // Consume the one-shot authorisation now that a close actually went through. A failed
       // consume is paged: the flag would flatten manual positions on the NEXT close too.
       if (closeAll && (txids.length > 0 || confirmedGone)) {
@@ -464,44 +501,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         }).catch(() => ({ count: 0 }));
         if (cleared.count !== 1) {
           await sendNotification(`⚠️ Could not clear kraken_margin_close_all_positions after using it on ${pair} — it is STILL ARMED and will flatten manual positions on the next close. Clear it by hand.`, "margin_urgent").catch(() => {});
-        }
-      }
-      // CANCEL THE NOW-STRANDED STOPS IMMEDIATELY — including after a partial flatten.
-      // If the second AddOrder throws, skipping this sweep would leave the first close's
-      // stop resting. Kraken's attached close[] cannot be reduce_only, so that stop can
-      // open a BRAND NEW leveraged position in the opposite direction — unowned (its
-      // ordertxid is the stop's, not in the ledger), therefore invisible to this close
-      // path and to the naked-position guard, and with no stop of its own. The guardian's
-      // orphan sweep needs two consecutive runs, so it would leave a 5-10 minute window
-      // in which an ordinary 1.5% move flips a closed trade into an unmonitored short.
-      // Scoped to our userref AND to sides we actually submitted a close for, so a
-      // still-open position on the other side keeps its stop, and manual orders are safe.
-      if (closedSides.size > 0) {
-        try {
-          const resting = (await krakenOpenOrders()).filter((o) =>
-            o.userref === MARGIN_USERREF &&
-            o.ordertype.includes("stop") &&
-            pairBase(o.pair) === pairBase(pair) &&
-            closedSides.has(o.side));
-          // Count real successes: a swallowed cancel failure would report "cancelled" while
-          // the stop still rests, carrying the exact flip risk this sweep exists to remove.
-          const failed: string[] = [];
-          let cancelled = 0;
-          for (const o of resting) {
-            try { await krakenCancelOrder(o.txid); cancelled++; } catch { failed.push(o.txid); }
-          }
-          if (cancelled) pending.push(`🧹 Cancelled ${cancelled} stranded stop(s) on ${pair} after the close (a resting stop with no position can open a fresh one).`);
-          if (failed.length) {
-            await sendNotification(
-              `🚨 Could NOT cancel ${failed.length} stop(s) on ${pair} after closing (${failed.join(", ")}). A stranded stop can OPEN a new leveraged position if it triggers. Cancel them on Kraken now.`,
-              "margin_urgent",
-            ).catch(() => {});
-          }
-        } catch (err) {
-          await sendNotification(
-            `⚠️ Closed ${pair} but could NOT sweep its resting stops — a stranded stop can open a new position if it triggers. Check Kraken. ${String(err).slice(0, 140)}`,
-            "margin_urgent",
-          ).catch(() => {});
         }
       }
       for (const msg of pending) await sendNotification(msg, "margin_urgent").catch(() => {});

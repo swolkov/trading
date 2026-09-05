@@ -108,24 +108,35 @@ export async function POST(request: Request) {
   // instances. Rate limiting happens AFTER auth so junk traffic cannot starve real
   // alerts by burning a shared counter.
   let duplicate = false;
+  let reservedId: number | null = null;
   try {
     await ensureAlertsTable();
-    const [{ recent, dupes }] = await prisma.$queryRawUnsafe<{ recent: bigint; dupes: bigint }[]>(
+    await ensureShadowColumns();
+    // RESERVE the slot before executing: the row is inserted first (exec_note 'pending'),
+    // so concurrent requests count each other and a burst cannot all pass the cap.
+    const [{ id }] = await prisma.$queryRawUnsafe<{ id: number }[]>(
+      `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source, sim_version)
+       VALUES ($1,$2,$3,$4,NULL,false,false,'pending','manual',$5) RETURNING id`,
+      symbol, side, leverage ?? null, note, SIM_VERSION,
+    );
+    reservedId = id;
+    const [{ recent, recentclose, dupes }] = await prisma.$queryRawUnsafe<{ recent: bigint; recentclose: bigint; dupes: bigint }[]>(
       `SELECT
-         count(*) FILTER (WHERE time > now() - interval '60 seconds')::bigint AS recent,
+         count(*) FILTER (WHERE time > now() - interval '60 seconds' AND side <> 'close')::bigint AS recent,
+         count(*) FILTER (WHERE time > now() - interval '60 seconds' AND side = 'close' AND symbol = $1)::bigint AS recentclose,
          count(*) FILTER (WHERE time > now() - interval '120 seconds'
                             AND symbol = $1 AND side = $2
                             AND COALESCE(leverage, -1) = COALESCE($3::float, -1)
-                            AND note = $4)::bigint AS dupes
+                            AND note = $4 AND id <> $5)::bigint AS dupes
        FROM tradingview_alerts`,
-      symbol, side, leverage ?? null, note,
+      symbol, side, leverage ?? null, note, id,
     );
-    // Neither guard applies to a CLOSE: a close only reduces risk, reduce_only makes a
-    // repeat idempotent, and a failed close re-sent inside two minutes must be RETRIED,
-    // not logged as a duplicate.
-    // Closes keep their own, generous cap — a leaked secret must not be able to flood
-    // Kraken's per-key limit with closes and starve the guardian's protective calls.
-    if (Number(recent) >= (side === "close" ? 60 : 30)) {
+    // A CLOSE is never a "duplicate" (a failed close re-sent inside two minutes must be
+    // RETRIED) and has its own per-symbol cap: a legitimate retry is never blocked, while a
+    // leaked secret cannot flood Kraken's per-key budget and starve the guardian's
+    // protective calls.
+    if ((side !== "close" && Number(recent) > 30) || (side === "close" && Number(recentclose) > 10)) {
+      await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET exec_note='rate limited' WHERE id=$1`, id).catch(() => {});
       return Response.json({ error: "rate limited" }, { status: 429 });
     }
     duplicate = side !== "close" && Number(dupes) > 0;
@@ -157,14 +168,19 @@ export async function POST(request: Request) {
 
   try {
     await ensureAlertsTable();
-    // ensureShadowColumns owns the sim_version column — run it too so an alert landing
-    // right after a deploy (before the first cron) can't hit a missing column.
     await ensureShadowColumns();
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source, sim_version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',$9)`,
-      symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note, SIM_VERSION,
-    );
+    if (reservedId != null) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE tradingview_alerts SET mark_price=$1, executed=$2, validated=$3, exec_note=$4 WHERE id=$5`,
+        markPrice, result.executed, result.validated, result.note, reservedId,
+      );
+    } else {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source, sim_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',$9)`,
+        symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note, SIM_VERSION,
+      );
+    }
     await prisma.agentConfig.upsert({
       where: { key: "tradingview_last_alert" },
       update: { value: new Date().toISOString() },
