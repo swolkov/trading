@@ -80,21 +80,9 @@ export default function PaperTradesPage() {
         </p>
       </div>
 
+      <LiveMirrorCard />
+
       <div className="rounded-xl border border-border bg-card p-4 space-y-2">
-        <p className="text-xs font-bold">The $5k live book — how this gets to thousands a day without blowing up</p>
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          Live goes off the real Kraken account (~$5k), not a fantasy size. Dollar risk is always
-          {" "}<span className="text-foreground/80">equity × 3%</span> (high conviction 2×, hard ceiling 6%).
-          The quality long cut on paper has averaged a few hundred dollars a trade at this size (measured Sep 5 on the US universe: 15 trades, 80% hit) — that is thousands a week IF it holds
-          for 30+ trades and 7+ days, which is exactly what this page is measuring. Thousands a day at 3%
-          still needs a larger account (~$50k+). Do not crank risk on $5k to fake the daily number.
-        </p>
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          What grows is leverage cap, not risk %: <span className="text-foreground/80">2× below $10k</span> (now),
-          {" "}<span className="text-foreground/80">3× from $10k</span>, <span className="text-foreground/80">5× from $20k</span>.
-          Paper stays scored at a fixed $5k so the t-stats stay comparable — compounding paper equity into the verdict would fake an edge.
-          Live stays unarmed until a sleeve prints <span className="text-foreground/80">REAL EDGE</span> (30+ resolved, net&gt;0 at live sizing, t≥2, 7+ days).
-        </p>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           Auto paper is the live-candidate sleeve only: <span className="text-foreground/80">high-conviction 5m/15m longs, not stretched</span>.
           Shorts on this sleeve lost on both the old 37-coin universe (17% hit, −$3.2k, Sep 4) and the US-only slice (40% hit, −$714, Sep 5) — they no longer open. Stretched longs were a coin-flip — skipped.
@@ -316,6 +304,72 @@ export default function PaperTradesPage() {
         <p className="text-[11px] text-muted-foreground/40">
           Every individual paper trade (with live P&amp;L) is in the full log on the <Link href="/orders" className="underline hover:text-foreground/70">Orders</Link> tab → Paper.
         </p>
+      )}
+    </div>
+  );
+}
+
+// ── LIVE MIRRORS PAPER ── every number derived from the live config + the real account,
+// beside what the paper record uses, with a check per item. If any row is red, the
+// scoreboard's "At LIVE sizing" column is describing a trade the executor would not place.
+interface ExecCfg {
+  live: { armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
+  paper: { refEquity: number; baseRiskPct: number; stopPct: number; maxHoldH: number; exit: string };
+  equity: number | null; leverageRung: number;
+  ladder: { from: number; cap: number }[];
+  tiers: { tier: string; riskPct: number; riskUsd: number | null; notionalUsd: number | null }[];
+  aligned: { stop: boolean; risk: boolean; hold: boolean; sizing: boolean; exit: boolean }; allAligned: boolean;
+}
+function LiveMirrorCard() {
+  const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
+  const ok = (b: boolean) => <span className={b ? "text-emerald-400" : "text-red-400 font-bold"}>{b ? "✓" : "✗"}</span>;
+  const usd0 = (n: number | null) => (n == null ? "—" : `$${Math.round(n).toLocaleString()}`);
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-bold">The live book — mirrors paper, sized off the real account</p>
+        {cfg && (
+          <p className="text-[10px]">
+            <span className={cfg.live.armed ? "text-red-400 font-bold" : "text-muted-foreground/60"}>{cfg.live.armed ? "ARMED — real orders" : cfg.live.auto ? "validate-only" : "disarmed"}</span>
+            {cfg.live.ddBreakerTripped && <span className="text-red-400 ml-2">· drawdown breaker tripped</span>}
+            <span className={`ml-2 ${cfg.allAligned ? "text-emerald-400" : "text-red-400 font-bold"}`}>{cfg.allAligned ? "live = paper ✓" : "live ≠ paper ✗"}</span>
+          </p>
+        )}
+      </div>
+      {!cfg ? <p className="text-[11px] text-muted-foreground/50">Loading live config…</p> : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50 border-b border-border/50">
+                  <th className="text-left font-medium py-1 pr-3">Setting</th>
+                  <th className="text-right font-medium py-1 px-2">Paper (the record)</th>
+                  <th className="text-right font-medium py-1 px-2">Live (what would trade)</th>
+                  <th className="text-right font-medium py-1 pl-2">Same?</th>
+                </tr>
+              </thead>
+              <tbody className="tabular-nums">
+                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Risk per trade (base · high conviction · ceiling)</td><td className="text-right px-2">{cfg.paper.baseRiskPct}% · {Math.min(6, cfg.paper.baseRiskPct * 2)}% · 6%</td><td className="text-right px-2">{cfg.live.baseRiskPct}% · {Math.min(6, cfg.live.baseRiskPct * 2)}% · 6%</td><td className="text-right pl-2">{ok(cfg.aligned.risk)}</td></tr>
+                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Initial stop</td><td className="text-right px-2">{cfg.paper.stopPct}%</td><td className="text-right px-2">{cfg.live.trailPct > 0 ? `Kraken trailing ${cfg.live.trailPct}%` : `${cfg.live.stopPct}%`}</td><td className="text-right pl-2">{ok(cfg.aligned.stop)}</td></tr>
+                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Managed exit</td><td className="text-right px-2">{cfg.paper.exit}</td><td className="text-right px-2">{cfg.live.trailPct > 0 ? "Kraken trailing-stop (different)" : "guardian ratchets the resting stop the same way"}</td><td className="text-right pl-2">{ok(cfg.aligned.exit)}</td></tr>
+                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Time stop</td><td className="text-right px-2">{cfg.paper.maxHoldH}h</td><td className="text-right px-2">{cfg.live.maxHoldH}h</td><td className="text-right pl-2">{ok(cfg.aligned.hold)}</td></tr>
+                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Sizing</td><td className="text-right px-2">risk × ${cfg.paper.refEquity.toLocaleString()} ÷ stop, ≤ leverage × equity</td><td className="text-right px-2">risk × {cfg.equity != null ? usd0(cfg.equity) : "equity"} ÷ stop, ≤ {cfg.leverageRung}× equity{cfg.live.perTradeCapUsd > 0 ? ` · capped ${usd0(cfg.live.perTradeCapUsd)}/trade` : ""}</td><td className="text-right pl-2">{ok(cfg.aligned.sizing)}</td></tr>
+                <tr><td className="py-1 pr-3 text-foreground/80">Guards (live only)</td><td className="text-right px-2 text-muted-foreground/50">—</td><td className="text-right px-2">max {cfg.live.maxPositions} positions · {cfg.live.maxTradesPerDay}/day · 15% drawdown breaker · daily loss cap</td><td className="text-right pl-2 text-muted-foreground/40">n/a</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+            <span className="text-foreground/80">Grows with the account.</span> Live sizes off the real Kraken equity
+            {cfg.equity != null ? <> (<span className="text-foreground/80">{usd0(cfg.equity)}</span> now)</> : " (unreadable right now)"}, so dollar risk and position size rise as capital does at the same 3%:
+            {" "}{cfg.tiers.map((t) => `${t.tier} conviction risks ${usd0(t.riskUsd)} on ${usd0(t.notionalUsd)}`).join(" · ")}.
+            The leverage cap steps up with equity — {cfg.ladder.map((l) => `${l.cap}× from $${l.from.toLocaleString()}`).join(", ")} — and is <span className="text-foreground/80">{cfg.leverageRung}×</span> at today&apos;s equity (operator ceiling {cfg.live.maxLeverageCeiling}×).
+            Paper stays scored at a fixed ${cfg.paper.refEquity.toLocaleString()} so its t-stats stay comparable — compounding paper equity into the verdict would fake an edge.
+          </p>
+          <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+            Thousands a day at 3% still needs a larger account (~$50k+). Do not crank risk on $5k to fake the daily number. Live stays unarmed until a sleeve prints
+            {" "}<span className="text-foreground/80">REAL EDGE</span> (30+ resolved, net&gt;0 at live sizing, t≥2, 7+ days).
+          </p>
+        </>
       )}
     </div>
   );

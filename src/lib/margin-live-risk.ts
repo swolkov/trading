@@ -89,6 +89,54 @@ export function pairHasExposure(
     || restingPairs.some((p) => pairMatches(p, symbol));
 }
 
+// ---------- THE CONTAINER — live mirrors the paper record's `selective` sleeve ----------
+// Paper's live candidate: 3% initial stop, breakeven once +1R, then a 1R trail behind the
+// peak, 48h time stop, notional = risk × equity ÷ stop (capped at leverage × equity).
+// Until Sep 5 2026 the executor defaulted to a 15% stop (0.3/leverage), no trail, and a
+// $100 per-trade cap — the same signal in a different container, which is exactly the
+// class of gap the Sep 3 conviction fix closed one layer up. These constants are the
+// single source both the executor and the guardian's managed exit read.
+export const LIVE_STOP_DEFAULT_PCT = 3;      // = paper selective's oneR (entry × 0.03)
+export const LIVE_MAX_HOLD_H = 48;           // = paper MAX_HOLD_H
+export const LIVE_STOP_RATCHET_MIN_FRAC = 0.0005;   // move a resting stop only for ≥0.05% of price
+
+/**
+ * Notional exactly as paper's positionNotional: risk × equity ÷ stop distance, capped at
+ * leverage × equity. `perTradeCapUsd` > 0 is an optional operator ceiling on margin
+ * committed per entry (× leverage = notional); 0 means none — the default, because a
+ * $100 cap silently turned 3% risk into ~0.6% and made the scoreboard's "At LIVE sizing"
+ * column describe a trade the executor would never have placed.
+ */
+export function liveNotional(equity: number, riskFrac: number, stopFrac: number, leverage: number, perTradeCapUsd = 0): number {
+  if (!(equity > 0) || !(riskFrac > 0) || !(stopFrac > 0) || !(leverage >= 1)) return 0;
+  let notional = Math.min((riskFrac * equity) / stopFrac, equity * leverage);
+  if (perTradeCapUsd > 0) notional = Math.min(notional, perTradeCapUsd * leverage);
+  return notional;
+}
+
+/**
+ * Paper's managed exit, as a pure function the guardian can apply to a real resting stop:
+ * once the best price reached is ≥ +1R, the stop is at least breakeven and trails 1R
+ * behind the peak; it only ever ratchets in the trade's favour. Returns the stop level
+ * that should be resting now (unchanged when no ratchet is due).
+ */
+export function managedStopTarget(side: "long" | "short", entry: number, peak: number, currentStop: number, oneR: number): number {
+  if (!(entry > 0) || !(oneR > 0) || !Number.isFinite(peak) || !Number.isFinite(currentStop)) return currentStop;
+  const dir = side === "long" ? 1 : -1;
+  const peakR = (dir * (peak - entry)) / oneR;
+  if (peakR < 1) return currentStop;
+  const trail = peak - dir * oneR;
+  const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
+  return dir > 0 ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
+}
+
+/** True when `target` improves on `currentStop` by at least the ratchet threshold. */
+export function stopNeedsRatchet(side: "long" | "short", currentStop: number, target: number, price: number): boolean {
+  if (!(price > 0) || !Number.isFinite(target) || !Number.isFinite(currentStop)) return false;
+  const improvement = side === "long" ? target - currentStop : currentStop - target;
+  return improvement >= price * LIVE_STOP_RATCHET_MIN_FRAC;
+}
+
 /** Lock value is `${iso}#token`. Health UI must parse the iso, not Date(fullstring). */
 export const EXEC_LOCK_TTL_MS = 330_000;
 
