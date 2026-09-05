@@ -21,7 +21,7 @@ export async function GET() {
       "kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_disarmed_dd",
       "kraken_margin_live_max_risk_pct", "kraken_margin_stop_pct", "kraken_margin_trail_pct", "kraken_margin_max_leverage",
       "kraken_margin_per_trade_usd", "kraken_margin_max_hold_h", "kraken_margin_max_positions", "kraken_margin_max_trades_per_day",
-      "kraken_margin_trust_alert_conviction",
+      "kraken_margin_trust_alert_conviction", "kraken_margin_live_sources",
       "kraken_shadow_ref_equity", "kraken_margin_max_risk_pct",
     ];
     const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
@@ -55,6 +55,7 @@ export async function GET() {
       maxPositions: num("kraken_margin_max_positions", 3),
       maxTradesPerDay: num("kraken_margin_max_trades_per_day", 6),
       trustAlertConviction: c.kraken_margin_trust_alert_conviction === "true",
+      liveSources: (c.kraken_margin_live_sources ?? "").split(",").map((x) => x.trim()).filter(Boolean),
     };
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),

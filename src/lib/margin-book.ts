@@ -64,6 +64,10 @@ export function planReconcile(book: BookState, ours: BookStop[]): ReconcilePlan 
   // one could fire first and strand it). If it is short, cover ONLY the shortfall.
   const trailingVol = trailing.reduce((s, o) => s + remaining(o), 0);
   if (trailing.length) {
+    // More than one trailing stop, or one bigger than the book, is a state this planner
+    // cannot make safe by adding orders (a non-reduce-only trailing order of excess volume
+    // OPENS on fire). It needs a human: block, and let the caller page.
+    if (trailing.length > 1 || trailingVol > book.vol * 1.01) return { ...none, blocked: `trailing stop(s) exceed the book (${trailing.length} order(s), ${trailingVol} vs ${book.vol}) — needs manual attention` };
     const short = book.vol - trailingVol;
     const fixedVol = fixed.reduce((s, o) => s + remaining(o), 0);
     if (short <= book.vol * 0.01) return { ...none, cancel: fixed.map((o) => o.txid), keeper: null, covered: true, reason: "trailing covers the book" };
@@ -76,7 +80,10 @@ export function planReconcile(book: BookState, ours: BookStop[]): ReconcilePlan 
   // Fixed stops only. A keeper is one stop whose remaining volume matches the book (±1%)
   // and whose level is at least the target.
   const volOk = (o: BookStop) => remaining(o) >= book.vol * 0.99 && remaining(o) <= book.vol * 1.01;
-  const good = fixed.filter((o) => volOk(o) && atLeastAsGood(book.side, o.price, book.targetLevel, book.px));
+  // A keeper must also rest on the SAFE side of the market: a stop at/through price has
+  // triggered (or is about to) and is not protection; it is a close in progress.
+  const safeSide = (o: BookStop) => (book.side === "long" ? o.price < book.px : o.price > book.px);
+  const good = fixed.filter((o) => volOk(o) && safeSide(o) && atLeastAsGood(book.side, o.price, book.targetLevel, book.px));
   if (good.length) {
     // Best-priced, tie → newest. Everything else goes (duplicates, partials, oversized).
     const keeper = [...good].sort((a, b) => (book.side === "long" ? b.price - a.price : a.price - b.price) || b.opentm - a.opentm)[0];

@@ -67,6 +67,7 @@ import { convictionForAlert } from "@/lib/margin-scanner";
 import {
   DEFAULT_MAX_LEVERAGE,
   EXEC_LOCK_TTL_MS,
+  isSourceArmed,
   LIVE_STOP_DEFAULT_PCT,
   clampLiveStopFrac,
   effectiveMaxLeverage,
@@ -90,6 +91,9 @@ export interface AlertOrder {
   // executor scores the coin itself with the SAME scorer the paper record uses. Sizing
   // scales with it exactly as paper does — see liveRiskFraction().
   conviction?: "low" | "med" | "high";
+  // Where the entry came from: "manual", "tv:<strategy>", or a scanner sleeve ("selective").
+  // Only sources named in kraken_margin_live_sources may place a real order.
+  source?: string;
 }
 
 export interface ExecResult {
@@ -204,6 +208,30 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
   };
 }
 
+// THE CLOSE LOCK — shared by every path that flattens or re-covers a book (webhook close,
+// guardian close/reconcile). Kraken nets FIFO, so two closes reading the same snapshot can
+// both pass the ownership guard and the second reduces a NEWER manual position. The lease
+// is created at ACQUISITION (never nearly-expired on arrival), TTL 120s (a dead holder
+// expires; a live close finishes well inside it), and a caller that cannot acquire it in
+// its wait budget gets `null` — it must NOT proceed unlocked.
+export const CLOSE_LOCK_KEY = "kraken_margin_close_lock";
+export const CLOSE_LOCK_TTL_MS = 120_000;
+export async function acquireCloseLock(waitMs: number): Promise<string | null> {
+  const deadline = Date.now() + waitMs;
+  await prisma.agentConfig.upsert({ where: { key: CLOSE_LOCK_KEY }, update: {}, create: { key: CLOSE_LOCK_KEY, value: "" } }).catch(() => {});
+  for (;;) {
+    const token = `${new Date().toISOString()}#${Math.random().toString(36).slice(2, 10)}`;
+    const cutoff = new Date(Date.now() - CLOSE_LOCK_TTL_MS).toISOString();
+    const r = await prisma.agentConfig.updateMany({ where: { key: CLOSE_LOCK_KEY, OR: [{ value: "" }, { value: { lt: cutoff } }] }, data: { value: token } }).catch(() => ({ count: 0 }));
+    if (r.count === 1) return token;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+export async function releaseCloseLock(token: string): Promise<void> {
+  await prisma.agentConfig.updateMany({ where: { key: CLOSE_LOCK_KEY, value: token }, data: { value: "" } }).catch(() => {});
+}
+
 // A position is OURS if its OpenPositions key (the opening order's txid) is in the ledger.
 // Fails CLOSED by design: an unrecognised position is treated as Spencer's and left alone.
 // `kraken_margin_close_all_positions=true` is the deliberate escape hatch for a real
@@ -301,16 +329,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // a NEWER manual position after the first consumed the bot's. reduce_only is not
     // idempotency. A lock that could trap a close is worse than no lock, so after 20s we
     // proceed regardless; the fresh positions read below is what makes the retry harmless.
-    const closeToken = `${new Date().toISOString()}#${Math.random().toString(36).slice(2, 10)}`;
-    let closeLockHeld = false;
-    // Wait up to the lock's TTL (60s): a live holder is never bypassed, a dead one expires, a
-    // close is never refused. Each tranche is also re-read right before its own order.
-    for (let i = 0; i < 60; i++) {
-      const cutoff = new Date(Date.now() - 60_000).toISOString();
-      await prisma.agentConfig.upsert({ where: { key: "kraken_margin_close_lock" }, update: {}, create: { key: "kraken_margin_close_lock", value: "" } }).catch(() => {});
-      const r = await prisma.agentConfig.updateMany({ where: { key: "kraken_margin_close_lock", OR: [{ value: "" }, { value: { lt: cutoff } }] }, data: { value: closeToken } }).catch(() => ({ count: 0 }));
-      if (r.count === 1) { closeLockHeld = true; break; }
-      await new Promise((r) => setTimeout(r, 1000));
+    const closeToken = await acquireCloseLock(90_000);
+    if (!closeToken) {
+      await sendNotification(`🚨 Close on ${pair} NOT attempted — another close/reconcile has held the lock for over 90s. Retry the close; check Kraken now.`, "margin_urgent").catch(() => {});
+      return { executed: false, validated: false, note: "close lock held by another operation for >90s — not attempted, retry" };
     }
     try {
       // Our RESTING ENTRY orders on the pair go first: a partially filled maker entry could
@@ -412,17 +434,25 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       const closeMeta = await getPairMeta(pair);
       const txids: string[] = [];
       let closeErr: unknown = null;
+      // ONE fresh read under the lock, right before the orders: the snapshot above is
+      // minutes old at worst; nothing else can close between here and the orders because
+      // the lock is held. An unreadable fresh read refuses the close — a reduce-only order
+      // for a tranche that is already gone would net against the NEXT position under FIFO,
+      // possibly Spencer's.
+      let freshById: Map<string, number>;
+      try {
+        freshById = new Map((await getKrakenMarginPositions()).map((q) => [q.id, q.vol] as const));
+      } catch (e) {
+        await sendNotification(`🚨 Close on ${pair} NOT attempted — could not re-read positions right before sending (${String(e).slice(0, 100)}). Retry.`, "margin_urgent").catch(() => {});
+        return { executed: false, validated: false, note: `close not attempted: positions unreadable before sending — retry` };
+      }
+      const closeStartedAt = Date.now();
       for (const p of positions) {
-        // Fresh check: is this exact tranche still open, at what volume? A concurrent close
-        // (or Kraken) may have taken it; a reduce-only order for a gone tranche would net
-        // against the NEXT position on the side under FIFO — possibly Spencer's.
-        let liveVol = p.vol;
-        try {
-          const now = await getKrakenMarginPositions();
-          const cur = now.find((q) => q.id === p.id);
-          if (!cur) { pending.push(`ℹ️ ${pair}: tranche ${p.id} was already closed — skipped.`); continue; }
-          liveVol = cur.vol;
-        } catch { /* keep the snapshot volume; reduce_only bounds the damage to flat */ }
+        // Reserve time for the post-close reconcile: never let a long tranche list run the
+        // route out before protection is re-set.
+        if (Date.now() - closeStartedAt > 150_000) { pending.push(`⚠️ ${pair}: stopped after ${txids.length} tranche(s) to leave time to re-set protection — retry the close for the rest.`); break; }
+        const liveVol = freshById.get(p.id);
+        if (liveVol == null) { pending.push(`ℹ️ ${pair}: tranche ${p.id} was already closed — skipped.`); continue; }
         const params: Record<string, string> = {
           pair,
           type: p.side === "long" ? "sell" : "buy",
@@ -463,7 +493,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         for (const side of touchedSides) {
           // ALL remaining bot exposure on this side — including tranches this close refused
           // (FIFO) — decides the cover, never just the ones we targeted.
-          const remainingBot = after.filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === side && (closeAll || isOurs(p)));
+          // Bot-owned exposure, plus a targeted (close_all) survivor — never a manual position
+          // opened during the close, which would otherwise get a bot stop nobody manages.
+          const remainingBot = after.filter((p) => pairMatchesSymbol(p.pair, alert.symbol) && p.side === side && (isOurs(p) || (closeAll && targeted.has(p.id))));
           const vol = remainingBot.reduce((s, p) => s + p.vol, 0);
           const closeSide = side === "long" ? "sell" : "buy";
           const ours = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair) && o.side === closeSide);
@@ -526,9 +558,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       ).catch(() => {});
       return { executed: false, validated: false, note: `close failed: ${e}` };
     } finally {
-      if (closeLockHeld) {
-        await prisma.agentConfig.updateMany({ where: { key: "kraken_margin_close_lock", value: closeToken }, data: { value: "" } }).catch(() => {});
-      }
+      await releaseCloseLock(closeToken);
     }
   }
 
@@ -536,6 +566,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // Layer 1: armed at all? (Entries only — the close path above deliberately runs first.)
   const auto = (await cfg("kraken_margin_auto")) === "true";
   if (!auto) return { executed: false, validated: false, note: "tracked only (kraken_margin_auto off)" };
+
+  // Layer 1a: the SOURCE must be armed. The executor being on is necessary, not sufficient:
+  // each sleeve earns live money separately (kraken_margin_live_sources), so a TradingView
+  // strategy or a scanner sleeve trades on paper until it is named there explicitly.
+  if (!isSourceArmed(await cfg("kraken_margin_live_sources"), alert.source)) {
+    return { executed: false, validated: false, note: `tracked only (source "${alert.source ?? "manual"}" is not in kraken_margin_live_sources)` };
+  }
 
   // Layer 1b: the pair must be one a US retail account can actually margin-trade — the
   // same table that bounds the scanner universe and the paper record (kraken-pairs.ts).

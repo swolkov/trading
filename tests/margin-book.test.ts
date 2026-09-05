@@ -107,3 +107,15 @@ test("applyReconcile: place first; a failed placement cancels nothing; failed ca
   const blocked = await applyReconcile(planReconcile(book(1, 97, 0), []), okIO);
   assert.equal(blocked.covered, false);
 });
+
+test("round 6: excess or duplicate trailing stops are blocked, never 'covered'", () => {
+  assert.ok(planReconcile(book(1, 97), [stop("T", 3, 10, { ordertype: "trailing-stop" })]).blocked);
+  assert.ok(planReconcile(book(1, 97), [stop("T1", 3, 1, { ordertype: "trailing-stop" }), stop("T2", 3, 1, { ordertype: "trailing-stop" })]).blocked);
+});
+
+test("round 6: a stop at or through the market is never a keeper", () => {
+  // Long at px 95 with a resting stop at 97 — it has triggered; the plan must not call it cover.
+  const p = planReconcile(book(1, 97, 95), [stop("A", 97, 1)]);
+  assert.equal(p.keeper, null);
+  assert.ok(p.blocked, "target through the market → blocked for the breach path");
+});

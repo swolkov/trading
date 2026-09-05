@@ -4,6 +4,8 @@ import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib
 import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
 import { autoShadowPlans } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
+import { executeAlert } from "@/lib/margin-executor";
+import { isSourceArmed } from "@/lib/margin-live-risk";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -120,6 +122,8 @@ export async function GET(request: Request) {
   // PAUSED (not retired — sample too thin to call a loser, not the live candidate):
   //   'swing-lev' / 'swing-spot' — gathering, slightly negative; 4h is not this container.
   const opened: { symbol: string; side: string; tier: string }[] = [];
+  const live: string[] = [];
+  const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "").catch(() => "");
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
     if (flag?.value !== "false") {
@@ -162,6 +166,16 @@ export async function GET(request: Request) {
             s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
           );
           opened.push({ symbol: s.symbol, side, tier: conv.tier });
+          // LIVE — only for a sleeve explicitly ARMED in kraken_margin_live_sources (the
+          // go-live plan's "arm ONE strategy"). The executor applies every guard (arm
+          // switch, validate-only, breaker, guardian freshness, universe, netting, sizing);
+          // the paper row above is unaffected either way — paper keeps measuring.
+          if (armedSources && isSourceArmed(armedSources, plan.source)) {
+            try {
+              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source });
+              live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
+            } catch (e) { live.push(`${s.symbol} ${plan.source}: executor error ${String(e).slice(0, 100)}`); }
+          }
         }
       }
     }
@@ -169,6 +183,7 @@ export async function GET(request: Request) {
     errors.push(`autoshadow: ${String(e).slice(0, 80)}`);
   }
   const autoOpened = opened.length;
+  if (live.length) await sendNotification(`💸 LIVE executor (armed sources: ${armedSources}):\n${live.map((l) => `• ${l}`).join("\n")}`, "margin_urgent").catch(() => {});
 
   await saveState(state);
 

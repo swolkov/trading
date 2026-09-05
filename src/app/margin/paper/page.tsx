@@ -313,7 +313,7 @@ export default function PaperTradesPage() {
 // beside what the paper record uses, with a check per item. If any row is red, the
 // scoreboard's "At LIVE sizing" column is describing a trade the executor would not place.
 interface ExecCfg {
-  live: { armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
+  live: { liveSources?: string[]; armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
   paper: { refEquity: number; baseRiskPct: number; stopPct: number; maxHoldH: number; exit: string };
   equity: number | null; equityAt?: string | null; leverageRung: number;
   ladder: { from: number; cap: number }[];
@@ -331,6 +331,7 @@ function LiveMirrorCard() {
         {cfg && (
           <p className="text-[10px]">
             <span className={cfg.live.armed ? "text-red-400 font-bold" : "text-muted-foreground/60"}>{cfg.live.armed ? "ARMED — real orders" : cfg.live.auto ? "validate-only" : "disarmed"}</span>
+            <span className="text-muted-foreground/60 ml-2">· sources armed: {cfg.live.liveSources?.length ? cfg.live.liveSources.join(", ") : "none"}</span>
             {cfg.live.ddBreakerTripped && <span className="text-red-400 ml-2">· drawdown breaker tripped</span>}
             <span className={`ml-2 ${cfg.allAligned ? "text-emerald-400" : "text-red-400 font-bold"}`}>{cfg.allAligned ? "live = paper ✓" : "live ≠ paper ✗"}</span>
           </p>

@@ -203,3 +203,24 @@ test("fifoWouldHitManual: only an OLDER manual position on the same pair and sid
   assert.equal(fifoWouldHitManual(bot, [bot, sameTime], isOurs, same), true);
   assert.equal(fifoWouldHitManual({ ...bot, openedAt: "" }, [bot, newerManual], isOurs, same), true);
 });
+
+import { isSourceArmed, tvSource } from "../src/lib/margin-live-risk";
+
+test("source arming: nothing is armed by default; only named sources trade live", () => {
+  assert.equal(isSourceArmed("", "manual"), false);
+  assert.equal(isSourceArmed(null, "selective"), false);
+  assert.equal(isSourceArmed("selective", "selective"), true);
+  assert.equal(isSourceArmed("selective, tv:esbueno", "tv:esbueno"), true);
+  assert.equal(isSourceArmed("selective", "manual"), false);
+  assert.equal(isSourceArmed("SELECTIVE", "selective"), true);
+  assert.equal(isSourceArmed("selective", undefined), false);   // undefined = manual
+});
+
+test("tvSource: a TradingView strategy name becomes a tv: sleeve, garbage becomes nothing", () => {
+  assert.equal(tvSource("Esbueno_Breakout"), "tv:esbueno_breakout");
+  assert.equal(tvSource(""), null);
+  assert.equal(tvSource(undefined), null);
+  assert.equal(tvSource("bad name"), null);
+  assert.equal(tvSource("x".repeat(40)), null);
+  assert.equal(tvSource("-lead"), null);
+});

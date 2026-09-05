@@ -1,0 +1,36 @@
+//@version=6
+// ESBUENO BREAKOUT — the crypto desk's `selective` rule, as a TradingView study.
+// Same detectors as src/lib/margin-scanner.ts: a 20-bar high pierced by the forming bar,
+// confluence scored from volume (≥3× the 20-bar average on the last closed bar), a
+// 3-bar momentum move (timeframe-scaled), and NOT stretched (RSI(14) < 75).
+// "High conviction" in the desk's terms needs ≥4 points; on a single chart the only
+// points available are volume (+2) and momentum (+1), so this study fires when BOTH are
+// present (3 points) — treat that as the chart-level proxy for high conviction, and let
+// the webhook's server-side scorer confirm across timeframes.
+//
+// Alert: "Any alert() function call", once per bar, webhook = your /api/webhook/tradingview.
+// Message is built by the script (below). Set one alert per chart/timeframe you want.
+indicator("Esbueno Breakout (selective)", overlay=true)
+
+movePct   = input.float(1.5, "3-bar move %", step=0.1)          // 1.5 on 5m, 2.0 on 15m
+strategy  = input.string("selective-tv", "Strategy name (sleeve)")
+secret    = input.string("", "Webhook secret")
+symbolOut = input.string("BTC/USD", "Symbol as the desk expects (e.g. BTC/USD)")
+
+hh20   = ta.highest(high[1], 20)
+broke  = high > hh20
+volAvg = ta.sma(volume[1], 20)
+volOk  = volume[1] >= 3 * volAvg
+back   = close[3]
+moveOk = (close - back) / back * 100 >= movePct
+rsi    = ta.rsi(close, 14)
+notStretched = rsi < 75
+
+fire = broke and volOk and moveOk and notStretched
+
+plotshape(fire, title="Breakout", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.small)
+plot(hh20, "20-bar high", color=color.new(color.gray, 60))
+
+if fire
+    msg = '{"secret":"' + secret + '","symbol":"' + symbolOut + '","side":"buy","strategy":"' + strategy + '","conviction":"high","note":"tv ' + timeframe.period + ' breakout vol+mom"}'
+    alert(msg, alert.freq_once_per_bar)

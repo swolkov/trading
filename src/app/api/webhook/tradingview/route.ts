@@ -1,5 +1,10 @@
 import crypto from "crypto";
 import { prisma } from "@/lib/db";
+import { tvSource } from "@/lib/margin-live-risk";
+import { isUsMarginSymbol } from "@/lib/kraken-pairs";
+import { STOCK_UNIVERSE, isStockSessionOpenAt } from "@/lib/stock-paper-model";
+import { getStockBars } from "@/lib/stock-bars";
+import { openStockPaperTrade } from "@/lib/stock-shadow";
 import { sendNotification } from "@/lib/notifications";
 import { getKrakenPrice } from "@/lib/kraken";
 import { executeAlert, type AlertOrder } from "@/lib/margin-executor";
@@ -85,6 +90,37 @@ export async function POST(request: Request) {
 
   const symbol = String(b.symbol ?? "").toUpperCase();
   const side = String(b.side ?? "").toLowerCase();
+  // A named TradingView strategy becomes its own paper sleeve ("tv:<name>") with the live
+  // candidate's container; no name = "manual" (a hand-drawn alert). Neither trades live
+  // unless named in kraken_margin_live_sources.
+  const source = tvSource(b.strategy) ?? "manual";
+  const market = String(b.market ?? "crypto").toLowerCase();
+
+  // STOCK alerts feed the stock paper book only (nothing connects to Robinhood). Long-only,
+  // same 2%/next-close fast container as the scanner's fast sleeve, own sleeve name.
+  if (market === "stock") {
+    if (!/^[A-Z][A-Z.]{0,5}$/.test(symbol) || side !== "buy") {
+      return Response.json({ error: "stock alerts: symbol must be a ticker and side buy (paper long-only)" }, { status: 400 });
+    }
+    if (!STOCK_UNIVERSE.includes(symbol)) {
+      return Response.json({ error: `${symbol} is not in the stock paper universe` }, { status: 400 });
+    }
+    if (!isStockSessionOpenAt(new Date())) {
+      return Response.json({ ok: false, note: "market closed — stock paper entries open only during the regular session" }, { status: 200 });
+    }
+    try {
+      const bars = await getStockBars(symbol, "1m", Date.now() - 2 * 3600_000);
+      const px = bars.length ? bars[bars.length - 1].c : 0;
+      if (!(px > 0)) return Response.json({ error: "no price" }, { status: 502 });
+      const convRaw = String(b.conviction ?? "").toLowerCase().trim();
+      const tier = convRaw === "high" || convRaw === "low" ? convRaw : "med";
+      const res = await openStockPaperTrade({ symbol, source: source === "manual" ? "tv:manual" : source, timeframe: String(b.timeframe ?? "tv").slice(0, 8), conviction: tier, score: 0, signalPrice: px });
+      return Response.json({ ok: true, market: "stock", source, opened: res.opened, reason: res.opened ? undefined : res.reason, price: px });
+    } catch (e) {
+      return Response.json({ error: String(e).slice(0, 200) }, { status: 500 });
+    }
+  }
+
   if (!/^[A-Z0-9]{2,10}\/USD$/.test(symbol) || !["buy", "sell", "close"].includes(side)) {
     return Response.json({ error: "symbol must be XXX/USD and side buy|sell|close" }, { status: 400 });
   }
@@ -93,6 +129,9 @@ export async function POST(request: Request) {
   // a TradingView alert could put a levered order on a market nobody intended. Closes are
   // exempt: a close only reduces risk, and refusing one could strand a position.
   // kraken_margin_symbols overrides (comma-separated); default is the three majors.
+  if (side === "close" && !isUsMarginSymbol(symbol)) {
+    return Response.json({ error: `close: ${symbol} is not a US-margin pair` }, { status: 400 });
+  }
   if (side !== "close") {
     const raw = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_symbols" } })
       .then((r) => r?.value).catch(() => null);
@@ -116,18 +155,19 @@ export async function POST(request: Request) {
     // so concurrent requests count each other and a burst cannot all pass the cap.
     const [{ id }] = await prisma.$queryRawUnsafe<{ id: number }[]>(
       `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source, sim_version)
-       VALUES ($1,$2,$3,$4,NULL,false,false,'pending','manual',$5) RETURNING id`,
-      symbol, side, leverage ?? null, note, SIM_VERSION,
+       VALUES ($1,$2,$3,$4,NULL,false,false,'pending',$6,$5) RETURNING id`,
+      symbol, side, leverage ?? null, note, SIM_VERSION, source,
     );
     reservedId = id;
-    const [{ recent, recentclose, dupes }] = await prisma.$queryRawUnsafe<{ recent: bigint; recentclose: bigint; dupes: bigint }[]>(
+    const [{ recent, recentclose, recentcloseall, dupes }] = await prisma.$queryRawUnsafe<{ recent: bigint; recentclose: bigint; recentcloseall: bigint; dupes: bigint }[]>(
       `SELECT
          count(*) FILTER (WHERE time > now() - interval '60 seconds' AND side <> 'close')::bigint AS recent,
          count(*) FILTER (WHERE time > now() - interval '60 seconds' AND side = 'close' AND symbol = $1)::bigint AS recentclose,
+         count(*) FILTER (WHERE time > now() - interval '60 seconds' AND side = 'close')::bigint AS recentcloseall,
          count(*) FILTER (WHERE time > now() - interval '120 seconds'
                             AND symbol = $1 AND side = $2
                             AND COALESCE(leverage, -1) = COALESCE($3::float, -1)
-                            AND note = $4 AND id <> $5)::bigint AS dupes
+                            AND note = $4 AND id < $5)::bigint AS dupes
        FROM tradingview_alerts`,
       symbol, side, leverage ?? null, note, id,
     );
@@ -135,7 +175,7 @@ export async function POST(request: Request) {
     // RETRIED) and has its own per-symbol cap: a legitimate retry is never blocked, while a
     // leaked secret cannot flood Kraken's per-key budget and starve the guardian's
     // protective calls.
-    if ((side !== "close" && Number(recent) > 30) || (side === "close" && Number(recentclose) > 10)) {
+    if ((side !== "close" && Number(recent) > 30) || (side === "close" && (Number(recentclose) > 10 || Number(recentcloseall) > 30))) {
       await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET exec_note='rate limited' WHERE id=$1`, id).catch(() => {});
       return Response.json({ error: "rate limited" }, { status: 429 });
     }
@@ -161,7 +201,7 @@ export async function POST(request: Request) {
   const convRaw = String(b.conviction ?? "").toLowerCase().trim();
   const conviction = convRaw === "high" || convRaw === "med" || convRaw === "low"
     ? (convRaw as "high" | "med" | "low") : undefined;
-  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note, conviction };
+  const alert: AlertOrder = { symbol, side: side as AlertOrder["side"], leverage, note, conviction, source };
   const result = duplicate
     ? { executed: false, validated: false, note: "duplicate alert within 2m — logged, not executed" }
     : await executeAlert(alert);
@@ -177,8 +217,8 @@ export async function POST(request: Request) {
     } else {
       await prisma.$executeRawUnsafe(
         `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, exec_note, source, sim_version)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',$9)`,
-        symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note, SIM_VERSION,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$10,$9)`,
+        symbol, side, leverage ?? null, note, markPrice, result.executed, result.validated, result.note, SIM_VERSION, source,
       );
     }
     await prisma.agentConfig.upsert({

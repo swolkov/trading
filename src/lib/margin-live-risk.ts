@@ -231,3 +231,21 @@ export function execLockHeldSince(raw: string | null | undefined): string | null
   const t = Date.parse(iso);
   return Number.isFinite(t) ? iso : null;
 }
+
+// ---------- SOURCE ARMING — the switch that lets a paper sleeve trade live ----------
+// Every entry carries a SOURCE: "manual" (a hand-drawn TradingView alert), "tv:<name>" (a
+// named TradingView strategy), or a scanner sleeve like "selective". Only sources listed in
+// kraken_margin_live_sources (comma-separated) may place a real order; everything else is
+// tracked on paper even when the executor is armed. Default: NOTHING is armed. This is the
+// per-strategy gate the go-live plan calls "arm ONE strategy".
+export function isSourceArmed(liveSourcesRaw: string | null | undefined, source: string | null | undefined): boolean {
+  const src = (source ?? "manual").trim().toLowerCase();
+  const list = (liveSourcesRaw ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  return src.length > 0 && list.includes(src);
+}
+
+/** A TradingView strategy name → source "tv:<name>", or null when absent/invalid. */
+export function tvSource(strategyRaw: unknown): string | null {
+  const s = String(strategyRaw ?? "").trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,31}$/.test(s) ? `tv:${s}` : null;
+}
