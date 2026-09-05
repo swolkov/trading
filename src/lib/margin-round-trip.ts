@@ -100,11 +100,15 @@ async function save(state: RtState): Promise<void> {
   await prisma.agentConfig.upsert({ where: { key: RT_KEY }, update: { value }, create: { key: RT_KEY, value } });
 }
 const log = (s: RtState, line: string) => { s.log.push(`${nowIso().slice(11, 19)} ${line}`); };
-/** A finished run must never keep rewriting live config: once its restore is clean, the
- *  saved snapshot is dropped so nothing can compare against it again. */
+/** Terminal transition. It never touches `savedCfg`: ONLY a clean `restoreCfg` may drop the
+ *  snapshot (see `dropSnapshotIfClean`), because the snapshot is what the restore reads. */
 function finish(s: RtState, stage: "done" | "failed" | "aborted", error?: string): void {
   s.stage = stage; s.finishedAt = nowIso();
   if (error) s.error = error;
+}
+/** After a restore that reported no failures the snapshot has done its job; dropping it
+ *  guarantees a finished run can never compare against it and rewrite live config again. */
+function dropSnapshotIfClean(s: RtState): void {
   if (!s.restoreFailed?.length) delete s.savedCfg;
 }
 
@@ -300,7 +304,7 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
       // stage stays "entering" → recovery decides whether a fill exists
     } finally {
       state.restoreFailed = await restoreCfg(state.savedCfg);
-      if (!state.restoreFailed.length && (state.stage === "failed" || state.stage === "done" || state.stage === "aborted")) delete state.savedCfg;
+      dropSnapshotIfClean(state);   // restore done; the snapshot exists from here on ONLY while a restore is still owed
       if (state.restoreFailed.length) {
         log(state, `⚠️ could not restore ${state.restoreFailed.join(", ")} — the guardian retries every tick`);
         await sendNotification(`🚨 Round trip: could not restore ${state.restoreFailed.join(", ")} after the entry. The guardian retries the restore every 5 min; until then check /margin/paper.`, "margin_urgent").catch(() => {});
@@ -376,25 +380,23 @@ async function recoverEntering(state: RtState): Promise<void> {
 export async function advanceRoundTrip(): Promise<RtState | null> {
   const state = await readRoundTrip();
   if (!state) return null;
-  // Any restore debt is paid first, every tick, until clean — a crash between arming and
-  // restore, or a DB hiccup during restore, must never leave the executor armed.
-  if (state.savedCfg && (state.stage === "open" || state.stage === "closing" || (state.restoreFailed?.length ?? 0) > 0)) {
-    const cur = await readCfg(CFG_KEYS).catch(() => null);
-    const debt = new Set(state.restoreFailed ?? []);
-    if (cur) for (const k of CFG_KEYS) if ((cur[k] ?? null) !== (state.savedCfg[k] ?? null) && (k === "kraken_margin_auto" || k === "kraken_margin_validate_only" || cur.kraken_margin_live_sources === RT_SOURCE || debt.size)) debt.add(k);
-    if (debt.size) {
-      const failed = await restoreCfg(state.savedCfg, [...debt]);
-      state.restoreFailed = failed;
-      log(state, failed.length ? `restore retry failed: ${failed.join(", ")}` : `restored ${[...debt].join(", ")}`);
-      if (!failed.length && (state.stage === "done" || state.stage === "failed" || state.stage === "aborted")) delete state.savedCfg;
-      await save(state);
-    }
+  // Any restore debt is paid first, every tick, until clean — a DB hiccup during restore must
+  // never leave the executor armed. The snapshot exists ONLY while a restore is owed (the
+  // start's finally drops it after a clean restore), so a finished run can never rewrite
+  // live config that Spencer set later.
+  if (state.savedCfg && (state.restoreFailed?.length ?? 0) > 0 && state.stage !== "entering") {
+    const failed = await restoreCfg(state.savedCfg);
+    state.restoreFailed = failed;
+    log(state, failed.length ? `restore retry failed: ${failed.join(", ")}` : "restore debt paid");
+    dropSnapshotIfClean(state);
+    await save(state);
   }
   if (state.stage === "entering") {
     // The start route (maxDuration 300s) may still be alive; only after that can "entering"
     // mean abandoned — restoring earlier could disarm the real pass mid-flight.
     if (Date.now() - new Date(state.startedAt).getTime() > 330_000) {
       state.restoreFailed = await restoreCfg(state.savedCfg);
+      dropSnapshotIfClean(state);
       await recoverEntering(state);
       await save(state);
     }
@@ -518,7 +520,7 @@ export async function abortRoundTrip(): Promise<RtState | null> {
   const state = await readRoundTrip();
   if (!state) return null;
   if (!["entering", "open", "closing"].includes(state.stage) && !state.restoreFailed?.length) return state;   // finished: nothing to abort, config untouched
-  state.restoreFailed = await restoreCfg(state.savedCfg);
+  if (state.savedCfg) { state.restoreFailed = await restoreCfg(state.savedCfg); dropSnapshotIfClean(state); }
   if (state.stage === "entering") { await recoverEntering(state); }
   if (state.stage === "open" || state.stage === "closing") {
     state.abortRequested = true;
