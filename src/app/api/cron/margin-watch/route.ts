@@ -350,6 +350,7 @@ export async function GET(request: Request) {
     const mine = orders.filter((o) => o.userref === MARGIN_USERREF);
     if (mine.length) {
       const positions = await getKrakenMarginPositions();
+      const positionsReadAtSec = Date.now() / 1000;   // stop ages are judged as of THIS read
       // SAFETY: getKrakenMarginPositions returns [] for an empty result, and Kraken can return
       // an empty OpenPositions during degradation — indistinguishable from a genuinely flat
       // account. If we treated that as flat, EVERY stop would look orphaned and get cancelled,
@@ -388,7 +389,7 @@ export async function GET(request: Request) {
             // Only a stop OLDER than a fresh entry could belong to the flattened book: an
             // entry's attached close[] can show in OpenOrders a beat before its position does,
             // and a two-minute-old stop cannot be that. Younger stops wait for a second sighting.
-            const justFlattened = hadBookLastRun.has(`${pairBase(o.pair)}|${o.side === "sell" ? "long" : "short"}`) && (nowSec - o.opentm) > 120;
+            const justFlattened = hadBookLastRun.has(`${pairBase(o.pair)}|${o.side === "sell" ? "long" : "short"}`) && (positionsReadAtSec - o.opentm) > 120;
             if (seen >= 2 || justFlattened) {
               try { await krakenCancelOrder(o.txid); sent.push(`orphan-stop-cancelled-${o.pair}`); } catch { /* already gone */ }
             } else {
@@ -572,7 +573,17 @@ export async function GET(request: Request) {
             return false;
           }
           if (withhold && (plan.place || plan.cancel.length)) { errors.push(`${pairRaw} (${why}): withholding stop changes on an unconfirmed empty book`); return false; }
-          if (!plan.place && !plan.cancel.length) return plan.covered;
+          if (!plan.place && !plan.cancel.length) {
+            // "Covered" on the run's snapshot is minutes old; a stop cancelled since would be
+            // stamped as protection. Re-read the orders (no lock needed to LOOK) and re-plan;
+            // only a still-clean plan counts.
+            try { orders = await krakenOpenOrders(); }
+            catch (e) { errors.push(`${pairRaw} (${why}): could not re-read orders to confirm cover (${String(e).slice(0, 60)})`); return false; }
+            plan = planReconcile({ side, vol: wantVol, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+            if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
+            if (!plan.place && !plan.cancel.length) return plan.covered;
+            if (withhold) { errors.push(`${pairRaw} (${why}): withholding stop changes on an unconfirmed empty book`); return false; }
+          }
           // THE MANUAL-BOOK BOUNDARY: with an OLDER manual position on this pair+side, any exit
           // order of ours — a stop included — would reduce Spencer's position first when it
           // fires. No order is placed or moved; existing cover stays; page every run.
@@ -587,8 +598,15 @@ export async function GET(request: Request) {
           if (!lock) { errors.push(`${pairRaw} (${why}): close lock busy — retry next run`); return false; }
           let out;
           try {
-            const fresh = await remainingVol();
-            if (fresh == null) { errors.push(`${pairRaw} (${why}): could not confirm remaining exposure — not acting`); return false; }
+            const freshRead = await remainingVol();
+            if (freshRead == null) { errors.push(`${pairRaw} (${why}): could not confirm remaining exposure — not acting`); return false; }
+            if (freshRead.book <= 0 && freshRead.botOnPairSide > 0) {
+              // This book is gone but ANOTHER bot book now holds the pair+side: its stops are
+              // that book's cover, planned on the next run. Nothing here may touch them.
+              errors.push(`${pairRaw} (${why}): book closed meanwhile; a newer bot book holds the pair+side — replanned next run`);
+              return false;
+            }
+            const fresh = freshRead.book;
             // Fresh ORDERS too: a webhook close may have re-covered or swept this book since
             // the run's order snapshot; planning against stale orders keeps phantom keepers
             // or doubles a stop that was already replaced.
@@ -597,6 +615,11 @@ export async function GET(request: Request) {
             plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
             if (!plan.place && !plan.cancel.length) return plan.covered;
+            if (fresh > 0 && freshRead.fifoHit) {
+              await sendNotification(`🚨 ${pairRaw} ${side}: a manual position OLDER than the bot's remaining book appeared since the snapshot — cover NOT changed (${plan.reason}); any stop of ours would reduce YOUR position first (FIFO). Close it by hand.`, "margin_urgent").catch(() => {});
+              errors.push(`${pairRaw}: fifo-blocked on re-read, cover left as is`);
+              return false;
+            }
             out = await applyReconcile(plan, io);
           } finally { await releaseCloseLock(lock); }
           if (out.placed) { sent.push(`stop-${plan.reason.replace(/[^a-z]+/gi, "-").toLowerCase()}-${pairRaw}`); }
@@ -615,12 +638,24 @@ export async function GET(request: Request) {
         // Reliable remaining exposure for this book (null = cannot tell).
         // Reliable remaining exposure for this book (null = cannot tell). Retried: right
         // after a fill, OpenPositions and TradeBalance can disagree for a call or two.
-        const remainingVol = async (): Promise<number | null> => {
+        // `book` is THIS book's volume; `botOnPairSide` is every bot position on the pair+side
+        // (any order). "Flat" for a sweep must mean the latter: a stop resting on the pair+side
+        // may belong to a NEWER bot book (a re-entry after a webhook close), and sweeping it
+        // would leave that book naked through its 6-minute grace.
+        const remainingVol = async (): Promise<{ book: number; botOnPairSide: number; fifoHit: boolean } | null> => {
           for (let attempt = 0; attempt < 2; attempt++) {
             const health = await getKrakenMarginHealth().catch(() => null);
             const after = await getKrakenMarginPositions().catch(() => null);
             if (after != null && !failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null)) {
-              return after.filter((p) => grp.some((g) => g.ordertxid === p.ordertxid) && p.side === side).reduce((s, p) => s + p.vol, 0);
+              const onSide = after.filter((p) => samePair(p.pair, pairRaw) && p.side === side && ownership.isOurs(p as unknown as { ordertxid: string; id: string }));
+              const mine = onSide.filter((p) => grp.some((g) => g.ordertxid === p.ordertxid));
+              return {
+                book: mine.reduce((s, p) => s + p.vol, 0),
+                botOnPairSide: onSide.reduce((s, p) => s + p.vol, 0),
+                // Re-judged on the FRESH list: a manual position opened since the snapshot that
+                // is older than what remains of this book makes any new stop of ours hit it first.
+                fifoHit: mine.some((p) => fifoWouldHitManual({ pair: pairRaw, side, openedAt: newestOpenedAt || p.openedAt }, after, isOursLoose, samePair)),
+              };
             }
             await new Promise((r) => setTimeout(r, 1000));
           }
@@ -643,8 +678,15 @@ export async function GET(request: Request) {
           try {
           // Fresh volume under the lock — a webhook close may have flattened this book since
           // the snapshot; a reduce-only order for a gone book would reduce the NEXT position.
-          const freshVol = await remainingVol();
-          if (freshVol == null) { errors.push(`${why} ${pairRaw}: could not confirm exposure before closing — not sent`); return "unconfirmed"; }
+          const freshRead = await remainingVol();
+          if (freshRead == null) { errors.push(`${why} ${pairRaw}: could not confirm exposure before closing — not sent`); return "unconfirmed"; }
+          const freshVol = freshRead.book;
+          if (freshVol <= 0 && freshRead.botOnPairSide > 0) {
+            // Gone, but a NEWER bot book holds the pair+side — its stops stay; it is planned
+            // next run. This book simply drops out.
+            delete managedNext[stateKey]; delete nextBreached[stateKey];
+            return "closed";
+          }
           if (freshVol <= 0) {
             // Flattened elsewhere between the snapshot and the lock (a webhook close). Sweep
             // whatever that close left resting NOW — a stop of ours on a flat pair+side is not
@@ -653,6 +695,14 @@ export async function GET(request: Request) {
             let sweepOk = false;
             try {
               orders = await krakenOpenOrders();
+              if (!orders.length) {
+                // An EMPTY read is this account's normal state and also what a bad read looks
+                // like. Nothing to cancel that we can see; keep the book managed one more run
+                // so 3b's single-sighting rule sweeps anything that was hidden.
+                if (prev) managedNext[stateKey] = prev;
+                delete nextBreached[stateKey];
+                return "closed";
+              }
               const sweep = planReconcile({ side, vol: 0, targetLevel: 0, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
               const out = sweep.cancel.length ? await applyReconcile(sweep, io) : null;
               sweepOk = !out || out.failedCancels.length === 0;
@@ -669,7 +719,18 @@ export async function GET(request: Request) {
           // Whatever the response said, the truth is the remaining exposure. A partial fill
           // keeps exact cover; zero sweeps every stop of ours; an unreadable state leaves
           // everything as it was and pages.
-          const left = await remainingVol();
+          let leftRead = await remainingVol();
+          // A partial fill (market-price protection) leaves a remainder that the breach/time
+          // stop still wants flat: one more reduce-only market close for exactly what is left,
+          // before falling back to covering it.
+          if (leftRead != null && leftRead.book > 0 && sendErr == null) {
+            try {
+              await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "market", volume: leftRead.book.toFixed(meta.lotDecimals), leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
+              sentVol += leftRead.book;
+              leftRead = await remainingVol();
+            } catch (err) { sendErr = err; }
+          }
+          const left = leftRead?.book ?? null;
           if (left == null) {
             await sendNotification(`🚨 ${why} on ${pairRaw}: close ${sendErr ? "errored" : "sent"} but the remaining position could not be confirmed — stops LEFT IN PLACE. Check Kraken now.${sendErr ? ` ${String(sendErr).slice(0, 120)}` : ""}`, "margin_urgent").catch(() => {});
             errors.push(`${why} ${pairRaw}: unconfirmed`);
@@ -687,11 +748,25 @@ export async function GET(request: Request) {
           const wantLevel = bestResting ?? initialStop;
           let plan = planReconcile({ side, vol: left, targetLevel: wantLevel, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
           if (plan.blocked && left > 0 && /through the market/.test(plan.blocked)) {
-            plan = planReconcile({ side, vol: left, targetLevel: guardLevel(), px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
+            // The run's px is a bar close from minutes ago; the guard level must sit beyond
+            // the market NOW, else the planner rejects it again and the remainder stays naked
+            // beside an oversized attached stop.
+            let pxNow = px;
+            try {
+              const tick = await krakenPublic("Ticker", { pair: publicPair });
+              const c = parseFloat(((Object.values(tick)[0] as { c?: string[] })?.c?.[0]) ?? "0");
+              if (c > 0) pxNow = c;
+            } catch { /* keep px */ }
+            const guardNow = side === "long" ? pxNow * (1 - 0.003) : pxNow * (1 + 0.003);
+            plan = planReconcile({ side, vol: left, targetLevel: guardNow, px: pxNow, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
           }
           let covered = false;
           if (plan.blocked) errors.push(`${why} ${pairRaw}: remainder not re-covered — ${plan.blocked}`);
           else if (!plan.place && !plan.cancel.length) covered = plan.covered;
+          else if (left > 0 && leftRead?.fifoHit) {
+            await sendNotification(`🚨 ${why} on ${pairRaw}: ${left} remains behind a manual position OLDER than it — cover NOT changed; a stop of ours would reduce YOUR position first (FIFO). Close it by hand.`, "margin_urgent").catch(() => {});
+            errors.push(`${why} ${pairRaw}: remainder fifo-blocked, cover left as is`);
+          }
           else {
             const out = await applyReconcile(plan, io);
             covered = out.covered && out.failedCancels.length === 0;

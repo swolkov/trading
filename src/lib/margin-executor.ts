@@ -340,16 +340,22 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       await sendNotification(`🚨 Close on ${pair} NOT attempted — another close/reconcile has held the lock for over 90s. Retry the close; check Kraken now.`, "margin_urgent").catch(() => {});
       return { executed: false, validated: false, note: "close lock held by another operation for >90s — not attempted, retry" };
     }
+    // Everything below must finish inside the lease (CLOSE_LOCK_TTL_MS): the budgets are
+    // measured from ACQUISITION, so a long cancel list cannot push the orders past it.
+    const lockAt = Date.now();
     try {
       // Our RESTING ENTRY orders on the pair go first: a partially filled maker entry could
       // otherwise keep filling after the flatten and leave a fresh bot tranche behind a
       // "closed" result. Then the positions are read, so the volume to flatten is current.
       try {
         const restingEntries = (await krakenOpenOrders()).filter((o) => o.userref === MARGIN_USERREF && !o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair));
-        for (const o of restingEntries) { try { await krakenCancelOrder(o.txid); } catch { await sendNotification(`⚠️ Could not cancel resting entry ${o.txid} on ${pair} before the close — cancel it on Kraken.`, "margin_urgent").catch(() => {}); } }
+        for (const o of restingEntries) {
+          if (Date.now() - lockAt > 45_000) { await sendNotification(`⚠️ ${pair}: stopped cancelling resting entries after 45s (${restingEntries.length} listed) — cancel the rest on Kraken.`, "margin_urgent").catch(() => {}); break; }
+          try { await krakenCancelOrder(o.txid); } catch { await sendNotification(`⚠️ Could not cancel resting entry ${o.txid} on ${pair} before the close — cancel it on Kraken.`, "margin_urgent").catch(() => {}); }
+        }
       } catch { /* the post-close sweep re-reads orders and reports its own failures */ }
-      const all = (await getKrakenMarginPositions())
-        .filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
+      const allAccount = await getKrakenMarginPositions();
+      const all = allAccount.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
       // OWNERSHIP FILTER: only flatten positions this bot opened. Kraken margin positions
       // carry no userref, so without this a close alert market-closes Spencer's own
       // hand-opened position on the same pair — his second book, destroyed by a trade he
@@ -413,9 +419,30 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       if (!positions.length) {
         for (const m of preNotes) await sendNotification(m, "margin_urgent").catch(() => {});
         if (fifoBlocked.length) return { executed: false, validated: false, note: `close refused: an older manual position on ${pair} would be closed first (FIFO) — bot positions left open with their stops` };
-        const note = skipped.length > 0
+        // Nothing of ours to close — but a stop of ours may still rest on the pair (a book
+        // flattened by hand, a lost sweep). On a flat side that stop is not protection: it
+        // OPENS, or reduces someone else's position, when it fires. Sweep it, on a RELIABLE
+        // read only, and only for sides where the bot provably holds nothing.
+        let swept = 0;
+        if (!closeAll && !ownership.ledgerCorrupt) {
+          try {
+            const health = await getKrakenMarginHealth().catch(() => null);
+            if (!failClosedOnEmptyPositions(allAccount.length, health?.marginUsedRaw ?? null)) {
+              const orders = await krakenOpenOrders();
+              for (const side of ["long", "short"] as const) {
+                if (all.some((p) => p.side === side && isOurs(p))) continue;
+                const closeSide = side === "long" ? "sell" : "buy";
+                const ours = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair) && o.side === closeSide);
+                const out = await applyReconcile(planReconcile({ side, vol: 0, targetLevel: 0, px: 0, priceDecimals: 2, lotDecimals: 4 }, ours), { placeStop: async () => undefined, cancel: (t) => krakenCancelOrder(t) });
+                swept += out.cancelled.length;
+                if (out.failedCancels.length) await sendNotification(`🚨 ${pair} ${side} is flat but stop(s) ${out.failedCancels.join(", ")} could NOT be cancelled — a resting non-reduce-only stop OPENS if it fires. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
+              }
+            }
+          } catch { /* the guardian sweeps orphans within two runs */ }
+        }
+        const note = (skipped.length > 0
           ? `close alert: ${skipped.length} position(s) on ${pair} are NOT the bot's — left untouched. Position ids: ${skipped.map((p) => p.ordertxid || p.id).join(", ")}. To flatten the pair deliberately set kraken_margin_close_all_positions=${alert.symbol.toUpperCase()} (or ALL). ⚠️ Adopting an id via kraken_margin_adopt_txids puts that position under the bot's FULL container (3% stop, ratchet, 48h time stop) — only adopt positions the bot actually opened.`
-          : "close alert but no open position";
+          : "close alert but no open position") + (swept ? ` (swept ${swept} stranded stop(s))` : "");
         if (skipped.length > 0) await sendNotification(`⚠️ ${note}`, "margin_urgent");
         return { executed: false, validated: false, note };
       }
@@ -458,7 +485,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       for (const p of positions) {
         // Reserve time for the post-close reconcile: never let a long tranche list run the
         // route out before protection is re-set.
-        if (Date.now() - closeStartedAt > 60_000) { pending.push(`⚠️ ${pair}: stopped after ${txids.length} tranche(s) to leave time to re-set protection — retry the close for the rest.`); break; }
+        if (Date.now() - closeStartedAt > 60_000 || Date.now() - lockAt > 150_000) { pending.push(`⚠️ ${pair}: stopped after ${txids.length} tranche(s) to leave time to re-set protection — retry the close for the rest.`); break; }
         // Every tranche after the first re-reads: a fill on Kraken's side between two of our
         // submissions (our own stop firing, a manual close) shrinks or removes the tranche,
         // and a reduce-only order for volume that is no longer there nets against the NEXT
@@ -528,7 +555,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           const levMax = Math.max(2, ...remainingBot.map((p) => p.leverage));
           const frac = fracs.length ? Math.min(...fracs) : clampLiveStopFrac(await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), levMax);
           const level = bestResting ?? (side === "long" ? entryPx * (1 - frac) : entryPx * (1 + frac));
-          const plan = planReconcile({ side, vol, targetLevel: level, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, ours);
+          let plan = planReconcile({ side, vol, targetLevel: level, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, ours);
+          if (plan.blocked && vol > 0 && px > 0 && /through the market/.test(plan.blocked)) {
+            // The entry-relative level is already breached (this close came late, or partially
+            // filled): cover the remainder just beyond the market rather than leave it beside an
+            // oversized attached stop — same fallback the guardian uses.
+            const guard = side === "long" ? px * (1 - 0.003) : px * (1 + 0.003);
+            plan = planReconcile({ side, vol, targetLevel: guard, px, priceDecimals: closeMeta.priceDecimals, lotDecimals: closeMeta.lotDecimals }, ours);
+          }
           if (plan.blocked) { pending.push(`🚨 ${pair} ${side}: could not reconcile stops after the close — ${plan.blocked}. Stops LEFT IN PLACE; the guardian retries in ≤5 min. Check Kraken.`); continue; }
           if (!plan.place && !plan.cancel.length) continue;
           // THE MANUAL-BOOK BOUNDARY (same rule as the guardian): with an OLDER manual position
@@ -578,7 +612,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         validated: validate,
         txid: txids[0],
         note: txids.length > 0
-          ? `close sent for ${txids.length} of ${positions.length} position(s) on ${pair}${confirmedGone ? " — confirmed flat" : " — verify on Kraken"}`
+          ? `close sent for ${txids.length} of ${positions.length} position(s) on ${pair}${confirmedGone && !fifoBlocked.length ? " — confirmed flat" : " — verify on Kraken"}`
           : `close: nothing sent on ${pair} (targets already gone)`,
       };
     } catch (e) {
@@ -619,7 +653,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // anything later) crosses it. kraken_margin_symbols unset = the whole US universe above
   // (the scanner's sleeves trade all of it); set = ONLY those symbols may open a position.
   {
-    const rawAllow = await cfg("kraken_margin_symbols");
+    let rawAllow: string | null;
+    try { rawAllow = await cfgStrict("kraken_margin_symbols"); }
+    catch (e) { return { executed: false, validated: false, note: `entry refused: could not read kraken_margin_symbols (${String(e).slice(0, 60)}) — an unreadable allowlist is a closed one` }; }
     const allow = (rawAllow ?? "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
     if (allow.length && !allow.includes(alert.symbol.toUpperCase())) {
       return { executed: false, validated: false, note: `entry refused: ${alert.symbol} is not in kraken_margin_symbols (${allow.join(", ")})` };
@@ -884,7 +920,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
     // The AddOrder round trip (≤15s) plus the ledger write plus recovery must fit before the
     // calling route is killed; an order accepted after that point would be unowned.
-    if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 45_000) {
+    if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 75_000) {
       return { executed: false, validated: false, note: "entry refused: not enough route time left to send AND record ownership — next scan" };
     }
     let res;
