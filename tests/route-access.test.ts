@@ -9,6 +9,7 @@ test("only sign-in, cron, and webhook paths are public", () => {
     "/api/cron/kraken",
     "/api/cron/margin-watch",
     "/api/cron/margin-scan",
+    "/api/cron/stock-scan",
     "/api/webhook/tradingview",
   ]) {
     assert.equal(isPublicPath(pathname), true, pathname);
@@ -19,6 +20,8 @@ test("paper scoreboard and the paper page are owner-only", () => {
   assert.equal(isPublicPath("/margin/paper"), false);
   assert.equal(isPublicPath("/api/margin/scoreboard"), false);
   assert.equal(isPublicPath("/api/margin/mode"), false);
+  assert.equal(isPublicPath("/stocks/paper"), false);
+  assert.equal(isPublicPath("/api/stocks/paper"), false);
 });
 
 test("the retired public futures track record is no longer public", () => {

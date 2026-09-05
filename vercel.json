@@ -11,6 +11,10 @@
     {
       "path": "/api/cron/margin-scan",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/stock-scan",
+      "schedule": "*/15 13-21 * * 1-5"
     }
   ]
 }
