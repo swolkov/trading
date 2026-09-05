@@ -17,6 +17,7 @@ interface ConvictionTier {
 interface ShadowScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number;
   avgWin: number; avgLoss: number; open: number; openUnrealized?: number; legacyOpen?: number; byConviction?: ConvictionTier[];
+  nonUsOpen?: number; nonUsResolved?: number;
 }
 interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -90,7 +91,14 @@ export default function PaperTradesPage() {
           Auto paper is the live-candidate sleeve only: <span className="text-foreground/80">high-conviction 5m/15m longs, not stretched</span>.
           Shorts on this sleeve hit 17% and lost $3.2k — they no longer open. Stretched longs were a coin-flip — skipped.
           1h/4h and both swing containers are paused (not the 3%/48h game). Retired: fast-tight, sweep-fade, scanner spray, selective-swing.
-          This is not &quot;always profitable.&quot; The quality long cut so far is 19 trades, 79% hit, ~$300 avg at $5k sizing — still one stop in five, and too few days to arm live.
+          This is not &quot;always profitable.&quot; The scoreboard below is the only number that counts, and it needs 30+ resolved over 7+ days before anything is armed.
+        </p>
+        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+          <span className="text-foreground/80">Universe: only coins a US retail Kraken account can actually margin-trade</span> — 26 scanned
+          (BTC 20×, the majors 10×, the rest 5×/3×/2×). Until Sep 5 the desk scanned 37 coins and 19 of them were not on Kraken&apos;s US list at all;
+          they produced most of the resolved trades and every dollar of the loss. Those trades are now excluded from every statistic on this page
+          {(score?.shadow?.nonUsResolved ?? 0) > 0 && <> (<span className="text-foreground/80">{score?.shadow?.nonUsResolved} resolved</span> set aside)</>}
+          {" "}and their open positions are winding down, badged <span className="text-amber-400/70">non-US</span> in the log. Paper measures what live can take, nothing else.
         </p>
       </div>
 
@@ -99,7 +107,7 @@ export default function PaperTradesPage() {
         <div className="rounded-xl border border-border bg-card p-8 text-center">
           <p className="text-sm text-muted-foreground/60">No paper trades yet.</p>
           <p className="text-[11px] text-muted-foreground/40 mt-1">
-            The scanner still watches every coin. Paper opens only high-conviction 5m/15m longs that are not stretched. They&apos;ll appear here and score themselves — check back soon.
+            The scanner watches every US-tradeable margin coin. Paper opens only high-conviction 5m/15m longs that are not stretched. They&apos;ll appear here and score themselves — check back soon.
           </p>
         </div>
       )}
@@ -116,6 +124,9 @@ export default function PaperTradesPage() {
               )}
               {(score.shadow.legacyOpen ?? 0) > 0 && (
                 <> · <span title="Opened before the Sep 2 measurement upgrade — still tracked to their finish, but excluded from every statistic on this page">+{score.shadow.legacyOpen} winding down (old measurement)</span></>
+              )}
+              {(score.shadow.nonUsOpen ?? 0) > 0 && (
+                <> · <span title="On coins a US retail Kraken account cannot margin-trade — tracked to their finish, but excluded from every statistic on this page because the live book could never take them">+{score.shadow.nonUsOpen} winding down (non-US coins)</span></>
               )}
               {" "}· no real money
             </p>

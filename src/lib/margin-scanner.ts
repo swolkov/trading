@@ -8,29 +8,32 @@
 // on the right chart at the right moment and to build a scored record — not to trade.
 import { getKrakenOHLC, type KrakenBar } from "@/lib/kraken-margin";
 
-// Curated liquid margin universe (Kraken public pair codes). The 10x tier plus the most
-// liquid 5x names; HYPE included because Spencer trades it. Kept as a fixed list so the
-// scan is deterministic and fast rather than re-deriving the universe every run.
-// The liquid US-margin universe — curated from live Kraken data (Sep 2026): every USD margin
-// pair with a tight spread (<~0.15%), EXCLUDING stablecoins & gold (USDT/USDC/DAI/PAXG/XAUT —
-// they don't move) and the wide-spread long tail (spread eats the edge). Watching broadly is
-// free; the DISCIPLINE is in trading selectively (high-conviction, risk-managed), not in
-// narrowing what we watch. ~37 coins × 5 timeframes = the real tradeable field.
+// THE SCAN UNIVERSE = the US-retail margin list (kraken-pairs.ts US_MARGIN_MAX_LEVERAGE),
+// minus the two that don't move (USDC stablecoin, PAXG gold). Every coin here is one the
+// live book can actually margin-trade, and a unit test enforces that.
+//
+// ⚠️ HISTORY, do not repeat: from Sep 1–5 2026 this list held 37 coins curated from
+// Kraken's public AssetPairs (the INTERNATIONAL product). 19 of them — BNB XMR TIA TON APT
+// ICP INJ ARB OP ATOM ETC FIL POL ONDO BONK WLD JUP STX PYTH — cannot be margin-traded by a
+// US retail account at all. They produced 170 of 266 resolved paper trades and −$12.7k
+// while the 18 tradeable coins netted +$3.5k. The record was measuring a universe live
+// could never run. Watching what you cannot trade is not "free": it fills the sample with
+// the wrong population. Spreads re-checked Sep 5 (all < 0.10%); candles verified for
+// every new name.
 export const SCAN_COINS: { name: string; symbol: string }[] = [
+  // 20× / 10× tier
   { name: "BTC", symbol: "BTC/USD" }, { name: "ETH", symbol: "ETH/USD" }, { name: "SOL", symbol: "SOL/USD" },
   { name: "XRP", symbol: "XRP/USD" }, { name: "DOGE", symbol: "DOGE/USD" }, { name: "ADA", symbol: "ADA/USD" },
   { name: "AVAX", symbol: "AVAX/USD" }, { name: "LINK", symbol: "LINK/USD" }, { name: "LTC", symbol: "LTC/USD" },
-  { name: "DOT", symbol: "DOT/USD" }, { name: "SUI", symbol: "SUI/USD" }, { name: "AAVE", symbol: "AAVE/USD" },
-  { name: "HYPE", symbol: "HYPE/USD" },
-  // Added Sep 2026 from the live tradeable-universe scan (liquid, tight-spread margin coins):
-  { name: "BNB", symbol: "BNB/USD" }, { name: "XMR", symbol: "XMR/USD" }, { name: "TRX", symbol: "TRX/USD" },
-  { name: "XLM", symbol: "XLM/USD" }, { name: "HBAR", symbol: "HBAR/USD" }, { name: "TIA", symbol: "TIA/USD" },
-  { name: "TON", symbol: "TON/USD" }, { name: "APT", symbol: "APT/USD" }, { name: "ICP", symbol: "ICP/USD" },
-  { name: "INJ", symbol: "INJ/USD" }, { name: "ARB", symbol: "ARB/USD" }, { name: "OP", symbol: "OP/USD" },
-  { name: "ATOM", symbol: "ATOM/USD" }, { name: "ETC", symbol: "ETC/USD" }, { name: "FIL", symbol: "FIL/USD" },
-  { name: "POL", symbol: "POL/USD" }, { name: "ONDO", symbol: "ONDO/USD" }, { name: "PEPE", symbol: "PEPE/USD" },
-  { name: "BONK", symbol: "BONK/USD" }, { name: "WLD", symbol: "WLD/USD" }, { name: "JUP", symbol: "JUP/USD" },
-  { name: "STX", symbol: "STX/USD" }, { name: "CRV", symbol: "CRV/USD" }, { name: "PYTH", symbol: "PYTH/USD" },
+  { name: "SUI", symbol: "SUI/USD" },
+  // 5× tier
+  { name: "AAVE", symbol: "AAVE/USD" }, { name: "BCH", symbol: "BCH/USD" }, { name: "CRV", symbol: "CRV/USD" },
+  { name: "DOT", symbol: "DOT/USD" }, { name: "HBAR", symbol: "HBAR/USD" }, { name: "HYPE", symbol: "HYPE/USD" },
+  { name: "PEPE", symbol: "PEPE/USD" }, { name: "SHIB", symbol: "SHIB/USD" }, { name: "TRX", symbol: "TRX/USD" },
+  { name: "UNI", symbol: "UNI/USD" }, { name: "ZEC", symbol: "ZEC/USD" },
+  // 3× / 2× tier
+  { name: "PENGU", symbol: "PENGU/USD" }, { name: "NEAR", symbol: "NEAR/USD" }, { name: "RENDER", symbol: "RENDER/USD" },
+  { name: "ALGO", symbol: "ALGO/USD" }, { name: "XLM", symbol: "XLM/USD" },
 ];
 
 // Timeframes scanned for awareness. 5m is the fastest — it's where intraday breakouts

@@ -8,7 +8,7 @@
 // per-strategy time stop. The evaluator walks each open signal across 1-min candles and
 // resolves it the moment a level is hit. Awareness only — it places nothing.
 import { prisma } from "@/lib/db";
-import { pairBase } from "@/lib/kraken-pairs";
+import { pairBase, isUsMarginSymbol, US_MARGIN_SYMBOLS_SQL } from "@/lib/kraken-pairs";
 import { getKrakenOHLC } from "@/lib/kraken-margin";
 import {
   LIVE_RISK_DEFAULT_PCT,
@@ -103,6 +103,15 @@ export const SIM_VERSION = "v2";
 // forgets the stamp quarantines its rows (they read as pre-cohort via the backfill)
 // instead of silently polluting the statistics that gate real money.
 export const SIM_COHORT_SQL = `sim_version='${SIM_VERSION}'`;
+
+// THE RECORD = current measurement cohort AND a pair the live book can actually trade.
+// Every statistic that feeds a verdict (scoreboard, strategy table, edges, milestones)
+// reads through this predicate. Paper trades on non-US pairs are still opened by nothing
+// (the scanner universe is US-only now), still RESOLVED by the evaluator (an open trade
+// must reach its finish), still visible in the log (badged), but never counted — a
+// strategy cannot earn REAL EDGE on coins the executor would refuse. Found Sep 5 2026:
+// 19 of 37 scanned coins were untradeable and carried every dollar of the loss.
+export const RECORD_SQL = `${SIM_COHORT_SQL} AND ${US_MARGIN_SYMBOLS_SQL}`;
 
 export interface ShadowResolution {
   id: number; symbol: string; side: string; entry: number; exit: number;
@@ -401,6 +410,9 @@ export interface ShadowScore {
   legacyOpen: number;   // open trades from a PRIOR measurement cohort, still winding down —
                         // shown so the live book never looks empty while they exist, but
                         // excluded from every statistic above
+  nonUsOpen: number;      // current-cohort trades on pairs a US account cannot margin-trade:
+  nonUsResolved: number;  // resolved to their finish and logged, but excluded from every
+                          // statistic above (the live book could never have taken them)
 }
 export async function shadowScore(): Promise<ShadowScore> {
   await ensureShadowColumns();
@@ -411,21 +423,29 @@ export async function shadowScore(): Promise<ShadowScore> {
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
        COALESCE(sum(shadow_unrealized) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open'),0)::float AS openfloat
-     FROM tradingview_alerts WHERE ${SIM_COHORT_SQL}`,
+     FROM tradingview_alerts WHERE ${RECORD_SQL}`,
   );
   const [wl] = await prisma.$queryRawUnsafe<{ avgwin: number | null; avgloss: number | null }[]>(
     `SELECT
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss
-     FROM tradingview_alerts WHERE ${SIM_COHORT_SQL}`,
+     FROM tradingview_alerts WHERE ${RECORD_SQL}`,
   );
   const tiers = await prisma.$queryRawUnsafe<{ tier: string; resolved: bigint; wins: bigint; total: number | null }[]>(
     `SELECT COALESCE(conviction,'untagged') AS tier,
        count(*)::bigint AS resolved,
        count(*) FILTER (WHERE shadow_pnl > 0)::bigint AS wins,
        COALESCE(sum(shadow_pnl),0)::float AS total
-     FROM tradingview_alerts WHERE shadow_status='resolved' AND ${SIM_COHORT_SQL}
+     FROM tradingview_alerts WHERE shadow_status='resolved' AND ${RECORD_SQL}
      GROUP BY COALESCE(conviction,'untagged')`,
+  );
+  const [nonUs] = await prisma.$queryRawUnsafe<{ open: bigint; resolved: bigint }[]>(
+    // The complement of the record within the current cohort: what the universe fix
+    // excluded. Shown so the exclusion is visible on the page, never silent.
+    `SELECT
+       count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open,
+       count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved
+     FROM tradingview_alerts WHERE ${SIM_COHORT_SQL} AND NOT (${US_MARGIN_SYMBOLS_SQL})`,
   );
   const [legacy] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
     // COALESCE, not NOT(...): a NULL sim_version row would vanish from BOTH cohorts
@@ -456,6 +476,8 @@ export async function shadowScore(): Promise<ShadowScore> {
     open: Number(agg.open),
     openUnrealized: agg.openfloat || 0,
     legacyOpen: Number(legacy.n),
+    nonUsOpen: Number(nonUs.open),
+    nonUsResolved: Number(nonUs.resolved),
     byConviction,
   };
 }
@@ -553,7 +575,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
          / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
          FILTER (WHERE shadow_status='resolved') AS livestd
      FROM tradingview_alerts
-     WHERE ${SIM_COHORT_SQL}
+     WHERE ${RECORD_SQL}
      GROUP BY COALESCE(source,'manual')`,
     liveRiskPct, paperRiskPct,
   );
@@ -618,7 +640,7 @@ async function edgeBy(groupExpr: string, labelFn: (k: string) => string): Promis
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open
      FROM tradingview_alerts
-     WHERE side IN ('buy','sell') AND ${SIM_COHORT_SQL}
+     WHERE side IN ('buy','sell') AND ${RECORD_SQL}
      GROUP BY ${groupExpr}`,
   );
   return rows
@@ -647,6 +669,7 @@ export interface PaperTradeRow {
   leverage: number | null; conviction: string | null; entry: number | null;
   exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
   simVersion: string;   // measurement cohort — the log shows all cohorts, labeled
+  usTradeable: boolean; // false = a pair the live book cannot margin-trade; logged, not counted
 }
 export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
   await ensureShadowColumns();
@@ -682,5 +705,6 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
     simVersion: r.sim_version ?? SIM_VERSION,
+    usTradeable: isUsMarginSymbol(r.symbol),
   }));
 }

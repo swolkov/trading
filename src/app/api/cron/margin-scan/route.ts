@@ -237,7 +237,7 @@ export async function GET(request: Request) {
         return `${s.label}: ${s.resolved} res, ${s.hitRate != null ? (s.hitRate * 100).toFixed(0) : "—"}% win · GROSS ${s.grossPnl >= 0 ? "+" : ""}$${s.grossPnl.toFixed(0)} − fees $${s.fees.toFixed(0)} = NET ${net >= 0 ? "+" : ""}$${net.toFixed(0)} → *${s.verdict}*`;
       }).join("\n");
       await sendNotification(
-        `📊 *MILESTONE — ${score.resolved} resolved paper trades.* Verdict per strategy (net of fees, statistically judged):\n${lines}\n\n` +
+        `📊 *MILESTONE — ${score.resolved} resolved paper trades* (US-tradeable pairs only — the universe live can run). Verdict per strategy (net of fees, statistically judged):\n${lines}\n\n` +
         `Verdicts: "REAL EDGE" = positive net + statistically significant (t≥2, not luck). "promising" = positive but could be luck — needs more. ` +
         `Overall net $${score.totalPnl.toFixed(0)}. Still 100% paper. Arming only when a strategy hits REAL EDGE over a large sample — never on luck.`,
         "margin_results",

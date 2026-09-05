@@ -3,6 +3,8 @@
 import { PrismaClient } from "../src/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
+// Same universe predicate the page uses — the desk dump must agree with /margin/paper.
+import { US_MARGIN_SYMBOLS_SQL } from "../src/lib/kraken-pairs";
 
 const SIM_VERSION = "v2";
 const LABELS: Record<string, string> = {
@@ -102,7 +104,7 @@ async function main() {
          / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
          FILTER (WHERE shadow_status='resolved') AS livestd
      FROM tradingview_alerts
-     WHERE sim_version='${SIM_VERSION}'
+     WHERE sim_version='${SIM_VERSION}' AND ${US_MARGIN_SYMBOLS_SQL}
      GROUP BY COALESCE(source,'manual')
      ORDER BY COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0) DESC`,
     livePct, paperPct,
@@ -128,7 +130,7 @@ async function main() {
        count(*)::bigint AS resolved,
        count(*) FILTER (WHERE shadow_pnl > 0)::bigint AS wins,
        COALESCE(sum(shadow_pnl),0)::float AS total
-     FROM tradingview_alerts WHERE shadow_status='resolved' AND sim_version='${SIM_VERSION}'
+     FROM tradingview_alerts WHERE shadow_status='resolved' AND sim_version='${SIM_VERSION}' AND ${US_MARGIN_SYMBOLS_SQL}
      GROUP BY COALESCE(conviction,'untagged')`,
   );
   console.log("\nCONVICTION (resolved v2, all sleeves — includes retired losers)");
