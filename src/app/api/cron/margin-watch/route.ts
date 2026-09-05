@@ -577,8 +577,14 @@ export async function GET(request: Request) {
             // "Covered" on the run's snapshot is minutes old; a stop cancelled since would be
             // stamped as protection. Re-read the orders (no lock needed to LOOK) and re-plan;
             // only a still-clean plan counts.
-            try { orders = await krakenOpenOrders(); }
+            const hadStops = ourStopsOnBook().length > 0;
+            let reread: typeof orders;
+            try { reread = await krakenOpenOrders(); }
             catch (e) { errors.push(`${pairRaw} (${why}): could not re-read orders to confirm cover (${String(e).slice(0, 60)})`); return false; }
+            // Stops seen a minute ago and none now, with the book still open, is what a bad
+            // read looks like — not a naked book. Placing beside a hidden attached stop doubles it.
+            if (hadStops && reread.length === 0) { errors.push(`${pairRaw} (${why}): orders re-read empty after showing stops — treated as unreliable, not naked`); return false; }
+            orders = reread;
             plan = planReconcile({ side, vol: wantVol, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
             if (!plan.place && !plan.cancel.length) return plan.covered;
@@ -610,8 +616,12 @@ export async function GET(request: Request) {
             // Fresh ORDERS too: a webhook close may have re-covered or swept this book since
             // the run's order snapshot; planning against stale orders keeps phantom keepers
             // or doubles a stop that was already replaced.
-            try { orders = await krakenOpenOrders(); }
+            const hadStopsLocked = ourStopsOnBook().length > 0;
+            let rereadLocked: typeof orders;
+            try { rereadLocked = await krakenOpenOrders(); }
             catch (e) { errors.push(`${pairRaw} (${why}): could not re-read orders under the lock (${String(e).slice(0, 60)}) — not acting`); return false; }
+            if (hadStopsLocked && rereadLocked.length === 0 && fresh > 0) { errors.push(`${pairRaw} (${why}): orders re-read empty under the lock after showing stops — unreliable, not acting`); return false; }
+            orders = rereadLocked;
             plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
             if (!plan.place && !plan.cancel.length) return plan.covered;
@@ -647,7 +657,12 @@ export async function GET(request: Request) {
             const health = await getKrakenMarginHealth().catch(() => null);
             const after = await getKrakenMarginPositions().catch(() => null);
             if (after != null && !failClosedOnEmptyPositions(after.length, health?.marginUsedRaw ?? null)) {
-              const onSide = after.filter((p) => samePair(p.pair, pairRaw) && p.side === side && ownership.isOurs(p as unknown as { ordertxid: string; id: string }));
+              // Ownership re-read NOW: the scanner may have ledgered a new entry on this
+              // pair+side since the run started. A position not in the run's snapshot at all
+              // (an entry whose ledger write is still in flight) counts as possibly ours.
+              const own = await botOwnership().catch(() => ownership);
+              const isOursNow = (p: { ordertxid: string; id: string }) => own.isOurs(p) || !positionsAll.some((q) => q.id === p.id);
+              const onSide = after.filter((p) => samePair(p.pair, pairRaw) && p.side === side && isOursNow(p));
               const mine = onSide.filter((p) => grp.some((g) => g.ordertxid === p.ordertxid));
               return {
                 book: mine.reduce((s, p) => s + p.vol, 0),
@@ -719,17 +734,11 @@ export async function GET(request: Request) {
           // Whatever the response said, the truth is the remaining exposure. A partial fill
           // keeps exact cover; zero sweeps every stop of ours; an unreadable state leaves
           // everything as it was and pages.
-          let leftRead = await remainingVol();
-          // A partial fill (market-price protection) leaves a remainder that the breach/time
-          // stop still wants flat: one more reduce-only market close for exactly what is left,
-          // before falling back to covering it.
-          if (leftRead != null && leftRead.book > 0 && sendErr == null) {
-            try {
-              await krakenPrivate("AddOrder", { pair: publicPair, type: closeSide, ordertype: "market", volume: leftRead.book.toFixed(meta.lotDecimals), leverage: lev, reduce_only: "true", userref: String(MARGIN_USERREF) });
-              sentVol += leftRead.book;
-              leftRead = await remainingVol();
-            } catch (err) { sendErr = err; }
-          }
+          // ONE close per run, never a retry send: OpenPositions can lag a fill by a call or
+          // two, and a second reduce-only order on a lagging read would over-reduce into a
+          // NEWER manual position (reduce_only stops OPENING, not over-reducing). A partial
+          // remainder is covered below and closed again on the next run.
+          const leftRead = await remainingVol();
           const left = leftRead?.book ?? null;
           if (left == null) {
             await sendNotification(`🚨 ${why} on ${pairRaw}: close ${sendErr ? "errored" : "sent"} but the remaining position could not be confirmed — stops LEFT IN PLACE. Check Kraken now.${sendErr ? ` ${String(sendErr).slice(0, 120)}` : ""}`, "margin_urgent").catch(() => {});

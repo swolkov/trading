@@ -432,7 +432,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
               for (const side of ["long", "short"] as const) {
                 if (all.some((p) => p.side === side && isOurs(p))) continue;
                 const closeSide = side === "long" ? "sell" : "buy";
-                const ours = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair) && o.side === closeSide);
+                // Only stops older than two minutes: an entry's attached close[] can appear in
+                // OpenOrders a beat before its position does, and that stop is not stranded.
+                const nowSec = Date.now() / 1000;
+                const ours = orders.filter((o) => o.userref === MARGIN_USERREF && o.ordertype.includes("stop") && pairBase(o.pair) === pairBase(pair) && o.side === closeSide && nowSec - o.opentm > 120);
                 const out = await applyReconcile(planReconcile({ side, vol: 0, targetLevel: 0, px: 0, priceDecimals: 2, lotDecimals: 4 }, ours), { placeStop: async () => undefined, cancel: (t) => krakenCancelOrder(t) });
                 swept += out.cancelled.length;
                 if (out.failedCancels.length) await sendNotification(`🚨 ${pair} ${side} is flat but stop(s) ${out.failedCancels.join(", ")} could NOT be cancelled — a resting non-reduce-only stop OPENS if it fires. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
