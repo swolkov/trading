@@ -56,7 +56,7 @@ export default function PaperTradesPage() {
   );
 
   const hasAny = !!score && (
-    (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0)) ||
+    (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0 || (score.shadow.nonUsOpen ?? 0) > 0)) ||
     (score.strategies != null && score.strategies.some((s) => s.resolved > 0 || s.open > 0))
   );
 
@@ -77,7 +77,7 @@ export default function PaperTradesPage() {
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           Live goes off the real Kraken account (~$5k), not a fantasy size. Dollar risk is always
           {" "}<span className="text-foreground/80">equity × 3%</span> (high conviction 2×, hard ceiling 6%).
-          The quality long cut on paper is ~$300/trade at this size — that is thousands a week IF it holds
+          The quality long cut on paper has averaged a few hundred dollars a trade at this size (measured Sep 5 on the US universe: 15 trades, 80% hit) — that is thousands a week IF it holds
           for 30+ trades and 7+ days, which is exactly what this page is measuring. Thousands a day at 3%
           still needs a larger account (~$50k+). Do not crank risk on $5k to fake the daily number.
         </p>
@@ -89,7 +89,7 @@ export default function PaperTradesPage() {
         </p>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           Auto paper is the live-candidate sleeve only: <span className="text-foreground/80">high-conviction 5m/15m longs, not stretched</span>.
-          Shorts on this sleeve hit 17% and lost $3.2k — they no longer open. Stretched longs were a coin-flip — skipped.
+          Shorts on this sleeve lost on both the old 37-coin universe (17% hit, −$3.2k, Sep 4) and the US-only slice (40% hit, −$714, Sep 5) — they no longer open. Stretched longs were a coin-flip — skipped.
           1h/4h and both swing containers are paused (not the 3%/48h game). Retired: fast-tight, sweep-fade, scanner spray, selective-swing.
           This is not &quot;always profitable.&quot; The scoreboard below is the only number that counts, and it needs 30+ resolved over 7+ days before anything is armed.
         </p>
@@ -113,7 +113,7 @@ export default function PaperTradesPage() {
       )}
 
       {/* ── Tracked-signal paper record ── */}
-      {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0) && (
+      {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0 || (score.shadow.nonUsOpen ?? 0) > 0) && (
         <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-xs font-bold">📊 Tracked-Signal Paper Record — would these have made money?</p>
