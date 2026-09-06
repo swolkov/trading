@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { readRoundTrip, roundTripVerdict } from "@/lib/margin-round-trip";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
+import { STAGE3_KEY, readStage3, loadLiveFills, divergenceSummary } from "@/lib/margin-synthesis";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -22,6 +23,10 @@ const DEFAULT_SOURCE = "selective";
 // free margin (MARGIN_HEADROOM) instead of being rejected — realised risk a little under 6%
 // until the 3× leverage rung at $10k. The daily loss cap is set to about two full losses.
 const BASE_RISK_PCT = 3;
+// Spencer's decision (Sep 6): the first 20 live trades run at HALF of paper's base (3% per
+// high-conviction trade instead of 6%), then graduate automatically if live matches paper.
+const STAGE3_TARGET = 20;
+const START_BASE_PCT = BASE_RISK_PCT / 2;
 
 async function setKey(key: string, value: string | null): Promise<void> {
   if (value == null) { await prisma.agentConfig.deleteMany({ where: { key } }); return; }
@@ -42,6 +47,9 @@ async function status() {
   for (const r of rows) c[r.key] = r.value;
   const rt = await readRoundTrip();
   const rtPassed = rt?.stage === "done" && roundTripVerdict(rt.checks).allOk;
+  const stage3 = await readStage3().catch(() => null);
+  let stage3Done: number | null = null;
+  if (stage3) { try { stage3Done = divergenceSummary(await loadLiveFills()).closed; } catch { stage3Done = stage3.done ?? null; } }
   let log: string[] = [];
   try { log = c[ARM_LOG] ? (JSON.parse(c[ARM_LOG]) as string[]) : []; } catch { log = []; }
   return {
@@ -57,6 +65,7 @@ async function status() {
     ddTripped: c.kraken_margin_disarmed_dd === "true",
     roundTripPassed: rtPassed,
     roundTripRunning: rt != null && ["entering", "open", "closing"].includes(rt.stage),
+    stage3: stage3 ? { ...stage3, done: stage3Done ?? stage3.done ?? 0 } : null,
     log: log.slice(-10).reverse(),
   };
 }
@@ -83,8 +92,8 @@ export async function POST(request: Request) {
   if (!/^[a-z0-9_-]{1,32}$/.test(source) || RETIRED_AUTO_SOURCES.has(source)) return Response.json({ error: `source "${source}" cannot be armed`, ...(await status()) }, { status: 400 });
   // One position at a time to start: a 3%-risk trade with a 3% stop is notional = equity =
   // 50% of the account as margin at 2×; a second one would use the other half exactly.
-  const riskPct = BASE_RISK_PCT * 2;          // what the candidate's (high-conviction) trades risk
-  const basePct = String(BASE_RISK_PCT);
+  const riskPct = START_BASE_PCT * 2;         // what the candidate's (high-conviction) trades risk at the start
+  const basePct = String(START_BASE_PCT);
   const maxPositions = Math.min(3, Math.max(1, Math.round(Number(body.maxPositions ?? 1)) || 1));
   const maxTradesPerDay = Math.min(6, Math.max(1, Math.round(Number(body.maxTradesPerDay ?? 3)) || 3));
 
@@ -99,6 +108,7 @@ export async function POST(request: Request) {
   const dailyCap = Math.max(200, Math.round(equity * (riskPct / 100) * 2.2));   // ≈ two full losses incl. fees
   await setKey("kraken_margin_live_max_risk_pct", basePct);
   await setKey("kraken_margin_daily_loss_cap", String(dailyCap));
+  await setKey(STAGE3_KEY, JSON.stringify({ status: "running", startedAt: new Date().toISOString(), target: STAGE3_TARGET, fromBase: START_BASE_PCT, toBase: BASE_RISK_PCT, done: 0 }));
   await setKey("kraken_margin_maker_entries", "false");        // MARKET entries: mirror the paper model
   await setKey("kraken_margin_max_positions", String(maxPositions));
   await setKey("kraken_margin_max_trades_per_day", String(maxTradesPerDay));
@@ -106,7 +116,7 @@ export async function POST(request: Request) {
   await setKey("kraken_margin_live_sources", source);
   await setKey("kraken_margin_validate_only", "false");
   await setKey("kraken_margin_auto", "true");
-  await appendLog(`ARMED source=${source} base=${basePct}% (high conviction ${riskPct}%, paper's rule) dailyLossCap=$${dailyCap} maxPositions=${maxPositions} maxTradesPerDay=${maxTradesPerDay} marketEntries=true from the admin page`);
-  await sendNotification(`🔴 Kraken margin executor ARMED from the admin page: source ${source}, base ${basePct}% of equity at risk per trade, ${riskPct}% on high conviction — the same rule paper is scored with (the candidate only takes high-conviction setups; at this equity the size is fitted to free margin, so realised risk is a little under ${riskPct}% until the 3× rung at $10k). Daily loss cap $${dailyCap}, max ${maxPositions} position(s), ${maxTradesPerDay} trades/day, market entries, whole US universe. Disarm on /margin/paper or set kraken_margin_auto=false.`, "margin_live").catch(() => {});
+  await appendLog(`ARMED source=${source} base=${basePct}% (high conviction ${riskPct}%) for the first ${STAGE3_TARGET} live trades, then base ${BASE_RISK_PCT}% (paper's full rule) if live matches paper; dailyLossCap=$${dailyCap} maxPositions=${maxPositions} maxTradesPerDay=${maxTradesPerDay} marketEntries=true from the admin page`);
+  await sendNotification(`🔴 Kraken margin executor ARMED from the admin page: source ${source}. Stage 3: the first ${STAGE3_TARGET} live trades at ${riskPct}% of equity per trade (base ${basePct}%, conviction scaling on), then paper's full rule (${BASE_RISK_PCT * 2}% on high conviction) automatically if real fills match paper. Daily loss cap $${dailyCap}, max ${maxPositions} position(s), ${maxTradesPerDay} trades/day, market entries, whole US universe. Disarm on /margin/paper or set kraken_margin_auto=false.`, "margin_live").catch(() => {});
   return Response.json({ ok: true, ...(await status()) });
 }

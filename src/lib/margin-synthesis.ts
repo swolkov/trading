@@ -220,6 +220,47 @@ ${stats.slice(0, 12000)}`;
   return text || null;
 }
 
+// ---- Stage 3: the first 20 live trades at half size, then paper's full rule --------------
+// Spencer's decision (Sep 6): arm at 3% per trade (base 1.5), and once 20 live trades have
+// closed AND real fills match the paper model, move to paper's full sizing (base 3 → 6% on
+// high conviction). If live DIVERGES, hold at half size and page — never double into a
+// broken assumption. Checked after every scan tick and every synthesis run.
+export const STAGE3_KEY = "kraken_margin_stage3";
+export interface Stage3 { status: "running" | "graduated" | "held"; startedAt: string; target: number; fromBase: number; toBase: number; done?: number; note?: string; updatedAt?: string }
+export async function readStage3(): Promise<Stage3 | null> {
+  const raw = await cfgGet(STAGE3_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as Stage3; } catch { return null; }
+}
+export async function maybeGraduateStage3(): Promise<Stage3 | null> {
+  const st = await readStage3();
+  if (!st) return null;
+  const fills = await loadLiveFills().catch(() => [] as LiveFill[]);
+  const div = divergenceSummary(fills);
+  st.done = div.closed; st.updatedAt = new Date().toISOString();
+  if (st.status === "running" && div.closed >= st.target) {
+    if (/DIVERGES/.test(div.verdict)) {
+      st.status = "held"; st.note = div.verdict;
+      await sendNotification(`⚠️ Stage 3: ${div.closed} live trades closed but LIVE DIVERGES FROM PAPER — holding at half size (base ${st.fromBase}%). ${div.verdict}`, "margin_live").catch(() => {});
+    } else {
+      await cfgSet("kraken_margin_live_max_risk_pct", String(st.toBase));
+      const ws = await cfgGet("margin_watch_state");
+      let eq = 0; try { const p = ws ? (JSON.parse(ws) as { lastEquity?: number }) : null; eq = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { eq = 0; }
+      const cap = Math.max(200, Math.round(eq * (st.toBase * 2 / 100) * 2.2));
+      await cfgSet("kraken_margin_daily_loss_cap", String(cap));
+      st.status = "graduated"; st.note = `graduated after ${div.closed} closed live trades: ${div.verdict}`;
+      try {
+        const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
+        log.push(`${new Date().toISOString()} STAGE 3 GRADUATED: base ${st.fromBase}% → ${st.toBase}% (high conviction ${st.toBase * 2}%), daily loss cap $${cap}, after ${div.closed} closed live trades (${div.verdict})`);
+        await cfgSet("kraken_margin_arm_log", JSON.stringify(log.slice(-50)));
+      } catch { /* log only */ }
+      await sendNotification(`🎓 Stage 3 complete: ${div.closed} live trades closed and real fills match paper (${div.verdict}). Sizing moved to paper's full rule — base ${st.toBase}%, ${st.toBase * 2}% on high conviction — daily loss cap $${cap}.`, "margin_live").catch(() => {});
+    }
+  }
+  await cfgSet(STAGE3_KEY, JSON.stringify(st));
+  return st;
+}
+
 export interface SynthesisRun { ran: boolean; reason: string; fills: number; closed: number; journaled: number; lessons: boolean; observations: string[]; divergence: string }
 
 export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
@@ -291,6 +332,7 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
     } catch { lessons = false; }
   }
 
+  await maybeGraduateStage3().catch(() => null);
   await cfgSet(SYNTH_LAST_RUN, at);
   const armedLine = auto === "true" && validate === "false" ? "ARMED" : "disarmed";
   const best = [...strategies].filter((s) => s.resolved > 0).sort((a, b) => (b.tStat ?? -9) - (a.tStat ?? -9))[0];
