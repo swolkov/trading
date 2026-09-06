@@ -24,6 +24,7 @@ interface Position {
   currentPrice: number | null; liqPrice: number | null; liqPctAway: number | null; openedAt: string;
 }
 interface Health { equity: number; marginUsed: number; freeMargin: number; unrealized: number; marginLevel: number | null }
+interface StatusResp { connected: boolean; health: Health | null; positions: Position[]; stale?: boolean; error?: string }
 interface Scoreboard {
   trades: number; wins: number; hitRate: number | null; avgWin: number; avgLoss: number;
   profitFactor: number | null; totalNetPnl: number; totalFees: number; totalRollover: number;
@@ -68,9 +69,12 @@ export default function MarginCockpitPage() {
   const [showAllPairs, setShowAllPairs] = useState(false);
 
   const { data: universe } = useSWR<{ rows: UniverseRow[] }>("/api/margin/universe", fetcher, { refreshInterval: 300_000 });
-  const { data: status } = useSWR<{ connected: boolean; health: Health | null; positions: Position[] }>(
+  const { data: status, error: statusErr } = useSWR<StatusResp>(
     "/api/margin/status", fetcher, { refreshInterval: 30_000 },
   );
+  // Kraken unreachable must read as UNREACHABLE, never as "no positions" — a flat-looking
+  // panel during an outage is exactly the false-empty read the guardian audit warned about.
+  const krakenDown = !!statusErr || (status != null && (status.connected === false || !!status.error));
   const { data: score } = useSWR<{ scoreboard: Scoreboard; recentTrips: Trip[] }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 },
   );
@@ -125,7 +129,7 @@ export default function MarginCockpitPage() {
       <PageHeader
         title="Margin Cockpit"
         sub="Kraken spot margin — margin call at 80% margin level, forced liquidation at 40%."
-        right={<Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : "Margin not in use"}</Chip>}
+        right={krakenDown ? <Chip tone="red" size="md" dot>Kraken unreachable</Chip> : <Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : status ? "Margin not in use" : "Loading…"}</Chip>}
       />
 
       {(news?.imminent?.length ?? 0) > 0 && (
@@ -141,7 +145,9 @@ export default function MarginCockpitPage() {
           title="Open margin positions"
           aside={health && <span className="tabular-nums">equity {money(health.equity)} · margin used {money(health.marginUsed)} · free {money(health.freeMargin)}</span>}
         />
-        {positions.length === 0 ? <Empty>No margin positions open.</Empty> : (
+        {krakenDown ? <Empty><span className="text-down">Kraken did not answer</span> — positions unknown, not zero. The guardian keeps managing anything open; this page retries every 30s.</Empty>
+          : !status ? <Empty>Loading positions…</Empty>
+          : positions.length === 0 ? <Empty>No margin positions open.</Empty> : (
           <DataTable>
             <thead>
               <tr>
@@ -219,10 +225,10 @@ export default function MarginCockpitPage() {
               className={`${seg(wsnameToSymbol(r.wsname) === pairWs)} ${!r.tradeable && wsnameToSymbol(r.wsname) !== pairWs ? "border-down/25 bg-down/[0.04] text-muted-foreground" : ""}`}
             >
               {r.wsname.replace("/USD", "").replace("XBT", "BTC")}
-              <span className="ml-1 text-[10px] text-muted-foreground">{r.maxLeverage}x</span>
+              <span className="ml-1 text-[11px] text-muted-foreground">{r.maxLeverage}x</span>
               {r.usMargin === false
-                ? <span className="ml-1 text-[10px] text-warn" title="Not on Kraken's US retail margin list — the executor refuses it">non-US</span>
-                : !r.tradeable && <span className="ml-1 text-[10px] text-down">wide</span>}
+                ? <span className="ml-1 text-[11px] text-warn" title="Not on Kraken's US retail margin list — the executor refuses it">non-US</span>
+                : !r.tradeable && <span className="ml-1 text-[11px] text-down">wide</span>}
             </button>
           ))}
         </PanelBody>

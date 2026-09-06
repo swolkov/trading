@@ -1,11 +1,11 @@
 {
   "name": "Esbueno Trades",
   "short_name": "Esbueno",
-  "description": "AI-Powered Options Trading Agent",
+  "description": "Kraken margin desk — live account, paper record, orders, system health",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f0f4f8",
-  "theme_color": "#10b981",
+  "background_color": "#111318",
+  "theme_color": "#111318",
   "orientation": "any",
   "icons": [
     {
