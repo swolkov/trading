@@ -1,37 +1,27 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
+import { Chip, verdictTone } from "@/components/ui/chip";
+import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
+import { Explainer, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
+import { GoLivePanel, type StrategyStat } from "@/components/margin/go-live-panel";
+import { money, pct, pnl2, tone } from "@/lib/format";
 
-// ============ PAPER TRADES ============
+// ============ ROAD TO LIVE ============
 // The shadow experiment's home. Every strategy the system runs on paper — scored on real
 // Kraken prices with Spencer's real fees + rollover, zero money at risk — lives here:
-// the tracked-signal record, the per-strategy scoreboard (what's working), and the full
-// trade log. This is the record that has to show a real edge before anything goes live.
+// the go-live panel (plumbing → paper gate → arm), the pooled paper record, the
+// per-strategy scoreboard, and the edge breakdowns. Individual trades are on Orders → Paper.
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
-interface ConvictionTier {
-  tier: string; resolved: number; wins: number; hitRate: number | null; totalPnl: number;
-}
+interface ConvictionTier { tier: string; resolved: number; wins: number; hitRate: number | null; totalPnl: number }
 interface ShadowScore {
   resolved: number; wins: number; hitRate: number | null; totalPnl: number;
   avgWin: number; avgLoss: number; open: number; openUnrealized?: number; legacyOpen?: number; byConviction?: ConvictionTier[];
   nonUsOpen?: number; nonUsResolved?: number;
-}
-interface StrategyStat {
-  key: string; label: string; resolved: number; wins: number; hitRate: number | null;
-  avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
-  grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; paperTStat?: number | null; verdict: string;
-  forwardResolved?: number; days?: number;
-}
-function verdictCls(v: string): string {
-  if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
-  if (v.startsWith("promising")) return "text-amber-400";
-  if (v.startsWith("retired")) return "text-muted-foreground/55";
-  if (v.startsWith("not paying")) return "text-red-400";
-  return "text-muted-foreground/50"; // gathering
 }
 interface EdgeStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -41,16 +31,13 @@ interface EdgeBreakdowns { byDirection: EdgeStat[]; byCoin: EdgeStat[] }
 
 // Sample-size gate: thin slices find fake edges. Nothing is a verdict until ~20 resolved.
 const MIN_EDGE_SAMPLE = 20;
-function edgeVerdict(e: EdgeStat): { label: string; cls: string } {
-  if (e.resolved < MIN_EDGE_SAMPLE) return { label: `watching · ${e.resolved}/${MIN_EDGE_SAMPLE}`, cls: "text-muted-foreground/40" };
-  if (e.expectancy == null) return { label: "—", cls: "text-muted-foreground/40" };
-  if (e.expectancy > 0) return { label: "promising", cls: "text-emerald-400" };
-  return { label: "not paying", cls: "text-red-400" };
+function edgeVerdict(e: EdgeStat): { label: string; tone: "grey" | "green" | "red" } {
+  if (e.resolved < MIN_EDGE_SAMPLE) return { label: `watching · ${e.resolved}/${MIN_EDGE_SAMPLE}`, tone: "grey" };
+  if (e.expectancy == null) return { label: "—", tone: "grey" };
+  if (e.expectancy > 0) return { label: "promising", tone: "green" };
+  return { label: "not paying", tone: "red" };
 }
-
-const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-const money2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
-const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
+const hitTone = (h: number | null) => (h != null && h >= 0.5 ? "text-up" : "text-warn");
 
 export default function PaperTradesPage() {
   const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns }>(
@@ -63,537 +50,201 @@ export default function PaperTradesPage() {
   const retired = (score?.strategies ?? []).filter((s) => s.verdict.startsWith("retired"));
   const shownStrategies = (score?.strategies ?? []).filter((s) => showRetired || !s.verdict.startsWith("retired"));
 
-  const hasAny = !!score && (
-    (score.shadow != null && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0 || (score.shadow.nonUsOpen ?? 0) > 0)) ||
-    (score.strategies != null && score.strategies.some((s) => s.resolved > 0 || s.open > 0))
-  );
+  const sh = score?.shadow ?? null;
+  const shadowHasAny = sh != null && (sh.resolved > 0 || sh.open > 0 || (sh.legacyOpen ?? 0) > 0 || (sh.nonUsOpen ?? 0) > 0);
+  const hasAny = !!score && (shadowHasAny || (score.strategies ?? []).some((s) => s.resolved > 0 || s.open > 0));
 
   return (
     <div className="space-y-5">
-      {/* ── Header ── */}
-      <div>
-        <h2 className="text-xl font-bold tracking-tight">Kraken margin — the road to live</h2>
-        <p className="text-[11px] text-muted-foreground/50">
-          Three steps, in order. Every strategy is scored on paper first with real Kraken prices and your real fees. Nothing trades real money until step 2 is green.
-        </p>
-      </div>
+      <PageHeader
+        title="Road to Live"
+        sub="Three steps, in order. Every strategy is scored on paper first with real Kraken prices and your real fees. Nothing trades real money until step 2 is green."
+      />
 
       <GoLivePanel strategies={score?.strategies ?? []} />
 
-      <details className="rounded-xl border border-border bg-card p-4 text-[11px] text-muted-foreground/70 leading-relaxed">
-        <summary className="cursor-pointer text-xs font-bold text-foreground/80">How to read this page</summary>
-        <ul className="mt-2 space-y-1 list-disc pl-4">
-          <li><span className="text-foreground/80">Paper</span> = the strategy ran on real prices with real fees, but no money moved. It is the evidence.</li>
-          <li><span className="text-foreground/80">Live candidate</span> = the one strategy that can be armed: high-conviction 5-minute and 15-minute breakouts, longs only, 3% stop, breakeven then a trailing stop, 48-hour time limit.</li>
-          <li><span className="text-foreground/80">Confidence (t)</span> = how far the average result is from zero, in units of its own noise. Below 2 a good run can still be luck. That is why the gate needs 2.</li>
-          <li><span className="text-foreground/80">Distinct days</span> = crypto coins move together, so 30 wins in one day are closer to one bet than thirty. The gate needs results spread over 7 days.</li>
-          <li><span className="text-foreground/80">Universe</span> = only the 26 coins a US retail Kraken account can margin-trade. Trades on other coins are kept in the log for honesty but count toward nothing{(score?.shadow?.nonUsResolved ?? 0) > 0 && <> ({score?.shadow?.nonUsResolved} set aside)</>}.</li>
+      <Explainer title="How to read this page">
+        <ul className="space-y-1">
+          <li><strong>Paper</strong> = the strategy ran on real prices with real fees, but no money moved. It is the evidence.</li>
+          <li><strong>Live candidate</strong> = the one strategy that can be armed: high-conviction 5-minute and 15-minute breakouts, longs only, 3% stop, breakeven then a trailing stop, 48-hour time limit.</li>
+          <li><strong>Confidence (t)</strong> = how far the average result is from zero, in units of its own noise. Below 2 a good run can still be luck. That is why the gate needs 2.</li>
+          <li><strong>Distinct days</strong> = crypto coins move together, so 30 wins in one day are closer to one bet than thirty. The gate needs results spread over 7 days.</li>
+          <li><strong>Universe</strong> = only the 26 coins a US retail Kraken account can margin-trade. Trades on other coins are kept in the log for honesty but count toward nothing{(sh?.nonUsResolved ?? 0) > 0 && <> ({sh?.nonUsResolved} set aside)</>}.</li>
           <li>Retired strategies (fast-tight, sweep-fade, scanner spray, selective-swing, shorts) lost on this record and no longer open trades. Their numbers stay behind the toggle in the scoreboard.</li>
         </ul>
-      </details>
+      </Explainer>
 
-      {/* ── Empty state ── */}
       {!hasAny && (
-        <div className="rounded-xl border border-border bg-card p-8 text-center">
-          <p className="text-sm text-muted-foreground/60">No paper trades yet.</p>
-          <p className="text-[11px] text-muted-foreground/40 mt-1">
-            The scanner watches every US-tradeable margin coin. Paper opens only high-conviction 5m/15m longs that are not stretched. They&apos;ll appear here and score themselves — check back soon.
-          </p>
-        </div>
+        <Panel><PanelBody className="py-8 text-center">
+          <p className="text-[13px] text-muted-foreground">No paper trades yet.</p>
+          <Note className="mt-1">The scanner watches every US-tradeable margin coin. Paper opens only high-conviction 5m/15m longs that are not stretched. They appear here and score themselves.</Note>
+        </PanelBody></Panel>
       )}
 
-      {/* ── Tracked-signal paper record ── */}
-      {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0 || (score.shadow.nonUsOpen ?? 0) > 0) && (
-        <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-4">
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-bold">All paper trades together — would these have made money?</p>
-            <p className="text-[10px] text-muted-foreground/45">
-              {score.shadow.open} open
-              {score.shadow.open > 0 && score.shadow.openUnrealized != null && (
-                <> · floating <span className={`font-bold ${col(score.shadow.openUnrealized)}`}>{money2(score.shadow.openUnrealized)}</span></>
-              )}
-              {(score.shadow.legacyOpen ?? 0) > 0 && (
-                <> · <span title="Opened before the Sep 2 measurement upgrade — still tracked to their finish, but excluded from every statistic on this page">+{score.shadow.legacyOpen} winding down (old measurement)</span></>
-              )}
-              {(score.shadow.nonUsOpen ?? 0) > 0 && (
-                <> · <span title="On coins a US retail Kraken account cannot margin-trade — tracked to their finish, but excluded from every statistic on this page because the live book could never take them">+{score.shadow.nonUsOpen} winding down (non-US coins)</span></>
-              )}
-              {" "}· no real money
-            </p>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div>
-              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Resolved</p>
-              <p className="text-lg font-black tabular-nums">{score.shadow.resolved}</p>
+      {/* ── Pooled paper record ── */}
+      {sh && shadowHasAny && (
+        <Panel tone="paper">
+          <PanelHeader
+            title="All paper trades together — would these have made money?"
+            aside={
+              <>
+                <Chip tone="paper">{sh.open} open</Chip>
+                {sh.open > 0 && sh.openUnrealized != null && <span>floating <span className={`font-semibold ${tone(sh.openUnrealized)}`}>{pnl2(sh.openUnrealized)}</span></span>}
+                {(sh.legacyOpen ?? 0) > 0 && <Chip tone="grey" title="Opened before the Sep 2 measurement upgrade — still tracked to their finish, but excluded from every statistic on this page">+{sh.legacyOpen} old measurement</Chip>}
+                {(sh.nonUsOpen ?? 0) > 0 && <Chip tone="grey" title="On coins a US retail Kraken account cannot margin-trade — tracked to their finish, but excluded from every statistic because the live book could never take them">+{sh.nonUsOpen} non-US coins</Chip>}
+                <span>no real money</span>
+              </>
+            }
+          />
+          <PanelBody className="space-y-4">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <Stat label="Resolved" value={sh.resolved} />
+              <Stat label="Hit rate" value={pct(sh.hitRate)} valueCls={hitTone(sh.hitRate)} />
+              <Stat label="Avg win / loss" value={<><span className="text-up">{money(sh.avgWin)}</span><span className="mx-1 text-muted-foreground">/</span><span className="text-down">{money(sh.avgLoss)}</span></>} />
+              <Stat label="Would-be P&L" value={money(sh.totalPnl)} valueCls={tone(sh.totalPnl)} />
             </div>
-            <div>
-              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Hit rate</p>
-              <p className={`text-lg font-black tabular-nums ${score.shadow.hitRate != null && score.shadow.hitRate >= 0.5 ? "text-emerald-400" : "text-amber-400"}`}>
-                {score.shadow.hitRate != null ? `${(score.shadow.hitRate * 100).toFixed(0)}%` : "—"}
-              </p>
-            </div>
-            <div>
-              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Avg win / loss</p>
-              <p className="text-lg font-black tabular-nums">
-                <span className="text-emerald-400">{money(score.shadow.avgWin)}</span>
-                <span className="text-muted-foreground/40 mx-1">/</span>
-                <span className="text-red-400">{money(score.shadow.avgLoss)}</span>
-              </p>
-            </div>
-            <div>
-              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Would-be P&L</p>
-              <p className={`text-lg font-black tabular-nums ${col(score.shadow.totalPnl)}`}>{money(score.shadow.totalPnl)}</p>
-            </div>
-          </div>
-          {score.shadow.byConviction && score.shadow.byConviction.some((t) => t.resolved > 0) && (
-            <div className="mt-3 pt-3 border-t border-purple-500/15">
-              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1.5">
-                Does conviction matter? — win rate by how many signals agreed
-              </p>
-              <div className="space-y-1">
-                {score.shadow.byConviction.filter((t) => t.resolved > 0).map((t) => (
-                  <div key={t.tier} className="flex items-center gap-3 text-[11px] tabular-nums">
-                    <span className="w-16 font-semibold capitalize text-foreground/70">{t.tier}</span>
-                    <span className={`w-12 font-bold ${t.hitRate != null && t.hitRate >= 0.5 ? "text-emerald-400" : "text-amber-400"}`}>
-                      {t.hitRate != null ? `${(t.hitRate * 100).toFixed(0)}%` : "—"}
-                    </span>
-                    <span className="w-20 text-muted-foreground/50">{t.wins}/{t.resolved} won</span>
-                    <span className={`font-bold ${col(t.totalPnl)}`}>{money(t.totalPnl)}</span>
-                  </div>
-                ))}
+            {sh.byConviction && sh.byConviction.some((t) => t.resolved > 0) && (
+              <div className="border-t border-border pt-3">
+                <Label className="mb-2">Does conviction matter? — win rate by how many signals agreed</Label>
+                <div className="space-y-1">
+                  {sh.byConviction.filter((t) => t.resolved > 0).map((t) => (
+                    <div key={t.tier} className="flex items-center gap-3 text-xs tabular-nums">
+                      <span className="w-16 font-semibold capitalize">{t.tier}</span>
+                      <span className={`w-12 font-semibold ${hitTone(t.hitRate)}`}>{pct(t.hitRate)}</span>
+                      <span className="w-20 text-muted-foreground">{t.wins}/{t.resolved} won</span>
+                      <span className={`font-semibold ${tone(t.totalPnl)}`}>{money(t.totalPnl)}</span>
+                    </div>
+                  ))}
+                </div>
+                <Note className="mt-2">Auto paper now opens the quality long cut only (high, 5m/15m, not stretched). This table still includes historical shorts, stretched names, and retired sleeves — that drag is why pooled high is not the live candidate.</Note>
               </div>
-              <p className="text-[10px] text-muted-foreground/40 mt-1.5">
-                Auto paper now opens the quality long cut only (high, 5m/15m, not stretched). This table still includes historical shorts, stretched names, and retired sleeves — that drag is why pooled high is not the live candidate.
-              </p>
-            </div>
-          )}
-          <p className="text-[10px] text-muted-foreground/40 mt-2">
-            Estimate — each trade followed to a stop/target/48h outcome, net of fees: trade fee (<span className="text-foreground/60">~0.15% maker in + 0.25% taker out</span>) matched to your real 0.17%/side; 4h rollover (<span className="text-foreground/60">BTC 0.015% verified, ETH ~0.02%, alts ~0.03%</span>) on notional. Kraken&apos;s live rollover fluctuates — real fills are exact, these are conservative estimates. Spot swings pay no rollover.
-          </p>
-        </div>
+            )}
+            <Note>
+              Estimate — each trade followed to a stop/target/48h outcome, net of fees: trade fee (~0.15% maker in + 0.25% taker out) matched to your real 0.17%/side; 4h rollover (BTC 0.015% verified, ETH ~0.02%, alts ~0.03%) on notional. Kraken&apos;s live rollover fluctuates — real fills are exact, these are conservative estimates. Spot swings pay no rollover.
+            </Note>
+          </PanelBody>
+        </Panel>
       )}
 
-      {/* ── Strategy scoreboard: what's working ── */}
+      {/* ── Strategy scoreboard ── */}
       {score?.strategies && score.strategies.some((s) => s.resolved > 0 || s.open > 0) && (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-            <p className="text-xs font-bold">Which strategies are working — the scoreboard behind the gate</p>
-            <p className="text-[10px] text-muted-foreground/45">
-              paper · expectancy = avg $/trade after fees
-              {retired.length > 0 && (
-                <> · <button onClick={() => setShowRetired(!showRetired)} className="text-purple-400 hover:underline">{showRetired ? "hide" : "show"} {retired.length} retired sleeve{retired.length === 1 ? "" : "s"}</button></>
-              )}
-            </p>
+        <Panel>
+          <PanelHeader
+            title="Which strategies are working — the scoreboard behind the gate"
+            aside={
+              <>
+                <span>paper · expectancy = avg $/trade after fees</span>
+                {retired.length > 0 && (
+                  <button onClick={() => setShowRetired(!showRetired)} className="text-primary hover:underline">{showRetired ? "hide" : "show"} {retired.length} retired sleeve{retired.length === 1 ? "" : "s"}</button>
+                )}
+              </>
+            }
+          />
+          <DataTable>
+            <thead>
+              <tr>
+                <Th>Strategy</Th>
+                <Th num>Resolved</Th>
+                <Th num>Open</Th>
+                <Th num>Hit rate</Th>
+                <Th num title="P&L before fees — the raw edge">Gross</Th>
+                <Th num title="Fee + rollover drag">Fees</Th>
+                <Th num title="Gross − fees — what you actually keep, at the paper experiment's 3–6% research risk">Net (paper risk)</Th>
+                <Th num className="text-foreground" title="The same trades priced as the LIVE executor would size them — 3% risk, conviction-scaled exactly like paper. These columns agreeing is the check that live reproduces the record.">At live sizing</Th>
+                <Th num title="Went green at peak → finished green. The gap is the give-back — green that appeared but wasn't banked">Green banked</Th>
+                <Th num title="Judged on LIVE sizing: 30+ trades, positive net at live risk, t≥2 on the live-priced series, and resolutions spanning 7+ days.">Verdict</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownStrategies.map((s) => (
+                <Row key={s.key}>
+                  <Td strong>{s.label}</Td>
+                  <Td num>
+                    {s.resolved}
+                    {s.forwardResolved != null && s.resolved > 0 && !s.verdict.startsWith("retired") && (
+                      <span className="ml-1 text-[11px] text-muted-foreground" title="Of these, how many were entered after the Sep 5 universe fix — the forward-only part of the sample.">{s.forwardResolved} fwd</span>
+                    )}
+                  </Td>
+                  <Td num muted>{s.open}</Td>
+                  <Td num className={`font-semibold ${hitTone(s.hitRate)}`}>{pct(s.hitRate)}</Td>
+                  <Td num className={tone(s.grossPnl)}>{money(s.grossPnl)}</Td>
+                  <Td num className="text-down/80">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</Td>
+                  <Td num className={`${tone(s.totalPnl)} opacity-70`}>{money(s.totalPnl)}</Td>
+                  <Td num className={`font-semibold ${tone(s.liveNet ?? 0)}`}>{money(s.liveNet ?? 0)}</Td>
+                  <Td num muted title="peaked green → finished green">{s.resolved > 0 ? `${Math.round((s.peakedGreen / s.resolved) * 100)}% → ${Math.round((s.wins / s.resolved) * 100)}%` : "—"}</Td>
+                  <Td num>
+                    <span className="inline-flex items-center gap-1.5">
+                      <Chip tone={verdictTone(s.verdict)}>{s.verdict}</Chip>
+                      {s.tStat != null && (s.resolved >= 30 || s.verdict.startsWith("retired")) && <span className="text-[11px] text-muted-foreground">t={s.tStat.toFixed(1)}</span>}
+                    </span>
+                  </Td>
+                </Row>
+              ))}
+            </tbody>
+          </DataTable>
+          <div className="border-t border-border px-4 py-3">
+            <Note>
+              <strong>Gross</strong> is the raw edge (before fees); <strong>Fees</strong> is the drag; <strong>Net</strong> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if gross beats fees. Maker entries + fewer/bigger trades shrink the fees column. <strong>At live sizing</strong> prices each trade the way the live executor would size it; it matches the paper column because live scales by conviction (2× high, 0.5× low) exactly as paper does. While live bet a flat 3%, these same 48 trades were worth <span className="text-up">+$1,779</span> on paper and <span className="text-down">−$137</span> live — flat sizing halves the winners and doubles the losers. <strong>Green banked</strong> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
+            </Note>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-[11px]">
-              <thead>
-                <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50 border-b border-border/50">
-                  <th className="text-left font-medium px-4 py-1.5">Strategy</th>
-                  <th className="text-right font-medium px-2 py-1.5">Resolved</th>
-                  <th className="text-right font-medium px-2 py-1.5">Open</th>
-                  <th className="text-right font-medium px-2 py-1.5">Hit rate</th>
-                  <th className="text-right font-medium px-2 py-1.5" title="P&L before fees — the raw edge">Gross</th>
-                  <th className="text-right font-medium px-2 py-1.5" title="Fee + rollover drag">Fees</th>
-                  <th className="text-right font-medium px-2 py-1.5" title="Gross − fees — what you actually keep, at the paper experiment's 3–6% research risk">Net (paper risk)</th>
-                  <th className="text-right font-medium px-2 py-1.5 text-foreground/70" title="The same trades priced as the LIVE executor would size them — 3% risk, conviction-scaled exactly like paper. These columns AGREEING is the check that live reproduces the record; they diverge the moment live risk is set differently.">At LIVE sizing</th>
-                  <th className="text-right font-medium px-2 py-1.5" title="Went green at peak → finished green. The gap between the two numbers is the give-back — green that appeared but wasn't banked">Green banked</th>
-                  <th className="text-right font-medium px-4 py-1.5" title="Judged on LIVE sizing: 30+ trades, positive net AT LIVE RISK, t≥2 on the live-priced series, and resolutions spanning 7+ days. Live now uses the same 3% base + conviction 2×/0.5× (6% cap) as paper, so these columns agree unless kraken_margin_live_max_risk_pct is set differently.">Verdict <span className="opacity-40 font-normal">(at live sizing)</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                {shownStrategies.map((s) => (
-                  <tr key={s.key} className="border-b border-border/30 last:border-0">
-                    <td className="text-left px-4 py-2 font-semibold text-foreground/80">{s.label}</td>
-                    <td className="text-right px-2 py-2 tabular-nums">
-                      {s.resolved}
-                      {s.forwardResolved != null && s.resolved > 0 && !s.verdict.startsWith("retired") && (
-                        <span className="text-[9px] text-muted-foreground/45 ml-1" title="Of these, how many were ENTERED after the Sep 5 universe fix — the forward-only part of the sample. The rest are valid (the fix excluded coins by Kraken's list, not by outcome) but were re-qualified after the fact.">{s.forwardResolved} fwd</span>
-                      )}
-                    </td>
-                    <td className="text-right px-2 py-2 tabular-nums text-muted-foreground/50">{s.open}</td>
-                    <td className={`text-right px-2 py-2 tabular-nums font-bold ${s.hitRate != null && s.hitRate >= 0.5 ? "text-emerald-400" : "text-amber-400"}`}>
-                      {s.hitRate != null ? `${(s.hitRate * 100).toFixed(0)}%` : "—"}
-                    </td>
-                    <td className={`text-right px-2 py-2 tabular-nums ${col(s.grossPnl)}`}>{money(s.grossPnl)}</td>
-                    <td className="text-right px-2 py-2 tabular-nums text-red-400/70">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</td>
-                    <td className={`text-right px-2 py-2 tabular-nums ${col(s.totalPnl)} opacity-70`}>{money(s.totalPnl)}</td>
-                    <td className={`text-right px-2 py-2 tabular-nums font-bold ${col(s.liveNet ?? 0)}`}>{money(s.liveNet ?? 0)}</td>
-                    <td className="text-right px-2 py-2 tabular-nums text-muted-foreground/70" title="peaked green → finished green">
-                      {s.resolved > 0 ? `${Math.round((s.peakedGreen / s.resolved) * 100)}% → ${Math.round((s.wins / s.resolved) * 100)}%` : "—"}
-                    </td>
-                    <td className={`text-right px-4 py-2 ${verdictCls(s.verdict)}`}>{s.verdict}{s.tStat != null && (s.resolved >= 30 || s.verdict.startsWith("retired")) ? <span className="text-[9px] font-normal opacity-50 ml-1">t={s.tStat.toFixed(1)}</span> : null}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
-            <span className="text-foreground/60">Gross</span> is the raw edge (before fees); <span className="text-red-400/70">Fees</span> is the drag; <span className="text-foreground/60">Net</span> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if <span className="text-foreground/60">Gross beats Fees</span>. Maker entries + fewer/bigger trades shrink the Fees column. <span className="text-foreground/60">At LIVE sizing</span> prices each trade the way the live executor would size it. It now matches the paper column, and that agreement is the point — live scales by <span className="text-foreground/60">conviction</span> (2× high, 0.5× low) exactly as paper does. It did not always: while live bet a flat 3%, these same 48 trades were worth <span className="text-emerald-400/80">+$1,779</span> on paper and <span className="text-red-400/80">−$137</span> live, because flat sizing halves the winners (high conviction averages +$73/trade) and doubles the losers (low averages −$74). <span className="text-foreground/60">Green banked</span> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
-          </p>
-        </div>
+        </Panel>
       )}
 
       {/* ── Edges: where's the money coming from? ── */}
       {score?.edges && (score.edges.byDirection.some((e) => e.resolved > 0 || e.open > 0) || score.edges.byCoin.some((e) => e.resolved > 0 || e.open > 0)) && (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-            <p className="text-xs font-bold">Where the money comes from — by direction and by coin</p>
-            <p className="text-[10px] text-muted-foreground/45">the paper record, sliced by factor</p>
-          </div>
-          <div className="px-4 py-2 border-b border-border/50 bg-amber-500/[0.04]">
-            <p className="text-[10px] text-amber-400/70">
-              ⚠️ Thin slices lie. A bucket with a handful of trades can look brilliant by pure luck — that&apos;s data-mining, and it&apos;s how you talk yourself into betting on noise. Nothing here counts as an edge until it has a real sample ({MIN_EDGE_SAMPLE}+ resolved). Watch the count, not the color.
-            </p>
+        <Panel>
+          <PanelHeader title="Where the money comes from — by direction and by coin" aside={<span>the paper record, sliced by factor</span>} />
+          <div className="border-b border-border bg-warn/[0.06] px-4 py-2">
+            <Note className="text-warn/90">
+              Thin slices lie. A bucket with a handful of trades can look brilliant by pure luck — that is data-mining. Nothing here counts as an edge until it has a real sample ({MIN_EDGE_SAMPLE}+ resolved). Watch the count, not the colour.
+            </Note>
           </div>
           {([
             { title: "By direction — do longs or shorts pay?", rows: score.edges.byDirection },
             { title: "By coin — which coins are worth trading?", rows: score.edges.byCoin.filter((e) => e.resolved > 0 || e.open > 0) },
           ] as { title: string; rows: EdgeStat[] }[]).map((grp) => (
-            <div key={grp.title} className="border-b border-border/30 last:border-0">
-              <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider px-4 pt-3 pb-1">{grp.title}</p>
-              <div className="overflow-x-auto">
-                <table className="w-full text-[11px]">
-                  <thead>
-                    <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/40">
-                      <th className="text-left font-medium px-4 py-1">Slice</th>
-                      <th className="text-right font-medium px-2 py-1">Resolved</th>
-                      <th className="text-right font-medium px-2 py-1">Open</th>
-                      <th className="text-right font-medium px-2 py-1">Hit rate</th>
-                      <th className="text-right font-medium px-2 py-1">Expectancy</th>
-                      <th className="text-right font-medium px-2 py-1">Total P&amp;L</th>
-                      <th className="text-right font-medium px-4 py-1">Verdict</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {grp.rows.map((e) => {
-                      const v = edgeVerdict(e);
-                      return (
-                        <tr key={e.key} className="border-t border-border/20">
-                          <td className="text-left px-4 py-1.5 font-semibold text-foreground/80">{e.label}</td>
-                          <td className="text-right px-2 py-1.5 tabular-nums">{e.resolved}</td>
-                          <td className="text-right px-2 py-1.5 tabular-nums text-muted-foreground/50">{e.open}</td>
-                          <td className="text-right px-2 py-1.5 tabular-nums">{e.hitRate != null ? `${(e.hitRate * 100).toFixed(0)}%` : "—"}</td>
-                          <td className={`text-right px-2 py-1.5 tabular-nums font-bold ${e.expectancy != null && e.resolved >= MIN_EDGE_SAMPLE ? col(e.expectancy) : "text-muted-foreground/40"}`}>
-                            {e.expectancy != null ? money2(e.expectancy) : "—"}
-                          </td>
-                          <td className={`text-right px-2 py-1.5 tabular-nums ${e.resolved >= MIN_EDGE_SAMPLE ? col(e.totalPnl) : "text-muted-foreground/40"}`}>{money(e.totalPnl)}</td>
-                          <td className={`text-right px-4 py-1.5 font-semibold ${v.cls}`}>{v.label}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+            <div key={grp.title} className="border-b border-border last:border-0">
+              <Label className="px-4 pb-1 pt-3">{grp.title}</Label>
+              <DataTable dense>
+                <thead>
+                  <tr>
+                    <Th>Slice</Th>
+                    <Th num>Resolved</Th>
+                    <Th num>Open</Th>
+                    <Th num>Hit rate</Th>
+                    <Th num>Expectancy</Th>
+                    <Th num>Total P&amp;L</Th>
+                    <Th num>Verdict</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grp.rows.map((e) => {
+                    const v = edgeVerdict(e);
+                    const judged = e.resolved >= MIN_EDGE_SAMPLE;
+                    return (
+                      <Row key={e.key}>
+                        <Td strong>{e.label}</Td>
+                        <Td num>{e.resolved}</Td>
+                        <Td num muted>{e.open}</Td>
+                        <Td num>{pct(e.hitRate)}</Td>
+                        <Td num className={`font-semibold ${judged && e.expectancy != null ? tone(e.expectancy) : "text-muted-foreground"}`}>{e.expectancy != null ? pnl2(e.expectancy) : "—"}</Td>
+                        <Td num className={judged ? tone(e.totalPnl) : "text-muted-foreground"}>{money(e.totalPnl)}</Td>
+                        <Td num><Chip tone={v.tone}>{v.label}</Chip></Td>
+                      </Row>
+                    );
+                  })}
+                </tbody>
+              </DataTable>
             </div>
           ))}
-          <p className="text-[10px] text-muted-foreground/40 px-4 py-2 border-t border-border/50">
-            Expectancy = avg $/trade after fees. A real edge is a slice with positive expectancy over a <span className="text-foreground/60">large</span> sample — the profitable setup is usually a combination of these factors, not one alone. Grayed numbers haven&apos;t earned a verdict yet.
-          </p>
-        </div>
+          <div className="border-t border-border px-4 py-3">
+            <Note>Expectancy = avg $/trade after fees. A real edge is a slice with positive expectancy over a <strong>large</strong> sample — the profitable setup is usually a combination of these factors, not one alone. Grey numbers have not earned a verdict yet.</Note>
+          </div>
+        </Panel>
       )}
 
       {hasAny && (
-        <p className="text-[11px] text-muted-foreground/40">
-          Every individual paper trade (with live P&amp;L) is in the full log on the <Link href="/orders" className="underline hover:text-foreground/70">Orders</Link> tab → Paper.
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ── LIVE MIRRORS PAPER ── every number derived from the live config + the real account,
-// beside what the paper record uses, with a check per item. If any row is red, the
-// scoreboard's "At LIVE sizing" column is describing a trade the executor would not place.
-interface ExecCfg {
-  live: { liveSources?: string[]; armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
-  paper: { refEquity: number; baseRiskPct: number; stopPct: number; maxHoldH: number; exit: string };
-  equity: number | null; equityAt?: string | null; leverageRung: number;
-  ladder: { from: number; cap: number }[];
-  tiers: { tier: string; riskPct: number; riskUsd: number | null; notionalUsd: number | null }[];
-  aligned: { stop: boolean; risk: boolean; hold: boolean; sizing: boolean; exit: boolean }; allAligned: boolean;
-}
-interface RtView {
-  state: { stage: string; symbol: string; startedAt: string; updatedAt: string; entryTxid?: string; closeTxid?: string; fillVol?: number; log: string[]; error?: string; finishedAt?: string; fees?: { entry: number; exit: number; net: number | null } } | null;
-  checklist: { key: string; label: string; result: { ok: boolean | null; note: string; at: string } | null }[];
-  verdict: { complete: boolean; allOk: boolean; failed: string[] } | null;
-  dryRun?: { at: string; symbol: string; ok: boolean; note: string; restoreFailed: string[] } | null;
-}
-// The $20 round trip: one real trade through the real executor, to prove the Kraken
-// behaviours the code assumes. Two clicks to start (arm the button, then send), because
-// the second click moves real money. The guardian closes it within ~7 minutes.
-// ── The go-live panel: three steps a founder can read at a glance ──────────────────────────
-const LIVE_CANDIDATE = "selective";
-function Step({ n, title, status, tone, children }: { n: number; title: string; status: string; tone: "green" | "amber" | "grey" | "red"; children?: ReactNode }) {
-  const toneCls = tone === "green" ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10" : tone === "amber" ? "text-amber-400 border-amber-500/40 bg-amber-500/10" : tone === "red" ? "text-red-400 border-red-500/40 bg-red-500/10" : "text-muted-foreground/60 border-border bg-muted/30";
-  return (
-    <div className="rounded-xl border border-border bg-card p-4 space-y-2">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-sm font-bold"><span className="text-muted-foreground/50 mr-2">{n}</span>{title}</p>
-        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${toneCls}`}>{status}</span>
-      </div>
-      {children}
-    </div>
-  );
-}
-function GateRow({ label, value, target, ok, hint }: { label: string; value: string; target: string; ok: boolean; hint: string }) {
-  return (
-    <div className="grid grid-cols-[1.2rem_1fr_auto] items-center gap-2 text-[12px]">
-      <span className={ok ? "text-emerald-400" : "text-red-400 font-bold"}>{ok ? "✓" : "✗"}</span>
-      <span className="text-foreground/80">{label} <span className="text-muted-foreground/50">— {hint}</span></span>
-      <span className="tabular-nums text-right"><span className={ok ? "text-emerald-400 font-bold" : "text-foreground/80 font-bold"}>{value}</span><span className="text-muted-foreground/50"> / {target}</span></span>
-    </div>
-  );
-}
-interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[]; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
-function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean }) {
-  const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 15_000 });
-  const [confirm, setConfirm] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const post = async (body: Record<string, unknown>) => {
-    setBusy(true); setMsg(null);
-    try {
-      const r = await fetch("/api/margin/arm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-      const j = await r.json();
-      setMsg(j.error ?? (j.armed ? "ARMED — real orders from the next scan tick" : "disarmed"));
-      await mutate();
-    } catch (e) { setMsg(String(e)); }
-    finally { setBusy(false); setConfirm(""); }
-  };
-  if (!arm) return <p className="text-[11px] text-muted-foreground/50">Loading arm state…</p>;
-  return (
-    <div className="space-y-2">
-      {arm.armed ? (
-        <div className="flex items-center gap-2 flex-wrap">
-          <button disabled={busy} onClick={() => post({ action: "disarm" })} className="rounded-md border border-red-500/60 bg-red-500/15 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/25 disabled:opacity-50">{busy ? "…" : "DISARM now — stop new entries"}</button>
-          <span className="text-[11px] text-muted-foreground/70">Live: {arm.sources.join(", ")} · {arm.riskPct}% base, {arm.riskPct * 2}% high conviction · max {arm.maxPositions} positions · {arm.maxTradesPerDay} trades/day · {arm.marketEntries ? "market" : "maker"} entries. Open positions stay under the guardian after a disarm.</span>
-        </div>
-      ) : (
-        <div className="flex items-center gap-2 flex-wrap">
-          <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='type ARM' className="w-24 rounded-md border border-border bg-background px-2 py-1 text-[12px]" />
-          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective — 3% per trade for the first 20 live trades, then paper's full 6%; 1 position, 3 trades/day"}</button>
-          {!rtPassed && <span className="text-[11px] text-red-400">plumbing test must pass first</span>}
-          {arm.ddTripped && <span className="text-[11px] text-red-400">drawdown breaker tripped</span>}
-          {!gateOk && rtPassed && <span className="text-[11px] text-amber-400">paper gate is not green — arming anyway is your decision, recorded in the log</span>}
-        </div>
-      )}
-      {arm.armed && (
-        <p className="text-[11px]">
-          <span className="text-foreground/80">Live now:</span>{" "}
-          {arm.liveNow && arm.liveNow.length > 0
-            ? arm.liveNow.map((p) => `${p.pair.replace(/:BTNL$/, "").replace(/USD$/, "")} ${p.side} · entry ${p.entry.toPrecision(5)} · ${p.net != null ? `${p.net < 0 ? "−" : "+"}$${Math.abs(p.net).toFixed(0)} open` : "P&L pending"} · since ${new Date(p.openedAt).toLocaleTimeString()}`).join(" | ")
-            : "no open position — waiting for the next high-conviction breakout"}
-          <span className="text-muted-foreground/50"> · full detail on Margin Cockpit</span>
-        </p>
-      )}
-      {arm.stage3 && (
-        <p className="text-[11px]">
-          <span className="text-foreground/80">Stage 3:</span>{" "}
-          {arm.stage3.status === "running" && <>first {arm.stage3.target} live trades at half size — <span className="font-bold">{arm.stage3.done} of {arm.stage3.target}</span> closed. Moves to paper&apos;s full size automatically when real fills match paper.</>}
-          {arm.stage3.status === "graduated" && <span className="text-emerald-400">graduated — paper&apos;s full sizing rule is on ({arm.stage3.toBase}% base, {arm.stage3.toBase * 2}% high conviction).</span>}
-          {arm.stage3.status === "held" && <span className="text-red-400">held at half size — live diverged from paper: {arm.stage3.note}</span>}
-        </p>
-      )}
-      {msg && <p className="text-[11px] text-muted-foreground/70">{msg}</p>}
-      {arm.log.length > 0 && <p className="text-[10px] text-muted-foreground/50">Last: {arm.log[0]}</p>}
-    </div>
-  );
-}
-function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
-  const { data: rt } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 30_000 });
-  const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
-  const cand = strategies.find((s) => s.key === LIVE_CANDIDATE) ?? null;
-  const rtState = rt?.state ?? null;
-  const rtRunning = rtState != null && ["entering", "open", "closing"].includes(rtState.stage);
-  const rtPassed = rtState?.stage === "done" && !!rt?.verdict?.allOk;
-  const plumbingStatus = rtRunning ? `RUNNING · ${rtState?.stage}` : rtPassed ? `PASSED · ${new Date(rtState!.finishedAt ?? rtState!.updatedAt).toLocaleDateString()}` : rtState?.stage === "done" ? "FAILED CHECKS" : rtState?.stage === "failed" ? "LAST RUN FAILED" : "NOT RUN YET";
-  const plumbingTone = rtRunning ? "amber" : rtPassed ? "green" : rtState ? "red" : "grey";
-
-  const resolved = cand?.resolved ?? 0;
-  const net = cand?.liveNet ?? 0;
-  const t = cand?.tStat ?? null;
-  const days = cand?.days ?? 0;
-  const gate = { n: resolved >= 30, net: resolved > 0 && net > 0, t: t != null && t >= 2, days: days >= 7 };
-  const gateOk = gate.n && gate.net && gate.t && gate.days;
-  const gateStatus = !cand ? "NO DATA YET" : gateOk ? "REAL EDGE — gate open" : `${[gate.n, gate.net, gate.t, gate.days].filter(Boolean).length} of 4 green`;
-  const gateTone = !cand ? "grey" : gateOk ? "green" : "amber";
-
-  const armed = !!cfg?.live.armed;
-  const eq = cfg?.equity ?? 0;
-
-  return (
-    <div className="space-y-3">
-      <Step n={1} title="Plumbing test — one real $20 trade through the whole system" status={plumbingStatus} tone={plumbingTone}>
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          Proves Kraken behaves the way the code assumes: entry, attached stop, close, fees. It is not a strategy test and does not move step 2.
-          {rtPassed && <> <span className="text-emerald-400">All 14 checks passed.</span> It only needs to run again if the Kraken code changes.</>}
-        </p>
-        <details open={!rtPassed}>
-          <summary className="cursor-pointer text-[11px] text-muted-foreground/60">{rtPassed ? "Show the test card (re-run, details)" : "Run the test"}</summary>
-          <div className="mt-2"><RoundTripCard /></div>
-        </details>
-      </Step>
-
-      <Step n={2} title="Paper gate — the live candidate has to prove itself" status={gateStatus} tone={gateTone}>
-        <p className="text-[11px] text-muted-foreground/70">
-          Strategy under test: <span className="text-foreground/80">{cand?.label ?? "high-conviction 5m/15m breakouts (selective)"}</span>. All four must be green. Until then nothing trades real money.
-        </p>
-        {cand ? (
-          <div className="space-y-1.5">
-            <GateRow label="Resolved trades" hint="enough of a sample" value={String(resolved)} target="30" ok={gate.n} />
-            <GateRow label="Net result at live sizing" hint="it makes money after fees" value={`${net < 0 ? "−" : ""}$${Math.abs(Math.round(net)).toLocaleString()}`} target="> $0" ok={gate.net} />
-            <GateRow label="Confidence (t)" hint="not luck" value={t == null ? "—" : t.toFixed(2)} target="2.00" ok={gate.t} />
-            <GateRow label="Distinct days" hint="not one good day" value={String(days)} target="7" ok={gate.days} />
-            <p className="text-[11px] text-muted-foreground/60">Verdict: <span className={verdictCls(cand.verdict)}>{cand.verdict}</span>{cand.open > 0 && <> · {cand.open} open now</>}</p>
-          </div>
-        ) : <p className="text-[11px] text-muted-foreground/50">No resolved trades for the live candidate yet.</p>}
-      </Step>
-
-      <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `ARMED · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "DISARMED"} tone={armed ? "red" : "grey"}>
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          What arming means: {cfg ? <><span className="text-foreground/80">the same sizing rule paper is scored with</span>: {cfg.live.baseRiskPct}% of the account at risk per trade, {cfg.live.baseRiskPct * 2}% on high conviction{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / 100).toLocaleString()} today)</>}. The candidate only takes high-conviction setups, so its live trades are the {cfg.live.baseRiskPct * 2}% ones; on today&apos;s account that is twice the account in size, so the executor fits the order to free margin (a little under {cfg.live.baseRiskPct * 2}% realised) until the 3× rung at $10k — at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
-          Arming is deliberate: type ARM, then press. Starts at 1 position and 3 trades a day. Every arm and disarm is logged and paged to Slack.
-        </p>
-        <ArmControls rtPassed={rtPassed} gateOk={gateOk} />
-        <details>
-          <summary className="cursor-pointer text-[11px] text-muted-foreground/60">Show the live-vs-paper settings check</summary>
-          <div className="mt-2"><LiveMirrorCard /></div>
-        </details>
-      </Step>
-    </div>
-  );
-}
-
-function RoundTripCard() {
-  const { data, mutate } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 20_000 });
-  const [armed, setArmed] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const post = async (action: string) => {
-    setBusy(action); setMsg(null);
-    try {
-      const r = await fetch("/api/margin/round-trip", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, symbol: "BTC/USD" }) });
-      const j = await r.json();
-      setMsg(j.note ?? (r.ok ? "ok" : `error ${r.status}`));
-      await mutate();
-    } catch (e) { setMsg(String(e)); }
-    finally { setBusy(null); setArmed(false); }
-  };
-  const st = data?.state ?? null;
-  const running = st != null && ["entering", "open", "closing"].includes(st.stage);
-  const stageCls = st?.stage === "done" ? (data?.verdict?.allOk ? "text-emerald-400" : "text-red-400") : running ? "text-amber-400" : st?.stage === "failed" ? "text-red-400" : "text-muted-foreground/60";
-  const mark = (ok: boolean | null | undefined) => ok === true ? <span className="text-emerald-400">✓</span> : ok === false ? <span className="text-red-400 font-bold">✗</span> : <span className="text-muted-foreground/40">·</span>;
-  return (
-    <div className="rounded-xl border border-border bg-card p-4 space-y-2">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-xs font-bold">The $20 round trip — one real trade to prove Kraken behaves the way the code assumes</p>
-        <p className={`text-[10px] font-bold ${stageCls}`}>
-          {!st ? "never run" : `${st.stage.toUpperCase()} · ${st.symbol}${st.stage === "done" && data?.verdict ? (data.verdict.allOk ? " · ALL CHECKS PASSED" : ` · FAILED: ${data.verdict.failed.join(", ") || "incomplete"}`) : ""}`}
-        </p>
-      </div>
-      <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-        Buys about $20 of BTC on 2× margin through the real executor path (every guard on), waits for the attached stop to appear, probes the
-        API behaviours the guardian relies on, then closes through the real close path. Runs only while the executor is DISARMED and the pair is
-        empty. Cost: two market fees on $20 (a few cents) plus spread. This is plumbing validation, not a strategy test — it does not move the paper gate.
-      </p>
-      <div className="flex items-center gap-2 flex-wrap">
-        {!running && <button disabled={busy != null} onClick={() => post("dryrun")} className="rounded-md border border-emerald-500/60 bg-emerald-500/10 px-2 py-1 text-[11px] font-bold text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50">{busy === "dryrun" ? "asking Kraken…" : "1 · Dry run (free — Kraken checks the order, places nothing)"}</button>}
-        {!running && !armed && <button disabled={busy != null || !data?.dryRun?.ok} title={data?.dryRun?.ok ? "" : "run a clean dry run first"} onClick={() => setArmed(true)} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-40">2 · Arm the $20 round trip…</button>}
-        {!running && armed && (
-          <>
-            <button disabled={busy != null} onClick={() => post("start")} className="rounded-md border border-red-500/60 bg-red-500/10 px-2 py-1 text-[11px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-50">{busy === "start" ? "sending…" : "SEND the real $20 buy on BTC/USD"}</button>
-            <button onClick={() => setArmed(false)} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted">cancel</button>
-          </>
-        )}
-        {running && <button disabled={busy != null} onClick={() => post("advance")} className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-50">{busy === "advance" ? "checking…" : "run the checks now"}</button>}
-        {running && <button disabled={busy != null} onClick={() => post("abort")} className="rounded-md border border-red-500/60 px-2 py-1 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50">{busy === "abort" ? "closing…" : "abort (close now)"}</button>}
-        {msg && <span className="text-[11px] text-muted-foreground/70">{msg}</span>}
-        {st?.error && <span className="text-[11px] text-red-400">{st.error}</span>}
-      </div>
-      {data?.dryRun && (
-        <p className="text-[11px]">
-          <span className={data.dryRun.ok ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>{data.dryRun.ok ? "Dry run passed" : "Dry run failed"}</span>
-          <span className="text-muted-foreground/60"> · {new Date(data.dryRun.at).toLocaleTimeString()} · {data.dryRun.note}</span>
-        </p>
-      )}
-      {data?.checklist && st && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-[11px]">
-            <tbody>
-              {data.checklist.map((c) => (
-                <tr key={c.key} className="border-b border-border/30">
-                  <td className="py-1 pr-2 w-4">{mark(c.result?.ok)}</td>
-                  <td className="py-1 pr-3 text-foreground/80">{c.label}</td>
-                  <td className="py-1 text-muted-foreground/60">{c.result?.note ?? ""}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {st && st.log.length > 0 && (
-        <details className="text-[10px] text-muted-foreground/60">
-          <summary className="cursor-pointer">log ({st.log.length})</summary>
-          <pre className="whitespace-pre-wrap mt-1">{st.log.slice(-25).join("\n")}</pre>
-        </details>
-      )}
-      {st?.fees && <p className="text-[11px] text-muted-foreground/70">Fees: entry ${st.fees.entry.toFixed(4)} · exit ${st.fees.exit.toFixed(4)} · net after fees {st.fees.net != null ? `$${st.fees.net.toFixed(2)}` : "?"}.</p>}
-    </div>
-  );
-}
-
-function LiveMirrorCard() {
-  const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
-  const ok = (b: boolean) => <span className={b ? "text-emerald-400" : "text-red-400 font-bold"}>{b ? "✓" : "✗"}</span>;
-  const usd0 = (n: number | null) => (n == null ? "—" : `$${Math.round(n).toLocaleString()}`);
-  return (
-    <div className="rounded-xl border border-border bg-card p-4 space-y-2">
-      <div className="flex items-center justify-between">
-        <p className="text-xs font-bold">The live book — mirrors paper, sized off the real account</p>
-        {cfg && (
-          <p className="text-[10px]">
-            <span className={cfg.live.armed ? "text-red-400 font-bold" : "text-muted-foreground/60"}>{cfg.live.armed ? "ARMED — real orders" : cfg.live.auto ? "validate-only" : "disarmed"}</span>
-            <span className="text-muted-foreground/60 ml-2">· sources armed: {cfg.live.liveSources?.length ? cfg.live.liveSources.join(", ") : "none"}</span>
-            {cfg.live.ddBreakerTripped && <span className="text-red-400 ml-2">· drawdown breaker tripped</span>}
-            <span className={`ml-2 ${cfg.allAligned ? "text-emerald-400" : "text-red-400 font-bold"}`}>{cfg.allAligned ? "live = paper ✓" : "live ≠ paper ✗"}</span>
-          </p>
-        )}
-      </div>
-      {!cfg ? <p className="text-[11px] text-muted-foreground/50">Loading live config…</p> : (
-        <>
-          <div className="overflow-x-auto">
-            <table className="w-full text-[11px]">
-              <thead>
-                <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50 border-b border-border/50">
-                  <th className="text-left font-medium py-1 pr-3">Setting</th>
-                  <th className="text-right font-medium py-1 px-2">Paper (the record)</th>
-                  <th className="text-right font-medium py-1 px-2">Live (what would trade)</th>
-                  <th className="text-right font-medium py-1 pl-2">Same?</th>
-                </tr>
-              </thead>
-              <tbody className="tabular-nums">
-                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Risk per trade (base · high conviction · ceiling)</td><td className="text-right px-2">{cfg.paper.baseRiskPct}% · {Math.min(6, cfg.paper.baseRiskPct * 2)}% · 6%</td><td className="text-right px-2">{cfg.live.baseRiskPct}% · {Math.min(6, cfg.live.baseRiskPct * 2)}% · 6%</td><td className="text-right pl-2">{ok(cfg.aligned.risk)}</td></tr>
-                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Initial stop</td><td className="text-right px-2">{cfg.paper.stopPct}%</td><td className="text-right px-2">{cfg.live.trailPct > 0 ? `Kraken trailing ${cfg.live.trailPct}%` : `${cfg.live.stopPct}%`}</td><td className="text-right pl-2">{ok(cfg.aligned.stop)}</td></tr>
-                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Managed exit</td><td className="text-right px-2">{cfg.paper.exit}</td><td className="text-right px-2">{cfg.live.trailPct > 0 ? "Kraken trailing-stop (different)" : "guardian ratchets the resting stop the same way"}</td><td className="text-right pl-2">{ok(cfg.aligned.exit)}</td></tr>
-                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Time stop</td><td className="text-right px-2">{cfg.paper.maxHoldH}h</td><td className="text-right px-2">{cfg.live.maxHoldH}h</td><td className="text-right pl-2">{ok(cfg.aligned.hold)}</td></tr>
-                <tr className="border-b border-border/30"><td className="py-1 pr-3 text-foreground/80">Sizing</td><td className="text-right px-2">risk × ${cfg.paper.refEquity.toLocaleString()} ÷ stop, ≤ leverage × equity</td><td className="text-right px-2">risk × {cfg.equity != null ? usd0(cfg.equity) : "equity"} ÷ stop, ≤ {cfg.leverageRung}× equity{cfg.live.perTradeCapUsd > 0 ? ` · capped ${usd0(cfg.live.perTradeCapUsd)}/trade` : ""}</td><td className="text-right pl-2">{ok(cfg.aligned.sizing)}</td></tr>
-                <tr><td className="py-1 pr-3 text-foreground/80">Guards (live only)</td><td className="text-right px-2 text-muted-foreground/50">—</td><td className="text-right px-2">max {cfg.live.maxPositions} positions · {cfg.live.maxTradesPerDay}/day · 15% drawdown breaker · daily loss cap</td><td className="text-right pl-2 text-muted-foreground/40">n/a</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-            <span className="text-foreground/80">Grows with the account.</span> Live sizes off the real Kraken equity
-            {cfg.equity != null ? <> (<span className="text-foreground/80">{usd0(cfg.equity)}</span> at the guardian&apos;s last run)</> : " (not read yet)"}, so dollar risk and position size rise as capital does at the same 3%:
-            {" "}{cfg.tiers.map((t) => `${t.tier} conviction risks ${usd0(t.riskUsd)} on ${usd0(t.notionalUsd)}`).join(" · ")}.
-            The leverage cap steps up with equity — {cfg.ladder.map((l) => `${l.cap}× from $${l.from.toLocaleString()}`).join(", ")} — and is <span className="text-foreground/80">{cfg.leverageRung}×</span> at today&apos;s equity (operator ceiling {cfg.live.maxLeverageCeiling}×).
-            Paper stays scored at a fixed ${cfg.paper.refEquity.toLocaleString()} so its t-stats stay comparable — compounding paper equity into the verdict would fake an edge.
-          </p>
-          <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-            Thousands a day at 3% still needs a larger account (~$50k+). Do not crank risk on $5k to fake the daily number. Live stays unarmed until a sleeve prints
-            {" "}<span className="text-foreground/80">REAL EDGE</span> (30+ resolved, net&gt;0 at live sizing, t≥2, 7+ days).
-          </p>
-        </>
+        <Note>Every individual paper trade (with live P&amp;L) is in the full log on <Link href="/orders" className="text-primary hover:underline">Orders</Link> → Paper.</Note>
       )}
     </div>
   );

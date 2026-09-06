@@ -16,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Esbueno Trades — Multi-Asset Trading Dashboard",
-  description: "Unified multi-asset dashboard — Tradovate futures + Kraken with AI-powered trading agents",
+  title: "Esbueno Trades",
+  description: "Kraken margin desk — live account, paper record, orders, system health",
 };
 
 export default function RootLayout({
@@ -26,15 +26,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
+    // Dark by default: every page component was written for a dark surface (white/6% borders,
+    // emerald-400 text) while the root palette was light, which is why borders vanished and
+    // green read as pastel. Remove "dark" here to flip the whole admin back to light.
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}
     >
       <head>
         <link rel="manifest" href="/manifest.json" />
         <meta name="theme-color" content="#10b981" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="Esbueno Trades" />
       </head>
       <body className="h-full flex bg-background">
@@ -45,8 +48,8 @@ export default function RootLayout({
           <Sidebar />
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             <TopBar />
-            <main className="flex-1 overflow-auto pt-0 md:pt-0 pl-0">
-              <div className="p-5 animate-fade-up">
+            <main className="flex-1 overflow-auto">
+              <div className="mx-auto w-full max-w-[1400px] p-4 md:p-6 animate-fade-up">
                 {children}
               </div>
             </main>

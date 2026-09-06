@@ -3,38 +3,38 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { useState, useEffect } from "react";
-import useSWR from "swr";
+import { useState } from "react";
 import {
   LayoutDashboard,
   CandlestickChart,
   ClipboardList,
   FlaskConical,
+  Route,
   Activity,
+  Menu,
+  X,
 } from "lucide-react";
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
-
-// Curated IA around the single live pillar (Kraken crypto). Futures/Tradovate was
-// retired Aug 2026 (pages redirect home via proxy.ts); Alpaca was removed earlier.
+// Curated IA around the single live pillar (Kraken margin). Futures/Tradovate was retired
+// Aug 2026 and the spot trend bot Aug 31 — their pages redirect home via proxy.ts.
 const sections = [
   {
-    label: "OVERVIEW",
+    label: "Overview",
     links: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
     ],
   },
   {
-    label: "TRADING",
+    label: "Trading",
     links: [
-      { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart, broker: "Kraken" },
-      { href: "/margin/paper", label: "Road to Live", icon: FlaskConical, broker: "Kraken" },
-      { href: "/stocks/paper", label: "Stock Paper Book", icon: FlaskConical, broker: "Stocks" },
+      { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart, hint: "live account" },
+      { href: "/margin/paper", label: "Road to Live", icon: Route, hint: "paper gate · arm" },
+      { href: "/stocks/paper", label: "Stock Paper Book", icon: FlaskConical, hint: "paper only" },
       { href: "/orders", label: "Orders", icon: ClipboardList },
     ],
   },
   {
-    label: "SYSTEM",
+    label: "System",
     links: [
       { href: "/command", label: "System Health", icon: Activity },
     ],
@@ -44,19 +44,9 @@ const sections = [
 export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  // Live = the MARGIN EXECUTOR is armed for real orders — the only live-money path now (the
-  // spot trend bot is retired). Reads /api/margin/mode so the badge accurately warns when real
-  // money is armed; fails safe to "paper" if unreadable. (The old /api/kraken-agent source
-  // tracked the dead bot and would show "paper" even with margin auto-trading armed.)
-  const { data: mode } = useSWR<{ armed?: boolean }>("/api/margin/mode", fetcher, { refreshInterval: 60000 });
-  const isLiveView = Boolean(mode?.armed);
 
-  useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
-
-  // The active link is the one whose href is the longest prefix of the current path.
-  // This keeps "/research" from lighting up when we're on "/research/correlations".
+  // The active link is the one whose href is the longest prefix of the current path, so
+  // "/margin" does not light up while on "/margin/paper".
   const bestMatch = sections
     .flatMap((s) => s.links.map((l) => l.href))
     .filter((href) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/"))
@@ -66,35 +56,22 @@ export function Sidebar() {
 
   const sidebarContent = (
     <>
-      {/* Logo */}
-      <div className="px-4 py-4 border-b border-border">
-        <Link href="/" className="flex items-center gap-3 group">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 via-emerald-400 to-teal-300 flex items-center justify-center shadow-md shadow-emerald-500/25 group-hover:shadow-emerald-500/40 transition-shadow">
-            <span className="text-white font-black text-sm tracking-tighter">E</span>
+      <div className="flex h-12 items-center border-b border-sidebar-border px-4">
+        <Link href="/" className="flex items-center gap-2.5">
+          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <span className="text-[13px] font-bold">E</span>
           </div>
-          <div>
-            <h1 className="text-[13px] font-bold tracking-tight leading-none bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">Esbueno Trades</h1>
-            <div className="flex items-center gap-1.5 mt-1">
-              <span className="relative flex h-1.5 w-1.5">
-                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isLiveView ? "bg-red-400" : "bg-emerald-400"}`} />
-                <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isLiveView ? "bg-red-400" : "bg-emerald-400"}`} />
-              </span>
-              <span className={`text-[9px] font-semibold tracking-[0.15em] uppercase ${isLiveView ? "text-red-400/80" : "text-emerald-400/80"}`}>
-                {isLiveView ? "Live" : "Paper"}
-              </span>
-            </div>
-          </div>
+          <span className="text-[13px] font-semibold tracking-tight">Esbueno Trades</span>
         </Link>
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 py-3 overflow-auto">
+      <nav className="flex-1 overflow-auto py-3">
         {sections.map((section) => (
           <div key={section.label} className="mb-4">
-            <p className="px-4 py-1 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground/40 uppercase">
+            <p className="px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
               {section.label}
             </p>
-            <div className="px-2 space-y-0.5">
+            <div className="space-y-0.5 px-2">
               {section.links.map((link) => {
                 const Icon = link.icon;
                 const active = isActive(link.href);
@@ -102,19 +79,18 @@ export function Sidebar() {
                   <Link
                     key={link.href}
                     href={link.href}
+                    onClick={() => setMobileOpen(false)}
                     className={cn(
-                      "flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-[12.5px] font-medium transition-all duration-100",
+                      "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
                       active
-                        ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                        ? "bg-sidebar-accent text-foreground"
+                        : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
                     )}
                   >
-                    <Icon className={cn("w-3.5 h-3.5 shrink-0", active ? "text-primary" : "text-muted-foreground/50")} />
-                    <span className="flex-1">{link.label}</span>
-                    {"broker" in link && link.broker && (
-                      <span className="text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded text-purple-400/40 bg-purple-500/[0.06]">
-                        {link.broker}
-                      </span>
+                    <Icon className={cn("h-4 w-4 shrink-0", active ? "text-primary" : "text-muted-foreground/70")} />
+                    <span className="flex-1 truncate">{link.label}</span>
+                    {"hint" in link && link.hint && (
+                      <span className="text-[10px] text-muted-foreground/60">{link.hint}</span>
                     )}
                   </Link>
                 );
@@ -123,48 +99,30 @@ export function Sidebar() {
           </div>
         ))}
       </nav>
-
-      {/* Footer */}
-      <div className="px-4 py-3 border-t border-border">
-        <p className="text-[9px] text-muted-foreground/30 tracking-wider uppercase text-center">
-          Kraken · Claude AI
-        </p>
-      </div>
     </>
   );
 
   return (
     <>
-      {/* Mobile hamburger button */}
       <button
         onClick={() => setMobileOpen(!mobileOpen)}
-        className="md:hidden fixed top-3 left-3 z-50 w-10 h-10 rounded-lg bg-card border border-border flex items-center justify-center shadow-lg"
+        className="fixed left-3 top-2 z-50 flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-foreground md:hidden"
         aria-label="Toggle menu"
       >
-        <div className="space-y-1.5">
-          <span className={cn("block w-5 h-0.5 bg-foreground transition-all", mobileOpen && "rotate-45 translate-y-2")} />
-          <span className={cn("block w-5 h-0.5 bg-foreground transition-all", mobileOpen && "opacity-0")} />
-          <span className={cn("block w-5 h-0.5 bg-foreground transition-all", mobileOpen && "-rotate-45 -translate-y-2")} />
-        </div>
+        {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
       </button>
 
-      {/* Mobile overlay */}
       {mobileOpen && (
-        <div
-          className="md:hidden fixed inset-0 bg-black/50 z-40"
-          onClick={() => setMobileOpen(false)}
-        />
+        <div className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={() => setMobileOpen(false)} />
       )}
 
-      {/* Desktop sidebar */}
-      <aside className="hidden md:flex w-52 border-r border-border bg-sidebar flex-col shrink-0">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex">
         {sidebarContent}
       </aside>
 
-      {/* Mobile sidebar */}
       <aside className={cn(
-        "md:hidden fixed left-0 top-0 bottom-0 w-64 bg-sidebar border-r border-border z-40 flex flex-col transition-transform duration-300",
-        mobileOpen ? "translate-x-0" : "-translate-x-full"
+        "fixed bottom-0 left-0 top-0 z-40 flex w-64 flex-col border-r border-sidebar-border bg-sidebar transition-transform duration-200 md:hidden",
+        mobileOpen ? "translate-x-0" : "-translate-x-full",
       )}>
         {sidebarContent}
       </aside>

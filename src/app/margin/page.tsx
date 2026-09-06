@@ -5,12 +5,15 @@ import Link from "next/link";
 import useSWR from "swr";
 import { MarginChart, INTERVAL_LABELS, useTimeframeStats, type PriceLevel } from "@/components/margin/margin-chart";
 import { pairMatchesSymbol, SCAN_UNIVERSE } from "@/lib/kraken-pairs";
+import { Chip } from "@/components/ui/chip";
+import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
+import { Empty, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
+import { money, pct, pnl2, timeOnly, tone, usd } from "@/lib/format";
 
 // ============ MARGIN COCKPIT ============
-// Home base for discretionary margin trading: multi-timeframe charts on any
-// margin-eligible pair, open positions with EXACT liquidation prices, the account's
-// margin-level gauge, a break-even calculator, and the scoreboard measuring the real
-// edge (hit rate + expectancy after fees and rollover) from Kraken's own trade ledger.
+// The live account: open positions with EXACT liquidation prices, the account's margin-level
+// gauge, the scanner's signals, multi-timeframe charts on any margin-eligible pair, a
+// break-even calculator, and the real round-trip scoreboard from Kraken's own ledger.
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
@@ -34,32 +37,25 @@ interface Trip {
   entryPrice: number; exitPrice: number; netPnl: number;
 }
 const TIMEFRAMES = [3, 5, 15, 60, 240, 1440];
-const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-const money2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
-const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
 
 // Kraken pair code → app symbol for the OHLC API (XBTUSD → BTC/USD style).
 function wsnameToSymbol(wsname: string): string {
   return wsname.replace("XBT/", "BTC/");
 }
 
+const seg = (active: boolean) => `h-7 rounded-md border px-2.5 text-xs font-semibold transition-colors ${active ? "border-paper/50 bg-paper/15 text-paper" : "border-border text-muted-foreground hover:text-foreground"}`;
 
 function TfTile({ symbol, interval, active, onClick }: { symbol: string; interval: number; active: boolean; onClick: () => void }) {
   const { changePct, rsi } = useTimeframeStats(symbol, interval);
   return (
-    <button
-      onClick={onClick}
-      className={`rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-        active ? "border-purple-500/50 bg-purple-500/10" : "border-border bg-card hover:border-border/80"
-      }`}
-    >
+    <button onClick={onClick} className={`rounded-lg border px-2.5 py-1.5 text-left transition-colors ${active ? "border-paper/50 bg-paper/10" : "border-border bg-card hover:bg-accent/50"}`}>
       <div className="flex items-center gap-2">
-        <span className="text-[11px] font-bold">{INTERVAL_LABELS[interval]}</span>
-        <span className={`text-[10px] font-semibold tabular-nums ${col(changePct ?? 0)}`}>
+        <span className="text-xs font-semibold">{INTERVAL_LABELS[interval]}</span>
+        <span className={`text-xs font-semibold tabular-nums ${tone(changePct ?? 0)}`}>
           {changePct != null ? `${changePct >= 0 ? "+" : ""}${changePct.toFixed(1)}%` : "…"}
         </span>
       </div>
-      <p className={`text-[9px] tabular-nums ${rsi == null ? "text-muted-foreground/40" : rsi > 70 ? "text-red-400" : rsi < 30 ? "text-emerald-400" : "text-muted-foreground/60"}`}>
+      <p className={`text-[11px] tabular-nums ${rsi == null ? "text-muted-foreground" : rsi > 70 ? "text-down" : rsi < 30 ? "text-up" : "text-muted-foreground"}`}>
         RSI {rsi != null ? rsi.toFixed(0) : "—"}{rsi != null && rsi > 70 ? " overbought" : rsi != null && rsi < 30 ? " oversold" : ""}
       </p>
     </button>
@@ -87,7 +83,7 @@ export default function MarginCockpitPage() {
     "/api/margin/signals", fetcher, { refreshInterval: 120_000 });
 
   const symbol = wsnameToSymbol(pairWs);
-  const positions = status?.positions ?? [];
+  const positions = useMemo(() => status?.positions ?? [], [status?.positions]);
   const health = status?.health ?? null;
   const sb = score?.scoreboard;
 
@@ -108,10 +104,10 @@ export default function MarginCockpitPage() {
   const [beHours, setBeHours] = useState(6);
   const [beMaker, setBeMaker] = useState(false);
   // Fees are charged on NOTIONAL. Calibrated to Spencer's REAL fills (kraken_my_trades):
-  // 0.172%/side measured — so ~0.15% maker / ~0.25% taker, NOT the 0.30/0.60 an older note
-  // assumed. Rollover ≈ 0.02% per 4h on notional. A price move of m yields m×notional, so the
-  // break-even move equals total costs as a % of notional — leverage cancels out of the move but
-  // multiplies what that move does to your margin.
+  // 0.172%/side measured — so ~0.15% maker / ~0.25% taker. Rollover ≈ 0.02% per 4h on
+  // notional. A price move of m yields m×notional, so the break-even move equals total costs
+  // as a % of notional — leverage cancels out of the move but multiplies what that move does
+  // to your margin.
   const feeSide = beMaker ? 0.0015 : 0.0025;
   const rollover = 0.0002 * Math.ceil(beHours / 4);
   const beMovePct = (feeSide * 2 + rollover) * 100;
@@ -120,362 +116,250 @@ export default function MarginCockpitPage() {
 
   const visiblePairs = (universe?.rows ?? []).filter((r) => showAllPairs || r.tradeable).slice(0, showAllPairs ? 200 : 24);
 
+  const ml = health?.marginLevel ?? null;
+  const mlTone = ml == null ? "grey" : ml < 100 ? "red" : ml < 150 ? "amber" : "green";
+  const inputCls = "mt-1 h-8 w-full rounded-md border border-input bg-background px-2.5 text-[13px] font-semibold tabular-nums";
+
   return (
     <div className="space-y-5">
-      {/* ── Header + health ── */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-bold tracking-tight">Margin Cockpit</h2>
-          <p className="text-[11px] text-muted-foreground/50">
-            Kraken spot margin — call at 80% margin level, forced liquidation at 40%
-          </p>
-        </div>
-        {health && health.marginLevel != null ? (
-          <div className={`px-4 py-2 rounded-xl border ${
-            health.marginLevel < 100 ? "border-red-500/40 bg-red-500/10" :
-            health.marginLevel < 150 ? "border-amber-500/40 bg-amber-500/10" :
-            "border-emerald-500/25 bg-emerald-500/5"
-          }`}>
-            <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Margin Level</p>
-            <p className={`text-xl font-black tabular-nums ${
-              health.marginLevel < 100 ? "text-red-400" : health.marginLevel < 150 ? "text-amber-400" : "text-emerald-400"
-            }`}>
-              {health.marginLevel.toFixed(0)}%
-            </p>
-          </div>
-        ) : (
-          <div className="px-4 py-2 rounded-xl border border-border bg-card">
-            <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Margin</p>
-            <p className="text-sm font-bold text-muted-foreground">not in use</p>
-          </div>
-        )}
-      </div>
+      <PageHeader
+        title="Margin Cockpit"
+        sub="Kraken spot margin — margin call at 80% margin level, forced liquidation at 40%."
+        right={<Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : "Margin not in use"}</Chip>}
+      />
 
-      {/* ── Imminent high-impact event warning ── */}
       {(news?.imminent?.length ?? 0) > 0 && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/[0.07] px-4 py-3">
-          <p className="text-xs font-bold text-amber-400">
-            ⚠️ High-impact event within ~24h: {news!.imminent.map((e) => `${e.name} (${e.date} ${e.time})`).join(" · ")}
-          </p>
-          <p className="text-[11px] text-muted-foreground/60 mt-0.5">
-            Volatility around these prints routinely exceeds a 20x position&apos;s entire 3% cushion. Being levered into one is a choice — make it knowingly.
-          </p>
-        </div>
+        <Panel tone="amber"><PanelBody>
+          <p className="text-[13px] font-semibold text-warn">High-impact event within ~24h: {news!.imminent.map((e) => `${e.name} (${e.date} ${e.time})`).join(" · ")}</p>
+          <Note className="mt-0.5">Volatility around these prints routinely exceeds a 20x position&apos;s entire 3% cushion. Being levered into one is a choice — make it knowingly.</Note>
+        </PanelBody></Panel>
       )}
 
       {/* ── Open positions ── */}
-      <div className="rounded-xl border border-border bg-card overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-          <p className="text-xs font-bold">Open Margin Positions</p>
-          {health && (
-            <p className="text-[10px] text-muted-foreground/50 tabular-nums">
-              equity {money(health.equity)} · margin used {money(health.marginUsed)} · free {money(health.freeMargin)}
-            </p>
-          )}
-        </div>
-        {positions.length === 0 ? (
-          <p className="px-4 py-5 text-sm text-muted-foreground/40">No margin positions open.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-[12px]">
-              <thead className="text-[9px] uppercase tracking-wider text-muted-foreground/45 border-b border-border">
-                <tr>
-                  <th className="text-left px-4 py-2 font-medium">Pair</th>
-                  <th className="text-left px-2 py-2 font-medium">Side</th>
-                  <th className="text-right px-2 py-2 font-medium">Lev</th>
-                  <th className="text-right px-2 py-2 font-medium">Entry</th>
-                  <th className="text-right px-2 py-2 font-medium">Now</th>
-                  <th className="text-right px-2 py-2 font-medium">P&L</th>
-                  <th className="text-right px-2 py-2 font-medium" title="Per-position estimate (0.6/leverage). The account margin level gauge is the authoritative number.">Liquidation (est.)</th>
-                  <th className="text-right px-4 py-2 font-medium">Distance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {positions.map((p) => (
-                  <tr key={p.id} className="border-b border-border/40">
-                    <td className="px-4 py-2 font-bold">{p.pair}</td>
-                    <td className={`px-2 py-2 font-bold ${p.side === "long" ? "text-emerald-400" : "text-red-400"}`}>
-                      {p.side.toUpperCase()}
-                    </td>
-                    <td className="px-2 py-2 text-right tabular-nums">{p.leverage.toFixed(0)}x</td>
-                    <td className="px-2 py-2 text-right tabular-nums">${p.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{p.currentPrice ? `$${p.currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</td>
-                    <td className={`px-2 py-2 text-right tabular-nums font-bold ${col(p.net ?? 0)}`}>{p.net != null ? money2(p.net) : "—"}</td>
-                    <td className="px-2 py-2 text-right tabular-nums text-red-400">{p.liqPrice ? `$${p.liqPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</td>
-                    <td className={`px-4 py-2 text-right tabular-nums font-bold ${
-                      p.liqPctAway == null ? "" : p.liqPctAway < 0.015 ? "text-red-400" : p.liqPctAway < 0.03 ? "text-amber-400" : "text-muted-foreground"
-                    }`}>
-                      {p.liqPctAway != null ? `${(p.liqPctAway * 100).toFixed(1)}%` : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <Panel>
+        <PanelHeader
+          title="Open margin positions"
+          aside={health && <span className="tabular-nums">equity {money(health.equity)} · margin used {money(health.marginUsed)} · free {money(health.freeMargin)}</span>}
+        />
+        {positions.length === 0 ? <Empty>No margin positions open.</Empty> : (
+          <DataTable>
+            <thead>
+              <tr>
+                <Th>Pair</Th>
+                <Th>Side</Th>
+                <Th num>Lev</Th>
+                <Th num>Entry</Th>
+                <Th num>Now</Th>
+                <Th num>P&amp;L</Th>
+                <Th num title="Per-position estimate (0.6/leverage). The account margin level gauge is the authoritative number.">Liquidation (est.)</Th>
+                <Th num>Distance</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => (
+                <Row key={p.id}>
+                  <Td strong>{p.pair}</Td>
+                  <Td className={`font-semibold ${p.side === "long" ? "text-up" : "text-down"}`}>{p.side === "long" ? "Long" : "Short"}</Td>
+                  <Td num>{p.leverage.toFixed(0)}x</Td>
+                  <Td num>{usd(p.entryPrice)}</Td>
+                  <Td num>{p.currentPrice ? usd(p.currentPrice) : "—"}</Td>
+                  <Td num className={`font-semibold ${tone(p.net ?? 0)}`}>{p.net != null ? pnl2(p.net) : "—"}</Td>
+                  <Td num className="text-down">{p.liqPrice ? usd(p.liqPrice) : "—"}</Td>
+                  <Td num className={`font-semibold ${p.liqPctAway == null ? "" : p.liqPctAway < 0.015 ? "text-down" : p.liqPctAway < 0.03 ? "text-warn" : "text-muted-foreground"}`}>
+                    {pct(p.liqPctAway, 1)}
+                  </Td>
+                </Row>
+              ))}
+            </tbody>
+          </DataTable>
         )}
-      </div>
+      </Panel>
 
       {/* ── Live scanner signals ── */}
-      <div className="rounded-xl border border-border bg-card overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-          <p className="text-xs font-bold">🔎 Live Signals — all margin coins, all timeframes</p>
-          <p className="text-[10px] text-muted-foreground/45">awareness only · scans every 5 min · not trade advice</p>
-        </div>
+      <Panel>
+        <PanelHeader title="Live signals — all margin coins, all timeframes" aside={<span>awareness only · scans every 5 min · not trade advice</span>} />
         {(sig?.signals?.length ?? 0) === 0 ? (
-          <p className="px-4 py-4 text-sm text-muted-foreground/40">No notable signals in the last 24h. The scanner is watching the {SCAN_UNIVERSE.length} US-margin coins {`{`}{SCAN_UNIVERSE.join(", ")}{`}`} on 5m/15m/1h/4h/daily.</p>
+          <Empty>No notable signals in the last 24h. The scanner is watching the {SCAN_UNIVERSE.length} US-margin coins ({SCAN_UNIVERSE.join(", ")}) on 5m/15m/1h/4h/daily.</Empty>
         ) : (
-          <div className="max-h-56 overflow-y-auto divide-y divide-border/40">
+          <div className="max-h-56 divide-y divide-border/60 overflow-y-auto">
             {sig!.signals.map((s, i) => {
               const bullish = s.kind === "oversold" || s.kind === "breakout" || s.kind === "move-up";
               const bearish = s.kind === "overbought" || s.kind === "breakdown" || s.kind === "move-down";
               return (
-                <button
-                  key={i}
-                  onClick={() => { setPairWs(`${s.coin === "BTC" ? "BTC" : s.coin}/USD`); }}
-                  className="w-full flex items-center gap-3 px-4 py-1.5 hover:bg-white/[0.02] text-left"
-                >
-                  <span className="text-[10px] text-muted-foreground/45 tabular-nums w-16 shrink-0">
-                    {new Date(s.ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-                  </span>
-                  <span className="font-bold text-[12px] w-12 shrink-0">{s.coin}</span>
-                  <span className="text-[10px] text-muted-foreground/50 w-8 shrink-0">{s.timeframe}</span>
-                  <span className={`text-[12px] flex-1 ${bullish ? "text-emerald-400" : bearish ? "text-red-400" : "text-muted-foreground/80"}`}>
-                    {s.detail}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground/40 tabular-nums">${s.price.toLocaleString()}</span>
+                <button key={i} onClick={() => { setPairWs(`${s.coin}/USD`); }} className="flex w-full items-center gap-3 px-4 py-1.5 text-left text-xs hover:bg-foreground/[0.03]">
+                  <span className="w-16 shrink-0 tabular-nums text-muted-foreground">{timeOnly(s.ts)}</span>
+                  <span className="w-12 shrink-0 font-semibold">{s.coin}</span>
+                  <span className="w-8 shrink-0 text-muted-foreground">{s.timeframe}</span>
+                  <span className={`flex-1 truncate ${bullish ? "text-up" : bearish ? "text-down" : ""}`}>{s.detail}</span>
+                  <span className="tabular-nums text-muted-foreground">${s.price.toLocaleString()}</span>
                 </button>
               );
             })}
           </div>
         )}
-      </div>
+      </Panel>
 
       {/* ── Pair picker ── */}
-      <div className="rounded-xl border border-border bg-card p-3">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-wider">
-            Margin pairs — US-retail only by default (BTC 20x, majors 10x); non-US pairs cannot be traded from this account
-          </p>
-          <button onClick={() => setShowAllPairs(!showAllPairs)} className="text-[10px] text-purple-400 hover:underline">
-            {showAllPairs ? "show tradeable only" : `show all ${universe?.rows?.length ?? "…"}`}
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
+      <Panel>
+        <PanelHeader
+          title="Margin pairs"
+          aside={
+            <>
+              <span className="hidden sm:inline">US-retail only by default (BTC 20x, majors 10x) — non-US pairs cannot be traded from this account</span>
+              <button onClick={() => setShowAllPairs(!showAllPairs)} className="text-primary hover:underline">{showAllPairs ? "show tradeable only" : `show all ${universe?.rows?.length ?? "…"}`}</button>
+            </>
+          }
+        />
+        <PanelBody className="flex flex-wrap gap-1.5 p-3">
           {visiblePairs.map((r) => (
             <button
               key={r.pair}
               onClick={() => setPairWs(wsnameToSymbol(r.wsname))}
               title={r.spreadPct != null ? `spread ${r.spreadPct.toFixed(3)}%` : ""}
-              className={`px-2 py-1 rounded-md border text-[11px] font-semibold transition-colors ${
-                wsnameToSymbol(r.wsname) === pairWs
-                  ? "border-purple-500/60 bg-purple-500/15 text-purple-300"
-                  : r.tradeable
-                    ? "border-border bg-background hover:border-border/60"
-                    : "border-red-500/20 bg-red-500/[0.04] text-muted-foreground/50"
-              }`}
+              className={`${seg(wsnameToSymbol(r.wsname) === pairWs)} ${!r.tradeable && wsnameToSymbol(r.wsname) !== pairWs ? "border-down/25 bg-down/[0.04] text-muted-foreground" : ""}`}
             >
               {r.wsname.replace("/USD", "").replace("XBT", "BTC")}
-              <span className="text-[8px] text-muted-foreground/50 ml-1">{r.maxLeverage}x</span>
+              <span className="ml-1 text-[10px] text-muted-foreground">{r.maxLeverage}x</span>
               {r.usMargin === false
-                ? <span className="text-[8px] text-amber-400/70 ml-1" title="Not on Kraken's US retail margin list — the executor refuses it">non-US</span>
-                : !r.tradeable && <span className="text-[8px] text-red-400/70 ml-1">wide</span>}
+                ? <span className="ml-1 text-[10px] text-warn" title="Not on Kraken's US retail margin list — the executor refuses it">non-US</span>
+                : !r.tradeable && <span className="ml-1 text-[10px] text-down">wide</span>}
             </button>
           ))}
-        </div>
-      </div>
+        </PanelBody>
+      </Panel>
 
       {/* ── Chart + timeframe tiles ── */}
-      <div className="rounded-xl border border-border bg-card p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <p className="text-sm font-bold">{pairWs}</p>
-          <div className="flex gap-1.5">
+      <Panel>
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 pt-3">
+          <p className="text-[13px] font-semibold">{pairWs}</p>
+          <div className="flex gap-1">
             {TIMEFRAMES.map((tf) => (
-              <button
-                key={tf}
-                onClick={() => setInterval_(tf)}
-                className={`px-2.5 py-1 rounded-md border text-[11px] font-bold ${
-                  interval === tf ? "border-purple-500/60 bg-purple-500/15 text-purple-300" : "border-border text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {INTERVAL_LABELS[tf]}
-              </button>
+              <button key={tf} onClick={() => setInterval_(tf)} className={seg(interval === tf)}>{INTERVAL_LABELS[tf]}</button>
             ))}
           </div>
         </div>
-        <MarginChart symbol={symbol} interval={interval} levels={levels} height={440} />
-        {/* Multi-timeframe snapshot: every frame at a glance, click to switch */}
-        <div className="grid grid-cols-3 md:grid-cols-6 gap-1.5 mt-2">
-          {TIMEFRAMES.map((tf) => (
-            <TfTile key={tf} symbol={symbol} interval={tf} active={interval === tf} onClick={() => setInterval_(tf)} />
-          ))}
+        <div className="p-3">
+          <MarginChart symbol={symbol} interval={interval} levels={levels} height={440} />
+          <div className="mt-2 grid grid-cols-3 gap-1.5 md:grid-cols-6">
+            {TIMEFRAMES.map((tf) => (
+              <TfTile key={tf} symbol={symbol} interval={tf} active={interval === tf} onClick={() => setInterval_(tf)} />
+            ))}
+          </div>
         </div>
-      </div>
+      </Panel>
 
       {/* ── Break-even calculator ── */}
-      <div className="rounded-xl border border-border bg-card p-4">
-        <p className="text-xs font-bold mb-3">Break-Even Calculator — what this trade must do before you earn a cent</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-          <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-            Margin (your money)
-            <input type="number" value={beSize} min={10} onChange={(e) => setBeSize(Number(e.target.value) || 0)}
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-bold tabular-nums" />
-          </label>
-          <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-            Leverage
-            <select value={beLev} onChange={(e) => setBeLev(Number(e.target.value))}
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-bold">
-              {[1, 2, 3, 5, 10, 20].map((l) => <option key={l} value={l}>{l}x</option>)}
-            </select>
-          </label>
-          <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-            Expected hold (hours)
-            <input type="number" value={beHours} min={0} onChange={(e) => setBeHours(Number(e.target.value) || 0)}
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-bold tabular-nums" />
-          </label>
-          <label className="text-[10px] text-muted-foreground/60 uppercase tracking-wider">
-            Order type
-            <select value={beMaker ? "maker" : "taker"} onChange={(e) => setBeMaker(e.target.value === "maker")}
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-bold">
-              <option value="taker">Market (taker 0.60%)</option>
-              <option value="maker">Limit (maker 0.30%)</option>
-            </select>
-          </label>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="rounded-lg border border-amber-500/25 bg-amber-500/[0.05] px-3 py-2">
-            <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Price must move in your favor</p>
-            <p className="text-xl font-black text-amber-400 tabular-nums">{beMovePct.toFixed(2)}%</p>
-            <p className="text-[10px] text-muted-foreground/50">fees both sides + rollover on ${beNotional.toLocaleString()} notional</p>
+      <Panel>
+        <PanelHeader title="Break-even calculator — what this trade must do before you earn a cent" />
+        <PanelBody className="space-y-3">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <label><Label>Margin (your money)</Label>
+              <input type="number" value={beSize} min={10} onChange={(e) => setBeSize(Number(e.target.value) || 0)} className={inputCls} />
+            </label>
+            <label><Label>Leverage</Label>
+              <select value={beLev} onChange={(e) => setBeLev(Number(e.target.value))} className={inputCls}>
+                {[1, 2, 3, 5, 10, 20].map((l) => <option key={l} value={l}>{l}x</option>)}
+              </select>
+            </label>
+            <label><Label>Expected hold (hours)</Label>
+              <input type="number" value={beHours} min={0} onChange={(e) => setBeHours(Number(e.target.value) || 0)} className={inputCls} />
+            </label>
+            <label><Label>Order type</Label>
+              <select value={beMaker ? "maker" : "taker"} onChange={(e) => setBeMaker(e.target.value === "maker")} className={inputCls}>
+                <option value="taker">Market (taker ~0.25%/side)</option>
+                <option value="maker">Limit (maker ~0.15%/side)</option>
+              </select>
+            </label>
           </div>
-          <div className="rounded-lg border border-red-500/25 bg-red-500/[0.05] px-3 py-2">
-            <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Liquidation if it moves against you</p>
-            <p className="text-xl font-black text-red-400 tabular-nums">{beCushionPct.toFixed(1)}%</p>
-            <p className="text-[10px] text-muted-foreground/50">you lose the full ${beSize.toLocaleString()} margin</p>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div className="rounded-lg border border-warn/30 bg-warn/[0.06] px-3 py-2">
+              <Stat label="Price must move in your favour" value={`${beMovePct.toFixed(2)}%`} valueCls="text-warn" sub={`fees both sides + rollover on $${beNotional.toLocaleString()} notional`} />
+            </div>
+            <div className="rounded-lg border border-down/30 bg-down/[0.06] px-3 py-2">
+              <Stat label="Liquidation if it moves against you" value={`${beCushionPct.toFixed(1)}%`} valueCls="text-down" sub={`you lose the full $${beSize.toLocaleString()} margin`} />
+            </div>
+            <div className="rounded-lg border border-border bg-background px-3 py-2">
+              <Stat label="Rollover cost while held" value={`$${(beNotional * rollover).toFixed(2)}`} sub="~0.02% of notional every 4 hours" />
+            </div>
           </div>
-          <div className="rounded-lg border border-border bg-background px-3 py-2">
-            <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Rollover cost while held</p>
-            <p className="text-xl font-black tabular-nums">${(beNotional * rollover).toFixed(2)}</p>
-            <p className="text-[10px] text-muted-foreground/50">~0.02% of notional every 4 hours</p>
-          </div>
-        </div>
-      </div>
+        </PanelBody>
+      </Panel>
 
       {/* ── News & events ── */}
-      <div className="grid md:grid-cols-3 gap-3">
-        <div className="md:col-span-2 rounded-xl border border-border bg-card overflow-hidden">
-          <p className="px-4 py-2.5 border-b border-border text-xs font-bold">Crypto Headlines</p>
-          <div className="max-h-64 overflow-y-auto divide-y divide-border/40">
-            {(news?.headlines ?? []).length === 0 ? (
-              <p className="px-4 py-4 text-sm text-muted-foreground/40">Loading headlines…</p>
-            ) : (
+      <div className="grid gap-3 md:grid-cols-3">
+        <Panel className="md:col-span-2">
+          <PanelHeader title="Crypto headlines" />
+          <div className="max-h-64 divide-y divide-border/60 overflow-y-auto">
+            {(news?.headlines ?? []).length === 0 ? <Empty>Loading headlines…</Empty> : (
               news!.headlines.map((h, i) => (
-                <a key={i} href={h.link} target="_blank" rel="noreferrer" className="block px-4 py-2 hover:bg-white/[0.02]">
-                  <p className="text-[12px] leading-snug">{h.title}</p>
-                  <p className="text-[9px] text-muted-foreground/40 mt-0.5">
+                <a key={i} href={h.link} target="_blank" rel="noreferrer" className="block px-4 py-2 hover:bg-foreground/[0.03]">
+                  <p className="text-xs leading-snug">{h.title}</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
                     {h.source}{h.publishedAt ? ` · ${new Date(h.publishedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
                   </p>
                 </a>
               ))
             )}
           </div>
-        </div>
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <p className="px-4 py-2.5 border-b border-border text-xs font-bold">High-Impact Calendar</p>
-          <div className="p-3 space-y-2">
-            {(news?.upcoming ?? []).length === 0 ? (
-              <p className="text-[11px] text-muted-foreground/40">Nothing major in the next 2 weeks.</p>
-            ) : (
+        </Panel>
+        <Panel>
+          <PanelHeader title="High-impact calendar" />
+          <PanelBody className="space-y-2 p-3">
+            {(news?.upcoming ?? []).length === 0 ? <Note>Nothing major in the next 2 weeks.</Note> : (
               news!.upcoming.map((e, i) => (
-                <div key={i} className="flex items-center justify-between text-[11px]">
+                <div key={i} className="flex items-center justify-between text-xs">
                   <span className="font-semibold">{e.name}</span>
-                  <span className="text-muted-foreground/60 tabular-nums">{e.date}{e.approx ? " ~" : ""}</span>
+                  <span className="tabular-nums text-muted-foreground">{e.date}{e.approx ? " ~" : ""}</span>
                 </div>
               ))
             )}
-            <p className="text-[9px] text-muted-foreground/35 pt-1">~ = date approximate; the daily brief verifies exact times.</p>
-          </div>
-        </div>
+            <Note className="pt-1 text-[11px]">~ = date approximate; the daily brief verifies exact times.</Note>
+          </PanelBody>
+        </Panel>
       </div>
 
-      {/* ── Link to the paper-trades experiment (its own tab) ── */}
-      <Link href="/margin/paper" className="flex items-center justify-between rounded-xl border border-purple-500/20 bg-purple-500/[0.03] px-4 py-3 hover:bg-purple-500/[0.06] transition-colors">
-        <div>
-          <p className="text-xs font-bold">📊 Paper Trades — the shadow experiment</p>
-          <p className="text-[10px] text-muted-foreground/45">Strategy scoreboard + full trade log — what&apos;s working, scored on paper. The record that earns real-money automation.</p>
-        </div>
-        <span className="text-purple-400 text-sm">→</span>
-      </Link>
-
       {/* ── Scoreboard ── */}
-      <div className="rounded-xl border border-border bg-card overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-          <p className="text-xs font-bold">Your Margin Track Record — from Kraken&apos;s own ledger</p>
-          {sb && <p className="text-[10px] text-muted-foreground/50">automation gate: {sb.gate.progress}</p>}
-        </div>
+      <Panel>
+        <PanelHeader title="Your margin track record — from Kraken's own ledger" aside={sb && <span>automation gate: {sb.gate.progress}</span>} />
         {!sb || sb.trades === 0 ? (
-          <p className="px-4 py-5 text-sm text-muted-foreground/40">
-            No completed margin round trips synced yet. History syncs automatically every 5 minutes.
-          </p>
+          <Empty>No completed margin round trips synced yet. History syncs automatically every 5 minutes.</Empty>
         ) : (
-          <div className="p-4 space-y-4">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Round trips</p>
-                <p className="text-lg font-black tabular-nums">{sb.trades}</p>
-              </div>
-              <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Hit rate</p>
-                <p className={`text-lg font-black tabular-nums ${sb.hitRate != null && sb.hitRate >= 0.6 ? "text-emerald-400" : "text-amber-400"}`}>
-                  {sb.hitRate != null ? `${(sb.hitRate * 100).toFixed(0)}%` : "—"}
-                </p>
-              </div>
-              <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Avg win / loss</p>
-                <p className="text-lg font-black tabular-nums">
-                  <span className="text-emerald-400">{money(sb.avgWin)}</span>
-                  <span className="text-muted-foreground/40 mx-1">/</span>
-                  <span className="text-red-400">{money(sb.avgLoss)}</span>
-                </p>
-              </div>
-              <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Net P&L (after fees)</p>
-                <p className={`text-lg font-black tabular-nums ${col(sb.totalNetPnl)}`}>{money(sb.totalNetPnl)}</p>
-              </div>
-              <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider" title="Rollover financing is account-level and subtracted from the total">After rollover</p>
-                <p className={`text-lg font-black tabular-nums ${col(sb.pnlAfterRollover)}`}>{money(sb.pnlAfterRollover)}</p>
-              </div>
+          <PanelBody className="space-y-4">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+              <Stat label="Round trips" value={sb.trades} />
+              <Stat label="Hit rate" value={pct(sb.hitRate)} valueCls={sb.hitRate != null && sb.hitRate >= 0.6 ? "text-up" : "text-warn"} />
+              <Stat label="Avg win / loss" value={<><span className="text-up">{money(sb.avgWin)}</span><span className="mx-1 text-muted-foreground">/</span><span className="text-down">{money(sb.avgLoss)}</span></>} />
+              <Stat label="Net P&L (after fees)" value={money(sb.totalNetPnl)} valueCls={tone(sb.totalNetPnl)} />
+              <Stat label="After rollover" title="Rollover financing is account-level and subtracted from the total" value={money(sb.pnlAfterRollover)} valueCls={tone(sb.pnlAfterRollover)} />
             </div>
-            <div className="grid md:grid-cols-2 gap-4">
+            <div className="grid gap-4 md:grid-cols-2">
               <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1.5">By coin</p>
+                <Label className="mb-1.5">By coin</Label>
                 {Object.entries(sb.byPair).sort((a, b) => b[1].trades - a[1].trades).map(([pair, s]) => (
-                  <div key={pair} className="flex items-center justify-between text-[11px] py-0.5">
+                  <div key={pair} className="flex items-center justify-between py-0.5 text-xs">
                     <span className="font-semibold">{pair}</span>
-                    <span className="text-muted-foreground/60">{s.trades} trades · {s.trades ? ((s.wins / s.trades) * 100).toFixed(0) : 0}% win</span>
-                    <span className={`font-bold tabular-nums ${col(s.netPnl)}`}>{money(s.netPnl)}</span>
+                    <span className="text-muted-foreground">{s.trades} trades · {s.trades ? ((s.wins / s.trades) * 100).toFixed(0) : 0}% win</span>
+                    <span className={`font-semibold tabular-nums ${tone(s.netPnl)}`}>{money(s.netPnl)}</span>
                   </div>
                 ))}
               </div>
               <div>
-                <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider mb-1.5">By hold time</p>
+                <Label className="mb-1.5">By hold time</Label>
                 {["minutes", "hours", "days", "weeks+"].filter((k) => sb.byHold[k]).map((k) => (
-                  <div key={k} className="flex items-center justify-between text-[11px] py-0.5">
+                  <div key={k} className="flex items-center justify-between py-0.5 text-xs">
                     <span className="font-semibold capitalize">{k}</span>
-                    <span className="text-muted-foreground/60">{sb.byHold[k].trades} trades · {sb.byHold[k].trades ? ((sb.byHold[k].wins / sb.byHold[k].trades) * 100).toFixed(0) : 0}% win</span>
-                    <span className={`font-bold tabular-nums ${col(sb.byHold[k].netPnl)}`}>{money(sb.byHold[k].netPnl)}</span>
+                    <span className="text-muted-foreground">{sb.byHold[k].trades} trades · {sb.byHold[k].trades ? ((sb.byHold[k].wins / sb.byHold[k].trades) * 100).toFixed(0) : 0}% win</span>
+                    <span className={`font-semibold tabular-nums ${tone(sb.byHold[k].netPnl)}`}>{money(sb.byHold[k].netPnl)}</span>
                   </div>
                 ))}
               </div>
             </div>
             {(score?.recentTrips?.length ?? 0) > 0 && (
-              <p className="text-[10px] text-muted-foreground/45">
-                This is the performance summary. Every individual round trip with its P&amp;L is on the <Link href="/orders" className="underline hover:text-foreground/70">Orders</Link> tab → Live → Round trips.
-              </p>
+              <Note>This is the performance summary. Every individual round trip with its P&amp;L is on <Link href="/orders" className="text-primary hover:underline">Orders</Link> → Live → Round trips.</Note>
             )}
-          </div>
+          </PanelBody>
         )}
-      </div>
+      </Panel>
     </div>
   );
 }
