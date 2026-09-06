@@ -14,6 +14,7 @@ const LABELS: Record<string, string> = {
   "swing-spot": "Spot swing — PAUSED Sep 4",
   "sweep-fade": "Liquidity-sweep fade — RETIRED",
   selective: "Selective — HC 5m/15m longs, 3%/48h",
+  "selective-x5": "Selective ×5 SIZE — same trades ×5 (experiment)",
   "selective-swing": "Selective SWING — RETIRED Sep 4",
   manual: "Manual alerts",
 };

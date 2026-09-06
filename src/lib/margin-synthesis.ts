@@ -15,7 +15,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
-import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, type StrategyStat, type ShadowScore, type EdgeBreakdowns } from "@/lib/margin-shadow";
+import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, EXPERIMENT_SOURCES, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { pairBase } from "@/lib/kraken-pairs";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
@@ -123,7 +123,7 @@ export function divergenceSummary(fills: LiveFill[]): Divergence {
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(0)}`;
 const pct = (n: number | null) => (n == null ? "—" : `${(n * 100).toFixed(0)}%`);
 
-export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null } }): string {
+export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null }): string {
   const s = input.strategies.filter((x) => x.resolved > 0 || x.open > 0);
   const lines: string[] = [];
   lines.push("---", `last_updated: "${input.at.slice(0, 10)}"`, 'updated_by: "margin-synthesis"', "tags: [performance, margin, paper, live]", "---", "");
@@ -144,7 +144,26 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
   lines.push("| sleeve | resolved | hit | net (live-sized) | t | days-independent verdict |", "|---|---|---|---|---|---|");
   for (const x of s) lines.push(`| ${x.label} | ${x.resolved} (${x.open} open) | ${pct(x.hitRate)} | ${money(x.liveNet)} | ${x.tStat?.toFixed(2) ?? "—"} | ${x.verdict} |`);
   lines.push("", "Verdict ladder: gathering → not paying → promising (could be luck) → **REAL EDGE** (30+ resolved, net>0 at live sizing, t≥2, 7+ distinct days). Arm nothing below REAL EDGE.", "");
-  if (input.shadow) lines.push(`Shadow totals (current cohort, US universe): ${input.shadow.resolved} resolved · ${pct(input.shadow.hitRate)} hit · net ${money(input.shadow.totalPnl)} · ${input.shadow.open} open (${money(input.shadow.openUnrealized)} unrealized).`, "");
+  if (input.shadow) lines.push(`Shadow totals (current cohort, US universe, experiment twins excluded): ${input.shadow.resolved} resolved · ${pct(input.shadow.hitRate)} hit · net ${money(input.shadow.totalPnl)} · ${input.shadow.open} open (${money(input.shadow.openUnrealized)} unrealized).`, "");
+  const c = input.candidate;
+  if (c && (c.byTimeframe.length > 0 || c.recent.length > 0)) {
+    const tfmt = (t: number | null) => (t == null ? "—" : t.toFixed(2));
+    lines.push(`## Live candidate — detail (${c.source})`, "");
+    lines.push(`> The scoreboard row pools every ${c.source} trade since the cohort began. The auto-paper rule narrowed to high-conviction 5m/15m longs on ${POLICY_CUT_AT.slice(0, 10)}; trades entered before that were picked under the old rule and re-qualified after the fact. The forward-only slice is the honest test of the rule as it stands. Dollars here are PAPER-sized (base 3%; halve for a live base of 1.5%). The experiment twin (${EXPERIMENT_SOURCES.join(", ")}) is the same trades again at 5× size — it is not independent evidence and appears nowhere in this section.`, "");
+    if (c.forward) lines.push(`- **Forward-only** (entered after ${POLICY_CUT_AT.slice(0, 16).replace("T", " ")} UTC): ${c.forward.resolved} resolved · ${pct(c.forward.hitRate)} hit · net ${money(c.forward.net)} · t=${tfmt(c.forward.tStat)} · ${c.forward.days} distinct days · ${c.forward.open} open`, "");
+    if (c.byTimeframe.length) {
+      lines.push("| timeframe | resolved | hit | net (paper-sized) | t | days | open |", "|---|---|---|---|---|---|---|");
+      for (const s of c.byTimeframe) lines.push(`| ${s.key} | ${s.resolved} | ${pct(s.hitRate)} | ${money(s.net)} | ${tfmt(s.tStat)} | ${s.days} | ${s.open} |`);
+      lines.push("");
+    }
+    if (c.byDay.length) lines.push("By resolution day (UTC) — one big day is closer to one bet than many: " + c.byDay.map((d) => `${d.day} ${d.resolved} trades ${money(d.net)}`).join(" · "), "");
+    if (c.recent.length) {
+      lines.push(`Last ${c.recent.length} resolved — peak is the best price reached before the exit (the give-back, trade by trade):`, "");
+      lines.push("| opened (UTC) | pair | tf | peak | exit | net (paper-sized) |", "|---|---|---|---|---|---|");
+      for (const t of c.recent) lines.push(`| ${t.opened.slice(0, 16).replace("T", " ")} | ${t.symbol.replace("/USD", "")} | ${t.timeframe ?? "?"} | ${t.peakPct != null ? `${t.peakPct >= 0 ? "+" : ""}${t.peakPct.toFixed(1)}%` : "—"} | ${t.reason ?? "—"} | ${t.pnl != null ? money(t.pnl) : "—"} |`);
+      lines.push("");
+    }
+  }
   const top = (arr: { key: string; resolved: number; totalPnl: number; hitRate: number | null }[], n: number) => [...arr].filter((e) => e.resolved >= 3).sort((a, b) => b.totalPnl - a.totalPnl).slice(0, n);
   const dir = input.edges.byDirection; const coins = top(input.edges.byCoin as { key: string; resolved: number; totalPnl: number; hitRate: number | null }[], 8);
   if (dir.length) lines.push("## Edges", "", "By direction: " + dir.map((e) => `${e.key} ${e.resolved} trades, ${pct(e.hitRate)} hit, ${money(e.totalPnl)}`).join(" · "), "");
@@ -208,6 +227,9 @@ Rules:
 - If live diverges from paper, that is lesson #1 and it says STOP scaling.
 - Max 6 lessons, each 1–2 sentences, ranked by what it would cost to ignore. Then max 3 anti-patterns. Then 2–3 "what to watch next" items.
 - Do NOT propose parameter changes to sleeves (pre-registered experiments). You may propose what a future, separately pre-registered sleeve should test.
+- The ×5-size twin (selective-x5) is the SAME trades as the live candidate at 5× size. It is not independent evidence — never cite it as confirmation of anything; its only lesson is what those swings would do to a $5k account.
+- Weigh the forward-only slice and the by-day spread over the pooled row: trades entered before the policy cut were re-qualified after the fact, and one big resolution day is closer to one bet than many.
+- Live stops trigger on Kraken's INDEX price; paper stops on Kraken last-trade candle lows. A paper stop-out that live survived (or the reverse) is a measurement difference to note, not a live edge.
 - Plain English. No hedging filler. Start with a one-line status: are we closer to arming, or not, and why.
 
 Previous lessons file (may be empty):
@@ -268,18 +290,21 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
   const hours = lastRun ? (Date.now() - new Date(lastRun).getTime()) / 3600_000 : Infinity;
   if (!force && hours < 20) return { ran: false, reason: `ran ${hours.toFixed(1)}h ago`, fills: 0, closed: 0, journaled: 0, lessons: false, observations: [], divergence: "" };
 
-  const [strategies, shadow, edges, fills] = await Promise.all([
+  // The candidate whose detail is reported = the armed sleeve if one is armed, else selective.
+  const candSource = ((await cfgGet("kraken_margin_live_sources")) ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0] || "selective";
+  const [strategies, shadow, edges, fills, candidate] = await Promise.all([
     strategyBreakdown().catch(() => [] as StrategyStat[]),
     shadowScore().catch(() => null),
     edgeBreakdowns().catch(() => ({ byDirection: [], byCoin: [] }) as EdgeBreakdowns),
     loadLiveFills().catch(() => [] as LiveFill[]),
+    candidateDetail(candSource).catch(() => null),
   ]);
   const div = divergenceSummary(fills);
   const [auto, validate, sources, watchState] = await Promise.all([cfgGet("kraken_margin_auto"), cfgGet("kraken_margin_validate_only"), cfgGet("kraken_margin_live_sources"), cfgGet("margin_watch_state")]);
   let equity: number | null = null;
   try { const p = watchState ? (JSON.parse(watchState) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : null; } catch { equity = null; }
   const at = new Date().toISOString();
-  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
+  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
   await vaultWrite("Performance/margin-statistics.md", stats, "margin-synthesis");
 
   // Journal each closed live round trip once.

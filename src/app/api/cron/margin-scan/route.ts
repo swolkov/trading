@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, SIZE_MULTIPLIER } from "@/lib/margin-shadow";
 import { autoShadowPlans } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
@@ -123,7 +123,7 @@ export async function GET(request: Request) {
   //   'selective-swing' Sep 4 — 5%/4d A/B, t=−3.8, give-back
   // PAUSED (not retired — sample too thin to call a loser, not the live candidate):
   //   'swing-lev' / 'swing-spot' — gathering, slightly negative; 4h is not this container.
-  const opened: { symbol: string; side: string; tier: string }[] = [];
+  const opened: { symbol: string; side: string; tier: string; source: string }[] = [];
   const live: string[] = [];
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "").catch(() => "");
   try {
@@ -168,7 +168,7 @@ export async function GET(request: Request) {
             s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
           );
           const rowId = inserted[0]?.id ?? null;
-          opened.push({ symbol: s.symbol, side, tier: conv.tier });
+          opened.push({ symbol: s.symbol, side, tier: conv.tier, source: plan.source });
           // LIVE — only for a sleeve explicitly ARMED in kraken_margin_live_sources (the
           // go-live plan's "arm ONE strategy"). The executor applies every guard (arm
           // switch, validate-only, breaker, guardian freshness, universe, netting, sizing);
@@ -210,8 +210,13 @@ export async function GET(request: Request) {
     // tally must describe the RECORD the scoreboard keeps — the cloud routines read these
     // posts as the record. So the headline counts and net cover US-tradeable pairs only;
     // non-US results are listed separately and labelled, never folded into the total.
-    const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol));
-    const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol));
+    // Experiment twins (the ×5-size sleeve) are the SAME trades again at a different size:
+    // they are labelled and tallied apart so the cloud routines that read this channel as
+    // the record never count a candidate trade twice.
+    const isExperiment = (r: { source: string | null }) => (r.source ?? "") in SIZE_MULTIPLIER;
+    const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol) && !isExperiment(r));
+    const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol) && !isExperiment(r));
+    const experiments = resolutions.filter(isExperiment);
     const fmtLine = (r: (typeof resolutions)[number]) =>
       `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`;
     if (resolutions.length > 10) {
@@ -224,8 +229,11 @@ export async function GET(request: Request) {
       const aside = setAside.length > 0
         ? `\n_Set aside (non-US pairs, not in the record): ${setAside.length} resolved, net ${setAside.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(setAside.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
         : "";
+      const expLine = experiments.length > 0
+        ? `\n_×5-size experiment (not the record — the same trades again, bigger): ${experiments.length} resolved, net ${experiments.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(experiments.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
+        : "";
       await sendNotification(
-        `📊 ${counted.length} paper trades resolved this run (US-tradeable pairs) — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}${aside}\n` +
+        `📊 ${counted.length} paper trades resolved this run (US-tradeable pairs) — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}${aside}${expLine}\n` +
         `Estimate — fees+rollover modeled; no real money moved.`,
         "margin_results",
       );
@@ -233,7 +241,9 @@ export async function GET(request: Request) {
       for (const r of resolutions) {
         const win = r.pnl >= 0;
         const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
-        const tag = isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
+        const tag = isExperiment(r)
+          ? ` 🧪 ×5-size experiment (${r.source}) — the same trade again, bigger; NOT in the record`
+          : isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
         await sendNotification(
           `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
           `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
@@ -247,12 +257,15 @@ export async function GET(request: Request) {
   }
 
   if (autoOpened) {
-    const lines = opened
+    // One line per SETUP: the experiment twin rides the same signal and is not a second trade.
+    const setups = opened.filter((o) => !((o.source ?? "") in SIZE_MULTIPLIER));
+    const twins = opened.length - setups.length;
+    const lines = setups
       .map((o) => `• ${o.symbol} ${o.side.toUpperCase()} — ${o.tier} conviction`)
       .join("\n");
     await sendNotification(
-      `👁 Opened ${autoOpened} tracked paper trade${autoOpened > 1 ? "s" : ""} from high-conviction 5m/15m longs:\n${lines}\n` +
-      `Longs only, not stretched. Paper only, no money moved.`,
+      `👁 Opened ${setups.length} tracked paper trade${setups.length === 1 ? "" : "s"} from high-conviction 5m/15m longs:\n${lines}\n` +
+      `Longs only, not stretched. Paper only, no money moved.${twins > 0 ? ` (${twins} mirrored by the ×5-size experiment — same trades, not counted.)` : ""}`,
       "margin_results",
     );
   }
