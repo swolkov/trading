@@ -3,6 +3,10 @@
 import useSWR from "swr";
 import { useState } from "react";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
+import { Chip } from "@/components/ui/chip";
+import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
+import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
+import { coinOf, hold, pnl0, pnl2, tone, usd, usd0, when } from "@/lib/format";
 
 interface Fill {
   symbol: string; action: string; price: number; vol: number; notional: number; fee: number; leveraged: boolean; time: string;
@@ -22,19 +26,22 @@ interface PaperTradeRow {
 interface ScoreData { log?: PaperTradeRow[]; recentTrips?: RoundTrip[] }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
-const money = (n: number) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-const money2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
-// Crypto prices span PEPE at $0.0000094 to BTC at $100k, so a fixed 2-decimal format
-// renders every sub-cent coin as "$0" — the price column looked broken on meme coins.
-// Scale precision to magnitude instead: enough significant digits to see the price move.
-const usd = (n: number) => {
-  const a = Math.abs(n);
-  const digits = a === 0 ? 2 : a >= 1 ? 2 : a >= 0.01 ? 4 : a >= 0.0001 ? 6 : 8;
-  return `$${n.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: a > 0 && a < 1 ? Math.min(digits, 4) : 2 })}`;
-};
-const usd0 = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-const col = (n: number) => (n > 0 ? "text-emerald-400" : n < 0 ? "text-red-400" : "text-muted-foreground");
-const hold = (m: number) => (m < 60 ? `${Math.round(m)}m` : m < 1440 ? `${(m / 60).toFixed(1)}h` : `${(m / 1440).toFixed(1)}d`);
+
+function Segmented<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { k: T; label: string; tone?: "red" | "paper" }[] }) {
+  return (
+    <div className="inline-flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5">
+      {options.map((o) => {
+        const active = o.k === value;
+        const activeCls = o.tone === "red" ? "bg-down/15 text-down" : o.tone === "paper" ? "bg-paper/15 text-paper" : "bg-accent text-foreground";
+        return (
+          <button key={o.k} onClick={() => onChange(o.k)} className={`h-7 rounded-md px-3 text-xs font-semibold transition-colors ${active ? activeCls : "text-muted-foreground hover:text-foreground"}`}>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 // The one place for EVERY trade — Live (real) vs Paper (shadow), never blended. Live defaults
 // to ROUND TRIPS (paired buy→sell with real P&L); a fills view shows every raw execution.
@@ -46,15 +53,7 @@ export function UnifiedOrdersTable() {
 
   return (
     <div className="space-y-4">
-      <div className="inline-flex items-center gap-1 rounded-lg border border-border bg-card p-1">
-        <button onClick={() => setView("live")} className={`text-[11px] px-3 py-1 rounded-md transition-colors ${view === "live" ? "bg-red-500/15 text-red-400 font-bold" : "text-muted-foreground/50 hover:text-foreground/70"}`}>
-          🔴 Live · real money
-        </button>
-        <button onClick={() => setView("paper")} className={`text-[11px] px-3 py-1 rounded-md transition-colors ${view === "paper" ? "bg-purple-500/15 text-purple-300 font-bold" : "text-muted-foreground/50 hover:text-foreground/70"}`}>
-          🧪 Paper · no real money
-        </button>
-      </div>
-
+      <Segmented value={view} onChange={setView} options={[{ k: "live", label: "Live · real money", tone: "red" }, { k: "paper", label: "Paper · no real money", tone: "paper" }]} />
       {view === "live"
         ? <LiveView data={data} krk={krk} trips={score?.recentTrips ?? []} tripsLoading={score === undefined} />
         : <PaperLogTable log={score?.log ?? []} loading={score === undefined} />}
@@ -77,138 +76,123 @@ function LiveView({ data, krk, trips, tripsLoading }: {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-border bg-card p-3 space-y-1">
-        <div className="flex items-center justify-between">
-          <p className="text-xs font-bold">Open now — the bot&apos;s live positions</p>
-          <p className="text-[10px] text-muted-foreground/50">{arm ? (arm.armed ? "executor armed" : "executor disarmed") : "loading…"}</p>
-        </div>
-        {!arm ? <p className="text-[11px] text-muted-foreground/50">loading…</p> : openNow.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground/60">No open position. {arm.armed ? "Waiting for the next high-conviction breakout." : ""}</p>
+      <Panel>
+        <PanelHeader title="Open now — the bot's live positions" aside={arm ? <Chip tone={arm.armed ? "red" : "grey"} dot={arm.armed}>{arm.armed ? "executor armed" : "executor disarmed"}</Chip> : <span>loading…</span>} />
+        {!arm ? <Empty>loading…</Empty> : openNow.length === 0 ? (
+          <Empty>No open position.{arm.armed ? " Waiting for the next high-conviction breakout." : ""}</Empty>
         ) : (
-          <table className="w-full text-[11px] tabular-nums">
-            <thead><tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50"><th className="text-left font-medium py-1">Coin</th><th className="text-left font-medium py-1">Side</th><th className="text-right font-medium py-1">Size</th><th className="text-right font-medium py-1">Entry</th><th className="text-right font-medium py-1">Open P&amp;L</th><th className="text-right font-medium py-1">Since</th></tr></thead>
+          <DataTable>
+            <thead><tr><Th>Coin</Th><Th>Side</Th><Th num>Size</Th><Th num>Entry</Th><Th num>Open P&amp;L</Th><Th num>Since</Th></tr></thead>
             <tbody>
               {openNow.map((p) => (
-                <tr key={p.pair + p.openedAt} className="border-t border-border/30">
-                  <td className="py-1">{p.pair.replace(/:BTNL$/, "")}</td>
-                  <td className="py-1">{p.side === "long" ? "Long" : "Short"}</td>
-                  <td className="py-1 text-right">{p.vol.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
-                  <td className="py-1 text-right">${p.entry.toLocaleString(undefined, { maximumFractionDigits: 6 })}</td>
-                  <td className={`py-1 text-right font-bold ${p.net == null ? "" : p.net < 0 ? "text-red-400" : "text-emerald-400"}`}>{p.net == null ? "—" : `${p.net < 0 ? "−" : "+"}$${Math.abs(p.net).toFixed(2)}`}</td>
-                  <td className="py-1 text-right text-muted-foreground/60">{new Date(p.openedAt).toLocaleString()}</td>
-                </tr>
+                <Row key={p.pair + p.openedAt}>
+                  <Td strong>{coinOf(p.pair)}</Td>
+                  <Td className={p.side === "long" ? "text-up" : "text-down"}>{p.side === "long" ? "Long" : "Short"}</Td>
+                  <Td num>{p.vol.toLocaleString(undefined, { maximumFractionDigits: 4 })}</Td>
+                  <Td num>{usd(p.entry)}</Td>
+                  <Td num className={`font-semibold ${tone(p.net)}`}>{p.net == null ? "—" : pnl2(p.net)}</Td>
+                  <Td num muted>{when(p.openedAt)}</Td>
+                </Row>
               ))}
             </tbody>
-          </table>
+          </DataTable>
         )}
-        <p className="text-[10px] text-muted-foreground/40">A position moves to &ldquo;Round trips&rdquo; below when it closes. Stops, margin level and liquidation distance are on Margin Cockpit.</p>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <Stat label="Kraken account P&L" value={krkPnl != null ? money(krkPnl) : "—"} cls={krkPnl != null ? col(krkPnl) : ""}
-          sub={krkVal != null && krk?.totalInvested != null
-            ? `$${krk.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })} in → $${krkVal.toLocaleString(undefined, { maximumFractionDigits: 0 })} now`
-            : krk === undefined ? "loading…" : "account unreachable"} />
-        <Stat label="Round trips" value={`${trips.length}`} sub="completed margin trades" />
-        <Stat label="Fees paid" value={`−$${(data?.summary?.totalFees ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`} cls="text-red-400/80" sub="real fees, lifetime" />
+        <div className="border-t border-border px-4 py-2">
+          <Note>A position moves to Round trips below when it closes. Stops, margin level and liquidation distance are on Margin Cockpit.</Note>
+        </div>
+      </Panel>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Panel><PanelBody>
+          <Stat label="Kraken account P&L" value={krkPnl != null ? pnl0(krkPnl) : "—"} valueCls={krkPnl != null ? tone(krkPnl) : ""}
+            sub={krkVal != null && krk?.totalInvested != null ? `${usd0(krk.totalInvested)} in → ${usd0(krkVal)} now · balance-based` : krk === undefined ? "loading…" : "account unreachable"} />
+        </PanelBody></Panel>
+        <Panel><PanelBody><Stat label="Round trips" value={trips.length} sub="completed margin trades" /></PanelBody></Panel>
+        <Panel><PanelBody><Stat label="Fees paid" value={`−${usd0(data?.summary?.totalFees ?? 0)}`} valueCls="text-down/80" sub="real fees, lifetime" /></PanelBody></Panel>
       </div>
 
-      <div className="flex items-center gap-1">
-        <button onClick={() => setMode("trips")} className={`text-[10px] px-2 py-1 rounded transition-colors ${mode === "trips" ? "bg-white/[0.10] text-foreground font-semibold" : "text-muted-foreground/50 hover:text-foreground/70"}`}>Round trips (P&amp;L)</button>
-        <button onClick={() => setMode("fills")} className={`text-[10px] px-2 py-1 rounded transition-colors ${mode === "fills" ? "bg-white/[0.10] text-foreground font-semibold" : "text-muted-foreground/50 hover:text-foreground/70"}`}>All fills</button>
-      </div>
+      <Segmented value={mode} onChange={setMode} options={[{ k: "trips", label: "Round trips (P&L)" }, { k: "fills", label: "All fills" }]} />
 
       {mode === "trips" ? <TripsTable trips={trips} loading={tripsLoading} /> : <FillsTable data={data} />}
 
-      <p className="text-[10px] text-muted-foreground/40">
-        Round trips pair each buy with its matching sell to show real per-trade P&amp;L (net of fees). &ldquo;All fills&rdquo; is the raw execution log — a single fill has no P&amp;L on its own. Account P&amp;L is balance-based (value − deposits).
-      </p>
+      <Note>
+        Round trips pair each buy with its matching sell to show real per-trade P&amp;L (net of fees). All fills is the raw execution log — a single fill has no P&amp;L on its own. Account P&amp;L is balance-based (value − deposits).
+      </Note>
     </div>
   );
 }
 
 function TripsTable({ trips, loading }: { trips: RoundTrip[]; loading: boolean }) {
-  if (loading) return <div className="text-sm text-muted-foreground/60 py-6">Loading round trips…</div>;
-  if (trips.length === 0) return <p className="text-sm text-muted-foreground/55 py-6">No completed round trips yet (need a matched buy + sell).</p>;
+  if (loading) return <Note className="py-4">Loading round trips…</Note>;
+  if (trips.length === 0) return <Note className="py-4">No completed round trips yet (need a matched buy + sell).</Note>;
   return (
-    <div className="rounded-xl border border-border bg-card overflow-hidden">
-      <div className="max-h-[60vh] overflow-y-auto">
-        <table className="w-full text-[12px]">
-          <thead className="sticky top-0 bg-card border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground/45">
-            <tr>
-              <th className="text-left font-medium px-3 py-2">Closed</th>
-              <th className="text-left font-medium px-2 py-2">Coin</th>
-              <th className="text-left font-medium px-2 py-2">Side</th>
-              <th className="text-right font-medium px-2 py-2">Entry → Exit</th>
-              <th className="text-right font-medium px-2 py-2">Hold</th>
-              <th className="text-right font-medium px-2 py-2">Fee</th>
-              <th className="text-right font-medium px-3 py-2">P&amp;L (net)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {trips.map((t, i) => (
-              <tr key={i} className="border-b border-border/40 hover:bg-white/[0.02]">
-                <td className="px-3 py-1.5 text-muted-foreground/60 tabular-nums whitespace-nowrap">
-                  {new Date(t.closedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(t.closedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-                </td>
-                <td className="px-2 py-1.5 font-semibold">{t.pair.replace("/USD", "").replace("USD", "")}</td>
-                <td className={`px-2 py-1.5 font-medium capitalize ${t.side === "long" ? "text-emerald-400" : "text-red-400"}`}>{t.side}</td>
-                <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{usd(t.entryPrice)} → {usd(t.exitPrice)}</td>
-                <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/50">{hold(t.holdMinutes)}</td>
-                <td className="px-2 py-1.5 text-right tabular-nums text-red-400/60">{t.fees ? `−${usd(t.fees)}` : "—"}</td>
-                <td className={`px-3 py-1.5 text-right tabular-nums font-bold ${col(t.netPnl)}`}>{money2(t.netPnl)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <Panel>
+      <DataTable sticky maxH="60vh">
+        <thead>
+          <tr>
+            <Th>Closed</Th>
+            <Th>Coin</Th>
+            <Th>Side</Th>
+            <Th num>Entry → Exit</Th>
+            <Th num>Hold</Th>
+            <Th num>Fee</Th>
+            <Th num>P&amp;L (net)</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {trips.map((t, i) => (
+            <Row key={i}>
+              <Td muted>{when(t.closedAt)}</Td>
+              <Td strong>{coinOf(t.pair)}</Td>
+              <Td className={`capitalize ${t.side === "long" ? "text-up" : "text-down"}`}>{t.side}</Td>
+              <Td num muted>{usd(t.entryPrice)} → {usd(t.exitPrice)}</Td>
+              <Td num muted>{hold(t.holdMinutes)}</Td>
+              <Td num className="text-down/70">{t.fees ? `−${usd(t.fees)}` : "—"}</Td>
+              <Td num className={`font-semibold ${tone(t.netPnl)}`}>{pnl2(t.netPnl)}</Td>
+            </Row>
+          ))}
+        </tbody>
+      </DataTable>
+    </Panel>
   );
 }
 
 function FillsTable({ data }: { data: Data | undefined }) {
   const [filter, setFilter] = useState<"all" | "margin" | "spot">("all");
-  if (!data?.orders) return <div className="text-sm text-muted-foreground/60 py-6">Loading fills…</div>;
+  if (!data?.orders) return <Note className="py-4">Loading fills…</Note>;
   const rows = filter === "all" ? data.orders : data.orders.filter((o) => (filter === "margin" ? o.leveraged : !o.leveraged));
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-1">
-        {([{ k: "all", label: "All" }, { k: "margin", label: "My margin" }, { k: "spot", label: "Spot / bot" }] as { k: "all" | "margin" | "spot"; label: string }[]).map((f) => (
-          <button key={f.k} onClick={() => setFilter(f.k)} className={`text-[10px] px-2 py-1 rounded transition-colors ${filter === f.k ? "bg-white/[0.08] text-foreground/80 font-semibold" : "text-muted-foreground/40 hover:text-foreground/60"}`}>{f.label}</button>
-        ))}
-      </div>
-      {rows.length === 0 ? <p className="text-sm text-muted-foreground/55 py-6">No fills.</p> : (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="max-h-[55vh] overflow-y-auto">
-            <table className="w-full text-[12px]">
-              <thead className="sticky top-0 bg-card border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground/45">
-                <tr>
-                  <th className="text-left font-medium px-3 py-2">When</th>
-                  <th className="text-left font-medium px-2 py-2">Coin</th>
-                  <th className="text-left font-medium px-2 py-2">Side</th>
-                  <th className="text-right font-medium px-2 py-2">Price</th>
-                  <th className="text-right font-medium px-2 py-2">Size</th>
-                  <th className="text-right font-medium px-2 py-2">Value</th>
-                  <th className="text-right font-medium px-3 py-2">Fee</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((o, i) => (
-                  <tr key={i} className="border-b border-border/40 hover:bg-white/[0.02]">
-                    <td className="px-3 py-1.5 text-muted-foreground/60 tabular-nums whitespace-nowrap">
-                      {new Date(o.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(o.time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-                    </td>
-                    <td className="px-2 py-1.5 font-semibold">{o.symbol}{o.leveraged && <span className="ml-1 text-[8px] uppercase text-purple-400/70 align-top">margin</span>}</td>
-                    <td className={`px-2 py-1.5 font-medium capitalize ${o.action === "buy" ? "text-emerald-400" : "text-red-400"}`}>{o.action}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{o.price != null ? usd(o.price) : "—"}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/60">{o.vol != null ? o.vol.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "—"}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{o.notional != null ? usd(o.notional) : "—"}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-red-400/60">{o.fee ? `−${usd(o.fee)}` : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      <Segmented value={filter} onChange={setFilter} options={[{ k: "all", label: "All" }, { k: "margin", label: "Margin" }, { k: "spot", label: "Spot / bot" }]} />
+      {rows.length === 0 ? <Note className="py-4">No fills.</Note> : (
+        <Panel>
+          <DataTable sticky maxH="55vh">
+            <thead>
+              <tr>
+                <Th>When</Th>
+                <Th>Coin</Th>
+                <Th>Side</Th>
+                <Th num>Price</Th>
+                <Th num>Size</Th>
+                <Th num>Value</Th>
+                <Th num>Fee</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((o, i) => (
+                <Row key={i}>
+                  <Td muted>{when(o.time)}</Td>
+                  <Td strong>{o.symbol}{o.leveraged && <Chip tone="paper" className="ml-1.5 h-4 px-1.5 text-[10px]">margin</Chip>}</Td>
+                  <Td className={`capitalize ${o.action === "buy" ? "text-up" : "text-down"}`}>{o.action}</Td>
+                  <Td num muted>{o.price != null ? usd(o.price) : "—"}</Td>
+                  <Td num muted>{o.vol != null ? o.vol.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "—"}</Td>
+                  <Td num muted>{o.notional != null ? usd(o.notional) : "—"}</Td>
+                  <Td num className="text-down/70">{o.fee ? `−${usd(o.fee)}` : "—"}</Td>
+                </Row>
+              ))}
+            </tbody>
+          </DataTable>
+        </Panel>
       )}
     </div>
   );
@@ -222,80 +206,61 @@ function PaperLogTable({ log: fullLog, loading }: { log: PaperTradeRow[]; loadin
   const isSetAside = (t: PaperTradeRow) => t.simVersion === "v1" || t.usTradeable === false || RETIRED_AUTO_SOURCES.has(t.source);
   const setAsideCount = fullLog.filter(isSetAside).length;
   const log = showSetAside ? fullLog : fullLog.filter((t) => !isSetAside(t));
-  if (loading) return <div className="text-sm text-muted-foreground/60 py-6">Loading paper trades…</div>;
+  if (loading) return <Note className="py-4">Loading paper trades…</Note>;
   return (
     <div className="space-y-3">
-      <p className="text-[10px] text-purple-300/60">
-        🧪 Paper trades — hypothetical, <span className="text-foreground/60">no real money moved</span>. <span className="text-foreground/60">Risk-based sizing</span>: each trade is sized so its stop loses a fixed <span className="text-foreground/60">max loss</span> (~3% of the reference account) — a tighter stop means a bigger position for the same risk — then the stop trails up as it goes right. P&amp;L is net of estimated fees (trade fee at your real 0.17%/side; rollover BTC-verified, alts conservative). Open trades show a live &ldquo;if closed now&rdquo; P&amp;L.
+      <Note>
+        Paper trades — hypothetical, <strong className="font-medium text-foreground/85">no real money moved</strong>. Risk-based sizing: each trade is sized so its stop loses a fixed max loss (~3% of the reference account) — a tighter stop means a bigger position for the same risk — then the stop trails up as it goes right. P&amp;L is net of estimated fees (trade fee at your real 0.17%/side; rollover BTC-verified, alts conservative). Open trades show a live &ldquo;if closed now&rdquo; P&amp;L.
         {setAsideCount > 0 && (
-          <> <button onClick={() => setShowSetAside(!showSetAside)} className="text-purple-400 hover:underline">{showSetAside ? "Hide" : "Show"} {setAsideCount} set-aside</button> (non-US coins, retired sleeves, old measurement — never counted).</>
+          <> <button onClick={() => setShowSetAside(!showSetAside)} className="text-primary hover:underline">{showSetAside ? "Hide" : "Show"} {setAsideCount} set-aside</button> (non-US coins, retired sleeves, old measurement — never counted).</>
         )}
-      </p>
-      {log.length === 0 ? <p className="text-sm text-muted-foreground/55 py-6">No paper trades yet — they open automatically as breakouts fire.</p> : (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <div className="max-h-[60vh] overflow-y-auto">
-            <table className="w-full text-[12px]">
-              <thead className="sticky top-0 bg-card border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground/45">
-                <tr>
-                  <th className="text-left font-medium px-3 py-2">When</th>
-                  <th className="text-left font-medium px-2 py-2">Strategy</th>
-                  <th className="text-left font-medium px-2 py-2">Coin</th>
-                  <th className="text-left font-medium px-2 py-2">Side</th>
-                  <th className="text-left font-medium px-2 py-2">Conv.</th>
-                  <th className="text-right font-medium px-2 py-2">Size</th>
-                  <th className="text-right font-medium px-2 py-2">Entry</th>
-                  <th className="text-right font-medium px-2 py-2">Exit</th>
-                  <th className="text-right font-medium px-2 py-2">P&amp;L</th>
-                  <th className="text-left font-medium px-3 py-2">Outcome</th>
-                </tr>
-              </thead>
-              <tbody>
-                {log.map((t) => {
-                  const open = t.status !== "resolved";
-                  const val = open ? t.unrealized : t.pnl;
-                  return (
-                    <tr key={t.id} className="border-b border-border/40 hover:bg-white/[0.02]">
-                      <td className="px-3 py-1.5 text-muted-foreground/60 tabular-nums whitespace-nowrap">
-                        {new Date(t.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })} {new Date(t.time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-                      </td>
-                      <td className="px-2 py-1.5 text-muted-foreground/70">
-                        {t.source}
-                        {t.simVersion === "v1" && (
-                          <span className="ml-1 text-[9px] text-muted-foreground/40" title="Scored under the pre-Sep-2 measurement model — excluded from the scoreboard statistics">v1</span>
-                        )}
-                        {t.usTradeable === false && (
-                          <span className="ml-1 text-[9px] text-amber-400/60" title="Not a pair a US retail Kraken account can margin-trade — the live book could never take it, so it is excluded from the scoreboard statistics">non-US</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-1.5 font-semibold">{t.symbol.replace("/USD", "")}</td>
-                      <td className={`px-2 py-1.5 font-medium ${t.side === "buy" ? "text-emerald-400" : "text-red-400"}`}>{t.side.toUpperCase()}{t.leverage ? ` ${t.leverage}x` : ""}</td>
-                      <td className="px-2 py-1.5 text-muted-foreground/60 capitalize">{t.conviction ?? "—"}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{t.notional != null ? usd0(t.notional) : "—"}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{t.entry != null ? usd(t.entry) : "—"}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/70">{t.exit != null ? usd(t.exit) : "—"}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums font-bold">
-                        {val != null ? <span className={col(val)}>{money2(val)}{open ? <span className="text-[8px] font-normal opacity-50 ml-0.5">live</span> : null}</span> : <span className="text-muted-foreground/40">—</span>}
-                      </td>
-                      <td className="px-3 py-1.5 whitespace-nowrap">
-                        {open ? <span className="text-amber-400/80">● open</span> : <span className="text-muted-foreground/60">{t.reason ?? "closed"}</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      </Note>
+      {log.length === 0 ? <Note className="py-4">No paper trades yet — they open automatically as breakouts fire.</Note> : (
+        <Panel>
+          <DataTable sticky maxH="60vh">
+            <thead>
+              <tr>
+                <Th>When</Th>
+                <Th>Strategy</Th>
+                <Th>Coin</Th>
+                <Th>Side</Th>
+                <Th>Conviction</Th>
+                <Th num>Size</Th>
+                <Th num>Entry</Th>
+                <Th num>Exit</Th>
+                <Th num>P&amp;L</Th>
+                <Th>Outcome</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {log.map((t) => {
+                const open = t.status !== "resolved";
+                const val = open ? t.unrealized : t.pnl;
+                return (
+                  <Row key={t.id}>
+                    <Td muted>{when(t.time)}</Td>
+                    <Td muted>
+                      {t.source}
+                      {t.simVersion === "v1" && <span className="ml-1 text-[11px]" title="Scored under the pre-Sep-2 measurement model — excluded from the scoreboard statistics">v1</span>}
+                      {t.usTradeable === false && <span className="ml-1 text-[11px] text-warn" title="Not a pair a US retail Kraken account can margin-trade — excluded from the scoreboard statistics">non-US</span>}
+                    </Td>
+                    <Td strong>{coinOf(t.symbol)}</Td>
+                    <Td className={t.side === "buy" ? "text-up" : "text-down"}>{t.side === "buy" ? "Long" : "Short"}{t.leverage ? ` ${t.leverage}x` : ""}</Td>
+                    <Td muted className="capitalize">{t.conviction ?? "—"}</Td>
+                    <Td num muted>{t.notional != null ? usd0(t.notional) : "—"}</Td>
+                    <Td num muted>{t.entry != null ? usd(t.entry) : "—"}</Td>
+                    <Td num muted>{t.exit != null ? usd(t.exit) : "—"}</Td>
+                    <Td num className="font-semibold">
+                      {val != null ? <span className={tone(val)}>{pnl2(val)}{open && <span className="ml-1 text-[10px] font-normal text-muted-foreground">live</span>}</span> : <span className="text-muted-foreground">—</span>}
+                    </Td>
+                    <Td>{open ? <Chip tone="amber">open</Chip> : <span className="text-muted-foreground">{t.reason ?? "closed"}</span>}</Td>
+                  </Row>
+                );
+              })}
+            </tbody>
+          </DataTable>
+        </Panel>
       )}
-    </div>
-  );
-}
-
-function Stat({ label, value, cls = "", sub }: { label: string; value: string; cls?: string; sub?: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-card px-3 py-2">
-      <p className={`text-base font-black tabular-nums ${cls}`}>{value}</p>
-      <p className="text-[9px] uppercase tracking-wider text-muted-foreground/45">{label}{sub ? ` · ${sub}` : ""}</p>
     </div>
   );
 }

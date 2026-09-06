@@ -7,9 +7,17 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-geist-mono);
+  /* Geist is loaded in layout.tsx as --font-geist-sans. Pointing font-sans at a variable
+     that was never defined is why the whole app rendered in the browser's serif fallback. */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
   --font-heading: var(--font-sans);
+  /* Semantic P&L / status colours — tokens, so green/red mean the same thing on every page
+     and survive a light/dark flip. Use text-up / text-down / text-warn / text-paper. */
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-warn: var(--warn);
+  --color-paper: var(--paper);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -67,6 +75,10 @@
   --border: oklch(0.90 0.01 240);
   --input: oklch(0.90 0.01 240);
   --ring: oklch(0.55 0.18 250);
+  --up: oklch(0.55 0.15 160);
+  --down: oklch(0.58 0.21 25);
+  --warn: oklch(0.66 0.16 70);
+  --paper: oklch(0.55 0.2 300);
   --chart-1: oklch(0.55 0.18 250);
   --chart-2: oklch(0.60 0.15 170);
   --chart-3: oklch(0.55 0.20 25);
@@ -84,93 +96,65 @@
 }
 
 .dark {
-  --background: oklch(0.18 0.025 230);
-  --foreground: oklch(0.95 0.005 230);
-  --card: oklch(0.22 0.03 232);
-  --card-foreground: oklch(0.95 0.005 230);
-  --popover: oklch(0.22 0.03 232);
-  --popover-foreground: oklch(0.95 0.005 230);
-  --primary: oklch(0.70 0.17 170);
-  --primary-foreground: oklch(0.12 0.02 230);
-  --secondary: oklch(0.26 0.03 232);
-  --secondary-foreground: oklch(0.95 0.005 230);
-  --muted: oklch(0.26 0.03 232);
-  --muted-foreground: oklch(0.65 0.015 230);
-  --accent: oklch(0.26 0.03 232);
-  --accent-foreground: oklch(0.95 0.005 230);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 14%);
-  --input: oklch(1 0 0 / 16%);
-  --ring: oklch(0.6 0.02 230);
-  --chart-1: oklch(0.70 0.17 170);
+  --background: oklch(0.16 0.012 250);
+  --foreground: oklch(0.93 0.006 250);
+  --card: oklch(0.20 0.014 250);
+  --card-foreground: oklch(0.93 0.006 250);
+  --popover: oklch(0.20 0.014 250);
+  --popover-foreground: oklch(0.93 0.006 250);
+  --primary: oklch(0.78 0.14 165);
+  --primary-foreground: oklch(0.14 0.02 250);
+  --secondary: oklch(0.25 0.015 250);
+  --secondary-foreground: oklch(0.93 0.006 250);
+  --muted: oklch(0.24 0.014 250);
+  --muted-foreground: oklch(0.66 0.012 250);
+  --accent: oklch(0.25 0.015 250);
+  --accent-foreground: oklch(0.93 0.006 250);
+  --destructive: oklch(0.70 0.19 22);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.6 0.02 250);
+  --up: oklch(0.78 0.15 163);
+  --down: oklch(0.71 0.19 22);
+  --warn: oklch(0.82 0.16 80);
+  --paper: oklch(0.76 0.14 300);
+  --chart-1: oklch(0.78 0.14 165);
   --chart-2: oklch(0.65 0.15 200);
   --chart-3: oklch(0.60 0.12 230);
   --chart-4: oklch(0.55 0.10 260);
   --chart-5: oklch(0.50 0.08 290);
-  --sidebar: oklch(0.15 0.03 232);
-  --sidebar-foreground: oklch(0.90 0.005 230);
-  --sidebar-primary: oklch(0.70 0.17 170);
-  --sidebar-primary-foreground: oklch(0.95 0.005 230);
-  --sidebar-accent: oklch(0.22 0.03 232);
-  --sidebar-accent-foreground: oklch(0.90 0.005 230);
-  --sidebar-border: oklch(1 0 0 / 14%);
-  --sidebar-ring: oklch(0.6 0.02 230);
+  --sidebar: oklch(0.14 0.012 250);
+  --sidebar-foreground: oklch(0.88 0.006 250);
+  --sidebar-primary: oklch(0.78 0.14 165);
+  --sidebar-primary-foreground: oklch(0.14 0.02 250);
+  --sidebar-accent: oklch(0.22 0.014 250);
+  --sidebar-accent-foreground: oklch(0.93 0.006 250);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.6 0.02 250);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
-  }
   html {
     @apply font-sans;
   }
+  body {
+    @apply bg-background text-foreground text-[13px] leading-normal;
+    font-feature-settings: "tnum" 1, "cv11" 1;
+  }
+  h1, h2, h3 {
+    @apply tracking-tight;
+  }
 }
 
-/* Subtle animated gradient background */
-@keyframes gradient-shift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-body {
-  background: linear-gradient(145deg,
-    oklch(0.97 0.01 235) 0%,
-    oklch(0.96 0.012 245) 30%,
-    oklch(0.97 0.01 230) 60%,
-    oklch(0.96 0.012 240) 100%
-  );
-  background-size: 300% 300%;
-  animation: gradient-shift 30s ease infinite;
-}
-
-/* Premium scrollbar */
+/* Scrollbar — theme-aware (the old one was black-on-black in dark mode) */
 @layer base {
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: oklch(0 0 0 / 12%);
-    border-radius: 3px;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: oklch(0 0 0 / 22%);
-  }
-}
-
-/* Glass card utility */
-.glass-card {
-  background: oklch(1 0 0 / 80%);
-  border: 1px solid oklch(0.90 0.01 240);
-  border-radius: 0.75rem;
-  backdrop-filter: blur(16px);
-  box-shadow: 0 2px 12px oklch(0 0 0 / 6%);
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: color-mix(in oklch, var(--foreground) 18%, transparent); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in oklch, var(--foreground) 30%, transparent); }
 }
 
 /* Pulse dot animation for live indicators */
@@ -178,9 +162,7 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
-.live-dot {
-  animation: pulse-dot 2s ease-in-out infinite;
-}
+.live-dot { animation: pulse-dot 2s ease-in-out infinite; }
 
 /* Skeleton shimmer */
 @keyframes shimmer {
@@ -188,7 +170,10 @@ body {
   100% { background-position: 200% 0; }
 }
 .skeleton {
-  background: linear-gradient(90deg, oklch(0 0 0 / 4%) 25%, oklch(0 0 0 / 8%) 50%, oklch(0 0 0 / 4%) 75%);
+  background: linear-gradient(90deg,
+    color-mix(in oklch, var(--foreground) 5%, transparent) 25%,
+    color-mix(in oklch, var(--foreground) 10%, transparent) 50%,
+    color-mix(in oklch, var(--foreground) 5%, transparent) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
   border-radius: 0.375rem;
@@ -196,15 +181,7 @@ body {
 
 /* Fade in animation for page content */
 @keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
-.animate-fade-up {
-  animation: fade-up 0.3s ease-out;
-}
+.animate-fade-up { animation: fade-up 0.25s ease-out; }

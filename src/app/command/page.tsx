@@ -1,7 +1,9 @@
 "use client";
 
 import useSWR from "swr";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Chip, type ChipTone } from "@/components/ui/chip";
+import { Note, PageHeader, Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
+import { ago, minutesSince } from "@/lib/format";
 
 // ============ SYSTEM HEALTH ============
 // Kraken MARGIN era (spot trend bot retired Aug 2026). One job: prove the LIVE machinery is
@@ -22,24 +24,24 @@ interface CommandData {
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
-function ageInfo(isoDate: string | null, warnMin: number, critMin: number): { text: string; status: "ok" | "warning" | "critical" | "unknown" } {
-  if (!isoDate) return { text: "never", status: "unknown" };
+function ageTone(isoDate: string | null, warnMin: number, critMin: number): ChipTone {
+  if (!isoDate) return "grey";
   const t = new Date(isoDate).getTime();
-  if (!Number.isFinite(t)) return { text: "—", status: "unknown" };
+  if (!Number.isFinite(t)) return "grey";
   const age = (Date.now() - t) / 60000;
-  const text = age < 1 ? "just now" : age < 60 ? `${age.toFixed(0)}m ago` : age < 1440 ? `${(age / 60).toFixed(1)}h ago` : `${(age / 1440).toFixed(0)}d ago`;
-  const status = age < warnMin ? "ok" : age < critMin ? "warning" : "critical";
-  return { text, status };
+  return age < warnMin ? "green" : age < critMin ? "amber" : "red";
 }
 
-function StatusDot({ status }: { status: "ok" | "warning" | "critical" | "unknown" }) {
-  const colors = {
-    ok: "bg-emerald-500",
-    warning: "bg-yellow-500",
-    critical: "bg-red-500 animate-pulse",
-    unknown: "bg-zinc-600",
-  };
-  return <span className={`inline-block w-2 h-2 rounded-full ${colors[status]}`} />;
+function HealthRow({ label, sub, chip, children }: { label: string; sub?: string; chip?: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0">
+      <div className="min-w-0">
+        <p className="text-[13px]">{label}</p>
+        {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
+      </div>
+      <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground tabular-nums">{children}{chip}</div>
+    </div>
+  );
 }
 
 export default function SystemHealthPage() {
@@ -47,124 +49,82 @@ export default function SystemHealthPage() {
 
   if (isLoading || !data) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full" />
+      <div className="flex h-64 items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
       </div>
     );
   }
 
   if (data.error) {
     return (
-      <div className="space-y-6 animate-fade-up">
-        <div>
-          <h1 className="text-xl font-bold">System Health</h1>
-          <p className="text-sm text-muted-foreground">Kraken machinery heartbeats — auto-refreshes every 30s</p>
-        </div>
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-          <p className="text-sm font-bold text-red-500">Health check failed to read state</p>
-          <p className="text-xs text-red-400 mt-1 break-words">{data.error}</p>
-        </div>
+      <div className="space-y-5">
+        <PageHeader title="System Health" sub="Kraken machinery heartbeats — refreshes every 30s" />
+        <Panel tone="red"><PanelBody>
+          <p className="text-[13px] font-semibold text-down">Health check failed to read state</p>
+          <p className="mt-1 break-words text-xs text-down/80">{data.error}</p>
+        </PanelBody></Panel>
       </div>
     );
   }
 
   const hb = data.heartbeats;
   // Thresholds follow each job's real cadence: scan/watch */5 → amber 20m/red 60m.
-  const rows: { label: string; sub: string; age: ReturnType<typeof ageInfo> }[] = [
-    { label: "Margin scanner", sub: "runs every 5 min", age: ageInfo(hb.marginScan, 20, 60) },
-    { label: "Margin guardian", sub: "runs every 5 min", age: ageInfo(hb.marginWatch, 20, 60) },
-    { label: "Trade sync", sub: "fills from Kraken ledger", age: ageInfo(hb.tradeSync, 90, 360) },
+  const rows = [
+    { label: "Margin scanner", sub: "runs every 5 min", at: hb.marginScan, tone: ageTone(hb.marginScan, 20, 60) },
+    { label: "Margin guardian", sub: "runs every 5 min", at: hb.marginWatch, tone: ageTone(hb.marginWatch, 20, 60) },
+    { label: "Trade sync", sub: "fills from Kraken ledger", at: hb.tradeSync, tone: ageTone(hb.tradeSync, 90, 360) },
   ];
 
   // The margin exec lock is only held while placing a real order; alarming if it outlives 330s TTL.
-  const lockAgeMin = data.execLock.since ? (Date.now() - new Date(data.execLock.since).getTime()) / 60000 : 0;
+  const lockAgeMin = minutesSince(data.execLock.since);
   const lockStuck = data.execLock.held && lockAgeMin > 6;
+  const armed = data.config.marginAuto && !data.config.marginValidateOnly;
 
-  const switches = [
-    { label: "Margin auto-trade", on: data.config.marginAuto, onText: "ARMED", offText: "tracked only" },
-    { label: "Real orders", on: !data.config.marginValidateOnly, onText: "LIVE", offText: "validate-only" },
-    { label: "Shadow auto-track", on: data.config.shadowAutotrack, onText: "on", offText: "off", neutral: true },
-    { label: "Drawdown breaker", on: data.config.drawdownDisarmed, onText: "TRIPPED", offText: "clear" },
+  const switches: { label: string; on: boolean; onText: string; offText: string; onTone: ChipTone; offTone: ChipTone }[] = [
+    { label: "Margin auto-trade", on: data.config.marginAuto, onText: "armed", offText: "tracked only", onTone: "red", offTone: "green" },
+    { label: "Real orders", on: !data.config.marginValidateOnly, onText: "live", offText: "validate-only", onTone: "red", offTone: "green" },
+    { label: "Shadow auto-track", on: data.config.shadowAutotrack, onText: "on", offText: "off", onTone: "green", offTone: "grey" },
+    { label: "Drawdown breaker", on: data.config.drawdownDisarmed, onText: "tripped", offText: "clear", onTone: "red", offTone: "green" },
   ];
 
   return (
-    <div className="space-y-6 animate-fade-up">
-      <div>
-        <h1 className="text-xl font-bold">System Health</h1>
-        <p className="text-sm text-muted-foreground">Kraken margin machinery heartbeats — auto-refreshes every 30s</p>
-      </div>
+    <div className="space-y-5">
+      <PageHeader
+        title="System Health"
+        sub="Kraken margin machinery heartbeats — refreshes every 30s"
+        right={<Chip tone={armed ? "red" : "grey"} dot={armed} size="md">{armed ? "Executor armed — real orders" : "Paper / tracked — no real money"}</Chip>}
+      />
 
       {lockStuck && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-          <p className="text-sm font-bold text-red-500">EXEC LOCK STUCK</p>
-          <p className="text-xs text-red-400 mt-1">
-            Held since {data.execLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 5.5m). A real-order run likely died mid-flight; the next call recovers it, but check Vercel logs if this persists.
-          </p>
-        </div>
+        <Panel tone="red"><PanelBody>
+          <p className="text-[13px] font-semibold text-down">Exec lock stuck</p>
+          <Note className="mt-1">Held since {data.execLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 5.5m). A real-order run likely died mid-flight; the next call recovers it, but check Vercel logs if this persists.</Note>
+        </PanelBody></Panel>
       )}
 
-      <div className="grid lg:grid-cols-2 gap-4">
-        {/* Heartbeats */}
-        <Card className="border-zinc-800">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-bold">Heartbeats</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2.5">
+      <div className="grid gap-3 lg:grid-cols-2">
+        <Panel>
+          <PanelHeader title="Heartbeats" />
+          <PanelBody className="divide-y divide-border">
             {rows.map((r) => (
-              <div key={r.label} className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <StatusDot status={r.age.status} />
-                  <span className="text-[12px]">{r.label}</span>
-                  <span className="text-[10px] text-muted-foreground/40">{r.sub}</span>
-                </div>
-                <span className="text-[11px] text-muted-foreground tabular-nums">{r.age.text}</span>
-              </div>
+              <HealthRow key={r.label} label={r.label} sub={r.sub} chip={<Chip tone={r.tone} dot={r.tone === "red"}>{r.at ? ago(r.at) : "never"}</Chip>} />
             ))}
-            <div className="flex items-center justify-between border-t border-zinc-800 pt-2.5">
-              <div className="flex items-center gap-2">
-                <StatusDot status={hb.tradingViewAlert ? "ok" : "unknown"} />
-                <span className="text-[12px]">TradingView alert</span>
-                <span className="text-[10px] text-muted-foreground/40">last webhook received</span>
-              </div>
-              <span className="text-[11px] text-muted-foreground tabular-nums">
-                {hb.tradingViewAlert ? ageInfo(hb.tradingViewAlert, 1e9, 1e9).text : "none yet"}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
+            <HealthRow label="TradingView alert" sub="last webhook received" chip={<Chip tone={hb.tradingViewAlert ? "green" : "grey"}>{hb.tradingViewAlert ? ago(hb.tradingViewAlert) : "none yet"}</Chip>} />
+          </PanelBody>
+        </Panel>
 
-        {/* Switches */}
-        <Card className="border-zinc-800">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-bold">Switches</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2.5">
+        <Panel>
+          <PanelHeader title="Switches" />
+          <PanelBody className="divide-y divide-border">
             {switches.map((s) => (
-              <div key={s.label} className="flex items-center justify-between">
-                <span className="text-[12px]">{s.label}</span>
-                <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
-                  s.on
-                    ? (s.neutral ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400")
-                    : (s.neutral ? "bg-zinc-500/15 text-zinc-400" : "bg-emerald-500/15 text-emerald-400")
-                }`}>
-                  {s.on ? s.onText : s.offText}
-                </span>
-              </div>
+              <HealthRow key={s.label} label={s.label} chip={<Chip tone={s.on ? s.onTone : s.offTone} dot={s.on && s.onTone === "red"}>{s.on ? s.onText : s.offText}</Chip>} />
             ))}
-            <div className="flex items-center justify-between border-t border-zinc-800 pt-2.5">
-              <span className="text-[12px]">Margin exec lock</span>
-              <span className={`text-[11px] tabular-nums ${lockStuck ? "text-red-400" : "text-muted-foreground"}`}>
-                {data.execLock.held ? `held ${lockAgeMin.toFixed(0)}m` : "released"}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
+            <HealthRow label="Margin exec lock" chip={<Chip tone={lockStuck ? "red" : data.execLock.held ? "amber" : "grey"}>{data.execLock.held ? `held ${lockAgeMin.toFixed(0)}m` : "released"}</Chip>} />
+          </PanelBody>
+        </Panel>
       </div>
 
-      <p className="text-[11px] text-muted-foreground/40">
-        The margin executor is <span className="text-foreground/60">{data.config.marginAuto && !data.config.marginValidateOnly ? "ARMED — placing real orders" : "in paper/tracked mode — no real money"}</span>.
-        The spot trend bot was retired; its machinery is no longer monitored here.
-      </p>
+      <Note>The spot trend bot was retired; its machinery is no longer monitored here.</Note>
     </div>
   );
 }
