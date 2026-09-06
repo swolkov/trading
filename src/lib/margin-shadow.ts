@@ -519,6 +519,7 @@ export interface StrategyStat {
   paperTStat: number | null;  // t on the paper-sized series, for reference only. `tStat`
                               // and `verdict` are computed on the LIVE-sized series.
   tStat: number | null;   // t = mean × √n / std — is the net expectancy distinguishable from luck?
+  days: number;           // distinct resolution days — the independence guard in the verdict
   verdict: string;        // rule-based: gathering / not paying / promising (could be luck) / REAL EDGE
 }
 
@@ -638,6 +639,7 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
         paperTStat,
         // Gate on the LIVE net and the LIVE t-stat — the money that would actually be made,
         // judged at the significance the live sizing would actually achieve.
+        days: Number(r.days),
         verdict: strategyVerdict(r.source, resolved, liveNet, tStat, Number(r.days)),
       };
     })
