@@ -162,7 +162,7 @@ export default function PaperTradesPage() {
                   <Td num>
                     {s.resolved}
                     {s.forwardResolved != null && s.resolved > 0 && !s.verdict.startsWith("retired") && (
-                      <span className="ml-1 text-[11px] text-muted-foreground" title="Of these, how many were entered after the Sep 5 universe fix — the forward-only part of the sample.">{s.forwardResolved} fwd</span>
+                      <span className="ml-1 text-[11px] text-muted-foreground" title="Of these, how many were entered after the Sep 5 universe fix — the forward-only part of the sample.">({s.forwardResolved} fwd)</span>
                     )}
                   </Td>
                   <Td num muted>{s.open}</Td>
