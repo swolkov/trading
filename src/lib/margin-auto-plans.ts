@@ -48,5 +48,6 @@ export function autoShadowPlans(
   if (isStretched(conv.factors)) return [];
 
   const capped = Math.max(2, Math.min(20, lev));
-  return [{ source: "selective", lev: capped }];
+  // The ×5-size twin rides the same signal at 5× leverage (capped by the coin's own max).
+  return [{ source: "selective", lev: capped }, { source: "selective-x5", lev: Math.max(2, Math.min(5, lev)) }];
 }
