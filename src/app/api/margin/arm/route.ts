@@ -1,0 +1,95 @@
+import { prisma } from "@/lib/db";
+import { sendNotification } from "@/lib/notifications";
+import { readRoundTrip, roundTripVerdict } from "@/lib/margin-round-trip";
+import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
+
+// THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
+// Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
+// requires the typed word "ARM", a passed plumbing test, an untripped drawdown breaker and
+// no round trip in flight; it sets the limits FIRST and kraken_margin_auto LAST, and every
+// arm/disarm is appended to kraken_margin_arm_log and paged to Slack. Disarming needs no
+// confirmation: it only ever reduces risk (kraken_margin_auto=false; the guardian keeps
+// managing whatever is open).
+export const dynamic = "force-dynamic";
+
+const ARM_LOG = "kraken_margin_arm_log";
+const DEFAULT_SOURCE = "selective";
+
+async function setKey(key: string, value: string | null): Promise<void> {
+  if (value == null) { await prisma.agentConfig.deleteMany({ where: { key } }); return; }
+  await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
+}
+async function appendLog(line: string): Promise<void> {
+  const row = await prisma.agentConfig.findUnique({ where: { key: ARM_LOG } }).catch(() => null);
+  let list: string[] = [];
+  try { list = row?.value ? (JSON.parse(row.value) as string[]) : []; } catch { list = []; }
+  list.push(`${new Date().toISOString()} ${line}`);
+  await setKey(ARM_LOG, JSON.stringify(list.slice(-50)));
+}
+
+async function status() {
+  const keys = ["kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_live_sources", "kraken_margin_max_positions", "kraken_margin_max_trades_per_day", "kraken_margin_maker_entries", "kraken_margin_symbols", "kraken_margin_disarmed_dd", "kraken_margin_live_max_risk_pct", ARM_LOG];
+  const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
+  const c: Record<string, string> = {};
+  for (const r of rows) c[r.key] = r.value;
+  const rt = await readRoundTrip();
+  const rtPassed = rt?.stage === "done" && roundTripVerdict(rt.checks).allOk;
+  let log: string[] = [];
+  try { log = c[ARM_LOG] ? (JSON.parse(c[ARM_LOG]) as string[]) : []; } catch { log = []; }
+  return {
+    armed: c.kraken_margin_auto === "true" && c.kraken_margin_validate_only === "false",
+    auto: c.kraken_margin_auto === "true",
+    validateOnly: c.kraken_margin_validate_only !== "false",
+    sources: (c.kraken_margin_live_sources ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    maxPositions: parseInt(c.kraken_margin_max_positions ?? "3", 10) || 3,
+    maxTradesPerDay: parseInt(c.kraken_margin_max_trades_per_day ?? "6", 10) || 6,
+    marketEntries: c.kraken_margin_maker_entries === "false",
+    symbols: c.kraken_margin_symbols ?? null,
+    riskPct: parseFloat(c.kraken_margin_live_max_risk_pct ?? "3") || 3,
+    ddTripped: c.kraken_margin_disarmed_dd === "true",
+    roundTripPassed: rtPassed,
+    roundTripRunning: rt != null && ["entering", "open", "closing"].includes(rt.stage),
+    log: log.slice(-10).reverse(),
+  };
+}
+
+export async function GET() {
+  return Response.json(await status());
+}
+
+export async function POST(request: Request) {
+  let body: { action?: string; confirm?: string; source?: string; maxPositions?: number; maxTradesPerDay?: number } = {};
+  try { body = await request.json(); } catch { /* empty */ }
+  const action = String(body.action ?? "");
+
+  if (action === "disarm") {
+    await setKey("kraken_margin_auto", "false");
+    await appendLog("DISARMED (kraken_margin_auto=false) from the admin page");
+    await sendNotification("⚪ Kraken margin executor DISARMED from the admin page. No new entries; the guardian keeps managing anything open.", "margin_urgent").catch(() => {});
+    return Response.json({ ok: true, ...(await status()) });
+  }
+
+  if (action !== "arm") return Response.json({ error: "action must be arm | disarm" }, { status: 400 });
+  if (String(body.confirm ?? "") !== "ARM") return Response.json({ error: 'type ARM to confirm', ...(await status()) }, { status: 400 });
+  const source = String(body.source ?? DEFAULT_SOURCE).trim().toLowerCase();
+  if (!/^[a-z0-9_-]{1,32}$/.test(source) || RETIRED_AUTO_SOURCES.has(source)) return Response.json({ error: `source "${source}" cannot be armed`, ...(await status()) }, { status: 400 });
+  const maxPositions = Math.min(3, Math.max(1, Math.round(Number(body.maxPositions ?? 2)) || 2));
+  const maxTradesPerDay = Math.min(6, Math.max(1, Math.round(Number(body.maxTradesPerDay ?? 3)) || 3));
+
+  const s = await status();
+  if (!s.roundTripPassed) return Response.json({ error: "the plumbing test has not passed — run the $20 round trip first", ...s }, { status: 409 });
+  if (s.roundTripRunning) return Response.json({ error: "a round trip is running — wait for it", ...s }, { status: 409 });
+  if (s.ddTripped) return Response.json({ error: "the drawdown breaker is tripped (kraken_margin_disarmed_dd) — clear it deliberately first", ...s }, { status: 409 });
+
+  // Limits first, the arm flag LAST, so no instant exists where the executor is on without them.
+  await setKey("kraken_margin_maker_entries", "false");        // MARKET entries: mirror the paper model
+  await setKey("kraken_margin_max_positions", String(maxPositions));
+  await setKey("kraken_margin_max_trades_per_day", String(maxTradesPerDay));
+  await setKey("kraken_margin_symbols", null);                 // whole US universe (the scanner's)
+  await setKey("kraken_margin_live_sources", source);
+  await setKey("kraken_margin_validate_only", "false");
+  await setKey("kraken_margin_auto", "true");
+  await appendLog(`ARMED source=${source} risk=${s.riskPct}% maxPositions=${maxPositions} maxTradesPerDay=${maxTradesPerDay} marketEntries=true from the admin page`);
+  await sendNotification(`🔴 Kraken margin executor ARMED from the admin page: source ${source}, ${s.riskPct}% risk per trade, max ${maxPositions} positions, ${maxTradesPerDay} trades/day, market entries, whole US universe. Disarm on /margin/paper or set kraken_margin_auto=false.`, "margin_urgent").catch(() => {});
+  return Response.json({ ok: true, ...(await status()) });
+}
