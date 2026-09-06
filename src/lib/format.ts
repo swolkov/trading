@@ -63,3 +63,10 @@ export const minutesSince = (iso: string | null | undefined) => {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? (Date.now() - t) / 60000 : 0;
 };
+
+/** Split an executor log line "2026-09-06T00:55:47.346Z ARMED …" into a display time and its text. */
+export const splitLogLine = (line: string): { at: string | null; text: string } => {
+  const m = line.match(/^(\d{4}-\d{2}-\d{2}T[^ ]+Z?)\s+([\s\S]*)$/);
+  if (!m || !Number.isFinite(Date.parse(m[1]))) return { at: null, text: line };
+  return { at: m[1], text: m[2] };
+};

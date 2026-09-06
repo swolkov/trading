@@ -4,7 +4,7 @@ import Link from "next/link";
 import useSWR from "swr";
 import { Chip, type ChipTone } from "@/components/ui/chip";
 import { PageHeader, Panel, PanelBody, PanelHeader, Stat, Label, Note } from "@/components/ui/panel";
-import { ago, coinOf, money, pct, pnl0, pnl2, tone, usd, when } from "@/lib/format";
+import { ago, coinOf, money, pct, pnl0, pnl2, splitLogLine, tone, usd, when } from "@/lib/format";
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
@@ -43,7 +43,8 @@ function heartbeatTone(iso: string | null | undefined, warnMin: number, critMin:
 
 export default function DashboardPage() {
   const { data: krk } = useSWR<KrakenStatus>("/api/kraken-agent", fetcher, { refreshInterval: 60_000 });
-  const { data: status } = useSWR<{ connected: boolean; health: MarginHealth | null; positions: MarginPosition[] }>("/api/margin/status", fetcher, { refreshInterval: 30_000 });
+  const { data: status, error: statusErr } = useSWR<{ connected: boolean; health: MarginHealth | null; positions: MarginPosition[]; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 30_000 });
+  const krakenDown = !!statusErr || (status != null && (status.connected === false || !!status.error));
   const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 30_000 });
   const { data: score } = useSWR<{ recentTrips: Trip[]; strategies: StrategyStat[] }>("/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 });
   const { data: cmd } = useSWR<Command>("/api/command", fetcher, { refreshInterval: 60_000 });
@@ -77,8 +78,7 @@ export default function DashboardPage() {
   const machineryTone: ChipTone = [scanTone, watchTone].includes("red") ? "red" : [scanTone, watchTone].includes("amber") ? "amber" : [scanTone, watchTone].includes("grey") ? "grey" : "green";
 
   const lastEvent = arm?.log?.[0] ?? null;
-  const lastEventAt = lastEvent ? lastEvent.slice(0, 24).trim() : null;
-  const lastEventText = lastEvent ? lastEvent.slice(24).trim() : null;
+  const { at: lastEventAt, text: lastEventText } = lastEvent ? splitLogLine(lastEvent) : { at: null, text: null };
 
   const loading = !arm && !status && !krk;
 
@@ -106,7 +106,7 @@ export default function DashboardPage() {
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
             <Stat size="lg" label="Equity" value={equity != null ? money(equity) : "—"} title="Kraken margin equity — the number the executor sizes every trade off"
-              sub={health ? <>margin level <span className={health.marginLevel == null ? "" : health.marginLevel < 100 ? "text-down font-semibold" : health.marginLevel < 150 ? "text-warn font-semibold" : "text-foreground/80"}>{health.marginLevel != null ? `${health.marginLevel.toFixed(0)}%` : "n/a"}</span> · free {money(health.freeMargin)}</> : "Kraken not reachable"} />
+              sub={health ? <>margin level <span className={health.marginLevel == null ? "" : health.marginLevel < 100 ? "text-down font-semibold" : health.marginLevel < 150 ? "text-warn font-semibold" : "text-foreground/80"}>{health.marginLevel != null ? `${health.marginLevel.toFixed(0)}%` : "n/a"}</span> · free {money(health.freeMargin)}</> : krakenDown ? <span className="text-down">Kraken did not answer — retrying</span> : "loading…"} />
           )}
         </PanelBody></Panel>
 
@@ -118,7 +118,9 @@ export default function DashboardPage() {
         </PanelBody></Panel>
 
         <Panel><PanelBody>
-          {loading ? <Skeleton /> : open ? (
+          {loading ? <Skeleton /> : krakenDown && !open ? (
+            <Stat size="lg" label="Open live position" value={<span className="text-down">Unknown</span>} sub="Kraken did not answer — an empty read during an outage is not a flat book. Retrying every 30s." />
+          ) : open ? (
             <Stat size="lg" label="Open live position" value={<>{coinOf(open.pair)} <span className={`text-base font-medium ${open.side === "long" ? "text-up" : "text-down"}`}>{open.side}</span></>}
               sub={<>entry {usd(open.entry)} · <span className={`font-semibold ${tone(open.net)}`}>{open.net != null ? pnl2(open.net) : "P&L pending"}</span>{openDetail?.liqPctAway != null && <> · {pct(openDetail.liqPctAway, 1)} from liquidation</>} · since {when(open.openedAt)}</> } />
           ) : (
@@ -152,7 +154,7 @@ export default function DashboardPage() {
         <Panel>
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5">
             <Label>Last executor event</Label>
-            <span className="text-xs text-muted-foreground tabular-nums">{lastEventAt && Number.isFinite(Date.parse(lastEventAt)) ? `${when(lastEventAt)} · ${ago(lastEventAt)}` : ""}</span>
+            <span className="text-xs text-muted-foreground tabular-nums">{lastEventAt ? `${when(lastEventAt)} · ${ago(lastEventAt)}` : ""}</span>
             <span className="min-w-0 flex-1 truncate text-[13px]" title={lastEventText ?? ""}>{lastEventText}</span>
             <Link href="/margin/paper" className="text-xs text-primary hover:underline">Road to Live</Link>
           </div>

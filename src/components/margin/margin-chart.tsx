@@ -112,7 +112,7 @@ export function MarginChart({ symbol, interval, height = 420, levels = [], compa
       <div ref={containerRef} style={{ height }} />
       {!data && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="animate-spin w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full" />
+          <div className="animate-spin w-5 h-5 border-2 border-primary border-t-transparent rounded-full" />
         </div>
       )}
     </div>

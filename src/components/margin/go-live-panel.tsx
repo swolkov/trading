@@ -6,7 +6,7 @@ import { Check, X } from "lucide-react";
 import { Chip, type ChipTone, verdictTone } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Note, Panel, PanelBody } from "@/components/ui/panel";
-import { ago, coinOf, pnl0, timeOnly, usd, usd0 } from "@/lib/format";
+import { ago, coinOf, pnl2, splitLogLine, timeOnly, usd, usd0, when } from "@/lib/format";
 
 // ── The go-live panel: three steps a founder can read at a glance ──────────────────────────
 // 1 plumbing ($20 round trip) · 2 paper gate (the live candidate's record) · 3 arm.
@@ -116,7 +116,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
           {arm.liveNow && arm.liveNow.length > 0
             ? arm.liveNow.map((p) => (
               <Chip key={p.pair + p.openedAt} tone={p.net == null ? "grey" : p.net >= 0 ? "green" : "red"} size="md">
-                {coinOf(p.pair)} {p.side} · entry {usd(p.entry)} · {p.net != null ? pnl0(p.net) : "P&L pending"} · since {timeOnly(p.openedAt)}
+                {coinOf(p.pair)} {p.side} · entry {usd(p.entry)} · {p.net != null ? pnl2(p.net) : "P&L pending"} · since {timeOnly(p.openedAt)}
               </Chip>
             ))
             : <Chip tone="grey" size="md">no open position — waiting for the next high-conviction breakout</Chip>}
@@ -132,7 +132,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
         </div>
       )}
       {msg && <Note className="text-foreground/80">{msg}</Note>}
-      {arm.log.length > 0 && <Note>Last: {arm.log[0]}</Note>}
+      {arm.log.length > 0 && (() => { const l = splitLogLine(arm.log[0]); return <Note>Last{l.at ? <> · {when(l.at)} · {ago(l.at)}</> : null}: {l.text}</Note>; })()}
     </div>
   );
 }

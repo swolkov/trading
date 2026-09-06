@@ -185,7 +185,7 @@ export default function StockPaperPage() {
                     <Td num muted>{usd(t.entry)}</Td>
                     <Td num muted>{t.stop != null ? usd(t.stop) : "—"}</Td>
                     <Td num muted>{t.exit != null ? usd(t.exit) : "—"}</Td>
-                    <Td num className={`font-semibold ${val != null ? tone(val) : "text-muted-foreground"}`}>{val != null ? pnl2(val) : "—"}{open && <span className="ml-1 text-[10px] font-normal text-muted-foreground">float</span>}</Td>
+                    <Td num className={`font-semibold ${val != null ? tone(val) : "text-muted-foreground"}`}>{val != null ? pnl2(val) : "—"}{open && <span className="ml-1 text-[11px] font-normal text-muted-foreground">float</span>}</Td>
                     <Td>{open ? <Chip tone="amber">open</Chip> : t.status === "void" ? <Chip tone="grey">void</Chip> : <span className="text-muted-foreground">{t.reason ?? t.status}</span>}</Td>
                   </Row>
                 );

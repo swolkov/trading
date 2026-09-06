@@ -73,12 +73,18 @@ function LiveView({ data, krk, trips, tripsLoading }: {
   // real money right now, so it belongs at the top of the live view.
   const { data: arm } = useSWR<{ armed: boolean; liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] }>("/api/margin/arm", fetcher, { refreshInterval: 20000 });
   const openNow = arm?.liveNow ?? [];
+  // The arm endpoint answers with an empty list on ANY Kraken failure, so an empty "open now"
+  // is only trustworthy when the status endpoint could reach Kraken at the same time.
+  const { data: st, error: stErr } = useSWR<{ connected: boolean; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 30000 });
+  const krakenDown = !!stErr || (st != null && (st.connected === false || !!st.error));
 
   return (
     <div className="space-y-4">
       <Panel>
         <PanelHeader title="Open now — the bot's live positions" aside={arm ? <Chip tone={arm.armed ? "red" : "grey"} dot={arm.armed}>{arm.armed ? "executor armed" : "executor disarmed"}</Chip> : <span>loading…</span>} />
-        {!arm ? <Empty>loading…</Empty> : openNow.length === 0 ? (
+        {!arm ? <Empty>loading…</Empty> : openNow.length === 0 && krakenDown ? (
+          <Empty><span className="text-down">Kraken did not answer</span> — open positions unknown, not zero. Retrying every 20s.</Empty>
+        ) : openNow.length === 0 ? (
           <Empty>No open position.{arm.armed ? " Waiting for the next high-conviction breakout." : ""}</Empty>
         ) : (
           <DataTable>
@@ -182,7 +188,7 @@ function FillsTable({ data }: { data: Data | undefined }) {
               {rows.map((o, i) => (
                 <Row key={i}>
                   <Td muted>{when(o.time)}</Td>
-                  <Td strong>{o.symbol}{o.leveraged && <Chip tone="paper" className="ml-1.5 h-4 px-1.5 text-[10px]">margin</Chip>}</Td>
+                  <Td strong>{o.symbol}{o.leveraged && <Chip tone="paper" className="ml-1.5 h-4 px-1.5 text-[11px]">margin</Chip>}</Td>
                   <Td className={`capitalize ${o.action === "buy" ? "text-up" : "text-down"}`}>{o.action}</Td>
                   <Td num muted>{o.price != null ? usd(o.price) : "—"}</Td>
                   <Td num muted>{o.vol != null ? o.vol.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "—"}</Td>
@@ -251,7 +257,7 @@ function PaperLogTable({ log: fullLog, loading }: { log: PaperTradeRow[]; loadin
                     <Td num muted>{t.entry != null ? usd(t.entry) : "—"}</Td>
                     <Td num muted>{t.exit != null ? usd(t.exit) : "—"}</Td>
                     <Td num className="font-semibold">
-                      {val != null ? <span className={tone(val)}>{pnl2(val)}{open && <span className="ml-1 text-[10px] font-normal text-muted-foreground">live</span>}</span> : <span className="text-muted-foreground">—</span>}
+                      {val != null ? <span className={tone(val)}>{pnl2(val)}{open && <span className="ml-1 text-[11px] font-normal text-muted-foreground">live</span>}</span> : <span className="text-muted-foreground">—</span>}
                     </Td>
                     <Td>{open ? <Chip tone="amber">open</Chip> : <span className="text-muted-foreground">{t.reason ?? "closed"}</span>}</Td>
                   </Row>

@@ -22,7 +22,7 @@ export function TopBar() {
   const { data: mode } = useSWR<{ armed?: boolean; auto?: boolean }>("/api/margin/mode", fetcher, { refreshInterval: 60000 });
   const armed = Boolean(mode?.armed);
 
-  const equity = krk?.connected ? krk.totalValue || 0 : null;
+  const equity = krk?.connected && (krk.totalValue ?? 0) > 0 ? krk.totalValue! : null;
   const parkedPnl = krk?.connected ? krk.strategyPnl ?? null : null;
   const parkedPct = parkedPnl != null && (krk?.strategyCapital || 0) > 0 ? parkedPnl / (krk!.strategyCapital as number) : null;
 
@@ -40,7 +40,8 @@ export function TopBar() {
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Account</span>
               <span className="text-[13px] font-semibold tabular-nums">{equity != null ? money(equity) : "—"}</span>
             </div>
-            {parkedPnl != null && (
+            {equity == null && krk && <Chip tone="red" title="Kraken did not answer the last read; the numbers will fill in on the next one">Kraken did not answer</Chip>}
+            {parkedPnl != null && equity != null && (
               <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="The parked BTC/ETH holdings versus what was deposited for them. Not the margin desk — that record is on Orders and Road to Live.">
                 <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Parked coins</span>
                 <span className={`text-[13px] font-semibold tabular-nums ${tone(parkedPnl)}`}>{pnl0(parkedPnl)}</span>
