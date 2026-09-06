@@ -897,8 +897,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     // SIZE = risk × equity ÷ stop, capped at leverage × equity — paper's positionNotional
     // on the REAL account's equity, so dollar size grows with the account automatically.
-    const notional = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade);
-    if (!(notional > 0)) return { executed: false, validated: false, note: "sizing produced no notional — skipped" };
+    const unclamped = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade);
+    const notional = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade, health.freeMargin);
+    if (!(notional > 0)) return { executed: false, validated: false, note: `sizing produced no notional (free margin $${health.freeMargin.toFixed(0)}) — skipped` };
+    const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;
     if (meta.orderMin > 0 && rawVol < meta.orderMin) {
       return { executed: false, validated: false, note: `size ${rawVol} below Kraken minimum ${meta.orderMin} after risk cap — skipped` };
@@ -963,7 +965,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // which caps churn; the guardian sweeps unfilled entries). Real executions only.
     if (!validate) await bumpDayState(dayState);
 
-    const stopDesc = trailPct > 0 ? `trailing stop ${trailPct.toFixed(1)}%` : `stop ${(stopPct * 100).toFixed(1)}%`;
+    const stopDesc = (trailPct > 0 ? `trailing stop ${trailPct.toFixed(1)}%` : `stop ${(stopPct * 100).toFixed(1)}%`) + (marginClamped ? ` — size fitted to free margin ($${unclamped.toFixed(0)} wanted, $${notional.toFixed(0)} sent; risk ≈${((notional * riskDist) / equity * 100).toFixed(1)}%)` : "");
     return {
       executed: !validate,
       validated: validate,

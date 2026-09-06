@@ -107,10 +107,17 @@ export const LIVE_STOP_RATCHET_MIN_FRAC = 0.0005;   // move a resting stop only 
  * $100 cap silently turned 3% risk into ~0.6% and made the scoreboard's "At LIVE sizing"
  * column describe a trade the executor would never have placed.
  */
-export function liveNotional(equity: number, riskFrac: number, stopFrac: number, leverage: number, perTradeCapUsd = 0): number {
+// Kraken's real limit is FREE margin, not equity: fees, spread and any open position
+// eat into it. An order sized to exactly equity × leverage is rejected ("Insufficient
+// margin") or fills at a ~100% margin level. So the size is also capped at
+// MARGIN_HEADROOM of the free margin × leverage — a 6% trade on a $5k account at 2× asks
+// for the whole account and gets ~90% of it instead of a rejection.
+export const MARGIN_HEADROOM = 0.9;
+export function liveNotional(equity: number, riskFrac: number, stopFrac: number, leverage: number, perTradeCapUsd = 0, freeMarginUsd: number | null = null): number {
   if (!(equity > 0) || !(riskFrac > 0) || !(stopFrac > 0) || !(leverage >= 1)) return 0;
   let notional = Math.min((riskFrac * equity) / stopFrac, equity * leverage);
   if (perTradeCapUsd > 0) notional = Math.min(notional, perTradeCapUsd * leverage);
+  if (freeMarginUsd != null && Number.isFinite(freeMarginUsd)) notional = Math.min(notional, Math.max(0, freeMarginUsd) * MARGIN_HEADROOM * leverage);
   return notional;
 }
 
