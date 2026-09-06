@@ -70,9 +70,39 @@ function LiveView({ data, krk, trips, tripsLoading }: {
   const [mode, setMode] = useState<"trips" | "fills">("trips");
   const krkVal = krk?.connected ? krk?.totalValue ?? null : null;
   const krkPnl = krkVal != null && krk?.totalInvested != null ? krkVal - krk.totalInvested : null;
+  // The bot's OPEN positions — a trade that has not closed is not a round trip yet, but it is
+  // real money right now, so it belongs at the top of the live view.
+  const { data: arm } = useSWR<{ armed: boolean; liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] }>("/api/margin/arm", fetcher, { refreshInterval: 20000 });
+  const openNow = arm?.liveNow ?? [];
 
   return (
     <div className="space-y-4">
+      <div className="rounded-xl border border-border bg-card p-3 space-y-1">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-bold">Open now — the bot&apos;s live positions</p>
+          <p className="text-[10px] text-muted-foreground/50">{arm ? (arm.armed ? "executor armed" : "executor disarmed") : "loading…"}</p>
+        </div>
+        {!arm ? <p className="text-[11px] text-muted-foreground/50">loading…</p> : openNow.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground/60">No open position. {arm.armed ? "Waiting for the next high-conviction breakout." : ""}</p>
+        ) : (
+          <table className="w-full text-[11px] tabular-nums">
+            <thead><tr className="text-[9px] uppercase tracking-wider text-muted-foreground/50"><th className="text-left font-medium py-1">Coin</th><th className="text-left font-medium py-1">Side</th><th className="text-right font-medium py-1">Size</th><th className="text-right font-medium py-1">Entry</th><th className="text-right font-medium py-1">Open P&amp;L</th><th className="text-right font-medium py-1">Since</th></tr></thead>
+            <tbody>
+              {openNow.map((p) => (
+                <tr key={p.pair + p.openedAt} className="border-t border-border/30">
+                  <td className="py-1">{p.pair.replace(/:BTNL$/, "")}</td>
+                  <td className="py-1">{p.side === "long" ? "Long" : "Short"}</td>
+                  <td className="py-1 text-right">{p.vol.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
+                  <td className="py-1 text-right">${p.entry.toLocaleString(undefined, { maximumFractionDigits: 6 })}</td>
+                  <td className={`py-1 text-right font-bold ${p.net == null ? "" : p.net < 0 ? "text-red-400" : "text-emerald-400"}`}>{p.net == null ? "—" : `${p.net < 0 ? "−" : "+"}$${Math.abs(p.net).toFixed(2)}`}</td>
+                  <td className="py-1 text-right text-muted-foreground/60">{new Date(p.openedAt).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="text-[10px] text-muted-foreground/40">A position moves to &ldquo;Round trips&rdquo; below when it closes. Stops, margin level and liquidation distance are on Margin Cockpit.</p>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <Stat label="Kraken account P&L" value={krkPnl != null ? money(krkPnl) : "—"} cls={krkPnl != null ? col(krkPnl) : ""}
           sub={krkVal != null && krk?.totalInvested != null
