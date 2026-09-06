@@ -345,7 +345,7 @@ function GateRow({ label, value, target, ok, hint }: { label: string; value: str
     </div>
   );
 }
-interface ArmStatus { stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
+interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[]; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
 function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean }) {
   const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 15_000 });
   const [confirm, setConfirm] = useState("");
@@ -377,6 +377,15 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
           {arm.ddTripped && <span className="text-[11px] text-red-400">drawdown breaker tripped</span>}
           {!gateOk && rtPassed && <span className="text-[11px] text-amber-400">paper gate is not green — arming anyway is your decision, recorded in the log</span>}
         </div>
+      )}
+      {arm.armed && (
+        <p className="text-[11px]">
+          <span className="text-foreground/80">Live now:</span>{" "}
+          {arm.liveNow && arm.liveNow.length > 0
+            ? arm.liveNow.map((p) => `${p.pair.replace(/:BTNL$/, "").replace(/USD$/, "")} ${p.side} · entry ${p.entry.toPrecision(5)} · ${p.net != null ? `${p.net < 0 ? "−" : "+"}$${Math.abs(p.net).toFixed(0)} open` : "P&L pending"} · since ${new Date(p.openedAt).toLocaleTimeString()}`).join(" | ")
+            : "no open position — waiting for the next high-conviction breakout"}
+          <span className="text-muted-foreground/50"> · full detail on Margin Cockpit</span>
+        </p>
       )}
       {arm.stage3 && (
         <p className="text-[11px]">

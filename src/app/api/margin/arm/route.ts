@@ -3,6 +3,9 @@ import { sendNotification } from "@/lib/notifications";
 import { readRoundTrip, roundTripVerdict } from "@/lib/margin-round-trip";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 import { STAGE3_KEY, readStage3, loadLiveFills, divergenceSummary } from "@/lib/margin-synthesis";
+import { getKrakenMarginPositions } from "@/lib/kraken-margin";
+import { botOwnership } from "@/lib/margin-executor";
+import { krakenConfigured } from "@/lib/kraken";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -52,6 +55,14 @@ async function status() {
   if (stage3) { try { stage3Done = divergenceSummary(await loadLiveFills()).closed; } catch { stage3Done = stage3.done ?? null; } }
   let log: string[] = [];
   try { log = c[ARM_LOG] ? (JSON.parse(c[ARM_LOG]) as string[]) : []; } catch { log = []; }
+  // The bot's OWN open positions, for the "live now" line (read-only; empty on any failure).
+  let liveNow: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] = [];
+  try {
+    if (krakenConfigured()) {
+      const [positions, own] = await Promise.all([getKrakenMarginPositions(), botOwnership()]);
+      liveNow = positions.filter((p) => own.isOurs(p)).map((p) => ({ pair: p.pair, side: p.side, vol: p.vol, entry: p.entryPrice, net: p.net, openedAt: p.openedAt }));
+    }
+  } catch { liveNow = []; }
   return {
     armed: c.kraken_margin_auto === "true" && c.kraken_margin_validate_only === "false",
     auto: c.kraken_margin_auto === "true",
@@ -66,6 +77,7 @@ async function status() {
     roundTripPassed: rtPassed,
     roundTripRunning: rt != null && ["entering", "open", "closing"].includes(rt.stage),
     stage3: stage3 ? { ...stage3, done: stage3Done ?? stage3.done ?? 0 } : null,
+    liveNow,
     log: log.slice(-10).reverse(),
   };
 }
