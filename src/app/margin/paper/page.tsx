@@ -158,7 +158,7 @@ export default function PaperTradesPage() {
             <tbody>
               {shownStrategies.map((s) => (
                 <Row key={s.key}>
-                  <Td strong>{s.label}</Td>
+                  <Td strong className="min-w-[14rem] max-w-[22rem] whitespace-normal">{s.label}</Td>
                   <Td num>
                     {s.resolved}
                     {s.forwardResolved != null && s.resolved > 0 && !s.verdict.startsWith("retired") && (

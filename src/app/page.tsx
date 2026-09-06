@@ -113,7 +113,7 @@ export default function DashboardPage() {
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
             <Stat size="lg" label="Today" value={pnl0(today)} valueCls={tone(today)} title="Round trips closed since midnight (Kraken ledger) plus the float on the bot's open positions"
-              sub={<>{closedToday.length} closed{closedToday.length > 0 && <> ({pnl0(realizedToday)})</>} · floating <span className={tone(floating)}>{pnl2(floating)}</span></>} />
+              sub={<>{closedToday.length} closed{closedToday.length > 0 && <> ({pnl2(realizedToday)})</>} · floating <span className={tone(floating)}>{pnl2(floating)}</span></>} />
           )}
         </PanelBody></Panel>
 

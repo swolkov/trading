@@ -45,7 +45,7 @@ export default function StockPaperPage() {
       <PageHeader
         title="Stock Paper Book"
         sub="The crypto desk's method on US stocks: high-conviction breakout longs, scored on real 1-minute bars with slippage and margin interest. No money at risk."
-        right={<><Chip tone="paper" size="md">Paper only</Chip><Chip tone="grey" size="md" title="Runs every 15 min, 9:30–4:00 ET">Scanner ran {ago(data?.lastRun ?? null)}</Chip></>}
+        right={<><Chip tone="paper" size="md">Paper only</Chip><Chip tone="grey" size="md" title="Runs every 15 min, 9:30–4:00 ET">{data?.lastRun ? `Scanner ran ${ago(data.lastRun)}` : "Scanner: no run yet"}</Chip></>}
       />
 
       <Explainer title="Why this is paper, and what it is for">
