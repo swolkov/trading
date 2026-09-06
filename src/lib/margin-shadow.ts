@@ -28,8 +28,16 @@ import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 // market (taker, higher); entries are post-only (maker, lower). Set slightly conservative
 // (0.40% round trip) so the paper record never flatters a strategy on understated cost —
 // the one bias that could wrongly green-light going live. Re-check if his fee tier changes.
-const MAKER = 0.0015;   // ~0.15% entry (post-only limit / maker)
-const TAKER = 0.0025;   // ~0.25% exit (stop/target = market / taker)
+// ENTRY is a TAKER fee (Sep 6 2026): the live executor enters at MARKET
+// (kraken_margin_maker_entries=false — a post-only bid rarely fills a breakout), and the
+// first two real fills paid 0.215% and 0.223% per side. Paper already charges the 0.1%
+// entry chase (a chase IS a market order); charging a maker fee on top of it flattered every
+// sleeve by ~0.1% of notional per trade. Rows resolved before this change keep the fee they
+// were scored with (fees are written at resolution); the shift is well inside one trade's
+// noise (≈$11 on a $10.7k paper position vs a ≈$430 per-trade standard deviation), so the
+// v2 cohort stands.
+const ENTRY_FEE = 0.0025;   // ~0.25% entry (market / taker — what live actually pays)
+const TAKER = 0.0025;       // ~0.25% exit (stop/target = market / taker)
 const MAX_HOLD_H = 48;
 // Per-4h rollover on notional, by coin. Kraken's US-margin rates FLUCTUATE with market
 // conditions (locked at execution, shown on the order form) — no static number is exact, so
@@ -120,10 +128,17 @@ export const RECORD_SQL = `${SIM_COHORT_SQL} AND ${US_MARGIN_SYMBOLS_SQL}`;
 // fact, and the arming gate should be read knowing how much of the sample is forward-only.
 // strategyBreakdown reports the count of resolved trades ENTERED after this moment.
 export const UNIVERSE_FIX_AT = "2026-09-05T17:00:00Z";
+// When the auto-paper policy narrowed to high-conviction 5m/15m LONGS, not stretched
+// (Sep 4 2026 16:59 UTC). Trades entered before it were chosen under the old rule (any
+// high-conviction breakout, any timeframe, both directions) and re-qualified after the fact;
+// the forward-only slice is the honest test of the rule as it stands. candidateDetail()
+// reports it beside the pooled row.
+export const POLICY_CUT_AT = "2026-09-04T17:00:00Z";
 
 export interface ShadowResolution {
   id: number; symbol: string; side: string; entry: number; exit: number;
   pnl: number; pnlPct: number; reason: string; leverage: number; conviction: string | null;
+  source: string | null;   // which sleeve — so Slack can label experiment twins as not-the-record
 }
 
 interface OpenRow {
@@ -175,6 +190,13 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
 // leverage (can't hold more than lev × equity). This makes paper P&L read like real risk-managed
 // trading — realistic size, fixed downside — instead of an arbitrary fixed stake.
 export const SIZE_MULTIPLIER: Record<string, number> = { "selective-x5": 5 };
+// EXPERIMENT TWINS ride the live candidate's signals at a different size. They are the SAME
+// trades again, so pooling them with the record would count every candidate trade twice (at
+// 3.5× the weight) in the headline totals, the conviction table, the edges by direction and
+// coin, the milestone reports, and the daily lessons. They keep their own scoreboard row and
+// the log; every POOLED statistic reads through this predicate instead of RECORD_SQL.
+export const EXPERIMENT_SOURCES: string[] = Object.keys(SIZE_MULTIPLIER);
+export const POOLED_SQL = `${RECORD_SQL} AND COALESCE(source,'manual') NOT IN (${EXPERIMENT_SOURCES.map((s) => `'${s}'`).join(",")})`;
 export function positionNotional(source: string | null, lev: number, entry: number, refEquity: number, maxRiskPct: number): number {
   const { oneR } = exitParams(source, lev, entry);
   maxRiskPct = maxRiskPct * (SIZE_MULTIPLIER[source ?? ""] ?? 1);
@@ -300,7 +322,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     if (!(now > 0)) {
       if (ageH >= maxHoldH) {
         const rollPeriods = Math.ceil(ageH / 4);
-        const feeFrac = MAKER + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
+        const feeFrac = ENTRY_FEE + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
         const netPct = -feeFrac;
         const pnl = netPct * notional;
         const affected = await prisma.$executeRawUnsafe(
@@ -308,7 +330,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
           entry, pnl, `${timeStopLabel} (no price)`, r.id, feeFrac * notional,
         );
         if (affected === 0) continue;
-        resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: `${timeStopLabel} (no price)`, leverage: lev, conviction: r.conviction });
+        resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: `${timeStopLabel} (no price)`, leverage: lev, conviction: r.conviction, source: r.source });
       }
       continue;
     }
@@ -391,7 +413,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       // taker − rollover accrued so far). Refreshed every 5 min so the log shows a live float.
       const uGross = (dir * (now - entry)) / entry;
       const uRoll = Math.ceil(ageH / 4);
-      const uNet = uGross - MAKER - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
+      const uNet = uGross - ENTRY_FEE - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
       const unrealized = uNet * notional;
       // Still-open guard: an overlapping cron run working from an older SELECT must not
       // overwrite peak/stop on a row the other run has since resolved — shadow_peak
@@ -407,7 +429,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const rollPeriods = Math.ceil(ageH / 4);
     // Net of maker entry + taker exit + per-coin rollover on notional (leverage-scaled).
     // Spot swings (carry=false) pay NO rollover — nothing is borrowed.
-    const feeFrac = MAKER + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
+    const feeFrac = ENTRY_FEE + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
     const netPct = grossPct - feeFrac;
     const pnl = netPct * notional;
     const feeDollars = feeFrac * notional;   // the fee drag on this trade (for gross-vs-net)
@@ -421,7 +443,7 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       exit, pnl, reason, peak, stopPx, r.id, feeDollars,
     );
     if (affected === 0) continue;
-    resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction });
+    resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction, source: r.source });
   }
   return resolved;
 }
@@ -451,20 +473,20 @@ export async function shadowScore(): Promise<ShadowScore> {
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        count(*) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open')::bigint AS open,
        COALESCE(sum(shadow_unrealized) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open'),0)::float AS openfloat
-     FROM tradingview_alerts WHERE ${RECORD_SQL}`,
+     FROM tradingview_alerts WHERE ${POOLED_SQL}`,
   );
   const [wl] = await prisma.$queryRawUnsafe<{ avgwin: number | null; avgloss: number | null }[]>(
     `SELECT
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl <= 0) AS avgloss
-     FROM tradingview_alerts WHERE ${RECORD_SQL}`,
+     FROM tradingview_alerts WHERE ${POOLED_SQL}`,
   );
   const tiers = await prisma.$queryRawUnsafe<{ tier: string; resolved: bigint; wins: bigint; total: number | null }[]>(
     `SELECT COALESCE(conviction,'untagged') AS tier,
        count(*)::bigint AS resolved,
        count(*) FILTER (WHERE shadow_pnl > 0)::bigint AS wins,
        COALESCE(sum(shadow_pnl),0)::float AS total
-     FROM tradingview_alerts WHERE shadow_status='resolved' AND ${RECORD_SQL}
+     FROM tradingview_alerts WHERE shadow_status='resolved' AND ${POOLED_SQL}
      GROUP BY COALESCE(conviction,'untagged')`,
   );
   const [nonUs] = await prisma.$queryRawUnsafe<{ open: bigint; resolved: bigint }[]>(
@@ -557,7 +579,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "swing-spot": "Spot swing — PAUSED Sep 4 (not the live candidate)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",
-  "selective-x5": "Selective ×5 SIZE — same trades, 5× the risk (15%/30%), 5× leverage — experiment, never live",
+  "selective-x5": "Selective ×5 SIZE — the SAME trades again at 5× the risk (15%/30%), 5× leverage — experiment, never live, not pooled",
   "selective-swing": "Selective SWING — RETIRED Sep 4 (5%/4d give-back)",
   manual: "Manual alerts (yours)",
 };
@@ -674,7 +696,7 @@ async function edgeBy(groupExpr: string, labelFn: (k: string) => string): Promis
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        count(*) FILTER (WHERE side IN ('buy','sell') AND COALESCE(shadow_status,'open')='open')::bigint AS open
      FROM tradingview_alerts
-     WHERE side IN ('buy','sell') AND ${RECORD_SQL}
+     WHERE side IN ('buy','sell') AND ${POOLED_SQL}
      GROUP BY ${groupExpr}`,
   );
   return rows
@@ -741,4 +763,85 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     simVersion: r.sim_version ?? SIM_VERSION,
     usTradeable: isUsMarginSymbol(r.symbol),
   }));
+}
+
+// LIVE CANDIDATE DETAIL — the per-trade view the daily synthesis and its lessons read.
+// The scoreboard row is one pooled number; this is the same sleeve sliced the ways that
+// decide whether the pooled number can be trusted: forward-only (entered after the policy
+// cut), by timeframe, by resolution day (one big day ≈ one bet), and the last N trades with
+// their peak and exit reason (the give-back, trade by trade). Read-only, RECORD_SQL scoped.
+export interface CandidateSlice { key: string; resolved: number; wins: number; hitRate: number | null; net: number; tStat: number | null; days: number; open: number }
+export interface CandidateTrade {
+  id: number; symbol: string; timeframe: string | null; conviction: string | null; opened: string;
+  resolvedAt: string | null; peakPct: number | null; reason: string | null; pnl: number | null;
+}
+export interface CandidateDetail {
+  source: string;
+  forward: CandidateSlice | null;              // entered after POLICY_CUT_AT
+  byTimeframe: CandidateSlice[];
+  byDay: { day: string; resolved: number; net: number }[];   // UTC resolution days
+  recent: CandidateTrade[];
+}
+const TF_SQL = `COALESCE(substring(note from '(5m|15m|1h|4h|1d)'), '?')`;
+export async function candidateDetail(source: string, limit = 30): Promise<CandidateDetail> {
+  await ensureShadowColumns();
+  type SliceRow = { k: string; resolved: bigint; wins: bigint; net: number | null; meanpnl: number | null; stdpnl: number | null; days: bigint; open: bigint };
+  // groupExpr / extraWhere are fixed strings chosen below — never user input.
+  const slice = async (groupExpr: string, extraWhere: string): Promise<CandidateSlice[]> => {
+    const rows = await prisma.$queryRawUnsafe<SliceRow[]>(
+      `SELECT ${groupExpr} AS k,
+         count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
+         count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
+         COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS net,
+         avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
+         stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl,
+         count(DISTINCT date_trunc('day', shadow_resolved_at AT TIME ZONE 'UTC')) FILTER (WHERE shadow_status='resolved')::bigint AS days,
+         count(*) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open')::bigint AS open
+       FROM tradingview_alerts
+       WHERE source=$1 AND side IN ('buy','sell') AND ${RECORD_SQL} ${extraWhere}
+       GROUP BY 1`,
+      source,
+    );
+    return rows.map((r) => {
+      const resolved = Number(r.resolved);
+      return {
+        key: String(r.k), resolved, wins: Number(r.wins),
+        hitRate: resolved > 0 ? Number(r.wins) / resolved : null,
+        net: r.net || 0,
+        tStat: resolved > 1 && r.meanpnl != null && r.stdpnl != null && r.stdpnl > 0 ? (r.meanpnl * Math.sqrt(resolved)) / r.stdpnl : null,
+        days: Number(r.days), open: Number(r.open),
+      };
+    });
+  };
+  const [fwd, byTimeframe, dayRows, recentRows] = await Promise.all([
+    slice(`'forward'`, `AND time > '${POLICY_CUT_AT}'::timestamptz`),
+    slice(TF_SQL, ""),
+    prisma.$queryRawUnsafe<{ day: string; resolved: bigint; net: number | null }[]>(
+      `SELECT to_char(date_trunc('day', shadow_resolved_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+         count(*)::bigint AS resolved, COALESCE(sum(shadow_pnl),0)::float AS net
+       FROM tradingview_alerts WHERE source=$1 AND shadow_status='resolved' AND ${RECORD_SQL}
+       GROUP BY 1 ORDER BY 1`,
+      source,
+    ),
+    prisma.$queryRawUnsafe<{ id: number; symbol: string; tf: string; conviction: string | null; time: Date; shadow_resolved_at: Date | null; peakpct: number | null; shadow_reason: string | null; shadow_pnl: number | null }[]>(
+      `SELECT id, symbol, ${TF_SQL} AS tf, conviction, time, shadow_resolved_at, shadow_reason, shadow_pnl,
+         CASE WHEN shadow_peak IS NOT NULL AND mark_price > 0
+              THEN (CASE WHEN side='buy' THEN shadow_peak / mark_price - 1 ELSE 1 - shadow_peak / mark_price END) * 100 END AS peakpct
+       FROM tradingview_alerts WHERE source=$1 AND shadow_status='resolved' AND ${RECORD_SQL}
+       ORDER BY shadow_resolved_at DESC LIMIT $2`,
+      source, Math.max(1, Math.min(200, limit)),
+    ),
+  ]);
+  const order: Record<string, number> = { "5m": 0, "15m": 1, "1h": 2, "4h": 3, "1d": 4 };
+  return {
+    source,
+    forward: fwd[0] ?? null,
+    byTimeframe: byTimeframe.sort((a, b) => (order[a.key] ?? 9) - (order[b.key] ?? 9)),
+    byDay: dayRows.map((d) => ({ day: d.day, resolved: Number(d.resolved), net: d.net || 0 })),
+    recent: recentRows.map((r) => ({
+      id: r.id, symbol: r.symbol, timeframe: r.tf === "?" ? null : r.tf, conviction: r.conviction,
+      opened: r.time.toISOString(), resolvedAt: r.shadow_resolved_at?.toISOString() ?? null,
+      peakPct: r.peakpct, reason: r.shadow_reason, pnl: r.shadow_pnl,
+    })),
+  };
 }
