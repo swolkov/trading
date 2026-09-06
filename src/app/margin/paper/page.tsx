@@ -372,7 +372,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
       ) : (
         <div className="flex items-center gap-2 flex-wrap">
           <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='type ARM' className="w-24 rounded-md border border-border bg-background px-2 py-1 text-[12px]" />
-          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 2, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective at 3% — 2 positions, 3 trades/day"}</button>
+          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective — 3% risk per trade, 1 position, 3 trades/day"}</button>
           {!rtPassed && <span className="text-[11px] text-red-400">plumbing test must pass first</span>}
           {arm.ddTripped && <span className="text-[11px] text-red-400">drawdown breaker tripped</span>}
           {!gateOk && rtPassed && <span className="text-[11px] text-amber-400">paper gate is not green — arming anyway is your decision, recorded in the log</span>}
@@ -436,8 +436,8 @@ function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
 
       <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `ARMED · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "DISARMED"} tone={armed ? "red" : "grey"}>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          What arming means: {cfg ? <><span className="text-foreground/80">{cfg.live.baseRiskPct}% of the account per trade</span>{riskUsd != null && <> (about ${riskUsd.toLocaleString()} today)</>}, high-conviction setups up to {cfg.live.baseRiskPct * 2}%, at most {cfg.live.maxPositions} positions and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
-          Arming is deliberate: type ARM, then press. Starts at 2 positions and 3 trades a day. Every arm and disarm is logged and paged to Slack.
+          What arming means: {cfg ? <><span className="text-foreground/80">3% of the account at risk on every live trade</span>{eq > 0 && <> (about ${Math.round(eq * 0.03).toLocaleString()} today)</>} — the candidate only takes high-conviction setups, which size at twice the {cfg.live.baseRiskPct}% base — at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
+          Arming is deliberate: type ARM, then press. Starts at 1 position and 3 trades a day. Every arm and disarm is logged and paged to Slack.
         </p>
         <ArmControls rtPassed={rtPassed} gateOk={gateOk} />
         <details>
