@@ -345,6 +345,44 @@ function GateRow({ label, value, target, ok, hint }: { label: string; value: str
     </div>
   );
 }
+interface ArmStatus { armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
+function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean }) {
+  const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 15_000 });
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const post = async (body: Record<string, unknown>) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch("/api/margin/arm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const j = await r.json();
+      setMsg(j.error ?? (j.armed ? "ARMED — real orders from the next scan tick" : "disarmed"));
+      await mutate();
+    } catch (e) { setMsg(String(e)); }
+    finally { setBusy(false); setConfirm(""); }
+  };
+  if (!arm) return <p className="text-[11px] text-muted-foreground/50">Loading arm state…</p>;
+  return (
+    <div className="space-y-2">
+      {arm.armed ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button disabled={busy} onClick={() => post({ action: "disarm" })} className="rounded-md border border-red-500/60 bg-red-500/15 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/25 disabled:opacity-50">{busy ? "…" : "DISARM now — stop new entries"}</button>
+          <span className="text-[11px] text-muted-foreground/70">Live: {arm.sources.join(", ")} · {arm.riskPct}% risk · max {arm.maxPositions} positions · {arm.maxTradesPerDay} trades/day · {arm.marketEntries ? "market" : "maker"} entries. Open positions stay under the guardian after a disarm.</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 flex-wrap">
+          <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='type ARM' className="w-24 rounded-md border border-border bg-background px-2 py-1 text-[12px]" />
+          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 2, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective at 3% — 2 positions, 3 trades/day"}</button>
+          {!rtPassed && <span className="text-[11px] text-red-400">plumbing test must pass first</span>}
+          {arm.ddTripped && <span className="text-[11px] text-red-400">drawdown breaker tripped</span>}
+          {!gateOk && rtPassed && <span className="text-[11px] text-amber-400">paper gate is not green — arming anyway is your decision, recorded in the log</span>}
+        </div>
+      )}
+      {msg && <p className="text-[11px] text-muted-foreground/70">{msg}</p>}
+      {arm.log.length > 0 && <p className="text-[10px] text-muted-foreground/50">Last: {arm.log[0]}</p>}
+    </div>
+  );
+}
 function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
   const { data: rt } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 30_000 });
   const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
@@ -399,8 +437,9 @@ function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
       <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `ARMED · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "DISARMED"} tone={armed ? "red" : "grey"}>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
           What arming means: {cfg ? <><span className="text-foreground/80">{cfg.live.baseRiskPct}% of the account per trade</span>{riskUsd != null && <> (about ${riskUsd.toLocaleString()} today)</>}, high-conviction setups up to {cfg.live.baseRiskPct * 2}%, at most {cfg.live.maxPositions} positions and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
-          Arming is a deliberate step done together in a verified session; there is no button here on purpose. Start with 2 positions and 3 trades a day.
+          Arming is deliberate: type ARM, then press. Starts at 2 positions and 3 trades a day. Every arm and disarm is logged and paged to Slack.
         </p>
+        <ArmControls rtPassed={rtPassed} gateOk={gateOk} />
         <details>
           <summary className="cursor-pointer text-[11px] text-muted-foreground/60">Show the live-vs-paper settings check</summary>
           <div className="mt-2"><LiveMirrorCard /></div>
