@@ -8,7 +8,7 @@ import { pairMatchesSymbol, SCAN_UNIVERSE } from "@/lib/kraken-pairs";
 import { Chip } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { money, pct, pnl2, timeOnly, tone, usd } from "@/lib/format";
+import { coinOf, money, pct, pnl2, timeOnly, tone, usd } from "@/lib/format";
 
 // ============ MARGIN COCKPIT ============
 // The live account: open positions with EXACT liquidation prices, the account's margin-level
@@ -164,7 +164,7 @@ export default function MarginCockpitPage() {
             <tbody>
               {positions.map((p) => (
                 <Row key={p.id}>
-                  <Td strong>{p.pair}</Td>
+                  <Td strong title={p.pair}>{coinOf(p.pair)}</Td>
                   <Td className={`font-semibold ${p.side === "long" ? "text-up" : "text-down"}`}>{p.side === "long" ? "Long" : "Short"}</Td>
                   <Td num>{p.leverage.toFixed(0)}x</Td>
                   <Td num>{usd(p.entryPrice)}</Td>
@@ -343,7 +343,7 @@ export default function MarginCockpitPage() {
                 <Label className="mb-1.5">By coin</Label>
                 {Object.entries(sb.byPair).sort((a, b) => b[1].trades - a[1].trades).map(([pair, s]) => (
                   <div key={pair} className="flex items-center justify-between py-0.5 text-xs">
-                    <span className="font-semibold">{pair}</span>
+                    <span className="font-semibold" title={pair}>{coinOf(pair)}</span>
                     <span className="text-muted-foreground">{s.trades} trades · {s.trades ? ((s.wins / s.trades) * 100).toFixed(0) : 0}% win</span>
                     <span className={`font-semibold tabular-nums ${tone(s.netPnl)}`}>{money(s.netPnl)}</span>
                   </div>
