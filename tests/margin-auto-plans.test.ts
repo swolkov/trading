@@ -17,7 +17,7 @@ test("retired sleeves never appear in new auto plans", () => {
       for (const conv of convs) {
         for (const p of autoShadowPlans(kind, tf, conv, 5)) {
           assert.equal(RETIRED_AUTO_SOURCES.has(p.source), false, `${p.source} must not auto-open`);
-          assert.equal(p.source, "selective");
+          assert.ok(p.source === "selective" || p.source === "selective-x5", p.source);
         }
       }
     }
@@ -46,9 +46,18 @@ test("1h/4h/1d high longs are paused — 3%/48h selective is a 5m/15m container"
   assert.deepEqual(autoShadowPlans("breakout", "1d", high, 5), []);
 });
 
-test("the paying paper path: high 5m/15m long, not stretched → selective only", () => {
-  assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5), [{ source: "selective", lev: 5 }]);
-  assert.deepEqual(autoShadowPlans("breakout", "15m", high, 8), [{ source: "selective", lev: 8 }]);
+test("the paying paper path: high 5m/15m long, not stretched → selective plus its ×5-size twin", () => {
+  assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5), [{ source: "selective", lev: 5 }, { source: "selective-x5", lev: 5 }]);
+  assert.deepEqual(autoShadowPlans("breakout", "15m", high, 8), [{ source: "selective", lev: 8 }, { source: "selective-x5", lev: 5 }]);
+});
+
+test("the ×5-size twin rides the same signal, never on its own, and sizes at 5× the risk", async () => {
+  const { positionNotional } = await import("../src/lib/margin-shadow");
+  const base = positionNotional("selective", 5, 100, 5000, 0.06);
+  const big = positionNotional("selective-x5", 5, 100, 5000, 0.06);
+  assert.ok(Math.abs(base - 5000 * 2) < 1e-6, "selective at 6% risk / 3% stop = 2× equity");
+  assert.ok(Math.abs(big - 5000 * 5) < 1e-6, "the ×5 twin wants 10× equity and is capped at the 5× leverage cap");
+  assert.deepEqual(autoShadowPlans("breakdown", "5m", high, 5), [], "no twin without a base plan");
 });
 
 test("swings are not opened — not the live candidate", () => {
@@ -72,7 +81,7 @@ test("real scorer: 3-TF + volume is high and opens; adding RSI stretch still hig
   ];
   const clean = scoreConviction(br, confluence);
   assert.equal(clean.tier, "high");
-  assert.deepEqual(autoShadowPlans(br.kind, br.timeframe, clean, 5), [{ source: "selective", lev: 5 }]);
+  assert.deepEqual(autoShadowPlans(br.kind, br.timeframe, clean, 5), [{ source: "selective", lev: 5 }, { source: "selective-x5", lev: 5 }]);
 
   const stretched = scoreConviction(br, [...confluence, sig({ kind: "overbought", timeframe: "5m" })]);
   assert.equal(stretched.tier, "high");

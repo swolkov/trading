@@ -194,7 +194,7 @@ export async function GET(request: Request) {
     errors.push(`autoshadow: ${String(e).slice(0, 80)}`);
   }
   const autoOpened = opened.length;
-  if (live.length) await sendNotification(`💸 LIVE executor (armed sources: ${armedSources}):\n${live.map((l) => `• ${l}`).join("\n")}`, "margin_urgent").catch(() => {});
+  if (live.length) await sendNotification(`💸 LIVE executor (armed sources: ${armedSources}):\n${live.map((l) => `• ${l}`).join("\n")}`, "margin_live").catch(() => {});
   // Stage 3 bookkeeping: count closed live trades; graduate to paper's full size at 20 if live matches paper.
   if (armedSources) await maybeGraduateStage3().catch(() => null);
 

@@ -150,6 +150,13 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // Selective (high-conviction only): a better setup earns a bit more room (3% stop) + the
   // managed exit banks the green (breakeven at +1R, then trails). Fewer of these = tiny fee drag.
   if (source === "selective") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  // SELECTIVE ×5 SIZE — pre-registered experiment (Spencer, Sep 6 2026): the SAME entries and
+  // the SAME container as the live candidate, but sized at 5× the risk (15% base, 30% on high
+  // conviction) with 5× leverage — "use more of the account". Scored with the same fees and
+  // rollover. It exists to answer, with numbers, whether bigger size beats the policy after
+  // the drawdowns. It can never trade live unless armed by name; note that live's 15%
+  // drawdown breaker would halt after ONE full loss at this size.
+  if (source === "selective-x5") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
   // TradingView strategy sleeves ("tv:<name>") are scored in the SAME container as the live
   // candidate (3% / 48h / managed exit) so their record is directly comparable and, if one
   // is armed, live reproduces exactly what paper measured.
@@ -167,8 +174,10 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
 // trade. A tighter stop → a BIGGER position for the SAME dollar risk (the real lever). Capped by
 // leverage (can't hold more than lev × equity). This makes paper P&L read like real risk-managed
 // trading — realistic size, fixed downside — instead of an arbitrary fixed stake.
+export const SIZE_MULTIPLIER: Record<string, number> = { "selective-x5": 5 };
 export function positionNotional(source: string | null, lev: number, entry: number, refEquity: number, maxRiskPct: number): number {
   const { oneR } = exitParams(source, lev, entry);
+  maxRiskPct = maxRiskPct * (SIZE_MULTIPLIER[source ?? ""] ?? 1);
   const stopDistPct = entry > 0 ? oneR / entry : 0;
   const levCap = refEquity * Math.max(1, lev);
   if (!(stopDistPct > 0) || !(maxRiskPct > 0)) return Math.min(refEquity, levCap);
@@ -548,6 +557,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "swing-spot": "Spot swing — PAUSED Sep 4 (not the live candidate)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",
+  "selective-x5": "Selective ×5 SIZE — same trades, 5× the risk (15%/30%), 5× leverage — experiment, never live",
   "selective-swing": "Selective SWING — RETIRED Sep 4 (5%/4d give-back)",
   manual: "Manual alerts (yours)",
 };
