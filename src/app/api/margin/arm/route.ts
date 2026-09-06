@@ -90,6 +90,6 @@ export async function POST(request: Request) {
   await setKey("kraken_margin_validate_only", "false");
   await setKey("kraken_margin_auto", "true");
   await appendLog(`ARMED source=${source} risk=${s.riskPct}% maxPositions=${maxPositions} maxTradesPerDay=${maxTradesPerDay} marketEntries=true from the admin page`);
-  await sendNotification(`🔴 Kraken margin executor ARMED from the admin page: source ${source}, ${s.riskPct}% risk per trade, max ${maxPositions} positions, ${maxTradesPerDay} trades/day, market entries, whole US universe. Disarm on /margin/paper or set kraken_margin_auto=false.`, "margin_urgent").catch(() => {});
+  await sendNotification(`🔴 Kraken margin executor ARMED from the admin page: source ${source}, ${s.riskPct}% risk per trade, max ${maxPositions} positions, ${maxTradesPerDay} trades/day, market entries, whole US universe. Disarm on /margin/paper or set kraken_margin_auto=false.`, "margin_live").catch(() => {});
   return Response.json({ ok: true, ...(await status()) });
 }

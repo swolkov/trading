@@ -382,7 +382,7 @@ export async function startRoundTrip(symbol = "BTC/USD", deadlineMs?: number): P
       await save(state);
     }
     if (state.stage === "open") {
-      await sendNotification(`🧪 $20 round trip STARTED on ${symbol}: entry ${state.entryTxid} sent. The guardian checks Kraken's behaviour every 5 min and closes it within ~${Math.round(RT_CLOSE_AFTER_MS / 60_000)} min.`, "margin_results").catch(() => {});
+      await sendNotification(`🧪 $20 round trip STARTED on ${symbol}: entry ${state.entryTxid} sent. The guardian checks Kraken's behaviour every 5 min and closes it within ~${Math.round(RT_CLOSE_AFTER_MS / 60_000)} min.`, "margin_live").catch(() => {});
       return { ok: true, note: `entry sent (${state.entryTxid})`, state };
     }
     if (state.stage === "entering") {
@@ -435,7 +435,7 @@ async function recoverEntering(state: RtState): Promise<void> {
     state.stage = "open";
     state.checks.entry_accepted = check(true, `recovered after an interrupted start: ${found.txid}`);
     log(state, `recovered entry ${found.txid} — continuing as OPEN`);
-    await sendNotification(`🧪 Round trip on ${state.symbol}: the interrupted entry WAS accepted (${found.txid}) — adopted, will be closed on schedule.`, "margin_results").catch(() => {});
+    await sendNotification(`🧪 Round trip on ${state.symbol}: the interrupted entry WAS accepted (${found.txid}) — adopted, will be closed on schedule.`, "margin_live").catch(() => {});
   } else if (Date.now() - startedMs > 8 * 60_000) {
     finish(state, "failed", state.error ?? "start did not complete and no filled order of ours was found (ledger, ClosedOrders)");
     log(state, "recovery: nothing found after 8 min — failed");
