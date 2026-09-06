@@ -56,3 +56,10 @@ export const timeOnly = (iso: string | number | Date) =>
 
 /** Kraken pair → coin, via the one canonical normaliser: XBTUSD:BTNL → BTC · SOL/USD → SOL · XXBTZUSD → BTC */
 export const coinOf = (pair: string) => pairBase(pair.replace("/", ""));
+
+/** Minutes elapsed since an ISO timestamp (0 when missing/invalid). */
+export const minutesSince = (iso: string | null | undefined) => {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? (Date.now() - t) / 60000 : 0;
+};
