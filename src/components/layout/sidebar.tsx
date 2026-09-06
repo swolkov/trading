@@ -27,9 +27,9 @@ const sections = [
   {
     label: "Trading",
     links: [
-      { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart, hint: "live account" },
-      { href: "/margin/paper", label: "Road to Live", icon: Route, hint: "paper gate · arm" },
-      { href: "/stocks/paper", label: "Stock Paper Book", icon: FlaskConical, hint: "paper only" },
+      { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart },
+      { href: "/margin/paper", label: "Road to Live", icon: Route },
+      { href: "/stocks/paper", label: "Stock Paper Book", icon: FlaskConical },
       { href: "/orders", label: "Orders", icon: ClipboardList },
     ],
   },
@@ -89,9 +89,6 @@ export function Sidebar() {
                   >
                     <Icon className={cn("h-4 w-4 shrink-0", active ? "text-primary" : "text-muted-foreground/70")} />
                     <span className="flex-1 truncate">{link.label}</span>
-                    {"hint" in link && link.hint && (
-                      <span className="text-[10px] text-muted-foreground/60">{link.hint}</span>
-                    )}
                   </Link>
                 );
               })}
