@@ -72,7 +72,8 @@ export async function GET() {
       return {
         tier, riskPct,
         riskUsd: eq > 0 ? (eq * riskPct) / 100 : null,
-        notionalUsd: eq > 0 ? liveNotional(eq, riskPct / 100, stopFrac, rung, live.perTradeCapUsd) : null,
+        // Fitted to free margin the way the executor does it (a flat account's free margin ≈ equity).
+        notionalUsd: eq > 0 ? liveNotional(eq, riskPct / 100, stopFrac, rung, live.perTradeCapUsd, eq) : null,
       };
     });
     const ladder = [

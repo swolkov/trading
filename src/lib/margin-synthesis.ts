@@ -246,7 +246,7 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
       await cfgSet("kraken_margin_live_max_risk_pct", String(st.toBase));
       const ws = await cfgGet("margin_watch_state");
       let eq = 0; try { const p = ws ? (JSON.parse(ws) as { lastEquity?: number }) : null; eq = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { eq = 0; }
-      const cap = Math.max(200, Math.round(eq * (st.toBase * 2 / 100) * 2.2));
+      const cap = Math.max(200, Math.round(eq * (st.toBase * 2 / 100) * 2.0));   // two full losses end the day
       await cfgSet("kraken_margin_daily_loss_cap", String(cap));
       st.status = "graduated"; st.note = `graduated after ${div.closed} closed live trades: ${div.verdict}`;
       try {

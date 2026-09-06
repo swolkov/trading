@@ -105,7 +105,9 @@ export async function POST(request: Request) {
   // Limits first, the arm flag LAST, so no instant exists where the executor is on without them.
   let equity = 0;
   try { const st = (await prisma.agentConfig.findUnique({ where: { key: "margin_watch_state" } }))?.value; const p = st ? (JSON.parse(st) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { equity = 0; }
-  const dailyCap = Math.max(200, Math.round(equity * (riskPct / 100) * 2.2));   // ≈ two full losses incl. fees
+  // Two full losses END the day: a full loss at this size ≈ stop + fees both sides + rollover
+  // ≈ 1.13 × the stop-only risk, so 2.0 × risk sits just under two of them.
+  const dailyCap = Math.max(200, Math.round(equity * (riskPct / 100) * 2.0));
   await setKey("kraken_margin_live_max_risk_pct", basePct);
   await setKey("kraken_margin_daily_loss_cap", String(dailyCap));
   await setKey(STAGE3_KEY, JSON.stringify({ status: "running", startedAt: new Date().toISOString(), target: STAGE3_TARGET, fromBase: START_BASE_PCT, toBase: BASE_RISK_PCT, done: 0 }));

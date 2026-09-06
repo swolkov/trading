@@ -276,8 +276,12 @@ export async function GET(request: Request) {
           sent.push(key);
         }
       } else if (ml < 150) {
+        // A deliberately sized bot trade sits at ~105–110% margin level for its whole life
+        // (a 6% trade at the 2× rung uses ~90% of the account). That is by design and it is
+        // stop-protected, so this is a once-a-day reminder, not an hourly page.
         const key = "ml-warn";
-        if (shouldFire(state, key)) {
+        const lastWarn = state.alerts[key] ? new Date(state.alerts[key]).getTime() : 0;
+        if (Date.now() - lastWarn > 24 * 3600_000) {
           await sendNotification(
             `⚠️ Margin level ${ml.toFixed(0)}% — getting close to the 80% margin-call line. ` +
             `Equity $${health.equity.toFixed(0)}, free margin $${health.freeMargin.toFixed(0)}.`,
