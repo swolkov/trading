@@ -345,7 +345,7 @@ function GateRow({ label, value, target, ok, hint }: { label: string; value: str
     </div>
   );
 }
-interface ArmStatus { armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
+interface ArmStatus { stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
 function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean }) {
   const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 15_000 });
   const [confirm, setConfirm] = useState("");
@@ -372,11 +372,19 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
       ) : (
         <div className="flex items-center gap-2 flex-wrap">
           <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='type ARM' className="w-24 rounded-md border border-border bg-background px-2 py-1 text-[12px]" />
-          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective — paper's sizing rule (3% base, 6% high conviction), 1 position, 3 trades/day"}</button>
+          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective — 3% per trade for the first 20 live trades, then paper's full 6%; 1 position, 3 trades/day"}</button>
           {!rtPassed && <span className="text-[11px] text-red-400">plumbing test must pass first</span>}
           {arm.ddTripped && <span className="text-[11px] text-red-400">drawdown breaker tripped</span>}
           {!gateOk && rtPassed && <span className="text-[11px] text-amber-400">paper gate is not green — arming anyway is your decision, recorded in the log</span>}
         </div>
+      )}
+      {arm.stage3 && (
+        <p className="text-[11px]">
+          <span className="text-foreground/80">Stage 3:</span>{" "}
+          {arm.stage3.status === "running" && <>first {arm.stage3.target} live trades at half size — <span className="font-bold">{arm.stage3.done} of {arm.stage3.target}</span> closed. Moves to paper&apos;s full size automatically when real fills match paper.</>}
+          {arm.stage3.status === "graduated" && <span className="text-emerald-400">graduated — paper&apos;s full sizing rule is on ({arm.stage3.toBase}% base, {arm.stage3.toBase * 2}% high conviction).</span>}
+          {arm.stage3.status === "held" && <span className="text-red-400">held at half size — live diverged from paper: {arm.stage3.note}</span>}
+        </p>
       )}
       {msg && <p className="text-[11px] text-muted-foreground/70">{msg}</p>}
       {arm.log.length > 0 && <p className="text-[10px] text-muted-foreground/50">Last: {arm.log[0]}</p>}
@@ -404,7 +412,6 @@ function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
 
   const armed = !!cfg?.live.armed;
   const eq = cfg?.equity ?? 0;
-  const riskUsd = eq > 0 ? Math.round((eq * (cfg?.live.baseRiskPct ?? 3)) / 100) : null;
 
   return (
     <div className="space-y-3">
