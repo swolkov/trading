@@ -224,3 +224,14 @@ test("tvSource: a TradingView strategy name becomes a tv: sleeve, garbage become
   assert.equal(tvSource("x".repeat(40)), null);
   assert.equal(tvSource("-lead"), null);
 });
+
+test("liveNotional fits the order to free margin: a 6% trade on a $5,185 account at 2× asks for the whole account and gets 90% of it", async () => {
+  const { liveNotional, MARGIN_HEADROOM } = await import("../src/lib/margin-live-risk");
+  const eq = 5185;
+  assert.equal(liveNotional(eq, 0.06, 0.03, 2), eq * 2, "unclamped: exactly the leverage cap");
+  const fitted = liveNotional(eq, 0.06, 0.03, 2, 0, eq);          // free margin = the whole account
+  assert.ok(Math.abs(fitted - eq * MARGIN_HEADROOM * 2) < 1e-6);
+  assert.ok(Math.abs(liveNotional(eq, 0.03, 0.03, 2, 0, eq) - eq) < 1e-6, "a 3% trade is untouched (needs half the margin)");
+  assert.equal(liveNotional(eq, 0.03, 0.03, 2, 0, 0), 0, "no free margin → nothing sent");
+  assert.ok(Math.abs(liveNotional(eq, 0.03, 0.03, 2, 0, null) - eq) < 1e-6, "unknown free margin → unchanged (caller decides)");
+});

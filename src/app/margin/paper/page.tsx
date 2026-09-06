@@ -367,12 +367,12 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
       {arm.armed ? (
         <div className="flex items-center gap-2 flex-wrap">
           <button disabled={busy} onClick={() => post({ action: "disarm" })} className="rounded-md border border-red-500/60 bg-red-500/15 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/25 disabled:opacity-50">{busy ? "…" : "DISARM now — stop new entries"}</button>
-          <span className="text-[11px] text-muted-foreground/70">Live: {arm.sources.join(", ")} · {arm.riskPct}% risk · max {arm.maxPositions} positions · {arm.maxTradesPerDay} trades/day · {arm.marketEntries ? "market" : "maker"} entries. Open positions stay under the guardian after a disarm.</span>
+          <span className="text-[11px] text-muted-foreground/70">Live: {arm.sources.join(", ")} · {arm.riskPct}% base, {arm.riskPct * 2}% high conviction · max {arm.maxPositions} positions · {arm.maxTradesPerDay} trades/day · {arm.marketEntries ? "market" : "maker"} entries. Open positions stay under the guardian after a disarm.</span>
         </div>
       ) : (
         <div className="flex items-center gap-2 flex-wrap">
           <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='type ARM' className="w-24 rounded-md border border-border bg-background px-2 py-1 text-[12px]" />
-          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective — 3% risk per trade, 1 position, 3 trades/day"}</button>
+          <button disabled={busy || confirm !== "ARM" || !rtPassed || arm.ddTripped || arm.roundTripRunning} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className="rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[12px] font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">{busy ? "arming…" : "ARM selective — paper's sizing rule (3% base, 6% high conviction), 1 position, 3 trades/day"}</button>
           {!rtPassed && <span className="text-[11px] text-red-400">plumbing test must pass first</span>}
           {arm.ddTripped && <span className="text-[11px] text-red-400">drawdown breaker tripped</span>}
           {!gateOk && rtPassed && <span className="text-[11px] text-amber-400">paper gate is not green — arming anyway is your decision, recorded in the log</span>}
@@ -436,7 +436,7 @@ function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
 
       <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `ARMED · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "DISARMED"} tone={armed ? "red" : "grey"}>
         <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          What arming means: {cfg ? <><span className="text-foreground/80">3% of the account at risk on every live trade</span>{eq > 0 && <> (about ${Math.round(eq * 0.03).toLocaleString()} today)</>} — the candidate only takes high-conviction setups, which size at twice the {cfg.live.baseRiskPct}% base — at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
+          What arming means: {cfg ? <><span className="text-foreground/80">the same sizing rule paper is scored with</span>: {cfg.live.baseRiskPct}% of the account at risk per trade, {cfg.live.baseRiskPct * 2}% on high conviction{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / 100).toLocaleString()} today)</>}. The candidate only takes high-conviction setups, so its live trades are the {cfg.live.baseRiskPct * 2}% ones; on today&apos;s account that is twice the account in size, so the executor fits the order to free margin (a little under {cfg.live.baseRiskPct * 2}% realised) until the 3× rung at $10k — at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
           Arming is deliberate: type ARM, then press. Starts at 1 position and 3 trades a day. Every arm and disarm is logged and paged to Slack.
         </p>
         <ArmControls rtPassed={rtPassed} gateOk={gateOk} />
