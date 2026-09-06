@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 
@@ -24,7 +24,7 @@ interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
   avgWin: number; avgLoss: number; expectancy: number | null; totalPnl: number; open: number;
   grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; paperTStat?: number | null; verdict: string;
-  forwardResolved?: number;
+  forwardResolved?: number; days?: number;
 }
 function verdictCls(v: string): string {
   if (v.startsWith("REAL EDGE")) return "text-emerald-400 font-bold";
@@ -72,34 +72,25 @@ export default function PaperTradesPage() {
     <div className="space-y-5">
       {/* ── Header ── */}
       <div>
-        <h2 className="text-xl font-bold tracking-tight">Paper Trades</h2>
+        <h2 className="text-xl font-bold tracking-tight">Kraken margin — the road to live</h2>
         <p className="text-[11px] text-muted-foreground/50">
-          The shadow experiment — every strategy scored on real prices with your real fees + rollover, no money at risk.
-          This is the record that has to prove an edge before the $5k live book is armed. Risk stays 3% (6% high-conviction ceiling);
-          leverage is allowed to grow only as that account actually grows.
+          Three steps, in order. Every strategy is scored on paper first with real Kraken prices and your real fees. Nothing trades real money until step 2 is green.
         </p>
       </div>
 
-      <LiveMirrorCard />
+      <GoLivePanel strategies={score?.strategies ?? []} />
 
-      <RoundTripCard />
-
-      <div className="rounded-xl border border-border bg-card p-4 space-y-2">
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          Auto paper is the live-candidate sleeve only: <span className="text-foreground/80">high-conviction 5m/15m longs, not stretched</span>.
-          Shorts on this sleeve lost on both the old 37-coin universe (17% hit, −$3.2k, Sep 4) and the US-only slice (40% hit, −$714, Sep 5) — they no longer open. Stretched longs were a coin-flip — skipped.
-          1h/4h and both swing containers are paused (not the 3%/48h game). Retired: fast-tight, sweep-fade, scanner spray, selective-swing.
-          This is not &quot;always profitable.&quot; The scoreboard below is the only number that counts, and it needs 30+ resolved over 7+ days before anything is armed.
-        </p>
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          <span className="text-foreground/80">Universe: only coins a US retail Kraken account can actually margin-trade</span> — 26 scanned
-          (BTC 20×, the majors 10×, the rest 5×/3×/2×). Until Sep 5 the desk scanned 37 coins and 19 of them were not on Kraken&apos;s US list at all;
-          they produced most of the resolved trades and every dollar of the loss. Those trades are now excluded from every statistic on this page
-          {(score?.shadow?.nonUsResolved ?? 0) > 0 && <> (<span className="text-foreground/80">{score?.shadow?.nonUsResolved} resolved</span> set aside)</>}
-          {" "}and their open positions are winding down, badged <span className="text-amber-400/70">non-US</span> in the log. Paper measures what live can take, nothing else.
-          The surviving trades were kept because Kraken&apos;s list excluded coins, not outcomes — but they were re-qualified after the fact, so the scoreboard also shows how many of each sleeve&apos;s resolved trades were entered <span className="text-foreground/80">after</span> the fix (&quot;fwd&quot;). Read the arming gate with that split in mind.
-        </p>
-      </div>
+      <details className="rounded-xl border border-border bg-card p-4 text-[11px] text-muted-foreground/70 leading-relaxed">
+        <summary className="cursor-pointer text-xs font-bold text-foreground/80">How to read this page</summary>
+        <ul className="mt-2 space-y-1 list-disc pl-4">
+          <li><span className="text-foreground/80">Paper</span> = the strategy ran on real prices with real fees, but no money moved. It is the evidence.</li>
+          <li><span className="text-foreground/80">Live candidate</span> = the one strategy that can be armed: high-conviction 5-minute and 15-minute breakouts, longs only, 3% stop, breakeven then a trailing stop, 48-hour time limit.</li>
+          <li><span className="text-foreground/80">Confidence (t)</span> = how far the average result is from zero, in units of its own noise. Below 2 a good run can still be luck. That is why the gate needs 2.</li>
+          <li><span className="text-foreground/80">Distinct days</span> = crypto coins move together, so 30 wins in one day are closer to one bet than thirty. The gate needs results spread over 7 days.</li>
+          <li><span className="text-foreground/80">Universe</span> = only the 26 coins a US retail Kraken account can margin-trade. Trades on other coins are kept in the log for honesty but count toward nothing{(score?.shadow?.nonUsResolved ?? 0) > 0 && <> ({score?.shadow?.nonUsResolved} set aside)</>}.</li>
+          <li>Retired strategies (fast-tight, sweep-fade, scanner spray, selective-swing, shorts) lost on this record and no longer open trades. Their numbers stay behind the toggle in the scoreboard.</li>
+        </ul>
+      </details>
 
       {/* ── Empty state ── */}
       {!hasAny && (
@@ -115,7 +106,7 @@ export default function PaperTradesPage() {
       {score?.shadow && (score.shadow.resolved > 0 || score.shadow.open > 0 || (score.shadow.legacyOpen ?? 0) > 0 || (score.shadow.nonUsOpen ?? 0) > 0) && (
         <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-4">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-bold">📊 Tracked-Signal Paper Record — would these have made money?</p>
+            <p className="text-xs font-bold">All paper trades together — would these have made money?</p>
             <p className="text-[10px] text-muted-foreground/45">
               {score.shadow.open} open
               {score.shadow.open > 0 && score.shadow.openUnrealized != null && (
@@ -186,7 +177,7 @@ export default function PaperTradesPage() {
       {score?.strategies && score.strategies.some((s) => s.resolved > 0 || s.open > 0) && (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-            <p className="text-xs font-bold">🧭 Strategy Scoreboard — what&apos;s actually working</p>
+            <p className="text-xs font-bold">Which strategies are working — the scoreboard behind the gate</p>
             <p className="text-[10px] text-muted-foreground/45">
               paper · expectancy = avg $/trade after fees
               {retired.length > 0 && (
@@ -247,7 +238,7 @@ export default function PaperTradesPage() {
       {score?.edges && (score.edges.byDirection.some((e) => e.resolved > 0 || e.open > 0) || score.edges.byCoin.some((e) => e.resolved > 0 || e.open > 0)) && (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-            <p className="text-xs font-bold">🔬 Edges — where&apos;s the money coming from?</p>
+            <p className="text-xs font-bold">Where the money comes from — by direction and by coin</p>
             <p className="text-[10px] text-muted-foreground/45">the paper record, sliced by factor</p>
           </div>
           <div className="px-4 py-2 border-b border-border/50 bg-amber-500/[0.04]">
@@ -331,6 +322,94 @@ interface RtView {
 // The $20 round trip: one real trade through the real executor, to prove the Kraken
 // behaviours the code assumes. Two clicks to start (arm the button, then send), because
 // the second click moves real money. The guardian closes it within ~7 minutes.
+// ── The go-live panel: three steps a founder can read at a glance ──────────────────────────
+const LIVE_CANDIDATE = "selective";
+function Step({ n, title, status, tone, children }: { n: number; title: string; status: string; tone: "green" | "amber" | "grey" | "red"; children?: ReactNode }) {
+  const toneCls = tone === "green" ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10" : tone === "amber" ? "text-amber-400 border-amber-500/40 bg-amber-500/10" : tone === "red" ? "text-red-400 border-red-500/40 bg-red-500/10" : "text-muted-foreground/60 border-border bg-muted/30";
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-sm font-bold"><span className="text-muted-foreground/50 mr-2">{n}</span>{title}</p>
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${toneCls}`}>{status}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+function GateRow({ label, value, target, ok, hint }: { label: string; value: string; target: string; ok: boolean; hint: string }) {
+  return (
+    <div className="grid grid-cols-[1.2rem_1fr_auto] items-center gap-2 text-[12px]">
+      <span className={ok ? "text-emerald-400" : "text-red-400 font-bold"}>{ok ? "✓" : "✗"}</span>
+      <span className="text-foreground/80">{label} <span className="text-muted-foreground/50">— {hint}</span></span>
+      <span className="tabular-nums text-right"><span className={ok ? "text-emerald-400 font-bold" : "text-foreground/80 font-bold"}>{value}</span><span className="text-muted-foreground/50"> / {target}</span></span>
+    </div>
+  );
+}
+function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
+  const { data: rt } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 30_000 });
+  const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
+  const cand = strategies.find((s) => s.key === LIVE_CANDIDATE) ?? null;
+  const rtState = rt?.state ?? null;
+  const rtRunning = rtState != null && ["entering", "open", "closing"].includes(rtState.stage);
+  const rtPassed = rtState?.stage === "done" && !!rt?.verdict?.allOk;
+  const plumbingStatus = rtRunning ? `RUNNING · ${rtState?.stage}` : rtPassed ? `PASSED · ${new Date(rtState!.finishedAt ?? rtState!.updatedAt).toLocaleDateString()}` : rtState?.stage === "done" ? "FAILED CHECKS" : rtState?.stage === "failed" ? "LAST RUN FAILED" : "NOT RUN YET";
+  const plumbingTone = rtRunning ? "amber" : rtPassed ? "green" : rtState ? "red" : "grey";
+
+  const resolved = cand?.resolved ?? 0;
+  const net = cand?.liveNet ?? 0;
+  const t = cand?.tStat ?? null;
+  const days = cand?.days ?? 0;
+  const gate = { n: resolved >= 30, net: resolved > 0 && net > 0, t: t != null && t >= 2, days: days >= 7 };
+  const gateOk = gate.n && gate.net && gate.t && gate.days;
+  const gateStatus = !cand ? "NO DATA YET" : gateOk ? "REAL EDGE — gate open" : `${[gate.n, gate.net, gate.t, gate.days].filter(Boolean).length} of 4 green`;
+  const gateTone = !cand ? "grey" : gateOk ? "green" : "amber";
+
+  const armed = !!cfg?.live.armed;
+  const eq = cfg?.equity ?? 0;
+  const riskUsd = eq > 0 ? Math.round((eq * (cfg?.live.baseRiskPct ?? 3)) / 100) : null;
+
+  return (
+    <div className="space-y-3">
+      <Step n={1} title="Plumbing test — one real $20 trade through the whole system" status={plumbingStatus} tone={plumbingTone}>
+        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+          Proves Kraken behaves the way the code assumes: entry, attached stop, close, fees. It is not a strategy test and does not move step 2.
+          {rtPassed && <> <span className="text-emerald-400">All 14 checks passed.</span> It only needs to run again if the Kraken code changes.</>}
+        </p>
+        <details open={!rtPassed}>
+          <summary className="cursor-pointer text-[11px] text-muted-foreground/60">{rtPassed ? "Show the test card (re-run, details)" : "Run the test"}</summary>
+          <div className="mt-2"><RoundTripCard /></div>
+        </details>
+      </Step>
+
+      <Step n={2} title="Paper gate — the live candidate has to prove itself" status={gateStatus} tone={gateTone}>
+        <p className="text-[11px] text-muted-foreground/70">
+          Strategy under test: <span className="text-foreground/80">{cand?.label ?? "high-conviction 5m/15m breakouts (selective)"}</span>. All four must be green. Until then nothing trades real money.
+        </p>
+        {cand ? (
+          <div className="space-y-1.5">
+            <GateRow label="Resolved trades" hint="enough of a sample" value={String(resolved)} target="30" ok={gate.n} />
+            <GateRow label="Net result at live sizing" hint="it makes money after fees" value={`${net < 0 ? "−" : ""}$${Math.abs(Math.round(net)).toLocaleString()}`} target="> $0" ok={gate.net} />
+            <GateRow label="Confidence (t)" hint="not luck" value={t == null ? "—" : t.toFixed(2)} target="2.00" ok={gate.t} />
+            <GateRow label="Distinct days" hint="not one good day" value={String(days)} target="7" ok={gate.days} />
+            <p className="text-[11px] text-muted-foreground/60">Verdict: <span className={verdictCls(cand.verdict)}>{cand.verdict}</span>{cand.open > 0 && <> · {cand.open} open now</>}</p>
+          </div>
+        ) : <p className="text-[11px] text-muted-foreground/50">No resolved trades for the live candidate yet.</p>}
+      </Step>
+
+      <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `ARMED · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "DISARMED"} tone={armed ? "red" : "grey"}>
+        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+          What arming means: {cfg ? <><span className="text-foreground/80">{cfg.live.baseRiskPct}% of the account per trade</span>{riskUsd != null && <> (about ${riskUsd.toLocaleString()} today)</>}, high-conviction setups up to {cfg.live.baseRiskPct * 2}%, at most {cfg.live.maxPositions} positions and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
+          Arming is a deliberate step done together in a verified session; there is no button here on purpose. Start with 2 positions and 3 trades a day.
+        </p>
+        <details>
+          <summary className="cursor-pointer text-[11px] text-muted-foreground/60">Show the live-vs-paper settings check</summary>
+          <div className="mt-2"><LiveMirrorCard /></div>
+        </details>
+      </Step>
+    </div>
+  );
+}
+
 function RoundTripCard() {
   const { data, mutate } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 20_000 });
   const [armed, setArmed] = useState(false);

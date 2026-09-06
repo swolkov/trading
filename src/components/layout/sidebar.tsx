@@ -28,7 +28,7 @@ const sections = [
     label: "TRADING",
     links: [
       { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart, broker: "Kraken" },
-      { href: "/margin/paper", label: "Paper Trades", icon: FlaskConical, broker: "Kraken" },
+      { href: "/margin/paper", label: "Road to Live", icon: FlaskConical, broker: "Kraken" },
       { href: "/stocks/paper", label: "Stock Paper Book", icon: FlaskConical, broker: "Stocks" },
       { href: "/orders", label: "Orders", icon: ClipboardList },
     ],
