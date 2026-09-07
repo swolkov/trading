@@ -6,6 +6,7 @@ import { STAGE3_KEY, readStage3, loadLiveFills, divergenceSummary } from "@/lib/
 import { getKrakenMarginPositions } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
+import { emptyReadIsUnconfirmed } from "@/lib/margin-live-risk";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -44,7 +45,7 @@ async function appendLog(line: string): Promise<void> {
 }
 
 async function status() {
-  const keys = ["kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_live_sources", "kraken_margin_max_positions", "kraken_margin_max_trades_per_day", "kraken_margin_maker_entries", "kraken_margin_symbols", "kraken_margin_disarmed_dd", "kraken_margin_live_max_risk_pct", ARM_LOG];
+  const keys = ["kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_live_sources", "kraken_margin_max_positions", "kraken_margin_max_trades_per_day", "kraken_margin_maker_entries", "kraken_margin_symbols", "kraken_margin_disarmed_dd", "kraken_margin_live_max_risk_pct", "margin_watch_state", ARM_LOG];
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
   const c: Record<string, string> = {};
   for (const r of rows) c[r.key] = r.value;
@@ -55,14 +56,20 @@ async function status() {
   if (stage3) { try { stage3Done = divergenceSummary(await loadLiveFills()).closed; } catch { stage3Done = stage3.done ?? null; } }
   let log: string[] = [];
   try { log = c[ARM_LOG] ? (JSON.parse(c[ARM_LOG]) as string[]) : []; } catch { log = []; }
-  // The bot's OWN open positions, for the "live now" line (read-only; empty on any failure).
-  let liveNow: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] = [];
+  // The bot's OWN open positions, for the "live now" line (read-only). null = UNCONFIRMED:
+  // Kraken not configured, the read threw, or it came back empty while the guardian's last
+  // run was still managing a book — a degraded read must never render as "no open position".
+  let managedCount = 0;
+  try { const ws = c.margin_watch_state ? (JSON.parse(c.margin_watch_state) as { managed?: Record<string, unknown> }) : null; managedCount = Object.keys(ws?.managed ?? {}).length; } catch { managedCount = 0; }
+  let liveNow: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null = null;
   try {
     if (krakenConfigured()) {
       const [positions, own] = await Promise.all([getKrakenMarginPositions(), botOwnership()]);
-      liveNow = positions.filter((p) => own.isOurs(p)).map((p) => ({ pair: p.pair, side: p.side, vol: p.vol, entry: p.entryPrice, net: p.net, openedAt: p.openedAt }));
+      liveNow = emptyReadIsUnconfirmed(positions.length, managedCount)
+        ? null
+        : positions.filter((p) => own.isOurs(p)).map((p) => ({ pair: p.pair, side: p.side, vol: p.vol, entry: p.entryPrice, net: p.net, openedAt: p.openedAt }));
     }
-  } catch { liveNow = []; }
+  } catch { liveNow = null; }
   return {
     armed: c.kraken_margin_auto === "true" && c.kraken_margin_validate_only === "false",
     auto: c.kraken_margin_auto === "true",

@@ -46,7 +46,7 @@ interface RtView {
   verdict: { complete: boolean; allOk: boolean; failed: string[] } | null;
   dryRun?: { at: string; symbol: string; ok: boolean; note: string; restoreFailed: string[] } | null;
 }
-interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[]; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
+interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
 
 const OkMark = ({ ok }: { ok: boolean | null | undefined }) =>
   ok === true ? <Check className="h-3.5 w-3.5 text-up" /> : ok === false ? <X className="h-3.5 w-3.5 text-down" /> : <span className="inline-block h-1 w-1 rounded-full bg-muted-foreground/50" />;
@@ -123,13 +123,15 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
       {arm.armed && (
         <div className="flex flex-wrap items-center gap-2 text-[13px]">
           <span className="text-muted-foreground">Live now</span>
-          {arm.liveNow && arm.liveNow.length > 0
-            ? arm.liveNow.map((p) => (
-              <Chip key={p.pair + p.openedAt} tone={p.net == null ? "grey" : p.net >= 0 ? "green" : "red"} size="md">
-                {coinOf(p.pair)} {p.side} · entry {usd(p.entry)} · {p.net != null ? pnl2(p.net) : "P&L pending"} · since {timeOnly(p.openedAt)}
-              </Chip>
-            ))
-            : <Chip tone="grey" size="md">no open position — waiting for the next high-conviction breakout</Chip>}
+          {arm.liveNow == null
+            ? <Chip tone="amber" size="md" title="Kraken did not answer, or answered empty while the guardian was still managing a position. Not the same as flat.">Kraken did not answer — open positions unconfirmed</Chip>
+            : arm.liveNow.length > 0
+              ? arm.liveNow.map((p) => (
+                <Chip key={p.pair + p.openedAt} tone={p.net == null ? "grey" : p.net >= 0 ? "green" : "red"} size="md">
+                  {coinOf(p.pair)} {p.side} · entry {usd(p.entry)} · {p.net != null ? pnl2(p.net) : "P&L pending"} · since {timeOnly(p.openedAt)}
+                </Chip>
+              ))
+              : <Chip tone="grey" size="md">no open position — waiting for the next high-conviction breakout</Chip>}
           <span className="text-xs text-muted-foreground">detail on Margin Cockpit</span>
         </div>
       )}

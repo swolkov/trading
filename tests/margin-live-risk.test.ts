@@ -235,3 +235,11 @@ test("liveNotional fits the order to free margin: a 6% trade on a $5,185 account
   assert.equal(liveNotional(eq, 0.03, 0.03, 2, 0, 0), 0, "no free margin → nothing sent");
   assert.ok(Math.abs(liveNotional(eq, 0.03, 0.03, 2, 0, null) - eq) < 1e-6, "unknown free margin → unchanged (caller decides)");
 });
+
+test("an empty positions read while the guardian is managing a book is UNCONFIRMED, not flat", async () => {
+  const { emptyReadIsUnconfirmed } = await import("../src/lib/margin-live-risk");
+  assert.equal(emptyReadIsUnconfirmed(0, 1), true, "guardian had RENDER, Kraken said nothing → unconfirmed");
+  assert.equal(emptyReadIsUnconfirmed(0, 0), false, "nothing managed, nothing open → flat");
+  assert.equal(emptyReadIsUnconfirmed(1, 1), false, "a real read is a real read");
+  assert.equal(emptyReadIsUnconfirmed(2, 0), false);
+});
