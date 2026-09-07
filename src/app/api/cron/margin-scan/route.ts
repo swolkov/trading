@@ -7,7 +7,7 @@ import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
 import { isSourceArmed } from "@/lib/margin-live-risk";
-import { maybeGraduateStage3 } from "@/lib/margin-synthesis";
+import { maybeGraduateStage3, maybeDemote } from "@/lib/margin-synthesis";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -214,6 +214,8 @@ export async function GET(request: Request) {
   if (live.length) await sendNotification(`💸 LIVE executor (armed sources: ${armedSources}):\n${live.map((l) => `• ${l}`).join("\n")}`, "margin_live").catch(() => {});
   // Stage 3 bookkeeping: count closed live trades; graduate to paper's full size at 20 if live matches paper.
   if (armedSources) await maybeGraduateStage3().catch(() => null);
+  // Kill criteria that fire by themselves: forward record not paying, or live diverging from paper.
+  if (armedSources) await maybeDemote().catch(() => null);
 
   await saveState(state);
 

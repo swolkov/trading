@@ -301,6 +301,71 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
   return st;
 }
 
+// ── AUTOMATIC DEMOTION (pre-registered Sep 7 2026) ─────────────────────────────────────────
+// The kill criteria fire by themselves. Only the drawdown breaker disarmed the executor before
+// this; a strategy that quietly stopped paying would have kept trading until a human noticed.
+// Two rules, both read from records the desk already keeps:
+//   1. The armed sleeve's FORWARD-ONLY paper record (entered after the policy cut) has
+//      DEMOTION_MIN_RESOLVED resolved trades and its net is ≤ 0 → the rule as it stands is
+//      not paying on paper; live has no business running it.
+//   2. Live diverges from paper (divergenceSummary's DIVERGES verdict) after at least
+//      DEMOTION_MIN_CLOSED_LIVE closed live trades → the record does not describe what live
+//      earns; stop and recalibrate before more money tests the gap.
+// Demotion = kraken_margin_auto=false FIRST (risk off before anything else), then the reason
+// is stored under DEMOTION_KEY, logged to the arm log and paged to margin_live + margin_urgent.
+// Re-arming needs a human to acknowledge the demotion (the arm switch refuses while the key
+// exists) — a demoted sleeve never re-arms by itself.
+export const DEMOTION_KEY = "kraken_margin_demoted";
+export const DEMOTION_MIN_RESOLVED = 30;
+export const DEMOTION_MIN_CLOSED_LIVE = 5;
+export interface Demotion { at: string; source: string; reason: string }
+
+/** The pure rule. null = keep running. */
+export function demotionVerdict(
+  forward: { resolved: number; net: number } | null,
+  div: { closed: number; verdict: string },
+  minResolved = DEMOTION_MIN_RESOLVED,
+  minClosed = DEMOTION_MIN_CLOSED_LIVE,
+): string | null {
+  if (forward && forward.resolved >= minResolved && forward.net <= 0) {
+    return `the forward-only paper record is not paying: ${forward.resolved} resolved, net ${forward.net < 0 ? "−" : ""}$${Math.abs(forward.net).toFixed(0)} (rule: ≤ $0 at ${minResolved}+ resolved)`;
+  }
+  if (div.closed >= minClosed && /DIVERGES/.test(div.verdict)) {
+    return `live diverges from paper after ${div.closed} closed live trades: ${div.verdict}`;
+  }
+  return null;
+}
+
+export async function readDemotion(): Promise<Demotion | null> {
+  const raw = await cfgGet(DEMOTION_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as Demotion; } catch { return null; }
+}
+
+/** Runs after every armed scan tick and in the daily synthesis. Disarms when a rule fires. */
+export async function maybeDemote(): Promise<Demotion | null> {
+  const [auto, validate, sources] = await Promise.all([cfgGet("kraken_margin_auto"), cfgGet("kraken_margin_validate_only"), cfgGet("kraken_margin_live_sources")]);
+  if (!(auto === "true" && validate === "false")) return null;   // only an ARMED executor can be demoted
+  const source = (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0];
+  if (!source) return null;
+  const [detail, fills] = await Promise.all([candidateDetail(source).catch(() => null), loadLiveFills().catch(() => [] as LiveFill[])]);
+  const forward = detail?.forward ? { resolved: detail.forward.resolved, net: detail.forward.net } : null;
+  const reason = demotionVerdict(forward, divergenceSummary(fills));
+  if (!reason) return null;
+  const d: Demotion = { at: new Date().toISOString(), source, reason };
+  await cfgSet("kraken_margin_auto", "false");        // risk off FIRST
+  await cfgSet(DEMOTION_KEY, JSON.stringify(d));
+  try {
+    const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
+    log.push(`${d.at} DEMOTED ${source} → paper (kraken_margin_auto=false): ${reason}. Re-arming needs the demotion acknowledged on Road to Live.`);
+    await cfgSet("kraken_margin_arm_log", JSON.stringify(log.slice(-50)));
+  } catch { /* log only */ }
+  const msg = `🛑 DEMOTED to paper: ${source} disarmed automatically — ${reason}. Open positions stay under the guardian. Re-arming needs the demotion acknowledged on Road to Live.`;
+  await sendNotification(msg, "margin_live").catch(() => {});
+  await sendNotification(msg, "margin_urgent").catch(() => {});
+  return d;
+}
+
 export interface SynthesisRun { ran: boolean; reason: string; fills: number; closed: number; journaled: number; lessons: boolean; observations: string[]; divergence: string }
 
 export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
@@ -377,6 +442,7 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
   }
 
   await maybeGraduateStage3().catch(() => null);
+  await maybeDemote().catch(() => null);
   await cfgSet(SYNTH_LAST_RUN, at);
   const armedLine = auto === "true" && validate === "false" ? "ARMED" : "disarmed";
   const best = [...strategies].filter((s) => s.resolved > 0).sort((a, b) => (b.tStat ?? -9) - (a.tStat ?? -9))[0];
