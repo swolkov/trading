@@ -1,8 +1,9 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, SIZE_MULTIPLIER } from "@/lib/margin-shadow";
-import { autoShadowPlans } from "@/lib/margin-auto-plans";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, EXPERIMENT_SOURCES } from "@/lib/margin-shadow";
+import { openTsmomPaper, readBtcRegime } from "@/lib/margin-regime";
+import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
 import { isSourceArmed } from "@/lib/margin-live-risk";
@@ -133,11 +134,18 @@ export async function GET(request: Request) {
       const lev = Math.max(2, Math.min(20, levRow?.value ? parseFloat(levRow.value) : 5));
       // ensureShadowColumns creates the table AND the shadow_*/conviction columns read below.
       await ensureShadowColumns();
+      // BTC daily regime for the selective-btc twin: read once per run from COMPLETE daily
+      // closes. Unreadable → the twin opens nothing this run (never guesses a regime).
+      let regime: Regime = { btcUp: null };
+      if (fresh.some((s) => s.kind === "breakout")) {
+        try { regime = { btcUp: await readBtcRegime() }; } catch (e) { errors.push(`btc regime: ${String(e).slice(0, 60)}`); }
+        if (regime.btcUp == null) errors.push("btc regime unreadable — selective-btc twin not opened this run");
+      }
       for (const s of fresh) {
         if (!(s.price > 0)) continue;
         if (s.kind !== "breakout" && s.kind !== "breakdown") continue;
         const conv = scoreConviction(s, signals);
-        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev);
+        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime);
         if (plans.length === 0) continue;
         const side: "buy" | "sell" = s.kind === "breakout" ? "buy" : "sell";
         for (const plan of plans) {
@@ -193,6 +201,15 @@ export async function GET(request: Request) {
   } catch (e) {
     errors.push(`autoshadow: ${String(e).slice(0, 80)}`);
   }
+  // TSMOM — daily trend sleeve on the majors, once per UTC day (paper only, own row).
+  try {
+    const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
+    if (flag?.value !== "false") {
+      const t = await openTsmomPaper();
+      for (const sym of t.opened) opened.push({ symbol: sym, side: "buy", tier: "med", source: "tsmom" });
+      for (const err of t.errors) errors.push(`tsmom ${err}`);
+    }
+  } catch (e) { errors.push(`tsmom: ${String(e).slice(0, 80)}`); }
   const autoOpened = opened.length;
   if (live.length) await sendNotification(`💸 LIVE executor (armed sources: ${armedSources}):\n${live.map((l) => `• ${l}`).join("\n")}`, "margin_live").catch(() => {});
   // Stage 3 bookkeeping: count closed live trades; graduate to paper's full size at 20 if live matches paper.
@@ -213,7 +230,7 @@ export async function GET(request: Request) {
     // Experiment twins (the ×5-size sleeve) are the SAME trades again at a different size:
     // they are labelled and tallied apart so the cloud routines that read this channel as
     // the record never count a candidate trade twice.
-    const isExperiment = (r: { source: string | null }) => (r.source ?? "") in SIZE_MULTIPLIER;
+    const isExperiment = (r: { source: string | null }) => EXPERIMENT_SOURCES.includes(r.source ?? "");
     const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol) && !isExperiment(r));
     const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol) && !isExperiment(r));
     const experiments = resolutions.filter(isExperiment);
@@ -258,7 +275,7 @@ export async function GET(request: Request) {
 
   if (autoOpened) {
     // One line per SETUP: the experiment twin rides the same signal and is not a second trade.
-    const setups = opened.filter((o) => !((o.source ?? "") in SIZE_MULTIPLIER));
+    const setups = opened.filter((o) => !EXPERIMENT_SOURCES.includes(o.source ?? ""));
     const twins = opened.length - setups.length;
     const lines = setups
       .map((o) => `• ${o.symbol} ${o.side.toUpperCase()} — ${o.tier} conviction`)
