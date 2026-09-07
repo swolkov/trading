@@ -22,6 +22,16 @@ export interface StrategyStat {
   grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; paperTStat?: number | null; verdict: string;
   forwardResolved?: number; days?: number;
 }
+// Cost of capacity (from /api/margin/scoreboard → capacity): what the setups the executor
+// refused since arming went on to do, and a replay of the same stream with more slots.
+export interface CapacityView {
+  source: string; since: string; liveFactor: number;
+  rules: { slots: number; perDay: number; cooldownMin: number };
+  setups: number; taken: number;
+  refused: { total: number; slots: number; cooldown: number; dailyCap: number; other: number };
+  refusedOutcome: { resolved: number; wins: number; net: number; open: number; floating: number };
+  replay: { slots: number; taken: number; resolved: number; open: number; net: number; floating: number }[];
+}
 interface ExecCfg {
   live: { liveSources?: string[]; armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
   paper: { refEquity: number; baseRiskPct: number; stopPct: number; maxHoldH: number; exit: string };
@@ -137,7 +147,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
   );
 }
 
-export function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
+export function GoLivePanel({ strategies, capacity = null }: { strategies: StrategyStat[]; capacity?: CapacityView | null }) {
   const { data: rt } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 30_000 });
   const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
   const cand = strategies.find((s) => s.key === LIVE_CANDIDATE) ?? null;
@@ -195,11 +205,68 @@ export function GoLivePanel({ strategies }: { strategies: StrategyStat[] }) {
           Arming is deliberate: type ARM, then press. Every arm and disarm is logged and paged to Slack.
         </Note>
         <ArmControls rtPassed={rtPassed} gateOk={gateOk} />
+        {capacity && <CapacityCard cap={capacity} />}
         <details>
           <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">Show the live-vs-paper settings check</summary>
           <div className="mt-2"><LiveMirrorCard /></div>
         </details>
       </Step>
+    </div>
+  );
+}
+
+// ── COST OF CAPACITY ── the slots are the binding constraint on a $5k account (two at 2×).
+// Every high-conviction setup the executor refused still ran on paper to a finish; this shows
+// what they did, and what the same stream would have earned with more slots. It is the number
+// behind the max-positions decision at the next leverage rung — not a reason to raise it now.
+function CapacityCard({ cap }: { cap: CapacityView }) {
+  const live = (n: number) => pnl2(n * cap.liveFactor);
+  const liveTone = (n: number) => (n * cap.liveFactor >= 0 ? "text-up" : "text-down");
+  const o = cap.refusedOutcome;
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <div className="flex flex-wrap items-center gap-2 text-[13px]">
+        <span className="text-muted-foreground">Cost of capacity</span>
+        <Chip tone="grey" size="md">since {when(cap.since)}: {cap.setups} setups · {cap.taken} taken · {cap.refused.total} refused</Chip>
+        {cap.refused.total > 0 && <span className="text-xs text-muted-foreground">{cap.refused.slots} slots full · {cap.refused.cooldown} cooldown · {cap.refused.dailyCap} daily cap{cap.refused.other > 0 ? ` · ${cap.refused.other} other` : ""}</span>}
+      </div>
+      {cap.refused.total > 0 ? (
+        <Note>
+          The refused setups went on to: {o.resolved} resolved ({o.wins} won), <span className={`font-semibold ${liveTone(o.net)}`}>{live(o.net)}</span> at live size
+          {o.open > 0 && <> · {o.open} still open, floating <span className={`font-semibold ${liveTone(o.floating)}`}>{live(o.floating)}</span></>}.
+        </Note>
+      ) : <Note>Nothing refused yet — every setup since arming found a slot.</Note>}
+      {cap.replay.some((r) => r.taken > 0) && (
+        <div className="-mx-4">
+          <DataTable dense>
+            <thead>
+              <tr>
+                <Th title="Replay of the same setups with this many slots, keeping today's per-day cap and cooldown">Slots</Th>
+                <Th num>Would have taken</Th>
+                <Th num>Resolved</Th>
+                <Th num title="Paper P&L of the resolved ones × the live size factor">Net (live size)</Th>
+                <Th num>Open</Th>
+                <Th num>Floating (live size)</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {cap.replay.map((r) => (
+                <Row key={r.slots} className={r.slots === cap.rules.slots ? "bg-accent/40" : undefined}>
+                  <Td strong>{r.slots > 0 ? `${r.slots}${r.slots === cap.rules.slots ? " · today" : ""}` : "every setup"}</Td>
+                  <Td num>{r.taken}</Td>
+                  <Td num muted>{r.resolved}</Td>
+                  <Td num className={`font-semibold ${r.resolved > 0 ? liveTone(r.net) : "text-muted-foreground"}`}>{r.resolved > 0 ? live(r.net) : "—"}</Td>
+                  <Td num muted>{r.open}</Td>
+                  <Td num className={r.open > 0 ? liveTone(r.floating) : "text-muted-foreground"}>{r.open > 0 ? live(r.floating) : "—"}</Td>
+                </Row>
+              ))}
+            </tbody>
+          </DataTable>
+        </div>
+      )}
+      <Note>
+        Slots are the binding limit on this account ({cap.rules.slots} at the current rung, {cap.rules.perDay}/day, {cap.rules.cooldownMin}-min cooldown). Paper dollars × {cap.liveFactor.toFixed(2)} = live size while stage 3 runs. This is the number behind the max-positions decision at the $10k rung — a bigger table has to show more money over a real sample before a slot is added. Setups arriving within minutes of each other are the same market move, so the cooldown stays.
+      </Note>
     </div>
   );
 }

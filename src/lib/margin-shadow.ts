@@ -135,6 +135,16 @@ export const UNIVERSE_FIX_AT = "2026-09-05T17:00:00Z";
 // reports it beside the pooled row.
 export const POLICY_CUT_AT = "2026-09-04T17:00:00Z";
 
+// PRE-REGISTERED CUTS of the live candidate (registered Sep 7 2026, before the samples exist,
+// so no cut can be chosen after seeing it): forward-only, by timeframe, by entry window (UTC).
+// A cut is READ only at SLICE_MIN_RESOLVED resolved trades; below that it is "watching",
+// whatever colour it shows. Three cuts of one sleeve is a small family — the multiple-
+// comparison risk is stated on the page, not hidden.
+export const SLICES_PREREGISTERED_AT = "2026-09-07";
+export const SLICE_MIN_RESOLVED = 30;
+const ENTRY_HOUR_SQL = `extract(hour from (time AT TIME ZONE 'UTC'))`;
+export const ENTRY_WINDOW_SQL = `CASE WHEN ${ENTRY_HOUR_SQL} < 6 THEN '00–06 UTC' WHEN ${ENTRY_HOUR_SQL} < 12 THEN '06–12 UTC' WHEN ${ENTRY_HOUR_SQL} < 18 THEN '12–18 UTC' ELSE '18–24 UTC' END`;
+
 export interface ShadowResolution {
   id: number; symbol: string; side: string; entry: number; exit: number;
   pnl: number; pnlPct: number; reason: string; leverage: number; conviction: string | null;
@@ -779,6 +789,7 @@ export interface CandidateDetail {
   source: string;
   forward: CandidateSlice | null;              // entered after POLICY_CUT_AT
   byTimeframe: CandidateSlice[];
+  byEntryWindow: CandidateSlice[];             // 6-hour UTC windows of the ENTRY time (pre-registered cut)
   byDay: { day: string; resolved: number; net: number }[];   // UTC resolution days
   recent: CandidateTrade[];
 }
@@ -813,9 +824,10 @@ export async function candidateDetail(source: string, limit = 30): Promise<Candi
       };
     });
   };
-  const [fwd, byTimeframe, dayRows, recentRows] = await Promise.all([
+  const [fwd, byTimeframe, byWindow, dayRows, recentRows] = await Promise.all([
     slice(`'forward'`, `AND time > '${POLICY_CUT_AT}'::timestamptz`),
     slice(TF_SQL, ""),
+    slice(ENTRY_WINDOW_SQL, ""),
     prisma.$queryRawUnsafe<{ day: string; resolved: bigint; net: number | null }[]>(
       `SELECT to_char(date_trunc('day', shadow_resolved_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
          count(*)::bigint AS resolved, COALESCE(sum(shadow_pnl),0)::float AS net
@@ -837,6 +849,7 @@ export async function candidateDetail(source: string, limit = 30): Promise<Candi
     source,
     forward: fwd[0] ?? null,
     byTimeframe: byTimeframe.sort((a, b) => (order[a.key] ?? 9) - (order[b.key] ?? 9)),
+    byEntryWindow: byWindow.sort((a, b) => a.key.localeCompare(b.key)),
     byDay: dayRows.map((d) => ({ day: d.day, resolved: Number(d.resolved), net: d.net || 0 })),
     recent: recentRows.map((r) => ({
       id: r.id, symbol: r.symbol, timeframe: r.tf === "?" ? null : r.tf, conviction: r.conviction,
