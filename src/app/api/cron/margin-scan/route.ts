@@ -145,7 +145,7 @@ export async function GET(request: Request) {
         if (!(s.price > 0)) continue;
         if (s.kind !== "breakout" && s.kind !== "breakdown") continue;
         const conv = scoreConviction(s, signals);
-        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime);
+        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime, s.symbol);
         if (plans.length === 0) continue;
         const side: "buy" | "sell" = s.kind === "breakout" ? "buy" : "sell";
         for (const plan of plans) {

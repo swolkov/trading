@@ -209,6 +209,7 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   if (source === "selective-tight") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1, tightAfterR: 2, tightTrailR: 0.5 };
   if (source === "selective-launch") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1, launchH: 8, launchMinR: 0.5 };
   if (source === "selective-btc") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  if (source === "selective-majors") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
   // TSMOM (Sep 7 2026, margin-regime.ts): daily time-series momentum on the majors — the
   // horizon the literature finds robust. 8% stop, breakeven-then-trail, 14-day time stop.
   if (source === "tsmom") return { maxHoldH: 24 * 14, oneR: entry * 0.08, carry: lev > 1 };
@@ -625,6 +626,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "selective-tight": "Selective TIGHT TRAIL — same trades, trail 0.5R after +2R — twin (Sep 7), not pooled",
   "selective-launch": "Selective LAUNCH STOP — same trades, closed if <+0.5R after 8h — twin (Sep 7), not pooled",
   "selective-btc": "Selective in BTC UP-REGIME only — same trades, opened only above BTC's 20-day average — twin (Sep 7), not pooled",
+  "selective-majors": "Selective on the MAJORS only — same rule, BTC / ETH / SOL signals only — twin (Sep 7), not pooled",
   tsmom: "Daily trend (tsmom) — majors, 20-day momentum, 8% / 14d — new sleeve (Sep 7), paper only",
   manual: "Manual alerts (yours)",
 };

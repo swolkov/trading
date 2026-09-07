@@ -9,11 +9,11 @@ import { renderStatistics, divergenceSummary } from "../src/lib/margin-synthesis
 test("POOLED_SQL = the record minus the experiment twins", async () => {
   const { POOLED_SQL, RECORD_SQL, EXPERIMENT_SOURCES, SIZE_MULTIPLIER } = await import("../src/lib/margin-shadow");
   for (const k of Object.keys(SIZE_MULTIPLIER)) assert.ok(EXPERIMENT_SOURCES.includes(k), k);
-  for (const k of ["selective-tight", "selective-launch", "selective-btc"]) assert.ok(EXPERIMENT_SOURCES.includes(k), `${k} is the same trades again — must stay out of pooled stats`);
+  for (const k of ["selective-tight", "selective-launch", "selective-btc", "selective-majors"]) assert.ok(EXPERIMENT_SOURCES.includes(k), `${k} is the same trades again — must stay out of pooled stats`);
   assert.ok(!EXPERIMENT_SOURCES.includes("tsmom"), "tsmom has its own entries — it is a sleeve, not a twin");
   assert.ok(EXPERIMENT_SOURCES.includes("selective-x5"));
   assert.ok(POOLED_SQL.startsWith(RECORD_SQL), "pooled stats keep the cohort + US-universe predicate");
-  assert.match(POOLED_SQL, /NOT IN \('selective-x5','selective-tight','selective-launch','selective-btc'\)/);
+  assert.match(POOLED_SQL, /NOT IN \('selective-x5','selective-tight','selective-launch','selective-btc','selective-majors'\)/);
 });
 
 test("the statistics file carries the live candidate's forward-only, timeframe, by-day and per-trade detail", () => {
@@ -45,7 +45,7 @@ test("the statistics file carries the live candidate's forward-only, timeframe, 
   assert.match(text, /\| 12–18 UTC \| 9 \| 33% \| −\$1200 \| -1\.40 \| 3 \| 2 \|/);
   assert.match(text, /2026-09-03 8 trades \$3798 · 2026-09-05 6 trades −\$795/);
   assert.match(text, /\| 2026-09-06 12:13 \| LINK \| 5m \| \+8\.2% \| trailing stop \| \$505 \|/);
-  assert.match(text, /experiment twins \(selective-x5, selective-tight, selective-launch, selective-btc\) ride the same signals again/);
+  assert.match(text, /experiment twins \(selective-x5, selective-tight, selective-launch, selective-btc, selective-majors\) ride the same signals again/);
 });
 
 test("without candidate detail the file renders as before", () => {

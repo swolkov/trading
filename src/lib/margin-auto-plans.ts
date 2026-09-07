@@ -31,7 +31,11 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //                      below +0.5R after 8h is closed (frees the slot).
 //   selective-btc    — opened only while BTC closes above its 20-day average: the regime
 //                      hypothesis behind the 12–18 UTC and clustered-alt losses.
-export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc"] as const;
+//   selective-majors — the same rule on BTC, ETH and SOL ONLY (Spencer's Aug 30 instinct:
+//                      his +$732 / +$596 days were BTC and ETH). Does the rule pay more per
+//                      trade at the same risk on the deepest books? Registered Sep 7 2026.
+export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors"] as const;
+export const MAJORS = new Set(["BTC", "ETH", "SOL"]);
 
 export type AutoPlan = { source: string; lev: number };
 export type Regime = { btcUp: boolean | null };   // null = daily bars unavailable → no regime twin this run
@@ -54,6 +58,7 @@ export function autoShadowPlans(
   conv: ConvictionInput,
   lev: number,
   regime?: Regime,
+  symbol?: string,   // "BTC/USD" — the majors twin opens only on BTC/ETH/SOL
 ): AutoPlan[] {
   if (kind !== "breakout") return [];
   if (conv.tier !== "high") return [];
@@ -70,5 +75,8 @@ export function autoShadowPlans(
   ];
   // The regime twin opens ONLY in a confirmed BTC up-regime; an unreadable regime opens nothing.
   if (regime?.btcUp === true) plans.push({ source: "selective-btc", lev: capped });
+  // The majors twin: the same signal, only when the coin is BTC, ETH or SOL.
+  const base = (symbol ?? "").split("/")[0].toUpperCase();
+  if (MAJORS.has(base === "XBT" ? "BTC" : base)) plans.push({ source: "selective-majors", lev: capped });
   return plans;
 }

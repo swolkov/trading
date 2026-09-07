@@ -54,7 +54,7 @@ test("plans: the two container twins always ride along; the regime twin only in 
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: false }).map((p) => p.source), base, "down-regime → no regime twin");
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: true }).map((p) => p.source), [...base, "selective-btc"]);
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5, { btcUp: true }), [], "twins never widen the entry rule");
-  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc"]);
+  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors"]);
 });
 
 test("BTC regime and tsmom signals need 21 complete closes and read close vs 20-day average", () => {
@@ -70,4 +70,18 @@ test("BTC regime and tsmom signals need 21 complete closes and read close vs 20-
   const f = tsmomSignal(falling);
   assert.ok(f && !f.long && f.ret20 < 0);
   assert.equal(tsmomSignal([1, 2, 3]), null);
+});
+
+test("selective-majors rides the same signal only on BTC, ETH and SOL, in the record's container", () => {
+  const src = (symbol?: string, regime?: { btcUp: boolean | null }) => autoShadowPlans("breakout", "5m", high, 5, regime, symbol).map((p) => p.source);
+  assert.ok(src("BTC/USD").includes("selective-majors"));
+  assert.ok(src("ETH/USD").includes("selective-majors"));
+  assert.ok(src("SOL/USD").includes("selective-majors"));
+  assert.ok(src("XBT/USD").includes("selective-majors"), "Kraken's XBT spelling counts as BTC");
+  assert.ok(!src("ADA/USD").includes("selective-majors"));
+  assert.ok(!src("RENDER/USD").includes("selective-majors"));
+  assert.ok(!src(undefined).includes("selective-majors"), "no symbol → no majors twin");
+  assert.deepEqual(src("BTC/USD", { btcUp: true }), ["selective", "selective-x5", "selective-tight", "selective-launch", "selective-btc", "selective-majors"]);
+  const m = exitParams("selective-majors", 2, 100), s = exitParams("selective", 2, 100);
+  assert.deepEqual({ oneR: m.oneR, maxHoldH: m.maxHoldH, carry: m.carry }, { oneR: s.oneR, maxHoldH: s.maxHoldH, carry: s.carry });
 });
