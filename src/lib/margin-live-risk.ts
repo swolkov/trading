@@ -72,6 +72,16 @@ export function effectiveMaxLeverage(cfgMax: number, equity: number): number {
  * Treating that as "no conflict" would wave through an opposing entry that nets against
  * a hidden manual position. Fail closed.
  */
+/**
+ * An OpenPositions read that comes back EMPTY while the guardian's last run was still
+ * managing a book is what a degraded Kraken read looks like, not a flat account. The admin
+ * "live now" line must say "unconfirmed" in that case, never "no open position" (seen live
+ * Sep 7 2026: Road to Live showed no position while a RENDER long was open at the broker).
+ */
+export function emptyReadIsUnconfirmed(openCount: number, guardianManagedCount: number): boolean {
+  return openCount === 0 && guardianManagedCount > 0;
+}
+
 export function failClosedOnEmptyPositions(
   openCount: number,
   marginUsedRaw: number | null | undefined,
