@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { readRoundTrip, roundTripVerdict } from "@/lib/margin-round-trip";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
-import { STAGE3_KEY, readStage3, loadLiveFills, divergenceSummary } from "@/lib/margin-synthesis";
+import { STAGE3_KEY, DEMOTION_KEY, readStage3, readDemotion, loadLiveFills, divergenceSummary } from "@/lib/margin-synthesis";
 import { getKrakenMarginPositions } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
@@ -52,6 +52,7 @@ async function status() {
   const rt = await readRoundTrip();
   const rtPassed = rt?.stage === "done" && roundTripVerdict(rt.checks).allOk;
   const stage3 = await readStage3().catch(() => null);
+  const demoted = await readDemotion().catch(() => null);
   let stage3Done: number | null = null;
   if (stage3) { try { stage3Done = divergenceSummary(await loadLiveFills()).closed; } catch { stage3Done = stage3.done ?? null; } }
   let log: string[] = [];
@@ -81,6 +82,7 @@ async function status() {
     symbols: c.kraken_margin_symbols ?? null,
     riskPct: parseFloat(c.kraken_margin_live_max_risk_pct ?? "3") || 3,
     ddTripped: c.kraken_margin_disarmed_dd === "true",
+    demoted,
     roundTripPassed: rtPassed,
     roundTripRunning: rt != null && ["entering", "open", "closing"].includes(rt.stage),
     stage3: stage3 ? { ...stage3, done: stage3Done ?? stage3.done ?? 0 } : null,
@@ -105,7 +107,16 @@ export async function POST(request: Request) {
     return Response.json({ ok: true, ...(await status()) });
   }
 
-  if (action !== "arm") return Response.json({ error: "action must be arm | disarm" }, { status: 400 });
+  // Acknowledging a demotion is a deliberate human act: it clears the block, it does NOT arm.
+  if (action === "acknowledge-demotion") {
+    const d = await readDemotion().catch(() => null);
+    if (!d) return Response.json({ error: "nothing to acknowledge", ...(await status()) }, { status: 400 });
+    await setKey(DEMOTION_KEY, null);
+    await appendLog(`DEMOTION ACKNOWLEDGED (${d.source}, ${d.at}: ${d.reason}) from the admin page — still disarmed; arming is a separate act`);
+    await sendNotification(`⚪ Demotion acknowledged on Road to Live (${d.source}). Still disarmed.`, "margin_live").catch(() => {});
+    return Response.json({ ok: true, ...(await status()) });
+  }
+  if (action !== "arm") return Response.json({ error: "action must be arm | disarm | acknowledge-demotion" }, { status: 400 });
   if (String(body.confirm ?? "") !== "ARM") return Response.json({ error: 'type ARM to confirm', ...(await status()) }, { status: 400 });
   const source = String(body.source ?? DEFAULT_SOURCE).trim().toLowerCase();
   if (!/^[a-z0-9_-]{1,32}$/.test(source) || RETIRED_AUTO_SOURCES.has(source)) return Response.json({ error: `source "${source}" cannot be armed`, ...(await status()) }, { status: 400 });
@@ -120,6 +131,7 @@ export async function POST(request: Request) {
   if (!s.roundTripPassed) return Response.json({ error: "the plumbing test has not passed — run the $20 round trip first", ...s }, { status: 409 });
   if (s.roundTripRunning) return Response.json({ error: "a round trip is running — wait for it", ...s }, { status: 409 });
   if (s.ddTripped) return Response.json({ error: "the drawdown breaker is tripped (kraken_margin_disarmed_dd) — clear it deliberately first", ...s }, { status: 409 });
+  if (s.demoted) return Response.json({ error: `demoted to paper on ${s.demoted.at.slice(0, 16).replace("T", " ")} UTC: ${s.demoted.reason} — acknowledge the demotion first`, ...s }, { status: 409 });
 
   // Limits first, the arm flag LAST, so no instant exists where the executor is on without them.
   let equity = 0;

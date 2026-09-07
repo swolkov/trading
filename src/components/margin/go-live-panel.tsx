@@ -46,7 +46,7 @@ interface RtView {
   verdict: { complete: boolean; allOk: boolean; failed: string[] } | null;
   dryRun?: { at: string; symbol: string; ok: boolean; note: string; restoreFailed: string[] } | null;
 }
-interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
+interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; demoted?: { at: string; source: string; reason: string } | null; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
 
 const OkMark = ({ ok }: { ok: boolean | null | undefined }) =>
   ok === true ? <Check className="h-3.5 w-3.5 text-up" /> : ok === false ? <X className="h-3.5 w-3.5 text-down" /> : <span className="inline-block h-1 w-1 rounded-full bg-muted-foreground/50" />;
@@ -94,7 +94,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
     finally { setBusy(false); setConfirm(""); }
   };
   if (!arm) return <Note>Loading arm state…</Note>;
-  const canArm = confirm === "ARM" && rtPassed && !arm.ddTripped && !arm.roundTripRunning;
+  const canArm = confirm === "ARM" && rtPassed && !arm.ddTripped && !arm.demoted && !arm.roundTripRunning;
   return (
     <div className="space-y-2.5">
       {arm.armed ? (
@@ -115,8 +115,18 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
           <div className="flex flex-wrap gap-1.5">
             {!rtPassed && <Chip tone="red">plumbing test must pass first</Chip>}
             {arm.ddTripped && <Chip tone="red">drawdown breaker tripped</Chip>}
+            {arm.demoted && <Chip tone="red" dot>demoted to paper · {when(arm.demoted.at)}</Chip>}
             {arm.roundTripRunning && <Chip tone="amber">round trip running</Chip>}
             {!gateOk && rtPassed && <Chip tone="amber">paper gate not green — arming anyway is your call, and is logged</Chip>}
+          </div>
+        </div>
+      )}
+      {arm.demoted && (
+        <div className="space-y-1.5 rounded-md border border-down/40 bg-down/[0.06] px-3 py-2">
+          <Note className="text-foreground/85"><strong className="text-down">Demoted to paper automatically</strong> ({arm.demoted.source}, {when(arm.demoted.at)}): {arm.demoted.reason}</Note>
+          <div className="flex flex-wrap items-center gap-2">
+            <button disabled={busy} onClick={() => post({ action: "acknowledge-demotion" })} className={btnPlain}>{busy ? "…" : "Acknowledge — clears the block, does not arm"}</button>
+            <Note>The pre-registered kill rule fired. Read the record before arming again; arming is a separate act.</Note>
           </div>
         </div>
       )}
