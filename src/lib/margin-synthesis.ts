@@ -15,7 +15,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
-import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, EXPERIMENT_SOURCES, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
+import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
+import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { pairBase } from "@/lib/kraken-pairs";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
@@ -123,7 +124,7 @@ export function divergenceSummary(fills: LiveFill[]): Divergence {
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(0)}`;
 const pct = (n: number | null) => (n == null ? "—" : `${(n * 100).toFixed(0)}%`);
 
-export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null }): string {
+export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null; capacity?: CapacityReport | null }): string {
   const s = input.strategies.filter((x) => x.resolved > 0 || x.open > 0);
   const lines: string[] = [];
   lines.push("---", `last_updated: "${input.at.slice(0, 10)}"`, 'updated_by: "margin-synthesis"', "tags: [performance, margin, paper, live]", "---", "");
@@ -156,6 +157,12 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
       for (const s of c.byTimeframe) lines.push(`| ${s.key} | ${s.resolved} | ${pct(s.hitRate)} | ${money(s.net)} | ${tfmt(s.tStat)} | ${s.days} | ${s.open} |`);
       lines.push("");
     }
+    if (c.byEntryWindow?.length) {
+      lines.push(`By entry window (UTC hour of entry; pre-registered ${SLICES_PREREGISTERED_AT}, read only at ${SLICE_MIN_RESOLVED} resolved per window):`, "");
+      lines.push("| entry window | resolved | hit | net (paper-sized) | t | days | open |", "|---|---|---|---|---|---|---|");
+      for (const s of c.byEntryWindow) lines.push(`| ${s.key} | ${s.resolved} | ${pct(s.hitRate)} | ${money(s.net)} | ${tfmt(s.tStat)} | ${s.days} | ${s.open} |`);
+      lines.push("");
+    }
     if (c.byDay.length) lines.push("By resolution day (UTC) — one big day is closer to one bet than many: " + c.byDay.map((d) => `${d.day} ${d.resolved} trades ${money(d.net)}`).join(" · "), "");
     if (c.recent.length) {
       lines.push(`Last ${c.recent.length} resolved — peak is the best price reached before the exit (the give-back, trade by trade):`, "");
@@ -163,6 +170,17 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
       for (const t of c.recent) lines.push(`| ${t.opened.slice(0, 16).replace("T", " ")} | ${t.symbol.replace("/USD", "")} | ${t.timeframe ?? "?"} | ${t.peakPct != null ? `${t.peakPct >= 0 ? "+" : ""}${t.peakPct.toFixed(1)}%` : "—"} | ${t.reason ?? "—"} | ${t.pnl != null ? money(t.pnl) : "—"} |`);
       lines.push("");
     }
+  }
+  const cap = input.capacity;
+  if (cap) {
+    const live = (n: number) => money(n * cap.liveFactor);
+    lines.push("## Cost of capacity (since arming)", "");
+    lines.push(`> The live book has ${cap.rules.slots} slot${cap.rules.slots === 1 ? "" : "s"} (${cap.rules.perDay}/day, ${cap.rules.cooldownMin}-min cooldown). Every setup the executor refused still ran on paper to a finish. This is what they did — the number behind the max-positions decision at the next leverage rung, not a reason to raise it. Dollars at LIVE size (paper × ${cap.liveFactor.toFixed(2)}).`, "");
+    lines.push(`- Since ${cap.since.slice(0, 16).replace("T", " ")} UTC: ${cap.setups} setups · ${cap.taken} taken · ${cap.refused.total} refused (${cap.refused.slots} slots full, ${cap.refused.cooldown} cooldown, ${cap.refused.dailyCap} daily cap, ${cap.refused.other} other)`);
+    lines.push(`- Refused setups went on to: ${cap.refusedOutcome.resolved} resolved (${cap.refusedOutcome.wins} won) net ${live(cap.refusedOutcome.net)} · ${cap.refusedOutcome.open} still open, floating ${live(cap.refusedOutcome.floating)}`, "");
+    lines.push("| slots | would have taken | resolved | net (live size) | open | floating (live size) |", "|---|---|---|---|---|---|");
+    for (const r of cap.replay) lines.push(`| ${r.slots > 0 ? r.slots : "every setup"} | ${r.taken} | ${r.resolved} | ${live(r.net)} | ${r.open} | ${live(r.floating)} |`);
+    lines.push("");
   }
   const top = (arr: { key: string; resolved: number; totalPnl: number; hitRate: number | null }[], n: number) => [...arr].filter((e) => e.resolved >= 3).sort((a, b) => b.totalPnl - a.totalPnl).slice(0, n);
   const dir = input.edges.byDirection; const coins = top(input.edges.byCoin as { key: string; resolved: number; totalPnl: number; hitRate: number | null }[], 8);
@@ -292,19 +310,20 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
 
   // The candidate whose detail is reported = the armed sleeve if one is armed, else selective.
   const candSource = ((await cfgGet("kraken_margin_live_sources")) ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0] || "selective";
-  const [strategies, shadow, edges, fills, candidate] = await Promise.all([
+  const [strategies, shadow, edges, fills, candidate, capacity] = await Promise.all([
     strategyBreakdown().catch(() => [] as StrategyStat[]),
     shadowScore().catch(() => null),
     edgeBreakdowns().catch(() => ({ byDirection: [], byCoin: [] }) as EdgeBreakdowns),
     loadLiveFills().catch(() => [] as LiveFill[]),
     candidateDetail(candSource).catch(() => null),
+    capacityReport(candSource).catch(() => null),
   ]);
   const div = divergenceSummary(fills);
   const [auto, validate, sources, watchState] = await Promise.all([cfgGet("kraken_margin_auto"), cfgGet("kraken_margin_validate_only"), cfgGet("kraken_margin_live_sources"), cfgGet("margin_watch_state")]);
   let equity: number | null = null;
   try { const p = watchState ? (JSON.parse(watchState) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : null; } catch { equity = null; }
   const at = new Date().toISOString();
-  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
+  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, capacity, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
   await vaultWrite("Performance/margin-statistics.md", stats, "margin-synthesis");
 
   // Journal each closed live round trip once.

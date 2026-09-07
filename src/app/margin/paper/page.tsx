@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Chip, verdictTone } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Explainer, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { GoLivePanel, type StrategyStat } from "@/components/margin/go-live-panel";
+import { GoLivePanel, type CapacityView, type StrategyStat } from "@/components/margin/go-live-panel";
 import { money, pct, pnl2, tone } from "@/lib/format";
 
 // ============ ROAD TO LIVE ============
@@ -28,6 +28,20 @@ interface EdgeStat {
   expectancy: number | null; totalPnl: number; open: number;
 }
 interface EdgeBreakdowns { byDirection: EdgeStat[]; byCoin: EdgeStat[] }
+interface CandidateSlice { key: string; resolved: number; wins: number; hitRate: number | null; net: number; tStat: number | null; days: number; open: number }
+interface CandidateDetail { source: string; forward: CandidateSlice | null; byTimeframe: CandidateSlice[]; byEntryWindow: CandidateSlice[] }
+
+// PRE-REGISTERED CUTS (Sep 7 2026): the live candidate sliced three fixed ways — forward-only,
+// by timeframe, by entry window. Registered before the samples exist so no cut is picked after
+// seeing it; each is read only at SLICE_MIN resolved. Same constants as the server.
+const SLICES_PREREGISTERED_AT = "2026-09-07";
+const SLICE_MIN = 30;
+function sliceVerdict(s: CandidateSlice): { label: string; tone: "grey" | "green" | "red" | "amber" } {
+  if (s.resolved < SLICE_MIN) return { label: `watching · ${s.resolved}/${SLICE_MIN}`, tone: "grey" };
+  if (s.net <= 0) return { label: "not paying", tone: "red" };
+  if (s.tStat != null && s.tStat >= 2) return { label: "paying", tone: "green" };
+  return { label: "positive, could be luck", tone: "amber" };
+}
 
 // Sample-size gate: thin slices find fake edges. Nothing is a verdict until ~20 resolved.
 const MIN_EDGE_SAMPLE = 20;
@@ -40,7 +54,7 @@ function edgeVerdict(e: EdgeStat): { label: string; tone: "grey" | "green" | "re
 const hitTone = (h: number | null) => (h != null && h >= 0.5 ? "text-up" : "text-warn");
 
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
 
@@ -61,7 +75,7 @@ export default function PaperTradesPage() {
         sub="Three steps, in order. Every strategy is scored on paper first with real Kraken prices and your real fees. Nothing trades real money until step 2 is green."
       />
 
-      <GoLivePanel strategies={score?.strategies ?? []} />
+      <GoLivePanel strategies={score?.strategies ?? []} capacity={score?.capacity ?? null} />
 
       <Explainer title="How to read this page">
         <ul className="space-y-1">
@@ -187,6 +201,62 @@ export default function PaperTradesPage() {
               <strong>Gross</strong> is the raw edge (before fees); <strong>Fees</strong> is the drag; <strong>Net</strong> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if gross beats fees. Maker entries + fewer/bigger trades shrink the fees column. <strong>At live sizing</strong> prices each trade the way the live executor would size it; it matches the paper column because live scales by conviction (2× high, 0.5× low) exactly as paper does. While live bet a flat 3%, these same 48 trades were worth <span className="text-up">+$1,779</span> on paper and <span className="text-down">−$137</span> live — flat sizing halves the winners and doubles the losers. <strong>Green banked</strong> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
             </Note>
           </div>
+        </Panel>
+      )}
+
+      {/* ── The live candidate, sliced — pre-registered cuts ── */}
+      {score?.candidate && (score.candidate.forward || score.candidate.byTimeframe.length > 0 || score.candidate.byEntryWindow.length > 0) && (
+        <Panel>
+          <PanelHeader
+            title={`The live candidate, sliced — three cuts registered ${SLICES_PREREGISTERED_AT}, read at ${SLICE_MIN}`}
+            aside={<span>{score.candidate.source} · paper-sized dollars (halve for stage 3 live)</span>}
+          />
+          <div className="border-b border-border bg-warn/[0.06] px-4 py-2">
+            <Note className="text-warn/90">
+              These cuts were fixed in advance so none of them is chosen after seeing the numbers. A cut is only read once it has {SLICE_MIN} resolved trades — until then it is &quot;watching&quot;, whatever colour it shows. Three cuts of one sleeve is still three chances for luck; a cut earns a change to the rule only with t ≥ 2 on its own sample.
+            </Note>
+          </div>
+          {([
+            { title: "Forward-only — entered after the Sep 4 rule cut (the honest test of the rule as it stands)", rows: score.candidate.forward ? [{ ...score.candidate.forward, key: "forward-only" }] : [] },
+            { title: "By timeframe — 5-minute vs 15-minute breakouts", rows: score.candidate.byTimeframe },
+            { title: "By entry window — UTC hour the trade opened (12–18 UTC is the US morning)", rows: score.candidate.byEntryWindow },
+          ] as { title: string; rows: CandidateSlice[] }[]).filter((g) => g.rows.length > 0).map((grp) => (
+            <div key={grp.title} className="border-b border-border last:border-0">
+              <Label className="px-4 pb-1 pt-3">{grp.title}</Label>
+              <DataTable dense>
+                <thead>
+                  <tr>
+                    <Th>Slice</Th>
+                    <Th num>Resolved</Th>
+                    <Th num>Open</Th>
+                    <Th num>Hit rate</Th>
+                    <Th num title="After fees, at paper's base risk (halve for stage-3 live)">Net (paper)</Th>
+                    <Th num title="Confidence: average ÷ its own noise × √n. Below 2 a good run can still be luck.">t</Th>
+                    <Th num title="Distinct UTC resolution days — one big day is closer to one bet than many">Days</Th>
+                    <Th num>Verdict</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grp.rows.map((s) => {
+                    const v = sliceVerdict(s);
+                    const judged = s.resolved >= SLICE_MIN;
+                    return (
+                      <Row key={s.key}>
+                        <Td strong>{s.key}</Td>
+                        <Td num>{s.resolved}</Td>
+                        <Td num muted>{s.open}</Td>
+                        <Td num>{pct(s.hitRate)}</Td>
+                        <Td num className={`font-semibold ${judged ? tone(s.net) : "text-muted-foreground"}`}>{money(s.net)}</Td>
+                        <Td num className={judged ? "" : "text-muted-foreground"}>{s.tStat != null ? s.tStat.toFixed(2) : "—"}</Td>
+                        <Td num muted>{s.days}</Td>
+                        <Td num><Chip tone={v.tone}>{v.label}</Chip></Td>
+                      </Row>
+                    );
+                  })}
+                </tbody>
+              </DataTable>
+            </div>
+          ))}
         </Panel>
       )}
 
