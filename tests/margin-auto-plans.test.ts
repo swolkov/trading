@@ -17,7 +17,7 @@ test("retired sleeves never appear in new auto plans", () => {
       for (const conv of convs) {
         for (const p of autoShadowPlans(kind, tf, conv, 5)) {
           assert.equal(RETIRED_AUTO_SOURCES.has(p.source), false, `${p.source} must not auto-open`);
-          assert.ok(p.source === "selective" || p.source === "selective-x5", p.source);
+          assert.ok(["selective", "selective-x5", "selective-tight", "selective-launch"].includes(p.source), p.source);
         }
       }
     }
@@ -47,8 +47,8 @@ test("1h/4h/1d high longs are paused — 3%/48h selective is a 5m/15m container"
 });
 
 test("the paying paper path: high 5m/15m long, not stretched → selective plus its ×5-size twin", () => {
-  assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5), [{ source: "selective", lev: 5 }, { source: "selective-x5", lev: 5 }]);
-  assert.deepEqual(autoShadowPlans("breakout", "15m", high, 8), [{ source: "selective", lev: 8 }, { source: "selective-x5", lev: 5 }]);
+  assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5), [{ source: "selective", lev: 5 }, { source: "selective-x5", lev: 5 }, { source: "selective-tight", lev: 5 }, { source: "selective-launch", lev: 5 }]);
+  assert.deepEqual(autoShadowPlans("breakout", "15m", high, 8), [{ source: "selective", lev: 8 }, { source: "selective-x5", lev: 5 }, { source: "selective-tight", lev: 8 }, { source: "selective-launch", lev: 8 }]);
 });
 
 test("the ×5-size twin rides the same signal, never on its own, and sizes at 5× the risk", async () => {
@@ -81,7 +81,7 @@ test("real scorer: 3-TF + volume is high and opens; adding RSI stretch still hig
   ];
   const clean = scoreConviction(br, confluence);
   assert.equal(clean.tier, "high");
-  assert.deepEqual(autoShadowPlans(br.kind, br.timeframe, clean, 5), [{ source: "selective", lev: 5 }, { source: "selective-x5", lev: 5 }]);
+  assert.deepEqual(autoShadowPlans(br.kind, br.timeframe, clean, 5), [{ source: "selective", lev: 5 }, { source: "selective-x5", lev: 5 }, { source: "selective-tight", lev: 5 }, { source: "selective-launch", lev: 5 }]);
 
   const stretched = scoreConviction(br, [...confluence, sig({ kind: "overbought", timeframe: "5m" })]);
   assert.equal(stretched.tier, "high");

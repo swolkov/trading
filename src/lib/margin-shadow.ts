@@ -15,7 +15,7 @@ import {
   liveRiskFraction,
   parseLiveRiskBasePct,
 } from "@/lib/margin-live-risk";
-import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
+import { RETIRED_AUTO_SOURCES, TWIN_SOURCES } from "@/lib/margin-auto-plans";
 
 // FEE MODEL — an honest ESTIMATE, not exact truth (that's the real scoreboard, which
 // reads actual fills+fees from Kraken's ledger). Modeled: maker entry + taker exit on
@@ -161,7 +161,29 @@ interface OpenRow {
 // cap). Swings hold longer with a WIDER fixed stop so a multi-day move can breathe. Spot swings
 // carry NO rollover — holding the coin outright borrows nothing; leveraged trades pay rollover
 // on notional. This is what lets the scoreboard show where leverage stops being worth it.
-function exitParams(source: string | null, lev: number, entry: number): { maxHoldH: number; oneR: number; carry: boolean } {
+export interface ExitProfile {
+  maxHoldH: number; oneR: number; carry: boolean;
+  tightAfterR?: number; tightTrailR?: number;   // once the peak reaches tightAfterR, trail tightTrailR behind it (default 1R)
+  launchH?: number; launchMinR?: number;        // failure to launch: still below launchMinR after launchH hours → close
+}
+/**
+ * Paper's managed exit as ONE pure function (the guardian mirrors the default form in
+ * managedStopTarget): breakeven once +1R, then trail 1R behind the peak — or, for a
+ * profile that says so, a tighter trail once the peak passes tightAfterR. Ratchet only.
+ */
+export function managedStop(dir: number, entry: number, peak: number, stopPx: number, oneR: number, p?: Pick<ExitProfile, "tightAfterR" | "tightTrailR">): number {
+  if (!(oneR > 0)) return stopPx;
+  const peakR = (dir * (peak - entry)) / oneR;
+  if (peakR < 1) return stopPx;
+  const trailR = p?.tightAfterR != null && p?.tightTrailR != null && peakR >= p.tightAfterR ? p.tightTrailR : 1;
+  const trail = peak - dir * oneR * trailR;
+  const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
+  return dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
+}
+export function launchStopDue(p: Pick<ExitProfile, "launchH" | "launchMinR">, ageH: number, peakR: number): boolean {
+  return p.launchH != null && p.launchMinR != null && ageH >= p.launchH && peakR < p.launchMinR;
+}
+export function exitParams(source: string | null, lev: number, entry: number): ExitProfile {
   if (source === "swing-spot") return { maxHoldH: 24 * 14, oneR: entry * 0.06, carry: false };
   if (source === "swing-lev") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
@@ -182,6 +204,14 @@ function exitParams(source: string | null, lev: number, entry: number): { maxHol
   // the drawdowns. It can never trade live unless armed by name; note that live's 15%
   // drawdown breaker would halt after ONE full loss at this size.
   if (source === "selective-x5") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  // PRE-REGISTERED TWINS (Sep 7 2026, see margin-auto-plans.ts): the candidate's container
+  // with ONE change each. selective-btc is the same container under a regime filter.
+  if (source === "selective-tight") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1, tightAfterR: 2, tightTrailR: 0.5 };
+  if (source === "selective-launch") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1, launchH: 8, launchMinR: 0.5 };
+  if (source === "selective-btc") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  // TSMOM (Sep 7 2026, margin-regime.ts): daily time-series momentum on the majors — the
+  // horizon the literature finds robust. 8% stop, breakeven-then-trail, 14-day time stop.
+  if (source === "tsmom") return { maxHoldH: 24 * 14, oneR: entry * 0.08, carry: lev > 1 };
   // TradingView strategy sleeves ("tv:<name>") are scored in the SAME container as the live
   // candidate (3% / 48h / managed exit) so their record is directly comparable and, if one
   // is armed, live reproduces exactly what paper measured.
@@ -205,7 +235,7 @@ export const SIZE_MULTIPLIER: Record<string, number> = { "selective-x5": 5 };
 // 3.5× the weight) in the headline totals, the conviction table, the edges by direction and
 // coin, the milestone reports, and the daily lessons. They keep their own scoreboard row and
 // the log; every POOLED statistic reads through this predicate instead of RECORD_SQL.
-export const EXPERIMENT_SOURCES: string[] = Object.keys(SIZE_MULTIPLIER);
+export const EXPERIMENT_SOURCES: string[] = [...Object.keys(SIZE_MULTIPLIER), ...TWIN_SOURCES];
 export const POOLED_SQL = `${RECORD_SQL} AND COALESCE(source,'manual') NOT IN (${EXPERIMENT_SOURCES.map((s) => `'${s}'`).join(",")})`;
 export function positionNotional(source: string | null, lev: number, entry: number, refEquity: number, maxRiskPct: number): number {
   const { oneR } = exitParams(source, lev, entry);
@@ -320,7 +350,8 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const entry = r.mark_price;
     const lev = Math.max(1, Math.min(20, r.leverage || 2));
     const dir = r.side === "buy" ? 1 : -1;
-    const { maxHoldH, oneR, carry } = exitParams(r.source, lev, entry);   // per-strategy exit profile
+    const profile = exitParams(r.source, lev, entry);   // per-strategy exit profile
+    const { maxHoldH, oneR, carry } = profile;
     const notional = positionNotional(r.source, lev, entry, refEquity, convictionRisk(r.conviction, maxRiskPct));   // risk-based, bigger on high-conviction
     const timeStopLabel = `${Math.round(maxHoldH)}h time stop`;
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
@@ -374,15 +405,9 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     let stopPx = r.shadow_stop ?? entry - dir * oneR;
     let exit: number | null = null;
     let reason = "";
-    const ratchet = () => {
-      const peakR = (dir * (peak - entry)) / oneR;   // best profit reached, in R
-      if (peakR >= 1) {
-        // Breakeven once +1R, then trail 1R behind the peak — ratchet only (never loosen).
-        const trail = peak - dir * oneR;
-        const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
-        stopPx = dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
-      }
-    };
+    // Breakeven once +1R, then trail behind the peak — ratchet only (never loosen). The
+    // trail width is the profile's (1R for the record; selective-tight narrows after +2R).
+    const ratchet = () => { stopPx = managedStop(dir, entry, peak, stopPx, oneR, profile); };
     for (const b of doneBars) {
       if (dir > 0 ? b.l <= stopPx : b.h >= stopPx) {
         exit = dir > 0 ? Math.min(stopPx, b.o) : Math.max(stopPx, b.o);
@@ -411,6 +436,12 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
         exit = dir > 0 ? Math.min(stopPx, now) : Math.max(stopPx, now);
         reason = (dir * (peak - entry)) / oneR >= 1 ? "trailing stop" : "initial stop";
       }
+    }
+    // Failure to launch (selective-launch only): still short of +launchMinR after launchH
+    // hours → close at the last price and free the slot. Other profiles never take this path.
+    if (exit == null && launchStopDue(profile, ageH, (dir * (peak - entry)) / oneR)) {
+      exit = now;
+      reason = `launch stop (${profile.launchH}h, <${profile.launchMinR}R)`;
     }
     if (exit == null && ageH >= maxHoldH) {
       exit = now;
@@ -591,6 +622,10 @@ const STRATEGY_LABELS: Record<string, string> = {
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",
   "selective-x5": "Selective ×5 SIZE — the SAME trades again at 5× the risk (15%/30%), 5× leverage — experiment, never live, not pooled",
   "selective-swing": "Selective SWING — RETIRED Sep 4 (5%/4d give-back)",
+  "selective-tight": "Selective TIGHT TRAIL — same trades, trail 0.5R after +2R — twin (Sep 7), not pooled",
+  "selective-launch": "Selective LAUNCH STOP — same trades, closed if <+0.5R after 8h — twin (Sep 7), not pooled",
+  "selective-btc": "Selective in BTC UP-REGIME only — same trades, opened only above BTC's 20-day average — twin (Sep 7), not pooled",
+  tsmom: "Daily trend (tsmom) — majors, 20-day momentum, 8% / 14d — new sleeve (Sep 7), paper only",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {

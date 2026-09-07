@@ -22,7 +22,19 @@ export const RETIRED_AUTO_SOURCES = new Set([
   "selective-swing",  // RETIRED Sep 4 2026 — 5%/4d A/B, t=−3.8, give-back
 ]);
 
+// PRE-REGISTERED TWINS (Sep 7 2026) — the live candidate's OWN signals, re-scored in a
+// different container or under a filter. Same entries, so they are never pooled with the
+// record (EXPERIMENT_SOURCES). Each is judged at 30 resolved, t ≥ 2, 7 days, and replaces
+// the live rule only by beating `selective` on the same signals. Why these three:
+//   selective-tight  — winners peak 2.5R and bank 1.55R: trail 0.5R (not 1R) once +2R.
+//   selective-launch — losers peak 0.42R and die in ~12h, winners take ~22h: a trade still
+//                      below +0.5R after 8h is closed (frees the slot).
+//   selective-btc    — opened only while BTC closes above its 20-day average: the regime
+//                      hypothesis behind the 12–18 UTC and clustered-alt losses.
+export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc"] as const;
+
 export type AutoPlan = { source: string; lev: number };
+export type Regime = { btcUp: boolean | null };   // null = daily bars unavailable → no regime twin this run
 
 export type ConvictionInput = { tier: string; factors: string[] };
 
@@ -41,6 +53,7 @@ export function autoShadowPlans(
   timeframe: string,
   conv: ConvictionInput,
   lev: number,
+  regime?: Regime,
 ): AutoPlan[] {
   if (kind !== "breakout") return [];
   if (conv.tier !== "high") return [];
@@ -49,5 +62,13 @@ export function autoShadowPlans(
 
   const capped = Math.max(2, Math.min(20, lev));
   // The ×5-size twin rides the same signal at 5× leverage (capped by the coin's own max).
-  return [{ source: "selective", lev: capped }, { source: "selective-x5", lev: Math.max(2, Math.min(5, lev)) }];
+  const plans: AutoPlan[] = [
+    { source: "selective", lev: capped },
+    { source: "selective-x5", lev: Math.max(2, Math.min(5, lev)) },
+    { source: "selective-tight", lev: capped },
+    { source: "selective-launch", lev: capped },
+  ];
+  // The regime twin opens ONLY in a confirmed BTC up-regime; an unreadable regime opens nothing.
+  if (regime?.btcUp === true) plans.push({ source: "selective-btc", lev: capped });
+  return plans;
 }
