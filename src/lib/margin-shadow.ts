@@ -621,8 +621,8 @@ function strategyVerdict(source: string, resolved: number, net: number, tStat: n
 const STRATEGY_LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop — RETIRED Sep 4 (spray, not paying)",
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
-  "swing-lev": "Leveraged swing — PAUSED Sep 4 (not the live candidate)",
-  "swing-spot": "Spot swing — PAUSED Sep 4 (not the live candidate)",
+  "swing-lev": "Leveraged swing — high-conviction 4h/1d longs, 4% / 4d — REACTIVATED Sep 8 (slot-B candidate)",
+  "swing-spot": "Spot swing — same entries, 1×, 6% / 14d, no rollover — REACTIVATED Sep 8 (spot, not margin-tradeable by the executor)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",
   "selective-x5": "Selective ×5 SIZE — the SAME trades again at 5× the risk (15%/30%), 5× leverage — experiment, never live, not pooled",

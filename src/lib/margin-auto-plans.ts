@@ -41,6 +41,15 @@ export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-b
 // a 20–40% rally; this sleeve exists so the next bear stretch produces evidence instead of
 // finding the desk idle. It opens nothing in an up-regime. Paper only, judged like every sleeve.
 export const SHORT_SOURCE = "selective-short";
+// THE SLOW FAMILY, REACTIVATED Sep 8 2026. swing-lev (4% stop / 4-day hold, leveraged) and
+// swing-spot (6% / 14-day, spot, no rollover) were paused Sep 4 as "not the live candidate".
+// Their Sep 2–4 samples (35 each) then resolved through the rally: swing-spot +$1,430 with
+// +$1,247 still floating, swing-lev +$618, while the fast 5m/15m rule lost $2,662 on paper
+// in the Sep 7–8 chop. Day-to-day the fast and slow families do NOT lose together — the
+// two-slot desk needs a proven slow sleeve, and a paused sleeve can never earn its 30.
+// Entry rule = the Sep 3–4 rule they were paused under, longs only: high-conviction 4h/1d
+// BREAKOUTS. Paper only; judged like every sleeve.
+export const SWING_TFS = new Set(["4h", "1d"]);
 export const MAJORS = new Set(["BTC", "ETH", "SOL"]);
 
 export type AutoPlan = { source: string; lev: number };
@@ -67,10 +76,12 @@ export function autoShadowPlans(
   symbol?: string,   // "BTC/USD" — the majors twin opens only on BTC/ETH/SOL
 ): AutoPlan[] {
   if (conv.tier !== "high") return [];
+  const capped = Math.max(2, Math.min(20, lev));
+  // Higher-timeframe BREAKOUTS feed the slow family only (the Sep 3–4 rule: high, 4h/1d, long).
+  if (kind === "breakout" && SWING_TFS.has(timeframe)) return [{ source: "swing-lev", lev: capped }, { source: "swing-spot", lev: 1 }];
   if (!PAYING_TFS.has(timeframe)) return [];
   if (isStretched(conv.factors)) return [];
 
-  const capped = Math.max(2, Math.min(20, lev));
   // Breakdowns: only the regime-gated short sleeve, and only in a confirmed BTC down-regime.
   if (kind === "breakdown") return regime?.btcUp === false ? [{ source: SHORT_SOURCE, lev: capped }] : [];
   if (kind !== "breakout") return [];
