@@ -54,6 +54,9 @@ test("plans: the two container twins always ride along; the regime twin only in 
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: false }).map((p) => p.source), base, "down-regime → no regime twin");
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: true }).map((p) => p.source), [...base, "selective-btc"]);
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5, { btcUp: true }), [], "twins never widen the entry rule");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot"], "4h/1d go to the slow family, never to the fast twins");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", { tier: "med", factors: [] }, 5), [], "slow family is high conviction only");
+  assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }), [], "slow family is longs only; the 5m/15m short sleeve does not take 4h");
   assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors"]);
 });
 

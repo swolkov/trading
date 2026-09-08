@@ -17,7 +17,7 @@ test("retired sleeves never appear in new auto plans", () => {
       for (const conv of convs) {
         for (const p of autoShadowPlans(kind, tf, conv, 5)) {
           assert.equal(RETIRED_AUTO_SOURCES.has(p.source), false, `${p.source} must not auto-open`);
-          assert.ok(["selective", "selective-x5", "selective-tight", "selective-launch"].includes(p.source), p.source);
+          assert.ok(["selective", "selective-x5", "selective-tight", "selective-launch", "swing-lev", "swing-spot"].includes(p.source), p.source);
         }
       }
     }
@@ -42,8 +42,8 @@ test("stretched highs are skipped — buying into the RSI extreme was a coin-fli
 
 test("1h/4h/1d high longs are paused — 3%/48h selective is a 5m/15m container", () => {
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5), []);
-  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5), []);
-  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 5), []);
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5), [{ source: "swing-lev", lev: 5 }, { source: "swing-spot", lev: 1 }], "4h high breakouts feed the slow family (reactivated Sep 8)");
+  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 5), [{ source: "swing-lev", lev: 5 }, { source: "swing-spot", lev: 1 }]);
 });
 
 test("the paying paper path: high 5m/15m long, not stretched → selective plus its ×5-size twin", () => {
@@ -60,11 +60,13 @@ test("the ×5-size twin rides the same signal, never on its own, and sizes at 5�
   assert.deepEqual(autoShadowPlans("breakdown", "5m", high, 5), [], "no twin without a base plan");
 });
 
-test("swings are not opened — not the live candidate", () => {
-  for (const p of autoShadowPlans("breakout", "4h", high, 5)) {
-    assert.notEqual(p.source, "swing-lev");
-    assert.notEqual(p.source, "swing-spot");
-  }
+test("the slow family (reactivated Sep 8) opens ONLY on high-conviction 4h/1d breakouts, longs, and never the fast twins", () => {
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5).map((p) => p.source), ["swing-lev", "swing-spot"]);
+  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 8), [{ source: "swing-lev", lev: 8 }, { source: "swing-spot", lev: 1 }], "spot leg is always 1×");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", highStretched, 5).map((p) => p.source), ["swing-lev", "swing-spot"], "the Sep 3–4 rule had no stretched filter — kept, so the record stays continuous");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", med, 5), []);
+  assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }), [], "longs only");
+  for (const tf of ["5m", "15m"]) assert.ok(!autoShadowPlans("breakout", tf, high, 5).some((p) => p.source.startsWith("swing")), `${tf} never feeds the slow family`);
 });
 
 function sig(partial: Partial<ScanSignal> & Pick<ScanSignal, "kind" | "timeframe">): ScanSignal {
