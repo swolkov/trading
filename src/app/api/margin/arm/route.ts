@@ -6,7 +6,7 @@ import { STAGE3_KEY, DEMOTION_KEY, readStage3, readDemotion, loadLiveFills, dive
 import { marginDisplaySnapshot } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
-import { emptyReadIsUnconfirmed } from "@/lib/margin-live-risk";
+import { emptyReadIsUnconfirmed, liveContainerFor } from "@/lib/margin-live-risk";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -121,6 +121,7 @@ export async function POST(request: Request) {
   if (String(body.confirm ?? "") !== "ARM") return Response.json({ error: 'type ARM to confirm', ...(await status()) }, { status: 400 });
   const source = String(body.source ?? DEFAULT_SOURCE).trim().toLowerCase();
   if (!/^[a-z0-9_-]{1,32}$/.test(source) || RETIRED_AUTO_SOURCES.has(source)) return Response.json({ error: `source "${source}" cannot be armed`, ...(await status()) }, { status: 400 });
+  if (!liveContainerFor(source)) return Response.json({ error: `source "${source}" has no live container (its paper exit is not mirrored by the guardian yet) — it cannot be armed`, ...(await status()) }, { status: 400 });
   // One position at a time to start: a 3%-risk trade with a 3% stop is notional = equity =
   // 50% of the account as margin at 2×; a second one would use the other half exactly.
   const riskPct = START_BASE_PCT * 2;         // what the candidate's (high-conviction) trades risk at the start

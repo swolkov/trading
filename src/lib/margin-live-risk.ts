@@ -108,6 +108,44 @@ export function pairHasExposure(
 // single source both the executor and the guardian's managed exit read.
 export const LIVE_STOP_DEFAULT_PCT = 3;      // = paper selective's oneR (entry × 0.03)
 export const LIVE_MAX_HOLD_H = 48;           // = paper MAX_HOLD_H
+
+/**
+ * PER-SLEEVE LIVE CONTAINERS (Sep 8 2026). Live must reproduce the container each paper
+ * sleeve was scored with — stop distance, time stop, entry style — or its record does not
+ * transfer (the Sep 5 audit's live ≠ paper gap, found again when the two-slot desk needed a
+ * slow sleeve in a 4% / 4-day container beside the fast 3% / 48h one). Keyed by source; an
+ * unlisted source has NO live container and cannot be armed. Sleeves whose paper EXIT
+ * differs from the guardian's (selective-tight's 0.5R trail, selective-launch's 8h close)
+ * are deliberately absent until the guardian mirrors them. The values here are pinned by
+ * test to margin-shadow's exitParams, so paper and live cannot drift apart silently.
+ */
+export interface LiveContainer { stopPct: number; maxHoldH: number; makerEntries: boolean | null }   // null = kraken_margin_maker_entries decides
+const FAST: LiveContainer = { stopPct: 3, maxHoldH: 48, makerEntries: false };   // market entries: a post-only bid rarely fills a breakout
+export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
+  selective: FAST, "selective-btc": FAST, "selective-majors": FAST, "selective-short": FAST, roundtrip: FAST,
+  // "manual" (raw webhook alerts) is deliberately absent: paper scores it in the default
+  // 0.3/leverage container, which the guardian does not mirror — so it cannot be armed.
+  "swing-lev": { stopPct: 4, maxHoldH: 24 * 4, makerEntries: null },
+  tsmom: { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
+  "tsmom-short": { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
+};
+export function liveContainerFor(source: string | null | undefined): LiveContainer | null {
+  if (!source) return null;
+  if (source.startsWith("tv:")) return FAST;
+  // Own properties only: "constructor" / "__proto__" pass the arm route's source regex and
+  // would otherwise resolve to Object.prototype members and read as armable.
+  return Object.hasOwn(LIVE_CONTAINERS, source) ? LIVE_CONTAINERS[source] : null;
+}
+/**
+ * A book's time stop = the shortest hold across its tranches, where a tranche with no
+ * ledgered hold (every position entered before Sep 8 2026) counts as the global config.
+ * So a legacy 48h position stacked with a new 96h one keeps its 48h — a tranche can never
+ * be held LONGER than its own rule because a neighbour arrived with a longer one.
+ */
+export function bookMaxHoldH(hours: (number | null | undefined)[], fallback: number): number {
+  const each = hours.map((h) => (h != null && Number.isFinite(h) && h > 0 ? h : fallback));
+  return each.length ? Math.min(...each) : fallback;
+}
 export const LIVE_STOP_RATCHET_MIN_FRAC = 0.0005;   // move a resting stop only for ≥0.05% of price
 
 /**
