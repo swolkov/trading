@@ -857,15 +857,19 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // THE SLEEVE'S CONTAINER: stop distance and hold come from the source's live container
     // (pinned to paper's exitParams); an unlisted source falls back to the global config.
     const container = liveContainerFor(alert.source);
-    const stopPct = clampLiveStopFrac(container?.stopPct ?? await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), leverage);
+    // No container, no entry — even if the source sits in kraken_margin_live_sources (a
+    // pre-deploy arm, or a hand-edited key). The arm switch refuses such a source too;
+    // this is the layer that holds when that one is bypassed. Closes never reach here.
+    if (!container) return { executed: false, validated: false, note: `entry refused: source "${alert.source ?? "manual"}" has no live container (its paper exit is not mirrored by the guardian) — disarm it` };
+    const stopPct = clampLiveStopFrac(container.stopPct, leverage);
     stopPctSent = stopPct;
     // A sleeve's container DEFINES its exit (fixed stop, guardian-managed); the global
     // trailing-stop knob applies only to sources without a container. Otherwise arming
     // swing-lev with kraken_margin_trail_pct set would send a trailing stop while the
     // ledger claims the 4% fixed one.
-    const trailPct = container ? 0 : Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
-    const makerEntries = container?.makerEntries ?? ((await cfg("kraken_margin_maker_entries")) !== "false");
-    ledgerMeta = { maxHoldH: container?.maxHoldH, source: alert.source ?? undefined };
+    const trailPct = 0;   // a container's exit is its fixed stop, guardian-managed; the global trailing knob is retired for entries
+    const makerEntries = container.makerEntries ?? ((await cfg("kraken_margin_maker_entries")) !== "false");
+    ledgerMeta = { maxHoldH: container.maxHoldH, source: alert.source ?? undefined };
     const meta = await getPairMeta(pair);
 
     // The entry reference price: the resting limit for a maker order, else the last trade.

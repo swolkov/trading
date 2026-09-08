@@ -26,6 +26,7 @@ test("the fast family shares one container with market entries; the slow sleeves
   const fast = liveContainerFor("selective")!;
   assert.deepEqual(fast, { stopPct: 3, maxHoldH: 48, makerEntries: false });
   for (const s of ["selective-btc", "selective-majors", "selective-short", "tv:esbueno", "roundtrip"]) assert.deepEqual(liveContainerFor(s), fast, s);
+  assert.equal(liveContainerFor("manual"), null, "raw webhook alerts are scored in a container the guardian does not mirror");
   assert.deepEqual(liveContainerFor("swing-lev"), { stopPct: 4, maxHoldH: 96, makerEntries: null });
   assert.deepEqual(liveContainerFor("tsmom"), { stopPct: 8, maxHoldH: 336, makerEntries: null });
 });

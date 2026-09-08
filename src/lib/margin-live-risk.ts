@@ -123,6 +123,8 @@ export interface LiveContainer { stopPct: number; maxHoldH: number; makerEntries
 const FAST: LiveContainer = { stopPct: 3, maxHoldH: 48, makerEntries: false };   // market entries: a post-only bid rarely fills a breakout
 export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
   selective: FAST, "selective-btc": FAST, "selective-majors": FAST, "selective-short": FAST, roundtrip: FAST,
+  // "manual" (raw webhook alerts) is deliberately absent: paper scores it in the default
+  // 0.3/leverage container, which the guardian does not mirror — so it cannot be armed.
   "swing-lev": { stopPct: 4, maxHoldH: 24 * 4, makerEntries: null },
   tsmom: { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
   "tsmom-short": { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
