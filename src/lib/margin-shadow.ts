@@ -210,6 +210,10 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   if (source === "selective-launch") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1, launchH: 8, launchMinR: 0.5 };
   if (source === "selective-btc") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
   if (source === "selective-majors") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  // Regime-gated shorts (Sep 8 2026): the candidate's container on breakdowns in a BTC
+  // down-regime; and the short leg of the daily trend sleeve. Paper only.
+  if (source === "selective-short") return { maxHoldH: MAX_HOLD_H, oneR: entry * 0.03, carry: lev > 1 };
+  if (source === "tsmom-short") return { maxHoldH: 24 * 14, oneR: entry * 0.08, carry: lev > 1 };
   // TSMOM (Sep 7 2026, margin-regime.ts): daily time-series momentum on the majors — the
   // horizon the literature finds robust. 8% stop, breakeven-then-trail, 14-day time stop.
   if (source === "tsmom") return { maxHoldH: 24 * 14, oneR: entry * 0.08, carry: lev > 1 };
@@ -628,6 +632,8 @@ const STRATEGY_LABELS: Record<string, string> = {
   "selective-btc": "Selective in BTC UP-REGIME only — same trades, opened only above BTC's 20-day average — twin (Sep 7), not pooled",
   "selective-majors": "Selective on the MAJORS only — same rule, BTC / ETH / SOL signals only — twin (Sep 7), not pooled",
   tsmom: "Daily trend (tsmom) — majors, 20-day momentum, 8% / 14d — new sleeve (Sep 7), paper only",
+  "selective-short": "Selective SHORT — high-conviction breakdowns, only in a BTC DOWN-regime, 3% / 48h — new sleeve (Sep 8), paper only",
+  "tsmom-short": "Daily trend SHORT (tsmom) — majors with negative 20-day momentum below the 20-day average, 8% / 14d — new sleeve (Sep 8), paper only",
   manual: "Manual alerts (yours)",
 };
 export async function strategyBreakdown(): Promise<StrategyStat[]> {
