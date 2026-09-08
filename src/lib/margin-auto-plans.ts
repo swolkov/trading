@@ -35,6 +35,12 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //                      his +$732 / +$596 days were BTC and ETH). Does the rule pay more per
 //                      trade at the same risk on the deepest books? Registered Sep 7 2026.
 export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors"] as const;
+// SELECTIVE-SHORT (registered Sep 8 2026) — NOT a twin: its own signals (high-conviction
+// BREAKDOWNS, 5m/15m, not stretched), opened ONLY while BTC's last complete daily close is
+// BELOW its 20-day average. Every short on the record (37, 11% won, −$5,140) was taken inside
+// a 20–40% rally; this sleeve exists so the next bear stretch produces evidence instead of
+// finding the desk idle. It opens nothing in an up-regime. Paper only, judged like every sleeve.
+export const SHORT_SOURCE = "selective-short";
 export const MAJORS = new Set(["BTC", "ETH", "SOL"]);
 
 export type AutoPlan = { source: string; lev: number };
@@ -60,12 +66,14 @@ export function autoShadowPlans(
   regime?: Regime,
   symbol?: string,   // "BTC/USD" — the majors twin opens only on BTC/ETH/SOL
 ): AutoPlan[] {
-  if (kind !== "breakout") return [];
   if (conv.tier !== "high") return [];
   if (!PAYING_TFS.has(timeframe)) return [];
   if (isStretched(conv.factors)) return [];
 
   const capped = Math.max(2, Math.min(20, lev));
+  // Breakdowns: only the regime-gated short sleeve, and only in a confirmed BTC down-regime.
+  if (kind === "breakdown") return regime?.btcUp === false ? [{ source: SHORT_SOURCE, lev: capped }] : [];
+  if (kind !== "breakout") return [];
   // The ×5-size twin rides the same signal at 5× leverage (capped by the coin's own max).
   const plans: AutoPlan[] = [
     { source: "selective", lev: capped },

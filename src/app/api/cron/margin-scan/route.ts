@@ -137,9 +137,9 @@ export async function GET(request: Request) {
       // BTC daily regime for the selective-btc twin: read once per run from COMPLETE daily
       // closes. Unreadable → the twin opens nothing this run (never guesses a regime).
       let regime: Regime = { btcUp: null };
-      if (fresh.some((s) => s.kind === "breakout")) {
+      if (fresh.some((s) => s.kind === "breakout" || s.kind === "breakdown")) {
         try { regime = { btcUp: await readBtcRegime() }; } catch (e) { errors.push(`btc regime: ${String(e).slice(0, 60)}`); }
-        if (regime.btcUp == null) errors.push("btc regime unreadable — selective-btc twin not opened this run");
+        if (regime.btcUp == null) errors.push("btc regime unreadable — selective-btc and selective-short not opened this run");
       }
       for (const s of fresh) {
         if (!(s.price > 0)) continue;
@@ -206,7 +206,7 @@ export async function GET(request: Request) {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
     if (flag?.value !== "false") {
       const t = await openTsmomPaper();
-      for (const sym of t.opened) opened.push({ symbol: sym, side: "buy", tier: "med", source: "tsmom" });
+      for (const o of t.opened) { const [sym, src] = o.split(" "); opened.push({ symbol: sym, side: src === "tsmom-short" ? "sell" : "buy", tier: "med", source: src ?? "tsmom" }); }
       for (const err of t.errors) errors.push(`tsmom ${err}`);
     }
   } catch (e) { errors.push(`tsmom: ${String(e).slice(0, 80)}`); }

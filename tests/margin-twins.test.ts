@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { autoShadowPlans, TWIN_SOURCES } from "../src/lib/margin-auto-plans";
+import { autoShadowPlans, TWIN_SOURCES, SHORT_SOURCE } from "../src/lib/margin-auto-plans";
 import { btcRegimeUp, tsmomSignal, REGIME_LOOKBACK } from "../src/lib/margin-regime";
 import { exitParams, launchStopDue, managedStop } from "../src/lib/margin-shadow";
 import { managedStopTarget } from "../src/lib/margin-live-risk";
@@ -84,4 +84,33 @@ test("selective-majors rides the same signal only on BTC, ETH and SOL, in the re
   assert.deepEqual(src("BTC/USD", { btcUp: true }), ["selective", "selective-x5", "selective-tight", "selective-launch", "selective-btc", "selective-majors"]);
   const m = exitParams("selective-majors", 2, 100), s = exitParams("selective", 2, 100);
   assert.deepEqual({ oneR: m.oneR, maxHoldH: m.maxHoldH, carry: m.carry }, { oneR: s.oneR, maxHoldH: s.maxHoldH, carry: s.carry });
+});
+
+test("selective-short: high-conviction breakdowns open ONLY in a confirmed BTC down-regime, and never a long twin", () => {
+  const plans = (regime?: { btcUp: boolean | null }) => autoShadowPlans("breakdown", "5m", high, 5, regime, "SOL/USD").map((p) => p.source);
+  assert.deepEqual(plans(undefined), [], "no regime → no short");
+  assert.deepEqual(plans({ btcUp: null }), [], "unreadable regime → no short");
+  assert.deepEqual(plans({ btcUp: true }), [], "up-regime → no short (every short on the record was taken here)");
+  assert.deepEqual(plans({ btcUp: false }), [SHORT_SOURCE]);
+  assert.deepEqual(autoShadowPlans("breakdown", "1h", high, 5, { btcUp: false }), [], "same timeframe rule as the longs");
+  assert.deepEqual(autoShadowPlans("breakdown", "5m", { tier: "med", factors: [] }, 5, { btcUp: false }), [], "same conviction rule");
+  assert.deepEqual(autoShadowPlans("breakdown", "5m", { tier: "high", factors: ["stretched"] }, 5, { btcUp: false }), [], "same stretched rule");
+  const sh = exitParams("selective-short", 2, 100), s = exitParams("selective", 2, 100);
+  assert.deepEqual({ oneR: sh.oneR, maxHoldH: sh.maxHoldH, carry: sh.carry }, { oneR: s.oneR, maxHoldH: s.maxHoldH, carry: s.carry }, "the candidate's container, mirrored");
+  assert.ok(!TWIN_SOURCES.includes(SHORT_SOURCE as never), "its own signals — a sleeve, not a twin");
+});
+
+test("tsmom has a short leg: negative 20-day return AND close below the 20-day average", () => {
+  const falling = Array.from({ length: 21 }, (_, i) => 120 - i);
+  const f = tsmomSignal(falling);
+  assert.ok(f && f.short && !f.long && f.ret20 < 0 && f.close < f.sma20);
+  const rising = Array.from({ length: 21 }, (_, i) => 100 + i);
+  const r = tsmomSignal(rising);
+  assert.ok(r && r.long && !r.short);
+  // negative return but a bounce back above the average: neither leg
+  const mixed = [...Array.from({ length: 15 }, () => 120), ...Array.from({ length: 5 }, () => 90), 118];
+  const m = tsmomSignal(mixed);
+  assert.ok(m && !m.short && !m.long, "20d return < 0 but close above the 20d average → no short");
+  const t = exitParams("tsmom-short", 2, 100);
+  assert.deepEqual({ oneR: t.oneR, maxHoldH: t.maxHoldH }, { oneR: 8, maxHoldH: 24 * 14 });
 });

@@ -29,7 +29,7 @@ export function btcRegimeUp(closes: number[]): boolean | null {
 }
 
 /** Time-series momentum signal from daily closes (oldest → newest, last complete). */
-export function tsmomSignal(closes: number[]): { long: boolean; ret20: number; sma20: number; close: number } | null {
+export function tsmomSignal(closes: number[]): { long: boolean; short: boolean; ret20: number; sma20: number; close: number } | null {
   if (closes.length < REGIME_LOOKBACK + 1) return null;
   const close = closes[closes.length - 1];
   const prior = closes[closes.length - 1 - REGIME_LOOKBACK];
@@ -37,7 +37,7 @@ export function tsmomSignal(closes: number[]): { long: boolean; ret20: number; s
   const sma20 = window.reduce((a, b) => a + b, 0) / window.length;
   if (!(close > 0) || !(prior > 0) || !(sma20 > 0)) return null;
   const ret20 = close / prior - 1;
-  return { long: ret20 > 0 && close > sma20, ret20, sma20, close };
+  return { long: ret20 > 0 && close > sma20, short: ret20 < 0 && close < sma20, ret20, sma20, close };
 }
 
 // Daily bars from Kraken; the newest bar is the in-progress day and is dropped so the
@@ -70,19 +70,22 @@ export async function openTsmomPaper(): Promise<{ opened: string[]; skipped: str
       const closes = await completedDailyCloses(symbol);
       const sig = tsmomSignal(closes);
       if (!sig) { out.skipped.push(`${symbol}: <21 daily closes`); continue; }
-      if (!sig.long) { out.skipped.push(`${symbol}: 20d ${(sig.ret20 * 100).toFixed(1)}%${sig.close <= sig.sma20 ? ", below 20d avg" : ""}`); continue; }
+      // Long leg (Sep 7) and short leg (Sep 8) — mutually exclusive by construction.
+      const leg = sig.long ? { source: "tsmom", side: "buy", px: sig.close * (1 + CHASE), note: `auto: tsmom trend 1d [med — 20d +${(sig.ret20 * 100).toFixed(1)}%, above 20d avg]` }
+        : sig.short ? { source: "tsmom-short", side: "sell", px: sig.close * (1 - CHASE), note: `auto: tsmom-short trend 1d [med — 20d ${(sig.ret20 * 100).toFixed(1)}%, below 20d avg]` }
+        : null;
+      if (!leg) { out.skipped.push(`${symbol}: 20d ${(sig.ret20 * 100).toFixed(1)}%, no trend either way`); continue; }
       const [{ n }] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
-        `SELECT count(*)::bigint AS n FROM tradingview_alerts WHERE symbol=$1 AND source='tsmom' AND COALESCE(shadow_status,'open')='open' AND ${SIM_COHORT_SQL}`,
-        symbol,
+        `SELECT count(*)::bigint AS n FROM tradingview_alerts WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open' AND ${SIM_COHORT_SQL}`,
+        symbol, leg.source,
       );
-      if (Number(n) > 0) { out.skipped.push(`${symbol}: already open`); continue; }
-      const note = `auto: tsmom trend 1d [med — 20d +${(sig.ret20 * 100).toFixed(1)}%, above 20d avg]`;
+      if (Number(n) > 0) { out.skipped.push(`${symbol}: ${leg.source} already open`); continue; }
       await prisma.$executeRawUnsafe(
         `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version)
-         VALUES ($1,'buy',$2,$3,$4,false,false,'med',NULL,'tsmom',$5)`,
-        symbol, TSMOM_LEV, note, sig.close * (1 + CHASE), SIM_VERSION,
+         VALUES ($1,$2,$3,$4,$5,false,false,'med',NULL,$6,$7)`,
+        symbol, leg.side, TSMOM_LEV, leg.note, leg.px, leg.source, SIM_VERSION,
       );
-      out.opened.push(symbol);
+      out.opened.push(`${symbol} ${leg.source}`);
     } catch (e) { out.errors.push(`${symbol}: ${String(e).slice(0, 80)}`); }
     await new Promise((r) => setTimeout(r, 120));
   }
