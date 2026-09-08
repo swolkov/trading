@@ -43,9 +43,9 @@ function heartbeatTone(iso: string | null | undefined, warnMin: number, critMin:
 
 export default function DashboardPage() {
   const { data: krk } = useSWR<KrakenStatus>("/api/kraken-agent", fetcher, { refreshInterval: 60_000 });
-  const { data: status, error: statusErr } = useSWR<{ connected: boolean; health: MarginHealth | null; positions: MarginPosition[]; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 30_000 });
+  const { data: status, error: statusErr } = useSWR<{ connected: boolean; health: MarginHealth | null; positions: MarginPosition[]; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 60_000 });
   const krakenDown = !!statusErr || (status != null && (status.connected === false || !!status.error));
-  const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 30_000 });
+  const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 60_000 });
   const { data: score } = useSWR<{ recentTrips: Trip[]; strategies: StrategyStat[] }>("/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 });
   const { data: cmd } = useSWR<Command>("/api/command", fetcher, { refreshInterval: 60_000 });
 

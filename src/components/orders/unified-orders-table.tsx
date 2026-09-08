@@ -75,7 +75,7 @@ function LiveView({ data, krk, trips, tripsLoading }: {
   const openNow = arm?.liveNow ?? [];
   // The arm endpoint answers with an empty list on ANY Kraken failure, so an empty "open now"
   // is only trustworthy when the status endpoint could reach Kraken at the same time.
-  const { data: st, error: stErr } = useSWR<{ connected: boolean; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 30000 });
+  const { data: st, error: stErr } = useSWR<{ connected: boolean; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 60_000 });
   const krakenDown = !!stErr || (st != null && (st.connected === false || !!st.error));
 
   return (
