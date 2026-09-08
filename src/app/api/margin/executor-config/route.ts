@@ -1,8 +1,9 @@
 import { prisma } from "@/lib/db";
 import {
   DEFAULT_MAX_LEVERAGE, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT,
-  effectiveMaxLeverage, leverageCapForEquity, liveNotional, liveRiskPct, parseLiveRiskBasePct,
+  effectiveMaxLeverage, leverageCapForEquity, liveContainerFor, liveNotional, liveRiskPct, parseLiveRiskBasePct,
 } from "@/lib/margin-live-risk";
+import { exitParams } from "@/lib/margin-shadow";
 
 // WHAT LIVE WOULD ACTUALLY DO, computed from the same config keys and the same helpers the
 // executor and guardian read — beside what PAPER does — so the admin page can show, per
@@ -41,15 +42,24 @@ export async function GET() {
       equityAt = run?.value ?? null;
     } catch { equity = null; }
 
+    // The container shown is the ARMED sleeve's (else selective's): live from its live
+    // container, paper from margin-shadow's exitParams — the same two tables the executor,
+    // guardian and paper evaluator read, so this card cannot drift from what would trade.
+    const liveSourcesList = (c.kraken_margin_live_sources ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    const shownSource = liveSourcesList[0] ?? "selective";
+    const lc = liveContainerFor(shownSource);
+    const pp = exitParams(shownSource, 2, 100);
     const live = {
+      source: shownSource,
+      hasContainer: lc != null,
       armed: c.kraken_margin_auto === "true" && c.kraken_margin_validate_only === "false",
       auto: c.kraken_margin_auto === "true",
       validateOnly: c.kraken_margin_validate_only !== "false",
       ddBreakerTripped: c.kraken_margin_disarmed_dd === "true",
       baseRiskPct: parseLiveRiskBasePct(num("kraken_margin_live_max_risk_pct", 3)),
-      stopPct: num("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT),
+      stopPct: lc?.stopPct ?? num("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT),
       trailPct: num("kraken_margin_trail_pct", 0),
-      maxHoldH: num("kraken_margin_max_hold_h", LIVE_MAX_HOLD_H),
+      maxHoldH: lc?.maxHoldH ?? num("kraken_margin_max_hold_h", LIVE_MAX_HOLD_H),
       perTradeCapUsd: num("kraken_margin_per_trade_usd", 0),
       maxLeverageCeiling: num("kraken_margin_max_leverage", DEFAULT_MAX_LEVERAGE),
       maxPositions: num("kraken_margin_max_positions", 3),
@@ -60,8 +70,9 @@ export async function GET() {
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),
       baseRiskPct: num("kraken_margin_max_risk_pct", 3),
-      stopPct: 3,          // selective's oneR (margin-shadow exitParams)
-      maxHoldH: 48,        // MAX_HOLD_H
+      source: shownSource,
+      stopPct: pp.oneR,        // exitParams at entry 100 → oneR is the stop in percent
+      maxHoldH: pp.maxHoldH,
       exit: "breakeven at +1R, then trail 1R behind the peak",
     };
     const eq = equity ?? 0;

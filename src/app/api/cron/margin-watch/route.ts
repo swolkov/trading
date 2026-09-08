@@ -11,7 +11,7 @@ import {
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, releaseCloseLock } from "@/lib/margin-executor";
-import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
+import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, bookMaxHoldH, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
 
@@ -817,8 +817,10 @@ export async function GET(request: Request) {
           } finally { await releaseCloseLock(lock); }
         };
 
-        // 1) TIME STOP (oldest tranche; only with a known open time).
-        if (Number.isFinite(oldestMs) && ageMs >= maxHoldH * 3600_000) {
+        // 1) TIME STOP (oldest tranche; only with a known open time). The hold is the
+        // sleeve's own (ledgered at entry — swing-lev 96h, tsmom 336h), else the global config.
+        const holdH = bookMaxHoldH(grp.map((g) => ownership.maxHoldHOf(g.ordertxid)), maxHoldH);
+        if (Number.isFinite(oldestMs) && ageMs >= holdH * 3600_000) {
           if (withhold) { errors.push(`time stop due on ${pairRaw} but orders read empty — confirming next run`); allCovered = false; continue; }
           const r = await closeBook("Time stop");
           if (r === "closed") continue;
