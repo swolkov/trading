@@ -70,7 +70,7 @@ export default function MarginCockpitPage() {
 
   const { data: universe } = useSWR<{ rows: UniverseRow[] }>("/api/margin/universe", fetcher, { refreshInterval: 300_000 });
   const { data: status, error: statusErr } = useSWR<StatusResp>(
-    "/api/margin/status", fetcher, { refreshInterval: 30_000 },
+    "/api/margin/status", fetcher, { refreshInterval: 60_000 },
   );
   // Kraken unreachable must read as UNREACHABLE, never as "no positions" — a flat-looking
   // panel during an outage is exactly the false-empty read the guardian audit warned about.

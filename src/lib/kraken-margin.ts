@@ -6,6 +6,7 @@
 // keys come only from env and the module is inert without them.
 import { prisma } from "@/lib/db";
 import { krakenPublic, krakenPrivate, krakenPair } from "@/lib/kraken";
+import { withReadRetry, displayCache } from "@/lib/kraken-read";
 
 // ---- multi-timeframe OHLC ----
 // Kraken's native intervals (minutes). 3m is aggregated from 1m because Kraken has no
@@ -67,7 +68,7 @@ export interface KrakenMarginHealth {
 }
 
 export async function getKrakenMarginHealth(): Promise<KrakenMarginHealth> {
-  const res = await krakenPrivate("TradeBalance", { asset: "ZUSD" });
+  const res = await withReadRetry(() => krakenPrivate("TradeBalance", { asset: "ZUSD" }));
   const f = (k: string) => parseFloat((res[k] as string) ?? "0") || 0;
   // A degraded Kraken 200 can return a partial body. Coercing every missing field to 0
   // makes "we could not read your margin" look identical to "you hold nothing" — and the
@@ -109,7 +110,7 @@ export interface KrakenMarginPosition {
 }
 
 export async function getKrakenMarginPositions(): Promise<KrakenMarginPosition[]> {
-  const res = await krakenPrivate("OpenPositions", { docalcs: "true" });
+  const res = await withReadRetry(() => krakenPrivate("OpenPositions", { docalcs: "true" }));
   const out: KrakenMarginPosition[] = [];
   for (const [id, p0] of Object.entries(res)) {
     const p = p0 as Record<string, string | number | undefined>;
@@ -496,3 +497,32 @@ export async function listRoundTrips(): Promise<RoundTrip[]> {
   const rows = await loadMarginFills();
   return reconstructTrips(rows).trips;
 }
+
+// ONE snapshot for every DISPLAY route (status, arm). Two layers: a per-instance memo
+// (concurrent callers share one read) and a copy in AgentConfig, so a COLD instance — the
+// common case on serverless, and where the 00:50 / 02:30 UTC Sep 8 collisions came from —
+// reuses a read younger than DISPLAY_TTL_MS instead of spending two private calls. The
+// guardian and the executor never read through this; they need the fresh read.
+export const DISPLAY_TTL_MS = 20_000;
+const DISPLAY_KEY = "margin_display_snapshot";
+export interface MarginDisplaySnapshot { health: KrakenMarginHealth; positions: KrakenMarginPosition[]; readAt: string }
+async function readDisplaySnapshotDb(): Promise<MarginDisplaySnapshot | null> {
+  try {
+    const raw = (await prisma.agentConfig.findUnique({ where: { key: DISPLAY_KEY } }))?.value;
+    if (!raw) return null;
+    const s = JSON.parse(raw) as MarginDisplaySnapshot;
+    if (!s.readAt || Date.now() - new Date(s.readAt).getTime() >= DISPLAY_TTL_MS) return null;
+    if (!s.health || !Array.isArray(s.positions)) return null;
+    return s;
+  } catch { return null; }
+}
+export const marginDisplaySnapshot = displayCache(async (): Promise<MarginDisplaySnapshot> => {
+  const shared = await readDisplaySnapshotDb();
+  if (shared) return shared;
+  // Sequenced, not Promise.all, so the two nonces are strictly ordered.
+  const health = await getKrakenMarginHealth();
+  const positions = await getKrakenMarginPositions();
+  const snap: MarginDisplaySnapshot = { health, positions, readAt: new Date().toISOString() };
+  prisma.agentConfig.upsert({ where: { key: DISPLAY_KEY }, update: { value: JSON.stringify(snap) }, create: { key: DISPLAY_KEY, value: JSON.stringify(snap) } }).catch(() => {});
+  return snap;
+}, { ttlMs: DISPLAY_TTL_MS, graceMs: 90_000 });

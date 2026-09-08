@@ -79,7 +79,7 @@ function GateRow({ label, value, target, ok, hint }: { label: string; value: str
 }
 
 function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean }) {
-  const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 15_000 });
+  const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 30_000 });
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);

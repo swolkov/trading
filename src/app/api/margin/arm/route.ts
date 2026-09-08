@@ -3,7 +3,7 @@ import { sendNotification } from "@/lib/notifications";
 import { readRoundTrip, roundTripVerdict } from "@/lib/margin-round-trip";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 import { STAGE3_KEY, DEMOTION_KEY, readStage3, readDemotion, loadLiveFills, divergenceSummary } from "@/lib/margin-synthesis";
-import { getKrakenMarginPositions } from "@/lib/kraken-margin";
+import { marginDisplaySnapshot } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
 import { emptyReadIsUnconfirmed } from "@/lib/margin-live-risk";
@@ -65,7 +65,8 @@ async function status() {
   let liveNow: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null = null;
   try {
     if (krakenConfigured()) {
-      const [positions, own] = await Promise.all([getKrakenMarginPositions(), botOwnership()]);
+      const [snap, own] = await Promise.all([marginDisplaySnapshot(), botOwnership()]);
+      const positions = snap.value.positions;
       liveNow = emptyReadIsUnconfirmed(positions.length, managedCount)
         ? null
         : positions.filter((p) => own.isOurs(p)).map((p) => ({ pair: p.pair, side: p.side, vol: p.vol, entry: p.entryPrice, net: p.net, openedAt: p.openedAt }));

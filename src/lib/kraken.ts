@@ -2,6 +2,7 @@
 // Credentials come ONLY from env (KRAKEN_API_KEY / KRAKEN_API_SECRET) set in the Vercel dashboard —
 // never from chat/DB. If they're absent the client is safely inert (krakenConfigured() === false).
 // Used by the 50-day trend follower (kraken-agent.ts). Spot, long-only, no leverage.
+import { withReadRetry } from "@/lib/kraken-read";
 import crypto from "crypto";
 
 const API_URL = "https://api.kraken.com";
@@ -428,7 +429,7 @@ export type OpenOrder = {
 };
 
 export async function krakenOpenOrders(): Promise<OpenOrder[]> {
-  const res = await krakenPrivate("OpenOrders");
+  const res = await withReadRetry(() => krakenPrivate("OpenOrders"));
   const open = (res.open ?? {}) as Record<string, {
     userref?: number; opentm?: number; vol?: string; vol_exec?: string;
     descr?: { pair?: string; ordertype?: string; type?: string; price?: string };
