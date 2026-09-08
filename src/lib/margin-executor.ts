@@ -859,7 +859,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const container = liveContainerFor(alert.source);
     const stopPct = clampLiveStopFrac(container?.stopPct ?? await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT), leverage);
     stopPctSent = stopPct;
-    const trailPct = Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
+    // A sleeve's container DEFINES its exit (fixed stop, guardian-managed); the global
+    // trailing-stop knob applies only to sources without a container. Otherwise arming
+    // swing-lev with kraken_margin_trail_pct set would send a trailing stop while the
+    // ledger claims the 4% fixed one.
+    const trailPct = container ? 0 : Math.min(50, Math.max(0, await cfgNum("kraken_margin_trail_pct", 0)));
     const makerEntries = container?.makerEntries ?? ((await cfg("kraken_margin_maker_entries")) !== "false");
     ledgerMeta = { maxHoldH: container?.maxHoldH, source: alert.source ?? undefined };
     const meta = await getPairMeta(pair);
@@ -1038,7 +1042,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
               && parseFloat(o.vol_exec ?? "0") > 0)
             .map(([txid]) => txid);
           const ledgered: string[] = [];
-          for (const txid of recovered) { if (await recordBotEntry(txid, pair, { stopFrac: stopPctSent || undefined })) ledgered.push(txid); }
+          for (const txid of recovered) { if (await recordBotEntry(txid, pair, { stopFrac: stopPctSent || undefined, ...ledgerMeta })) ledgered.push(txid); }
           recovered = ledgered;
           if (recovered.length && dayStateRef) await bumpDayState(dayStateRef);   // it counts as an entry
         } catch { recovered = []; }

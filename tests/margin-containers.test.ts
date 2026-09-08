@@ -16,7 +16,7 @@ test("every live container equals its paper container (stop % and hold hours)", 
 });
 
 test("sleeves whose paper EXIT the guardian does not mirror have no live container and cannot be armed", () => {
-  for (const s of ["selective-tight", "selective-launch", "selective-x5", "swing-spot", "scanner", "fast-tight", "sweep-fade", "selective-swing", "nonsense"]) assert.equal(liveContainerFor(s), null, s);
+  for (const s of ["selective-tight", "selective-launch", "selective-x5", "swing-spot", "scanner", "fast-tight", "sweep-fade", "selective-swing", "nonsense", "constructor", "__proto__", "toString"]) assert.equal(liveContainerFor(s), null, s);
   for (const s of RETIRED_AUTO_SOURCES) assert.equal(liveContainerFor(s), null, `retired ${s}`);
   assert.equal(liveContainerFor(null), null);
   assert.equal(liveContainerFor(""), null);
@@ -30,10 +30,12 @@ test("the fast family shares one container with market entries; the slow sleeves
   assert.deepEqual(liveContainerFor("tsmom"), { stopPct: 8, maxHoldH: 336, makerEntries: null });
 });
 
-test("a book's time stop is the shortest hold of its tranches, else the global config", () => {
+test("a book's time stop is the shortest hold of its tranches; a tranche with no ledgered hold counts as the global", () => {
   assert.equal(bookMaxHoldH([96, null, 48], 48), 48);
   assert.equal(bookMaxHoldH([96], 48), 96);
   assert.equal(bookMaxHoldH([null, undefined], 48), 48, "pre-container ledger entries keep today's behaviour");
+  assert.equal(bookMaxHoldH([null, 96], 48), 48, "a legacy 48h position stacked with a new 96h one keeps its 48h (Codex R1)");
   assert.equal(bookMaxHoldH([], 72), 72);
-  assert.equal(bookMaxHoldH([0, -5, NaN, 336], 48), 336, "junk is ignored");
+  assert.equal(bookMaxHoldH([0, -5, NaN, 336], 48), 48, "junk counts as the global, never as a longer hold");
+  assert.equal(bookMaxHoldH([336], 48), 336);
 });

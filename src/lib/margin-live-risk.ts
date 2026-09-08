@@ -130,12 +130,19 @@ export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
 export function liveContainerFor(source: string | null | undefined): LiveContainer | null {
   if (!source) return null;
   if (source.startsWith("tv:")) return FAST;
-  return LIVE_CONTAINERS[source] ?? null;
+  // Own properties only: "constructor" / "__proto__" pass the arm route's source regex and
+  // would otherwise resolve to Object.prototype members and read as armable.
+  return Object.hasOwn(LIVE_CONTAINERS, source) ? LIVE_CONTAINERS[source] : null;
 }
-/** A book's time stop = the shortest hold any of its tranches was entered with; fallback = the global config. */
+/**
+ * A book's time stop = the shortest hold across its tranches, where a tranche with no
+ * ledgered hold (every position entered before Sep 8 2026) counts as the global config.
+ * So a legacy 48h position stacked with a new 96h one keeps its 48h — a tranche can never
+ * be held LONGER than its own rule because a neighbour arrived with a longer one.
+ */
 export function bookMaxHoldH(hours: (number | null | undefined)[], fallback: number): number {
-  const known = hours.filter((h): h is number => h != null && Number.isFinite(h) && h > 0);
-  return known.length ? Math.min(...known) : fallback;
+  const each = hours.map((h) => (h != null && Number.isFinite(h) && h > 0 ? h : fallback));
+  return each.length ? Math.min(...each) : fallback;
 }
 export const LIVE_STOP_RATCHET_MIN_FRAC = 0.0005;   // move a resting stop only for ≥0.05% of price
 
