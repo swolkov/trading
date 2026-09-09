@@ -112,6 +112,16 @@ export async function GET(request: Request) {
     );
   }
 
+  // PERSIST THE RUN, refusals included. Without this the record only ever shows what was
+  // BOUGHT — and the single most important output of this experiment is what the $1k sleeve
+  // could NOT buy. A refusal that exists only in an HTTP response nobody reads is not a
+  // finding, it is a rumour.
+  await prisma.agentConfig.upsert({
+    where: { key: "options_scan_last_result" },
+    update: { value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused }) },
+    create: { key: "options_scan_last_result", value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused }) },
+  }).catch(() => {});
+
   const sleeves = await optionsSleeveBreakdown().catch(() => []);
   return Response.json({
     ok: true, simVersion: OPTIONS_SIM_VERSION, scanned,

@@ -8,11 +8,14 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const [sleeves, trades, lastRun] = await Promise.all([
+  const [sleeves, trades, lastRun, lastResultRaw] = await Promise.all([
     optionsSleeveBreakdown().catch(() => []),
     recentOptionPaperTrades(100).catch(() => []),
     prisma.agentConfig.findUnique({ where: { key: "options_scan_last_run" } }).then((r) => r?.value ?? null).catch(() => null),
+    prisma.agentConfig.findUnique({ where: { key: "options_scan_last_result" } }).then((r) => r?.value ?? null).catch(() => null),
   ]);
+  let lastResult: unknown = null;
+  try { lastResult = lastResultRaw ? JSON.parse(lastResultRaw) : null; } catch { lastResult = null; }
   return Response.json({
     simVersion: OPTIONS_SIM_VERSION,
     rules: {
@@ -21,6 +24,6 @@ export async function GET() {
       minDelta: MIN_DELTA, maxDelta: MAX_DELTA,
     },
     universe: OPTIONS_UNIVERSE, excluded: CRYPTO_PROXY_EXCLUDED,
-    sleeves, trades, lastRun,
+    sleeves, trades, lastRun, lastResult,
   });
 }

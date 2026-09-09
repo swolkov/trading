@@ -17,7 +17,7 @@
 import { prisma } from "@/lib/db";
 import { getDailyBars, getOptionQuotes, type OptionQuote } from "@/lib/alpaca-options";
 import {
-  OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
+  OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCES, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
   type BookState, type OptionSource,
   canExitAt, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf, isExitSignal, optionsVerdict, tStatOf,
 } from "@/lib/options-paper-model";
@@ -303,22 +303,29 @@ export async function optionsSleeveBreakdown(): Promise<OptionsSleeveStat[]> {
        count(*) FILTER (WHERE time >= date_trunc('month', now()))::bigint AS month
      FROM options_paper_trades WHERE ${OPTIONS_COHORT_SQL} GROUP BY source`,
   );
-  return rows.map((r) => {
-    const resolved = Number(r.resolved);
-    const net = r.total || 0;
-    const t = tStatOf(r.meanpnl, r.stdpnl, resolved);
+  const byKey = new Map(rows.map((r) => [r.source, r]));
+  // ALWAYS return a card for EVERY sleeve, including one that has never traded.
+  // `GROUP BY source` only emits rows that exist, so the $1k sleeve — which by design may
+  // go long stretches unable to afford any contract — would vanish from the page entirely,
+  // taking the whole point of the two-sleeve comparison with it. An empty sleeve is a
+  // RESULT ("nothing was affordable"), not an absence, and has to be visible as one.
+  return OPTION_SOURCES.map((source) => {
+    const r = byKey.get(source);
+    const resolved = Number(r?.resolved ?? 0);
+    const net = r?.total || 0;
+    const t = tStatOf(r?.meanpnl ?? null, r?.stdpnl ?? null, resolved);
     return {
-      key: r.source,
-      label: OPTION_SOURCE_LABELS[r.source as OptionSource] ?? r.source,
-      refEquity: r.refequity || OPTION_SOURCE_EQUITY[r.source as OptionSource] || 0,
-      resolved, wins: Number(r.wins), hitRate: resolved > 0 ? Number(r.wins) / resolved : null,
+      key: source,
+      label: OPTION_SOURCE_LABELS[source],
+      refEquity: r?.refequity || OPTION_SOURCE_EQUITY[source],
+      resolved, wins: Number(r?.wins ?? 0), hitRate: resolved > 0 ? Number(r?.wins ?? 0) / resolved : null,
       expectancy: resolved > 0 ? net / resolved : null, totalPnl: net,
-      open: Number(r.open), openPremium: r.openprem || 0, openMark: r.openmark || 0,
-      voided: Number(r.voided), days: Number(r.days), tStat: t,
-      verdict: optionsVerdict(resolved, net, t, Number(r.days)),
-      avgSpreadPct: r.avgspread, entriesThisMonth: Number(r.month),
+      open: Number(r?.open ?? 0), openPremium: r?.openprem || 0, openMark: r?.openmark || 0,
+      voided: Number(r?.voided ?? 0), days: Number(r?.days ?? 0), tStat: t,
+      verdict: optionsVerdict(resolved, net, t, Number(r?.days ?? 0)),
+      avgSpreadPct: r?.avgspread ?? null, entriesThisMonth: Number(r?.month ?? 0),
     };
-  }).sort((a, b) => a.key.localeCompare(b.key));
+  });
 }
 
 export interface OptionPaperRow {
