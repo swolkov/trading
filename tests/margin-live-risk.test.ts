@@ -13,6 +13,9 @@ import {
   failClosedOnEmptyPositions,
   DAILY_LOSS_CAP_FLOOR_USD,
   dailyLossCapUsd,
+  CUSHION_URGENT_AT,
+  CUSHION_WARN_AT,
+  STOP_CUSHION_FRACTION,
   entryKeepsMarginLevel,
   leverageCapForEquity,
   leverageThatFitsStop,
@@ -426,4 +429,29 @@ test("with the ladder retired, the STOP and the VENUE — not equity — cap lev
   // And the stop is never shrunk to buy leverage — that was the container-drift bug.
   assert.equal(clampLiveStopFrac(4, applied(20, 4)) * 100, 4);
   assert.equal(clampLiveStopFrac(8, applied(20, 8)) * 100, 8);
+});
+
+test("the guardian's cushion alarm must sit ABOVE where a correct stop lands", () => {
+  // leverageThatFitsStop picks leverage so the container's stop lands at exactly
+  // STOP_CUSHION_FRACTION of the liquidation cushion. Any alarm threshold below that fires
+  // on a position walking to its own stop — which is what the old 0.5/0.75 pair did on
+  // EVERY live container once leverage started being fitted to the stop.
+  assert.ok(CUSHION_WARN_AT > STOP_CUSHION_FRACTION, "warn must be past the stop");
+  assert.ok(CUSHION_URGENT_AT > CUSHION_WARN_AT, "urgent must be past warn");
+  assert.ok(CUSHION_URGENT_AT < 1, "and still ahead of liquidation itself");
+  // Prove it for every live container at the leverage it will actually run at.
+  for (const [source, c] of Object.entries(LIVE_CONTAINERS)) {
+    const lev = leverageThatFitsStop(c.stopPct, LEV_CAP_AT_20K);
+    const cushion = 0.6 / lev;
+    const stop = clampLiveStopFrac(c.stopPct, lev);
+    // `used` when price has moved exactly the stop distance:
+    const usedAtStop = 1 - (cushion - stop) / cushion;
+    assert.ok(usedAtStop <= CUSHION_WARN_AT + 1e-9,
+      `${source}: price at its ${c.stopPct}% stop consumes ${(usedAtStop * 100).toFixed(0)}% of the cushion, which must not already have warned`);
+  }
+  // And the alarm still fires when the stop genuinely failed and price ran past it.
+  const lev = leverageThatFitsStop(4, LEV_CAP_AT_20K);       // swing-lev: 9x, cushion 6.67%
+  const cushion = 0.6 / lev;
+  const usedAt6pct = 1 - (cushion - 0.06) / cushion;          // a 6% move, well past the 4% stop
+  assert.ok(usedAt6pct >= CUSHION_URGENT_AT, `a 6% move past a 4% stop must page urgent (used ${(usedAt6pct * 100).toFixed(0)}%)`);
 });

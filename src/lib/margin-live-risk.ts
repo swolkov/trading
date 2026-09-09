@@ -335,11 +335,39 @@ export function managedStopTarget(side: "long" | "short", entry: number, peak: n
  * so it is held inside it: 18% at 2×, 12% at 3×, 7.2% at 5×. Floor 0.1%. The 3% default
  * survives every rung the ladder allows. Returns a FRACTION.
  */
+/**
+ * The furthest a stop may sit, as a fraction of the liquidation cushion. A stop beyond this
+ * could never fire — the position would liquidate first. Named because the guardian's
+ * cushion alarm has to be read against it: a correctly placed stop always sits at or inside
+ * STOP_CUSHION_FRACTION, so any alarm threshold BELOW it fires on healthy positions.
+ */
+export const STOP_CUSHION_FRACTION = 0.6;
+
 export function clampLiveStopFrac(cfgPct: number, leverage: number): number {
   const liqDistance = 0.6 / Math.max(1, leverage);
   const raw = Number.isFinite(cfgPct) && cfgPct > 0 ? cfgPct / 100 : LIVE_STOP_DEFAULT_PCT / 100;
-  return Math.min(0.5, 0.6 * liqDistance, Math.max(0.001, raw));
+  return Math.min(0.5, STOP_CUSHION_FRACTION * liqDistance, Math.max(0.001, raw));
 }
+
+/**
+ * Cushion-consumption thresholds for the guardian's liquidation alarm.
+ *
+ * ⚠️ These MUST sit above STOP_CUSHION_FRACTION. Since 2026-09-09 leverage is chosen by
+ * leverageThatFitsStop so that the container's stop lands exactly at 0.6 × the cushion —
+ * which means the old 0.5 warning threshold fired BEFORE the stop on every live container,
+ * at every fitted rung:
+ *
+ *   selective 3% @12×  cushion 5.0%  warned at 2.5%  stop at 3%
+ *   swing-lev 4% @9×   cushion 6.7%  warned at 3.3%  stop at 4%
+ *   tsmom     8% @4×   cushion 15%   warned at 7.5%  stop at 8%
+ *
+ * Every ordinary drawdown toward its own stop would have paged margin_urgent with
+ * liquidation language, which is how an urgent lane gets tuned out. Past 0.6 the price is
+ * beyond where a correctly placed stop should have fired, so the alarm now means what it
+ * says: THE STOP DID NOT WORK.
+ */
+export const CUSHION_WARN_AT = 0.7;
+export const CUSHION_URGENT_AT = 0.85;
 
 /**
  * A stop order must rest on the safe side of the CURRENT price by a real margin, AFTER
