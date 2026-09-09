@@ -822,6 +822,11 @@ export interface PaperTradeRow {
   exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
   simVersion: string;   // measurement cohort — the log shows all cohorts, labeled
   usTradeable: boolean; // false = a pair the live book cannot margin-trade; logged, not counted
+  // How long this sleeve is ALLOWED to hold, and how long this row has. Without them an open
+  // row is just "open", and a swing-spot position 8 days into a 14-DAY hold looks identical to
+  // a swing-lev one 8 days past its 96-hour limit — one is working, the other would be a bug.
+  maxHoldH: number;
+  ageH: number;
 }
 export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
   await ensureShadowColumns();
@@ -858,6 +863,8 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     reason: r.shadow_reason,
     simVersion: r.sim_version ?? SIM_VERSION,
     usTradeable: isUsMarginSymbol(r.symbol),
+    maxHoldH: exitParams(r.source, Math.max(1, r.leverage ?? 1), 1).maxHoldH,
+    ageH: (Date.now() - r.time.getTime()) / 3_600_000,
   }));
 }
 
