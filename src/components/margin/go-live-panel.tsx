@@ -7,6 +7,9 @@ import { Chip, type ChipTone, verdictTone } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Note, Panel, PanelBody } from "@/components/ui/panel";
 import { ago, coinOf, pnl2, splitLogLine, timeOnly, usd, usd0, when } from "@/lib/format";
+// The per-trade risk ceiling, read from the source of truth the executor clamps with — so
+// this page can never advertise a limit the code no longer enforces.
+import { LIVE_RISK_CEILING_PCT } from "@/lib/margin-live-risk";
 
 // ── The go-live panel: three steps a founder can read at a glance ──────────────────────────
 // 1 plumbing ($20 round trip) · 2 paper gate (the live candidate's record) · 3 arm.
@@ -387,11 +390,19 @@ function LiveMirrorCard() {
   const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
   const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 60_000 });
   const money0 = (n: number | null) => (n == null ? "—" : usd0(Math.round(n)));
-  // Stage 3 runs the first live trades at half of paper's base risk ON PURPOSE. That is the
-  // only row allowed to differ; showing it as a red mismatch would read as a bug.
-  const stage3Half = arm?.stage3?.status === "running" && cfg != null && !cfg.aligned.risk
-    && Math.abs(cfg.live.baseRiskPct * 2 - cfg.paper.baseRiskPct) < 1e-9;
-  const mirrored = cfg != null && (cfg.allAligned || (stage3Half && cfg.aligned.stop && cfg.aligned.hold && cfg.aligned.sizing && cfg.aligned.exit));
+  // WHAT "MIRRORS PAPER" ACTUALLY MEANS. The rule has to match — the stop, the hold, the
+  // managed exit, and sizing by risk rather than a fixed dollar cap. The risk PERCENTAGE is a
+  // separate dial and is allowed to differ on purpose: stage 3 runs live at half paper's base,
+  // and from 2026-09-09 live runs ABOVE it (base 4% against paper's 3%) after the risk sweep.
+  // Neither is drift, and flagging them red would train the eye to ignore a red chip that one
+  // day means something. So the rule rows decide the colour, and the size difference is shown
+  // as the multiple it is — which is also exactly the factor paper dollars are scaled by.
+  const ruleMatches = cfg != null && cfg.aligned.stop && cfg.aligned.hold && cfg.aligned.sizing && cfg.aligned.exit;
+  const sizeFactor = cfg != null && cfg.paper.baseRiskPct > 0 ? cfg.live.baseRiskPct / cfg.paper.baseRiskPct : 1;
+  const mirrored = ruleMatches;
+  const sizeLabel = cfg == null || cfg.aligned.risk
+    ? "live = paper"
+    : `live = paper × ${sizeFactor.toFixed(2)} size${arm?.stage3?.status === "running" && sizeFactor < 1 ? " · stage 3" : ""}`;
   return (
     <Panel className="bg-background/40">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
@@ -401,7 +412,7 @@ function LiveMirrorCard() {
             <Chip tone={cfg.live.armed ? "red" : "grey"} dot={cfg.live.armed}>{cfg.live.armed ? "armed — real orders" : cfg.live.auto ? "validate-only" : "disarmed"}</Chip>
             <Chip tone="grey">sources: {cfg.live.liveSources?.length ? cfg.live.liveSources.join(", ") : "none"}</Chip>
             {cfg.live.ddBreakerTripped && <Chip tone="red">drawdown breaker tripped</Chip>}
-            <Chip tone={mirrored ? "green" : "red"}>{cfg.allAligned ? "live = paper" : mirrored ? "live = paper · stage 3 half size" : "live ≠ paper"}</Chip>
+            <Chip tone={mirrored ? "green" : "red"}>{mirrored ? sizeLabel : "live ≠ paper — THE RULE DIFFERS"}</Chip>
           </div>
         )}
       </div>
@@ -417,7 +428,10 @@ function LiveMirrorCard() {
               </tr>
             </thead>
             <tbody>
-              <Row><Td>Risk per trade (base · high conviction · ceiling)</Td><Td num>{cfg.paper.baseRiskPct}% · {Math.min(6, cfg.paper.baseRiskPct * 2)}% · 6%</Td><Td num>{cfg.live.baseRiskPct}% · {Math.min(6, cfg.live.baseRiskPct * 2)}% · 6%</Td><Td num>{stage3Half ? <Chip tone="amber" title="Stage 3: the first 20 live trades run at half of paper's base risk, then graduate to paper's rule automatically">½ · stage 3</Chip> : <span className="inline-flex justify-end"><OkMark ok={cfg.aligned.risk} /></span>}</Td></Row>
+              {/* The ceiling is read from the constant, never typed in: it moved 6 → 8 on
+                  2026-09-09 and a hardcoded "6%" here would have quietly lied about the
+                  limit that actually clamps every order. */}
+              <Row><Td>Risk per trade (base · high conviction · ceiling)</Td><Td num>{cfg.paper.baseRiskPct}% · {Math.min(LIVE_RISK_CEILING_PCT, cfg.paper.baseRiskPct * 2)}% · {LIVE_RISK_CEILING_PCT}%</Td><Td num>{cfg.live.baseRiskPct}% · {Math.min(LIVE_RISK_CEILING_PCT, cfg.live.baseRiskPct * 2)}% · {LIVE_RISK_CEILING_PCT}%</Td><Td num>{cfg.aligned.risk ? <span className="inline-flex justify-end"><OkMark ok /></span> : <Chip tone="amber" title={sizeFactor < 1 ? "Live is deliberately smaller than paper (stage 3 runs the first live trades at half paper's base, then graduates automatically)." : "Live is deliberately LARGER than paper, set 2026-09-09 after the risk sweep found 8% per trade is the last rung before the desk's return goes negative. The rule itself matches; only the size dial differs, and paper dollars are scaled by this factor."}>×{sizeFactor.toFixed(2)}</Chip>}</Td></Row>
               <Row><Td>Initial stop</Td><Td num>{cfg.paper.stopPct}%</Td><Td num>{cfg.live.trailPct > 0 ? `Kraken trailing ${cfg.live.trailPct}%` : `${cfg.live.stopPct}%`}</Td><Td num><span className="inline-flex justify-end"><OkMark ok={cfg.aligned.stop} /></span></Td></Row>
               <Row><Td>Managed exit</Td><Td num className="whitespace-normal">{cfg.paper.exit}</Td><Td num className="whitespace-normal">{cfg.live.trailPct > 0 ? "Kraken trailing-stop (different)" : "guardian ratchets the resting stop the same way"}</Td><Td num><span className="inline-flex justify-end"><OkMark ok={cfg.aligned.exit} /></span></Td></Row>
               <Row><Td>Time stop</Td><Td num>{cfg.paper.maxHoldH}h</Td><Td num>{cfg.live.maxHoldH}h</Td><Td num><span className="inline-flex justify-end"><OkMark ok={cfg.aligned.hold} /></span></Td></Row>
