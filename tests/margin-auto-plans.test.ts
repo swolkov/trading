@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RETIRED_AUTO_SOURCES, autoShadowPlans } from "../src/lib/margin-auto-plans";
+import { RETIRED_AUTO_SOURCES, autoShadowPlans, SWING_TFS, SWING_LEV_TFS } from "../src/lib/margin-auto-plans";
 import { scoreConviction, type ScanSignal } from "../src/lib/margin-scanner";
 
 const high = { tier: "high", factors: ["3 timeframes breaking", "volume confirms", "momentum aligned"] };
@@ -43,7 +43,10 @@ test("stretched highs are skipped — buying into the RSI extreme was a coin-fli
 test("1h/4h/1d high longs are paused — 3%/48h selective is a 5m/15m container", () => {
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5), []);
   assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5), [{ source: "swing-lev", lev: 5 }, { source: "swing-spot", lev: 1 }, { source: "swing-wide", lev: 5 }], "4h high breakouts feed the slow family (reactivated Sep 8) plus the wide-trail twin (Sep 9)");
-  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 5), [{ source: "swing-lev", lev: 5 }, { source: "swing-spot", lev: 1 }, { source: "swing-wide", lev: 5 }]);
+  // 1d feeds the SPOT sleeve only. The leveraged container was measured 4h-only on 2026-09-09
+  // (4h t=2.72 vs 1d t=-1.12, Welch t=2.34 on the difference); swing-spot's 6%/14d container
+  // was NOT tested, so it keeps both timeframes rather than inheriting an untested cut.
+  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 5), [{ source: "swing-spot", lev: 1 }]);
 });
 
 test("the paying paper path: high 5m/15m long, not stretched → selective plus its ×5-size twin", () => {
@@ -62,7 +65,7 @@ test("the ×5-size twin rides the same signal, never on its own, and sizes at 5�
 
 test("the slow family (reactivated Sep 8) opens ONLY on high-conviction 4h/1d breakouts, longs, and never the fast twins", () => {
   assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide"]);
-  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 8), [{ source: "swing-lev", lev: 8 }, { source: "swing-spot", lev: 1 }, { source: "swing-wide", lev: 8 }], "spot leg is always 1×; the wide twin rides at the plan leverage");
+  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 8), [{ source: "swing-spot", lev: 1 }], "1d is spot-only; the leveraged container is 4h-only");
   assert.deepEqual(autoShadowPlans("breakout", "4h", highStretched, 5).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide"], "the Sep 3–4 rule had no stretched filter — kept, so the record stays continuous");
   assert.deepEqual(autoShadowPlans("breakout", "4h", med, 5), []);
   assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }), [], "longs only");
@@ -89,4 +92,23 @@ test("real scorer: 3-TF + volume is high and opens; adding RSI stretch still hig
   assert.equal(stretched.tier, "high");
   assert.ok(stretched.factors.some((f) => /stretched/i.test(f)));
   assert.deepEqual(autoShadowPlans(br.kind, br.timeframe, stretched, 5), []);
+});
+
+test("the leveraged swing container is 4h-only; the spot container keeps both timeframes", () => {
+  // Measured, not assumed (scripts/backtest-variants.ts, 2026-09-09): replaying swing-lev's
+  // own 4%/96h container over every available Kraken bar, one open trade per coin —
+  //   4h  88 trades  avg +$152  t= 2.72   95% CI  +$42 … +$262
+  //   1d  31 trades  avg −$107  t=-1.12   95% CI −$295 … +$81
+  //   Welch on the difference: +$259/trade, t=2.34, 95% CI +$42 … +$477  ← the legs differ
+  // 1d is NOT significantly negative on its own; what is established is that it is
+  // significantly WORSE than 4h in this container, and it dragged the combined record from
+  // t=2.72 to t=1.72. swing-spot's container was never measured, so it is deliberately
+  // untouched — the asymmetry below is the whole point of this test.
+  const high = { tier: "high", factors: ["3 timeframes breaking", "volume confirms", "momentum aligned"] };
+  const at = (tf: string) => autoShadowPlans("breakout", tf, high, 5).map((p) => p.source);
+  assert.deepEqual(at("4h"), ["swing-lev", "swing-spot", "swing-wide"]);
+  assert.deepEqual(at("1d"), ["swing-spot"]);
+  assert.deepEqual(at("1h"), [], "1h still opens nothing");
+  assert.ok(SWING_LEV_TFS.has("4h") && !SWING_LEV_TFS.has("1d"));
+  assert.ok(SWING_TFS.has("4h") && SWING_TFS.has("1d"), "the spot family still spans both");
 });

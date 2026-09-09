@@ -57,6 +57,28 @@ export const SHORT_SOURCE = "selective-short";
 // Entry rule = the Sep 3–4 rule they were paused under, longs only: high-conviction 4h/1d
 // BREAKOUTS. Paper only; judged like every sleeve.
 export const SWING_TFS = new Set(["4h", "1d"]);
+/**
+ * THE LEVERAGED SLEEVE TAKES 4h ONLY (2026-09-09). Measured, not assumed.
+ *
+ * `scripts/backtest-variants.ts` replayed swing-lev's own container over every Kraken 4h and
+ * 1d bar available (one open trade per coin, paper's exact detector, conviction scorer, exit
+ * engine, chase and fees):
+ *
+ *   4h leg   88 trades   avg +$152   t = 2.72   95% CI  +$42 … +$262
+ *   1d leg   31 trades   avg −$107   t = −1.12  95% CI −$295 … +$81
+ *   Welch test on the difference: +$259/trade, t = 2.34, 95% CI +$42 … +$477
+ *
+ * The claim is NOT "1d loses money" — on its own it is not significantly negative. The claim
+ * is that the two legs are significantly DIFFERENT in the container swing-lev runs, and the
+ * 1d leg drags the combined record from t = 2.72 to t = 1.72. A separate two-year daily
+ * sample (110 trades, med+ conviction, −$1,992, 6/18 months positive) points the same way
+ * without reaching significance itself. Two samples, same sign, one significant difference.
+ *
+ * ⚠️ SCOPE. This was measured in the 4%/96h container ONLY. swing-spot runs a different one
+ * (6% stop, 14-day hold) and was NOT tested, so it keeps both timeframes — cutting it there
+ * would be exactly the assumption this comment exists to avoid.
+ */
+export const SWING_LEV_TFS = new Set(["4h"]);
 export const MAJORS = new Set(["BTC", "ETH", "SOL"]);
 
 export type AutoPlan = { source: string; lev: number };
@@ -85,8 +107,16 @@ export function autoShadowPlans(
   if (conv.tier !== "high") return [];
   const capped = Math.max(2, Math.min(20, lev));
   // Higher-timeframe BREAKOUTS feed the slow family only (the Sep 3–4 rule: high, 4h/1d, long).
+  // The LEVERAGED container is 4h-only from 2026-09-09 — measured, see SWING_LEV_TFS. Its
+  // wide-trail twin shares that container, so it follows. swing-spot's container was not
+  // tested and keeps both timeframes.
   if (kind === "breakout" && SWING_TFS.has(timeframe)) {
-    return [{ source: "swing-lev", lev: capped }, { source: "swing-spot", lev: 1 }, { source: "swing-wide", lev: capped }];
+    const plans: AutoPlan[] = [{ source: "swing-spot", lev: 1 }];
+    if (SWING_LEV_TFS.has(timeframe)) {
+      plans.unshift({ source: "swing-lev", lev: capped });
+      plans.push({ source: "swing-wide", lev: capped });
+    }
+    return plans;
   }
   if (!PAYING_TFS.has(timeframe)) return [];
   if (isStretched(conv.factors)) return [];
