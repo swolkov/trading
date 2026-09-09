@@ -61,12 +61,35 @@ export function liveRiskFraction(basePct: number, tier: string | null | undefine
  * That is the trade Spencer accepted; the stop, the daily loss cap and the 15%
  * drawdown breaker are all unchanged and still bound the downside.
  */
-export const LEV_CAP_AT_5K = 5;
-export const LEV_CAP_AT_10K = 5;
-export const LEV_CAP_AT_20K = 5;
+/**
+ * ⚠️ THE EQUITY LADDER IS RETIRED (2026-09-09). All rungs are the venue maximum; three
+ * better-founded limits do the capping instead, and every one of them is measured rather
+ * than guessed:
+ *
+ *   1. usRetailMaxLeverage — Kraken's OWN per-pair cap. BTC 20×, the majors (ETH SOL XRP
+ *      ADA AVAX DOGE LINK LTC SUI) 10×, mid-caps 5×, PENGU/NEAR/RENDER 3×, ALGO/XLM 2×.
+ *   2. leverageThatFitsStop — the container's stop must sit INSIDE the liquidation
+ *      cushion. Kraken liquidates near a 0.6/leverage move: 6% at 10×, 3% at 20×. A 4%
+ *      stop at 20× is liquidated BEFORE it fires, so a 4% container is capped at 9×.
+ *   3. MIN_ENTRY_MARGIN_LEVEL — the entry must leave the account above 150%.
+ *
+ * Why the ladder had to go: it was a second, arbitrary guess sitting on top of those three,
+ * and it was binding at 2× — while Spencer's own hand-placed fills on this account ran BTC
+ * at 20× ($124k notional) and SOL/ETH at 10×. The bot was posting half of every position as
+ * margin on coins the venue happily runs at 10×, so margin — not risk, not the stop — was
+ * silently deciding how big a trade could be. Leverage does NOT set position size here
+ * (notional = risk × equity ÷ stop, unchanged); it sets the MARGIN POSTED for that
+ * position, which is what decides whether the trade fits at all.
+ *
+ * kraken_margin_max_leverage remains the operator's kill-switch: set it to 2 to put the
+ * whole desk back on the old behaviour without a deploy.
+ */
+export const LEV_CAP_AT_5K = 20;
+export const LEV_CAP_AT_10K = 20;
+export const LEV_CAP_AT_20K = 20;
 export const LEV_EQUITY_10K = 10_000;
 export const LEV_EQUITY_20K = 20_000;
-export const DEFAULT_MAX_LEVERAGE = 5; // operator ceiling on the ladder
+export const DEFAULT_MAX_LEVERAGE = 20; // operator ceiling; the three limits above still bind
 
 /**
  * How many live positions the executor will ever hold at once.
