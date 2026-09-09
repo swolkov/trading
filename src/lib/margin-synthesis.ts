@@ -18,6 +18,7 @@ import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault"
 import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { pairBase } from "@/lib/kraken-pairs";
+import { dailyLossCapUsd } from "@/lib/margin-live-risk";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -286,8 +287,11 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
       await cfgSet("kraken_margin_live_max_risk_pct", String(st.toBase));
       const ws = await cfgGet("margin_watch_state");
       let eq = 0; try { const p = ws ? (JSON.parse(ws) as { lastEquity?: number }) : null; eq = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { eq = 0; }
-      const cap = Math.max(200, Math.round(eq * (st.toBase * 2 / 100) * 2.0));   // two full losses end the day
-      await cfgSet("kraken_margin_daily_loss_cap", String(cap));
+      const cap = dailyLossCapUsd(eq, st.toBase);   // two full losses end the day
+      // Reported, not frozen: clearing the override lets the executor derive this same rule
+      // live, so graduating to a bigger base risk raises the cap by itself and it keeps
+      // tracking equity afterwards. Writing the dollars would pin it at graduation day.
+      await cfgSet("kraken_margin_daily_loss_cap", "");
       st.status = "graduated"; st.note = `graduated after ${div.closed} closed live trades: ${div.verdict}`;
       try {
         const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];

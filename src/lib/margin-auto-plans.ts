@@ -34,7 +34,14 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //   selective-majors — the same rule on BTC, ETH and SOL ONLY (Spencer's Aug 30 instinct:
 //                      his +$732 / +$596 days were BTC and ETH). Does the rule pay more per
 //                      trade at the same risk on the deepest books? Registered Sep 7 2026.
-export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors"] as const;
+//   swing-wide       — swing-lev's own signals with a 2R trail instead of 1R and a 7-day
+//                      hold (registered Sep 9 2026). The 134 resolved high-conviction trades
+//                      average a 0.93R WIN against a 3.3R best, and most exit on the trailing
+//                      stop: the 1R trail may be cutting the right tail off. selective-tight
+//                      tests a NARROWER trail, so nothing on the desk could answer "are we
+//                      cutting winners short?" with a yes. Paper only — the guardian mirrors
+//                      a 1R trail, so it has no live container.
+export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide"] as const;
 // SELECTIVE-SHORT (registered Sep 8 2026) — NOT a twin: its own signals (high-conviction
 // BREAKDOWNS, 5m/15m, not stretched), opened ONLY while BTC's last complete daily close is
 // BELOW its 20-day average. Every short on the record (37, 11% won, −$5,140) was taken inside
@@ -78,7 +85,9 @@ export function autoShadowPlans(
   if (conv.tier !== "high") return [];
   const capped = Math.max(2, Math.min(20, lev));
   // Higher-timeframe BREAKOUTS feed the slow family only (the Sep 3–4 rule: high, 4h/1d, long).
-  if (kind === "breakout" && SWING_TFS.has(timeframe)) return [{ source: "swing-lev", lev: capped }, { source: "swing-spot", lev: 1 }];
+  if (kind === "breakout" && SWING_TFS.has(timeframe)) {
+    return [{ source: "swing-lev", lev: capped }, { source: "swing-spot", lev: 1 }, { source: "swing-wide", lev: capped }];
+  }
   if (!PAYING_TFS.has(timeframe)) return [];
   if (isStretched(conv.factors)) return [];
 

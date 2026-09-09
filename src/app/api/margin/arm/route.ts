@@ -6,7 +6,7 @@ import { STAGE3_KEY, DEMOTION_KEY, readStage3, readDemotion, loadLiveFills, dive
 import { marginDisplaySnapshot } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
-import { emptyReadIsUnconfirmed, liveContainerFor } from "@/lib/margin-live-risk";
+import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd } from "@/lib/margin-live-risk";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -139,10 +139,14 @@ export async function POST(request: Request) {
   let equity = 0;
   try { const st = (await prisma.agentConfig.findUnique({ where: { key: "margin_watch_state" } }))?.value; const p = st ? (JSON.parse(st) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { equity = 0; }
   // Two full losses END the day: a full loss at this size ≈ stop + fees both sides + rollover
-  // ≈ 1.13 × the stop-only risk, so 2.0 × risk sits just under two of them.
-  const dailyCap = Math.max(200, Math.round(equity * (riskPct / 100) * 2.0));
+  // ≈ 1.13 × the stop-only risk, so 2.0 × risk sits just under two of them. Shown in the log
+  // and the page so the operator sees the number, but NOT written to AgentConfig — the
+  // executor derives exactly this rule live (dailyLossCapUsd) so it tracks equity and the
+  // risk setting instead of freezing at whatever they were on arming day. Writing the
+  // dollars here would pin the override forever and make the derivation dead code.
+  const dailyCap = dailyLossCapUsd(equity, parseFloat(basePct));
   await setKey("kraken_margin_live_max_risk_pct", basePct);
-  await setKey("kraken_margin_daily_loss_cap", String(dailyCap));
+  await setKey("kraken_margin_daily_loss_cap", "");   // "" = derive; an explicit number would override, and "0" would mean a real zero cap
   await setKey(STAGE3_KEY, JSON.stringify({ status: "running", startedAt: new Date().toISOString(), target: STAGE3_TARGET, fromBase: START_BASE_PCT, toBase: BASE_RISK_PCT, done: 0 }));
   await setKey("kraken_margin_maker_entries", "false");        // MARKET entries: mirror the paper model
   await setKey("kraken_margin_max_positions", String(maxPositions));
