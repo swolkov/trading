@@ -79,13 +79,47 @@ export async function sendNotification(
     // 5s timeout: every Kraken call has one, this did not. A hung Slack webhook on a
     // trading path would otherwise stall the request until the function is killed — and on
     // the margin close path that turns a Slack outage into a CLOSE outage.
-    await fetch(webhook, {
+    const res = await fetch(webhook, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: message }),
       signal: AbortSignal.timeout(5000),
     });
-  } catch {
-    // notifications are best-effort
+    // A REVOKED WEBHOOK IS A SUCCESSFUL FETCH. Slack answers 404 "no_service" and this used to
+    // ignore the response entirely, so a dead lane went on swallowing every alert with no
+    // error anywhere — including the drawdown-breaker page, which is the one alert the desk
+    // cannot afford to lose. At 8% risk two consecutive losers trip that breaker, it does not
+    // self-clear, and an unnoticed trip costs far more than any single trade: replayed, a
+    // permanently latched breaker leaves the desk halted 93 of 118 days.
+    if (!res.ok) await recordNotifyFailure(channel, `HTTP ${res.status}`);
+    else await clearNotifyFailure(channel);
+  } catch (e) {
+    // Still best-effort — a Slack outage must never break a trading path, so this cannot
+    // throw. It can, however, leave a mark.
+    await recordNotifyFailure(channel, String(e).slice(0, 120));
   }
+}
+
+/**
+ * Notification delivery is best-effort BY DESIGN, so failure has to be recorded rather than
+ * raised. Both helpers swallow their own errors for the same reason: a failing Slack lane must
+ * not become a failing close. The stamp is what makes a silently dead webhook findable.
+ */
+const NOTIFY_FAIL_KEY = "notify_last_failure";
+async function recordNotifyFailure(channel: NotifyChannel, why: string): Promise<void> {
+  console.error(`[notify] ${channel} delivery FAILED: ${why}`);
+  try {
+    const { prisma } = await import("@/lib/db");
+    const value = JSON.stringify({ at: new Date().toISOString(), channel, why });
+    await prisma.agentConfig.upsert({ where: { key: NOTIFY_FAIL_KEY }, update: { value }, create: { key: NOTIFY_FAIL_KEY, value } });
+  } catch { /* recording a failure may not cause one */ }
+}
+async function clearNotifyFailure(channel: NotifyChannel): Promise<void> {
+  // Only the urgent lane clears the stamp: a working #results webhook says nothing about a
+  // broken #urgent one, and the urgent lane is the one that carries the breaker.
+  if (channel !== "margin_urgent") return;
+  try {
+    const { prisma } = await import("@/lib/db");
+    await prisma.agentConfig.deleteMany({ where: { key: NOTIFY_FAIL_KEY } });
+  } catch { /* best effort */ }
 }

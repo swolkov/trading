@@ -99,7 +99,15 @@ export async function GET() {
       sizing: live.perTradeCapUsd === 0,
       exit: live.trailPct === 0,   // the guardian's managed exit is paper's; a Kraken trailing-stop would not be
     };
-    const body = { live, paper, equity, equityAt, leverageRung: rung, ladder, tiers, aligned, allAligned: Object.values(aligned).every(Boolean), at: new Date().toISOString() };
+    // A dead Slack webhook is invisible by design (delivery is best-effort and cannot throw).
+    // sendNotification stamps this key when a lane fails; surfacing it here is what turns a
+    // silently swallowed breaker page into something the operator can actually see.
+    let notifyFailure: { at: string; channel: string; why: string } | null = null;
+    try {
+      const raw = (await prisma.agentConfig.findUnique({ where: { key: "notify_last_failure" } }))?.value;
+      if (raw) notifyFailure = JSON.parse(raw) as { at: string; channel: string; why: string };
+    } catch { notifyFailure = null; }
+    const body = { live, paper, equity, equityAt, leverageRung: rung, ladder, tiers, aligned, allAligned: Object.values(aligned).every(Boolean), notifyFailure, at: new Date().toISOString() };
     cache = { at: Date.now(), body };
     return Response.json(body);
   } catch (error) {
