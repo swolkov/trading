@@ -69,3 +69,10 @@ test("a REJECTED rung below an accepted one outranks 'matches'", () => {
   assert.equal(judge("PENGU", 5, [2, 3], [2, 3]).verdict, "table is HIGH");
   assert.equal(judge("XLM", 5, [2, 3, 4, 5], []).verdict, "nothing accepted");
 });
+
+test("the rung the desk actually runs at is probed on every venue class it touches", () => {
+  // The settled config pins the ceiling at 9 and the 4% container yields 9 on every major.
+  const running = leverageThatFitsStop(4, 9);
+  assert.equal(running, 9);
+  for (const coin of ["BTC", "ETH", "SOL"]) assert.ok(PROBE_PLAN[coin]?.includes(running), `${coin} must probe ${running}×`);
+});
