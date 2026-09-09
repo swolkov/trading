@@ -135,6 +135,32 @@ export const UNIVERSE_FIX_AT = "2026-09-05T17:00:00Z";
 // reports it beside the pooled row.
 export const POLICY_CUT_AT = "2026-09-04T17:00:00Z";
 
+/**
+ * THE SLOW FAMILY'S OWN CUT. swing-lev and swing-spot were paused Sep 4 and reactivated at
+ * 2026-09-08 14:55 UTC under a NARROWER rule than the one they were paused with: longs only,
+ * and swing-lev at 4h only (SWING_LEV_TFS, measured -- the 1d leg dragged it from t=2.72 to
+ * t=1.72). Their pre-pause sample really is a different rule: over Sep 1-4 swing-lev took 16
+ * SHORT legs that lost $4,398, and the reactivated sleeve has taken none and cannot.
+ *
+ * So one global cut date cannot be right for every sleeve -- POLICY_CUT_AT dates the FAST
+ * family's narrowing, and reading the slow family against it pools two rules under one label.
+ * Each sleeve's forward slice starts when ITS OWN rule last changed.
+ *
+ * WARNING: this is NOT a "fresh start" marker, and deliberately NOT the Sep 9 sizing change.
+ * Sep 9 altered LIVE sizing only (1 slot, base 2.2% -> 3%); paper's rule and paper's base risk
+ * were both untouched, so restarting paper's clock there would discard five days of evidence
+ * about a rule that never changed. A cut date marks a change in what a sleeve TRADES, never a
+ * change in what it BETS.
+ */
+export const SWING_REACTIVATED_AT = "2026-09-08T14:55:00Z";
+
+/** The moment after which a sleeve's record tests the rule as it stands today. */
+export function policyCutFor(source: string): string {
+  return source === "swing-lev" || source === "swing-spot" || source === "swing-wide"
+    ? SWING_REACTIVATED_AT
+    : POLICY_CUT_AT;
+}
+
 // PRE-REGISTERED CUTS of the live candidate (registered Sep 7 2026, before the samples exist,
 // so no cut can be chosen after seeing it): forward-only, by timeframe, by entry window (UTC).
 // A cut is READ only at SLICE_MIN_RESOLVED resolved trades; below that it is "watching",
@@ -885,7 +911,8 @@ export async function candidateDetail(source: string, limit = 30): Promise<Candi
     });
   };
   const [fwd, byTimeframe, byWindow, dayRows, recentRows] = await Promise.all([
-    slice(`'forward'`, `AND time > '${POLICY_CUT_AT}'::timestamptz`),
+    // Per-sleeve: the slow family's rule changed on a different day from the fast family's.
+    slice(`'forward'`, `AND time > '${policyCutFor(source)}'::timestamptz`),
     slice(TF_SQL, ""),
     slice(ENTRY_WINDOW_SQL, ""),
     prisma.$queryRawUnsafe<{ day: string; resolved: bigint; net: number | null }[]>(
