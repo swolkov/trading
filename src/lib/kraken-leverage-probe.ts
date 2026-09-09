@@ -36,8 +36,13 @@ export const PROBE_PLAN: Record<string, number[]> = {
   // fail-safe — the order is not placed — but it would make BTC silently unenterable for the
   // whole fast family while the probe still reported "matches". Unreachable at today's
   // kraken_shadow_lev of 5; probe it before arming a fast sleeve or raising that key.
-  BTC: [10, 12, 20],   // 10 and 20 are controls: real fills prove 20×
-  ETH: [5, 10],        // control: table and public agree at 10×
+  // 9 is THE rung the desk runs on every major: leverageThatFitsStop(4%, ·) = 9, and the
+  // settled config (2026-09-09) pins the ceiling at 9. It sits inside Kraken's published
+  // 2–10 ladder, but it had never been sent from this account — so it is probed on both the
+  // 20× and the 10× venue before the first real 9× order goes out.
+  BTC: [9, 10, 12, 20],   // 10 and 20 are controls: real fills prove 20×
+  ETH: [5, 9, 10],        // 10 is the control: table and public agree
+  SOL: [9, 10],           // a second 10× venue, so 9 is not proven on ETH alone
 };
 
 export interface ProbeRow {
