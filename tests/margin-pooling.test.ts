@@ -61,11 +61,11 @@ test("the statistics file carries the cost of capacity at live size", () => {
     capacity: {
       source: "selective", since: "2026-09-06T00:55:47.000Z", liveFactor: 0.5,
       rules: { slots: 2, perDay: 3, cooldownMin: 30 }, setups: 17, taken: 3,
-      refused: { total: 14, slots: 13, cooldown: 1, dailyCap: 0, other: 0 },
+      refused: { total: 14, slots: 13, cooldown: 1, dailyCap: 0, margin: 0, leverage: 0, other: 0 },
       refusedOutcome: { resolved: 8, wins: 5, net: 1120, open: 6, floating: -840 },
       replay: [
-        { slots: 2, taken: 4, resolved: 2, open: 2, net: -742, floating: 169 },
-        { slots: 0, taken: 17, resolved: 10, open: 7, net: 832, floating: -660 },
+        { slots: 2, taken: 4, resolved: 2, open: 2, net: -742, floating: 169, refusedByMargin: 0 },
+        { slots: 0, taken: 17, resolved: 10, open: 7, net: 832, floating: -660, refusedByMargin: 0 },
       ],
       ledger: [],
     },
