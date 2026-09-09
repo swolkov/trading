@@ -78,14 +78,17 @@ test("the same risk costs very different margin depending on the coin's venue le
   const btc = setupMarginUsd("BTC/USD", MARGIN);      // 20× venue, capped to 9× by the 4% stop
   const eth = setupMarginUsd("ETH/USD", MARGIN);      // 10× venue, also 9×
   const pepe = setupMarginUsd("PEPE/USD", MARGIN);    // 5× venue
-  const xlm = setupMarginUsd("XLM/USD", MARGIN);      // 2× venue in the table today
+  const pengu = setupMarginUsd("PENGU/USD", MARGIN);  // 3× — the dearest venue left after the probe
   assert.equal(btc.leverage, 9, "a 4% stop caps BTC at 9×, not 20×");
   assert.equal(eth.leverage, 9);
   assert.equal(pepe.leverage, 5);
-  assert.equal(xlm.leverage, 2);
-  assert.ok(btc.margin < pepe.margin && pepe.margin < xlm.margin, "cheaper leverage, dearer slot");
-  // The ratio is the whole point: XLM eats ~4.5× the margin of ETH for identical risk.
-  assert.ok(xlm.margin / eth.margin > 4, `XLM costs ${(xlm.margin / eth.margin).toFixed(1)}× an ETH slot`);
+  assert.equal(pengu.leverage, 3);
+  // XLM was 2× until the 2026-09-09 probe proved the venue accepts 5×. It is now as cheap
+  // to hold as any other mid-cap — which is the entire payoff of having verified it.
+  assert.equal(setupMarginUsd("XLM/USD", MARGIN).leverage, 5);
+  assert.ok(btc.margin < pepe.margin && pepe.margin < pengu.margin, "cheaper leverage, dearer slot");
+  // The ratio is the point: the dearest venue still eats ~3× the margin of a major.
+  assert.ok(pengu.margin / eth.margin > 2.5, `PENGU costs ${(pengu.margin / eth.margin).toFixed(1)}× an ETH slot`);
 });
 
 test("the margin floor refuses entries a slot count would have waved through", () => {
