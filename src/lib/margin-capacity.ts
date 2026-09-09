@@ -34,12 +34,39 @@ export interface CapacitySetup {
  * capacity card and its tests are unchanged.
  */
 export interface ReplayMargin { equity: number; riskFrac: number; stopFrac: number; floorPct: number }
-export interface ReplayConfig { slots: number; perDay: number; cooldownMin: number; margin?: ReplayMargin }
+export interface ReplayConfig {
+  slots: number; perDay: number; cooldownMin: number; margin?: ReplayMargin;
+  /** Base risk paper sized these setups at. Given it, `netAtOwnRisk` rescales the result to the
+   *  base this slot count could actually carry — notional is linear in risk, so it is exact. */
+  paperBasePct?: number;
+}
 export interface ReplayResult {
   slots: number; taken: number; resolved: number; open: number;
   net: number;        // resolved paper P&L of the trades this configuration would have taken
   floating: number;   // unrealized paper P&L of the ones still open
   refusedByMargin: number;   // setups a free slot existed for, but the margin floor still blocked
+  baseRiskPct: number;       // the largest base risk THIS slot count can carry (see baseRiskForSlots)
+  netAtOwnRisk: number;      // `net` rescaled from paper's base to that one — the comparable number
+}
+
+/**
+ * THE LARGEST BASE RISK A GIVEN SLOT COUNT CAN CARRY.
+ *
+ * Comparing slot counts at the SAME per-trade risk is the wrong comparison, and it is the one
+ * the capacity card used to make. Slots and size trade off against each other through the
+ * drawdown breaker: N simultaneous full stops must stay inside it, so ONE slot can carry a
+ * position more than three times the size three slots can, at identical account risk.
+ *
+ *   1 slot  → base 3.0%  (6.0% per high-conviction trade, at the policy ceiling) →  6% at risk
+ *   2 slots → base 3.0%  (ceiling binds first)                                   → 12% at risk
+ *   3 slots → base 2.5%  (breaker binds)                                         → 15% at risk
+ *   4 slots → base 1.875%                                                        → 15% at risk
+ *
+ * Conviction doubles the base, hence the 2x in both bounds.
+ */
+export function baseRiskForSlots(slots: number, breakerPct = 15, perTradeCeilingPct = 6): number {
+  if (!Number.isFinite(slots) || !(slots >= 1)) return 0;
+  return Math.min(perTradeCeilingPct / 2, breakerPct / (2 * slots));
 }
 
 export function classifyRefusal(liveTxid: string | null, note: string | null): RefusalKind {
@@ -75,7 +102,10 @@ export function replaySlots(setups: CapacitySetup[], cfg: ReplayConfig): ReplayR
   const occupied: { end: number; margin: number }[] = [];   // taken trades still open
   const perDay: Record<string, number> = {};
   let lastEntry = -Infinity;
-  const out: ReplayResult = { slots: cfg.slots, taken: 0, resolved: 0, open: 0, net: 0, floating: 0, refusedByMargin: 0 };
+  const out: ReplayResult = {
+    slots: cfg.slots, taken: 0, resolved: 0, open: 0, net: 0, floating: 0, refusedByMargin: 0,
+    baseRiskPct: cfg.slots > 0 ? baseRiskForSlots(cfg.slots) : (cfg.paperBasePct ?? 0), netAtOwnRisk: 0,
+  };
   for (const s of ordered) {
     const t = new Date(s.time).getTime();
     if (!Number.isFinite(t)) continue;
@@ -103,6 +133,12 @@ export function replaySlots(setups: CapacitySetup[], cfg: ReplayConfig): ReplayR
     if (s.status === "resolved") { out.resolved++; out.net += s.pnl ?? 0; }
     else { out.open++; out.floating += s.unrealized ?? 0; }
   }
+  // Paper sizes every setup at ONE base risk. A slot count that can carry more risk per trade
+  // would have earned proportionally more on the very same trades, so the honest comparison
+  // between slot counts is this rescaled figure, not the raw one.
+  out.netAtOwnRisk = cfg.paperBasePct && cfg.paperBasePct > 0 && out.baseRiskPct > 0
+    ? out.net * (out.baseRiskPct / cfg.paperBasePct)
+    : out.net;
   return out;
 }
 
@@ -173,8 +209,13 @@ export async function capacityReport(source: string): Promise<CapacityReport | n
       margin = { equity: eq, riskFrac: (liveBase * 2) / 100, stopFrac: container.stopPct / 100, floorPct: MIN_ENTRY_MARGIN_LEVEL };
     }
   } catch { margin = undefined; }
-  const replay = [1, 2, 3, 4].map((n) => replaySlots(setups, { slots: n, perDay, cooldownMin, margin }));
-  replay.push(replaySlots(setups, { slots: 0, perDay: Number.POSITIVE_INFINITY, cooldownMin: 0, margin }));
+  // Each slot count is replayed at the risk IT could carry, not at a single shared risk — the
+  // margin gate included, since a bigger position posts more margin and is refused sooner.
+  const replay = [1, 2, 3, 4].map((n) => replaySlots(setups, {
+    slots: n, perDay, cooldownMin, paperBasePct: paperBase,
+    margin: margin ? { ...margin, riskFrac: (baseRiskForSlots(n) * 2) / 100 } : undefined,
+  }));
+  replay.push(replaySlots(setups, { slots: 0, perDay: Number.POSITIVE_INFINITY, cooldownMin: 0, margin, paperBasePct: paperBase }));
   return {
     source, since, liveFactor, rules,
     setups: setups.length, taken: setups.filter((s) => s.kind === "taken").length,

@@ -30,7 +30,7 @@ export interface CapacityView {
   setups: number; taken: number;
   refused: { total: number; slots: number; cooldown: number; dailyCap: number; margin: number; leverage: number; other: number };
   refusedOutcome: { resolved: number; wins: number; net: number; open: number; floating: number };
-  replay: { slots: number; taken: number; resolved: number; open: number; net: number; floating: number }[];
+  replay: { slots: number; taken: number; resolved: number; open: number; net: number; floating: number; baseRiskPct: number; netAtOwnRisk: number }[];
 }
 interface ExecCfg {
   live: { liveSources?: string[]; armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
@@ -254,22 +254,24 @@ function CapacityCard({ cap }: { cap: CapacityView }) {
             <thead>
               <tr>
                 <Th title="Replay of the same setups with this many slots, keeping today's per-day cap and cooldown">Slots</Th>
+                <Th num title="The largest base risk this slot count can carry: N simultaneous full stops must stay inside the 15% drawdown breaker, and one high-conviction trade (2× base) inside the 6% per-trade ceiling. Fewer slots = a bigger position.">Base it can carry</Th>
                 <Th num>Would have taken</Th>
                 <Th num>Resolved</Th>
                 <Th num title="Paper P&L of the resolved ones × the live size factor">Net (live size)</Th>
+                <Th num title="The comparable number: the same trades resized to the risk THIS slot count could carry. Comparing slot counts at one shared risk flatters more slots — it credits the extra trades while hiding that each has to be smaller.">Net at its own size</Th>
                 <Th num>Open</Th>
-                <Th num>Floating (live size)</Th>
               </tr>
             </thead>
             <tbody>
               {cap.replay.map((r) => (
                 <Row key={r.slots} className={r.slots === cap.rules.slots ? "bg-accent/40" : undefined}>
                   <Td strong>{r.slots > 0 ? `${r.slots}${r.slots === cap.rules.slots ? " · today" : ""}` : "every setup"}</Td>
+                  <Td num muted>{r.slots > 0 ? `${r.baseRiskPct}%` : "—"}</Td>
                   <Td num>{r.taken}</Td>
                   <Td num muted>{r.resolved}</Td>
-                  <Td num className={`font-semibold ${r.resolved > 0 ? liveTone(r.net) : "text-muted-foreground"}`}>{r.resolved > 0 ? live(r.net) : "—"}</Td>
+                  <Td num className={r.resolved > 0 ? `${liveTone(r.net)} opacity-70` : "text-muted-foreground"}>{r.resolved > 0 ? live(r.net) : "—"}</Td>
+                  <Td num className={`font-semibold ${r.resolved > 0 ? liveTone(r.netAtOwnRisk) : "text-muted-foreground"}`}>{r.resolved > 0 ? live(r.netAtOwnRisk) : "—"}</Td>
                   <Td num muted>{r.open}</Td>
-                  <Td num className={r.open > 0 ? liveTone(r.floating) : "text-muted-foreground"}>{r.open > 0 ? live(r.floating) : "—"}</Td>
                 </Row>
               ))}
             </tbody>
@@ -277,7 +279,7 @@ function CapacityCard({ cap }: { cap: CapacityView }) {
         </div>
       )}
       <Note>
-        Slots are the binding limit on this account ({cap.rules.slots} at the current rung, {cap.rules.perDay}/day, {cap.rules.cooldownMin}-min cooldown). Paper dollars × {cap.liveFactor.toFixed(2)} = live size while stage 3 runs. This is the number behind the max-positions decision at the $10k rung — a bigger table has to show more money over a real sample before a slot is added. Setups arriving within minutes of each other are the same market move, so the cooldown stays.
+        Slots and size are the same dial ({cap.rules.slots} slot{cap.rules.slots === 1 ? "" : "s"} today, {cap.rules.perDay}/day, {cap.rules.cooldownMin}-min cooldown). N simultaneous full stops have to stay inside the 15% drawdown breaker, so one slot carries a position more than three times what three slots can at identical account risk — which is why the last column, not the one before it, is the comparison that decides anything. Adding a slot has to beat the current one THERE, over a real sample. Paper dollars × {cap.liveFactor.toFixed(2)} = live size while stage 3 runs. Setups arriving within minutes of each other are the same market move, so the cooldown stays.
       </Note>
     </div>
   );
