@@ -15,7 +15,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
-import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
+import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { pairBase } from "@/lib/kraken-pairs";
 import { dailyLossCapUsd } from "@/lib/margin-live-risk";
@@ -151,8 +151,8 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
   if (c && (c.byTimeframe.length > 0 || c.recent.length > 0)) {
     const tfmt = (t: number | null) => (t == null ? "—" : t.toFixed(2));
     lines.push(`## Live candidate — detail (${c.source})`, "");
-    lines.push(`> The scoreboard row pools every ${c.source} trade since the cohort began. The auto-paper rule narrowed to high-conviction 5m/15m longs on ${POLICY_CUT_AT.slice(0, 10)}; trades entered before that were picked under the old rule and re-qualified after the fact. The forward-only slice is the honest test of the rule as it stands. Dollars here are PAPER-sized (base 3%; halve for a live base of 1.5%). The experiment twins (${EXPERIMENT_SOURCES.join(", ")}) ride the same signals again at a different size or in a different container — not independent evidence, and they appear nowhere in this section.`, "");
-    if (c.forward) lines.push(`- **Forward-only** (entered after ${POLICY_CUT_AT.slice(0, 16).replace("T", " ")} UTC): ${c.forward.resolved} resolved · ${pct(c.forward.hitRate)} hit · net ${money(c.forward.net)} · t=${tfmt(c.forward.tStat)} · ${c.forward.days} distinct days · ${c.forward.open} open`, "");
+    lines.push(`> The scoreboard row pools every ${c.source} trade since the cohort began. That sleeve's rule last changed on ${policyCutFor(c.source).slice(0, 10)}; trades entered before that were picked under the old rule and re-qualified after the fact. The forward-only slice is the honest test of the rule as it stands. Dollars here are PAPER-sized (base 3%; halve for a live base of 1.5%). The experiment twins (${EXPERIMENT_SOURCES.join(", ")}) ride the same signals again at a different size or in a different container — not independent evidence, and they appear nowhere in this section.`, "");
+    if (c.forward) lines.push(`- **Forward-only** (entered after ${policyCutFor(c.source).slice(0, 16).replace("T", " ")} UTC): ${c.forward.resolved} resolved · ${pct(c.forward.hitRate)} hit · net ${money(c.forward.net)} · t=${tfmt(c.forward.tStat)} · ${c.forward.days} distinct days · ${c.forward.open} open`, "");
     if (c.byTimeframe.length) {
       lines.push("| timeframe | resolved | hit | net (paper-sized) | t | days | open |", "|---|---|---|---|---|---|---|");
       for (const s of c.byTimeframe) lines.push(`| ${s.key} | ${s.resolved} | ${pct(s.hitRate)} | ${money(s.net)} | ${tfmt(s.tStat)} | ${s.days} | ${s.open} |`);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { baseRiskForSlots, replaySlots, type CapacitySetup } from "../src/lib/margin-capacity";
 import { DEFAULT_ARM_SOURCE, liveContainerFor, LIVE_CONTAINERS } from "../src/lib/margin-live-risk";
 import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
+import { policyCutFor, POLICY_CUT_AT, SWING_REACTIVATED_AT } from "../src/lib/margin-shadow";
 
 // SLOTS AND SIZE ARE THE SAME DIAL. The capacity card used to compare slot counts at one
 // shared per-trade risk, which flatters more slots: it credits them with extra trades while
@@ -91,4 +92,34 @@ test("every source with a live container is a real, non-retired sleeve", () => {
   for (const source of Object.keys(LIVE_CONTAINERS)) {
     assert.ok(!RETIRED_AUTO_SOURCES.has(source), `${source} is retired but still has a live container — it could be armed`);
   }
+});
+
+// PER-SLEEVE POLICY CUTS. One global cut date pooled two different rules under the
+// `swing-lev` label: pre-Sep-4 it traded both directions and both timeframes (16 short legs,
+// −$4,398), and the sleeve reactivated on Sep 8 is longs-only, 4h-only and cannot take them.
+
+test("the slow family's forward slice starts at its own reactivation, not the fast family's cut", () => {
+  for (const s of ["swing-lev", "swing-spot", "swing-wide"]) {
+    assert.equal(policyCutFor(s), SWING_REACTIVATED_AT, s);
+  }
+  for (const s of ["selective", "selective-tight", "tsmom", "roundtrip"]) {
+    assert.equal(policyCutFor(s), POLICY_CUT_AT, s);
+  }
+});
+
+test("a cut date marks a RULE change, never a sizing change", () => {
+  // Sep 9 changed live sizing only (1 slot, base 2.2% → 3%); paper's rule and paper's base
+  // risk were untouched. No cut may land on it, or five days of valid evidence vanish.
+  for (const s of ["swing-lev", "swing-spot", "swing-wide", "selective", "tsmom"]) {
+    assert.ok(policyCutFor(s) < "2026-09-09", `${s} cut must predate the Sep 9 sizing change`);
+  }
+  // Both cuts must be real instants, and the slow family's must be the later one.
+  assert.ok(!Number.isNaN(Date.parse(POLICY_CUT_AT)));
+  assert.ok(!Number.isNaN(Date.parse(SWING_REACTIVATED_AT)));
+  assert.ok(Date.parse(SWING_REACTIVATED_AT) > Date.parse(POLICY_CUT_AT));
+});
+
+test("an unknown sleeve falls back to the global cut rather than to no cut at all", () => {
+  assert.equal(policyCutFor("something-new"), POLICY_CUT_AT);
+  assert.equal(policyCutFor(""), POLICY_CUT_AT);
 });
