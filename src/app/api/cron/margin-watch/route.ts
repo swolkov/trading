@@ -11,7 +11,7 @@ import {
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, releaseCloseLock } from "@/lib/margin-executor";
-import { LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, bookMaxHoldH, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
+import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, bookMaxHoldH, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
 
@@ -315,7 +315,11 @@ export async function GET(request: Request) {
         const { liqPrice, pctAway } = liquidationEstimate(p, px);
         const cushion = 0.6 / Math.max(1, p.leverage);   // full cushion at entry
         const used = 1 - pctAway / cushion;              // fraction of cushion consumed
-        if (used >= 0.75) {
+        // Thresholds live in margin-live-risk beside STOP_CUSHION_FRACTION, because they are
+        // only meaningful relative to it: leverage is now fitted so the stop sits at 0.6 of
+        // the cushion, so anything below 0.6 alarms on a position walking to its own stop.
+        // Past it, the price is beyond where the stop should have fired — the stop failed.
+        if (used >= CUSHION_URGENT_AT) {
           const key = `liq-urgent-${p.id}`;
           if (shouldFire(state, key)) {
             await sendNotification(
@@ -325,7 +329,7 @@ export async function GET(request: Request) {
             state.alerts[key] = new Date().toISOString();
             sent.push(key);
           }
-        } else if (used >= 0.5) {
+        } else if (used >= CUSHION_WARN_AT) {
           const key = `liq-warn-${p.id}`;
           if (shouldFire(state, key)) {
             await sendNotification(
