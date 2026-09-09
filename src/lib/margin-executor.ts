@@ -78,6 +78,12 @@ import {
   parseLiveRiskBasePct,
   pairHasExposure,
   liveContainerFor,
+  MAX_LIVE_POSITIONS,
+  MIN_ENTRY_MARGIN_LEVEL,
+  dailyLossCapUsd,
+  entryKeepsMarginLevel,
+  leverageThatFitsStop,
+  projectedMarginLevel,
 } from "@/lib/margin-live-risk";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
@@ -732,7 +738,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Optional operator ceiling on margin per entry. Default 0 = NONE: sizing is risk-based
     // exactly like paper. (The old $100 default silently made live risk ~0.6%, not 3%.)
     const perTrade = Math.max(0, await cfgNum("kraken_margin_per_trade_usd", 0));
-    const lossCap = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 200));
+    // An explicitly configured dollar cap still wins; 0/unset means "derive it from equity
+    // and the current risk setting" so it grows with the account instead of freezing at the
+    // number the arm script happened to compute on arming day (see dailyLossCapUsd).
+    const lossCapOverride = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 0));
 
     // Layer 5a: the guardian's PROTECTION must have actually run recently (the stamp is
     // written only after step 3c completed without a failure — not at route start). The
@@ -772,12 +781,16 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Also capped at the pair's own US-retail maximum (ALGO/XLM are 2×, PENGU/NEAR/RENDER
     // 3×): once the ladder allows 3×+ an order above the pair cap would be rejected by
     // Kraken — fail-safe, but a silent "this pair can never enter". Cap it here instead.
-    const leverage = Math.min(maxLev, usRetailMaxLeverage(alert.symbol, maxLev), Math.max(2, alert.leverage ?? 2));
+    // Narrowed once more below, after the sleeve's container is known: a wide stop needs
+    // LOW leverage to stay inside clampLiveStopFrac's allowance, and the container's stop
+    // always wins over the ladder (see leverageThatFitsStop).
+    const leverageRaw = Math.min(maxLev, usRetailMaxLeverage(alert.symbol, maxLev), Math.max(2, alert.leverage ?? 2));
     // The cap trips on EITHER measure, never on their sum. health.unrealized is TradeBalance
     // 'n' — the whole account, including positions Spencer opened by hand. Netting them
     // meant one profitable manual long could mask a bot that had already realised past the
     // cap, and the bot would keep entering. Realized-only is the bot-attributable number;
     // the combined figure is kept as an ADDITIONAL trigger, never as an offset.
+    const lossCap = dailyLossCapUsd(equity, parseLiveRiskBasePct(await cfgNum("kraken_margin_live_max_risk_pct", 3)), lossCapOverride);
     const todayPnl = realizedToday + (health.unrealized || 0);
     if (realizedToday < -lossCap || todayPnl < -lossCap) {
       const which = realizedToday < -lossCap ? `realized $${realizedToday.toFixed(0)}` : `realized+unrealized $${todayPnl.toFixed(0)}`;
@@ -796,7 +809,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const ourOrders = (await krakenOpenOrders()).filter((o) => o.userref === MARGIN_USERREF);
     const ourEntryOrders = ourOrders.filter((o) => !o.ordertype.includes("stop"));
     const exposureCount = openPositions.length + ourEntryOrders.length;
-    const maxPositions = Math.max(1, await cfgNum("kraken_margin_max_positions", 3));
+    // Clamped to MAX_LIVE_POSITIONS, the same ceiling the arm switch enforces. Without it
+    // this gate obeyed AgentConfig unbounded — the arm page could not ask for more than 3,
+    // but a direct write to the key could, and this is the gate that places the order.
+    const maxPositions = Math.min(MAX_LIVE_POSITIONS, Math.max(1, await cfgNum("kraken_margin_max_positions", 3)));
     if (exposureCount >= maxPositions) {
       return { executed: false, validated: false, note: `entry refused: ${exposureCount} positions+resting orders already (max ${maxPositions})` };
     }
@@ -861,7 +877,15 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // pre-deploy arm, or a hand-edited key). The arm switch refuses such a source too;
     // this is the layer that holds when that one is bypassed. Closes never reach here.
     if (!container) return { executed: false, validated: false, note: `entry refused: source "${alert.source ?? "manual"}" has no live container (its paper exit is not mirrored by the guardian) — disarm it` };
+    // THE CONTAINER'S STOP WINS OVER THE LADDER. At 5× the clamp only allows 7.2%, so a
+    // sleeve scored with a wider stop (tsmom is 8%) would have been run tighter than its
+    // paper record — the container drift the Sep 5 audit closed, re-entering through the
+    // leverage door. Drop leverage until the scored stop fits instead.
+    const leverage = leverageThatFitsStop(container.stopPct, leverageRaw);
     const stopPct = clampLiveStopFrac(container.stopPct, leverage);
+    if (Math.abs(stopPct * 100 - container.stopPct) > 1e-9) {
+      return { executed: false, validated: false, note: `entry refused: ${alert.source}'s ${container.stopPct}% stop does not survive the leverage clamp even at ${leverage}× (applied ${(stopPct * 100).toFixed(2)}%) — live would not be running the container this sleeve was scored in` };
+    }
     stopPctSent = stopPct;
     // A sleeve's container DEFINES its exit (fixed stop, guardian-managed); the global
     // trailing-stop knob applies only to sources without a container. Otherwise arming
@@ -919,6 +943,21 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const unclamped = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade);
     const notional = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade, health.freeMargin);
     if (!(notional > 0)) return { executed: false, validated: false, note: `sizing produced no notional (free margin $${health.freeMargin.toFixed(0)}) — skipped` };
+    // Layer 6b: the entry must LEAVE the account above the margin-level floor. Sizing is
+    // capped at 90% of free margin, which only guarantees Kraken accepts the order — it
+    // says nothing about the state of the book afterwards. With 3 slots available, risk %
+    // and slot count multiply, and the combination that leaves the account a 6% move from
+    // a margin call is reachable purely by config. This is the gate that makes the ACCOUNT
+    // decide how many positions it can carry, rather than a constant that must be kept in
+    // step with the risk setting by hand.
+    const mlFloor = await cfgNum("kraken_margin_min_margin_level", MIN_ENTRY_MARGIN_LEVEL);
+    if (!entryKeepsMarginLevel(equity, health.marginUsed, notional, leverage, mlFloor)) {
+      const after = projectedMarginLevel(equity, health.marginUsed, notional, leverage);
+      return {
+        executed: false, validated: false,
+        note: `entry refused: would leave margin level at ${after.toFixed(0)}% (floor ${mlFloor}%, Kraken calls at 80%). $${notional.toFixed(0)} notional at ${leverage}× on equity $${equity.toFixed(0)} with $${health.marginUsed.toFixed(0)} already posted. Lower kraken_margin_live_max_risk_pct or wait for a slot to close.`,
+      };
+    }
     const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;
     if (meta.orderMin > 0 && rawVol < meta.orderMin) {

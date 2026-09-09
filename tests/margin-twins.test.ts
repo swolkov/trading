@@ -3,7 +3,7 @@ import test from "node:test";
 import { autoShadowPlans, TWIN_SOURCES, SHORT_SOURCE } from "../src/lib/margin-auto-plans";
 import { btcRegimeUp, tsmomSignal, REGIME_LOOKBACK } from "../src/lib/margin-regime";
 import { exitParams, launchStopDue, managedStop } from "../src/lib/margin-shadow";
-import { managedStopTarget } from "../src/lib/margin-live-risk";
+import { managedStopTarget, liveContainerFor } from "../src/lib/margin-live-risk";
 
 // The Sep 7 2026 pre-registered twins: same signals as the live candidate, one change each.
 // These tests pin the ONE change per twin and prove the record's container is untouched.
@@ -54,10 +54,10 @@ test("plans: the two container twins always ride along; the regime twin only in 
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: false }).map((p) => p.source), base, "down-regime → no regime twin");
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: true }).map((p) => p.source), [...base, "selective-btc"]);
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5, { btcUp: true }), [], "twins never widen the entry rule");
-  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot"], "4h/1d go to the slow family, never to the fast twins");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide"], "4h/1d go to the slow family and its own wide-trail twin, never to the fast twins");
   assert.deepEqual(autoShadowPlans("breakout", "4h", { tier: "med", factors: [] }, 5), [], "slow family is high conviction only");
   assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }), [], "slow family is longs only; the 5m/15m short sleeve does not take 4h");
-  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors"]);
+  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide"]);
 });
 
 test("BTC regime and tsmom signals need 21 complete closes and read close vs 20-day average", () => {
@@ -116,4 +116,41 @@ test("tsmom has a short leg: negative 20-day return AND close below the 20-day a
   assert.ok(m && !m.short && !m.long, "20d return < 0 but close above the 20d average → no short");
   const t = exitParams("tsmom-short", 2, 100);
   assert.deepEqual({ oneR: t.oneR, maxHoldH: t.maxHoldH }, { oneR: 8, maxHoldH: 24 * 14 });
+});
+
+// ── swing-wide (Sep 9 2026): the wider-trail twin ─────────────────────────────────────
+test("swing-wide is swing-lev's container with a 2R trail and a 7-day hold", () => {
+  const wide = exitParams("swing-wide", 2, 100);
+  const lev = exitParams("swing-lev", 2, 100);
+  assert.equal(wide.oneR, lev.oneR, "same 4% stop — only the trail changes");
+  assert.equal(wide.trailR, 2);
+  assert.equal(wide.maxHoldH, 24 * 7, "a wider trail needs room to be right");
+  assert.equal(lev.trailR, undefined, "the control still trails the default 1R");
+});
+
+test("a 2R trail holds at breakeven, then rides 2R behind — it never risks more than 1R", () => {
+  const wide = exitParams("swing-wide", 2, 100);   // entry 100, oneR = 4
+  const stop0 = 96;                                 // the initial 4% stop
+  // Below +1R nothing moves, exactly like the control.
+  assert.equal(managedStop(1, 100, 103, stop0, wide.oneR, wide), stop0);
+  // At +1R the control banks breakeven; the wide trail also sits at breakeven (never worse).
+  assert.equal(managedStop(1, 100, 104, stop0, wide.oneR, wide), 100);
+  // At +2R the control would already be trailing at +1R; the wide trail is still breakeven.
+  assert.equal(managedStop(1, 100, 108, stop0, wide.oneR, wide), 100);
+  assert.equal(managedStop(1, 100, 108, stop0, wide.oneR), 104, "control trails 1R behind");
+  // At +3R the wide trail rides 2R behind the peak.
+  assert.equal(managedStop(1, 100, 112, stop0, wide.oneR, wide), 104);
+  // Ratchet only — a pullback never loosens the stop.
+  assert.equal(managedStop(1, 100, 109, 104, wide.oneR, wide), 104);
+});
+
+test("swing-wide rides swing-lev's signals and is never pooled with the record", () => {
+  const plans = autoShadowPlans("breakout", "4h", { tier: "high", factors: [] }, 5);
+  const sources = plans.map((p) => p.source);
+  assert.ok(sources.includes("swing-lev") && sources.includes("swing-wide"), "same signal, both sleeves");
+  assert.ok(TWIN_SOURCES.includes("swing-wide" as never), "twins are excluded from the pooled totals");
+  // 5m/15m breakouts belong to the fast family — the wide twin must not appear there.
+  assert.ok(!autoShadowPlans("breakout", "5m", { tier: "high", factors: [] }, 5).map((p) => p.source).includes("swing-wide"));
+  // Paper only: the guardian mirrors a 1R trail, so there is no live container to arm.
+  assert.equal(liveContainerFor("swing-wide"), null);
 });

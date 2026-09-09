@@ -16,7 +16,7 @@ test("every live container equals its paper container (stop % and hold hours)", 
 });
 
 test("sleeves whose paper EXIT the guardian does not mirror have no live container and cannot be armed", () => {
-  for (const s of ["selective-tight", "selective-launch", "selective-x5", "swing-spot", "scanner", "fast-tight", "sweep-fade", "selective-swing", "nonsense", "constructor", "__proto__", "toString"]) assert.equal(liveContainerFor(s), null, s);
+  for (const s of ["selective-tight", "selective-launch", "selective-x5", "swing-spot", "swing-wide", "scanner", "fast-tight", "sweep-fade", "selective-swing", "nonsense", "constructor", "__proto__", "toString"]) assert.equal(liveContainerFor(s), null, s);
   for (const s of RETIRED_AUTO_SOURCES) assert.equal(liveContainerFor(s), null, `retired ${s}`);
   assert.equal(liveContainerFor(null), null);
   assert.equal(liveContainerFor(""), null);

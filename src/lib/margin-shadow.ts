@@ -163,6 +163,7 @@ interface OpenRow {
 // on notional. This is what lets the scoreboard show where leverage stops being worth it.
 export interface ExitProfile {
   maxHoldH: number; oneR: number; carry: boolean;
+  trailR?: number;                              // BASE trail width behind the peak, in R (default 1)
   tightAfterR?: number; tightTrailR?: number;   // once the peak reaches tightAfterR, trail tightTrailR behind it (default 1R)
   launchH?: number; launchMinR?: number;        // failure to launch: still below launchMinR after launchH hours → close
 }
@@ -171,11 +172,15 @@ export interface ExitProfile {
  * managedStopTarget): breakeven once +1R, then trail 1R behind the peak — or, for a
  * profile that says so, a tighter trail once the peak passes tightAfterR. Ratchet only.
  */
-export function managedStop(dir: number, entry: number, peak: number, stopPx: number, oneR: number, p?: Pick<ExitProfile, "tightAfterR" | "tightTrailR">): number {
+export function managedStop(dir: number, entry: number, peak: number, stopPx: number, oneR: number, p?: Pick<ExitProfile, "trailR" | "tightAfterR" | "tightTrailR">): number {
   if (!(oneR > 0)) return stopPx;
   const peakR = (dir * (peak - entry)) / oneR;
   if (peakR < 1) return stopPx;
-  const trailR = p?.tightAfterR != null && p?.tightTrailR != null && peakR >= p.tightAfterR ? p.tightTrailR : 1;
+  // The BASE trail is 1R unless the profile widens it. A wider base trail does not risk more:
+  // the `Math.max(entry, …)` floor below still pins the stop at breakeven, so a 2R trail simply
+  // holds at breakeven until the peak clears +2R and then rides 2R behind it.
+  const base = p?.trailR != null && p.trailR > 0 ? p.trailR : 1;
+  const trailR = p?.tightAfterR != null && p?.tightTrailR != null && peakR >= p.tightAfterR ? p.tightTrailR : base;
   const trail = peak - dir * oneR * trailR;
   const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
   return dir > 0 ? Math.max(stopPx, candidate) : Math.min(stopPx, candidate);
@@ -186,6 +191,17 @@ export function launchStopDue(p: Pick<ExitProfile, "launchH" | "launchMinR">, ag
 export function exitParams(source: string | null, lev: number, entry: number): ExitProfile {
   if (source === "swing-spot") return { maxHoldH: 24 * 14, oneR: entry * 0.06, carry: false };
   if (source === "swing-lev") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
+  // SWING-WIDE (registered 2026-09-09) — swing-lev's container and signals with ONE change:
+  // trail 2R behind the peak instead of 1R, and hold 7 days instead of 4 so the wider trail
+  // has room to be right. Registered off a distribution, not a hunch: across 134 resolved
+  // high-conviction trades the average WIN is 0.93R while the best is 3.3R, and the modal
+  // exit is "trailing stop" — the 1R trail is banking winners about one stop-width past
+  // entry. selective-tight is already testing a NARROWER trail (0.5R after +2R); nothing
+  // was testing a wider one, so the question "are we cutting winners short?" had no arm
+  // that could answer yes. Judged like every sleeve: 30 resolved, t ≥ 2, 7+ days, and it
+  // replaces swing-lev only by beating it on the same signals. PAPER ONLY — the guardian
+  // mirrors a 1R trail, so this deliberately has no live container and cannot be armed.
+  if (source === "swing-wide") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2 };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
   // the wide 6% control. BOTH RETIRED (Sep 1 / Sep 4). Exit profiles stay so already-open
@@ -622,6 +638,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop — RETIRED Sep 4 (spray, not paying)",
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
   "swing-lev": "Leveraged swing — high-conviction 4h/1d longs, 4% / 4d — REACTIVATED Sep 8 (slot-B candidate)",
+  "swing-wide": "Swing WIDE TRAIL — swing-lev's trades, trailing 2R behind the peak instead of 1R, 7-day hold — twin (Sep 9), not pooled, paper only",
   "swing-spot": "Spot swing — same entries, 1×, 6% / 14d, no rollover — REACTIVATED Sep 8 (spot, not margin-tradeable by the executor)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",

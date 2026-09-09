@@ -38,21 +38,127 @@ export function liveRiskFraction(basePct: number, tier: string | null | undefine
  * decides how much notional that dollar-risk is allowed to buy (tighter stops
  * need more leverage to spend the same risk budget).
  *
- *   ~$5k  → 2×   US-retail margin, the live book
- *   ~$10k → 3×   after the account has actually grown
+ *   ~$5k  → 5×   raised from 2× on 2026-09-09 (Spencer's decision, see below)
+ *   ~$10k → 5×
  *   ~$20k → 5×   still well inside Kraken's 5–20× pair limits
  *
- * Unreadable / non-positive equity fails closed to 2× — never "treat missing
- * as large." The operator key kraken_margin_max_leverage is a CEILING on this
- * ladder (default 5 so growth is possible); it cannot raise leverage above
- * the rung the equity has earned.
+ * Unreadable / non-positive equity fails closed to LEV_CAP_AT_5K — never "treat
+ * missing as large." The operator key kraken_margin_max_leverage is a CEILING on
+ * this ladder (default 5); it cannot raise leverage above the rung the equity has
+ * earned.
+ *
+ * ⚠️ WHY THE $5k RUNG WENT 2× → 5× (2026-09-09, Spencer's call, logged to the arm log).
+ * Leverage does NOT change dollar risk here: notional = risk × equity ÷ stop, so the
+ * SAME position is placed either way and the stop still bounds the loss at 3%/6% of
+ * equity. What leverage changes is the MARGIN POSTED for that notional — at 2× a
+ * paper-sized trade posts half its notional, and two of them consume the whole account,
+ * which is why the second slot was being clipped and a third was impossible. At 5× the
+ * same trades post 20%, so three run at full size with the account margin level HIGHER
+ * (222%) than two did at 2× (133%). Kraken calls at 80% and liquidates at 40% on the
+ * ACCOUNT level, so this is not the riskier configuration by that measure.
+ * The genuine cost: 3 slots is ~50% more gross exposure than 2, and crypto longs
+ * correlate in a selloff — a gap through three 4% stops loses more than through two.
+ * That is the trade Spencer accepted; the stop, the daily loss cap and the 15%
+ * drawdown breaker are all unchanged and still bound the downside.
  */
-export const LEV_CAP_AT_5K = 2;
-export const LEV_CAP_AT_10K = 3;
+export const LEV_CAP_AT_5K = 5;
+export const LEV_CAP_AT_10K = 5;
 export const LEV_CAP_AT_20K = 5;
 export const LEV_EQUITY_10K = 10_000;
 export const LEV_EQUITY_20K = 20_000;
-export const DEFAULT_MAX_LEVERAGE = 5; // operator ceiling; ladder still holds $5k at 2×
+export const DEFAULT_MAX_LEVERAGE = 5; // operator ceiling on the ladder
+
+/**
+ * How many live positions the executor will ever hold at once.
+ *
+ * The arm switch already clamped its input to 3 (`Math.min(3, …)`) but the EXECUTOR had
+ * no upper clamp at all — `Math.max(1, cfgNum("kraken_margin_max_positions", 3))` honours
+ * whatever is in AgentConfig, so a fat-fingered "30" written directly to the key would
+ * have been obeyed by the one gate that actually places orders. The two sites now read
+ * the same constant, so the ceiling cannot be raised in one place and refused in another.
+ */
+export const MAX_LIVE_POSITIONS = 3;
+
+/**
+ * The account margin level a new entry must LEAVE BEHIND, in percent.
+ *
+ * 150 is not a new number — it is the line the guardian already calls "getting close to
+ * the 80% margin-call line" (margin-watch step 3). Until now nothing stopped the executor
+ * from opening the position that crossed it: size was capped at 90% of FREE margin, which
+ * prevents a Kraken rejection but says nothing about the health of the book afterwards.
+ *
+ * This matters much more at 3 slots than it did at 2. Slot count and risk % multiply:
+ * at 5× leverage and a 4% stop, three trades at 3% of equity each leave the account at
+ * ~222%, while three at 6% each leave it at ~111% — a 6% adverse move from a margin call,
+ * which crypto does on an ordinary Tuesday. Rather than pick a slot count and a risk %
+ * that happen to be compatible and hope nobody edits one of them, the executor now refuses
+ * the entry that would breach the floor. The account decides how many slots it can carry.
+ *
+ * Override with kraken_margin_min_margin_level (0 disables, for a deliberate operator).
+ */
+export const MIN_ENTRY_MARGIN_LEVEL = 150;
+
+/**
+ * Account margin level (equity ÷ margin used, in percent) AFTER adding a position of
+ * `notional` at `leverage`. Infinity when the resulting book posts no margin at all.
+ * Mirrors Kraken's own TradeBalance ml, which is the number it liquidates on.
+ */
+export function projectedMarginLevel(equity: number, marginUsedNow: number, notional: number, leverage: number): number {
+  if (!(leverage >= 1) || !(equity > 0)) return 0;
+  const after = Math.max(0, marginUsedNow) + notional / leverage;
+  return after > 0 ? (equity / after) * 100 : Infinity;
+}
+
+/**
+ * The most leverage at which a container's stop still fits inside clampLiveStopFrac.
+ *
+ * clampLiveStopFrac caps a stop at 0.6 × the liquidation cushion (0.6/leverage), so the
+ * allowance is 0.36/leverage: 18% at 2×, 7.2% at 5×. Raising the ladder to 5× therefore
+ * SILENTLY SHRINKS any container whose stop is wider than 7.2% — tsmom and tsmom-short
+ * are 8%, so live would have run a 7.2% stop against a paper record scored at 8%. That is
+ * precisely the live-vs-paper container drift the Sep 5 audit was written to end, arriving
+ * through the leverage door instead of the stop door.
+ *
+ * So leverage yields to the container, never the other way round: a sleeve is run at the
+ * highest leverage that still honours the stop it was scored with (floored at Kraken's
+ * margin minimum of 2, which allows stops up to 18% and so binds for nothing we run).
+ * 4% → 9×, 8% → 4×, 3% → 12×.
+ */
+export function leverageThatFitsStop(stopPct: number, leverage: number): number {
+  const stopFrac = Number.isFinite(stopPct) && stopPct > 0 ? stopPct / 100 : LIVE_STOP_DEFAULT_PCT / 100;
+  const fits = Math.floor(0.36 / stopFrac);
+  return Math.max(2, Math.min(leverage, fits));
+}
+
+/**
+ * The daily loss cap, DERIVED from equity and the current risk setting rather than frozen.
+ *
+ * Everything else on this desk scales with the account by construction: dollar risk is a
+ * percentage of equity, position size is risk ÷ stop, and the drawdown breaker's peak
+ * ratchets up as equity grows. The daily loss cap was the exception — the arm script
+ * computed "two full high-conviction losses" ONCE and wrote the dollars to AgentConfig, so
+ * it froze at the equity of the day it was armed. Double the account and the same two
+ * losses no longer reach the cap; halve it and the cap stops protecting anything.
+ *
+ * So it is computed live from the same rule the arm script used: two full losses at the
+ * risk currently configured, floored at $200. `overrideUsd` (kraken_margin_daily_loss_cap)
+ * still wins when an operator sets one deliberately, and an unreadable equity falls back to
+ * that override or the floor — never to "no cap".
+ */
+export const DAILY_LOSS_CAP_FLOOR_USD = 200;
+export const DAILY_LOSS_CAP_FULL_LOSSES = 2;
+export function dailyLossCapUsd(equity: number, baseRiskPct: number, overrideUsd = 0): number {
+  if (overrideUsd > 0) return overrideUsd;
+  if (!(equity > 0)) return DAILY_LOSS_CAP_FLOOR_USD;
+  const highFrac = liveRiskFraction(baseRiskPct, "high");
+  return Math.max(DAILY_LOSS_CAP_FLOOR_USD, Math.round(equity * highFrac * DAILY_LOSS_CAP_FULL_LOSSES));
+}
+
+/** True when the entry may proceed. floorPct <= 0 disables the check. */
+export function entryKeepsMarginLevel(equity: number, marginUsedNow: number, notional: number, leverage: number, floorPct: number): boolean {
+  if (!(floorPct > 0)) return true;
+  return projectedMarginLevel(equity, marginUsedNow, notional, leverage) >= floorPct;
+}
 
 export function leverageCapForEquity(equity: number): number {
   if (!Number.isFinite(equity) || equity <= 0) return LEV_CAP_AT_5K;

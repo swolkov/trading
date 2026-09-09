@@ -183,7 +183,16 @@ export async function GET(request: Request) {
           // the paper row above is unaffected either way — paper keeps measuring.
           if (armedSources && isSourceArmed(armedSources, plan.source)) {
             try {
-              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, deadlineMs: routeDeadlineMs });
+              // LEVERAGE MUST TRAVEL WITH THE PLAN. The executor takes
+              // min(equity ladder, the pair's US-retail max, Math.max(2, alert.leverage ?? 2)) —
+              // so an alert that carries no leverage pins the third term at 2 and the live
+              // trade runs 2× no matter what the ladder allows. That is exactly what was
+              // happening: every paper row here is scored at plan.lev (5×) while the real
+              // fills came back 2×, a silent paper/live divergence in the one input that
+              // decides how much MARGIN a position posts — and therefore how many of them
+              // fit at once. Notional is risk-based either way, so this does not change the
+              // dollar risk of a trade; it changes how many the account can carry.
+              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, deadlineMs: routeDeadlineMs });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
               // Link the paper row to its live attempt: this is what the daily synthesis uses
               // to compare REAL fills against the paper model, trade by trade.
