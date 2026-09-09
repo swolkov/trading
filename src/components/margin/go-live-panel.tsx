@@ -39,6 +39,7 @@ interface ExecCfg {
   live: { liveSources?: string[]; armed: boolean; auto: boolean; validateOnly: boolean; ddBreakerTripped: boolean; baseRiskPct: number; stopPct: number; trailPct: number; maxHoldH: number; perTradeCapUsd: number; maxLeverageCeiling: number; maxPositions: number; maxTradesPerDay: number; trustAlertConviction: boolean };
   paper: { refEquity: number; baseRiskPct: number; stopPct: number; maxHoldH: number; exit: string };
   equity: number | null; equityAt?: string | null; leverageRung: number;
+  notifyFailure?: { at: string; channel: string; why: string } | null;
   ladder: { from: number; cap: number }[];
   tiers: { tier: string; riskPct: number; riskUsd: number | null; notionalUsd: number | null }[];
   aligned: { stop: boolean; risk: boolean; hold: boolean; sizing: boolean; exit: boolean }; allAligned: boolean;
@@ -412,6 +413,13 @@ function LiveMirrorCard() {
             <Chip tone={cfg.live.armed ? "red" : "grey"} dot={cfg.live.armed}>{cfg.live.armed ? "armed — real orders" : cfg.live.auto ? "validate-only" : "disarmed"}</Chip>
             <Chip tone="grey">sources: {cfg.live.liveSources?.length ? cfg.live.liveSources.join(", ") : "none"}</Chip>
             {cfg.live.ddBreakerTripped && <Chip tone="red">drawdown breaker tripped</Chip>}
+            {/* The alerts are the only thing standing between a tripped breaker and a desk
+                that sits halted for days. If the lane is dead, say so LOUDLY here. */}
+            {cfg.notifyFailure && (
+              <Chip tone="red" dot title={`${cfg.notifyFailure.channel}: ${cfg.notifyFailure.why} — a drawdown-breaker page would be silently swallowed. Delivery is best-effort by design and cannot throw, so nothing else will tell you.`}>
+                ALERTS NOT DELIVERING ({cfg.notifyFailure.channel})
+              </Chip>
+            )}
             <Chip tone={mirrored ? "green" : "red"}>{mirrored ? sizeLabel : "live ≠ paper — THE RULE DIFFERS"}</Chip>
           </div>
         )}
