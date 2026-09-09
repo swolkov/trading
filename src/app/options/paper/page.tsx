@@ -27,9 +27,11 @@ interface TradeRow {
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
 }
 interface Rules { maxEntriesPerMonth: number; maxConcurrent: number; maxSpreadPct: number; minDte: number; maxDte: number; minDelta: number; maxDelta: number }
+interface LastResult { at: string; scanned: number; signals: string[]; fresh: string[]; opened: string[]; refused: string[] }
 interface Payload {
   simVersion: string; rules: Rules; universe: { symbol: string; group: string }[];
-  excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[]; lastRun: string | null;
+  excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[];
+  lastRun: string | null; lastResult: LastResult | null;
 }
 
 export default function OptionsPaperPage() {
@@ -86,9 +88,7 @@ export default function OptionsPaperPage() {
       </Explainer>
 
       <div className="grid gap-4 md:grid-cols-2">
-        {sleeves.length === 0 && (
-          <Panel><PanelBody><Note>No positions yet. The scan runs once a day after the close and only acts on a fresh breakout — expect long quiet stretches.</Note></PanelBody></Panel>
-        )}
+
         {sleeves.map((s) => (
           <Panel key={s.key}>
             <PanelHeader title={s.label} aside={<Chip tone={verdictTone(s.verdict)} size="md">{s.verdict}</Chip>} />
@@ -101,6 +101,12 @@ export default function OptionsPaperPage() {
                 <Stat label="Open mark" value={s.open > 0 ? usd(s.openMark) : "—"} />
                 <Stat label="t-stat" value={s.tStat != null ? s.tStat.toFixed(2) : "—"} />
               </div>
+              {s.open === 0 && s.resolved === 0 && (
+                <Note className="mt-3">
+                  Nothing opened yet. On this sleeve that is usually a <strong>result, not a gap</strong>: a breakout fired but no contract cleared the
+                  filters inside a {usd(s.refEquity * 0.55)} budget. The last scan below shows exactly what was refused and why.
+                </Note>
+              )}
               <div className="mt-3 flex flex-wrap gap-2">
                 <Chip tone="grey">Reference equity {usd(s.refEquity)}</Chip>
                 <Chip tone="grey">{s.entriesThisMonth}/{rules?.maxEntriesPerMonth ?? 2} entries this month</Chip>
@@ -126,6 +132,32 @@ export default function OptionsPaperPage() {
                   value={<span className={tone(s.totalPnl)}>{pct(s.totalPnl / (s.refEquity || 1), 1)}</span>} />
               ))}
             </div>
+          </PanelBody>
+        </Panel>
+      )}
+
+      {data?.lastResult && (
+        <Panel>
+          <PanelHeader title="Last scan" aside={<Label>{ago(data.lastResult.at)}</Label>} />
+          <PanelBody>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Stat label="Scanned" value={String(data.lastResult.scanned)} />
+              <Stat label="Trend signals" value={data.lastResult.signals.length ? data.lastResult.signals.join(", ") : "none"} />
+              <Stat label="Opened" value={String(data.lastResult.opened.length)} />
+              <Stat label="Refused" value={String(data.lastResult.refused.length)} />
+            </div>
+            {data.lastResult.refused.length > 0 && (
+              <div className="mt-4">
+                <Label>Refused, and why</Label>
+                <div className="mt-2 space-y-1">
+                  {data.lastResult.refused.map((r, i) => <div key={i} className="text-xs text-muted-foreground">{r}</div>)}
+                </div>
+                <Note className="mt-2">
+                  Refusals are the point, not noise. &quot;No contract passes filters&quot; on the $1,000 sleeve is this experiment&apos;s central
+                  finding being recorded in real time.
+                </Note>
+              </div>
+            )}
           </PanelBody>
         </Panel>
       )}
