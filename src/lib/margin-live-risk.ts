@@ -104,9 +104,14 @@ export const MIN_ENTRY_MARGIN_LEVEL = 150;
  * Mirrors Kraken's own TradeBalance ml, which is the number it liquidates on.
  */
 export function projectedMarginLevel(equity: number, marginUsedNow: number, notional: number, leverage: number): number {
-  if (!(leverage >= 1) || !(equity > 0)) return 0;
+  // Every input must be a real number. An Infinity equity (Kraken can hand back "1e309",
+  // and TradeBalance's `parseFloat(...) || 0` preserves it) would otherwise return Infinity
+  // and clear any floor — a bad read switching the guard OFF at the moment it is needed.
+  // 0 = refuse, which is the safe direction for a gate that only ever blocks entries.
+  if (!Number.isFinite(equity) || !Number.isFinite(marginUsedNow) || !Number.isFinite(notional) || !Number.isFinite(leverage)) return 0;
+  if (!(leverage >= 1) || !(equity > 0) || !(notional > 0)) return 0;
   const after = Math.max(0, marginUsedNow) + notional / leverage;
-  return after > 0 ? (equity / after) * 100 : Infinity;
+  return after > 0 ? (equity / after) * 100 : 0;
 }
 
 /**
@@ -141,15 +146,24 @@ export function leverageThatFitsStop(stopPct: number, leverage: number): number 
  * losses no longer reach the cap; halve it and the cap stops protecting anything.
  *
  * So it is computed live from the same rule the arm script used: two full losses at the
- * risk currently configured, floored at $200. `overrideUsd` (kraken_margin_daily_loss_cap)
- * still wins when an operator sets one deliberately, and an unreadable equity falls back to
- * that override or the floor — never to "no cap".
+ * risk currently configured, floored at $200.
+ *
+ * ⚠️ `overrideUsd` is `number | null`, and null — not 0 — is what means "derive". An
+ * explicit 0 is HONOURED as a real zero cap, which blocks every new entry. That is the
+ * documented behaviour of kraken_margin_daily_loss_cap (see the note above isBotPosition
+ * in margin-executor.ts: `parseFloat(...) || default` once turned "daily_loss_cap=0" into
+ * $200, and it was fixed deliberately). Treating 0 as "unset" here would re-introduce that
+ * exact bug and quietly re-open a desk someone had switched off. Callers must pass null
+ * when the key is missing, never 0.
  */
 export const DAILY_LOSS_CAP_FLOOR_USD = 200;
 export const DAILY_LOSS_CAP_FULL_LOSSES = 2;
-export function dailyLossCapUsd(equity: number, baseRiskPct: number, overrideUsd = 0): number {
-  if (overrideUsd > 0) return overrideUsd;
-  if (!(equity > 0)) return DAILY_LOSS_CAP_FLOOR_USD;
+export function dailyLossCapUsd(equity: number, baseRiskPct: number, overrideUsd: number | null = null): number {
+  if (overrideUsd != null && Number.isFinite(overrideUsd)) return Math.max(0, overrideUsd);
+  // Number.isFinite, not `> 0`: TradeBalance's parser preserves an absurd "1e309" as
+  // Infinity, which sails past a `> 0` check and would make the cap Infinity — no cap at
+  // all, on the one guard whose whole job is to stop a bad day.
+  if (!Number.isFinite(equity) || !(equity > 0)) return DAILY_LOSS_CAP_FLOOR_USD;
   const highFrac = liveRiskFraction(baseRiskPct, "high");
   return Math.max(DAILY_LOSS_CAP_FLOOR_USD, Math.round(equity * highFrac * DAILY_LOSS_CAP_FULL_LOSSES));
 }

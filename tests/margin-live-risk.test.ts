@@ -311,6 +311,46 @@ test("the margin-level floor, not the slot count, decides how many positions fit
   assert.ok(unguarded.marginLevel < 120, `unguarded book sits at ${unguarded.marginLevel.toFixed(0)}%`);
 });
 
+// Codex review of PR #100 found these three. Each is a way a NEW guard could have been
+// switched off by a bad read or by a writer that never stopped freezing its input.
+test("a non-finite equity can never vacate the new guards (Kraken can return 1e309)", () => {
+  const absurd = parseFloat("1e309");             // Infinity — and `parseFloat(x) || 0` keeps it
+  assert.equal(Number.isFinite(absurd), false);
+  assert.ok(absurd > 0, "which is exactly why a bare `> 0` check is not enough");
+  // The floor must REFUSE, not return Infinity and clear itself.
+  assert.equal(projectedMarginLevel(absurd, 2_782, 6_954, 5), 0);
+  assert.equal(entryKeepsMarginLevel(absurd, 2_782, 6_954, 5, 150), false);
+  // The daily cap must fall back to the floor, not become Infinity (= no cap at all).
+  assert.equal(dailyLossCapUsd(absurd, 3), DAILY_LOSS_CAP_FLOOR_USD);
+  assert.equal(dailyLossCapUsd(NaN, 3), DAILY_LOSS_CAP_FLOOR_USD);
+  // Junk in any other argument refuses too.
+  assert.equal(projectedMarginLevel(4_636, NaN, 6_954, 5), 0);
+  assert.equal(projectedMarginLevel(4_636, 0, NaN, 5), 0);
+});
+
+test("an explicit daily-loss-cap of 0 is a REAL zero cap, never 'unset'", () => {
+  // The note above isBotPosition records this being fixed once already: `parseFloat(x) ||
+  // default` turned "daily_loss_cap=0" into $200 and re-opened a desk someone had switched
+  // off. null means derive; 0 means zero.
+  assert.equal(dailyLossCapUsd(4_636, 3, 0), 0, "0 blocks every entry — that is the point");
+  assert.equal(dailyLossCapUsd(4_636, 3, null), 556, "null derives");
+  assert.equal(dailyLossCapUsd(4_636, 3, 100), 100);
+  assert.equal(dailyLossCapUsd(4_636, 3, NaN), 556, "unparseable falls through to derived");
+});
+
+test("the margin floor uses the LARGER of reported and observed margin, so a bad read only tightens it", () => {
+  // Kraken omits "m" from a degraded 200 → health.marginUsed coerces to 0 → the account
+  // looks flat. The executor takes max(reported, sum of the positions it just read).
+  const observed = [{ margin: 1_391 }, { margin: 1_391 }].reduce((s, p) => s + p.margin, 0);
+  const reportedZero = Math.max(0, observed);
+  assert.equal(reportedZero, 2_782);
+  // With the bad read taken at face value the entry passes at a fictional 333%…
+  assert.ok(entryKeepsMarginLevel(4_636, 0, 6_954, 5, 150), "the fail-open Codex found");
+  // …and with the observed margin it is correctly refused at 111%.
+  assert.equal(entryKeepsMarginLevel(4_636, reportedZero, 6_954, 5, 150), false);
+  assert.equal(Math.round(projectedMarginLevel(4_636, reportedZero, 6_954, 5)), 111);
+});
+
 test("projectedMarginLevel matches Kraken's equity ÷ margin, and the floor can be disabled", () => {
   // $6,955 notional at 5× posts $1,391 on a flat $4,636 account → 333%.
   assert.equal(Math.round(projectedMarginLevel(4_636, 0, 6_955, 5)), 333);

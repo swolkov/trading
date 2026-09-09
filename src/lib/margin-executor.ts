@@ -738,10 +738,15 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Optional operator ceiling on margin per entry. Default 0 = NONE: sizing is risk-based
     // exactly like paper. (The old $100 default silently made live risk ~0.6%, not 3%.)
     const perTrade = Math.max(0, await cfgNum("kraken_margin_per_trade_usd", 0));
-    // An explicitly configured dollar cap still wins; 0/unset means "derive it from equity
+    // An explicitly configured dollar cap wins; a MISSING key means "derive it from equity
     // and the current risk setting" so it grows with the account instead of freezing at the
     // number the arm script happened to compute on arming day (see dailyLossCapUsd).
-    const lossCapOverride = Math.max(0, await cfgNum("kraken_margin_daily_loss_cap", 0));
+    // ⚠️ Read the raw string, not cfgNum with a 0 default: an explicit "0" must stay a real
+    // zero cap (which blocks every entry — someone switching the desk off), and collapsing
+    // it into "unset" is precisely the bug the note above isBotPosition records being fixed.
+    const lossCapRaw = await cfg("kraken_margin_daily_loss_cap");
+    const parsedLossCap = lossCapRaw != null && lossCapRaw.trim() !== "" ? parseFloat(lossCapRaw) : NaN;
+    const lossCapOverride = Number.isFinite(parsedLossCap) ? parsedLossCap : null;
 
     // Layer 5a: the guardian's PROTECTION must have actually run recently (the stamp is
     // written only after step 3c completed without a failure — not at route start). The
@@ -772,8 +777,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const equity = health.equity;
     // Fail closed if equity reads 0/unreadable — otherwise risk-based sizing below would
     // silently skip its cap and place a full-size order.
-    if (!(equity > 0)) {
-      return { executed: false, validated: false, note: "equity reads 0/unreadable — failing closed" };
+    // Number.isFinite as well as > 0: TradeBalance parses "1e309" to Infinity and
+    // `parseFloat(...) || 0` preserves it, so an absurd equity passes a bare `> 0` and then
+    // makes every equity-derived guard vacuous — an infinite daily loss cap and an infinite
+    // projected margin level — while free margin stays finite enough to size a real order.
+    if (!Number.isFinite(equity) || !(equity > 0)) {
+      return { executed: false, validated: false, note: "equity reads 0/unreadable/non-finite — failing closed" };
     }
     // Equity ladder: $5k book stays 2× even if the operator ceiling is 5. Risk % is
     // unchanged — larger equity just means larger dollar bets at the same 3%/6%.
@@ -950,9 +959,17 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // a margin call is reachable purely by config. This is the gate that makes the ACCOUNT
     // decide how many positions it can carry, rather than a constant that must be kept in
     // step with the risk setting by hand.
+    // ⚠️ NOT health.marginUsed on its own. TradeBalance's "m" is coerced to 0 when Kraken
+    // omits it from a degraded 200 — the exact ambiguity marginUsedRaw exists to preserve —
+    // and a 0 here reads as "the account is flat", which would wave through a full-size
+    // entry precisely when the book is unreadable. Take the LARGER of the reported figure
+    // and the margin of the positions we already read, so a bad read can only make this
+    // gate stricter, never laxer.
+    const marginFromPositions = openPositions.reduce((s, p) => s + (p.margin > 0 ? p.margin : 0), 0);
+    const marginUsedNow = Math.max(health.marginUsed || 0, marginFromPositions);
     const mlFloor = await cfgNum("kraken_margin_min_margin_level", MIN_ENTRY_MARGIN_LEVEL);
-    if (!entryKeepsMarginLevel(equity, health.marginUsed, notional, leverage, mlFloor)) {
-      const after = projectedMarginLevel(equity, health.marginUsed, notional, leverage);
+    if (!entryKeepsMarginLevel(equity, marginUsedNow, notional, leverage, mlFloor)) {
+      const after = projectedMarginLevel(equity, marginUsedNow, notional, leverage);
       return {
         executed: false, validated: false,
         note: `entry refused: would leave margin level at ${after.toFixed(0)}% (floor ${mlFloor}%, Kraken calls at 80%). $${notional.toFixed(0)} notional at ${leverage}× on equity $${equity.toFixed(0)} with $${health.marginUsed.toFixed(0)} already posted. Lower kraken_margin_live_max_risk_pct or wait for a slot to close.`,
