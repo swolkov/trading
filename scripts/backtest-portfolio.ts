@@ -27,7 +27,7 @@ const TF: Record<string, TfSpec> = {
 };
 const RANK: Record<string, number> = { low: 0, med: 1, high: 2 };
 
-interface Sig { coin: string; t: number; px: number; tier: string; idx: number }
+interface Sig { coin: string; t: number; px: number; trigger: number; closedAbove: boolean; tier: string; idx: number }
 interface Open { coin: string; entry: number; stop: number; peak: number; oneR: number; notional: number; margin: number; openedT: number; idx: number }
 
 async function main() {
@@ -53,7 +53,12 @@ async function main() {
       if (ctx) { const u = ctx.filter((x) => x.t <= b[i].t); if (u.length >= 25) all = [...s, ...evaluate({ name: coin, symbol: `${coin}/USD` }, TF["1d"], u)]; }
       const conv = scoreConviction(brk, all);
       if (RANK[conv.tier] < RANK["med"]) continue;
-      sigs.push({ coin, t: b[i].t, px: b[i].c, tier: conv.tier, idx: i });
+      // px = the bar CLOSE (what a close-evaluated replay fills at).
+      // trigger = the 20-bar high the forming bar pierced — what LIVE fills near, because the
+      // scanner runs every 5 minutes and fires the moment last.h crosses it, not at the close.
+      const win = b.slice(Math.max(0, i - 20), i);
+      const hh = win.length ? Math.max(...win.map((x) => x.h)) : b[i].c;
+      sigs.push({ coin, t: b[i].t, px: b[i].c, trigger: hh, closedAbove: b[i].c > hh, tier: conv.tier, idx: i });
     }
   }
   writeFileSync(SIGCACHE, JSON.stringify(sigs));
@@ -142,6 +147,11 @@ async function main() {
     // enter
     while (si < sigs.length && sigs[si].t === t) {
       const s = sigs[si++];
+      // CONFIRM=1 requires the bar to CLOSE above the level, not merely wick through it. The
+      // detector fires on last.h > hh, so today a poke that reverses inside the same bar is a
+      // live entry — the comment on it ("Spencer decides whether it's a real break") predates
+      // the desk being automatic, and nobody decides any more.
+      if (process.env.CONFIRM === "1" && !s.closedAbove) continue;
       if (halted) continue;                        // entries halted; closes still run
       const slotsNow = REGIME ? (btcUp(t) ? WIDE : 1) : SLOTS;
       if (open.length >= slotsNow) continue;
@@ -155,7 +165,27 @@ async function main() {
       const margin = notional / lev;
       if (!(notional > 0)) continue;
       if ((eq / (marginNow + margin)) * 100 < FLOOR) continue;   // the 150% entry floor
-      const entry = s.px * (1 + CHASE);
+      // ⚠️ ENTRY=pierce IS A DISCREDITED MODEL. KEPT ONLY AS A WARNING — do not use it.
+      //
+      // It assumed live fills near the level that triggered the signal (~the top of the bar),
+      // because the scanner fires the moment last.h crosses the 20-bar high. Under it, live
+      // looked 5x worse than the close-evaluated replay (+2.3%/mo vs +12.4%), and "fix the
+      // entry timing" looked like the biggest win available.
+      //
+      // MEASURED AGAINST 52 REAL swing-lev FILLS (2026-09-09) IT IS SIMPLY FALSE:
+      //   live entry sits at 66% of the bar range (median)
+      //   the same bars CLOSED at 81%
+      //   live fills 0.93% mean / 0.35% median CHEAPER than that close, t = 3.45,
+      //   cheaper on 31 of 52
+      // The scan does not catch the pierce at the extreme; it catches it 5 minutes later,
+      // typically on a pullback. So ENTRY=close — what every number quoted from this harness
+      // uses — is if anything PESSIMISTIC about live, and live's entry timing needs no change.
+      //
+      // The lesson worth keeping: a model of the live path is a hypothesis. This one survived
+      // a paired test at t=3.44 and was still wrong, because the test compared two models to
+      // each other and neither to reality. Check the fills.
+      const base = process.env.ENTRY === "pierce" ? Math.max(s.trigger, Math.min(s.px, s.trigger * 1.004)) : s.px;
+      const entry = base * (1 + CHASE);
       open.push({ coin: s.coin, entry, stop: entry * (1 - STOP), peak: entry, oneR: entry * STOP, notional, margin, openedT: t, idx: s.idx });
     }
     curve.push({ t, eq });
