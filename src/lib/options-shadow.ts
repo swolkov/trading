@@ -19,8 +19,13 @@ import { getDailyBars, getOptionQuotes, type OptionQuote } from "@/lib/alpaca-op
 import {
   OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
   type BookState, type OptionSource,
-  dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf, isExitSignal, optionsVerdict, tStatOf,
+  canExitAt, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf, isExitSignal, optionsVerdict, tStatOf,
 } from "@/lib/options-paper-model";
+
+/** How long past expiry a position may stay open while settlement data is unavailable
+ *  before it is written off as unknowable. A transient bars outage on the day a contract
+ *  expires must NOT erase a real loss from the record — it just means "try again tomorrow". */
+const SETTLE_GRACE_DAYS = 5;
 
 export async function ensureOptionsPaperTable(): Promise<void> {
   await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS options_paper_trades (
@@ -94,35 +99,71 @@ export async function bookStateFor(source: OptionSource): Promise<BookState> {
 
 export type OpenResult = { opened: true; costUsd: number } | { opened: false; reason: string };
 
+/**
+ * Open one paper position, with every book cap enforced ATOMICALLY.
+ *
+ * The caps (concurrent count, book premium, monthly entries, one-per-correlation-group) are
+ * checked by reading and then inserting, which is only safe if nothing else can insert in
+ * between. The unique index alone does not cover this: it blocks a duplicate SYMBOL, not a
+ * second DIFFERENT symbol slipping past a shared cap. Two overlapping runs — the daily cron
+ * and a manual trigger, say — could otherwise both read "2 open, $600 premium" and both
+ * insert, leaving 4 positions and a book over its cap.
+ *
+ * So the whole check-and-insert runs inside one transaction behind a per-sleeve advisory
+ * lock. Concurrent callers serialize on the sleeve; the second one reads the first one's
+ * committed state and refuses correctly.
+ */
 export async function openOptionPaperTrade(p: {
   symbol: string; source: OptionSource; occ: string; strike: number; expiry: string;
-  ask: number; delta: number; iv: number | null; spreadPct: number; costUsd: number; underlying: number;
+  ask: number; bid: number; delta: number; iv: number | null; spreadPct: number;
+  costUsd: number; underlying: number;
 }): Promise<OpenResult> {
   await ensureOptionsPaperTable();
   const refEquity = await refEquityFor(p.source);
-  const book = await bookStateFor(p.source);
   const group = groupOf(p.symbol);
-  const [dup] = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
-    `SELECT count(*)::bigint AS n FROM options_paper_trades
-     WHERE status='open' AND symbol=$1 AND source=$2 AND ${OPTIONS_COHORT_SQL}`, p.symbol, p.source,
-  );
-  if (Number(dup?.n ?? 0) > 0) return { opened: false, reason: "already open" };
-  const refusal = entryRefusal(book, group, refEquity, p.costUsd);
-  if (refusal) return { opened: false, reason: refusal };
-  try {
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO options_paper_trades
-        (symbol, corr_group, source, occ, strike, expiry, ref_equity, entry_delta, entry_iv,
-         entry_spread_pct, entry_ask, cost_usd, underlying_at_entry, mark_usd, peak_usd, status, sim_version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$12,$12,'open',$14)`,
-      p.symbol, group, p.source, p.occ, p.strike, p.expiry, refEquity, p.delta, p.iv,
-      p.spreadPct, p.ask, p.costUsd, p.underlying, OPTIONS_SIM_VERSION,
+  return prisma.$transaction(async (tx) => {
+    // Serialize entries per sleeve for the life of this transaction.
+    await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, `options_paper:${p.source}`);
+
+    const [agg] = await tx.$queryRawUnsafe<{ n: bigint; premium: number | null; groups: string[] | null; dup: bigint }[]>(
+      `SELECT count(*)::bigint AS n, COALESCE(sum(cost_usd),0)::float AS premium,
+              COALESCE(array_agg(DISTINCT corr_group) FILTER (WHERE corr_group IS NOT NULL), '{}') AS groups,
+              count(*) FILTER (WHERE symbol=$2)::bigint AS dup
+       FROM options_paper_trades WHERE status='open' AND source=$1 AND ${OPTIONS_COHORT_SQL}`,
+      p.source, p.symbol,
     );
-  } catch (e) {
-    if (/options_paper_one_open_idx|unique/i.test(String(e))) return { opened: false, reason: "already open" };
-    throw e;
-  }
-  return { opened: true, costUsd: p.costUsd };
+    const [mo] = await tx.$queryRawUnsafe<{ n: bigint }[]>(
+      `SELECT count(*)::bigint AS n FROM options_paper_trades
+       WHERE source=$1 AND ${OPTIONS_COHORT_SQL} AND time >= date_trunc('month', now())`, p.source,
+    );
+    if (Number(agg?.dup ?? 0) > 0) return { opened: false, reason: "already open" } as OpenResult;
+    const book: BookState = {
+      openCount: Number(agg?.n ?? 0), openPremium: agg?.premium ?? 0,
+      entriesThisMonth: Number(mo?.n ?? 0), openGroups: agg?.groups ?? [],
+    };
+    const refusal = entryRefusal(book, group, refEquity, p.costUsd);
+    if (refusal) return { opened: false, reason: refusal } as OpenResult;
+
+    // The opening mark is what the position could be SOLD for right now — the bid — not
+    // what was paid for it. Seeding the mark with the cost would show every fresh position
+    // as flat when it is in fact already down the spread, which is the single largest cost
+    // this book exists to measure.
+    const openingMark = p.bid * 100;
+    try {
+      await tx.$executeRawUnsafe(
+        `INSERT INTO options_paper_trades
+          (symbol, corr_group, source, occ, strike, expiry, ref_equity, entry_delta, entry_iv,
+           entry_spread_pct, entry_ask, cost_usd, underlying_at_entry, mark_usd, peak_usd, status, sim_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15)`,
+        p.symbol, group, p.source, p.occ, p.strike, p.expiry, refEquity, p.delta, p.iv,
+        p.spreadPct, p.ask, p.costUsd, p.underlying, openingMark, OPTIONS_SIM_VERSION,
+      );
+    } catch (e) {
+      if (/options_paper_one_open_idx|unique/i.test(String(e))) return { opened: false, reason: "already open" } as OpenResult;
+      throw e;
+    }
+    return { opened: true, costUsd: p.costUsd } as OpenResult;
+  });
 }
 
 export interface OptionResolution {
@@ -156,57 +197,78 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
   let quotes: Record<string, OptionQuote> = {};
   try { quotes = await getOptionQuotes(rows.map((r) => r.occ)); } catch { /* handled per-row below */ }
   let bars: Record<string, { t: string; c: number; h: number; l: number }[]> = {};
-  try { bars = await getDailyBars([...new Set(rows.map((r) => r.symbol))], 90); } catch { /* trend exit skipped */ }
+  try { bars = await getDailyBars([...new Set(rows.map((r) => r.symbol))], 120); } catch { /* handled per-row below */ }
+
+  /** Every UPDATE that resolves a position is guarded by `status='open'`, so exactly one
+   *  concurrent evaluator can win it. Only the winner reports the closure — otherwise a
+   *  losing racer sends a duplicate Slack alert and inflates the run's closed count while
+   *  the database (correctly) counts it once. */
+  const resolveOnce = async (sql: string, ...args: unknown[]): Promise<boolean> =>
+    (await prisma.$executeRawUnsafe(sql, ...args)) > 0;
 
   const out: OptionResolution[] = [];
   for (const r of rows) {
     const q = quotes[r.occ];
     const dte = r.expiry ? dteOf(r.expiry, now) : 999;
     const symBars = bars[r.symbol] || [];
-    const lastClose = symBars.length ? symBars[symBars.length - 1].c : null;
 
-    // --- settle an expired contract at intrinsic value, never at "worthless" by default ---
-    if (dte <= 0) {
-      if (lastClose == null || r.strike == null) {
-        await prisma.$executeRawUnsafe(
-          `UPDATE options_paper_trades SET status='void', reason=$1, resolved_at=now(), mark_usd=NULL WHERE id=$2 AND status='open'`,
-          "voided — expired and neither an option quote nor an underlying close was available to settle it", r.id);
+    // ---- past expiry: settle at intrinsic value against the EXPIRY DAY's close ----
+    if (r.expiry && dte <= 0) {
+      // The close ON the expiry date decides an option's fate. Using the latest available
+      // close instead would settle a Friday expiry off Monday's price — a $14 call that
+      // died at Friday's $13 would be paid out on Monday's $20.
+      const expiryBar = symBars.find((b) => b.t.slice(0, 10) === r.expiry);
+      if (!expiryBar || r.strike == null) {
+        // No settlement data yet. A transient bars outage must not erase a real outcome, so
+        // wait; only write it off once it is clear the data is never coming.
+        if (-dte >= SETTLE_GRACE_DAYS) {
+          await resolveOnce(
+            `UPDATE options_paper_trades SET status='void', reason=$1, resolved_at=now(), mark_usd=NULL WHERE id=$2 AND status='open'`,
+            `voided — expired ${-dte} days ago and no close for ${r.expiry} was ever available to settle it`, r.id);
+        }
         continue;
       }
-      const intrinsic = Math.max(0, lastClose - r.strike) * 100;
+      const intrinsic = Math.max(0, expiryBar.c - r.strike) * 100;
       const pnl = intrinsic - r.cost_usd;
-      await prisma.$executeRawUnsafe(
+      const pnlPct = r.cost_usd > 0 ? pnl / r.cost_usd : 0;
+      const won = await resolveOnce(
         `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
            reason=$5, resolved_at=now(), mark_usd=NULL WHERE id=$6 AND status='open'`,
-        intrinsic / 100, intrinsic, pnl, r.cost_usd > 0 ? pnl / r.cost_usd : 0,
-        intrinsic > 0 ? `expired in the money — settled at intrinsic $${(intrinsic / 100).toFixed(2)}` : "expired worthless",
+        intrinsic / 100, intrinsic, pnl, pnlPct,
+        intrinsic > 0
+          ? `expired in the money — settled at intrinsic $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`
+          : `expired worthless — ${r.expiry} close $${expiryBar.c.toFixed(2)} below the $${r.strike} strike`,
         r.id);
-      out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: intrinsic, pnl, pnlPct: r.cost_usd > 0 ? pnl / r.cost_usd : 0, reason: "expiry" });
+      if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: intrinsic, pnl, pnlPct, reason: "expiry" });
       continue;
     }
 
-    // --- unpriceable this run: leave it open, do not guess a mark ---
-    if (!q || !(q.bid > 0)) continue;
+    // ---- no usable quote this run: leave it open, never guess a mark ----
+    // The gate is the same one entry uses: a real bid, real size behind it, quoted recently.
+    // A $6.00 bid for zero contracts is not an exit anyone could have taken.
+    if (!q || !canExitAt({ bid: q.bid, bidSize: q.bidSize, quoteTs: q.quoteTs }, now)) continue;
 
     const markUsd = q.bid * 100;
-    const peak = Math.max(r.peak_usd ?? 0, markUsd);
     const trendExit = symBars.length >= 25 ? isExitSignal(symBars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l }))) : false;
     const reason = exitReason({ trendExit, dte, markUsd, costUsd: r.cost_usd });
 
     if (!reason) {
+      // GREATEST in SQL, not Math.max in JS: two evaluators reading the same stale peak and
+      // writing back their own computed values would let the lower one overwrite the higher.
       await prisma.$executeRawUnsafe(
-        `UPDATE options_paper_trades SET mark_usd=$1, peak_usd=$2 WHERE id=$3 AND status='open'`, markUsd, peak, r.id);
+        `UPDATE options_paper_trades SET mark_usd=$1, peak_usd=GREATEST(COALESCE(peak_usd,0), $1) WHERE id=$2 AND status='open'`,
+        markUsd, r.id);
       continue;
     }
-    // Exit receives the quoted BID — the same side of the spread a real seller crosses.
     const proceeds = exitProceedsUsd(q.bid);
     const pnl = proceeds - r.cost_usd;
     const pnlPct = r.cost_usd > 0 ? pnl / r.cost_usd : 0;
-    await prisma.$executeRawUnsafe(
+    const won = await resolveOnce(
       `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
-         reason=$5, resolved_at=now(), peak_usd=$6, mark_usd=NULL WHERE id=$7 AND status='open'`,
-      q.bid, proceeds, pnl, pnlPct, reason, peak, r.id);
-    out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: proceeds, pnl, pnlPct, reason });
+         reason=$5, resolved_at=now(), peak_usd=GREATEST(COALESCE(peak_usd,0), $6), mark_usd=NULL
+       WHERE id=$7 AND status='open'`,
+      q.bid, proceeds, pnl, pnlPct, reason, markUsd, r.id);
+    if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: proceeds, pnl, pnlPct, reason });
   }
   return out;
 }

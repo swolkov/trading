@@ -9,7 +9,7 @@
 import { getDailyBars, getOptionChain } from "@/lib/alpaca-options";
 import {
   MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type ContractPick,
-  isEntrySignal, pickContract, positionBudget,
+  isEntrySignal, pickContract,
 } from "@/lib/options-paper-model";
 
 export interface TrendCandidate { symbol: string; close: number; bars: { t: string; c: number; h: number; l: number }[] }
@@ -37,14 +37,19 @@ export async function scanTrendSignals(): Promise<{ candidates: TrendCandidate[]
 export interface ChainPick extends ContractPick { symbol: string; underlying: number; iv: number | null }
 
 /**
- * The best in-the-money call on one underlying for a given budget, or null.
+ * The best in-the-money call on one underlying for a given SPENDABLE budget, or null.
+ *
+ * `budgetUsd` is the caller's real spending room — the smaller of the per-position budget
+ * and what is left under the book cap. It is passed in rather than derived from reference
+ * equity here, because selecting on the position budget alone picks the contract nearest
+ * the target delta and only then discovers the book cannot afford it, when a slightly
+ * cheaper contract one delta-step away would have passed every gate.
  *
  * The strike window is derived from delta, not guessed: a 0.70-0.85 delta call on a normal
  * equity is roughly 8-35% in the money, so the request asks for strikes between 60% and 97%
- * of spot and lets the delta filter in pickContract do the precise work. Asking wider costs
- * nothing extra on this endpoint but returns thousands of contracts to parse.
+ * of spot and lets the delta filter in pickContract do the precise work.
  */
-export async function pickContractFor(symbol: string, underlying: number, refEquity: number): Promise<ChainPick | null> {
+export async function pickContractFor(symbol: string, underlying: number, budgetUsd: number): Promise<ChainPick | null> {
   const now = Date.now();
   const from = new Date(now + MIN_DTE * 86_400_000).toISOString().slice(0, 10);
   const to = new Date(now + MAX_DTE * 86_400_000).toISOString().slice(0, 10);
@@ -61,7 +66,7 @@ export async function pickContractFor(symbol: string, underlying: number, refEqu
       occ: q.occ, strike: q.strike, expiry: q.expiry, delta: q.delta as number,
       bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize,
     }));
-  const pick = pickContract(candidates, positionBudget(refEquity));
+  const pick = pickContract(candidates, budgetUsd);
   if (!pick) return null;
   const iv = quotes.find((q) => q.occ === pick.contract.occ)?.iv ?? null;
   return { ...pick, symbol, underlying, iv };

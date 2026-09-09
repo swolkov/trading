@@ -69,10 +69,19 @@ export default function OptionsPaperPage() {
           Not out-of-the-money lottery tickets — those expire worthless most of the time and are how small options accounts die.
         </p>
         <p>
-          <strong>Entry pays the real ask and exit receives the real bid</strong>, both from the live quote — so the dominant cost is observed, not modeled.
-          That is the honest upgrade over the July research, which had to price entries with a formula because real options history costs $207 per name-year.
-          The trade-off: this can only measure forward. At two entries a month, a 30-trade verdict is roughly <strong>15 months</strong> away. It is a slow
-          instrument by design, and the number below will say &quot;gathering&quot; for a long time. That is the measurement working, not stalling.
+          <strong>Entry pays the ask and exit receives the bid</strong>, both from live quotes — so the dominant cost is observed, not modeled. That is the
+          honest upgrade over the July research, which had to price entries with a formula because real options history costs $207 per name-year. Exits also
+          require real size behind the bid and a recent quote, so a phantom price on an untraded strike cannot book a profit.
+        </p>
+        <p>
+          <strong>One caveat, stated plainly:</strong> this account is not signed up for the OPRA agreement, so quotes come from Alpaca&apos;s
+          <em> indicative</em> feed rather than the executable NBBO. That is real market data, not a model — but the true tradeable spread may be wider than
+          what is recorded here, which means these results are, if anything, <strong>flattering</strong>. Signing the OPRA agreement in the Alpaca dashboard
+          upgrades every number on this page with no other change.
+        </p>
+        <p>
+          The other trade-off: this can only measure forward. At two entries a month, a 30-trade verdict is roughly <strong>15 months</strong> away. It is a
+          slow instrument by design, and the number below will say &quot;gathering&quot; for a long time. That is the measurement working, not stalling.
         </p>
       </Explainer>
 

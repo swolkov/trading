@@ -116,8 +116,22 @@ export const MAX_DTE = 120;
 /** Hard reject above this quoted round-trip spread. The screen's cheap names (F 8.2%,
  *  CCL 5.8-28%, CHPT 21.8%, OPEN 27.1%) all fail here — cheap contract ≠ cheap trade. */
 export const MAX_SPREAD_PCT = 3.0;
-/** A quote with no size behind it is not a price. */
+/** A quote with no size behind it is not a price. Enforced on BOTH sides: at entry when
+ *  choosing a contract, and again at exit — a bid of $6.00 with zero size behind it would
+ *  otherwise book a profit that nobody was ever willing to pay. */
 export const MIN_QUOTE_SIZE = 1;
+/** A quote older than this is stale and may not be used to open or close a position.
+ *  Yesterday's quote on an untraded strike is not today's price. */
+export const MAX_QUOTE_AGE_MS = 36 * 3600_000;
+export function isQuoteFresh(quoteTs: string | null | undefined, now: Date): boolean {
+  if (!quoteTs) return false;
+  const t = Date.parse(quoteTs);
+  return Number.isFinite(t) && now.getTime() - t <= MAX_QUOTE_AGE_MS;
+}
+/** The exit-side gate: a bid we could actually hit, quoted recently. */
+export function canExitAt(q: { bid: number; bidSize: number; quoteTs?: string | null }, now: Date): boolean {
+  return q.bid > 0 && q.bidSize >= MIN_QUOTE_SIZE && isQuoteFresh(q.quoteTs, now);
+}
 
 export interface Contract {
   occ: string; strike: number; expiry: string; delta: number;
@@ -142,8 +156,13 @@ export function exitProceedsUsd(bid: number, contracts = 1): number {
 export const REG_FEE_PER_CONTRACT = 0.05;
 
 /** Choose the contract closest to TARGET_DELTA among those passing every liquidity and
- *  structure filter, and affordable within the position budget. Returns null with no
- *  fallback: "nothing tradeable today" is a valid and common answer for this book. */
+ *  structure filter, and affordable within `budgetUsd`. Returns null with no fallback:
+ *  "nothing tradeable today" is a valid and common answer for this book.
+ *
+ *  `budgetUsd` must be the SMALLER of the position budget and the room left under the book
+ *  cap. Passing only the position budget lets this pick a $500 contract that the book cap
+ *  then refuses, when a $295 contract one delta-step away would have passed everything —
+ *  a silently missed entry rather than a bad one, but a missed entry all the same. */
 export function pickContract(candidates: Contract[], budgetUsd: number): ContractPick | null {
   let best: ContractPick | null = null;
   for (const c of candidates) {
@@ -264,10 +283,25 @@ export function tStatOf(mean: number | null, std: number | null, n: number): num
 }
 
 /** Days to expiry from an OCC-style YYYY-MM-DD expiry string, at a given instant. */
+/** The ET calendar date at an instant, as YYYY-MM-DD. Expiries are calendar dates, so every
+ *  comparison against one has to be done in calendar terms or it drifts by a day. */
+export function etDateOf(at: Date): string {
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(at);
+  const g = (t: string) => p.find((x) => x.type === t)?.value ?? "";
+  return `${g("year")}-${g("month")}-${g("day")}`;
+}
+function dayNumber(isoDate: string): number {
+  return Date.UTC(Number(isoDate.slice(0, 4)), Number(isoDate.slice(5, 7)) - 1, Number(isoDate.slice(8, 10))) / 86_400_000;
+}
+/**
+ * Whole CALENDAR days from today (ET) to the expiry date. Zero on expiry day itself,
+ * negative after it.
+ *
+ * An earlier version subtracted timestamps and floored the result, which made a Dec-18
+ * expiry read as 0 DTE when the cron ran at 22:00 UTC on Dec 17 — settling a day early,
+ * every time, because that is exactly when the cron runs. Calendar dates in, calendar days
+ * out; no clock arithmetic to get wrong.
+ */
 export function dteOf(expiry: string, now: Date): number {
-  const exp = new Date(`${expiry}T21:00:00Z`).getTime();
-  // FLOOR, not ceil: rounding time-remaining DOWN is the conservative direction for the
-  // DTE_FLOOR exit — it can only ever close a position a day early, never a day late into
-  // the accelerating-decay window that the floor exists to avoid.
-  return Math.floor((exp - now.getTime()) / 86_400_000);
+  return dayNumber(expiry) - dayNumber(etDateOf(now));
 }

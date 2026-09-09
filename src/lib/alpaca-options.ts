@@ -16,6 +16,19 @@
 
 const DATA = process.env.ALPACA_DATA_URL?.replace(/\/$/, "") || "https://data.alpaca.markets";
 
+// THE OPTIONS QUOTE FEED — read this before quoting any number this book produces.
+//
+// `opra` is the real, executable NBBO. This account CANNOT use it: the endpoint returns
+// "OPRA agreement is not signed" (verified Sep 8 2026). So the book runs on `indicative`,
+// which is Alpaca's derived feed — real market data, not a Black-Scholes model, but NOT the
+// executable NBBO either. Concretely: spreads and fills measured here are indicative, and
+// the true tradeable spread may be wider. Every figure this book reports carries that
+// caveat, and the page says so.
+//
+// Signing the OPRA agreement in the Alpaca dashboard upgrades the whole book with no code
+// change beyond this variable — which is why it is a variable and not a literal.
+export const OPTIONS_FEED = process.env.ALPACA_OPTIONS_FEED || "indicative";
+
 function headers(): Record<string, string> {
   const key = process.env.ALPACA_API_KEY;
   const secret = process.env.ALPACA_API_SECRET;
@@ -58,6 +71,9 @@ export async function getDailyBars(symbols: string[], days = 420): Promise<Recor
 export interface OptionQuote {
   occ: string; strike: number; expiry: string; type: "call" | "put";
   bid: number; ask: number; bidSize: number; askSize: number;
+  /** When the quote was published. Kept because a quote with no timestamp check lets an
+   *  untraded strike's day-old bid settle today's position. */
+  quoteTs: string | null;
   delta: number | null; theta: number | null; iv: number | null; dayVolume: number;
 }
 
@@ -84,28 +100,39 @@ export async function getOptionChain(p: {
   underlying: string; expiryFrom: string; expiryTo: string; strikeMin: number; strikeMax: number; type?: "call" | "put";
 }): Promise<OptionQuote[]> {
   const q = new URLSearchParams({
-    feed: "indicative", limit: "1000", type: p.type ?? "call",
+    feed: OPTIONS_FEED, limit: "1000", type: p.type ?? "call",
     expiration_date_gte: p.expiryFrom, expiration_date_lte: p.expiryTo,
     strike_price_gte: p.strikeMin.toFixed(2), strike_price_lte: p.strikeMax.toFixed(2),
   });
-  const d = await getJson<{ snapshots: Record<string, {
-    latestQuote?: { bp?: number; ap?: number; bs?: number; as?: number };
-    greeks?: { delta?: number; theta?: number };
-    dailyBar?: { v?: number };
-    impliedVolatility?: number;
-  }> }>(`${DATA}/v1beta1/options/snapshots/${encodeURIComponent(p.underlying)}?${q}`);
+  // PAGINATE. A wide strike window on a liquid name returns more contracts than one page
+  // holds, and Alpaca signals that with next_page_token. Ignoring it silently truncates the
+  // chain, so the one qualifying contract can sit on page two and the scan reports "nothing
+  // passes filters" — a missed entry that looks exactly like a quiet day.
   const out: OptionQuote[] = [];
-  for (const [occ, s] of Object.entries(d.snapshots || {})) {
-    const parsed = parseOcc(occ);
-    if (!parsed) continue;
-    const lq = s.latestQuote || {};
-    out.push({
-      occ, strike: parsed.strike, expiry: parsed.expiry, type: parsed.type,
-      bid: lq.bp ?? 0, ask: lq.ap ?? 0, bidSize: lq.bs ?? 0, askSize: lq.as ?? 0,
-      delta: s.greeks?.delta ?? null, theta: s.greeks?.theta ?? null,
-      iv: s.impliedVolatility ?? null, dayVolume: s.dailyBar?.v ?? 0,
-    });
-  }
+  let pageToken: string | undefined;
+  let pages = 0;
+  do {
+    if (pageToken) q.set("page_token", pageToken); else q.delete("page_token");
+    const d = await getJson<{ snapshots: Record<string, {
+      latestQuote?: { bp?: number; ap?: number; bs?: number; as?: number; t?: string };
+      greeks?: { delta?: number; theta?: number };
+      dailyBar?: { v?: number };
+      impliedVolatility?: number;
+    }>; next_page_token?: string | null }>(`${DATA}/v1beta1/options/snapshots/${encodeURIComponent(p.underlying)}?${q}`);
+    for (const [occ, s] of Object.entries(d.snapshots || {})) {
+      const parsed = parseOcc(occ);
+      if (!parsed) continue;
+      const lq = s.latestQuote || {};
+      out.push({
+        occ, strike: parsed.strike, expiry: parsed.expiry, type: parsed.type,
+        bid: lq.bp ?? 0, ask: lq.ap ?? 0, bidSize: lq.bs ?? 0, askSize: lq.as ?? 0,
+        quoteTs: lq.t ?? null,
+        delta: s.greeks?.delta ?? null, theta: s.greeks?.theta ?? null,
+        iv: s.impliedVolatility ?? null, dayVolume: s.dailyBar?.v ?? 0,
+      });
+    }
+    pageToken = d.next_page_token || undefined;
+  } while (pageToken && ++pages < 20);
   return out;
 }
 
@@ -114,22 +141,29 @@ export async function getOptionQuotes(occs: string[]): Promise<Record<string, Op
   const out: Record<string, OptionQuote> = {};
   for (let i = 0; i < occs.length; i += 100) {
     const batch = occs.slice(i, i + 100);
-    const q = new URLSearchParams({ feed: "indicative", symbols: batch.join(",") });
-    const d = await getJson<{ snapshots: Record<string, {
-      latestQuote?: { bp?: number; ap?: number; bs?: number; as?: number };
-      greeks?: { delta?: number; theta?: number }; dailyBar?: { v?: number }; impliedVolatility?: number;
-    }> }>(`${DATA}/v1beta1/options/snapshots?${q}`);
-    for (const [occ, s] of Object.entries(d.snapshots || {})) {
-      const parsed = parseOcc(occ);
-      if (!parsed) continue;
-      const lq = s.latestQuote || {};
-      out[occ] = {
-        occ, strike: parsed.strike, expiry: parsed.expiry, type: parsed.type,
-        bid: lq.bp ?? 0, ask: lq.ap ?? 0, bidSize: lq.bs ?? 0, askSize: lq.as ?? 0,
-        delta: s.greeks?.delta ?? null, theta: s.greeks?.theta ?? null,
-        iv: s.impliedVolatility ?? null, dayVolume: s.dailyBar?.v ?? 0,
-      };
-    }
+    const q = new URLSearchParams({ feed: OPTIONS_FEED, symbols: batch.join(",") });
+    let pageToken: string | undefined;
+    let pages = 0;
+    do {
+      if (pageToken) q.set("page_token", pageToken); else q.delete("page_token");
+      const d = await getJson<{ snapshots: Record<string, {
+        latestQuote?: { bp?: number; ap?: number; bs?: number; as?: number; t?: string };
+        greeks?: { delta?: number; theta?: number }; dailyBar?: { v?: number }; impliedVolatility?: number;
+      }>; next_page_token?: string | null }>(`${DATA}/v1beta1/options/snapshots?${q}`);
+      for (const [occ, s] of Object.entries(d.snapshots || {})) {
+        const parsed = parseOcc(occ);
+        if (!parsed) continue;
+        const lq = s.latestQuote || {};
+        out[occ] = {
+          occ, strike: parsed.strike, expiry: parsed.expiry, type: parsed.type,
+          bid: lq.bp ?? 0, ask: lq.ap ?? 0, bidSize: lq.bs ?? 0, askSize: lq.as ?? 0,
+          quoteTs: lq.t ?? null,
+          delta: s.greeks?.delta ?? null, theta: s.greeks?.theta ?? null,
+          iv: s.impliedVolatility ?? null, dayVolume: s.dailyBar?.v ?? 0,
+        };
+      }
+      pageToken = d.next_page_token || undefined;
+    } while (pageToken && ++pages < 20);
   }
   return out;
 }

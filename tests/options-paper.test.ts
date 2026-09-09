@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CRYPTO_PROXY_EXCLUDED, MAX_ENTRIES_PER_MONTH, OPTIONS_SYMBOLS,
+  CRYPTO_PROXY_EXCLUDED, MAX_ENTRIES_PER_MONTH, MAX_QUOTE_AGE_MS, OPTIONS_SYMBOLS,
+  canExitAt, etDateOf, isQuoteFresh,
   type Bar, type BookState, type Contract,
   dteOf, entryRefusal, exitReason, groupOf, isEntrySignal, isExitSignal,
   pickContract, positionBudget, spreadPctOf,
@@ -164,4 +165,50 @@ test("OCC symbols parse from the right, so variable-length roots work", () => {
 test("dteOf counts days to expiry", () => {
   assert.equal(dteOf("2026-12-18", new Date("2026-09-08T12:00:00Z")), 101);   // floored, not rounded up
   assert.ok(dteOf("2026-09-08", new Date("2026-09-09T12:00:00Z")) <= 0);
+});
+
+
+// ---------- regressions from the Sep 8 cross-model review (Codex) ----------
+
+test("REGRESSION: a Dec-18 expiry is not 0 DTE when the 22:00 UTC cron runs on Dec 17", () => {
+  // The cron fires at 22:00 UTC daily. Timestamp subtraction + floor made the day BEFORE
+  // expiry read as 0 and settled every position a day early — deterministically, because
+  // that is exactly when the job runs. Calendar days fix it.
+  assert.equal(dteOf("2026-12-18", new Date("2026-12-17T22:00:00Z")), 1);
+  assert.equal(dteOf("2026-12-18", new Date("2026-12-18T13:00:00Z")), 0);
+  assert.equal(dteOf("2026-12-18", new Date("2026-12-21T22:00:00Z")), -3);
+});
+
+test("etDateOf resolves the ET calendar date across the UTC day boundary", () => {
+  // 01:00 UTC on the 9th is still the 8th in New York — the difference between settling a
+  // contract on the right day and the wrong one.
+  assert.equal(etDateOf(new Date("2026-09-09T01:00:00Z")), "2026-09-08");
+  assert.equal(etDateOf(new Date("2026-09-08T18:00:00Z")), "2026-09-08");
+});
+
+test("REGRESSION: a bid with no size behind it cannot close a position", () => {
+  const now = new Date("2026-09-08T20:00:00Z");
+  const fresh = now.toISOString();
+  assert.equal(canExitAt({ bid: 6, bidSize: 0, quoteTs: fresh }, now), false, "zero size is not an exit");
+  assert.equal(canExitAt({ bid: 0, bidSize: 50, quoteTs: fresh }, now), false);
+  assert.equal(canExitAt({ bid: 6, bidSize: 1, quoteTs: fresh }, now), true);
+});
+
+test("REGRESSION: a stale quote cannot open or close a position", () => {
+  const now = new Date("2026-09-08T20:00:00Z");
+  const old = new Date(now.getTime() - MAX_QUOTE_AGE_MS - 1000).toISOString();
+  assert.equal(isQuoteFresh(old, now), false);
+  assert.equal(isQuoteFresh(null, now), false);
+  assert.equal(canExitAt({ bid: 6, bidSize: 50, quoteTs: old }, now), false);
+  assert.equal(isQuoteFresh(new Date(now.getTime() - 3600_000).toISOString(), now), true);
+});
+
+test("REGRESSION: selection respects the SPENDABLE budget, not just the position budget", () => {
+  // $500 already committed on the $1k sleeve leaves $300 under the 80% book cap. The
+  // 0.78-delta contract at $500 is nearest the target but unaffordable; the 0.75-delta at
+  // $295 passes everything. Selecting on the position budget alone skipped the entry.
+  const near = c({ delta: 0.78, bid: 4.95, ask: 5.00, occ: "NEAR" });
+  const cheaper = c({ delta: 0.75, bid: 2.92, ask: 2.95, occ: "CHEAPER" });
+  assert.equal(pickContract([near, cheaper], positionBudget(1000))?.contract.occ, "NEAR");
+  assert.equal(pickContract([near, cheaper], 300)?.contract.occ, "CHEAPER");
 });

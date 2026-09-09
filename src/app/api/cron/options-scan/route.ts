@@ -2,9 +2,9 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { pickContractFor, scanTrendSignals } from "@/lib/options-scanner";
 import {
-  autotrackEnabled, evaluateOptionsPaper, openOptionPaperTrade, optionsSleeveBreakdown, refEquityFor,
+  autotrackEnabled, bookStateFor, evaluateOptionsPaper, openOptionPaperTrade, optionsSleeveBreakdown, refEquityFor,
 } from "@/lib/options-shadow";
-import { OPTIONS_SIM_VERSION, OPTION_SOURCES, dteOf } from "@/lib/options-paper-model";
+import { MAX_BOOK_PCT, OPTIONS_SIM_VERSION, OPTION_SOURCES, dteOf, positionBudget } from "@/lib/options-paper-model";
 
 // THE OPTIONS PAPER BOOK — once a day after the close (vercel.json: 0 22 * * 1-5, which is
 // 6pm ET in summer and 5pm ET in winter, comfortably past 4pm either way).
@@ -78,15 +78,22 @@ export async function GET(request: Request) {
     for (const source of OPTION_SOURCES) {
       const refEquity = await refEquityFor(source);
       for (const cand of fresh) {
+        // Spend only what the book can actually commit right now: the per-position budget,
+        // capped by the room left under the book premium cap. Selecting against the position
+        // budget alone would pick a contract the book then refuses, silently skipping an
+        // entry a cheaper qualifying contract could have taken.
+        const book = await bookStateFor(source);
+        const spendable = Math.min(positionBudget(refEquity), refEquity * MAX_BOOK_PCT - book.openPremium);
+        if (spendable <= 0) { refused.push(`${cand.symbol} ${source}: book premium cap`); continue; }
         let pick;
         try {
-          pick = await pickContractFor(cand.symbol, cand.close, refEquity);
+          pick = await pickContractFor(cand.symbol, cand.close, spendable);
         } catch (e) { errors.push(`${cand.symbol} chain: ${String(e).slice(0, 80)}`); continue; }
         if (!pick) { refused.push(`${cand.symbol} ${source}: no contract passes filters`); continue; }
         const dte = dteOf(pick.contract.expiry, new Date());
         const r = await openOptionPaperTrade({
           symbol: cand.symbol, source, occ: pick.contract.occ, strike: pick.contract.strike,
-          expiry: pick.contract.expiry, ask: pick.contract.ask, delta: pick.contract.delta,
+          expiry: pick.contract.expiry, ask: pick.contract.ask, bid: pick.contract.bid, delta: pick.contract.delta,
           iv: pick.iv, spreadPct: pick.spreadPct, costUsd: pick.costUsd, underlying: cand.close,
         });
         if (r.opened) {
