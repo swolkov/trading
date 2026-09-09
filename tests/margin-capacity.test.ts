@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyRefusal, replaySlots, type CapacitySetup } from "../src/lib/margin-capacity";
+import { classifyRefusal, replaySlots, setupMarginUsd, type CapacitySetup } from "../src/lib/margin-capacity";
 
 // The cost-of-capacity replay must reproduce the executor's admission rules exactly: a free
 // slot (a taken trade occupies one until its paper resolution), the cooldown since the last
@@ -61,4 +61,44 @@ test("order of arrival decides who gets the slot, whatever order the rows come i
   const s = [setup(2, at(2), { pnl: 999 }), setup(1, at(1), { pnl: 1 })];
   const r = replaySlots(s, { slots: 1, perDay: 10, cooldownMin: 0 });
   assert.deepEqual({ taken: r.taken, net: r.net }, { taken: 1, net: 1 });
+});
+
+// ── 2026-09-09: a slot is not a slot — margin is per coin ───────────────────────────────
+const MARGIN = { equity: 4636, riskFrac: 0.05, stopFrac: 0.04, floorPct: 150 };
+
+test("classifyRefusal reads the two refusals the margin floor and leverage clamp added", () => {
+  assert.equal(classifyRefusal(null, "entry refused: would leave margin level at 111% (floor 150%, Kraken calls at 80%)"), "margin");
+  assert.equal(classifyRefusal(null, "entry refused: tsmom's 8% stop does not survive the leverage clamp even at 4×"), "leverage");
+  // Still classified before, so the ledger does not silently reshuffle old rows.
+  assert.equal(classifyRefusal(null, "entry refused: 2 positions+resting orders already (max 2)"), "slots");
+  assert.equal(classifyRefusal("OD33LV-DUZF7-FIAFOR", null), "taken");
+});
+
+test("the same risk costs very different margin depending on the coin's venue leverage", () => {
+  const btc = setupMarginUsd("BTC/USD", MARGIN);      // 20× venue, capped to 9× by the 4% stop
+  const eth = setupMarginUsd("ETH/USD", MARGIN);      // 10× venue, also 9×
+  const pepe = setupMarginUsd("PEPE/USD", MARGIN);    // 5× venue
+  const xlm = setupMarginUsd("XLM/USD", MARGIN);      // 2× venue in the table today
+  assert.equal(btc.leverage, 9, "a 4% stop caps BTC at 9×, not 20×");
+  assert.equal(eth.leverage, 9);
+  assert.equal(pepe.leverage, 5);
+  assert.equal(xlm.leverage, 2);
+  assert.ok(btc.margin < pepe.margin && pepe.margin < xlm.margin, "cheaper leverage, dearer slot");
+  // The ratio is the whole point: XLM eats ~4.5× the margin of ETH for identical risk.
+  assert.ok(xlm.margin / eth.margin > 4, `XLM costs ${(xlm.margin / eth.margin).toFixed(1)}× an ETH slot`);
+});
+
+test("the margin floor refuses entries a slot count would have waved through", () => {
+  // Three cheap majors at once: fine, that is what three slots are for.
+  const majors = [setup(1, at(1), { symbol: "ETH/USD" }), setup(2, at(2), { symbol: "SOL/USD" }), setup(3, at(3), { symbol: "BTC/USD" })];
+  assert.equal(replaySlots(majors, { slots: 3, perDay: 10, cooldownMin: 0, margin: MARGIN }).taken, 3);
+  // Three of the dearest coin: slot-counting takes all three, the margin model does not.
+  const dear = [setup(1, at(1), { symbol: "XLM/USD" }), setup(2, at(2), { symbol: "ALGO/USD" }), setup(3, at(3), { symbol: "XLM/USD" })];
+  const bySlots = replaySlots(dear, { slots: 3, perDay: 10, cooldownMin: 0 });
+  const byMargin = replaySlots(dear, { slots: 3, perDay: 10, cooldownMin: 0, margin: MARGIN });
+  assert.equal(bySlots.taken, 3, "counting slots says the desk had room");
+  assert.ok(byMargin.taken < bySlots.taken, `margin model took ${byMargin.taken}, slot model ${bySlots.taken}`);
+  assert.ok(byMargin.refusedByMargin > 0, "and it says WHY, rather than silently agreeing");
+  // Omitting the margin config must leave the old behaviour untouched.
+  assert.equal(replaySlots(dear, { slots: 3, perDay: 10, cooldownMin: 0 }).refusedByMargin, 0);
 });

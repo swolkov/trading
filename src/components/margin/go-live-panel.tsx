@@ -28,7 +28,7 @@ export interface CapacityView {
   source: string; since: string; liveFactor: number;
   rules: { slots: number; perDay: number; cooldownMin: number };
   setups: number; taken: number;
-  refused: { total: number; slots: number; cooldown: number; dailyCap: number; other: number };
+  refused: { total: number; slots: number; cooldown: number; dailyCap: number; margin: number; leverage: number; other: number };
   refusedOutcome: { resolved: number; wins: number; net: number; open: number; floating: number };
   replay: { slots: number; taken: number; resolved: number; open: number; net: number; floating: number }[];
 }
@@ -240,7 +240,7 @@ function CapacityCard({ cap }: { cap: CapacityView }) {
       <div className="flex flex-wrap items-center gap-2 text-[13px]">
         <span className="text-muted-foreground">Cost of capacity</span>
         <Chip tone="grey" size="md">since {when(cap.since)}: {cap.setups} setups · {cap.taken} taken · {cap.refused.total} refused</Chip>
-        {cap.refused.total > 0 && <span className="text-xs text-muted-foreground">{cap.refused.slots} slots full · {cap.refused.cooldown} cooldown · {cap.refused.dailyCap} daily cap{cap.refused.other > 0 ? ` · ${cap.refused.other} other` : ""}</span>}
+        {cap.refused.total > 0 && <span className="text-xs text-muted-foreground">{cap.refused.slots} slots full · {cap.refused.cooldown} cooldown · {cap.refused.dailyCap} daily cap{cap.refused.margin > 0 ? ` · ${cap.refused.margin} margin level` : ""}{cap.refused.leverage > 0 ? ` · ${cap.refused.leverage} leverage/stop` : ""}{cap.refused.other > 0 ? ` · ${cap.refused.other} other` : ""}</span>}
       </div>
       {cap.refused.total > 0 ? (
         <Note>
