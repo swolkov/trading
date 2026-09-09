@@ -94,11 +94,17 @@ export default function OptionsPaperPage() {
             <PanelHeader title={s.label} aside={<Chip tone={verdictTone(s.verdict)} size="md">{s.verdict}</Chip>} />
             <PanelBody>
               <div className="grid grid-cols-3 gap-3">
-                <Stat label="Net P&L" value={<span className={tone(s.totalPnl)}>{pnl2(s.totalPnl)}</span>} />
+                {/* Net P&L is REALIZED only. With an open position that has not resolved it reads
+                    +$0.00, which next to a live mark can look like "flat" when the book is in fact
+                    down the spread. Unrealized sits beside it so the two are never confused. */}
+                <Stat label="Net P&L" sub="realized" value={<span className={tone(s.totalPnl)}>{pnl2(s.totalPnl)}</span>} />
+                <Stat label="Unrealized" sub={s.open > 0 ? "open positions" : undefined}
+                  value={s.open > 0
+                    ? <span className={tone(s.openMark - s.openPremium)}>{pnl2(s.openMark - s.openPremium)}</span>
+                    : "—"} />
                 <Stat label="Resolved" value={String(s.resolved)} />
-                <Stat label="Hit rate" value={s.hitRate != null ? pct(s.hitRate) : "—"} />
                 <Stat label="Open" value={`${s.open} · ${usd(s.openPremium)}`} />
-                <Stat label="Open mark" value={s.open > 0 ? usd(s.openMark) : "—"} />
+                <Stat label="Hit rate" value={s.hitRate != null ? pct(s.hitRate) : "—"} />
                 <Stat label="t-stat" value={s.tStat != null ? s.tStat.toFixed(2) : "—"} />
               </div>
               {s.open === 0 && s.resolved === 0 && (
@@ -169,7 +175,7 @@ export default function OptionsPaperPage() {
             <thead>
               <tr>
                 <Th>When</Th><Th>Sleeve</Th><Th>Contract</Th><Th num>Δ / spread</Th>
-                <Th num>Paid</Th><Th num>Mark / exit</Th><Th num>P&L</Th><Th>Status</Th>
+                <Th num>Paid</Th><Th num>Mark / exit</Th><Th num>P&L <span className="normal-case opacity-60">(open = unreal.)</span></Th><Th>Status</Th>
               </tr>
             </thead>
             <tbody>
@@ -181,7 +187,12 @@ export default function OptionsPaperPage() {
                 <Td num>{t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}</Td>
                 <Td num>{usd(t.costUsd)}</Td>
                 <Td num>{t.status === "resolved" ? (t.exitBid != null ? usd(t.exitBid * 100) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>
-                <Td num className={t.pnl != null ? tone(t.pnl) : ""}>{t.pnl != null ? pnl2(t.pnl) : "—"}</Td>
+                {/* An open row has everything needed to show its P&L (paid vs mark); a bare dash
+                    hides exactly the spread cost this book exists to measure. Shown in parentheses
+                    so it reads as unrealized and is never mistaken for a booked result. */}
+                <Td num className={t.pnl != null ? tone(t.pnl) : t.markUsd != null ? tone(t.markUsd - t.costUsd) : ""}>
+                  {t.pnl != null ? pnl2(t.pnl) : t.markUsd != null ? `(${pnl2(t.markUsd - t.costUsd)})` : "—"}
+                </Td>
                 <Td title={t.reason ?? ""}>
                   <Chip tone={t.status === "resolved" ? (t.pnl != null && t.pnl >= 0 ? "green" : "red") : t.status === "void" ? "amber" : "paper"}>
                     {t.status === "resolved" ? (t.reason ?? "closed") : t.status}
