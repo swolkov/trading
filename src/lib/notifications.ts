@@ -10,9 +10,12 @@ import { prisma } from "./db";
 // in one place until Spencer creates the separate Slack channels + webhooks.
 // stocks — the stock paper book (Sep 2026): scanner signals + paper outcomes. Falls back
 // to general (NOT kraken — a stock signal in the crypto channel would read as a crypto one).
+// options — the options paper book (Sep 2026): trend entries + paper outcomes. Also falls
+// back to general, never to kraken: its whole purpose is to be a record SEPARATE from the
+// crypto desk, and putting its alerts in the crypto lane would undo that at a glance.
 export type NotifyChannel =
   | "futures" | "futures_demo" | "kraken" | "general"
-  | "margin_urgent" | "margin_signals" | "margin_results" | "margin_live" | "stocks";
+  | "margin_urgent" | "margin_signals" | "margin_results" | "margin_live" | "stocks" | "options";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
@@ -24,6 +27,7 @@ const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   margin_results: "webhook_margin_results",
   margin_live: "webhook_margin_live",
   stocks: "webhook_stocks",
+  options: "webhook_options",
 };
 
 // The margin lanes fall back to the main kraken channel if their own webhook isn't set.
