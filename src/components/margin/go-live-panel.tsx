@@ -95,6 +95,10 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
   };
   if (!arm) return <Note>Loading arm state…</Note>;
   const canArm = confirm === "ARM" && rtPassed && !arm.ddTripped && !arm.demoted && !arm.roundTripRunning;
+  // The sleeve to arm is whatever kraken_margin_live_sources already names — the desk's own
+  // record of what it runs — never a literal in this file. `sources` survives a disarm, so it
+  // still reads correctly here; the API's own fallback covers the case where it is empty.
+  const armSource = arm.sources[0] ?? "swing-lev";
   return (
     <div className="space-y-2.5">
       {arm.armed ? (
@@ -107,11 +111,17 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="type ARM" aria-label="Type ARM to enable the arm button"
               className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-[13px] tabular-nums sm:w-28" />
-            <button disabled={busy || !canArm} onClick={() => post({ action: "arm", confirm, source: "selective", maxPositions: 1, maxTradesPerDay: 3 })} className={`${btnDanger} w-full sm:w-auto`}>
-              {busy ? "arming…" : "Arm selective — real money"}
+            <button disabled={busy || !canArm} onClick={() => post({ action: "arm", confirm, source: armSource, maxPositions: arm.maxPositions, maxTradesPerDay: arm.maxTradesPerDay })} className={`${btnDanger} w-full sm:w-auto`}>
+              {busy ? "arming…" : `Arm ${armSource} — real money`}
             </button>
           </div>
-          <Note>3% per trade for the first 20 live trades, then paper&apos;s full 6% · 1 position · 3 trades a day.</Note>
+          {/* Everything here is READ FROM THE LIVE CONFIG, never hardcoded. The button used to
+              send source:"selective" as a literal — the sleeve the desk stopped running on
+              Sep 8 — so re-arming would have silently switched the live book back to it. */}
+          <Note>
+            Arms <strong className="font-medium text-foreground/85">{armSource}</strong> · max {arm.maxPositions} position{arm.maxPositions === 1 ? "" : "s"} · {arm.maxTradesPerDay} trades a day.
+            {" "}⚠️ Arming RESETS per-trade risk to the stage-3 starting base (1.5%, so 3% on high conviction) and restarts the 20-trade clock — it graduates back to base 3% only after live matches paper. If risk is deliberately set above that right now, re-arming here will reduce it.
+          </Note>
           <div className="flex flex-wrap gap-1.5">
             {!rtPassed && <Chip tone="red">plumbing test must pass first</Chip>}
             {arm.ddTripped && <Chip tone="red">drawdown breaker tripped</Chip>}
@@ -213,7 +223,7 @@ export function GoLivePanel({ strategies, capacity = null }: { strategies: Strat
 
       <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `Armed · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "Disarmed"} tone={armed ? "red" : "grey"}>
         <Note>
-          What arming means: {cfg ? <><strong className="font-medium text-foreground/85">the same sizing rule paper is scored with</strong>: {cfg.live.baseRiskPct}% of the account at risk per trade, {cfg.live.baseRiskPct * 2}% on high conviction{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / 100).toLocaleString()} today)</>}. The candidate only takes high-conviction setups, so its live trades are the {cfg.live.baseRiskPct * 2}% ones; on today&apos;s account that is twice the account in size, so the executor fits the order to free margin (a little under {cfg.live.baseRiskPct * 2}% realised) until the 3× rung at $10k — at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit</> : "loading…"}.
+          What arming means: {cfg ? <><strong className="font-medium text-foreground/85">the same sizing rule paper is scored with</strong>: {cfg.live.baseRiskPct}% of the account at risk per trade, {cfg.live.baseRiskPct * 2}% on high conviction{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / 100).toLocaleString()} today)</>}. Size follows from that, not from a size setting: risk ÷ stop, so a high-conviction trade is {(cfg.live.baseRiskPct * 2 / cfg.live.stopPct).toFixed(1)}× the account in notional{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / cfg.live.stopPct).toLocaleString()})</>}, posting {eq > 0 ? <>about ${Math.round(eq * cfg.live.baseRiskPct * 2 / cfg.live.stopPct / Math.max(1, cfg.live.maxLeverageCeiling)).toLocaleString()} of margin</> : <>margin</>} at the {cfg.live.maxLeverageCeiling}× ceiling. Guards: at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} at a time and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit{cfg.live.maxPositions === 1 && <>. One slot is a deliberate choice, not a limitation: it is what lets each trade carry the full {cfg.live.baseRiskPct * 2}% — and while a position is open the desk refuses every other setup</>}</> : "loading…"}.
           Arming is deliberate: type ARM, then press. Every arm and disarm is logged and paged to Slack.
         </Note>
         <ArmControls rtPassed={rtPassed} gateOk={gateOk} />
@@ -227,10 +237,14 @@ export function GoLivePanel({ strategies, capacity = null }: { strategies: Strat
   );
 }
 
-// ── COST OF CAPACITY ── the slots are the binding constraint on a $5k account (two at 2×).
-// Every high-conviction setup the executor refused still ran on paper to a finish; this shows
-// what they did, and what the same stream would have earned with more slots. It is the number
-// behind the max-positions decision at the next leverage rung — not a reason to raise it now.
+// ── COST OF CAPACITY ── what refusing a setup costs, and what another slot would be worth.
+//
+// Every setup the executor refused still ran on paper to a finish, so the price of the slot
+// limit is measurable rather than a guess. Read the LAST column, not the one before it: slots
+// and size are the same dial, because N simultaneous full stops have to stay inside the 15%
+// drawdown breaker (see baseRiskForSlots). Comparing slot counts at one shared per-trade risk
+// — which this card used to do — flatters more slots, crediting them with the extra trades
+// while hiding that each one has to be smaller. Adding a slot has to win at its OWN size.
 function CapacityCard({ cap }: { cap: CapacityView }) {
   const live = (n: number) => pnl2(n * cap.liveFactor);
   const liveTone = (n: number) => (n * cap.liveFactor >= 0 ? "text-up" : "text-down");

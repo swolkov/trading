@@ -272,6 +272,18 @@ export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
   tsmom: { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
   "tsmom-short": { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
 };
+/**
+ * THE SLEEVE AN ARM DEFAULTS TO when the request body names none.
+ *
+ * It lives here, next to LIVE_CONTAINERS and under test, because the arm route's own copy of
+ * it went stale and nothing caught it: the desk moved from `selective` to `swing-lev` on Sep 8
+ * when the breaker tripped, and the route's literal did not move with it. A re-arm would have
+ * switched the live book back to a sleeve the desk had stopped running. The test asserts this
+ * names a source that is armable at all — a live container, not retired — so the same drift
+ * fails loudly next time. The admin button sends the CURRENT source explicitly regardless.
+ */
+export const DEFAULT_ARM_SOURCE = "swing-lev";
+
 export function liveContainerFor(source: string | null | undefined): LiveContainer | null {
   if (!source) return null;
   if (source.startsWith("tv:")) return FAST;

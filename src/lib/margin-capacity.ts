@@ -168,10 +168,10 @@ export async function capacityReport(source: string): Promise<CapacityReport | n
   if (!stage3?.startedAt) return null;
   const since = stage3.startedAt;
   const [slots, perDay, cooldownMin, liveBase, paperBase] = await Promise.all([
-    // Defaults track the executor's own (3 slots, 6/day) — they were 1 and 3, left over from
-    // the single-slot arming, so the capacity card was modelling a desk half the size of the
-    // real one whenever the keys were unset.
-    cfgNum("kraken_margin_max_positions", 3), cfgNum("kraken_margin_max_trades_per_day", 6), cfgNum("kraken_margin_cooldown_min", 30),
+    // Defaults track the EXECUTOR's own, so an unset key never makes this card model a desk
+    // the executor would not run. Both fall back to 1 position: the gate that places the
+    // order does, and a card claiming three slots while live takes one is worse than useless.
+    cfgNum("kraken_margin_max_positions", 1), cfgNum("kraken_margin_max_trades_per_day", 6), cfgNum("kraken_margin_cooldown_min", 30),
     cfgNum("kraken_margin_live_max_risk_pct", stage3.fromBase ?? 1.5), cfgNum("kraken_margin_max_risk_pct", 3),
   ]);
   const liveFactor = paperBase > 0 ? liveBase / paperBase : 0.5;

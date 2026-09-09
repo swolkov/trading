@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { baseRiskForSlots, replaySlots, type CapacitySetup } from "../src/lib/margin-capacity";
+import { DEFAULT_ARM_SOURCE, liveContainerFor, LIVE_CONTAINERS } from "../src/lib/margin-live-risk";
+import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
 
 // SLOTS AND SIZE ARE THE SAME DIAL. The capacity card used to compare slot counts at one
 // shared per-trade risk, which flatters more slots: it credits them with extra trades while
@@ -62,4 +64,31 @@ test("without paperBasePct the rescale is a no-op — an unknown base never inve
   ];
   const r = replaySlots(setups, { slots: 1, perDay: Number.POSITIVE_INFINITY, cooldownMin: 0 });
   assert.equal(r.netAtOwnRisk, r.net);
+});
+
+// THE DEFAULT ARM SOURCE. The arm route carried its own literal "selective" long after the
+// desk moved to swing-lev (Sep 8, when the breaker tripped that family), so an arm with no
+// explicit source would have switched the live book back to a sleeve nobody was running.
+//
+// BE HONEST ABOUT WHAT THESE CATCH: not that. "selective" has a live container and is not
+// retired, so every assertion below passes for it — a pure test cannot know which sleeve the
+// desk runs today, because that lives in AgentConfig. What actually fixed the bug is that the
+// admin button now sends the CURRENT source from live config instead of a literal, and this
+// constant sits beside LIVE_CONTAINERS where a reader will see it. These guard the weaker
+// invariant that still matters: the default must at least be something the route will accept,
+// so it can never rot into a source that makes every default arm fail closed.
+
+test("the default arm source is actually armable — a live container, not retired", () => {
+  assert.ok(liveContainerFor(DEFAULT_ARM_SOURCE), `${DEFAULT_ARM_SOURCE} has no live container — the arm route would reject its own default`);
+  assert.ok(!RETIRED_AUTO_SOURCES.has(DEFAULT_ARM_SOURCE), `${DEFAULT_ARM_SOURCE} is retired — the arm route would reject its own default`);
+});
+
+test("the default arm source passes the arm route's own source regex", () => {
+  assert.match(DEFAULT_ARM_SOURCE, /^[a-z0-9_-]{1,32}$/);
+});
+
+test("every source with a live container is a real, non-retired sleeve", () => {
+  for (const source of Object.keys(LIVE_CONTAINERS)) {
+    assert.ok(!RETIRED_AUTO_SOURCES.has(source), `${source} is retired but still has a live container — it could be armed`);
+  }
 });
