@@ -62,7 +62,7 @@ export async function GET() {
       maxHoldH: lc?.maxHoldH ?? num("kraken_margin_max_hold_h", LIVE_MAX_HOLD_H),
       perTradeCapUsd: num("kraken_margin_per_trade_usd", 0),
       maxLeverageCeiling: num("kraken_margin_max_leverage", DEFAULT_MAX_LEVERAGE),
-      maxPositions: num("kraken_margin_max_positions", 3),
+      maxPositions: num("kraken_margin_max_positions", 1),   // the executor's own fallback
       maxTradesPerDay: num("kraken_margin_max_trades_per_day", 6),
       trustAlertConviction: c.kraken_margin_trust_alert_conviction === "true",
       liveSources: (c.kraken_margin_live_sources ?? "").split(",").map((x) => x.trim()).filter(Boolean),

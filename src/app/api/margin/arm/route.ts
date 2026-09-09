@@ -6,7 +6,7 @@ import { STAGE3_KEY, DEMOTION_KEY, readStage3, readDemotion, loadLiveFills, dive
 import { marginDisplaySnapshot } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
-import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd } from "@/lib/margin-live-risk";
+import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd, DEFAULT_ARM_SOURCE } from "@/lib/margin-live-risk";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -18,7 +18,10 @@ import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd } from "@/lib
 export const dynamic = "force-dynamic";
 
 const ARM_LOG = "kraken_margin_arm_log";
-const DEFAULT_SOURCE = "selective";
+// Defined in margin-live-risk next to LIVE_CONTAINERS and pinned by test — the copy that
+// used to live here went stale when the desk moved off `selective` on Sep 8, and nothing
+// caught it. The admin button sends the current source explicitly; this is the fallback.
+const DEFAULT_SOURCE = DEFAULT_ARM_SOURCE;
 // THE ONE SIZING RULE, shared by paper and live: base 3% of equity at risk per trade,
 // scaled by conviction — high 2× (6%, the ceiling), medium 1×, low 0.5×. Paper's scoreboard
 // ("at live sizing") is computed with exactly this rule, so live follows paper trade for
@@ -77,7 +80,7 @@ async function status() {
     auto: c.kraken_margin_auto === "true",
     validateOnly: c.kraken_margin_validate_only !== "false",
     sources: (c.kraken_margin_live_sources ?? "").split(",").map((s) => s.trim()).filter(Boolean),
-    maxPositions: parseInt(c.kraken_margin_max_positions ?? "3", 10) || 3,
+    maxPositions: parseInt(c.kraken_margin_max_positions ?? "1", 10) || 1,   // the executor's own fallback
     maxTradesPerDay: parseInt(c.kraken_margin_max_trades_per_day ?? "6", 10) || 6,
     marketEntries: c.kraken_margin_maker_entries === "false",
     symbols: c.kraken_margin_symbols ?? null,

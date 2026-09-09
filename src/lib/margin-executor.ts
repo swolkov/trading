@@ -825,7 +825,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Clamped to MAX_LIVE_POSITIONS, the same ceiling the arm switch enforces. Without it
     // this gate obeyed AgentConfig unbounded — the arm page could not ask for more than 3,
     // but a direct write to the key could, and this is the gate that places the order.
-    const maxPositions = Math.min(MAX_LIVE_POSITIONS, Math.max(1, await cfgNum("kraken_margin_max_positions", 3)));
+    // The FALLBACK is 1, not 3. It is only reached when the key is missing or unreadable, and
+    // in that state the desk does not know its own configuration — so it takes the smallest
+    // number of positions that still lets it trade, rather than the largest it is allowed.
+    const maxPositions = Math.min(MAX_LIVE_POSITIONS, Math.max(1, await cfgNum("kraken_margin_max_positions", 1)));
     if (exposureCount >= maxPositions) {
       return { executed: false, validated: false, note: `entry refused: ${exposureCount} positions+resting orders already (max ${maxPositions})` };
     }
