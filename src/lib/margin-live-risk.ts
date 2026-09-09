@@ -3,7 +3,35 @@
 // Defaults match the agreed policy: 3% base, conviction 2×/0.5×, 6% ceiling.
 
 export const LIVE_RISK_DEFAULT_PCT = 3;
-export const LIVE_RISK_CEILING_PCT = 6;
+/**
+ * THE HARD CEILING ON WHAT ONE TRADE MAY RISK, whatever AgentConfig says.
+ *
+ * Raised 6 -> 8 on 2026-09-09. Not a preference: the 1-slot replay was swept across risk
+ * rungs, 10 tiebreak seeds each, with the drawdown breaker and measured slippage modelled,
+ * to find where bigger STOPS working:
+ *
+ *    6% -> $6,867   +12.4%/mo   10/10 seeds   maxDD 18%   2 breaker halts
+ *    8% -> $9,156   +10.8%/mo   10/10 seeds   maxDD 18%   4 halts   <- the new ceiling
+ *   10% -> $11,445  +12.7%/mo   10/10 seeds   maxDD 22%   4 halts
+ *   12% -> $13,734   -1.1%/mo    5/10 seeds   maxDD 23%   7 halts   <- A CLIFF
+ *   16% -> $18,312   -8.0%/mo    0/10 seeds
+ *   20% -> $22,890  -11.4%/mo    1/10 seeds
+ *
+ * Past 12% the desk trips the breaker so often it stops trading, and the return is negative
+ * in every run at 16%. So this constant is now doing MORE work, not less: at 8 it still makes
+ * 10%, 12% and everything beyond unreachable, and a fat-fingered base of 6 (which would ask
+ * for 12% on high conviction) clamps back to 8 instead of walking off the edge.
+ *
+ * 10% was deliberately NOT taken despite scoring as well as 6%: it earns no more than 8% and
+ * sits one rung from the cliff, so an estimate 20% optimistic puts it over and leaves 8% in.
+ *
+ * WARNING: SIZE DOES NOT CREATE THE EDGE. Expectancy is +0.30R/trade on the real paper book
+ * (49 resolved swing-lev: 65% win, average winner +0.94R, average loser -0.90R) and +0.32R in
+ * replay. Doubling the position doubles the win AND the loss; only variance and the speed of
+ * a breaker halt change. That is precisely why there is a cliff. Re-run the sweep before
+ * touching this again -- do not reason about it.
+ */
+export const LIVE_RISK_CEILING_PCT = 8;
 export const LIVE_RISK_FLOOR_PCT = 0.1;
 
 export type ConvictionTier = "low" | "med" | "high";
