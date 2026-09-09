@@ -7,6 +7,7 @@ import {
   LEV_CAP_AT_5K,
   LEV_CAP_AT_10K,
   LEV_CAP_AT_20K,
+  LIVE_RISK_CEILING_PCT,
   convictionMultiplier,
   effectiveMaxLeverage,
   execLockHeldSince,
@@ -39,12 +40,33 @@ test("conviction: high 2x, low 0.5x, null/med/garbage 1x never high", () => {
   assert.equal(convictionMultiplier("maybe"), 1);
 });
 
-test("live risk defaults 3%, high conviction 6% ceiling, unset key uses 3", () => {
+test("THE CLIFF IS UNREACHABLE: 12% per trade and beyond cannot be configured", () => {
+  // The risk sweep found the desk goes NEGATIVE at 12% per trade (5/10 seeds) and worse above,
+  // because the breaker halts it faster than it can earn. This ceiling exists to put that out
+  // of reach: a base of 6 asks for 12% on high conviction and must clamp back to 8.
+  assert.equal(LIVE_RISK_CEILING_PCT, 8);
+  for (const base of [6, 8, 10, 20, 100]) {
+    assert.ok(liveRiskPct(base, "high") <= 8, `base ${base}% must clamp to 8% or less`);
+  }
+  assert.equal(liveRiskPct(6, "high"), 8);       // would be 12% unclamped — the cliff
+  assert.equal(liveRiskPct(100, "high"), 8);
+  // A single full stop must never trip the 15% drawdown breaker on its own.
+  assert.ok(LIVE_RISK_CEILING_PCT < 15, "one stop may not halt the desk by itself");
+});
+
+test("live risk: base 4% reaches 8% on high conviction; base 3% is unchanged", () => {
   assert.equal(parseLiveRiskBasePct(undefined), 3);
   assert.equal(parseLiveRiskBasePct(NaN), 3);
   assert.equal(parseLiveRiskBasePct(0), 3);
   assert.equal(parseLiveRiskBasePct(0.5), 0.5);
-  assert.equal(parseLiveRiskBasePct(9), 6);
+  assert.equal(parseLiveRiskBasePct(9), LIVE_RISK_CEILING_PCT);
+  // The configured size, now actually reachable — at ceiling 6 this silently clamped to 6%
+  // and a base change to 4 would have been inert.
+  assert.equal(liveRiskPct(4, "high"), 8);
+  assert.equal(liveRiskFraction(4, "high"), 0.08);
+  assert.equal(liveRiskPct(4, "med"), 4);
+  assert.equal(liveRiskPct(4, "low"), 2);
+  // Raising the ceiling changed no live number by itself; only a deliberate base change does.
   assert.equal(liveRiskPct(3, "med"), 3);
   assert.equal(liveRiskPct(3, "high"), 6);
   assert.equal(liveRiskPct(3, "low"), 1.5);
@@ -79,10 +101,11 @@ test("exec lock TTL outlives the 300s webhook maxDuration", () => {
 
 test("paper fraction path equals executor percent path (no silent drift)", () => {
   // Paper stores 3% as 0.03; the executor parses the config key as 3. Same helper both ways.
+  assert.equal(liveRiskFraction(0.04 * 100, "high"), 0.08);
   assert.equal(liveRiskFraction(0.03 * 100, "high"), 0.06);
   assert.equal(liveRiskFraction(0.03 * 100, "low"), 0.015);
   assert.equal(liveRiskFraction(0.03 * 100, null), 0.03);
-  assert.equal(liveRiskFraction(9, "high"), 0.06); // ceiling on the base, then on the product
+  assert.equal(liveRiskFraction(9, "high"), LIVE_RISK_CEILING_PCT / 100); // ceiling on the base, then on the product
 });
 
 test("leverage cap grows with equity; risk % is a different knob", () => {
