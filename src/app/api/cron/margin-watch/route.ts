@@ -297,8 +297,10 @@ export async function GET(request: Request) {
   }
 
   // 3) Per-position liquidation distance (an ESTIMATE — account margin level above is
-  //    the authoritative trigger). Warns hourly at half the cushion gone and again at
-  //    three quarters; a position we cannot price is an ERROR, not a silent skip.
+  //    the authoritative trigger). Warns hourly at CUSHION_WARN_AT of the cushion gone
+  //    and again at CUSHION_URGENT_AT — both ABOVE STOP_CUSHION_FRACTION, so a position
+  //    walking to its own stop does not page; past it, the stop did not work. A position we
+  //    cannot price is an ERROR, not a silent skip.
   try {
     const positions = await getKrakenMarginPositions();
     flat = flat && positions.length === 0;

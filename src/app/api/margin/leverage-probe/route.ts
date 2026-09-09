@@ -30,7 +30,7 @@ export async function GET() {
       rows,
       // A copy-pasteable summary line per coin, so the result can be acted on without
       // re-deriving it from the JSON.
-      summary: rows.map((r) => `${r.coin}: table ${r.table}× · Kraken accepted ${r.maxAccepted || "none"}× · ${r.verdict}${r.detail && r.verdict !== "matches" ? ` — ${r.detail}` : ""}`),
+      summary: rows.map((r) => `${r.coin}: table ${r.table}× · accepted ${r.accepted.join("/") || "none"}×${r.rejected.length ? ` · REFUSED ${r.rejected.join("/")}×` : ""} · ${r.verdict}${r.detail && r.verdict !== "matches" ? ` — ${r.detail}` : ""}`),
     });
   } catch (e) {
     return Response.json({ ok: false, error: String(e).slice(0, 300) }, { status: 500 });
