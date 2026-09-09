@@ -90,9 +90,16 @@ test("the SQL predicate and isUsMarginSymbol agree on every spelling a row could
 test("US-retail leverage caps come from the table, AssetPairs only as a fallback", () => {
   assert.equal(usRetailMaxLeverage("XBTUSD:BTNL", 10), 20);
   assert.equal(usRetailMaxLeverage("XXBTZUSD", 10), 20);
-  assert.equal(usRetailMaxLeverage("XXLMZUSD", 3), 2);   // AssetPairs says 3x; US retail is 2x
-  assert.equal(usRetailMaxLeverage("ALGO/USD", 5), 2);
-  assert.equal(usRetailMaxLeverage("PENGUUSD", 3), 3);
+  // XLM/ALGO were 2× here until 2026-09-09, when a validate-only probe against Kraken
+  // (GET /api/margin/leverage-probe) showed the venue accepts 5×. The old values were a
+  // guess that cost real capacity: at 2× an XLM position needed ~4.5× the margin of an ETH
+  // one, so the 150% entry floor refused it — silently deleting the top-performing coin.
+  assert.equal(usRetailMaxLeverage("XXLMZUSD", 3), 5);   // probe-verified
+  assert.equal(usRetailMaxLeverage("ALGO/USD", 3), 5);   // probe-verified
+  assert.equal(usRetailMaxLeverage("PENGUUSD", 5), 3);   // still 3× — the fallback must not win
+  // The table always beats the caller's AssetPairs fallback, in BOTH directions.
+  assert.equal(usRetailMaxLeverage("XBTUSD:BTNL", 5), 20, "table raises above the fallback");
+  assert.equal(usRetailMaxLeverage("PENGUUSD", 20), 3, "table lowers below the fallback");
   assert.equal(usRetailMaxLeverage("ETH/USD", 5), 10);
   assert.equal(usRetailMaxLeverage("ARBUSD", 3), 3);     // not US-tradeable: caller's fallback
 });

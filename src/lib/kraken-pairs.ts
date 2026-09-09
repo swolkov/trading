@@ -54,12 +54,30 @@ export function marginOrderPairFor(symbolOrPair: string): string {
 // were on coins the live book could never take. Paper must measure what live can do, so
 // the scanner universe, the scoreboard, and the executor all gate on this one table.
 // Re-verify against the support page before arming; Kraken adds pairs a few at a time.
+//
+// ⚠️ VERIFIED AGAINST KRAKEN ITSELF on 2026-09-09 (GET /api/margin/leverage-probe): a
+// validate=true AddOrder at each rung on the :BTNL venue pair, which runs Kraken's own
+// server-side checks and places nothing. Four entries were UNDERSTATED and were raised:
+//
+//   XLM     2 → 5      ALGO    2 → 5      NEAR    3 → 5      RENDER  3 → 5
+//
+// Both controls passed in the same run — BTC accepted 20× (matching real fills) and ETH
+// accepted 10× — so the probe was answering honestly rather than accepting everything.
+//
+// This was never cosmetic. Margin is notional ÷ leverage, so at identical risk a 2× cap
+// made an XLM position cost ~4.5× an ETH one, and the 150% entry floor then REFUSED it at
+// live size. XLM is the top contributor in the 112-day replay: an understated cap had
+// silently deleted the best-performing coin from the book.
+//
+// Kraken's PUBLIC AssetPairs endpoint is NOT a valid source for these numbers — it
+// describes the international product and advertises BTC at 10× where the US venue really
+// gives 20×. Re-run the probe rather than reading the public feed.
 export const US_MARGIN_MAX_LEVERAGE: Record<string, number> = {
   BTC: 20,
   ADA: 10, AVAX: 10, DOGE: 10, ETH: 10, LINK: 10, LTC: 10, SOL: 10, SUI: 10, USDC: 10, XRP: 10,
   AAVE: 5, BCH: 5, CRV: 5, DOT: 5, HBAR: 5, HYPE: 5, PEPE: 5, PAXG: 5, SHIB: 5, TRX: 5, UNI: 5, ZEC: 5,
-  PENGU: 3, NEAR: 3, RENDER: 3,
-  ALGO: 2, XLM: 2,
+  ALGO: 5, NEAR: 5, RENDER: 5, XLM: 5,   // probe-verified 2026-09-09, was 2/3/3/2
+  PENGU: 3,
 };
 
 // Base asset of an app symbol ("BTC/USD") OR a Kraken pair (any spelling) — one function so
