@@ -20,6 +20,7 @@ interface PaperTradeRow {
   id: number; time: string; source: string; symbol: string; side: string;
   leverage: number | null; conviction: string | null; entry: number | null;
   exit: number | null; pnl: number | null; unrealized: number | null; notional: number | null; status: string; reason: string | null;
+  maxHoldH: number; ageH: number;
   simVersion?: string;
   usTradeable?: boolean;
 }
@@ -259,7 +260,14 @@ function PaperLogTable({ log: fullLog, loading }: { log: PaperTradeRow[]; loadin
                     <Td num className="font-semibold">
                       {val != null ? <span className={tone(val)}>{pnl2(val)}{open && <span className="ml-1 text-[11px] font-normal text-muted-foreground">live</span>}</span> : <span className="text-muted-foreground">—</span>}
                     </Td>
-                    <Td>{open ? <Chip tone="amber">open</Chip> : <span className="text-muted-foreground">{t.reason ?? "closed"}</span>}</Td>
+                    {/* An open row shows how far through ITS OWN hold it is. Sleeves differ by
+                        a lot — swing-spot and tsmom run 14-day holds where swing-lev runs 96
+                        hours — so "open" alone made a healthy long-hold position look stuck. */}
+                    <Td>{open ? (
+                      <Chip tone={t.maxHoldH > 0 && t.ageH > t.maxHoldH ? "red" : "amber"} title={t.maxHoldH > 0 && t.ageH > t.maxHoldH ? "PAST its time stop — the resolver has not reached it" : `This sleeve holds up to ${Math.round(t.maxHoldH)}h; the time stop closes it then.`}>
+                        open · {Math.round(t.ageH)}h of {Math.round(t.maxHoldH)}h
+                      </Chip>
+                    ) : <span className="text-muted-foreground">{t.reason ?? "closed"}</span>}</Td>
                   </Row>
                 );
               })}
