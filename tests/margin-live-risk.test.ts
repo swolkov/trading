@@ -93,17 +93,19 @@ test("leverage cap grows with equity; risk % is a different knob", () => {
   assert.equal(leverageCapForEquity(0), LEV_CAP_AT_5K);
   assert.equal(leverageCapForEquity(-1), LEV_CAP_AT_5K);
   assert.equal(leverageCapForEquity(NaN), LEV_CAP_AT_5K);
-  assert.equal(DEFAULT_MAX_LEVERAGE, 5);
+  assert.equal(DEFAULT_MAX_LEVERAGE, 20);
 });
 
 test("operator ceiling cannot be exceeded by the ladder; ladder cannot be exceeded by the ceiling", () => {
   // Sep 9 2026: the $5k rung was raised 2× → 5× (Spencer's decision). Leverage does not
   // change dollar risk — notional is risk × equity ÷ stop either way — it changes the
   // MARGIN a position posts, which is what decides how many slots fit.
-  assert.equal(effectiveMaxLeverage(5, 5_000), 5);
-  assert.equal(effectiveMaxLeverage(DEFAULT_MAX_LEVERAGE, 5_000), 5);
-  assert.equal(effectiveMaxLeverage(5, 10_000), 5);
-  assert.equal(effectiveMaxLeverage(5, 20_000), 5);
+  // Sep 9 2026: the equity ladder is RETIRED — every rung is the venue maximum, and the real
+  // capping is done by Kraken's per-pair limit, leverageThatFitsStop (the stop must sit inside
+  // the liquidation cushion) and the 150% margin floor.
+  assert.equal(effectiveMaxLeverage(20, 5_000), 20, "the ladder no longer holds a small book down");
+  assert.equal(effectiveMaxLeverage(DEFAULT_MAX_LEVERAGE, 5_000), 20);
+  assert.equal(effectiveMaxLeverage(5, 5_000), 5, "an operator ceiling below the venue max still binds");
   // Operator who wants to stay at 2× forever still can.
   assert.equal(effectiveMaxLeverage(2, 50_000), 2);
   // cfg < 2 means entries disabled — returned as-is so the executor can refuse.
@@ -400,6 +402,28 @@ test("the pair's own US-retail maximum still caps leverage below the ladder", ()
   assert.equal(applied(2, 5), 2);
   assert.equal(applied(3, 5), 3);
   assert.equal(applied(5, 5), 5);
-  assert.equal(applied(20, 5), 5);       // ladder still binds on BTC
+  assert.equal(applied(20, 5), 5);       // a plan asking for 5 gets 5, even on a 20× pair
   assert.equal(applied(5, 1), 2);        // a spot plan (lev 1) floors at Kraken's margin minimum
+});
+
+test("with the ladder retired, the STOP and the VENUE — not equity — cap leverage", () => {
+  // Spencer's own fills on this account ran BTC $124k at 20× and SOL $60,950 / ETH at 10×,
+  // while the bot ran the same account at 2× — because the equity ladder outranked both the
+  // venue limit and the stop. It no longer does. These are the three limits that remain.
+  const applied = (pairMax: number, stopPct: number, cfgMax = DEFAULT_MAX_LEVERAGE, equity = 4_636) =>
+    leverageThatFitsStop(stopPct, Math.min(effectiveMaxLeverage(cfgMax, equity), pairMax));
+  // A 4% container: Kraken liquidates near 0.6/lev, so at 20× (3%) the position dies BEFORE
+  // the stop fires. Capped at 9× on every pair, however much the venue would allow.
+  assert.equal(applied(20, 4), 9, "BTC allows 20×; a 4% stop does not");
+  assert.equal(applied(10, 4), 9, "the majors allow 10×; the stop is what binds");
+  assert.equal(applied(5, 4), 5, "a 5× pair is capped by the venue, not the stop");
+  assert.equal(applied(2, 4), 2, "ALGO/XLM stay at 2×");
+  // A tighter stop earns more leverage, a wider one less: tsmom's 8% container → 4×.
+  assert.equal(applied(20, 8), 4);
+  assert.equal(applied(20, 2), 18);
+  // kraken_margin_max_leverage remains the no-deploy kill switch back to the old behaviour.
+  assert.equal(applied(20, 4, 2), 2);
+  // And the stop is never shrunk to buy leverage — that was the container-drift bug.
+  assert.equal(clampLiveStopFrac(4, applied(20, 4)) * 100, 4);
+  assert.equal(clampLiveStopFrac(8, applied(20, 8)) * 100, 8);
 });
