@@ -744,7 +744,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // ⚠️ Read the raw string, not cfgNum with a 0 default: an explicit "0" must stay a real
     // zero cap (which blocks every entry — someone switching the desk off), and collapsing
     // it into "unset" is precisely the bug the note above isBotPosition records being fixed.
-    const lossCapRaw = await cfg("kraken_margin_daily_loss_cap");
+    // cfgStrict, not cfg: this key's safe state is STOP. cfg() collapses "the query failed"
+    // into null, and null now means "derive" — so a transient DB error would re-open a desk
+    // an operator had switched off with an explicit "0" at the derived cap instead. A throw
+    // here lands in the outer catch as "entry failed before any order was sent".
+    const lossCapRaw = await cfgStrict("kraken_margin_daily_loss_cap");
     const parsedLossCap = lossCapRaw != null && lossCapRaw.trim() !== "" ? parseFloat(lossCapRaw) : NaN;
     const lossCapOverride = Number.isFinite(parsedLossCap) ? parsedLossCap : null;
 

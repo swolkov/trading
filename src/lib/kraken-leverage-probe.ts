@@ -28,8 +28,16 @@ import { marginOrderPairFor, US_MARGIN_MAX_LEVERAGE } from "@/lib/kraken-pairs";
 /** Only where the two sources disagree, plus controls we already believe. */
 export const PROBE_PLAN: Record<string, number[]> = {
   XLM: [2, 3, 4, 5], ALGO: [2, 3, 4, 5], NEAR: [3, 4, 5], RENDER: [3, 4, 5],
-  BTC: [10, 20],   // control: real fills prove 20×. If this fails, the probe is wrong, not the table.
-  ETH: [5, 10],    // control: table and public agree at 10×
+  // BTC 12 is not a control — it is the one rung the executor can ASK FOR but nobody has
+  // verified. leverageThatFitsStop(3%, 20) = 12, so any FAST-container sleeve (selective and
+  // its twins, roundtrip, tv:*) on BTC sends leverage:"12" as soon as kraken_shadow_lev ≥ 12.
+  // Kraken's public rungs for XBT/USD stop at 10, and the US venue is known to differ (it
+  // gives 20 where public says 10), so 11–19 are simply unknown. A rejection there is
+  // fail-safe — the order is not placed — but it would make BTC silently unenterable for the
+  // whole fast family while the probe still reported "matches". Unreachable at today's
+  // kraken_shadow_lev of 5; probe it before arming a fast sleeve or raising that key.
+  BTC: [10, 12, 20],   // 10 and 20 are controls: real fills prove 20×
+  ETH: [5, 10],        // control: table and public agree at 10×
 };
 
 export interface ProbeRow {

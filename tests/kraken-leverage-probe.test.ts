@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PROBE_PLAN } from "../src/lib/kraken-leverage-probe";
 import { US_MARGIN_MAX_LEVERAGE } from "../src/lib/kraken-pairs";
+import { leverageThatFitsStop } from "../src/lib/margin-live-risk";
 
 // The probe only earns its private-call budget if it asks about the coins that are actually
 // in dispute, and if it carries controls that would expose a broken probe.
@@ -39,4 +40,15 @@ test("every probed level is a real Kraken rung and never below the margin minimu
     }
     assert.deepEqual([...levels].sort((a, b) => a - b), levels, `${coin} levels should be ascending`);
   }
+});
+
+test("BTC's 12x rung is probed — the executor can ask for it and nobody has verified it", () => {
+  // leverageThatFitsStop(3%, 20) = 12, so every FAST-container sleeve on BTC would send
+  // leverage:"12" once kraken_shadow_lev >= 12. Kraken's public rungs for XBT stop at 10 and
+  // the US venue is known to differ, so 12 is unverified. A rejection is fail-safe, but it
+  // would make BTC silently unenterable for the whole fast family.
+  assert.equal(leverageThatFitsStop(3, 20), 12, "this is the rung the fast container reaches for");
+  assert.ok(PROBE_PLAN.BTC?.includes(12), "so the probe must ask about it");
+  // The controls must still be there alongside it.
+  assert.ok(PROBE_PLAN.BTC?.includes(20) && PROBE_PLAN.BTC?.includes(10));
 });
