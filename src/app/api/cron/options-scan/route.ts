@@ -4,7 +4,8 @@ import { pickContractFor, scanTrendSignals } from "@/lib/options-scanner";
 import {
   autotrackEnabled, bookStateFor, evaluateOptionsPaper, openOptionPaperTrade, optionsSleeveBreakdown, refEquityFor,
 } from "@/lib/options-shadow";
-import { MAX_BOOK_PCT, OPTIONS_SIM_VERSION, OPTION_SOURCES, dteOf, positionBudget } from "@/lib/options-paper-model";
+import { EARNINGS_BLACKOUT_DAYS, MAX_BOOK_PCT, OPTIONS_SIM_VERSION, OPTION_SOURCES, dteOf, inEarningsBlackout, positionBudget } from "@/lib/options-paper-model";
+import { getEarningsCalendar } from "@/lib/finnhub";
 
 // THE OPTIONS PAPER BOOK — once a day after the close (vercel.json: 0 22 * * 1-5, which is
 // 6pm ET in summer and 5pm ET in winter, comfortably past 4pm either way).
@@ -74,6 +75,22 @@ export async function GET(request: Request) {
   const refused: string[] = [];
   const tracking = await autotrackEnabled();
 
+  // EARNINGS BLACKOUT. One calendar fetch for the whole run (the window is the same for every
+  // candidate), then each entry is checked against it. getEarningsCalendar swallows its own
+  // errors into [] — and a 14-day window across the US market is never genuinely empty — so
+  // an empty result means the FETCH failed, not that nobody reports. The gate then cannot
+  // run. This book measures; it does not gamble on a missing feed by refusing every entry
+  // for a Finnhub blip, but it must not pretend the gate was applied either. So the run
+  // proceeds and records `earningsGate: "unavailable"`, which is visible on the page.
+  const now = new Date();
+  let earningsCal: { symbol: string; date: string }[] = [];
+  if (tracking && fresh.length) {
+    const to = new Date(now.getTime() + (EARNINGS_BLACKOUT_DAYS + 1) * 86_400_000).toISOString().slice(0, 10);
+    earningsCal = (await getEarningsCalendar(now.toISOString().slice(0, 10), to)).map((e) => ({ symbol: e.symbol, date: e.date }));
+  }
+  const earningsGate: "applied" | "unavailable" | "not needed" = !tracking || !fresh.length ? "not needed" : earningsCal.length ? "applied" : "unavailable";
+  if (earningsGate === "unavailable") errors.push(`earnings calendar returned nothing for the next ${EARNINGS_BLACKOUT_DAYS} days — gate NOT applied this run`);
+
   if (tracking) {
     for (const source of OPTION_SOURCES) {
       const refEquity = await refEquityFor(source);
@@ -82,6 +99,12 @@ export async function GET(request: Request) {
         // capped by the room left under the book premium cap. Selecting against the position
         // budget alone would pick a contract the book then refuses, silently skipping an
         // entry a cheaper qualifying contract could have taken.
+        // Do not buy premium into a print. Checked BEFORE the chain request so a blocked name
+        // costs no API call. Only meaningful when the calendar actually loaded (see above).
+        if (earningsGate === "applied") {
+          const eb = inEarningsBlackout(cand.symbol, earningsCal, now);
+          if (eb.blocked) { refused.push(`${cand.symbol} ${source}: earnings ${eb.date} inside the ${EARNINGS_BLACKOUT_DAYS}-day blackout`); continue; }
+        }
         const book = await bookStateFor(source);
         const spendable = Math.min(positionBudget(refEquity), refEquity * MAX_BOOK_PCT - book.openPremium);
         if (spendable <= 0) { refused.push(`${cand.symbol} ${source}: book premium cap`); continue; }
@@ -118,8 +141,8 @@ export async function GET(request: Request) {
   // finding, it is a rumour.
   await prisma.agentConfig.upsert({
     where: { key: "options_scan_last_result" },
-    update: { value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused }) },
-    create: { key: "options_scan_last_result", value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused }) },
+    update: { value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused, earningsGate }) },
+    create: { key: "options_scan_last_result", value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused, earningsGate }) },
   }).catch(() => {});
 
   const sleeves = await optionsSleeveBreakdown().catch(() => []);

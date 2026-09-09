@@ -212,3 +212,28 @@ test("REGRESSION: selection respects the SPENDABLE budget, not just the position
   assert.equal(pickContract([near, cheaper], positionBudget(1000))?.contract.occ, "NEAR");
   assert.equal(pickContract([near, cheaper], 300)?.contract.occ, "CHEAPER");
 });
+
+// ── 2026-09-09: earnings blackout ────────────────────────────────────────────────────────
+import { EARNINGS_BLACKOUT_DAYS, inEarningsBlackout } from "../src/lib/options-paper-model";
+
+test("no premium is bought inside the earnings blackout, and the window is what it says", () => {
+  const now = new Date("2026-09-09T22:00:00Z");
+  const cal = [
+    { symbol: "IREN", date: "2026-09-16" },   // 7 days out — inside
+    { symbol: "WULF", date: "2026-09-23" },   // 14 days out — the edge, inside
+    { symbol: "APLD", date: "2026-09-24" },   // 15 days out — outside
+    { symbol: "CRWV", date: "2026-09-09" },   // reports TODAY — inside
+    { symbol: "HUT",  date: "2026-09-01" },   // already reported — outside (post-print is the GOOD time)
+  ];
+  assert.equal(EARNINGS_BLACKOUT_DAYS, 14);
+  assert.deepEqual(inEarningsBlackout("IREN", cal, now), { blocked: true, date: "2026-09-16" });
+  assert.deepEqual(inEarningsBlackout("WULF", cal, now), { blocked: true, date: "2026-09-23" });
+  assert.deepEqual(inEarningsBlackout("APLD", cal, now), { blocked: false });
+  assert.deepEqual(inEarningsBlackout("CRWV", cal, now), { blocked: true, date: "2026-09-09" });
+  assert.deepEqual(inEarningsBlackout("HUT", cal, now), { blocked: false }, "entering AFTER the print is the intended trade");
+  assert.deepEqual(inEarningsBlackout("NBIS", cal, now), { blocked: false }, "not on the calendar → not blocked");
+  // Case-insensitive on the symbol; the nearest date wins when a name has several.
+  assert.deepEqual(inEarningsBlackout("iren", [...cal, { symbol: "IREN", date: "2026-09-12" }], now), { blocked: true, date: "2026-09-12" });
+  // A malformed date can never block or unblock by accident.
+  assert.deepEqual(inEarningsBlackout("IREN", [{ symbol: "IREN", date: "not-a-date" }], now), { blocked: false });
+});

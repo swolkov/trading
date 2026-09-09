@@ -113,6 +113,40 @@ export const MIN_DELTA = 0.70;
 export const MAX_DELTA = 0.85;
 export const MIN_DTE = 60;
 export const MAX_DTE = 120;
+
+/**
+ * EARNINGS BLACKOUT (added 2026-09-09). Do not OPEN a position in the run-up to a scheduled
+ * earnings report.
+ *
+ * A long call is a bet on direction AND on implied volatility. Into a print, IV inflates —
+ * the market prices the coming jump — and after it, IV collapses whether or not the stock
+ * moved your way. Buying in that window pays a premium that is engineered to evaporate.
+ * With 60–120 DTE the report will usually fall INSIDE the hold; that is fine and expected,
+ * because a call bought at post-print IV carries the next print at a fair price. The thing
+ * to avoid is the ENTRY landing in the inflated window. Fourteen days is where the run-up
+ * measurably begins for names at this vol level.
+ *
+ * The one position in the book when this was added — IREN, entered at 97.6% IV — is the
+ * shape of trade this exists to stop from becoming a pattern in the record.
+ */
+export const EARNINGS_BLACKOUT_DAYS = 14;
+
+/** True when `symbol` has a scheduled report within the blackout window from `now`. Pure. */
+export function inEarningsBlackout(
+  symbol: string,
+  calendar: readonly { symbol: string; date: string }[],
+  now: Date,
+  days = EARNINGS_BLACKOUT_DAYS,
+): { blocked: boolean; date?: string } {
+  const start = now.getTime();
+  const end = start + days * 86_400_000;
+  const hit = calendar
+    .filter((e) => e.symbol.toUpperCase() === symbol.toUpperCase())
+    .map((e) => ({ date: e.date, t: Date.parse(e.date + "T12:00:00Z") }))
+    .filter((e) => Number.isFinite(e.t) && e.t >= start - 86_400_000 && e.t <= end)   // a report dated today still counts
+    .sort((a, b) => a.t - b.t)[0];
+  return hit ? { blocked: true, date: hit.date } : { blocked: false };
+}
 /** Hard reject above this quoted round-trip spread. The screen's cheap names (F 8.2%,
  *  CCL 5.8-28%, CHPT 21.8%, OPEN 27.1%) all fail here — cheap contract ≠ cheap trade. */
 export const MAX_SPREAD_PCT = 3.0;
