@@ -27,18 +27,31 @@ const TF: Record<string, TfSpec> = {
 };
 const RANK: Record<string, number> = { low: 0, med: 1, high: 2 };
 
-interface Sig { coin: string; t: number; px: number; trigger: number; closedAbove: boolean; tier: string; idx: number }
-interface Open { coin: string; entry: number; stop: number; peak: number; oneR: number; notional: number; margin: number; openedT: number; idx: number }
+interface Sig {
+  coin: string; t: number; px: number; trigger: number; closedAbove: boolean; tier: string; idx: number;
+  // PRE-REGISTERED FILTER INPUTS (fixed 2026-09-09 BEFORE any of them was scored). Each is a
+  // reason a breakout might be worse than average, not a slice chosen after seeing returns.
+  stretched: number;   // 1 = RSI-overbought against the trade (the fast family refuses these)
+  volRatio: number;    // this bar's volume vs the prior 20-bar mean — did anyone show up?
+  extension: number;   // (close - trigger)/trigger — how far it had already run when we saw it
+  ownAbove: number;    // coin close / its own 50-bar mean — is the coin itself in an uptrend?
+  btcAbove: number;    // BTC close / BTC's 50-bar mean — is the whole market risk-on?
+}
+interface Open { coin: string; entry: number; stop: number; peak: number; oneR: number; notional: number; margin: number; openedT: number; idx: number; sig: Sig }
 
 async function main() {
   if (!existsSync(CACHE)) throw new Error("no bar cache — run backtest-swing-lev.ts first");
   const bars: Record<string, { d: KrakenBar[]; h4: KrakenBar[] }> = JSON.parse(readFileSync(CACHE, "utf8"));
+  const barsRef = bars;
   const p = exitParams("swing-lev", 5, 1);
   const holdBars = Math.ceil(p.maxHoldH / 4);
 
   // 1. Collect every signal from every coin onto one timeline. Detector output depends only
   // on the bars, so it is cached — otherwise a config sweep re-runs the scanner every time.
-  const SIGCACHE = "/tmp/claude-501/-Users-user-trading/9d589653-7ac2-433f-a03a-11e6aa69aeb5/scratchpad/sigs-4h.json";
+  // Keyed by conviction tier AND by a shape version: the cached rows carry the filter inputs,
+  // so an old cache silently disables every filter AND the tier gate (generation is skipped
+  // entirely when a cache exists). That failure is invisible — it just returns the old numbers.
+  const SIGCACHE = `/tmp/claude-501/-Users-user-trading/9d589653-7ac2-433f-a03a-11e6aa69aeb5/scratchpad/sigs-4h-v3-${process.env.TIER === "high" ? "high" : "med"}.json`;
   let sigs: Sig[] = [];
   if (existsSync(SIGCACHE)) sigs = JSON.parse(readFileSync(SIGCACHE, "utf8"));
   if (!sigs.length) {
@@ -52,13 +65,37 @@ async function main() {
       let all: ScanSignal[] = s;
       if (ctx) { const u = ctx.filter((x) => x.t <= b[i].t); if (u.length >= 25) all = [...s, ...evaluate({ name: coin, symbol: `${coin}/USD` }, TF["1d"], u)]; }
       const conv = scoreConviction(brk, all);
-      if (RANK[conv.tier] < RANK["med"]) continue;
+      // LIVE TAKES HIGH CONVICTION ONLY — autoPlansFor's first line is
+      // `if (conv.tier !== "high") return []`. The med+high default replays a WIDER rule than
+      // anything that can trade, and it roughly DOUBLES the trade count, so every number moves.
+      if (RANK[conv.tier] < (process.env.TIER === "high" ? RANK["high"] : RANK["med"])) continue;
       // px = the bar CLOSE (what a close-evaluated replay fills at).
       // trigger = the 20-bar high the forming bar pierced — what LIVE fills near, because the
       // scanner runs every 5 minutes and fires the moment last.h crosses it, not at the close.
       const win = b.slice(Math.max(0, i - 20), i);
       const hh = win.length ? Math.max(...win.map((x) => x.h)) : b[i].c;
-      sigs.push({ coin, t: b[i].t, px: b[i].c, trigger: hh, closedAbove: b[i].c > hh, tier: conv.tier, idx: i });
+      const vols = win.map((x) => x.v).filter((v) => v > 0);
+      const avgVol = vols.length ? vols.reduce((x, y) => x + y, 0) / vols.length : 0;
+      const sma = (arr: KrakenBar[], j: number, n: number) => {
+        if (j < n) return 0;
+        let m = 0; for (let k = j - n + 1; k <= j; k++) m += arr[k].c;
+        return m / n;
+      };
+      const own = sma(b, i, 50);
+      const bh = barsRef["BTC"]?.h4 ?? [];
+      let bi = bh.length - 1; while (bi > 0 && bh[bi].t > b[i].t) bi--;
+      const bsma = sma(bh, bi, 50);
+      sigs.push({
+        coin, t: b[i].t, px: b[i].c, trigger: hh, closedAbove: b[i].c > hh, tier: conv.tier, idx: i,
+        // The RSI "stretched (−)" factor. NOT a new idea: it is production code that
+        // autoPlansFor already applies to the fast family and NEVER to the swing family,
+        // because the swing branch returns before line 122. Testing the asymmetry.
+        stretched: conv.factors.some((f) => /stretched/i.test(f)) ? 1 : 0,
+        volRatio: avgVol > 0 ? b[i].v / avgVol : 1,
+        extension: hh > 0 ? (b[i].c - hh) / hh : 0,
+        ownAbove: own > 0 ? b[i].c / own : 1,
+        btcAbove: bsma > 0 && bi > 0 ? bh[bi].c / bsma : 1,
+      });
     }
   }
   writeFileSync(SIGCACHE, JSON.stringify(sigs));
@@ -133,6 +170,10 @@ async function main() {
       const gross = o.notional * (exit - o.entry) / o.entry;
       const fees = o.notional * (ENTRY_FEE + TAKER) + o.notional * (ROLL4[o.coin] ?? 0.0003) * (heldH / 4);
       const pnl = gross - fees;
+      if (process.env.TRADEDUMP) {
+        const R = pnl / ((o.oneR / o.entry) * o.notional);
+        console.log(`T\t${o.coin}\t${R.toFixed(3)}\t${o.sig.volRatio.toFixed(2)}\t${o.sig.extension.toFixed(4)}\t${o.sig.ownAbove.toFixed(4)}\t${o.sig.btcAbove.toFixed(4)}\t${o.sig.stretched}`);
+      }
       eq += pnl; if (pnl > 0) wins++; else losses++;
       peakEq = Math.max(peakEq, eq); maxDD = Math.max(maxDD, (peakEq - eq) / peakEq);
       open.splice(k, 1);
@@ -152,6 +193,12 @@ async function main() {
       // live entry — the comment on it ("Spencer decides whether it's a real break") predates
       // the desk being automatic, and nobody decides any more.
       if (process.env.CONFIRM === "1" && !s.closedAbove) continue;
+      // ONE pre-registered filter at a time. Each REMOVES setups; none can add risk.
+      const F = process.env.FILTER ?? "none";
+      if (F === "volume" && !(s.volRatio >= 1.5)) continue;        // real participation
+      if (F === "notchasing" && !(s.extension <= 0.015)) continue; // do not buy an extended break
+      if (F === "owntrend" && !(s.ownAbove > 1)) continue;         // the coin is itself trending
+      if (F === "regime" && !(s.btcAbove > 1)) continue;           // the market is risk-on
       if (halted) continue;                        // entries halted; closes still run
       const slotsNow = REGIME ? (btcUp(t) ? WIDE : 1) : SLOTS;
       if (open.length >= slotsNow) continue;
@@ -186,7 +233,7 @@ async function main() {
       // each other and neither to reality. Check the fills.
       const base = process.env.ENTRY === "pierce" ? Math.max(s.trigger, Math.min(s.px, s.trigger * 1.004)) : s.px;
       const entry = base * (1 + CHASE);
-      open.push({ coin: s.coin, entry, stop: entry * (1 - STOP), peak: entry, oneR: entry * STOP, notional, margin, openedT: t, idx: s.idx });
+      open.push({ coin: s.coin, entry, stop: entry * (1 - STOP), peak: entry, oneR: entry * STOP, notional, margin, openedT: t, idx: s.idx, sig: s });
     }
     curve.push({ t, eq });
   }
