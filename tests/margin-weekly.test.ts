@@ -41,9 +41,9 @@ test("the memo carries the live book, the forward read, fees, capacity, the slee
     },
     capacity: {
       source: "selective", since: "2026-09-06T00:55:47.309Z", liveFactor: 0.5, rules: { slots: 2, perDay: 3, cooldownMin: 30 },
-      setups: 17, taken: 3, refused: { total: 14, slots: 13, cooldown: 1, dailyCap: 0, other: 0 },
+      setups: 17, taken: 3, refused: { total: 14, slots: 13, cooldown: 1, dailyCap: 0, margin: 0, leverage: 0, other: 0 },
       refusedOutcome: { resolved: 8, wins: 5, net: 1120, open: 6, floating: -840 },
-      replay: [{ slots: 2, taken: 4, resolved: 2, open: 2, net: -742, floating: 169 }, { slots: 3, taken: 6, resolved: 4, open: 2, net: -632, floating: -345 }],
+      replay: [{ slots: 2, taken: 4, resolved: 2, open: 2, net: -742, floating: 169, refusedByMargin: 0 }, { slots: 3, taken: 6, resolved: 4, open: 2, net: -632, floating: -345, refusedByMargin: 0 }],
       ledger: [],
     },
   });
