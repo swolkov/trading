@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PROBE_PLAN } from "../src/lib/kraken-leverage-probe";
+import { PROBE_PLAN, judge } from "../src/lib/kraken-leverage-probe";
 import { US_MARGIN_MAX_LEVERAGE } from "../src/lib/kraken-pairs";
 import { leverageThatFitsStop } from "../src/lib/margin-live-risk";
 
@@ -51,4 +51,21 @@ test("BTC's 12x rung is probed — the executor can ask for it and nobody has ve
   assert.ok(PROBE_PLAN.BTC?.includes(12), "so the probe must ask about it");
   // The controls must still be there alongside it.
   assert.ok(PROBE_PLAN.BTC?.includes(20) && PROBE_PLAN.BTC?.includes(10));
+});
+
+test("a REJECTED rung below an accepted one outranks 'matches'", () => {
+  // The exact scenario 12x was added to detect: Kraken refuses 12 but accepts 10 and 20.
+  // maxAccepted is 20, which equals the table — so judging on maxAccepted alone reports
+  // "matches" while the executor can still ask for 12 and be refused on every BTC entry.
+  const gap = judge("BTC", 20, [10, 12, 20], [10, 20]);
+  assert.equal(gap.verdict, "gap in ladder");
+  assert.deepEqual(gap.rejected, [12]);
+  assert.match(gap.detail, /REFUSED 12/);
+  // A clean run still reads "matches", and a rung rejected ABOVE the max is just the ceiling.
+  assert.equal(judge("BTC", 20, [10, 12, 20], [10, 12, 20]).verdict, "matches");
+  assert.equal(judge("ETH", 10, [5, 10, 20], [5, 10]).verdict, "matches", "20 rejected above the max is the cap, not a gap");
+  // Table drift is still detected, and total failure never reads as drift.
+  assert.equal(judge("XLM", 2, [2, 3, 4, 5], [2, 3, 4, 5]).verdict, "table is LOW");
+  assert.equal(judge("PENGU", 5, [2, 3], [2, 3]).verdict, "table is HIGH");
+  assert.equal(judge("XLM", 5, [2, 3, 4, 5], []).verdict, "nothing accepted");
 });

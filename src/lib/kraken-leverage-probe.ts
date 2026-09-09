@@ -41,12 +41,35 @@ export const PROBE_PLAN: Record<string, number[]> = {
 };
 
 export interface ProbeRow {
-  coin: string; table: number; accepted: number[]; maxAccepted: number;
-  verdict: "matches" | "table is LOW" | "table is HIGH" | "nothing accepted" | "skipped";
+  coin: string; table: number; accepted: number[]; rejected: number[]; maxAccepted: number;
+  verdict: "matches" | "table is LOW" | "table is HIGH" | "gap in ladder" | "nothing accepted" | "skipped";
   detail: string;
 }
 
 const PACE_MS = 1200;
+
+/**
+ * The pure verdict, split out so it is testable without touching Kraken. Order matters:
+ * a ladder GAP outranks "matches", because a gap is invisible to maxAccepted alone.
+ */
+export function judge(coin: string, table: number, levels: number[], accepted: number[], firstError?: string): Omit<ProbeRow, "coin"> {
+  const maxAccepted = accepted.length ? Math.max(...accepted) : 0;
+  const rejected = levels.filter((l) => !accepted.includes(l) && l < maxAccepted);
+  const verdict: ProbeRow["verdict"] =
+    maxAccepted === 0 ? "nothing accepted"
+      : rejected.length ? "gap in ladder"
+        : maxAccepted === table ? "matches"
+          : maxAccepted > table ? "table is LOW"
+            : "table is HIGH";
+  return {
+    table, accepted, rejected, maxAccepted, verdict,
+    detail: maxAccepted === 0 ? (firstError ?? "all rejected")
+      : rejected.length ? `Kraken REFUSED ${rejected.join("/")}× while accepting ${maxAccepted}× — any sleeve whose container asks for a refused rung cannot enter ${coin}`
+        : maxAccepted > table ? `raise US_MARGIN_MAX_LEVERAGE.${coin} ${table} → ${maxAccepted}`
+          : maxAccepted < table ? `LOWER US_MARGIN_MAX_LEVERAGE.${coin} ${table} → ${maxAccepted}; live orders at ${table}× would be rejected`
+            : "no change",
+  };
+}
 
 export async function probeLeverage(plan: Record<string, number[]> = PROBE_PLAN): Promise<{ rows: ProbeRow[]; drift: boolean; note: string }> {
   if (!krakenConfigured()) throw new Error("Kraken keys are not set in this environment");
@@ -56,7 +79,7 @@ export async function probeLeverage(plan: Record<string, number[]> = PROBE_PLAN)
     const symbol = `${coin}/USD`;
     let px = 0;
     try { px = await getKrakenPrice(symbol); } catch { /* handled below */ }
-    if (!(px > 0)) { rows.push({ coin, table, accepted: [], maxAccepted: 0, verdict: "skipped", detail: "price unreadable" }); continue; }
+    if (!(px > 0)) { rows.push({ coin, table, accepted: [], rejected: [], maxAccepted: 0, verdict: "skipped", detail: "price unreadable" }); continue; }
     const pair = marginOrderPairFor(symbol);
     // Deliberately tiny: this is a permission question, not a sizing one.
     const volume = (60 / px).toPrecision(8);
@@ -71,27 +94,21 @@ export async function probeLeverage(plan: Record<string, number[]> = PROBE_PLAN)
       }
       await new Promise((r) => setTimeout(r, PACE_MS));
     }
-    const maxAccepted = accepted.length ? Math.max(...accepted) : 0;
-    const verdict: ProbeRow["verdict"] =
-      maxAccepted === 0 ? "nothing accepted"
-        : maxAccepted === table ? "matches"
-          : maxAccepted > table ? "table is LOW"
-            : "table is HIGH";
-    rows.push({
-      coin, table, accepted, maxAccepted, verdict,
-      detail: maxAccepted === 0 ? (errors[0] ?? "all rejected")
-        : maxAccepted > table ? `raise US_MARGIN_MAX_LEVERAGE.${coin} ${table} → ${maxAccepted}`
-          : maxAccepted < table ? `LOWER US_MARGIN_MAX_LEVERAGE.${coin} ${table} → ${maxAccepted}; live orders at ${table}× would be rejected`
-            : "no change",
-    });
+    // A GAP is a rung REJECTED below one that was accepted. Reporting on maxAccepted alone
+    // is blind to it: probe BTC at [10,12,20], have Kraken reject 12 and accept 10 and 20,
+    // and maxAccepted is 20, which equals the table, so the row reads "matches" — while the
+    // executor can still ASK for 12 (leverageThatFitsStop(3%,20)=12) and be refused on every
+    // fast-family BTC entry. That is precisely the failure 12× was added to detect, so it
+    // has to outrank "matches".
+    rows.push({ coin, ...judge(coin, table, levels, accepted, errors[0]) });
   }
   // "nothing accepted" is never treated as drift: it means the probe could not get an answer
   // (venue closed to the pair, price stale, key scope), and acting on it would DELETE a coin.
-  const drift = rows.some((r) => r.verdict === "table is LOW" || r.verdict === "table is HIGH");
+  const drift = rows.some((r) => r.verdict === "table is LOW" || r.verdict === "table is HIGH" || r.verdict === "gap in ladder");
   return {
     rows, drift,
     note: drift
-      ? "US_MARGIN_MAX_LEVERAGE needs updating — see each row's detail."
+      ? "Action needed — see each row's detail (a ladder gap is not a table change; it means a rung the executor can ask for is refused)."
       : "The hardcoded table matches what Kraken accepts. No change needed.",
   };
 }
