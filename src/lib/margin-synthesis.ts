@@ -15,7 +15,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
-import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, POLICY_CUT_AT, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
+import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { pairBase } from "@/lib/kraken-pairs";
 import { dailyLossCapUsd } from "@/lib/margin-live-risk";
@@ -284,10 +284,21 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
       st.status = "held"; st.note = div.verdict;
       await sendNotification(`⚠️ Stage 3: ${div.closed} live trades closed but LIVE DIVERGES FROM PAPER — holding at half size (base ${st.fromBase}%). ${div.verdict}`, "margin_live").catch(() => {});
     } else {
-      await cfgSet("kraken_margin_live_max_risk_pct", String(st.toBase));
+      // GRADUATION MAY ONLY EVER RAISE. Stage 3's whole job is to start live BELOW paper's
+      // rule and move up once real fills match — it has no business reducing anything. But it
+      // wrote `toBase` unconditionally, and `toBase` is a snapshot taken on the day the record
+      // was created. On 2026-09-09 the base was deliberately raised 3% -> 4% (8% on high
+      // conviction) while the record still said toBase: 3. Sixteen trades later this line
+      // would have silently written it back to 3, cutting the position from $9,044 to $6,783
+      // — and announced it in Slack as "Stage 3 complete", which reads as good news.
+      // Taking the max makes a stale record harmless: graduation can lift a reduced base, and
+      // can never undo a deliberate increase made after the record was written.
+      const currentBase = parseFloat((await cfgGet("kraken_margin_live_max_risk_pct")) ?? "");
+      const graduateTo = Number.isFinite(currentBase) ? Math.max(currentBase, st.toBase) : st.toBase;
+      await cfgSet("kraken_margin_live_max_risk_pct", String(graduateTo));
       const ws = await cfgGet("margin_watch_state");
       let eq = 0; try { const p = ws ? (JSON.parse(ws) as { lastEquity?: number }) : null; eq = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { eq = 0; }
-      const cap = dailyLossCapUsd(eq, st.toBase);   // two full losses end the day
+      const cap = dailyLossCapUsd(eq, graduateTo);   // two full losses end the day
       // Reported, not frozen: clearing the override lets the executor derive this same rule
       // live, so graduating to a bigger base risk raises the cap by itself and it keeps
       // tracking equity afterwards. Writing the dollars would pin it at graduation day.
@@ -295,10 +306,10 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
       st.status = "graduated"; st.note = `graduated after ${div.closed} closed live trades: ${div.verdict}`;
       try {
         const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
-        log.push(`${new Date().toISOString()} STAGE 3 GRADUATED: base ${st.fromBase}% → ${st.toBase}% (high conviction ${st.toBase * 2}%), daily loss cap $${cap}, after ${div.closed} closed live trades (${div.verdict})`);
+        log.push(`${new Date().toISOString()} STAGE 3 GRADUATED: base ${st.fromBase}% → ${graduateTo}% (high conviction ${graduateTo * 2}%), daily loss cap $${cap}, after ${div.closed} closed live trades (${div.verdict})`);
         await cfgSet("kraken_margin_arm_log", JSON.stringify(log.slice(-50)));
       } catch { /* log only */ }
-      await sendNotification(`🎓 Stage 3 complete: ${div.closed} live trades closed and real fills match paper (${div.verdict}). Sizing moved to paper's full rule — base ${st.toBase}%, ${st.toBase * 2}% on high conviction — daily loss cap $${cap}.`, "margin_live").catch(() => {});
+      await sendNotification(`🎓 Stage 3 complete: ${div.closed} live trades closed and real fills match paper (${div.verdict}). Sizing moved to paper's full rule — base ${graduateTo}%, ${graduateTo * 2}% on high conviction — daily loss cap $${cap}.`, "margin_live").catch(() => {});
     }
   }
   await cfgSet(STAGE3_KEY, JSON.stringify(st));
