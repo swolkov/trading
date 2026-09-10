@@ -2,9 +2,6 @@ import crypto from "crypto";
 import { prisma } from "@/lib/db";
 import { tvSource } from "@/lib/margin-live-risk";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
-import { STOCK_UNIVERSE, isStockSessionOpenAt } from "@/lib/stock-paper-model";
-import { getStockBars } from "@/lib/stock-bars";
-import { openStockPaperTrade } from "@/lib/stock-shadow";
 import { sendNotification } from "@/lib/notifications";
 import { getKrakenPrice } from "@/lib/kraken";
 import { executeAlert, type AlertOrder } from "@/lib/margin-executor";
@@ -103,29 +100,12 @@ export async function POST(request: Request) {
   }
   const market = String(b.market ?? "crypto").toLowerCase();
 
-  // STOCK alerts feed the stock paper book only (nothing connects to Robinhood). Long-only,
-  // same 2%/next-close fast container as the scanner's fast sleeve, own sleeve name.
+  // The stock paper book was retired Sep 10 2026. A stock alert is REJECTED explicitly
+  // rather than left to fall through: the crypto guard below would reject a bare ticker
+  // anyway, but an explicit error says why, and nothing that is not crypto should ever get
+  // near the margin path by default.
   if (market === "stock") {
-    if (!/^[A-Z][A-Z.]{0,5}$/.test(symbol) || side !== "buy") {
-      return Response.json({ error: "stock alerts: symbol must be a ticker and side buy (paper long-only)" }, { status: 400 });
-    }
-    if (!STOCK_UNIVERSE.includes(symbol)) {
-      return Response.json({ error: `${symbol} is not in the stock paper universe` }, { status: 400 });
-    }
-    if (!isStockSessionOpenAt(new Date())) {
-      return Response.json({ ok: false, note: "market closed — stock paper entries open only during the regular session" }, { status: 200 });
-    }
-    try {
-      const bars = await getStockBars(symbol, "1m", Date.now() - 2 * 3600_000);
-      const px = bars.length ? bars[bars.length - 1].c : 0;
-      if (!(px > 0)) return Response.json({ error: "no price" }, { status: 502 });
-      const convRaw = String(b.conviction ?? "").toLowerCase().trim();
-      const tier = convRaw === "high" || convRaw === "low" ? convRaw : "med";
-      const res = await openStockPaperTrade({ symbol, source: source === "manual" ? "tv:manual" : source, timeframe: String(b.timeframe ?? "tv").slice(0, 8), conviction: tier, score: 0, signalPrice: px });
-      return Response.json({ ok: true, market: "stock", source, opened: res.opened, reason: res.opened ? undefined : res.reason, price: px });
-    } catch (e) {
-      return Response.json({ error: String(e).slice(0, 200) }, { status: 500 });
-    }
+    return Response.json({ error: "the stock paper book was retired — stock alerts are no longer accepted" }, { status: 410 });
   }
 
   if (!/^[A-Z0-9]{2,10}\/USD$/.test(symbol) || !["buy", "sell", "close"].includes(side)) {

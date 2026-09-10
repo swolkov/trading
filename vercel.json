@@ -17,10 +17,6 @@
       "schedule": "20 0 * * *"
     },
     {
-      "path": "/api/cron/stock-scan",
-      "schedule": "*/15 13-21 * * 1-5"
-    },
-    {
       "path": "/api/cron/margin-weekly",
       "schedule": "0 13 * * 1"
     },
