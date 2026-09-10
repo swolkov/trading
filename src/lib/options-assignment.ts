@@ -82,15 +82,22 @@ export function assessAssignment(p: AssignmentInput): AssignmentRisk[] {
   // rather than the whole strike — but a NAKED long call on a $500 account is a claim on tens
   // of thousands of dollars of stock.
   const longItm = p.longIsCall ? p.spot > p.longStrike + AUTO_EXERCISE_ITM : p.spot < p.longStrike - AUTO_EXERCISE_ITM;
-  if (longItm && !hasShort && p.longIsCall && p.dte <= EXERCISE_WARN_DTE) {
+  if (longItm && !hasShort && p.dte <= EXERCISE_WARN_DTE) {
     const needed = p.longStrike * 100 * p.contracts;
     if (needed > p.accountEquityUsd) {
+      // A naked long PUT is exercised too, and it is not the harmless side: exercising it
+      // SELLS 100 shares the account does not own, opening a short stock position that needs
+      // margin the account has not got. Same warning, different mechanism.
+      const consequence = p.longIsCall
+        ? `needs $${needed.toLocaleString()} to buy the shares`
+        : `SELLS 100 shares per contract the account does not own — a short stock position of ` +
+          `about $${needed.toLocaleString()} that needs margin`;
       out.push({
         level: p.dte <= 5 ? "high" : "watch",
         code: "exercise_capital",
         message:
-          `In the money with ${p.dte}d left. If it is still ITM at expiry Robinhood exercises it automatically, ` +
-          `which needs $${needed.toLocaleString()} to buy the shares against $${Math.round(p.accountEquityUsd).toLocaleString()} of equity. ` +
+          `In the money with ${p.dte}d left. If it is still ITM at expiry Robinhood exercises it automatically, which ` +
+          `${consequence}, against $${Math.round(p.accountEquityUsd).toLocaleString()} of equity. ` +
           `Close it before expiry — do not rely on the broker's forced-close to do it for you.`,
       });
     }

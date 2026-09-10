@@ -104,13 +104,30 @@ export const OPTIONS_COHORT_SQL = `sim_version='${OPTIONS_SIM_VERSION}'`;
 // $1k book can almost never open a position, which measures the wall rather than the
 // strategy. $3,500 replaces it because that is the size actually under consideration, and
 // it still brackets $5,000 so the size comparison survives.
-export type OptionSource = "opt-3.5k" | "opt-5k";
-export const OPTION_SOURCES: readonly OptionSource[] = ["opt-3.5k", "opt-5k"];
+// BEARISH SLEEVES ARE SEPARATE SLEEVES, not a flag on the existing ones. Long and short are
+// different strategies with different evidence, and every per-sleeve mechanism this book
+// already has — the monthly entry cap, the correlation-group rule, the book premium cap, the
+// verdict — keys on `source`. Separate sources therefore give complete separation for free,
+// and make it impossible for a bearish result to be pooled into the bullish record.
+//
+// The bearish rule is the exact mirror, deliberately: a new 50-session LOW while BELOW the
+// 200-day average, exited on a 25-session high. Same numbers, opposite sign — so if it fails
+// it fails as a fair test of the mirror rather than of a differently-tuned rule.
+export type OptionSource = "opt-3.5k" | "opt-5k" | "opt-3.5k-bear" | "opt-5k-bear";
+export const OPTION_SOURCES: readonly OptionSource[] = ["opt-3.5k", "opt-5k", "opt-3.5k-bear", "opt-5k-bear"];
 export const OPTION_SOURCE_LABELS: Record<OptionSource, string> = {
-  "opt-3.5k": "$3,500 book — ITM calls or debit spreads, 60-120 DTE, trend",
-  "opt-5k": "$5,000 book — same rules, more equity",
+  "opt-3.5k": "$3,500 long book — ITM calls, call debit or put credit spreads, 60-120 DTE",
+  "opt-5k": "$5,000 long book — same rules, more equity",
+  "opt-3.5k-bear": "$3,500 short book — ITM puts, put debit or call credit spreads, the mirrored signal",
+  "opt-5k-bear": "$5,000 short book — same rules, more equity",
 };
-export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = { "opt-3.5k": 3500, "opt-5k": 5000 };
+export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = {
+  "opt-3.5k": 3500, "opt-5k": 5000, "opt-3.5k-bear": 3500, "opt-5k-bear": 5000,
+};
+/** Bearish sleeves are suffixed, so direction is derivable anywhere a source string reaches. */
+export function isBearishSource(source: string | null | undefined): boolean {
+  return typeof source === "string" && source.endsWith("-bear");
+}
 
 // ---------- Contract selection ----------
 // In-the-money "stock replacement" calls, NOT out-of-the-money lottery tickets. Rationale
@@ -259,10 +276,25 @@ export function spreadProceedsUsd(longBid: number, shortAsk: number, contracts =
 // original single-leg book already stored — so every existing exit rule, the peak tracker and
 // the premium stop keep working untouched, and a credit spread that has lost half its
 // collateral trips the same stop as a call that has lost half its premium.
-export type StoredStructure = "call" | "call_spread" | "put_credit_spread";
+export type StoredStructure =
+  | "call" | "call_spread" | "put_credit_spread"          // bullish
+  | "put" | "put_spread" | "call_credit_spread";          // bearish
 
 export function isCreditStructure(structure: string | null | undefined): boolean {
   return structure === "put_credit_spread" || structure === "call_credit_spread";
+}
+
+/**
+ * Whether a structure's LEGS are puts. This is not the same question as whether the position
+ * is bearish, and conflating the two is how settlement silently inverts:
+ *
+ *   put_credit_spread  — legs are PUTS,  position is BULLISH
+ *   call_credit_spread — legs are CALLS, position is BEARISH
+ *
+ * Settlement depends on the leg type, never on the direction.
+ */
+export function isPutStructure(structure: string | null | undefined): boolean {
+  return structure === "put" || structure === "put_spread" || structure === "put_credit_spread";
 }
 
 /** Cash received opening a credit spread: sell the short leg at its bid, buy the protective
@@ -362,17 +394,21 @@ export function settleAtExpiry(p: {
   capitalAtRiskUsd: number;
   creditUsd: number;
 }): { valueUsd: number; pnlUsd: number } {
+  const puts = isPutStructure(p.structure);
   if (isCreditStructure(p.structure)) {
-    // The short leg is the one that can hurt: a put credit spread loses as the close falls
-    // through the short strike, and stops losing at the long strike. Capped at the width.
+    // The short leg is the one that can hurt, and WHICH WAY depends on the leg type: a short
+    // PUT loses as the close falls through its strike, a short CALL as the close rises through
+    // it. Capped at the width either way — beyond the long leg the two cancel.
     const short = p.shortStrike ?? p.longStrike;
     const width = p.widthUsd ?? Math.abs(short - p.longStrike) * 100;
-    const loss = Math.min(Math.max(0, (short - p.close) * 100), width);
+    const through = puts ? (short - p.close) : (p.close - short);
+    const loss = Math.min(Math.max(0, through * 100), width);
     const pnlUsd = p.creditUsd - loss;
     return { valueUsd: Math.max(0, p.capitalAtRiskUsd + pnlUsd), pnlUsd };
   }
-  // Debit: intrinsic on the long leg, capped at the width when there is a short leg above it.
-  const rawIntrinsic = Math.max(0, p.close - p.longStrike) * 100;
+  // Debit: intrinsic on the long leg — which for a put is strike MINUS close — capped at the
+  // width when there is a short leg beyond it.
+  const rawIntrinsic = Math.max(0, puts ? (p.longStrike - p.close) : (p.close - p.longStrike)) * 100;
   const cap = p.shortStrike != null && p.widthUsd != null ? p.widthUsd : Infinity;
   const valueUsd = Math.min(rawIntrinsic, cap);
   return { valueUsd, pnlUsd: valueUsd - p.capitalAtRiskUsd };
@@ -443,6 +479,30 @@ export function isExitSignal(bars: Bar[]): boolean {
   if (bars.length < DONCHIAN_EXIT) return false;
   const closes = bars.map((b) => b.c);
   return closes[closes.length - 1] <= Math.min(...closes.slice(-DONCHIAN_EXIT));
+}
+
+/** The mirror of isEntrySignal: a new DONCHIAN_ENTRY-session LOW while BELOW the 200-day
+ *  average. The trend filter does the same job in reverse — it keeps the rule from shorting
+ *  a dip inside an uptrend, which is where short Donchian does its losing. */
+export function isBearishEntrySignal(bars: Bar[]): boolean {
+  if (bars.length < TREND_FILTER + 1) return false;
+  const closes = bars.map((b) => b.c);
+  const last = closes[closes.length - 1];
+  const window = closes.slice(-DONCHIAN_ENTRY);
+  const sma = closes.slice(-TREND_FILTER).reduce((s, c) => s + c, 0) / TREND_FILTER;
+  return last <= Math.min(...window) && last < sma;
+}
+
+/** The mirror of isExitSignal: a DONCHIAN_EXIT-session HIGH ends a bearish position. */
+export function isBearishExitSignal(bars: Bar[]): boolean {
+  if (bars.length < DONCHIAN_EXIT) return false;
+  const closes = bars.map((b) => b.c);
+  return closes[closes.length - 1] >= Math.max(...closes.slice(-DONCHIAN_EXIT));
+}
+
+/** The exit rule that applies to a position, chosen by its sleeve's direction. */
+export function trendExitFor(source: string | null | undefined, bars: Bar[]): boolean {
+  return isBearishSource(source) ? isBearishExitSignal(bars) : isExitSignal(bars);
 }
 
 // ---------- Exits ----------

@@ -59,14 +59,16 @@ For each entry in `chainRequests` — **fetch BOTH calls and puts**:
 2. `get_option_instruments` per matching expiry, once with `type: "call"` and once with
    `type: "put"`, following `next` only until the strikes span `[strikeMin, strikeMax]`.
 3. `get_option_quotes` on those strikes, batched ≤ 20.
-   - **Calls** are what the position is built from — long leg deep in the money, short leg
-     above spot. Keep the ones between roughly **0.60 × and 1.30 × spot**.
-   - **Puts** do two jobs, so the window is wider than it looks: the at-the-money ones supply
-     the straddle (and therefore the expected move every structure is ranked against), and the
-     ones below spot are the legs of a put credit spread. Fetch roughly
-     **0.80 × to 1.08 × spot**.
-   - **Without a put near the money there is no straddle, no expected move, and that expiry
-     is skipped entirely.** If a symbol keeps producing no trade, check the puts arrived.
+   - **Use the request's own `strikeMin` / `strikeMax`.** Do not substitute a rule of thumb:
+     the window is set per request and it DIFFERS BY DIRECTION, because the legs sit on
+     opposite sides of spot. A long signal wants deep-in-the-money calls *below* spot; a short
+     signal wants deep-in-the-money puts *above* it.
+   - **Always fetch both calls and puts** across that window, whichever way the signal points.
+     Both sides are needed even for a one-directional trade, because the at-the-money straddle
+     is what supplies the expected move every structure is ranked against.
+   - **Without a call AND a put near the money there is no straddle, no expected move, and
+     that expiry is skipped entirely.** If a symbol keeps producing no trade, check both sides
+     arrived.
 4. **Do not pre-filter on delta, spread or price yourself.** The engine applies the real
    gates — liquidity on every leg, budget, and profitability at the expected move — and
    filtering first would quietly bypass rules that were reviewed.
@@ -118,15 +120,30 @@ three days and the next run picks them up.
   nothing can open. This is a real incident, not a quiet market. Say so plainly.
 
 ## What the book can open
-Three bullish shapes, chosen by the engine on real quotes — never by a rule of thumb:
-**long in-the-money call**, **call debit spread**, **put credit spread**. It compares every
-listed expiry in the 60–120 day window, each against its own expected move, and takes the best
-return on capital at risk. "Nothing qualifies" is a normal answer.
+**Four sleeves, two directions, two sizes** — `opt-3.5k`, `opt-5k` (long) and `opt-3.5k-bear`,
+`opt-5k-bear` (short). Each is an independent experiment with its own entry cap, its own book
+caps and its own verdict; a sleeve only ever sees signals of its own direction, so a bearish
+result can never be pooled into the bullish record.
 
-Bearish shapes (long put, put debit, call credit) are built and tested but **switched off**:
-the only entry signal this desk has validated is a long trend break, and its own crypto record
-found the mirrored short lost on every slice. Turning them on is a config change, not a
-rewrite — but it needs a validated bearish signal first, not a hunch.
+- **Long signal** — a new 50-session HIGH while above the 200-day average. Shapes: long
+  in-the-money call, call debit spread, put credit spread. Exits on a 25-session low.
+- **Short signal** — the exact mirror: a new 50-session LOW while BELOW the 200-day average.
+  Shapes: long in-the-money put, put debit spread, call credit spread. Exits on a 25-session
+  high.
+
+Same numbers, opposite sign, so if the short rule fails it fails as a fair test of the mirror
+rather than of a differently-tuned rule. A name cannot be at a 50-session high and low on the
+same day, so the two never collide.
+
+The engine compares every listed expiry in the 60–120 day window, each against its own
+expected move, and takes the best return on capital at risk — judged at spot MINUS the
+expected move for a short signal. "Nothing qualifies" is a normal answer.
+
+⚠️ **The short book is UNVALIDATED and expected to be the harder half.** This desk's crypto
+record found the mirrored short signal lost on every slice, and 22 of 39 names are usually
+above their 200-day average, so it will sit idle much of the time. It runs in paper precisely
+because that is where an unvalidated idea belongs — and it is kept in its own sleeves so it
+cannot contaminate anything.
 
 ## What the record means
 30+ resolved, positive net, t ≥ 2, across 7+ distinct days — same bar as every other desk.
