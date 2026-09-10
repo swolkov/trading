@@ -7,10 +7,12 @@ import { Explainer, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat
 import { ago, pct, pnl2, tone, usd, when } from "@/lib/format";
 
 // ============ OPTIONS PAPER BOOK ============
-// Two sleeves, identical rules, different reference equity ($1,000 and $5,000). The gap
-// between them is the experiment: it measures what account size is actually worth in this
-// strategy, instead of anyone asserting it. Nothing here places an order, and nothing here
-// touches the Kraken margin desk.
+// FOUR sleeves: the same rule at two sizes ($3,500 and $5,000), in two directions. The gap
+// between the sizes measures what account size is actually worth in this strategy instead of
+// anyone asserting it; the gap between the directions measures whether the mirrored short rule
+// works at all, which this desk's crypto record says it probably does not. Each sleeve is an
+// independent experiment with its own cap, its own book and its own verdict — they are never
+// pooled. Nothing here places an order, and nothing here touches the Kraken margin desk.
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
@@ -75,6 +77,13 @@ const levelLabel = (l: string) =>
 export default function OptionsPaperPage() {
   const { data } = useSWR<Payload>("/api/options/paper", fetcher, { refreshInterval: 60_000 });
   const sleeves = data?.sleeves ?? [];
+  // Size is only a fair comparison WITHIN a direction — a long book's return against a short
+  // book's answers neither question. A pair only appears once both of its sleeves have
+  // resolved something, otherwise the comparison is between a number and nothing.
+  const sizePairs: [string, Sleeve[]][] = ([
+    ["Long book", sleeves.filter((s) => !s.key.endsWith("-bear"))],
+    ["Short book", sleeves.filter((s) => s.key.endsWith("-bear"))],
+  ] as [string, Sleeve[]][]).filter(([, p]) => p.length === 2 && p.every((s) => s.resolved > 0));
   const trades = data?.trades ?? [];
   const rules = data?.rules;
   const groups = (data?.universe ?? []).reduce<Record<string, string[]>>((acc, n) => {
@@ -94,7 +103,7 @@ export default function OptionsPaperPage() {
     <div className="space-y-5">
       <PageHeader
         title="Options Paper Book"
-        sub="In-the-money calls on a 50-day breakout, held for months. Two sleeves at $1,000 and $5,000 — same rules, different size."
+        sub="In-the-money options on a 50-day breakout, held for months. Four sleeves: $3,500 and $5,000, long and short — same rule, mirrored."
         right={<>
           <Chip tone="paper" size="md">Paper only</Chip>
           <Chip tone="grey" size="md" title="Runs once a day after the close, Mon–Fri">
@@ -223,7 +232,13 @@ export default function OptionsPaperPage() {
 
         {sleeves.map((s) => (
           <Panel key={s.key}>
-            <PanelHeader title={s.label} aside={<Chip tone={verdictTone(s.verdict)} size="md">{s.verdict}</Chip>} />
+            <PanelHeader
+              title={s.label}
+              aside={<>
+                <Chip tone={s.key.endsWith("-bear") ? "red" : "green"} size="md">{s.key.endsWith("-bear") ? "short" : "long"}</Chip>
+                <Chip tone={verdictTone(s.verdict)} size="md">{s.verdict}</Chip>
+              </>}
+            />
             <PanelBody>
               <div className="grid grid-cols-3 gap-3">
                 {/* Net P&L is REALIZED only. With an open position that has not resolved it reads
@@ -256,20 +271,26 @@ export default function OptionsPaperPage() {
         ))}
       </div>
 
-      {sleeves.length === 2 && sleeves.every((s) => s.resolved > 0) && (
+      {sizePairs.length > 0 && (
         <Panel>
-          <PanelHeader title="Does account size matter?" />
+          <PanelHeader title="Does account size matter?" aside={<Label>compared within a direction, never across</Label>} />
           <PanelBody>
             <Note>
-              Both sleeves run the identical rule at {usd(sleeves[0].refEquity)} and {usd(sleeves[1].refEquity)}. Compare <strong>return on reference equity</strong>,
-              not dollars — the bigger book will always show bigger dollars.
+              Each pair runs the identical rule at two sizes. Compare <strong>return on reference equity</strong>, not dollars — the bigger
+              book will always show bigger dollars. Long and short are <em>not</em> compared here: that is a different question, and mixing
+              the two would answer neither.
             </Note>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              {sleeves.map((s) => (
-                <Stat key={s.key} label={`${s.key} return on equity`}
-                  value={<span className={tone(s.totalPnl)}>{pct(s.totalPnl / (s.refEquity || 1), 1)}</span>} />
-              ))}
-            </div>
+            {sizePairs.map(([label, pair]) => (
+              <div key={label} className="mt-3">
+                <Label>{label}</Label>
+                <div className="mt-1 grid grid-cols-2 gap-3">
+                  {pair.map((s) => (
+                    <Stat key={s.key} label={`${usd(s.refEquity)} return on equity`}
+                      value={<span className={tone(s.totalPnl)}>{pct(s.totalPnl / (s.refEquity || 1), 1)}</span>} />
+                  ))}
+                </div>
+              </div>
+            ))}
           </PanelBody>
         </Panel>
       )}
