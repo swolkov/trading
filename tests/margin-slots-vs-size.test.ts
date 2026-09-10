@@ -4,6 +4,8 @@ import { baseRiskForSlots, replaySlots, type CapacitySetup } from "../src/lib/ma
 import { DEFAULT_ARM_SOURCE, liveContainerFor, LIVE_CONTAINERS, LIVE_RISK_CEILING_PCT } from "../src/lib/margin-live-risk";
 import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
 import { planOrder } from "../src/lib/margin-dry-run";
+import { resolveConvictionTier } from "../src/lib/margin-live-risk";
+import { readFileSync } from "node:fs";
 import { policyCutFor, POLICY_CUT_AT, SWING_REACTIVATED_AT } from "../src/lib/margin-shadow";
 
 // SLOTS AND SIZE ARE THE SAME DIAL. The capacity card used to compare slot counts at one
@@ -174,4 +176,42 @@ test("dry-run never sizes past the ceiling, whatever the config says", () => {
     // risk is clamped at LIVE_RISK_CEILING_PCT (8%), so notional can never exceed 2x equity here
     assert.ok(p.notional <= 4522 * (LIVE_RISK_CEILING_PCT / 100) / 0.04 + 1, `base ${base}% must clamp`);
   }
+});
+
+// CONVICTION SIZING — the one input that can double or halve a live position.
+
+test("an internally-scored tier wins, and is honoured even with the trust flag off", () => {
+  // The scanner already refused everything but "high"; its tier must reach the executor.
+  assert.equal(resolveConvictionTier("high", undefined, false), "high");
+  assert.equal(resolveConvictionTier("med", undefined, false), "med");
+  // It also beats a conflicting payload tier — the internal score is the authoritative one.
+  assert.equal(resolveConvictionTier("med", "high", true), "med");
+});
+
+test("a PAYLOAD tier is ignored unless the operator trusts payloads", () => {
+  // The security property: holding the shared secret must not let a caller double its size.
+  assert.equal(resolveConvictionTier(undefined, "high", false), null);
+  assert.equal(resolveConvictionTier(undefined, "high", true), "high");
+  // null → the executor re-scores the coin itself; unscoreable sizes at 1x (med), never high.
+  assert.equal(resolveConvictionTier(undefined, undefined, true), null);
+});
+
+test("garbage never becomes high", () => {
+  for (const bad of ["HIGH", "hi", "", "1", "true", null, undefined] as (string | null | undefined)[]) {
+    assert.equal(resolveConvictionTier(bad, undefined, false), null, `scored=${bad}`);
+    assert.equal(resolveConvictionTier(undefined, bad, true), null, `payload=${bad}`);
+  }
+});
+
+test("the TradingView webhook cannot set scoredConviction — the field is internal-only", () => {
+  // THE SECURITY BOUNDARY, asserted on the source itself because that is where it lives: the
+  // webhook builds its AlertOrder from an explicit field list and never spreads the request
+  // body, so a payload cannot reach this field. If someone ever adds it there, an external
+  // caller could double its own position size and this test is the thing that notices.
+  const webhook = readFileSync(new URL("../src/app/api/webhook/tradingview/route.ts", import.meta.url), "utf8");
+  assert.ok(!/scoredConviction/.test(webhook), "the webhook route must never set scoredConviction");
+  assert.ok(!/\.\.\.\s*b\b/.test(webhook.split("const alert: AlertOrder")[1] ?? ""), "the webhook must not spread the request body into AlertOrder");
+  // And the scanner — an internal caller — must actually pass it, or the fix is inert.
+  const scan = readFileSync(new URL("../src/app/api/cron/margin-scan/route.ts", import.meta.url), "utf8");
+  assert.ok(/scoredConviction:\s*conv\.tier/.test(scan), "the scan route must pass its own scored tier");
 });

@@ -48,6 +48,39 @@ export function parseLiveRiskBasePct(raw: number | null | undefined): number {
 }
 
 /** Percent of equity risked on this trade (e.g. 3, 6, 1.5). */
+/**
+ * WHICH CONVICTION TIER SIZES THIS TRADE — the one input that can double or halve a position.
+ *
+ * Three sources, in strict precedence:
+ *
+ *  1. `scored` — a tier computed by an INTERNAL caller (the scanner) with the very signal set
+ *     that produced the plan. Always trusted, because a caller that can set this field is
+ *     already inside the process; the TradingView webhook builds its AlertOrder from an
+ *     explicit field list and cannot reach it.
+ *  2. `alertConv` — a tier carried on the alert PAYLOAD. Trusted only when the operator has
+ *     set kraken_margin_trust_alert_conviction, because otherwise anyone holding the shared
+ *     secret could double their own position by claiming "high".
+ *  3. null — the executor re-scores the coin itself, and an unscoreable coin sizes at 1x
+ *     (med). NEVER high: unverified must not mean maximum.
+ *
+ * Why (1) exists: the scanner scores conviction, refuses anything but "high", and then used to
+ * throw the tier away. The executor re-scanned the coin 20-90 SECONDS LATER over all five
+ * timeframes, where a 5m volume-spike or move-up can flip between the two reads — turning an
+ * 8% trade into a 4% one with no error, no log, and nothing able to flag it (the paper/live
+ * divergence check rescales paper to live size, so a halved position looks like agreement).
+ * Passing the tier that actually gated the trade is both safer and more faithful than
+ * recomputing it from different data at a different moment.
+ */
+export function resolveConvictionTier(
+  scored: string | null | undefined,
+  alertConv: string | null | undefined,
+  trustAlert: boolean,
+): ConvictionTier | null {
+  const ok = (v: string | null | undefined): ConvictionTier | null =>
+    v === "low" || v === "med" || v === "high" ? v : null;
+  return ok(scored) ?? (trustAlert ? ok(alertConv) : null);
+}
+
 export function liveRiskPct(basePct: number, tier: string | null | undefined): number {
   return Math.min(LIVE_RISK_CEILING_PCT, parseLiveRiskBasePct(basePct) * convictionMultiplier(tier));
 }

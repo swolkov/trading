@@ -84,6 +84,7 @@ import {
   entryKeepsMarginLevel,
   leverageThatFitsStop,
   projectedMarginLevel,
+  resolveConvictionTier,
 } from "@/lib/margin-live-risk";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
@@ -98,6 +99,13 @@ export interface AlertOrder {
   // executor scores the coin itself with the SAME scorer the paper record uses. Sizing
   // scales with it exactly as paper does — see liveRiskFraction().
   conviction?: "low" | "med" | "high";
+  // INTERNAL CALLERS ONLY — the tier the scanner ALREADY computed for the very signal that
+  // produced this plan, with the signal set that gated it. Always honoured, unlike
+  // `conviction` above: the TradingView webhook builds its AlertOrder from an explicit field
+  // list and never populates this, so a payload cannot reach it and inflate its own size.
+  // Set it and the executor skips its own re-scan, which happens 20-90s later over five
+  // timeframes and can silently disagree — see resolveConvictionTier().
+  scoredConviction?: "low" | "med" | "high";
   // Where the entry came from: "manual", "tv:<strategy>", or a scanner sleeve ("selective").
   // Only sources named in kraken_margin_live_sources may place a real order.
   source?: string;
@@ -946,7 +954,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // is "true": otherwise a payload could double the risk on the strength of the shared
     // secret alone. Default: the executor scores the coin itself, as paper does.
     const trustAlertConviction = (await cfg("kraken_margin_trust_alert_conviction")) === "true";
-    let convTier: "low" | "med" | "high" | null = trustAlertConviction ? (alert.conviction ?? null) : null;
+    let convTier: "low" | "med" | "high" | null =
+      resolveConvictionTier(alert.scoredConviction, alert.conviction, trustAlertConviction);
     if (!convTier && (alert.side === "buy" || alert.side === "sell")) {
       try {
         convTier = (await convictionForAlert(alert.symbol, alert.side))?.tier ?? null;
