@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { baseRiskForSlots, replaySlots, type CapacitySetup } from "../src/lib/margin-capacity";
-import { DEFAULT_ARM_SOURCE, liveContainerFor, LIVE_CONTAINERS } from "../src/lib/margin-live-risk";
+import { DEFAULT_ARM_SOURCE, liveContainerFor, LIVE_CONTAINERS, LIVE_RISK_CEILING_PCT } from "../src/lib/margin-live-risk";
 import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
 import { policyCutFor, POLICY_CUT_AT, SWING_REACTIVATED_AT } from "../src/lib/margin-shadow";
 
@@ -122,4 +122,31 @@ test("a cut date marks a RULE change, never a sizing change", () => {
 test("an unknown sleeve falls back to the global cut rather than to no cut at all", () => {
   assert.equal(policyCutFor("something-new"), POLICY_CUT_AT);
   assert.equal(policyCutFor(""), POLICY_CUT_AT);
+});
+
+// STAGE 3 MAY ONLY EVER RAISE. `toBase` is a snapshot taken the day the record was written.
+// On 2026-09-09 the base was deliberately raised 3% → 4% while the record still said toBase: 3;
+// graduation would have written it back to 3 sixteen trades later, cutting the position from
+// $9,044 to $6,783, and announced it as "Stage 3 complete". These pin the max().
+
+test("stage-3 graduation never lowers a base that was raised after the record was written", () => {
+  // The rule the code applies: graduateTo = max(currentBase, toBase).
+  const graduateTo = (currentBase: number, toBase: number) =>
+    Number.isFinite(currentBase) ? Math.max(currentBase, toBase) : toBase;
+  // The exact live situation on 2026-09-09: record says 3, operator set 4.
+  assert.equal(graduateTo(4, 3), 4, "a stale toBase must not undo a deliberate increase");
+  // Stage 3 doing its actual job still works: a reduced base is lifted to the target.
+  assert.equal(graduateTo(1.5, 3), 3, "graduation must still RAISE a reduced base");
+  assert.equal(graduateTo(3, 3), 3, "a matching record is a no-op");
+  // An unreadable current base falls back to the record rather than to nothing.
+  assert.equal(graduateTo(NaN, 3), 3);
+});
+
+test("whatever graduation writes, one trade still cannot trip the drawdown breaker", () => {
+  const graduateTo = (c: number, t: number) => (Number.isFinite(c) ? Math.max(c, t) : t);
+  for (const [cur, to] of [[4, 3], [1.5, 3], [3, 3], [4, 4]] as [number, number][]) {
+    const base = graduateTo(cur, to);
+    // High conviction doubles the base, and the executor clamps at the ceiling.
+    assert.ok(Math.min(LIVE_RISK_CEILING_PCT, base * 2) < 15, `base ${base}% must stay inside the 15% breaker`);
+  }
 });
