@@ -49,6 +49,36 @@ export const STRUCTURE_LABELS: Record<StructureKind, string> = {
 
 export interface Leg { contract: Contract; side: "buy" | "sell" }
 
+// ---------- Cross-leg sanity ----------
+//
+// The exit path checks every leg's quote age carefully. Entry did not, and `tradeable()`
+// judges each leg in ISOLATION — so a vertical could be assembled from two quotes up to the
+// store's full 36-hour window apart and pass every gate.
+//
+// That is not a theoretical worry on a 90-100% implied-vol universe, and it is worse than a
+// stale price: the ranking divides by capital at risk, and on a credit spread the capital at
+// risk IS width minus credit. A stale leg inflates the credit, which SHRINKS the denominator,
+// which inflates the return — so the metric is structurally attracted to whichever pair of
+// legs is most mispriced. A gapped-overnight name with one unrefreshed strike wins the
+// ranking precisely because its price is wrong.
+export const MAX_LEG_QUOTE_SKEW_MS = 60 * 60_000;
+
+/** True when two legs were quoted close enough together to be one tradeable price.
+ *  Permissive when a timestamp is missing — unit tests build contracts without one, and the
+ *  quote store's own freshness gate still applies — but the scanner always supplies them. */
+export function legsQuotedTogether(a: Contract, b: Contract): boolean {
+  if (!a.quoteTs || !b.quoteTs) return true;
+  const ta = Date.parse(a.quoteTs), tb = Date.parse(b.quoteTs);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return true;
+  return Math.abs(ta - tb) <= MAX_LEG_QUOTE_SKEW_MS;
+}
+
+/** A credit above this fraction of the width means the short leg is effectively at or in the
+ *  money, or one of the legs is mispriced. Since a sold leg is already required to be out of
+ *  the money, a credit this large is a data problem rather than an opportunity. A sanity
+ *  bound, not a tuned parameter. */
+export const MAX_CREDIT_FRAC_OF_WIDTH = 0.60;
+
 export interface Candidate {
   kind: StructureKind;
   legs: Leg[];
@@ -173,7 +203,10 @@ function verticalCredit(kind: "put_credit" | "call_credit", short: Contract, lon
     maxLossUsd: width - creditUsd,
     breakeven: kind === "put_credit" ? short.strike - creditUsd / 100 : short.strike + creditUsd / 100,
     crossingCostUsd: halfSpread(short) + halfSpread(long),
-    netDelta: kind === "put_credit" ? long.delta - short.delta : short.delta - long.delta,
+    // Long minus short for BOTH kinds. A put credit spread is bullish (positive net delta);
+    // a call credit spread is bearish (negative). The earlier expression flipped the call
+    // case's sign, reporting a bearish structure as bullish.
+    netDelta: long.delta - short.delta,
     netTheta: 0,
   };
 }
@@ -217,12 +250,12 @@ export function buildCandidates(input: BuildInput): Candidate[] {
 
   if (kinds.includes("call_debit")) {
     for (const long of longCalls) for (const short of calls) {
-      if (short.strike > long.strike) out.push(verticalDebit("call_debit", long, short));
+      if (short.strike > long.strike && legsQuotedTogether(long, short)) out.push(verticalDebit("call_debit", long, short));
     }
   }
   if (kinds.includes("put_debit")) {
     for (const long of longPuts) for (const short of puts) {
-      if (short.strike < long.strike) out.push(verticalDebit("put_debit", long, short));
+      if (short.strike < long.strike && legsQuotedTogether(long, short)) out.push(verticalDebit("put_debit", long, short));
     }
   }
   // A SOLD leg must be OUT OF THE MONEY at entry. Structural, not a tuned threshold: selling
@@ -230,12 +263,16 @@ export function buildCandidates(input: BuildInput): Candidate[] {
   // than the one that has not, and it hands the buyer an immediate reason to exercise early.
   if (kinds.includes("put_credit")) {
     for (const short of puts) for (const long of puts) {
-      if (long.strike < short.strike && short.strike < input.spot) out.push(verticalCredit("put_credit", short, long));
+      if (long.strike < short.strike && short.strike < input.spot && legsQuotedTogether(short, long)) {
+        out.push(verticalCredit("put_credit", short, long));
+      }
     }
   }
   if (kinds.includes("call_credit")) {
     for (const short of calls) for (const long of calls) {
-      if (long.strike > short.strike && short.strike > input.spot) out.push(verticalCredit("call_credit", short, long));
+      if (long.strike > short.strike && short.strike > input.spot && legsQuotedTogether(short, long)) {
+        out.push(verticalCredit("call_credit", short, long));
+      }
     }
   }
 
@@ -249,7 +286,10 @@ export function buildCandidates(input: BuildInput): Candidate[] {
     // payoff can never reach — caught by the breakeven invariant test, not by a crash.
     (c.maxProfitUsd === null || c.maxProfitUsd > 0) &&
     // A credit structure that pays less than it costs to cross is not a trade either.
-    (c.creditUsd === 0 || c.creditUsd > c.crossingCostUsd)
+    (c.creditUsd === 0 || c.creditUsd > c.crossingCostUsd) &&
+    // And an implausibly large credit on an out-of-the-money short is a mispriced leg, not
+    // an opportunity — see MAX_CREDIT_FRAC_OF_WIDTH.
+    (c.creditUsd === 0 || c.creditUsd <= (c.capitalAtRiskUsd + c.creditUsd) * MAX_CREDIT_FRAC_OF_WIDTH)
   );
 }
 

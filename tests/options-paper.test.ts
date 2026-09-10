@@ -335,9 +335,22 @@ test("a credit position is marked as collateral plus what it has made so far", (
 });
 
 test("closing a credit spread costs the short's ask less the long's bid, plus both fees", () => {
-  assert.ok(Math.abs(creditCloseCostUsd(3.06, 1.40) - (166 + 2 * REG_FEE_PER_CONTRACT)) < 1e-9);
+  assert.ok(Math.abs(creditCloseCostUsd(3.06, 1.40, 500) - (166 + 2 * REG_FEE_PER_CONTRACT)) < 1e-9);
   // A worthless spread still costs the fees to close — and never a negative amount.
-  assert.ok(Math.abs(creditCloseCostUsd(0.01, 0.05) - 2 * REG_FEE_PER_CONTRACT) < 1e-9);
+  assert.ok(Math.abs(creditCloseCostUsd(0.01, 0.05, 500) - 2 * REG_FEE_PER_CONTRACT) < 1e-9);
+});
+
+test("a credit spread can never be closed for more than its width — parity is enough to breach it", () => {
+  // Short 95p / long 90p, $5 wide. Stock at 82.50: 95p ask 12.60, 90p bid 7.40. Crossing both
+  // legs costs $5.20 of a $5.00-wide spread — no crossed market required, just parity.
+  // Uncapped this booked a 105% loss on a defined-risk position.
+  const width = 500;
+  assert.equal(creditCloseCostUsd(12.60, 7.40, width), width);
+  // So the worst P&L equals the collateral exactly, never worse.
+  const credit = 144.90;
+  const collateral = width - credit;
+  const worstPnl = credit - creditCloseCostUsd(12.60, 7.40, width);
+  assert.ok(Math.abs(worstPnl + collateral) < 1e-9, `worst pnl ${worstPnl} must equal -collateral ${-collateral}`);
 });
 
 test("credit settlement: keep it all above the short strike, lose the collateral below the long", () => {

@@ -44,8 +44,10 @@ say so**, because spreads unlock and that is worth telling Spencer.
 **Open positions first — they are the safety-critical half.** An unmarked position is a
 stop that never gets checked; a missed entry costs one sample.
 
-For each open position (Robinhood identifies contracts by symbol + expiry + strike + type,
-never by OCC):
+For each entry in `openPositions` (Robinhood identifies contracts by symbol + expiry + strike +
+type, never by OCC). **A spread appears as TWO entries — `leg: "long"` and `leg: "short"` — and
+BOTH must be quoted.** Quoting only the long leg silently freezes the position: it stops
+marking and never reaches its stop or its 21-day floor.
 1. `get_option_chains` with `underlying_symbol` → chain `id`.
 2. `get_option_instruments` with that `chain_id`, `expiration_dates` = its expiry,
    `strike_price` = its strike, `type` → the instrument UUID.
@@ -97,7 +99,7 @@ filled now can open a position now. Report what it prints: quotes written, resol
 refused.
 
 ## Read budget
-About 2 + (3 × open positions) + (4–6 × chain requests). Concurrency is capped by the
+About 2 + (3 × open POSITION LEGS — a spread counts as two) + (4–6 × chain requests). Concurrency is capped by the
 model at 3 open positions per sleeve, so a normal run is well under 40 calls. **If a run
 would exceed ~80, do the open positions and skip the chain requests** — they survive for
 three days and the next run picks them up.

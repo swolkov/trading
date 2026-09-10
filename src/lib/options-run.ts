@@ -65,7 +65,7 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
     if (res.length) {
       const net = res.reduce((s, r) => s + r.pnl, 0);
       const lines = res.map((r) =>
-        `• ${r.symbol} ${r.source}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${(r.pnlPct * 100).toFixed(0)}% of premium, ${r.reason})`).join("\n");
+        `• ${r.symbol} ${r.source}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${(r.pnlPct * 100).toFixed(0)}% of capital at risk, ${r.reason})`).join("\n");
       await sendNotification(
         `🧾 ${res.length} options paper position${res.length === 1 ? "" : "s"} closed — net ${net >= 0 ? "+" : "−"}$${Math.abs(net).toFixed(0)}:\n${lines}\n_Paper record. Entry paid the real ask, exit received the real bid. No money moved._`,
         "options",
@@ -132,7 +132,7 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
           symbol: cand.symbol, source, occ: pick.contract.occ, strike: pick.contract.strike,
           expiry: pick.contract.expiry, ask: pick.contract.ask, bid: pick.contract.bid, delta: pick.contract.delta,
           iv: pick.iv, spreadPct: pick.spreadPct, costUsd: pick.costUsd, underlying: cand.close,
-          structure: pick.structure, creditUsd: pick.creditUsd,
+          structure: pick.structure, creditUsd: pick.creditUsd, crossingUsd: pick.crossingUsd,
           shortOcc: pick.short?.occ, shortStrike: pick.short?.strike,
           shortBid: pick.short?.bid, shortAsk: pick.short?.ask, widthUsd: pick.widthUsd,
         });

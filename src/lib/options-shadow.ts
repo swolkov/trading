@@ -15,6 +15,7 @@
 // keys prefixed `options_paper_`, and no import from any margin-* or kraken-* module. This
 // book cannot affect the Kraken margin system.
 import { prisma } from "@/lib/db";
+import { assessAssignment, worstLevel } from "@/lib/options-assignment";
 import { getDailyBars, getOptionQuotes, type OptionQuote } from "@/lib/rh-options-data";
 import {
   OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCES, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
@@ -64,6 +65,9 @@ export async function ensureOptionsPaperTable(): Promise<void> {
   for (const col of [
     "structure text NOT NULL DEFAULT 'call'",
     "credit_usd double precision NOT NULL DEFAULT 0",
+    "entry_crossing_usd double precision",
+    "assignment_level text",
+    "assignment_note text",
     "short_occ text",
     "short_strike double precision",
     "entry_short_bid double precision",
@@ -141,6 +145,10 @@ export async function openOptionPaperTrade(p: {
   // pnl_pct is measured against it, so both kinds of position are sized on the same basis.
   structure?: "call" | "call_spread" | "put_credit_spread";
   creditUsd?: number;
+  /** Half the quoted spread on EVERY leg — what getting in actually cost. `entry_spread_pct`
+   *  only ever described the long leg, which on a credit spread is the cheap protective one,
+   *  so on its own it understates a two-legged entry. */
+  crossingUsd?: number;
   shortOcc?: string; shortStrike?: number; shortBid?: number; shortAsk?: number; widthUsd?: number;
 }): Promise<OpenResult> {
   await ensureOptionsPaperTable();
@@ -187,12 +195,13 @@ export async function openOptionPaperTrade(p: {
         `INSERT INTO options_paper_trades
           (symbol, corr_group, source, occ, strike, expiry, ref_equity, entry_delta, entry_iv,
            entry_spread_pct, entry_ask, cost_usd, underlying_at_entry, mark_usd, peak_usd, status, sim_version,
-           structure, short_occ, short_strike, entry_short_bid, width_usd, credit_usd)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15,$16,$17,$18,$19,$20,$21)`,
+           structure, short_occ, short_strike, entry_short_bid, width_usd, credit_usd, entry_crossing_usd)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15,$16,$17,$18,$19,$20,$21,$22)`,
         p.symbol, group, p.source, p.occ, p.strike, p.expiry, refEquity, p.delta, p.iv,
         p.spreadPct, p.ask, p.costUsd, p.underlying, openingMark, OPTIONS_SIM_VERSION,
         p.structure ?? "call",
         p.shortOcc ?? null, p.shortStrike ?? null, p.shortBid ?? null, p.widthUsd ?? null, creditUsd,
+        p.crossingUsd ?? null,
       );
     } catch (e) {
       if (/options_paper_one_open_idx|unique/i.test(String(e))) return { opened: false, reason: "already open" } as OpenResult;
@@ -238,6 +247,12 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
   if (!rows.length) return [];
 
   const now = new Date();
+  // Reference equity per sleeve, fetched once: the exercise-capital check needs to know what
+  // the account could actually pay for if a long leg were auto-exercised.
+  const sleeveEquity = new Map<string, number>();
+  for (const src of new Set(rows.map((r) => r.source))) {
+    sleeveEquity.set(src, await refEquityFor(src as OptionSource).catch(() => 0));
+  }
   let quotes: Record<string, OptionQuote> = {};
   // Both legs of every vertical, or the position cannot be marked at all.
   const allOccs = [...new Set(rows.flatMap((r) => (r.short_occ ? [r.occ, r.short_occ] : [r.occ])))];
@@ -333,15 +348,42 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
       structure: r.structure, capitalAtRiskUsd: r.cost_usd, creditUsd: r.credit_usd ?? 0,
       longBid: q.bid, shortAsk: hasShort ? (sq as OptionQuote).ask : null,
     });
+
+    // ASSIGNMENT AND EXERCISE. Every one of these findings describes a place the book's own
+    // rules say a position should never be — the 21-day floor is what normally prevents all
+    // of them. So a HIGH finding is not a routine exit signal, it is evidence that the floor
+    // did not fire, which on this desk means the scheduled agent stopped running. Closing on
+    // it is the backstop, not the plan; "the broker will probably handle it" is exactly what
+    // this refuses to rely on.
+    //
+    // Ex-dividend is not plumbed: it drives early assignment of short CALLS, and the only
+    // credit structure enabled today is a short PUT. The check is ready if that changes.
+    const spotNow = symBars.length ? symBars[symBars.length - 1].c : 0;
+    const risks = spotNow > 0 && r.strike != null
+      ? assessAssignment({
+          longStrike: r.strike,
+          longIsCall: !isCredit,
+          shortStrike: r.short_strike, shortMid: sq ? (sq.bid + sq.ask) / 2 : null,
+          spot: spotNow, dte, contracts: 1,
+          accountEquityUsd: sleeveEquity.get(r.source) ?? 0,
+        })
+      : [];
+    const riskLevel = worstLevel(risks);
     const trendExit = symBars.length >= 25 ? isExitSignal(symBars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l }))) : false;
-    const reason = exitReason({ trendExit, dte, markUsd, costUsd: r.cost_usd });
+    // The book's own rules first; assignment risk only as the backstop, so when it IS the
+    // recorded reason that fact is itself the diagnostic.
+    const reason = exitReason({ trendExit, dte, markUsd, costUsd: r.cost_usd })
+      ?? (riskLevel === "high" ? ("assignment risk" as const) : null);
 
     if (!reason) {
       // GREATEST in SQL, not Math.max in JS: two evaluators reading the same stale peak and
       // writing back their own computed values would let the lower one overwrite the higher.
       await prisma.$executeRawUnsafe(
-        `UPDATE options_paper_trades SET mark_usd=$1, peak_usd=GREATEST(COALESCE(peak_usd,0), $1) WHERE id=$2 AND status='open'`,
-        markUsd, r.id);
+        `UPDATE options_paper_trades SET mark_usd=$1, peak_usd=GREATEST(COALESCE(peak_usd,0), $1),
+           assignment_level=$3, assignment_note=$4 WHERE id=$2 AND status='open'`,
+        markUsd, r.id,
+        riskLevel === "none" ? null : riskLevel,
+        risks.length ? risks.map((x) => x.message).join(" ") : null);
       continue;
     }
     // Closing a credit position COSTS money — buy the short back, sell the long — and the P&L
@@ -349,7 +391,9 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
     // then expressed as "what the capital at risk became", so proceeds_usd and pnl_pct mean
     // the same thing on every row.
     const pnl = isCredit
-      ? (r.credit_usd ?? 0) - creditCloseCostUsd((sq as OptionQuote).ask, q.bid)
+      // width === collateral + credit, so the close cost is capped at exactly the point where
+      // the loss equals the collateral. That is what makes "defined risk" true in the record.
+      ? (r.credit_usd ?? 0) - creditCloseCostUsd((sq as OptionQuote).ask, q.bid, r.cost_usd + (r.credit_usd ?? 0))
       : (hasShort
           ? spreadProceedsUsd(q.bid, (sq as OptionQuote).ask)
           : exitProceedsUsd(q.bid)) - r.cost_usd;
@@ -359,7 +403,9 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
       `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, exit_short_ask=$8, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
          reason=$5, resolved_at=now(), peak_usd=GREATEST(COALESCE(peak_usd,0), $6), mark_usd=NULL
        WHERE id=$7 AND status='open'`,
-      q.bid, proceeds, pnl, pnlPct, reason, markUsd, r.id, hasShort ? (sq as OptionQuote).ask : null);
+      q.bid, proceeds, pnl, pnlPct,
+      reason === "assignment risk" && risks.length ? `assignment risk — ${risks[0].message}` : reason,
+      markUsd, r.id, hasShort ? (sq as OptionQuote).ask : null);
     if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: proceeds, pnl, pnlPct, reason });
   }
   return out;
@@ -427,6 +473,11 @@ export interface OptionPaperRow {
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
   /** 'call' or 'call_spread'. The short leg and the width are null for a naked call. */
   structure: string; shortStrike: number | null; widthUsd: number | null; creditUsd: number;
+  /** What the position was actually worth on exit — the WHOLE position. `exitBid` is only the
+   *  long leg, so on any spread it contradicts the P&L beside it. */
+  proceedsUsd: number | null; crossingUsd: number | null;
+  /** Worst assignment/exercise finding on this position at its last mark, and why. */
+  assignmentLevel: string | null; assignmentNote: string | null;
 }
 export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperRow[]> {
   await ensureOptionsPaperTable();
@@ -436,10 +487,13 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     exit_bid: number | null; pnl: number | null; pnl_pct: number | null; status: string | null;
     reason: string | null; entry_delta: number | null; entry_spread_pct: number | null; sim_version: string | null;
     structure: string | null; short_strike: number | null; width_usd: number | null; credit_usd: number | null;
+    proceeds_usd: number | null; entry_crossing_usd: number | null;
+    assignment_level: string | null; assignment_note: string | null;
   }[]>(
     `SELECT id, time, symbol, source, occ, strike, expiry, entry_ask, cost_usd, mark_usd, peak_usd,
             exit_bid, pnl, pnl_pct, status, reason, entry_delta, entry_spread_pct, sim_version,
-            structure, short_strike, width_usd, COALESCE(credit_usd, 0) AS credit_usd
+            structure, short_strike, width_usd, COALESCE(credit_usd, 0) AS credit_usd,
+            proceeds_usd, entry_crossing_usd, assignment_level, assignment_note
      FROM options_paper_trades ORDER BY time DESC LIMIT $1`, Math.max(1, Math.min(500, limit)),
   );
   return rows.map((r) => ({
@@ -451,6 +505,8 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     simVersion: r.sim_version ?? OPTIONS_SIM_VERSION,
     structure: r.structure ?? "call", shortStrike: r.short_strike, widthUsd: r.width_usd,
     creditUsd: r.credit_usd ?? 0,
+    proceedsUsd: r.proceeds_usd, crossingUsd: r.entry_crossing_usd,
+    assignmentLevel: r.assignment_level, assignmentNote: r.assignment_note,
   }));
 }
 

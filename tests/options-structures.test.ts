@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Contract } from "../src/lib/options-paper-model";
 import {
-  BEARISH_KINDS, BULLISH_KINDS, type Candidate,
-  atmOf, buildCandidates, expectedMove, pnlAtExpiry, returnAt, scenarioTable, selectStructure,
+  BEARISH_KINDS, BULLISH_KINDS, MAX_CREDIT_FRAC_OF_WIDTH, type Candidate,
+  atmOf, buildCandidates, expectedMove, legsQuotedTogether, pnlAtExpiry, returnAt,
+  scenarioTable, selectStructure,
 } from "../src/lib/options-structures";
 
 const EXP = "2026-12-18";
@@ -183,4 +184,39 @@ test("returnAt and the scenario grid stay consistent with the payoff", () => {
   for (const g of grid) assert.ok(Math.abs(g.pnl - pnlAtExpiry(c, g.price)) < 1e-9);
   // Monotonic for a call spread: it can only do better as the stock rises.
   for (let i = 1; i < grid.length; i++) assert.ok(grid[i].pnl >= grid[i - 1].pnl);
+});
+
+
+// ============ CROSS-LEG SANITY ============
+// tradeable() judges each leg in isolation, so these are the checks that stop a vertical being
+// assembled from two prices that never existed at the same moment.
+
+test("legs quoted far apart cannot be combined into one vertical", () => {
+  const t0 = "2026-09-10T14:00:00Z";
+  const near = "2026-09-10T14:30:00Z";
+  const far = "2026-09-10T17:00:00Z";
+  const long = K(85, { bid: 23.15, ask: 23.70, delta: 0.76, quoteTs: t0 });
+  const shortNear = K(115, { bid: 9.95, ask: 10.20, delta: 0.446, quoteTs: near });
+  const shortFar = K(115, { bid: 9.95, ask: 10.20, delta: 0.446, quoteTs: far });
+
+  assert.equal(legsQuotedTogether(long, shortNear), true, "30 minutes apart is one price");
+  assert.equal(legsQuotedTogether(long, shortFar), false, "3 hours apart is not");
+  assert.equal(legsQuotedTogether(long, K(115, { bid: 9.95, ask: 10.20 })), true, "missing timestamps stay permissive");
+
+  const ok = buildCandidates({ calls: [long, shortNear], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["call_debit"] });
+  assert.equal(ok.length, 1);
+  const skewed = buildCandidates({ calls: [long, shortFar], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["call_debit"] });
+  assert.equal(skewed.length, 0, "a stale leg must not become half of a spread");
+});
+
+test("an implausibly large credit on an out-of-the-money short is a mispriced leg, not an edge", () => {
+  // The failure mode this guards: a stale leg inflates the credit, which SHRINKS capital at
+  // risk (width − credit), which INFLATES return-on-risk — so the ranking is attracted to the
+  // most mispriced pair precisely because the mispricing is the denominator.
+  const rich = [K(95, { bid: 3.50, ask: 3.56, delta: -0.35 }), K(90, { bid: 0.16, ask: 0.20, delta: -0.05 })];
+  const [bad] = buildCandidates({ calls: [], puts: rich, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["put_credit"] });
+  assert.equal(bad, undefined, `a $330 credit on a $500-wide spread is ${(330 / 500 * 100).toFixed(0)}% of width, over the ${(MAX_CREDIT_FRAC_OF_WIDTH * 100).toFixed(0)}% bound`);
+
+  const sane = [K(95, { bid: 3.00, ask: 3.06, delta: -0.35 }), K(90, { bid: 1.40, ask: 1.44, delta: -0.20 })];
+  assert.equal(buildCandidates({ calls: [], puts: sane, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["put_credit"] }).length, 1);
 });

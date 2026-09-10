@@ -22,7 +22,6 @@ import {
 } from "../src/lib/options-quote-store";
 import { parseOcc, toOcc } from "../src/lib/options-occ";
 import { runOptionsScan } from "../src/lib/options-run";
-import { OPTIONS_COHORT_SQL } from "../src/lib/options-paper-model";
 
 // Quotes arrive in ROBINHOOD's own shape — underlying symbol, expiration, strike, type —
 // and this script derives the OCC key. Asking the agent to hand-format OCC's eight-digit
@@ -59,8 +58,21 @@ function toStoreQuote(q: AgentQuote): QuoteWithHint | null {
 }
 
 async function worklist() {
-  const open = await prisma.$queryRawUnsafe<{ occ: string; symbol: string; expiry: string; strike: number | null }[]>(
-    `SELECT occ, symbol, expiry, strike FROM options_paper_trades WHERE status='open' AND ${OPTIONS_COHORT_SQL} ORDER BY time ASC`,
+  // BOTH LEGS, and NOT cohort-filtered.
+  //
+  // Both of those were bugs. Selecting only `occ` meant a spread's SHORT leg was quoted once
+  // at entry and never again; 36 hours later the evaluator's freshness gate dropped it, and
+  // from then on the position never marked, never checked its trend exit, never checked the
+  // 21-day floor — it just ran to expiry, which is precisely the assignment exposure this
+  // book exists to avoid. And filtering by cohort here re-introduced the abandonment that
+  // evaluateOptionsPaper deliberately removed: an open o1 position would stop being quoted
+  // the moment the sim version was bumped.
+  const open = await prisma.$queryRawUnsafe<{
+    occ: string; short_occ: string | null; symbol: string; expiry: string;
+    strike: number | null; short_strike: number | null;
+  }[]>(
+    `SELECT occ, short_occ, symbol, expiry, strike, short_strike
+     FROM options_paper_trades WHERE status='open' ORDER BY time ASC`,
   );
   const chains = await pendingChainRequests();
   const fresh = await quoteStoreFreshness();
@@ -68,12 +80,17 @@ async function worklist() {
     // Contracts we hold: they must be re-quoted every run or their stops go unchecked.
     // strike/type are spelled out so the agent can look the contract up on Robinhood
     // directly (it identifies contracts by symbol+expiry+strike+type, never by OCC).
-    openPositions: open.map((r) => {
-      const p = parseOcc(r.occ);
-      return {
-        occ: r.occ, symbol: r.symbol, expiry: r.expiry,
-        strike: r.strike ?? p?.strike ?? null, type: p?.type ?? "call",
-      };
+    // ONE ENTRY PER LEG. A spread needs both quoted or it cannot be marked or closed at all.
+    openPositions: open.flatMap((r) => {
+      const legs = [{ occ: r.occ, strike: r.strike, leg: "long" as const }];
+      if (r.short_occ) legs.push({ occ: r.short_occ, strike: r.short_strike, leg: "short" as const });
+      return legs.map(({ occ, strike, leg }) => {
+        const p = parseOcc(occ);
+        return {
+          occ, symbol: r.symbol, expiry: r.expiry,
+          strike: strike ?? p?.strike ?? null, type: p?.type ?? "call", leg,
+        };
+      });
     }),
     // Chains the scanner asked for and could not fetch itself.
     chainRequests: chains,

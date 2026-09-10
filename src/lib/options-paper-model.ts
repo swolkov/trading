@@ -180,6 +180,10 @@ export function canExitAt(q: { bid: number; bidSize: number; quoteTs?: string | 
 export interface Contract {
   occ: string; strike: number; expiry: string; delta: number;
   bid: number; ask: number; bidSize: number; askSize: number;
+  /** When the broker published this leg's quote. Optional on the type so unit tests can build
+   *  contracts without one, but the scanner ALWAYS supplies it: without it the multi-leg skew
+   *  check in options-structures.ts silently has nothing to check. */
+  quoteTs?: string | null;
 }
 export interface ContractPick { contract: Contract; costUsd: number; spreadPct: number }
 
@@ -267,11 +271,21 @@ export function spreadCreditUsd(shortBid: number, longAsk: number, contracts = 1
   return (shortBid - longAsk) * 100 * contracts - 2 * REG_FEE_PER_CONTRACT * contracts;
 }
 
-/** Cash to close a credit spread right now: buy the short leg back at its ask, sell the long
- *  leg at its bid. Floored at zero — a vertical is never worth less than nothing — and both
- *  legs pay a fee. */
-export function creditCloseCostUsd(shortAsk: number, longBid: number, contracts = 1): number {
-  return Math.max(0, (shortAsk - longBid) * 100 * contracts) + 2 * REG_FEE_PER_CONTRACT * contracts;
+/**
+ * Cash to close a credit spread right now: buy the short leg back at its ask, sell the long
+ * leg at its bid, both legs paying a fee.
+ *
+ * FLOORED AT ZERO **AND CAPPED AT THE WIDTH** (`maxUsd`, which is collateral + credit). The
+ * cap is not cosmetic and does not need a crossed market to matter — mere parity does it.
+ * Short 95p / long 90p on a $5 wide spread with the stock at 82.50 quotes 12.60 ask / 7.40
+ * bid: crossing both legs costs $5.20 of a $5.00-wide spread. Without the cap that books a
+ * 105% loss on a defined-risk position, contradicting settleAtExpiry (which caps at the
+ * collateral) and poisoning every average return that includes it. A vertical is worth at
+ * most its width; quotes implying more are a market you would not trade into.
+ */
+export function creditCloseCostUsd(shortAsk: number, longBid: number, maxUsd: number, contracts = 1): number {
+  const gross = Math.max(0, (shortAsk - longBid) * 100 * contracts) + 2 * REG_FEE_PER_CONTRACT * contracts;
+  return Math.min(gross, Math.max(0, maxUsd) * contracts);
 }
 
 /**
@@ -291,8 +305,14 @@ export function positionMarkUsd(p: {
 }): number {
   const n = p.contracts ?? 1;
   if (isCreditStructure(p.structure)) {
-    const costToClose = Math.max(0, ((p.shortAsk ?? 0) - p.longBid) * 100 * n);
-    return Math.max(0, p.capitalAtRiskUsd + p.creditUsd - costToClose);
+    // width === collateral + credit, always — so the cap needs no extra argument.
+    //
+    // FEES ARE EXCLUDED HERE, deliberately and symmetrically with the debit side: a debit
+    // position marks at bid × 100 and only pays its exit fee when it actually closes. The
+    // mark answers "what is this worth", not "what would I net after closing it".
+    const width = p.capitalAtRiskUsd + p.creditUsd;
+    const grossToClose = Math.min(Math.max(0, ((p.shortAsk ?? 0) - p.longBid) * 100 * n), width * n);
+    return Math.max(0, p.capitalAtRiskUsd + p.creditUsd - grossToClose);
   }
   const value = p.shortAsk != null
     ? Math.max(0, (p.longBid - p.shortAsk) * 100 * n)
@@ -409,7 +429,7 @@ export function isExitSignal(bars: Bar[]): boolean {
 // the single structural fact that makes short-dated options a bad instrument.
 export const DTE_FLOOR = 21;
 export const PREMIUM_STOP_FRAC = 0.50;
-export type ExitReason = "trend exit" | "dte floor" | "premium stop" | null;
+export type ExitReason = "trend exit" | "dte floor" | "premium stop" | "assignment risk" | null;
 
 export function exitReason(p: { trendExit: boolean; dte: number; markUsd: number; costUsd: number }): ExitReason {
   if (p.trendExit) return "trend exit";

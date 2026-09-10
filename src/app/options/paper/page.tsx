@@ -27,6 +27,8 @@ interface StructureStat {
 interface TradeRow {
   id: number; time: string; symbol: string; source: string; occ: string; strike: number | null;
   structure: string; shortStrike: number | null; widthUsd: number | null; creditUsd: number;
+  proceedsUsd: number | null; crossingUsd: number | null;
+  assignmentLevel: string | null; assignmentNote: string | null;
   expiry: string | null; entryAsk: number; costUsd: number; markUsd: number | null; peakUsd: number | null;
   exitBid: number | null; pnl: number | null; pnlPct: number | null; status: string; reason: string | null;
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
@@ -331,7 +333,7 @@ export default function OptionsPaperPage() {
             <thead>
               <tr>
                 <Th>When</Th><Th>Sleeve</Th><Th>Contract</Th><Th num>Δ / spread</Th>
-                <Th num>Paid</Th><Th num>Mark / exit</Th><Th num>P&L <span className="normal-case opacity-60">(open = unreal.)</span></Th><Th>Status</Th>
+                <Th num>At risk</Th><Th num>Mark / exit</Th><Th num>P&L <span className="normal-case opacity-60">(open = unreal.)</span></Th><Th>Status</Th>
               </tr>
             </thead>
             <tbody>
@@ -349,19 +351,34 @@ export default function OptionsPaperPage() {
                   {t.structure === "call_spread" && <Chip tone="blue" className="ml-1.5">debit</Chip>}
                   {t.structure === "put_credit_spread" && <Chip tone="amber" className="ml-1.5" title={`$${t.creditUsd.toFixed(0)} credit received`}>credit</Chip>}
                 </Td>
-                <Td num>{t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}</Td>
+                <Td num title={t.crossingUsd != null ? `${usd(t.crossingUsd)} crossed on entry, all legs` : undefined}>
+                  {t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}
+                  {t.crossingUsd != null && <span className="ml-1 text-[11px] text-muted-foreground">{usd(t.crossingUsd)}</span>}
+                </Td>
                 <Td num>{usd(t.costUsd)}</Td>
-                <Td num>{t.status === "resolved" ? (t.exitBid != null ? usd(t.exitBid * 100) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>
+                {/* On exit this must be what the WHOLE position was worth. exit_bid is only
+                    the long leg, so on any spread it contradicted the P&L in the next column —
+                    a winning credit spread showed +$80 P&L beside a $40 "exit". */}
+                <Td num>{t.status === "resolved" ? (t.proceedsUsd != null ? usd(t.proceedsUsd) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>
                 {/* An open row has everything needed to show its P&L (paid vs mark); a bare dash
                     hides exactly the spread cost this book exists to measure. Shown in parentheses
                     so it reads as unrealized and is never mistaken for a booked result. */}
                 <Td num className={t.pnl != null ? tone(t.pnl) : t.markUsd != null ? tone(t.markUsd - t.costUsd) : ""}>
                   {t.pnl != null ? pnl2(t.pnl) : t.markUsd != null ? `(${pnl2(t.markUsd - t.costUsd)})` : "—"}
                 </Td>
-                <Td title={t.reason ?? ""}>
+                <Td title={t.reason ?? t.assignmentNote ?? ""}>
                   <Chip tone={t.status === "resolved" ? (t.pnl != null && t.pnl >= 0 ? "green" : "red") : t.status === "void" ? "amber" : "paper"}>
                     {t.status === "resolved" ? (t.reason ?? "closed") : t.status}
                   </Chip>
+                  {/* Every assignment finding describes somewhere the 21-day floor should
+                      already have taken us out of. Seeing one on an OPEN row means the floor
+                      did not fire — which on this desk means the agent stopped. */}
+                  {t.status === "open" && t.assignmentLevel && (
+                    <Chip tone={t.assignmentLevel === "high" ? "red" : "amber"} dot={t.assignmentLevel === "high"}
+                          className="ml-1.5" title={t.assignmentNote ?? undefined}>
+                      {t.assignmentLevel === "high" ? "assignment risk" : "watch"}
+                    </Chip>
+                  )}
                 </Td>
               </Row>
             ))}

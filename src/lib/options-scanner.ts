@@ -50,6 +50,9 @@ export interface ChainPick {
   creditUsd: number;
   spreadPct: number;
   widthUsd?: number;
+  /** Half the quoted spread on EVERY leg — the real cost of getting in. `spreadPct` describes
+   *  the long leg alone, which on a credit spread is the cheap protective one. */
+  crossingUsd: number;
   symbol: string; underlying: number; iv: number | null;
 }
 
@@ -94,9 +97,11 @@ export async function pickContractFor(symbol: string, underlying: number, budget
   ]);
   if (!calls.length) return null;
 
+  // quoteTs is carried through so the multi-leg skew check has something to check. Dropping
+  // it here is what let a vertical be assembled from two quotes 36 hours apart.
   const asContract = (q: (typeof calls)[number]): Contract => ({
     occ: q.occ, strike: q.strike, expiry: q.expiry, delta: q.delta ?? 0,
-    bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize,
+    bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize, quoteTs: q.quoteTs,
   });
   const callContracts = calls.filter((q) => q.delta != null).map(asContract);
   const putContracts = puts.map(asContract);
@@ -126,25 +131,48 @@ export async function pickContractFor(symbol: string, underlying: number, budget
     });
     const sel = selectStructure(cands, underlying, em);
     if (!sel) continue;
-    if (!best || sel.returnAtRef > best.ret) {
-      const iv = calls.find((q) => q.occ === sel.best.legs[0].contract.occ)?.iv ?? null;
-      best = { cand: sel.best, ret: sel.returnAtRef, iv };
-    }
+    if (!best || sel.returnAtRef > best.ret) best = { cand: sel.best, ret: sel.returnAtRef, iv: null };
   }
   if (!best) return null;
 
   const longLeg = best.cand.legs.find((l) => l.side === "buy")!.contract;
   const shortLeg = best.cand.legs.find((l) => l.side === "sell")?.contract;
-  const structure: StoredStructure =
-    best.cand.kind === "put_credit" ? "put_credit_spread" : shortLeg ? "call_spread" : "call";
+  // EXHAUSTIVE, and it THROWS on anything unmapped. The previous expression defaulted every
+  // two-legged shape to "call_spread" — a DEBIT label. A call credit spread stored that way
+  // runs entirely on debit arithmetic: settleAtExpiry takes the debit branch and books a
+  // full-width LOSS as a full-width PROFIT. A put debit spread stored that way settles off
+  // `close − longStrike`, which is backwards for a put. Both were unreachable only because
+  // the `kinds` list below happens to exclude them, which is not a safeguard — it is luck.
+  // Enabling a bearish shape must fail loudly here, not silently invert its sign.
+  const STORED_FOR_KIND: Record<string, StoredStructure | undefined> = {
+    long_call: "call",
+    call_debit: "call_spread",
+    put_credit: "put_credit_spread",
+  };
+  const structure = STORED_FOR_KIND[best.cand.kind];
+  if (!structure) {
+    throw new Error(
+      `options: structure "${best.cand.kind}" has no storage mapping. The position lifecycle ` +
+      `only handles long calls, call debit spreads and put credit spreads. Add explicit ` +
+      `storage, marking and settlement for it before enabling it in the kinds list.`,
+    );
+  }
+  // The implied vol worth recording is the one the trade is ABOUT: for a debit position that
+  // is the vol we bought (the long leg); for a credit position it is the vol we SOLD (the
+  // short leg). Searching only the calls array left every credit row with a null IV, because
+  // its legs are puts.
+  const ivLeg = structure === "put_credit_spread" ? (shortLeg ?? longLeg) : longLeg;
+  const iv = [...calls, ...puts].find((q) => q.occ === ivLeg.occ)?.iv ?? null;
+
   return {
     structure,
     contract: longLeg,
     short: shortLeg,
     costUsd: best.cand.capitalAtRiskUsd,
     creditUsd: best.cand.creditUsd,
+    crossingUsd: best.cand.crossingCostUsd,
     spreadPct: ((longLeg.ask - longLeg.bid) / ((longLeg.ask + longLeg.bid) / 2)) * 100,
     widthUsd: shortLeg ? Math.abs(shortLeg.strike - longLeg.strike) * 100 : undefined,
-    symbol, underlying, iv: best.iv,
+    symbol, underlying, iv,
   };
 }
