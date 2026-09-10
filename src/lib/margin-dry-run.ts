@@ -19,7 +19,7 @@
 //
 // ⚠️ Private calls share the rate/nonce budget the guardian and executor depend on. Owner
 // triggered, never scheduled.
-import { krakenPrivate, krakenConfigured, getKrakenPrice, getPairMeta } from "@/lib/kraken";
+import { krakenPrivate, krakenConfigured, getKrakenPrice, getPairMeta, krakenPair } from "@/lib/kraken";
 import { marginOrderPairFor, US_MARGIN_MAX_LEVERAGE } from "@/lib/kraken-pairs";
 import { clampLiveStopFrac, leverageThatFitsStop, liveNotional, liveRiskFraction, liveContainerFor, parseLiveRiskBasePct } from "@/lib/margin-live-risk";
 
@@ -57,8 +57,12 @@ export async function dryRunNextOrder(symbols: string[], i: Omit<DryRunInput, "c
     try { price = await getKrakenPrice(symbol); } catch { /* reported below */ }
     if (!(price > 0)) { rows.push({ symbol, ok: false, leverage: 0, stopPct: container.stopPct, notional: 0, volume: "0", entryPx: 0, stopPx: "0", pair: "", marginUsd: 0, krakenSays: "price unreadable" }); continue; }
     const { leverage, stopFrac, notional, marginUsd } = planOrder(symbol, price, input);
+    // TWO DIFFERENT PAIRS, exactly as the executor uses them. AssetPairs is PUBLIC data and
+    // does not know the US retail venue pair — asking it for "XBTUSD:BTNL" returns
+    // "EQuery:Unknown asset pair" (this dry run's own first run, caught before it could claim
+    // anything). Metadata comes from the plain pair; the ORDER goes to :BTNL.
     const pair = marginOrderPairFor(symbol);
-    const meta = await getPairMeta(pair);
+    const meta = await getPairMeta(krakenPair(symbol));
     const volume = (notional / price).toFixed(meta.lotDecimals);
     const stopPx = (price * (1 - stopFrac)).toFixed(meta.priceDecimals);
     if (!(notional > 0) || parseFloat(volume) < meta.orderMin) {
@@ -71,6 +75,10 @@ export async function dryRunNextOrder(symbols: string[], i: Omit<DryRunInput, "c
       // carries, and the attached stop-loss conditional close. validate=true places NOTHING.
       await krakenPrivate("AddOrder", {
         pair, type: "buy", ordertype: "market", volume, leverage: String(leverage),
+        // The :BTNL venue triggers stops on the INDEX price, not last trade, and per Kraken's
+        // docs the entry's trigger also applies to its attached close[]. The executor sends
+        // this; omitting it here would validate an order the executor never sends.
+        trigger: "index",
         "close[ordertype]": "stop-loss", "close[price]": stopPx,
         validate: "true",
       });
