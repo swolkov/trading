@@ -55,10 +55,18 @@ interface Payload {
 }
 
 const mask = (a: string) => `••••${a.slice(-4)}`;
-const structureLabel = (s: string) =>
-  s === "call_spread" ? "Call debit spread"
-  : s === "put_credit_spread" ? "Put credit spread"
-  : "Naked ITM call";
+const STRUCTURE_LABEL: Record<string, string> = {
+  call: "Naked ITM call",
+  call_spread: "Call debit spread",
+  put_credit_spread: "Put credit spread",
+  put: "Naked ITM put",
+  put_spread: "Put debit spread",
+  call_credit_spread: "Call credit spread",
+};
+const structureLabel = (s: string) => STRUCTURE_LABEL[s] ?? s;
+const isCreditS = (s: string) => s === "put_credit_spread" || s === "call_credit_spread";
+const isPutS = (s: string) => s === "put" || s === "put_spread" || s === "put_credit_spread";
+const sleeveDirection = (s: string) => (s.endsWith("-bear") ? "short" : "long");
 const levelLabel = (l: string) =>
   l === "option_level_3" ? "Level 3 — spreads unlocked"
   : l === "option_level_2" ? "Level 2 — long premium only"
@@ -379,15 +387,16 @@ export default function OptionsPaperPage() {
               <Row key={t.id}>
                 <Td title={when(t.time)}>{ago(t.time)}</Td>
                 <Td>{t.source}</Td>
-                <Td className="whitespace-nowrap">
+                <Td className="whitespace-nowrap" title={structureLabel(t.structure)}>
                   {/* A credit spread is quoted short-strike-first, the way it is traded. */}
                   {t.symbol}{" "}
-                  {t.structure === "put_credit_spread" && t.shortStrike != null
-                    ? <>${t.shortStrike}<span className="text-muted-foreground">/${t.strike}p</span></>
+                  {isCreditS(t.structure) && t.shortStrike != null
+                    ? <>${t.shortStrike}<span className="text-muted-foreground">/${t.strike}{isPutS(t.structure) ? "p" : "c"}</span></>
                     : <>${t.strike ?? "—"}{t.shortStrike != null && <span className="text-muted-foreground">/${t.shortStrike}</span>}</>}
                   {" "}{t.expiry ?? ""}
-                  {t.structure === "call_spread" && <Chip tone="blue" className="ml-1.5">debit</Chip>}
-                  {t.structure === "put_credit_spread" && <Chip tone="amber" className="ml-1.5" title={`$${t.creditUsd.toFixed(0)} credit received`}>credit</Chip>}
+                  {(t.structure === "call_spread" || t.structure === "put_spread") && <Chip tone="blue" className="ml-1.5">debit</Chip>}
+                  {isCreditS(t.structure) && <Chip tone="amber" className="ml-1.5" title={`$${t.creditUsd.toFixed(0)} credit received`}>credit</Chip>}
+                  {sleeveDirection(t.source) === "short" && <Chip tone="red" className="ml-1.5" title="bearish sleeve — the mirrored 50-day-low rule">short</Chip>}
                 </Td>
                 <Td num title={t.crossingUsd != null ? `${usd(t.crossingUsd)} crossed on entry, all legs` : undefined}>
                   {t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}

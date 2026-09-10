@@ -29,10 +29,15 @@ function quote(strike: number, mid: number, expiry: string, delta: number): Cont
 }
 
 /** The stored-row shape the shadow layer would have written for a candidate. */
+const STORED: Record<string, string> = {
+  long_call: "call", call_debit: "call_spread", put_credit: "put_credit_spread",
+  long_put: "put", put_debit: "put_spread", call_credit: "call_credit_spread",
+};
 function asStored(c: Candidate) {
   const buy = c.legs.find((l) => l.side === "buy")!.contract;
   const sell = c.legs.find((l) => l.side === "sell")?.contract;
-  const structure = c.kind === "put_credit" ? "put_credit_spread" : sell ? "call_spread" : "call";
+  const structure = STORED[c.kind];
+  assert.ok(structure, `no storage mapping for ${c.kind}`);
   return {
     structure, longStrike: buy.strike, shortStrike: sell?.strike ?? null,
     widthUsd: sell ? Math.abs(sell.strike - buy.strike) * 100 : null,
@@ -59,10 +64,17 @@ test("no defined-risk position can lose more than its capital at risk, ever", ()
     const pShortMid = Math.max(0.5, spot * 0.03 * (0.5 + rand()));
     const puts = [quote(pShort, pShortMid, EXP, -0.32), quote(pLong, pShortMid * (0.3 + 0.4 * rand()), EXP, -0.18)];
 
-    const cands = buildCandidates({
-      calls, puts, spot, expiry: EXP, budgetUsd: 1e9,
-      kinds: ["long_call", "call_debit", "put_credit"],
-    });
+    // BOTH directions. The bearish shapes are where a settlement sign error hides: a put's
+    // intrinsic is strike MINUS close, and a short CALL loses as the close RISES.
+    const bearCalls = [quote(r2(spot * (1.02 + rand() * 0.10)), Math.max(0.5, spot * 0.03 * (0.5 + rand())), EXP, 0.30),
+                       quote(r2(spot * (1.15 + rand() * 0.15)), Math.max(0.5, spot * 0.012 * (0.5 + rand())), EXP, 0.15)];
+    const kLongPut = r2(spot * (1.10 + rand() * 0.15));
+    const bearPuts = [quote(kLongPut, (kLongPut - spot) + spot * 0.03 * rand(), EXP, -0.78),
+                      quote(r2(spot * (0.85 + rand() * 0.10)), Math.max(0.5, spot * 0.02 * (0.5 + rand())), EXP, -0.25)];
+    const cands = [
+      ...buildCandidates({ calls, puts, spot, expiry: EXP, budgetUsd: 1e9, kinds: ["long_call", "call_debit", "put_credit"] }),
+      ...buildCandidates({ calls: bearCalls, puts: bearPuts, spot, expiry: EXP, budgetUsd: 1e9, kinds: ["long_put", "put_debit", "call_credit"] }),
+    ];
     for (const c of cands) {
       const stored = asStored(c);
       for (let k = 0; k < 12; k++) {
@@ -148,6 +160,54 @@ test("bullish structures never get worse as the underlying rises", () => {
       for (let px = 0; px <= spot * 2; px += spot / 20) {
         const pnl = pnlAtExpiry(c, px);
         assert.ok(pnl >= prev - 1e-6, `${c.kind} fell as price rose at ${px}: ${pnl} < ${prev}`);
+        prev = pnl;
+      }
+    }
+  }
+});
+
+
+// ============ BEARISH SHAPES ============
+
+test("a put's intrinsic is strike MINUS close — the sign that silently inverts", () => {
+  const longPut = { structure: "put", longStrike: 100, shortStrike: null, widthUsd: null, capitalAtRiskUsd: 800, creditUsd: 0 };
+  assert.ok(Math.abs(settleAtExpiry({ ...longPut, close: 80 }).valueUsd - 2000) < 1e-9, "in the money BELOW the strike");
+  assert.equal(settleAtExpiry({ ...longPut, close: 120 }).valueUsd, 0, "worthless above it");
+  assert.ok(Math.abs(settleAtExpiry({ ...longPut, close: 120 }).pnlUsd + 800) < 1e-9);
+  // The bug this pins: call logic would have paid out $2,000 at 120 and nothing at 80.
+});
+
+test("a put debit spread is capped at its width, downward", () => {
+  const spread = { structure: "put_spread", longStrike: 100, shortStrike: 90, widthUsd: 1000, capitalAtRiskUsd: 515.10, creditUsd: 0 };
+  assert.ok(Math.abs(settleAtExpiry({ ...spread, close: 90 }).valueUsd - 1000) < 1e-9, "full width at the short strike");
+  assert.ok(Math.abs(settleAtExpiry({ ...spread, close: 0 }).valueUsd - 1000) < 1e-9, "and no more below it");
+  assert.ok(Math.abs(settleAtExpiry({ ...spread, close: 95 }).valueUsd - 500) < 1e-9, "half way");
+  assert.ok(Math.abs(settleAtExpiry({ ...spread, close: 130 }).pnlUsd + 515.10) < 1e-9, "worthless above the long strike");
+});
+
+test("a call credit spread loses as the close RISES through the short strike", () => {
+  const cc = { structure: "call_credit_spread", longStrike: 115, shortStrike: 110, widthUsd: 500, capitalAtRiskUsd: 344.10, creditUsd: 155.90 };
+  assert.ok(Math.abs(settleAtExpiry({ ...cc, close: 80 }).pnlUsd - 155.90) < 1e-9, "well below: keep the credit");
+  assert.ok(Math.abs(settleAtExpiry({ ...cc, close: 110 }).pnlUsd - 155.90) < 1e-9, "at the short strike it still expires worthless");
+  assert.ok(Math.abs(settleAtExpiry({ ...cc, close: 112 }).pnlUsd + 44.10) < 1e-9, "partly through");
+  assert.ok(Math.abs(settleAtExpiry({ ...cc, close: 115 }).pnlUsd + 344.10) < 1e-9, "at the long strike: the collateral");
+  assert.ok(Math.abs(settleAtExpiry({ ...cc, close: 400 }).pnlUsd + 344.10) < 1e-9, "and never worse — this is why it is defined risk");
+});
+
+test("bearish structures never get worse as the underlying FALLS", () => {
+  const rand = rng(31337);
+  for (let i = 0; i < 200; i++) {
+    const spot = 30 + rand() * 150;
+    const kLongPut = r2(spot * 1.15);
+    const puts = [quote(kLongPut, (kLongPut - spot) + spot * 0.02, EXP, -0.78), quote(r2(spot * 0.9), spot * 0.02, EXP, -0.25)];
+    const calls = [quote(r2(spot * 1.05), spot * 0.03, EXP, 0.3), quote(r2(spot * 1.2), spot * 0.012, EXP, 0.15)];
+    const cands = buildCandidates({ calls, puts, spot, expiry: EXP, budgetUsd: 1e9, kinds: ["long_put", "put_debit", "call_credit"] });
+    assert.ok(cands.length > 0, "the generator must actually produce bearish candidates");
+    for (const c of cands) {
+      let prev = -Infinity;
+      for (let px = spot * 2; px >= 0; px -= spot / 20) {
+        const pnl = pnlAtExpiry(c, px);
+        assert.ok(pnl >= prev - 1e-6, `${c.kind} fell as price dropped at ${px}: ${pnl} < ${prev}`);
         prev = pnl;
       }
     }

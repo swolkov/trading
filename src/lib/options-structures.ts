@@ -304,11 +304,20 @@ export interface Selection {
   rejectedForBreakeven: number;
 }
 
+export type Direction = "bullish" | "bearish";
+
+/**
+ * `direction` decides which WAY the reference move points. A bearish position is judged at
+ * spot × (1 − expected move), because judging it at a higher price would reject every
+ * candidate and the sleeve would silently never trade — a failure that looks exactly like a
+ * quiet market.
+ */
 export function selectStructure(
-  candidates: Candidate[], spot: number, expectedMoveFrac: number,
+  candidates: Candidate[], spot: number, expectedMoveFrac: number, direction: Direction = "bullish",
 ): Selection | null {
   if (!(spot > 0) || !(expectedMoveFrac > 0) || !candidates.length) return null;
-  const ref = spot * (1 + expectedMoveFrac);
+  const ref = spot * (1 + (direction === "bearish" ? -expectedMoveFrac : expectedMoveFrac));
+  if (!(ref > 0)) return null;
   let best: Candidate | null = null;
   let bestRet = -Infinity;
   let rejected = 0;

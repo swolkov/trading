@@ -223,3 +223,25 @@ test("an implausibly large credit on an out-of-the-money short is a mispriced le
   const sane = [K(95, { bid: 3.00, ask: 3.06, delta: -0.35 }), K(90, { bid: 1.40, ask: 1.44, delta: -0.20 })];
   assert.equal(buildCandidates({ calls: [], puts: sane, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["put_credit"] }).length, 1);
 });
+
+
+test("a bearish candidate is judged at spot MINUS the expected move", () => {
+  // Judging a bearish position at a HIGHER price rejects every candidate, and the sleeve then
+  // silently never trades — a failure indistinguishable from a quiet market.
+  const puts = [
+    K(115, { bid: 15.00, ask: 15.20, delta: -0.78 }),   // ITM long put
+    K(95, { bid: 2.00, ask: 2.04, delta: -0.25 }),      // short leg below
+  ];
+  const cands = buildCandidates({ calls: [], puts, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["long_put", "put_debit"] });
+  assert.ok(cands.length >= 2);
+
+  const bear = selectStructure(cands, 101.49, 0.08, "bearish");
+  assert.ok(bear, "must find a bearish structure when the stock is expected to fall 8%");
+  assert.ok(Math.abs(bear!.referencePrice - 101.49 * 0.92) < 1e-9, "reference is BELOW spot");
+  assert.ok(bear!.returnAtRef > 0);
+
+  // The same candidates judged bullishly are all rejected — they lose if the stock rises.
+  assert.equal(selectStructure(cands, 101.49, 0.08, "bullish"), null);
+  // And the default stays bullish, so nothing already written changes behaviour.
+  assert.equal(selectStructure(cands, 101.49, 0.08), null);
+});

@@ -9,16 +9,23 @@
 import { getDailyBars, getOptionChain } from "@/lib/rh-options-data";
 import {
   MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type StoredStructure,
-  isEntrySignal,
+  isBearishEntrySignal, isCreditStructure, isEntrySignal,
 } from "@/lib/options-paper-model";
 import {
-  type Candidate, atmOf, buildCandidates, expectedMove, selectStructure,
+  BEARISH_KINDS, BULLISH_KINDS, type Candidate, type Direction,
+  atmOf, buildCandidates, expectedMove, selectStructure,
 } from "@/lib/options-structures";
 
-export interface TrendCandidate { symbol: string; close: number; bars: { t: string; c: number; h: number; l: number }[] }
+export interface TrendCandidate {
+  symbol: string; close: number; bars: { t: string; c: number; h: number; l: number }[];
+  /** Which rule fired. A name cannot be at a 50-session high AND low on the same day, so the
+   *  two are mutually exclusive by construction and no symbol appears twice. */
+  direction: Direction;
+}
 
-/** Every universe name whose daily close just made a new 50-session high while above its
- *  200-day average. Returns the bars too so the caller does not refetch them. */
+/** Every universe name whose daily close just made a new 50-session high while ABOVE its
+ *  200-day average (bullish), or a new 50-session low while BELOW it (bearish). Returns the
+ *  bars too so the caller does not refetch them. */
 export async function scanTrendSignals(): Promise<{ candidates: TrendCandidate[]; scanned: number; errors: string[] }> {
   const errors: string[] = [];
   let bars: Record<string, { t: string; o: number; h: number; l: number; c: number; v: number }[]> = {};
@@ -32,7 +39,9 @@ export async function scanTrendSignals(): Promise<{ candidates: TrendCandidate[]
     const b = bars[symbol];
     if (!b || b.length < 201) { if (!b) errors.push(`${symbol}: no bars`); continue; }
     const slim = b.map((x) => ({ t: x.t, c: x.c, h: x.h, l: x.l }));
-    if (isEntrySignal(slim)) candidates.push({ symbol, close: b[b.length - 1].c, bars: slim });
+    const close = b[b.length - 1].c;
+    if (isEntrySignal(slim)) candidates.push({ symbol, close, bars: slim, direction: "bullish" });
+    else if (isBearishEntrySignal(slim)) candidates.push({ symbol, close, bars: slim, direction: "bearish" });
   }
   return { candidates, scanned: Object.keys(bars).length, errors };
 }
@@ -69,7 +78,9 @@ export interface ChainPick {
  * equity is roughly 8-35% in the money, so the request asks for strikes between 60% and 97%
  * of spot and lets the structure engine's delta band do the precise work.
  */
-export async function pickContractFor(symbol: string, underlying: number, budgetUsd: number): Promise<ChainPick | null> {
+export async function pickContractFor(
+  symbol: string, underlying: number, budgetUsd: number, direction: Direction = "bullish",
+): Promise<ChainPick | null> {
   const now = Date.now();
   const from = new Date(now + MIN_DTE * 86_400_000).toISOString().slice(0, 10);
   const to = new Date(now + MAX_DTE * 86_400_000).toISOString().slice(0, 10);
@@ -81,21 +92,28 @@ export async function pickContractFor(symbol: string, underlying: number, budget
   // of a vertical). Puts are fetched in a narrow band around spot for one reason only: the
   // at-the-money straddle is what gives the expected move, and the expected move is the
   // yardstick every structure is ranked against.
+  // The windows follow the direction, because the legs sit on opposite sides of spot. A
+  // bullish book wants deep-ITM CALLS (below spot) with short calls above; a bearish book
+  // wants deep-ITM PUTS (above spot) with short puts below, plus calls above spot for a call
+  // credit spread. Both need strikes around spot for the straddle that gives the expected move.
+  const bearish = direction === "bearish";
+  const callWindow = bearish ? [0.95, 1.35] : [0.60, 1.30];
+  const putWindow = bearish ? [0.70, 1.35] : [0.80, 1.08];
   const [calls, puts] = await Promise.all([
     getOptionChain({
       underlying: symbol, expiryFrom: from, expiryTo: to,
-      strikeMin: underlying * 0.60, strikeMax: underlying * 1.30, type: "call",
+      strikeMin: underlying * callWindow[0], strikeMax: underlying * callWindow[1], type: "call",
       budgetUsd, spot: underlying,
     }),
     getOptionChain({
       underlying: symbol, expiryFrom: from, expiryTo: to,
-      // Wide enough for put credit spreads (short just below spot, long below that) as well
-      // as the at-the-money straddle that supplies the expected move.
-      strikeMin: underlying * 0.80, strikeMax: underlying * 1.08, type: "put",
+      strikeMin: underlying * putWindow[0], strikeMax: underlying * putWindow[1], type: "put",
       budgetUsd, spot: underlying,
     }),
   ]);
-  if (!calls.length) return null;
+  // A bullish book is built from calls, a bearish one from puts (and calls for the short leg
+  // of a call credit spread) — so the side that carries the position must be present.
+  if (bearish ? !puts.length : !calls.length) return null;
 
   // quoteTs is carried through so the multi-leg skew check has something to check. Dropping
   // it here is what let a vertical be assembled from two quotes 36 hours apart.
@@ -104,12 +122,12 @@ export async function pickContractFor(symbol: string, underlying: number, budget
     bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize, quoteTs: q.quoteTs,
   });
   const callContracts = calls.filter((q) => q.delta != null).map(asContract);
-  const putContracts = puts.map(asContract);
+  const putContracts = puts.filter((q) => q.delta != null).map(asContract);
 
   // COMPARE EVERY LISTED EXPIRY IN THE WINDOW, rather than defaulting to the nearest one.
   // Each expiry is judged against ITS OWN expected move, because a 60-day move and a
   // 120-day move are not the same benchmark.
-  const expiries = [...new Set(callContracts.map((c) => c.expiry))].sort();
+  const expiries = [...new Set((bearish ? putContracts : callContracts).map((c) => c.expiry))].sort();
   let best: { cand: Candidate; ret: number; iv: number | null } | null = null;
   for (const expiry of expiries) {
     const em = expectedMove(atmOf(callContracts, underlying, expiry), atmOf(putContracts, underlying, expiry), underlying);
@@ -127,9 +145,9 @@ export async function pickContractFor(symbol: string, underlying: number, budget
       // is the credit, so its return at the expected move is usually far below a debit
       // spread's. It only wins when the debit alternatives are genuinely poor — which is the
       // right way round, given this desk's July finding that premium selling is not durable.
-      kinds: ["long_call", "call_debit", "put_credit"],
+      kinds: bearish ? BEARISH_KINDS : BULLISH_KINDS,
     });
-    const sel = selectStructure(cands, underlying, em);
+    const sel = selectStructure(cands, underlying, em, direction);
     if (!sel) continue;
     if (!best || sel.returnAtRef > best.ret) best = { cand: sel.best, ret: sel.returnAtRef, iv: null };
   }
@@ -148,6 +166,9 @@ export async function pickContractFor(symbol: string, underlying: number, budget
     long_call: "call",
     call_debit: "call_spread",
     put_credit: "put_credit_spread",
+    long_put: "put",
+    put_debit: "put_spread",
+    call_credit: "call_credit_spread",
   };
   const structure = STORED_FOR_KIND[best.cand.kind];
   if (!structure) {
@@ -161,7 +182,9 @@ export async function pickContractFor(symbol: string, underlying: number, budget
   // is the vol we bought (the long leg); for a credit position it is the vol we SOLD (the
   // short leg). Searching only the calls array left every credit row with a null IV, because
   // its legs are puts.
-  const ivLeg = structure === "put_credit_spread" ? (shortLeg ?? longLeg) : longLeg;
+  // For a CREDIT structure the vol that matters is the one we SOLD; for a debit, the one we
+  // bought. Either way the leg may be a call or a put, so both arrays are searched.
+  const ivLeg = isCreditStructure(structure) ? (shortLeg ?? longLeg) : longLeg;
   const iv = [...calls, ...puts].find((q) => q.occ === ivLeg.occ)?.iv ?? null;
 
   return {

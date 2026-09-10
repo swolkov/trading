@@ -4,7 +4,7 @@ import { pickContractFor, scanTrendSignals } from "@/lib/options-scanner";
 import {
   autotrackEnabled, bookStateFor, evaluateOptionsPaper, openOptionPaperTrade, optionsSleeveBreakdown, refEquityFor,
 } from "@/lib/options-shadow";
-import { EARNINGS_BLACKOUT_DAYS, MAX_BOOK_PCT, OPTIONS_SIM_VERSION, OPTION_SOURCES, dteOf, inEarningsBlackout, positionBudget } from "@/lib/options-paper-model";
+import { EARNINGS_BLACKOUT_DAYS, MAX_BOOK_PCT, OPTIONS_SIM_VERSION, OPTION_SOURCES, dteOf, inEarningsBlackout, isBearishSource, positionBudget } from "@/lib/options-paper-model";
 import { getEarningsCalendar } from "@/lib/finnhub";
 
 // THE OPTIONS PAPER BOOK — the run itself, extracted from the cron route so that the
@@ -108,7 +108,11 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
   if (tracking) {
     for (const source of OPTION_SOURCES) {
       const refEquity = await refEquityFor(source);
-      for (const cand of fresh) {
+      // A sleeve only sees signals of its own direction. The bearish sleeves are a SEPARATE
+      // experiment on the mirrored rule; letting a long breakout open a bearish position (or
+      // the reverse) would make both records meaningless.
+      const wantBearish = isBearishSource(source);
+      for (const cand of fresh.filter((c) => (c.direction === "bearish") === wantBearish)) {
         // Spend only what the book can actually commit right now: the per-position budget,
         // capped by the room left under the book premium cap. Selecting against the position
         // budget alone would pick a contract the book then refuses, silently skipping an
@@ -124,7 +128,7 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
         if (spendable <= 0) { refused.push(`${cand.symbol} ${source}: book premium cap`); continue; }
         let pick;
         try {
-          pick = await pickContractFor(cand.symbol, cand.close, spendable);
+          pick = await pickContractFor(cand.symbol, cand.close, spendable, cand.direction);
         } catch (e) { errors.push(`${cand.symbol} chain: ${String(e).slice(0, 80)}`); continue; }
         if (!pick) { refused.push(`${cand.symbol} ${source}: no contract passes filters`); continue; }
         const dte = dteOf(pick.contract.expiry, new Date());
@@ -137,11 +141,18 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
           shortBid: pick.short?.bid, shortAsk: pick.short?.ask, widthUsd: pick.widthUsd,
         });
         if (r.opened) {
-          const legs = pick.structure === "put_credit_spread"
-            ? `$${pick.short!.strike}/$${pick.contract.strike} put credit spread`
-            : pick.short
-              ? `$${pick.contract.strike}/$${pick.short.strike} call spread`
-              : `$${pick.contract.strike} call`;
+          const LABEL: Record<string, string> = {
+            call: "call", put: "put",
+            call_spread: "call debit spread", put_spread: "put debit spread",
+            put_credit_spread: "put credit spread", call_credit_spread: "call credit spread",
+          };
+          // A credit spread is quoted short-strike-first, the way it is traded.
+          const strikes = pick.short
+            ? (pick.creditUsd > 0
+                ? `$${pick.short.strike}/$${pick.contract.strike}`
+                : `$${pick.contract.strike}/$${pick.short.strike}`)
+            : `$${pick.contract.strike}`;
+          const legs = `${strikes} ${LABEL[pick.structure] ?? pick.structure}`;
           const money = pick.creditUsd > 0
             ? `$${pick.creditUsd.toFixed(0)} credit, $${r.costUsd.toFixed(0)} at risk`
             : `$${r.costUsd.toFixed(0)}${pick.widthUsd ? `, max $${pick.widthUsd.toFixed(0)}` : ""}`;
@@ -164,16 +175,27 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
   // BOUGHT — and the single most important output of this experiment is what the $1k sleeve
   // could NOT buy. A refusal that exists only in an HTTP response nobody reads is not a
   // finding, it is a rumour.
+  // Built ONCE: the direction tag has to be on the persisted record too, not just the HTTP
+  // response. A stored "ON, CCL" that omits "(short)" reads as two bullish breakouts on a day
+  // the market was falling — the page would say the opposite of what happened.
+  const withDirection = (cs: typeof candidates) =>
+    cs.map((c) => `${c.symbol}${c.direction === "bearish" ? " (short)" : ""}`);
+  const lastResult = JSON.stringify({
+    at: new Date().toISOString(), scanned,
+    signals: withDirection(candidates), fresh: withDirection(fresh),
+    opened, refused, earningsGate,
+  });
   await prisma.agentConfig.upsert({
     where: { key: "options_scan_last_result" },
-    update: { value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused, earningsGate }) },
-    create: { key: "options_scan_last_result", value: JSON.stringify({ at: new Date().toISOString(), scanned, signals: candidates.map((c) => c.symbol), fresh: fresh.map((c) => c.symbol), opened, refused, earningsGate }) },
+    update: { value: lastResult },
+    create: { key: "options_scan_last_result", value: lastResult },
   }).catch(() => {});
 
   const sleeves = await optionsSleeveBreakdown().catch(() => []);
   return {
     ok: true, simVersion: OPTIONS_SIM_VERSION, scanned,
-    trendSignals: candidates.map((c) => c.symbol), freshSignals: fresh.map((c) => c.symbol), staleSkipped: stale,
+    trendSignals: candidates.map((c) => `${c.symbol}${c.direction === "bearish" ? " (short)" : ""}`),
+    freshSignals: fresh.map((c) => `${c.symbol}${c.direction === "bearish" ? " (short)" : ""}`), staleSkipped: stale,
     resolved: resolvedCount, opened, refused: refused.slice(0, 20), tracking,
     sleeves: sleeves.map((s) => ({ key: s.key, resolved: s.resolved, open: s.open, net: s.totalPnl, verdict: s.verdict })),
     errors: errors.slice(0, 10),

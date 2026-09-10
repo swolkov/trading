@@ -7,7 +7,8 @@ import {
   type Bar, type BookState,
   dteOf, entryRefusal, exitReason, groupOf, isEntrySignal, isExitSignal,
   type Contract,
-  creditCloseCostUsd, isCreditStructure,
+  creditCloseCostUsd, isBearishEntrySignal, isBearishExitSignal, isBearishSource,
+  isCreditStructure, isPutStructure, trendExitFor,
   positionBudget, positionMarkUsd, settleAtExpiry,
   spreadCreditUsd, spreadDebitUsd, spreadPctOf, spreadProceedsUsd, tradeable,
 } from "../src/lib/options-paper-model";
@@ -257,10 +258,11 @@ test("no premium is bought inside the earnings blackout, and the window is what 
 // ============ VERTICAL DEBIT SPREADS (Level 3, Sep 10 2026) ============
 
 test("the retired $1k sleeve is gone and $3,500 replaces it", () => {
-  assert.deepEqual([...OPTION_SOURCES], ["opt-3.5k", "opt-5k"]);
   assert.equal(OPTION_SOURCE_EQUITY["opt-3.5k"], 3500);
   assert.equal(OPTION_SOURCE_EQUITY["opt-5k"], 5000);
-  // The rules changed, so the sample must restart rather than blend two rule sets.
+  // The rules changed, so the sample must restart rather than blend two rule sets. The
+  // bearish sleeves added later did NOT bump this: they are new sources with no history, and
+  // nothing about what the bullish sleeves trade changed.
   assert.equal(OPTIONS_SIM_VERSION, "o2");
 });
 
@@ -400,4 +402,78 @@ test("the premium stop means the same thing for both kinds of position", () => {
   assert.equal(exitReason({ trendExit: false, dte: 90, markUsd: 600, costUsd: 1375.10 }), "premium stop");
   assert.equal(exitReason({ trendExit: false, dte: 90, markUsd: 170, costUsd: 344.10 }), "premium stop");
   assert.equal(exitReason({ trendExit: false, dte: 90, markUsd: 200, costUsd: 344.10 }), null);
+});
+
+
+// ============ THE MIRRORED BEARISH RULE ============
+
+/** `n` bars walking from `from` to `to`, so the trend and the extreme are both controlled. */
+const ramp = (from: number, to: number, n = 260): Bar[] =>
+  Array.from({ length: n }, (_, i) => {
+    const c = from + ((to - from) * i) / (n - 1);
+    return { t: `2026-01-${String((i % 28) + 1).padStart(2, "0")}`, c, h: c, l: c };
+  });
+
+test("the bearish entry is the exact mirror: a 50-session low BELOW the 200-day average", () => {
+  const falling = ramp(100, 50);
+  assert.equal(isBearishEntrySignal(falling), true);
+  assert.equal(isEntrySignal(falling), false, "the two are mutually exclusive");
+
+  const rising = ramp(50, 100);
+  assert.equal(isBearishEntrySignal(rising), false);
+  assert.equal(isEntrySignal(rising), true);
+
+  // A 50-session low that is still ABOVE the 200-day average must NOT fire — that is the
+  // trend filter doing its job, and it is where short Donchian does its losing.
+  const dipInUptrend = [...ramp(50, 100, 259), { t: "2026-02-01", c: 97, h: 97, l: 97 }];
+  assert.equal(isBearishEntrySignal(dipInUptrend), false);
+
+  assert.equal(isBearishEntrySignal(ramp(100, 50, 100)), false, "needs 200+ sessions of history");
+});
+
+test("the bearish exit is a 25-session HIGH", () => {
+  const rising = ramp(50, 100, 40);
+  assert.equal(isBearishExitSignal(rising), true);
+  assert.equal(isExitSignal(rising), false);
+  const falling = ramp(100, 50, 40);
+  assert.equal(isBearishExitSignal(falling), false);
+  assert.equal(isExitSignal(falling), true);
+});
+
+test("a position is exited by ITS OWN sleeve's rule, never the other one", () => {
+  const rising = ramp(50, 100, 40);
+  const falling = ramp(100, 50, 40);
+  // Using the long rule on a short position would hold it through exactly the move that kills it.
+  assert.equal(trendExitFor("opt-3.5k-bear", rising), true, "a short exits into strength");
+  assert.equal(trendExitFor("opt-3.5k", rising), false, "a long does not");
+  assert.equal(trendExitFor("opt-5k", falling), true, "a long exits into weakness");
+  assert.equal(trendExitFor("opt-5k-bear", falling), false, "a short does not");
+});
+
+test("direction is derivable from the sleeve name alone", () => {
+  assert.equal(isBearishSource("opt-3.5k-bear"), true);
+  assert.equal(isBearishSource("opt-5k-bear"), true);
+  assert.equal(isBearishSource("opt-3.5k"), false);
+  assert.equal(isBearishSource("opt-5k"), false);
+  assert.equal(isBearishSource(null), false);
+});
+
+test("leg type and direction are different questions — conflating them inverts settlement", () => {
+  // A put credit spread is BULLISH but its legs are PUTS; a call credit spread is BEARISH but
+  // its legs are CALLS. Settlement follows the leg type, never the direction.
+  assert.equal(isPutStructure("put_credit_spread"), true);
+  assert.equal(isPutStructure("call_credit_spread"), false);
+  assert.equal(isPutStructure("put"), true);
+  assert.equal(isPutStructure("put_spread"), true);
+  assert.equal(isPutStructure("call"), false);
+  assert.equal(isPutStructure("call_spread"), false);
+  assert.equal(isCreditStructure("put_credit_spread"), true);
+  assert.equal(isCreditStructure("call_credit_spread"), true);
+  assert.equal(isCreditStructure("put_spread"), false);
+});
+
+test("all four sleeves exist, two per direction, at the two sizes", () => {
+  assert.deepEqual([...OPTION_SOURCES], ["opt-3.5k", "opt-5k", "opt-3.5k-bear", "opt-5k-bear"]);
+  assert.equal(OPTION_SOURCE_EQUITY["opt-3.5k-bear"], 3500);
+  assert.equal(OPTION_SOURCE_EQUITY["opt-5k-bear"], 5000);
 });

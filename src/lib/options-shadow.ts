@@ -21,9 +21,10 @@ import {
   OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCES, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
   type BookState, type OptionSource,
   MIN_QUOTE_SIZE,
+  type StoredStructure,
   canExitAt, creditCloseCostUsd, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf,
-  isCreditStructure, isExitSignal, isQuoteFresh, optionsVerdict, positionMarkUsd,
-  settleAtExpiry, spreadProceedsUsd, tStatOf,
+  isCreditStructure, isPutStructure, isQuoteFresh, optionsVerdict, positionMarkUsd,
+  settleAtExpiry, spreadProceedsUsd, tStatOf, trendExitFor,
 } from "@/lib/options-paper-model";
 
 /** How long past expiry a position may stay open while settlement data is unavailable
@@ -144,7 +145,7 @@ export async function openOptionPaperTrade(p: {
   // `costUsd` is CAPITAL AT RISK, not "what was paid": the debit for a debit position, the
   // collateral (width minus credit) for a credit one. Every book cap, every percentage and
   // pnl_pct is measured against it, so both kinds of position are sized on the same basis.
-  structure?: "call" | "call_spread" | "put_credit_spread";
+  structure?: StoredStructure;
   creditUsd?: number;
   /** Half the quoted spread on EVERY leg — what getting in actually cost. `entry_spread_pct`
    *  only ever described the long leg, which on a credit spread is the cheap protective one,
@@ -363,14 +364,20 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
     const risks = spotNow > 0 && r.strike != null
       ? assessAssignment({
           longStrike: r.strike,
-          longIsCall: !isCredit,
+          // Leg TYPE, not direction: a put credit spread is bullish but its legs are puts.
+          longIsCall: !isPutStructure(r.structure),
           shortStrike: r.short_strike, shortMid: sq ? (sq.bid + sq.ask) / 2 : null,
           spot: spotNow, dte, contracts: 1,
           accountEquityUsd: sleeveEquity.get(r.source) ?? 0,
         })
       : [];
     const riskLevel = worstLevel(risks);
-    const trendExit = symBars.length >= 25 ? isExitSignal(symBars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l }))) : false;
+    // The BEARISH sleeves exit on a 25-session HIGH, the bullish ones on a 25-session low.
+    // Using the long rule on a short position would hold it through exactly the move that
+    // kills it.
+    const trendExit = symBars.length >= 25
+      ? trendExitFor(r.source, symBars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l })))
+      : false;
     // The book's own rules first; assignment risk only as the backstop, so when it IS the
     // recorded reason that fact is itself the diagnostic.
     const reason = exitReason({ trendExit, dte, markUsd, costUsd: r.cost_usd })
