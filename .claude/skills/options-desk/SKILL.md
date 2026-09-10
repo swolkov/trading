@@ -103,3 +103,24 @@ three days and the next run picks them up.
 30+ resolved, positive net, t ≥ 2, across 7+ distinct days — same bar as every other desk.
 At two entries per sleeve per month this is roughly **15 months** to a verdict, and the page
 says so. "Gathering" for a long time is the measurement working, not stalling.
+
+## How this runs unattended
+A launchd job (`scripts/com.esbueno.options-desk.plist`, installed at
+`~/Library/LaunchAgents/com.esbueno.options-desk.plist`) runs
+`scripts/options-desk-run.sh` **weekdays at 17:32 local** — after the 16:00 close so the
+daily bars are settled and the option quotes are the day's real closing marks. Running
+before the open returns the PREVIOUS session's quote, which is stale by a day.
+
+The runner drives `claude -p` with a tight `--allowedTools` list (the Robinhood **read**
+tools plus the two script invocations) and an explicit `--disallowedTools` list naming every
+Robinhood order tool. That allowlist, not this document's prose, is what actually prevents
+an unattended session from placing an order.
+
+Log: `~/Library/Logs/options-desk.log`. Manage with:
+```bash
+launchctl print gui/$(id -u)/com.esbueno.options-desk     # state, run count, last exit
+launchctl kickstart -p gui/$(id -u)/com.esbueno.options-desk   # run once now
+launchctl bootout gui/$(id -u)/com.esbueno.options-desk   # stop it
+```
+The runner exits cleanly with a logged `[skip]` if the Robinhood port is not present in
+`/Users/user/trading`, so it is safe to install before the PR merges.
