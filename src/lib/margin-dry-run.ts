@@ -20,7 +20,6 @@
 // ⚠️ Private calls share the rate/nonce budget the guardian and executor depend on. Owner
 // triggered, never scheduled.
 import { krakenPrivate, krakenConfigured, getKrakenPrice, getPairMeta } from "@/lib/kraken";
-import { getKrakenMarginHealth } from "@/lib/kraken-margin";
 import { marginOrderPairFor, US_MARGIN_MAX_LEVERAGE } from "@/lib/kraken-pairs";
 import { clampLiveStopFrac, leverageThatFitsStop, liveNotional, liveRiskFraction, liveContainerFor, parseLiveRiskBasePct } from "@/lib/margin-live-risk";
 
