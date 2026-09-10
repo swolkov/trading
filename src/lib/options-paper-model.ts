@@ -130,12 +130,17 @@ export function isBearishSource(source: string | null | undefined): boolean {
 }
 
 // ---------- Contract selection ----------
-// In-the-money "stock replacement" calls, NOT out-of-the-money lottery tickets. Rationale
-// from the screen: at delta 0.78 most of the premium is intrinsic, so time decay is a small
-// fraction of the position; ITM strikes carry the tightest quoted spreads; and no stop-loss
-// order is needed because the premium itself is the floor. Out-of-the-money contracts have
-// the opposite of every one of those properties and are how small options accounts die.
-export const TARGET_DELTA = 0.78;
+// In-the-money "stock replacement" legs, NOT out-of-the-money lottery tickets. Rationale from
+// the screen: in the 0.70-0.85 delta band most of the premium is intrinsic, so time decay is a
+// small fraction of the position; ITM strikes carry the tightest quoted spreads; and no
+// stop-loss order is needed because the premium itself is the floor. Out-of-the-money
+// contracts have the opposite of every one of those properties and are how small options
+// accounts die.
+//
+// It is a BAND, not a target. Selection used to take the leg nearest 0.78; since Sep 10 2026
+// the structure engine takes the best return at the market's own expected move from among the
+// legs inside the band, so there is no longer a single delta being aimed at. The old
+// TARGET_DELTA constant was removed rather than left to imply a rule that no longer runs.
 export const MIN_DELTA = 0.70;
 export const MAX_DELTA = 0.85;
 export const MIN_DTE = 60;
@@ -145,13 +150,22 @@ export const MAX_DTE = 120;
  * EARNINGS BLACKOUT (added 2026-09-09). Do not OPEN a position in the run-up to a scheduled
  * earnings report.
  *
- * A long call is a bet on direction AND on implied volatility. Into a print, IV inflates —
- * the market prices the coming jump — and after it, IV collapses whether or not the stock
- * moved your way. Buying in that window pays a premium that is engineered to evaporate.
- * With 60–120 DTE the report will usually fall INSIDE the hold; that is fine and expected,
- * because a call bought at post-print IV carries the next print at a fair price. The thing
- * to avoid is the ENTRY landing in the inflated window. Fourteen days is where the run-up
- * measurably begins for names at this vol level.
+ * FOR A BOUGHT STRUCTURE the reason is implied volatility. Into a print, IV inflates — the
+ * market prices the coming jump — and after it, IV collapses whether or not the stock moved
+ * your way. Buying in that window pays a premium that is engineered to evaporate. With
+ * 60–120 DTE the report will usually fall INSIDE the hold; that is fine and expected, because
+ * an option bought at post-print IV carries the next print at a fair price. The thing to
+ * avoid is the ENTRY landing in the inflated window.
+ *
+ * FOR A SOLD STRUCTURE that argument inverts — inflated IV is what a seller wants — so the
+ * blackout is NOT justified by vol there, and pretending otherwise would be a comment that
+ * lies. It still applies, for a different and blunter reason: a credit spread's loss is
+ * capped at the width, and an earnings gap is the single most reliable way to travel the
+ * whole width overnight with no chance to react. This desk also found in July 2026 that
+ * premium selling is not durable, so it does not get the benefit of the doubt on a coin flip
+ * it cannot exit. One rule for both, with the honest reason stated for each.
+ *
+ * Fourteen days is where the run-up measurably begins for names at this vol level.
  *
  * The one position in the book when this was added — IREN, entered at 97.6% IV — is the
  * shape of trade this exists to stop from becoming a pattern in the record.
@@ -220,14 +234,6 @@ export function exitProceedsUsd(bid: number, contracts = 1): number {
  *  per contract per side. Charged both ways at the conservative end. */
 export const REG_FEE_PER_CONTRACT = 0.05;
 
-/** Choose the contract closest to TARGET_DELTA among those passing every liquidity and
- *  structure filter, and affordable within `budgetUsd`. Returns null with no fallback:
- *  "nothing tradeable today" is a valid and common answer for this book.
- *
- *  `budgetUsd` must be the SMALLER of the position budget and the room left under the book
- *  cap. Passing only the position budget lets this pick a $500 contract that the book cap
- *  then refuses, when a $295 contract one delta-step away would have passed everything —
- *  a silently missed entry rather than a bad one, but a missed entry all the same. */
 /** The quote gates every leg must pass, long or short: a real two-sided market, size behind
  *  both sides, and a quoted spread inside the ceiling. Extracted so the short leg of a
  *  vertical is held to exactly the same standard as the long — a tight long against a

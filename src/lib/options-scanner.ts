@@ -9,7 +9,7 @@
 import { getDailyBars, getOptionChain } from "@/lib/rh-options-data";
 import {
   MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type StoredStructure,
-  isBearishEntrySignal, isCreditStructure, isEntrySignal,
+  isBearishEntrySignal, isCreditStructure, isEntrySignal, spreadPctOf,
 } from "@/lib/options-paper-model";
 import {
   BEARISH_KINDS, BULLISH_KINDS, type Candidate, type Direction,
@@ -194,7 +194,7 @@ export async function pickContractFor(
     costUsd: best.cand.capitalAtRiskUsd,
     creditUsd: best.cand.creditUsd,
     crossingUsd: best.cand.crossingCostUsd,
-    spreadPct: ((longLeg.ask - longLeg.bid) / ((longLeg.ask + longLeg.bid) / 2)) * 100,
+    spreadPct: spreadPctOf(longLeg.bid, longLeg.ask),
     widthUsd: shortLeg ? Math.abs(shortLeg.strike - longLeg.strike) * 100 : undefined,
     symbol, underlying, iv,
   };
