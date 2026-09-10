@@ -38,14 +38,6 @@ export type StructureKind =
 export const BULLISH_KINDS: readonly StructureKind[] = ["long_call", "call_debit", "put_credit"];
 export const BEARISH_KINDS: readonly StructureKind[] = ["long_put", "put_debit", "call_credit"];
 
-export const STRUCTURE_LABELS: Record<StructureKind, string> = {
-  long_call: "Long call",
-  long_put: "Long put",
-  call_debit: "Call debit spread",
-  put_debit: "Put debit spread",
-  put_credit: "Put credit spread",
-  call_credit: "Call credit spread",
-};
 
 export interface Leg { contract: Contract; side: "buy" | "sell" }
 
@@ -335,11 +327,6 @@ export function selectStructure(
   };
 }
 
-/** The scenario grid the trade card shows. Percentages, not guesses. */
-export const SCENARIO_MOVES = [-0.10, -0.05, -0.02, 0, 0.02, 0.05, 0.10] as const;
-export function scenarioTable(c: Candidate, spot: number): { move: number; price: number; pnl: number }[] {
-  return SCENARIO_MOVES.map((m) => {
-    const price = spot * (1 + m);
-    return { move: m, price, pnl: pnlAtExpiry(c, price) };
-  });
-}
+// The payoff grid moved to options-paper-model.ts alongside settleAtExpiry: it is built from
+// STORED positions, not from selection candidates, so it belongs with the settlement math.
+export { SCENARIO_MOVES } from "@/lib/options-paper-model";

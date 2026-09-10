@@ -68,6 +68,7 @@ export async function ensureOptionsPaperTable(): Promise<void> {
     "entry_crossing_usd double precision",
     "assignment_level text",
     "assignment_note text",
+    "underlying_last double precision",
     "short_occ text",
     "short_strike double precision",
     "entry_short_bid double precision",
@@ -380,10 +381,11 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
       // writing back their own computed values would let the lower one overwrite the higher.
       await prisma.$executeRawUnsafe(
         `UPDATE options_paper_trades SET mark_usd=$1, peak_usd=GREATEST(COALESCE(peak_usd,0), $1),
-           assignment_level=$3, assignment_note=$4 WHERE id=$2 AND status='open'`,
+           assignment_level=$3, assignment_note=$4, underlying_last=$5 WHERE id=$2 AND status='open'`,
         markUsd, r.id,
         riskLevel === "none" ? null : riskLevel,
-        risks.length ? risks.map((x) => x.message).join(" ") : null);
+        risks.length ? risks.map((x) => x.message).join(" ") : null,
+        spotNow > 0 ? spotNow : null);
       continue;
     }
     // Closing a credit position COSTS money — buy the short back, sell the long — and the P&L
@@ -478,6 +480,8 @@ export interface OptionPaperRow {
   proceedsUsd: number | null; crossingUsd: number | null;
   /** Worst assignment/exercise finding on this position at its last mark, and why. */
   assignmentLevel: string | null; assignmentNote: string | null;
+  /** Strikes and the underlying's latest price — everything a payoff grid needs. */
+  longStrike: number | null; underlyingLast: number | null; capitalAtRiskUsd: number;
 }
 export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperRow[]> {
   await ensureOptionsPaperTable();
@@ -488,12 +492,12 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     reason: string | null; entry_delta: number | null; entry_spread_pct: number | null; sim_version: string | null;
     structure: string | null; short_strike: number | null; width_usd: number | null; credit_usd: number | null;
     proceeds_usd: number | null; entry_crossing_usd: number | null;
-    assignment_level: string | null; assignment_note: string | null;
+    assignment_level: string | null; assignment_note: string | null; underlying_last: number | null;
   }[]>(
     `SELECT id, time, symbol, source, occ, strike, expiry, entry_ask, cost_usd, mark_usd, peak_usd,
             exit_bid, pnl, pnl_pct, status, reason, entry_delta, entry_spread_pct, sim_version,
             structure, short_strike, width_usd, COALESCE(credit_usd, 0) AS credit_usd,
-            proceeds_usd, entry_crossing_usd, assignment_level, assignment_note
+            proceeds_usd, entry_crossing_usd, assignment_level, assignment_note, underlying_last
      FROM options_paper_trades ORDER BY time DESC LIMIT $1`, Math.max(1, Math.min(500, limit)),
   );
   return rows.map((r) => ({
@@ -507,6 +511,7 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     creditUsd: r.credit_usd ?? 0,
     proceedsUsd: r.proceeds_usd, crossingUsd: r.entry_crossing_usd,
     assignmentLevel: r.assignment_level, assignmentNote: r.assignment_note,
+    longStrike: r.strike, underlyingLast: r.underlying_last, capitalAtRiskUsd: r.cost_usd,
   }));
 }
 

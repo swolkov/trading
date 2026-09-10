@@ -3,8 +3,8 @@ import test from "node:test";
 import type { Contract } from "../src/lib/options-paper-model";
 import {
   BEARISH_KINDS, BULLISH_KINDS, MAX_CREDIT_FRAC_OF_WIDTH, type Candidate,
-  atmOf, buildCandidates, expectedMove, legsQuotedTogether, pnlAtExpiry, returnAt,
-  scenarioTable, selectStructure,
+  SCENARIO_MOVES, atmOf, buildCandidates, expectedMove, legsQuotedTogether, pnlAtExpiry,
+  returnAt, selectStructure,
 } from "../src/lib/options-structures";
 
 const EXP = "2026-12-18";
@@ -175,16 +175,19 @@ test("selection ranks on return at the market's own expected move", () => {
   assert.equal(selectStructure(cands, 101.49, 0), null, "no expected move, no yardstick, no trade");
 });
 
-test("returnAt and the scenario grid stay consistent with the payoff", () => {
+test("returnAt stays consistent with the payoff, and the scenario moves are the documented grid", () => {
   const c = one(buildCandidates({ calls: [INTC_85, INTC_115], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 1925, kinds: ["call_debit"] }));
   assert.ok(Math.abs(returnAt(c, 115)! - c.maxProfitUsd! / c.capitalAtRiskUsd) < 1e-9);
-  const grid = scenarioTable(c, 101.49);
-  assert.equal(grid.length, 7);
-  assert.ok(grid[0].move === -0.10 && grid[6].move === 0.10);
-  for (const g of grid) assert.ok(Math.abs(g.pnl - pnlAtExpiry(c, g.price)) < 1e-9);
+  assert.deepEqual([...SCENARIO_MOVES], [-0.10, -0.05, -0.02, 0, 0.02, 0.05, 0.10]);
   // Monotonic for a call spread: it can only do better as the stock rises.
-  for (let i = 1; i < grid.length; i++) assert.ok(grid[i].pnl >= grid[i - 1].pnl);
+  let prev = -Infinity;
+  for (const m of SCENARIO_MOVES) {
+    const pnl = pnlAtExpiry(c, 101.49 * (1 + m));
+    assert.ok(pnl >= prev - 1e-9, `fell at ${m}`);
+    prev = pnl;
+  }
 });
+
 
 
 // ============ CROSS-LEG SANITY ============

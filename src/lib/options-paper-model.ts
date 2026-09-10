@@ -320,6 +320,30 @@ export function positionMarkUsd(p: {
   return Math.max(0, value);
 }
 
+/** The moves a payoff grid is shown at. Lives here, beside settleAtExpiry, because the grid
+ *  is built from STORED positions rather than from selection candidates. */
+export const SCENARIO_MOVES = [-0.10, -0.05, -0.02, 0, 0.02, 0.05, 0.10] as const;
+
+export interface ScenarioPoint { move: number; price: number; pnl: number }
+
+/**
+ * What this position is worth at expiry if the underlying moves by each of SCENARIO_MOVES.
+ *
+ * Terminal values only — no attempt to model what it is worth BEFORE expiry, which would
+ * need a price model this book deliberately does not use. Stated on the page rather than
+ * implied, so nobody reads a −2% row as "what happens tomorrow".
+ */
+export function scenarioGrid(p: {
+  structure: string | null; longStrike: number; shortStrike?: number | null;
+  widthUsd?: number | null; capitalAtRiskUsd: number; creditUsd: number; spot: number;
+}): ScenarioPoint[] {
+  if (!(p.spot > 0)) return [];
+  return SCENARIO_MOVES.map((move) => {
+    const price = p.spot * (1 + move);
+    return { move, price, pnl: settleAtExpiry({ ...p, close: price }).pnlUsd };
+  });
+}
+
 /**
  * Settlement at expiry from the underlying's close on the expiry date.
  *

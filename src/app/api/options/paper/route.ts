@@ -4,6 +4,7 @@ import { pendingChainRequests, quoteStoreFreshness, readAccountSnapshot } from "
 import {
   CRYPTO_PROXY_EXCLUDED, MAX_CONCURRENT, MAX_ENTRIES_PER_MONTH, MAX_SPREAD_PCT,
   MAX_DTE, MIN_DTE, MIN_DELTA, MAX_DELTA, OPTIONS_SIM_VERSION, OPTIONS_UNIVERSE,
+  scenarioGrid,
 } from "@/lib/options-paper-model";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +25,19 @@ export async function GET() {
   ]);
   let lastResult: unknown = null;
   try { lastResult = lastResultRaw ? JSON.parse(lastResultRaw) : null; } catch { lastResult = null; }
+  // Payoff at expiry for everything still open — terminal values, computed from the stored
+  // legs and the underlying's latest price. Open rows only: a closed position has an answer.
+  const scenarios = trades
+    .filter((t) => t.status === "open" && t.underlyingLast != null && t.longStrike != null)
+    .map((t) => ({
+      id: t.id, symbol: t.symbol, spot: t.underlyingLast as number,
+      points: scenarioGrid({
+        structure: t.structure, longStrike: t.longStrike as number, shortStrike: t.shortStrike,
+        widthUsd: t.widthUsd, capitalAtRiskUsd: t.capitalAtRiskUsd, creditUsd: t.creditUsd,
+        spot: t.underlyingLast as number,
+      }),
+    }));
+
   return Response.json({
     simVersion: OPTIONS_SIM_VERSION,
     rules: {
@@ -33,6 +47,6 @@ export async function GET() {
     },
     universe: OPTIONS_UNIVERSE, excluded: CRYPTO_PROXY_EXCLUDED,
     sleeves, trades, lastRun, lastResult,
-    account, quoteStore, chainRequests, structures,
+    account, quoteStore, chainRequests, structures, scenarios,
   });
 }

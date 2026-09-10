@@ -44,12 +44,14 @@ interface ChainRequest {
   symbol: string; spot: number; budgetUsd: number;
   expiryFrom: string; expiryTo: string; strikeMin: number; strikeMax: number; requestedAt: string;
 }
+interface ScenarioSet { id: number; symbol: string; spot: number; points: { move: number; price: number; pnl: number }[] }
 interface Payload {
   simVersion: string; rules: Rules; universe: { symbol: string; group: string }[];
   excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[];
   lastRun: string | null; lastResult: LastResult | null;
   account: Account | null; quoteStore: QuoteStore; chainRequests: ChainRequest[];
   structures: StructureStat[];
+  scenarios: ScenarioSet[];
 }
 
 const mask = (a: string) => `••••${a.slice(-4)}`;
@@ -73,6 +75,7 @@ export default function OptionsPaperPage() {
   const account = data?.account ?? null;
   const chainRequests = data?.chainRequests ?? [];
   const structures = data?.structures ?? [];
+  const scenarios = data?.scenarios ?? [];
   // Quotes are PUSHED by a scheduled agent, not fetched by this app — so their age is a
   // safety number, not a nicety. Staleness is decided on the server against the very same
   // threshold the reads enforce, so this banner can never disagree with the behaviour.
@@ -285,6 +288,41 @@ export default function OptionsPaperPage() {
                 </Note>
               </div>
             )}
+          </PanelBody>
+        </Panel>
+      )}
+
+      {scenarios.length > 0 && (
+        <Panel>
+          <PanelHeader title="Payoff at expiry" aside={<Label>open positions, terminal values only</Label>} />
+          <PanelBody className="p-0">
+            <DataTable dense>
+              <thead>
+                <tr>
+                  <Th>Position</Th>
+                  {scenarios[0].points.map((pt) => (
+                    <Th key={pt.move} num>{pt.move === 0 ? "flat" : `${pt.move > 0 ? "+" : "−"}${Math.abs(pt.move * 100).toFixed(0)}%`}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {scenarios.map((sc) => (
+                  <Row key={sc.id}>
+                    <Td strong>{sc.symbol}<span className="ml-2 text-[11px] text-muted-foreground">spot {usd(sc.spot)}</span></Td>
+                    {sc.points.map((pt) => (
+                      <Td key={pt.move} num className={tone(pt.pnl)} title={`underlying ${usd(pt.price)}`}>{pnl2(pt.pnl)}</Td>
+                    ))}
+                  </Row>
+                ))}
+              </tbody>
+            </DataTable>
+          </PanelBody>
+          <PanelBody className="pt-0">
+            <Note>
+              These are values <strong>at expiry</strong>, not tomorrow. Working out what a position is worth part-way through
+              would need a price model, and this book deliberately never models a price — it buys at the quoted ask and sells at
+              the quoted bid. A losing column here is what the position settles at if the stock simply sits there.
+            </Note>
           </PanelBody>
         </Panel>
       )}
