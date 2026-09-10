@@ -132,9 +132,16 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
           symbol: cand.symbol, source, occ: pick.contract.occ, strike: pick.contract.strike,
           expiry: pick.contract.expiry, ask: pick.contract.ask, bid: pick.contract.bid, delta: pick.contract.delta,
           iv: pick.iv, spreadPct: pick.spreadPct, costUsd: pick.costUsd, underlying: cand.close,
+          structure: pick.structure,
+          shortOcc: pick.short?.occ, shortStrike: pick.short?.strike,
+          shortBid: pick.short?.bid, shortAsk: pick.short?.ask, widthUsd: pick.widthUsd,
         });
         if (r.opened) {
-          opened.push(`${cand.symbol} ${source} $${pick.contract.strike} ${pick.contract.expiry} — $${r.costUsd.toFixed(0)}, ${pick.spreadPct.toFixed(1)}% spread, ${pick.contract.delta.toFixed(2)} delta, ${dte}d`);
+          const legs = pick.short
+            ? `$${pick.contract.strike}/$${pick.short.strike} spread`
+            : `$${pick.contract.strike} call`;
+          const cap = pick.widthUsd ? `, max $${pick.widthUsd.toFixed(0)}` : "";
+          opened.push(`${cand.symbol} ${source} ${legs} ${pick.contract.expiry} — $${r.costUsd.toFixed(0)}${cap}, ${pick.spreadPct.toFixed(1)}% spread, ${pick.contract.delta.toFixed(2)} delta, ${dte}d`);
         } else {
           refused.push(`${cand.symbol} ${source}: ${r.reason}`);
         }

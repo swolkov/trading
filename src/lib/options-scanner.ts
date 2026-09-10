@@ -8,8 +8,8 @@
 // data plan.
 import { getDailyBars, getOptionChain } from "@/lib/rh-options-data";
 import {
-  MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type ContractPick,
-  isEntrySignal, pickContract,
+  MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type Structure,
+  isEntrySignal, pickPosition,
 } from "@/lib/options-paper-model";
 
 export interface TrendCandidate { symbol: string; close: number; bars: { t: string; c: number; h: number; l: number }[] }
@@ -34,7 +34,17 @@ export async function scanTrendSignals(): Promise<{ candidates: TrendCandidate[]
   return { candidates, scanned: Object.keys(bars).length, errors };
 }
 
-export interface ChainPick extends ContractPick { symbol: string; underlying: number; iv: number | null }
+/** What the scan hands the opener. `short` and `widthUsd` are present only for a vertical —
+ *  see pickPosition: naked when the budget allows it, otherwise the widest affordable spread. */
+export interface ChainPick {
+  structure: Structure;
+  contract: Contract;
+  short?: Contract;
+  costUsd: number;
+  spreadPct: number;
+  widthUsd?: number;
+  symbol: string; underlying: number; iv: number | null;
+}
 
 /**
  * The best in-the-money call on one underlying for a given SPENDABLE budget, or null.
@@ -69,8 +79,16 @@ export async function pickContractFor(symbol: string, underlying: number, budget
       occ: q.occ, strike: q.strike, expiry: q.expiry, delta: q.delta as number,
       bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize,
     }));
-  const pick = pickContract(candidates, budgetUsd);
+  const pick = pickPosition(candidates, budgetUsd);
   if (!pick) return null;
   const iv = quotes.find((q) => q.occ === pick.contract.occ)?.iv ?? null;
-  return { ...pick, symbol, underlying, iv };
+  return {
+    structure: pick.structure,
+    contract: pick.contract,
+    short: pick.structure === "call_spread" ? pick.short : undefined,
+    costUsd: pick.costUsd,
+    spreadPct: pick.spreadPct,
+    widthUsd: pick.structure === "call_spread" ? pick.widthUsd : undefined,
+    symbol, underlying, iv,
+  };
 }

@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { optionsSleeveBreakdown, recentOptionPaperTrades } from "@/lib/options-shadow";
+import { optionsSleeveBreakdown, optionsStructureBreakdown, recentOptionPaperTrades } from "@/lib/options-shadow";
 import { pendingChainRequests, quoteStoreFreshness, readAccountSnapshot } from "@/lib/options-quote-store";
 import {
   CRYPTO_PROXY_EXCLUDED, MAX_CONCURRENT, MAX_ENTRIES_PER_MONTH, MAX_SPREAD_PCT,
@@ -9,7 +9,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const [sleeves, trades, lastRun, lastResultRaw, account, quoteStore, chainRequests] = await Promise.all([
+  const [sleeves, trades, lastRun, lastResultRaw, account, quoteStore, chainRequests, structures] = await Promise.all([
     optionsSleeveBreakdown().catch(() => []),
     recentOptionPaperTrades(100).catch(() => []),
     prisma.agentConfig.findUnique({ where: { key: "options_scan_last_run" } }).then((r) => r?.value ?? null).catch(() => null),
@@ -20,6 +20,7 @@ export async function GET() {
     readAccountSnapshot().catch(() => null),
     quoteStoreFreshness().catch(() => ({ newestQuoteTs: null, rows: 0, ageMinutes: null, stale: true })),
     pendingChainRequests().catch(() => []),
+    optionsStructureBreakdown().catch(() => []),
   ]);
   let lastResult: unknown = null;
   try { lastResult = lastResultRaw ? JSON.parse(lastResultRaw) : null; } catch { lastResult = null; }
@@ -32,6 +33,6 @@ export async function GET() {
     },
     universe: OPTIONS_UNIVERSE, excluded: CRYPTO_PROXY_EXCLUDED,
     sleeves, trades, lastRun, lastResult,
-    account, quoteStore, chainRequests,
+    account, quoteStore, chainRequests, structures,
   });
 }

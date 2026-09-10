@@ -20,8 +20,13 @@ interface Sleeve {
   voided: number; days: number; tStat: number | null; verdict: string;
   avgSpreadPct: number | null; entriesThisMonth: number;
 }
+interface StructureStat {
+  structure: string; resolved: number; wins: number; hitRate: number | null;
+  totalPnl: number; avgPnlPct: number | null; open: number; openPremium: number;
+}
 interface TradeRow {
   id: number; time: string; symbol: string; source: string; occ: string; strike: number | null;
+  structure: string; shortStrike: number | null; widthUsd: number | null;
   expiry: string | null; entryAsk: number; costUsd: number; markUsd: number | null; peakUsd: number | null;
   exitBid: number | null; pnl: number | null; pnlPct: number | null; status: string; reason: string | null;
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
@@ -42,6 +47,7 @@ interface Payload {
   excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[];
   lastRun: string | null; lastResult: LastResult | null;
   account: Account | null; quoteStore: QuoteStore; chainRequests: ChainRequest[];
+  structures: StructureStat[];
 }
 
 const mask = (a: string) => `••••${a.slice(-4)}`;
@@ -60,6 +66,7 @@ export default function OptionsPaperPage() {
   }, {});
   const account = data?.account ?? null;
   const chainRequests = data?.chainRequests ?? [];
+  const structures = data?.structures ?? [];
   // Quotes are PUSHED by a scheduled agent, not fetched by this app — so their age is a
   // safety number, not a nicety. Staleness is decided on the server against the very same
   // threshold the reads enforce, so this banner can never disagree with the behaviour.
@@ -276,6 +283,41 @@ export default function OptionsPaperPage() {
         </Panel>
       )}
 
+      {structures.length > 0 && (
+        <Panel>
+          <PanelHeader title="Naked calls vs spreads" aside={<Label>did capping the winner cost more than it bought?</Label>} />
+          <PanelBody className="p-0">
+            <DataTable>
+              <thead>
+                <tr><Th>Structure</Th><Th num>Resolved</Th><Th num>Hit rate</Th><Th num>Avg return</Th><Th num>Net P&L</Th><Th num>Open</Th></tr>
+              </thead>
+              <tbody>
+                {structures.map((st) => (
+                  <Row key={st.structure}>
+                    <Td strong>{st.structure === "call_spread" ? "Vertical debit spread" : "Naked ITM call"}</Td>
+                    <Td num>{st.resolved}</Td>
+                    <Td num>{st.hitRate != null ? pct(st.hitRate) : "—"}</Td>
+                    <Td num className={st.avgPnlPct != null ? tone(st.avgPnlPct) : ""}>
+                      {st.avgPnlPct != null ? `${st.avgPnlPct < 0 ? "−" : "+"}${Math.abs(st.avgPnlPct * 100).toFixed(0)}%` : "—"}
+                    </Td>
+                    <Td num className={tone(st.totalPnl)}>{pnl2(st.totalPnl)}</Td>
+                    <Td num muted>{st.open}{st.openPremium > 0 ? ` · ${usd(st.openPremium)}` : ""}</Td>
+                  </Row>
+                ))}
+              </tbody>
+            </DataTable>
+          </PanelBody>
+          <PanelBody className="pt-0">
+            <Note>
+              A spread is a <strong>compromise, not an upgrade</strong>. This book has no take-profit because capping winners is what turns a
+              trend rule negative — and a vertical caps the winner by construction. It is used only when the naked call will not fit the budget,
+              which below roughly $4,500 is most of the time on a liquid name. This table is how we find out whether the cap cost more than it bought,
+              instead of assuming either way.
+            </Note>
+          </PanelBody>
+        </Panel>
+      )}
+
       <Panel>
         <PanelHeader title="Position log" aside={<Label>{trades.length} shown</Label>} />
         <PanelBody>
@@ -291,7 +333,12 @@ export default function OptionsPaperPage() {
               <Row key={t.id}>
                 <Td title={when(t.time)}>{ago(t.time)}</Td>
                 <Td>{t.source}</Td>
-                <Td className="whitespace-nowrap">{t.symbol} ${t.strike ?? "—"} {t.expiry ?? ""}</Td>
+                <Td className="whitespace-nowrap">
+                  {t.symbol} ${t.strike ?? "—"}
+                  {t.structure === "call_spread" && t.shortStrike != null && <span className="text-muted-foreground">/${t.shortStrike}</span>}
+                  {" "}{t.expiry ?? ""}
+                  {t.structure === "call_spread" && <Chip tone="blue" className="ml-1.5">spread</Chip>}
+                </Td>
                 <Td num>{t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}</Td>
                 <Td num>{usd(t.costUsd)}</Td>
                 <Td num>{t.status === "resolved" ? (t.exitBid != null ? usd(t.exitBid * 100) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>

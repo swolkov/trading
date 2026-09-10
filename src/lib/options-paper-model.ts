@@ -86,7 +86,13 @@ export function groupOf(symbol: string): CorrGroup | null {
 
 // Measurement cohort stamp — bump when contract selection, costs or exits change
 // materially. Aggregates fail CLOSED to this exact value, exactly as the other books do.
-export const OPTIONS_SIM_VERSION = "o1";
+// o2 (Sep 10 2026): Level 3 approval landed, so the book can now build VERTICAL DEBIT
+// SPREADS when a naked call does not fit the budget, and the $1,000 sleeve was retired in
+// favour of $3,500. Both change what gets traded, so the sample restarts rather than
+// blending two rule sets. The o1 rows stay in the table as history; open o1 positions are
+// still managed to their natural exit (see evaluateOptionsPaper) — a rule change is not a
+// reason to abandon a live position.
+export const OPTIONS_SIM_VERSION = "o2";
 export const OPTIONS_COHORT_SQL = `sim_version='${OPTIONS_SIM_VERSION}'`;
 
 // ---------- Sleeves ----------
@@ -94,13 +100,17 @@ export const OPTIONS_COHORT_SQL = `sim_version='${OPTIONS_SIM_VERSION}'`;
 // percentage of reference equity, so the only thing that differs is which contracts the
 // sleeve can afford — and that difference IS the experiment. Do not "fix" one sleeve's
 // parameters without the other; the comparison is the point.
-export type OptionSource = "opt-1k" | "opt-5k";
-export const OPTION_SOURCES: readonly OptionSource[] = ["opt-1k", "opt-5k"];
+// The $1,000 sleeve was RETIRED on Sep 10 2026. It had done its job: the screen proved a
+// $1k book can almost never open a position, which measures the wall rather than the
+// strategy. $3,500 replaces it because that is the size actually under consideration, and
+// it still brackets $5,000 so the size comparison survives.
+export type OptionSource = "opt-3.5k" | "opt-5k";
+export const OPTION_SOURCES: readonly OptionSource[] = ["opt-3.5k", "opt-5k"];
 export const OPTION_SOURCE_LABELS: Record<OptionSource, string> = {
-  "opt-1k": "$1,000 book — ITM calls, 60-120 DTE, trend",
-  "opt-5k": "$5,000 book — same rules, 5× the equity",
+  "opt-3.5k": "$3,500 book — ITM calls or debit spreads, 60-120 DTE, trend",
+  "opt-5k": "$5,000 book — same rules, more equity",
 };
-export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = { "opt-1k": 1000, "opt-5k": 5000 };
+export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = { "opt-3.5k": 3500, "opt-5k": 5000 };
 
 // ---------- Contract selection ----------
 // In-the-money "stock replacement" calls, NOT out-of-the-money lottery tickets. Rationale
@@ -200,18 +210,120 @@ export const REG_FEE_PER_CONTRACT = 0.05;
 export function pickContract(candidates: Contract[], budgetUsd: number): ContractPick | null {
   let best: ContractPick | null = null;
   for (const c of candidates) {
-    if (!(c.bid > 0 && c.ask > 0 && c.ask >= c.bid)) continue;
+    if (!tradeable(c)) continue;
     if (!(c.delta >= MIN_DELTA && c.delta <= MAX_DELTA)) continue;
-    if (!(c.bidSize >= MIN_QUOTE_SIZE && c.askSize >= MIN_QUOTE_SIZE)) continue;
-    const spreadPct = spreadPctOf(c.bid, c.ask);
-    if (!(spreadPct <= MAX_SPREAD_PCT)) continue;
     const costUsd = entryCostUsd(c.ask);
     if (costUsd > budgetUsd) continue;
     if (!best || Math.abs(c.delta - TARGET_DELTA) < Math.abs(best.contract.delta - TARGET_DELTA)) {
-      best = { contract: c, costUsd, spreadPct };
+      best = { contract: c, costUsd, spreadPct: spreadPctOf(c.bid, c.ask) };
     }
   }
   return best;
+}
+
+/** The quote gates every leg must pass, long or short: a real two-sided market, size behind
+ *  both sides, and a quoted spread inside the ceiling. Extracted so the short leg of a
+ *  vertical is held to exactly the same standard as the long — a tight long against a
+ *  garbage short is not a tradeable spread. */
+export function tradeable(c: Contract): boolean {
+  if (!(c.bid > 0 && c.ask > 0 && c.ask >= c.bid)) return false;
+  if (!(c.bidSize >= MIN_QUOTE_SIZE && c.askSize >= MIN_QUOTE_SIZE)) return false;
+  return spreadPctOf(c.bid, c.ask) <= MAX_SPREAD_PCT;
+}
+
+// ---------- Vertical debit spreads (added Sep 10 2026 with Level 3) ----------
+//
+// WHY THIS EXISTS, AND WHAT IT COSTS. A live screen on Sep 10 found the trap this book hits
+// between roughly $2k and $4.5k: the contracts a book that size can AFFORD are the ones
+// nobody trades (UBER's 0.74-delta December call quoted 11.7% wide on 132 open interest;
+// APLD's quoted 9.5% wide on TEN), while the ones that quote properly are unaffordable
+// (INTC's 0.76-delta December call quoted 2.35% wide on 3,852 open interest — and cost
+// $2,370 against a $1,925 budget). Selling a higher strike against the long leg brings that
+// exact contract inside the budget.
+//
+// THE COMPROMISE IS REAL AND IS NOT HIDDEN. This book has no take-profit precisely because
+// "capping the winners is what turns a trend rule negative" (see the exit rules below). A
+// vertical caps the winner by construction. It is accepted here only because at this account
+// size the alternative is not a cheaper naked call — it is no position, or a position in a
+// name whose quotes are fiction. Every row records its `structure`, so the record can answer
+// whether the cap cost more than it bought instead of anyone assuming either way.
+//
+// SELECTION RULE: keep the long leg the naked rule would have chosen, then sell the HIGHEST
+// strike that brings the net debit inside budget. Highest, not nearest — the short strike is
+// the ceiling on the trade, so pushing it as far out as affordability allows preserves the
+// most upside. Both legs pay the crossing cost, which roughly doubles the friction rate; that
+// is the price of the trade existing at all.
+export type Structure = "call" | "call_spread";
+
+export interface SpreadPick {
+  structure: "call_spread";
+  contract: Contract;   // long leg — the same ITM call the naked rule picks
+  short: Contract;      // short leg — higher strike, same expiry
+  costUsd: number;      // net debit, both legs' fees included
+  spreadPct: number;    // the long leg's quoted spread, kept for continuity of the record
+  widthUsd: number;     // (short strike − long strike) × 100 — the position's maximum value
+}
+export type PositionPick = (ContractPick & { structure: "call" }) | SpreadPick;
+
+/** Net cash to open a vertical: pay the long's ask, receive the short's bid, both legs' fees. */
+export function spreadDebitUsd(longAsk: number, shortBid: number, contracts = 1): number {
+  return (longAsk - shortBid) * 100 * contracts + 2 * REG_FEE_PER_CONTRACT * contracts;
+}
+/** Net cash to close a vertical: receive the long's bid, pay the short's ask, both legs' fees.
+ *  The gross is floored at zero — a vertical cannot be worth less than nothing, and a crossed
+ *  or stale pair of quotes must not book a loss deeper than the debit. */
+export function spreadProceedsUsd(longBid: number, shortAsk: number, contracts = 1): number {
+  return Math.max(0, (longBid - shortAsk) * 100 * contracts) - 2 * REG_FEE_PER_CONTRACT * contracts;
+}
+
+/** The long leg the naked rule would choose IGNORING budget — the anchor for a vertical. */
+export function bestLongLeg(candidates: Contract[]): Contract | null {
+  let best: Contract | null = null;
+  for (const c of candidates) {
+    if (!tradeable(c)) continue;
+    if (!(c.delta >= MIN_DELTA && c.delta <= MAX_DELTA)) continue;
+    if (!best || Math.abs(c.delta - TARGET_DELTA) < Math.abs(best.delta - TARGET_DELTA)) best = c;
+  }
+  return best;
+}
+
+/**
+ * Build the widest affordable vertical on the long leg the naked rule wanted. Returns null
+ * when no short strike brings the debit inside budget — "nothing tradeable today" stays a
+ * valid and common answer.
+ */
+export function pickSpread(candidates: Contract[], budgetUsd: number): SpreadPick | null {
+  const long = bestLongLeg(candidates);
+  if (!long) return null;
+  let best: SpreadPick | null = null;
+  for (const c of candidates) {
+    if (c.expiry !== long.expiry) continue;         // a vertical is one expiry
+    if (!(c.strike > long.strike)) continue;        // and a higher strike
+    if (!tradeable(c)) continue;
+    const costUsd = spreadDebitUsd(long.ask, c.bid);
+    if (!(costUsd > 0) || costUsd > budgetUsd) continue;
+    // Highest short strike that fits — the ceiling as far out as affordability allows.
+    if (!best || c.strike > best.short.strike) {
+      best = {
+        structure: "call_spread", contract: long, short: c, costUsd,
+        spreadPct: spreadPctOf(long.bid, long.ask),
+        widthUsd: (c.strike - long.strike) * 100,
+      };
+    }
+  }
+  return best;
+}
+
+/**
+ * What this book opens on a signal: the naked ITM call when the budget allows it, otherwise
+ * the widest affordable vertical on the same long leg. Naked is preferred deliberately —
+ * uncapped upside and half the crossing cost. The vertical is the fallback that makes a
+ * liquid name reachable, not an upgrade.
+ */
+export function pickPosition(candidates: Contract[], budgetUsd: number): PositionPick | null {
+  const naked = pickContract(candidates, budgetUsd);
+  if (naked) return { ...naked, structure: "call" };
+  return pickSpread(candidates, budgetUsd);
 }
 
 // ---------- Position budget + book caps ----------

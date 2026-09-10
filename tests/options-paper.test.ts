@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CRYPTO_PROXY_EXCLUDED, MAX_ENTRIES_PER_MONTH, MAX_QUOTE_AGE_MS, OPTIONS_SYMBOLS,
+  OPTION_SOURCES, OPTION_SOURCE_EQUITY, OPTIONS_SIM_VERSION, REG_FEE_PER_CONTRACT,
   canExitAt, etDateOf, isQuoteFresh,
   type Bar, type BookState, type Contract,
-  dteOf, entryRefusal, exitReason, groupOf, isEntrySignal, isExitSignal,
-  pickContract, positionBudget, spreadPctOf,
+  bestLongLeg, dteOf, entryRefusal, exitReason, groupOf, isEntrySignal, isExitSignal,
+  pickContract, pickPosition, pickSpread, positionBudget, spreadDebitUsd, spreadPctOf,
+  spreadProceedsUsd, tradeable,
 } from "../src/lib/options-paper-model";
 import { parseOcc, toOcc } from "../src/lib/options-occ";
 
@@ -244,4 +246,102 @@ test("no premium is bought inside the earnings blackout, and the window is what 
   assert.deepEqual(inEarningsBlackout("iren", [...cal, { symbol: "IREN", date: "2026-09-12" }], now), { blocked: true, date: "2026-09-12" });
   // A malformed date can never block or unblock by accident.
   assert.deepEqual(inEarningsBlackout("IREN", [{ symbol: "IREN", date: "not-a-date" }], now), { blocked: false });
+});
+
+
+// ============ VERTICAL DEBIT SPREADS (Level 3, Sep 10 2026) ============
+
+test("the retired $1k sleeve is gone and $3,500 replaces it", () => {
+  assert.deepEqual([...OPTION_SOURCES], ["opt-3.5k", "opt-5k"]);
+  assert.equal(OPTION_SOURCE_EQUITY["opt-3.5k"], 3500);
+  assert.equal(OPTION_SOURCE_EQUITY["opt-5k"], 5000);
+  // The rules changed, so the sample must restart rather than blend two rule sets.
+  assert.equal(OPTIONS_SIM_VERSION, "o2");
+});
+
+test("tradeable holds the short leg to the same standard as the long", () => {
+  assert.equal(tradeable(c()), true);
+  assert.equal(tradeable(c({ bid: 0 })), false);              // no two-sided market
+  assert.equal(tradeable(c({ bidSize: 0 })), false);          // no size behind the bid
+  assert.equal(tradeable(c({ askSize: 0 })), false);          // nothing offered
+  assert.equal(tradeable(c({ bid: 5.00, ask: 5.40 })), false); // 7.7% wide, over the 3% ceiling
+});
+
+test("bestLongLeg ignores budget and takes the delta nearest target", () => {
+  const chain = [
+    c({ occ: "A", strike: 10, delta: 0.84, bid: 9.00, ask: 9.15 }),
+    c({ occ: "B", strike: 12, delta: 0.79, bid: 7.00, ask: 7.10 }),
+    c({ occ: "C", strike: 16, delta: 0.60, bid: 3.00, ask: 3.05 }), // outside the delta band
+  ];
+  assert.equal(bestLongLeg(chain)?.occ, "B");
+  assert.equal(bestLongLeg([c({ delta: 0.40 })]), null);
+});
+
+test("spread cash flows charge BOTH legs a fee on each side", () => {
+  // Pay the long's ask, receive the short's bid.
+  assert.ok(Math.abs(spreadDebitUsd(23.70, 9.95) - (1375 + 2 * REG_FEE_PER_CONTRACT)) < 1e-9);
+  // Sell the long's bid, buy the short's ask back.
+  assert.ok(Math.abs(spreadProceedsUsd(23.15, 10.20) - (1295 - 2 * REG_FEE_PER_CONTRACT)) < 1e-9);
+});
+
+test("a vertical can never be worth less than nothing", () => {
+  // Crossed/stale quotes must not book a loss deeper than the debit paid.
+  assert.ok(spreadProceedsUsd(5.00, 9.00) < 0);                       // fees only
+  assert.ok(spreadProceedsUsd(5.00, 9.00) >= -2 * REG_FEE_PER_CONTRACT);
+});
+
+test("pickSpread sells the HIGHEST strike that fits — the ceiling as far out as affordable", () => {
+  const long = c({ occ: "L", strike: 85, delta: 0.76, bid: 23.15, ask: 23.70 });
+  const chain = [
+    long,
+    c({ occ: "S105", strike: 105, delta: 0.55, bid: 15.00, ask: 15.20 }), // debit  870 — fits
+    c({ occ: "S115", strike: 115, delta: 0.45, bid: 9.95, ask: 10.20 }),  // debit 1375 — fits, higher
+    c({ occ: "S130", strike: 130, delta: 0.25, bid: 4.00, ask: 4.10 }),   // debit 1970 — too dear
+  ];
+  const pick = pickSpread(chain, 1925);
+  assert.ok(pick);
+  assert.equal(pick!.short.occ, "S115", "must take the highest affordable strike, not the cheapest debit");
+  assert.equal(pick!.contract.occ, "L");
+  assert.ok(Math.abs(pick!.costUsd - (1375 + 0.10)) < 1e-9);
+  assert.equal(pick!.widthUsd, 3000);
+});
+
+test("pickSpread refuses a different expiry, a lower strike, and an illiquid short", () => {
+  const long = c({ occ: "L", strike: 85, delta: 0.76, bid: 23.15, ask: 23.70, expiry: "2026-12-18" });
+  assert.equal(pickSpread([long, c({ occ: "X", strike: 115, expiry: "2027-01-15", bid: 9.95, ask: 10.20 })], 1925), null);
+  // delta 0.84 is inside the band but further from the 0.78 target than the long's 0.76,
+  // so `long` stays the long leg and an 80 strike is simply not a valid short against it.
+  assert.equal(pickSpread([long, c({ occ: "X", strike: 80, delta: 0.84, bid: 26.00, ask: 26.20 })], 1925), null);
+  assert.equal(pickSpread([long, c({ occ: "X", strike: 115, bid: 9.00, ask: 10.20, bidSize: 0 })], 1925), null);
+  assert.equal(pickSpread([long], 1925), null, "a long leg alone is not a spread");
+});
+
+test("pickPosition prefers the naked call and only spreads when it cannot afford one", () => {
+  const long = c({ occ: "L", strike: 85, delta: 0.76, bid: 23.15, ask: 23.70 });
+  const short = c({ occ: "S", strike: 115, delta: 0.45, bid: 9.95, ask: 10.20 });
+
+  // Budget covers the naked call ($2,370.05) — take it, uncapped and half the friction.
+  const rich = pickPosition([long, short], 5000);
+  assert.equal(rich?.structure, "call");
+  assert.ok(Math.abs(rich!.costUsd - 2370.05) < 1e-9);
+
+  // The real $3,500 sleeve: budget is 55% = $1,925, the naked call does not fit, the
+  // vertical does. This is the exact INTC case measured live on 2026-09-10.
+  const budget = positionBudget(3500);
+  assert.ok(Math.abs(budget - 1925) < 1e-6, `55% of $3,500 is $1,925, got ${budget}`);
+  const lean = pickPosition([long, short], budget);
+  assert.equal(lean?.structure, "call_spread");
+  assert.ok(lean!.costUsd < budget);
+  assert.ok(Math.abs(lean!.costUsd - 1375.10) < 1e-9);
+
+  // Nothing affordable at all is still a valid answer.
+  assert.equal(pickPosition([long, short], 500), null);
+});
+
+test("a vertical's exit rules are the naked call's — the spread mark drives them", () => {
+  // Premium stop measures the whole position's mark against the whole debit.
+  assert.equal(exitReason({ trendExit: false, dte: 90, markUsd: 600, costUsd: 1375 }), "premium stop");
+  assert.equal(exitReason({ trendExit: false, dte: 90, markUsd: 800, costUsd: 1375 }), null);
+  assert.equal(exitReason({ trendExit: false, dte: 20, markUsd: 2000, costUsd: 1375 }), "dte floor");
+  assert.equal(exitReason({ trendExit: true, dte: 90, markUsd: 2000, costUsd: 1375 }), "trend exit");
 });

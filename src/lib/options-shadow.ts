@@ -19,7 +19,9 @@ import { getDailyBars, getOptionQuotes, type OptionQuote } from "@/lib/rh-option
 import {
   OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCES, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
   type BookState, type OptionSource,
-  canExitAt, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf, isExitSignal, optionsVerdict, tStatOf,
+  MIN_QUOTE_SIZE,
+  canExitAt, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf, isExitSignal,
+  isQuoteFresh, optionsVerdict, spreadProceedsUsd, tStatOf,
 } from "@/lib/options-paper-model";
 
 /** How long past expiry a position may stay open while settlement data is unavailable
@@ -55,6 +57,19 @@ export async function ensureOptionsPaperTable(): Promise<void> {
     resolved_at timestamptz,
     sim_version text
   )`);
+  // Added Sep 10 2026 with Level 3. ADD COLUMN IF NOT EXISTS, not a wider CREATE TABLE:
+  // the table already exists in production, so a changed CREATE would silently do nothing.
+  // `structure` defaults to 'call' so every pre-existing row reads correctly as a naked call.
+  for (const col of [
+    "structure text NOT NULL DEFAULT 'call'",
+    "short_occ text",
+    "short_strike double precision",
+    "entry_short_bid double precision",
+    "exit_short_ask double precision",
+    "width_usd double precision",
+  ]) {
+    await prisma.$executeRawUnsafe(`ALTER TABLE options_paper_trades ADD COLUMN IF NOT EXISTS ${col}`);
+  }
   await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS options_paper_open_idx ON options_paper_trades (status, source)`);
   // ONE open position per (sleeve, underlying, cohort), enforced by the database so two
   // overlapping runs cannot both pass the SELECT check and inflate the sample.
@@ -117,6 +132,10 @@ export async function openOptionPaperTrade(p: {
   symbol: string; source: OptionSource; occ: string; strike: number; expiry: string;
   ask: number; bid: number; delta: number; iv: number | null; spreadPct: number;
   costUsd: number; underlying: number;
+  // Present only for a vertical. `shortBid` is what the short leg was SOLD for at entry,
+  // so the opening mark can be computed the same honest way a naked call's is.
+  structure?: "call" | "call_spread";
+  shortOcc?: string; shortStrike?: number; shortBid?: number; shortAsk?: number; widthUsd?: number;
 }): Promise<OpenResult> {
   await ensureOptionsPaperTable();
   const refEquity = await refEquityFor(p.source);
@@ -148,15 +167,24 @@ export async function openOptionPaperTrade(p: {
     // what was paid for it. Seeding the mark with the cost would show every fresh position
     // as flat when it is in fact already down the spread, which is the single largest cost
     // this book exists to measure.
-    const openingMark = p.bid * 100;
+    // For a vertical the opening mark is what the WHOLE position could be unwound for now:
+    // sell the long at its bid AND buy the short back at its ask. Marking only the long leg
+    // would show the position miles ahead of reality.
+    const isSpread = p.structure === "call_spread";
+    const openingMark = isSpread
+      ? Math.max(0, (p.bid - (p.shortAsk ?? 0)) * 100)
+      : p.bid * 100;
     try {
       await tx.$executeRawUnsafe(
         `INSERT INTO options_paper_trades
           (symbol, corr_group, source, occ, strike, expiry, ref_equity, entry_delta, entry_iv,
-           entry_spread_pct, entry_ask, cost_usd, underlying_at_entry, mark_usd, peak_usd, status, sim_version)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15)`,
+           entry_spread_pct, entry_ask, cost_usd, underlying_at_entry, mark_usd, peak_usd, status, sim_version,
+           structure, short_occ, short_strike, entry_short_bid, width_usd)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15,$16,$17,$18,$19,$20)`,
         p.symbol, group, p.source, p.occ, p.strike, p.expiry, refEquity, p.delta, p.iv,
         p.spreadPct, p.ask, p.costUsd, p.underlying, openingMark, OPTIONS_SIM_VERSION,
+        isSpread ? "call_spread" : "call",
+        p.shortOcc ?? null, p.shortStrike ?? null, p.shortBid ?? null, p.widthUsd ?? null,
       );
     } catch (e) {
       if (/options_paper_one_open_idx|unique/i.test(String(e))) return { opened: false, reason: "already open" } as OpenResult;
@@ -173,6 +201,7 @@ export interface OptionResolution {
 interface OpenRow {
   id: number; time: Date; symbol: string; source: string; occ: string; strike: number | null;
   expiry: string | null; cost_usd: number; peak_usd: number | null;
+  structure: string | null; short_occ: string | null; short_strike: number | null; width_usd: number | null;
 }
 
 /**
@@ -187,15 +216,23 @@ interface OpenRow {
  */
 export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
   await ensureOptionsPaperTable();
+  // DELIBERATELY NOT cohort-filtered. Bumping the sim version starts a new SAMPLE; it does
+  // not abandon a position that is still open. An o1 call left unmanaged would never mark
+  // again and never hit its stop — the rules changed, the trade did not stop existing.
+  // Aggregates stay cohort-scoped, so a legacy position affects the record of its own
+  // cohort and nothing else.
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
-    `SELECT id, time, symbol, source, occ, strike, expiry, cost_usd, peak_usd
-     FROM options_paper_trades WHERE status='open' AND ${OPTIONS_COHORT_SQL} ORDER BY time ASC LIMIT 200`,
+    `SELECT id, time, symbol, source, occ, strike, expiry, cost_usd, peak_usd,
+            structure, short_occ, short_strike, width_usd
+     FROM options_paper_trades WHERE status='open' ORDER BY time ASC LIMIT 200`,
   );
   if (!rows.length) return [];
 
   const now = new Date();
   let quotes: Record<string, OptionQuote> = {};
-  try { quotes = await getOptionQuotes(rows.map((r) => r.occ)); } catch { /* handled per-row below */ }
+  // Both legs of every vertical, or the position cannot be marked at all.
+  const allOccs = [...new Set(rows.flatMap((r) => (r.short_occ ? [r.occ, r.short_occ] : [r.occ])))];
+  try { quotes = await getOptionQuotes(allOccs); } catch { /* handled per-row below */ }
   let bars: Record<string, { t: string; c: number; h: number; l: number }[]> = {};
   try { bars = await getDailyBars([...new Set(rows.map((r) => r.symbol))], 120); } catch { /* handled per-row below */ }
 
@@ -228,7 +265,12 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
         }
         continue;
       }
-      const intrinsic = Math.max(0, expiryBar.c - r.strike) * 100;
+      // A vertical settles at the long leg's intrinsic value CAPPED AT ITS WIDTH — above the
+      // short strike the two legs cancel. Settling a spread on the long leg alone would book
+      // an unbounded profit that the short leg never allowed.
+      const rawIntrinsic = Math.max(0, expiryBar.c - r.strike) * 100;
+      const capUsd = r.structure === "call_spread" && r.width_usd != null ? r.width_usd : Infinity;
+      const intrinsic = Math.min(rawIntrinsic, capUsd);
       const pnl = intrinsic - r.cost_usd;
       const pnlPct = r.cost_usd > 0 ? pnl / r.cost_usd : 0;
       const won = await resolveOnce(
@@ -236,7 +278,9 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
            reason=$5, resolved_at=now(), mark_usd=NULL WHERE id=$6 AND status='open'`,
         intrinsic / 100, intrinsic, pnl, pnlPct,
         intrinsic > 0
-          ? `expired in the money — settled at intrinsic $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`
+          ? (intrinsic === capUsd
+              ? `expired past the short strike — settled at the spread's full width $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`
+              : `expired in the money — settled at intrinsic $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`)
           : `expired worthless — ${r.expiry} close $${expiryBar.c.toFixed(2)} below the $${r.strike} strike`,
         r.id);
       if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: intrinsic, pnl, pnlPct, reason: "expiry" });
@@ -248,7 +292,17 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
     // A $6.00 bid for zero contracts is not an exit anyone could have taken.
     if (!q || !canExitAt({ bid: q.bid, bidSize: q.bidSize, quoteTs: q.quoteTs }, now)) continue;
 
-    const markUsd = q.bid * 100;
+    // A vertical needs BOTH legs to be closeable: sell the long at its bid AND buy the short
+    // back at its ask. A short leg with no offer is a position you cannot actually exit, so
+    // it is left open rather than marked at a price nobody would fill.
+    const isSpread = r.structure === "call_spread" && r.short_occ != null;
+    const sq = isSpread ? quotes[r.short_occ as string] : undefined;
+    if (isSpread) {
+      const shortCloseable = !!sq && sq.ask > 0 && sq.askSize >= MIN_QUOTE_SIZE && isQuoteFresh(sq.quoteTs, now);
+      if (!shortCloseable) continue;
+    }
+
+    const markUsd = isSpread ? Math.max(0, (q.bid - (sq as OptionQuote).ask) * 100) : q.bid * 100;
     const trendExit = symBars.length >= 25 ? isExitSignal(symBars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l }))) : false;
     const reason = exitReason({ trendExit, dte, markUsd, costUsd: r.cost_usd });
 
@@ -260,14 +314,14 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
         markUsd, r.id);
       continue;
     }
-    const proceeds = exitProceedsUsd(q.bid);
+    const proceeds = isSpread ? spreadProceedsUsd(q.bid, (sq as OptionQuote).ask) : exitProceedsUsd(q.bid);
     const pnl = proceeds - r.cost_usd;
     const pnlPct = r.cost_usd > 0 ? pnl / r.cost_usd : 0;
     const won = await resolveOnce(
-      `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
+      `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, exit_short_ask=$8, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
          reason=$5, resolved_at=now(), peak_usd=GREATEST(COALESCE(peak_usd,0), $6), mark_usd=NULL
        WHERE id=$7 AND status='open'`,
-      q.bid, proceeds, pnl, pnlPct, reason, markUsd, r.id);
+      q.bid, proceeds, pnl, pnlPct, reason, markUsd, r.id, isSpread ? (sq as OptionQuote).ask : null);
     if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: proceeds, pnl, pnlPct, reason });
   }
   return out;
@@ -333,6 +387,8 @@ export interface OptionPaperRow {
   expiry: string | null; entryAsk: number; costUsd: number; markUsd: number | null; peakUsd: number | null;
   exitBid: number | null; pnl: number | null; pnlPct: number | null; status: string; reason: string | null;
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
+  /** 'call' or 'call_spread'. The short leg and the width are null for a naked call. */
+  structure: string; shortStrike: number | null; widthUsd: number | null;
 }
 export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperRow[]> {
   await ensureOptionsPaperTable();
@@ -341,9 +397,11 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     expiry: string | null; entry_ask: number; cost_usd: number; mark_usd: number | null; peak_usd: number | null;
     exit_bid: number | null; pnl: number | null; pnl_pct: number | null; status: string | null;
     reason: string | null; entry_delta: number | null; entry_spread_pct: number | null; sim_version: string | null;
+    structure: string | null; short_strike: number | null; width_usd: number | null;
   }[]>(
     `SELECT id, time, symbol, source, occ, strike, expiry, entry_ask, cost_usd, mark_usd, peak_usd,
-            exit_bid, pnl, pnl_pct, status, reason, entry_delta, entry_spread_pct, sim_version
+            exit_bid, pnl, pnl_pct, status, reason, entry_delta, entry_spread_pct, sim_version,
+            structure, short_strike, width_usd
      FROM options_paper_trades ORDER BY time DESC LIMIT $1`, Math.max(1, Math.min(500, limit)),
   );
   return rows.map((r) => ({
@@ -353,5 +411,47 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     exitBid: r.exit_bid, pnl: r.pnl, pnlPct: r.pnl_pct, status: r.status ?? "open", reason: r.reason,
     entryDelta: r.entry_delta, entrySpreadPct: r.entry_spread_pct,
     simVersion: r.sim_version ?? OPTIONS_SIM_VERSION,
+    structure: r.structure ?? "call", shortStrike: r.short_strike, widthUsd: r.width_usd,
   }));
+}
+
+/**
+ * Naked calls versus verticals, within the current cohort.
+ *
+ * This exists because the vertical is a COMPROMISE, not an upgrade: it caps the winner, and
+ * this book's whole exit design says capping winners is what turns a trend rule negative.
+ * The compromise was accepted so that a $3,500 book could reach a liquid contract at all.
+ * Whether it was worth it is an empirical question, and this is the number that answers it —
+ * so nobody has to assume.
+ */
+export interface StructureStat {
+  structure: string; resolved: number; wins: number; hitRate: number | null;
+  totalPnl: number; avgPnlPct: number | null; open: number; openPremium: number;
+}
+export async function optionsStructureBreakdown(): Promise<StructureStat[]> {
+  await ensureOptionsPaperTable();
+  const rows = await prisma.$queryRawUnsafe<{
+    structure: string | null; resolved: bigint; wins: bigint; total: number | null;
+    avgpct: number | null; open: bigint; openprem: number | null;
+  }[]>(
+    `SELECT COALESCE(structure,'call') AS structure,
+       count(*) FILTER (WHERE status='resolved')::bigint            AS resolved,
+       count(*) FILTER (WHERE status='resolved' AND pnl > 0)::bigint AS wins,
+       COALESCE(sum(pnl) FILTER (WHERE status='resolved'),0)::float AS total,
+       avg(pnl_pct) FILTER (WHERE status='resolved')                AS avgpct,
+       count(*) FILTER (WHERE status='open')::bigint                AS open,
+       COALESCE(sum(cost_usd) FILTER (WHERE status='open'),0)::float AS openprem
+     FROM options_paper_trades WHERE ${OPTIONS_COHORT_SQL} GROUP BY 1 ORDER BY 1`,
+  );
+  return rows.map((r) => {
+    const resolved = Number(r.resolved);
+    return {
+      structure: r.structure ?? "call",
+      resolved, wins: Number(r.wins),
+      hitRate: resolved > 0 ? Number(r.wins) / resolved : null,
+      totalPnl: r.total ?? 0,
+      avgPnlPct: r.avgpct == null ? null : Number(r.avgpct),
+      open: Number(r.open), openPremium: r.openprem ?? 0,
+    };
+  });
 }
