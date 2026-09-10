@@ -86,7 +86,13 @@ export function groupOf(symbol: string): CorrGroup | null {
 
 // Measurement cohort stamp — bump when contract selection, costs or exits change
 // materially. Aggregates fail CLOSED to this exact value, exactly as the other books do.
-export const OPTIONS_SIM_VERSION = "o1";
+// o2 (Sep 10 2026): Level 3 approval landed, so the book can now build VERTICAL DEBIT
+// SPREADS when a naked call does not fit the budget, and the $1,000 sleeve was retired in
+// favour of $3,500. Both change what gets traded, so the sample restarts rather than
+// blending two rule sets. The o1 rows stay in the table as history; open o1 positions are
+// still managed to their natural exit (see evaluateOptionsPaper) — a rule change is not a
+// reason to abandon a live position.
+export const OPTIONS_SIM_VERSION = "o2";
 export const OPTIONS_COHORT_SQL = `sim_version='${OPTIONS_SIM_VERSION}'`;
 
 // ---------- Sleeves ----------
@@ -94,13 +100,17 @@ export const OPTIONS_COHORT_SQL = `sim_version='${OPTIONS_SIM_VERSION}'`;
 // percentage of reference equity, so the only thing that differs is which contracts the
 // sleeve can afford — and that difference IS the experiment. Do not "fix" one sleeve's
 // parameters without the other; the comparison is the point.
-export type OptionSource = "opt-1k" | "opt-5k";
-export const OPTION_SOURCES: readonly OptionSource[] = ["opt-1k", "opt-5k"];
+// The $1,000 sleeve was RETIRED on Sep 10 2026. It had done its job: the screen proved a
+// $1k book can almost never open a position, which measures the wall rather than the
+// strategy. $3,500 replaces it because that is the size actually under consideration, and
+// it still brackets $5,000 so the size comparison survives.
+export type OptionSource = "opt-3.5k" | "opt-5k";
+export const OPTION_SOURCES: readonly OptionSource[] = ["opt-3.5k", "opt-5k"];
 export const OPTION_SOURCE_LABELS: Record<OptionSource, string> = {
-  "opt-1k": "$1,000 book — ITM calls, 60-120 DTE, trend",
-  "opt-5k": "$5,000 book — same rules, 5× the equity",
+  "opt-3.5k": "$3,500 book — ITM calls or debit spreads, 60-120 DTE, trend",
+  "opt-5k": "$5,000 book — same rules, more equity",
 };
-export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = { "opt-1k": 1000, "opt-5k": 5000 };
+export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = { "opt-3.5k": 3500, "opt-5k": 5000 };
 
 // ---------- Contract selection ----------
 // In-the-money "stock replacement" calls, NOT out-of-the-money lottery tickets. Rationale
@@ -170,6 +180,10 @@ export function canExitAt(q: { bid: number; bidSize: number; quoteTs?: string | 
 export interface Contract {
   occ: string; strike: number; expiry: string; delta: number;
   bid: number; ask: number; bidSize: number; askSize: number;
+  /** When the broker published this leg's quote. Optional on the type so unit tests can build
+   *  contracts without one, but the scanner ALWAYS supplies it: without it the multi-leg skew
+   *  check in options-structures.ts silently has nothing to check. */
+  quoteTs?: string | null;
 }
 export interface ContractPick { contract: Contract; costUsd: number; spreadPct: number }
 
@@ -197,21 +211,171 @@ export const REG_FEE_PER_CONTRACT = 0.05;
  *  cap. Passing only the position budget lets this pick a $500 contract that the book cap
  *  then refuses, when a $295 contract one delta-step away would have passed everything —
  *  a silently missed entry rather than a bad one, but a missed entry all the same. */
-export function pickContract(candidates: Contract[], budgetUsd: number): ContractPick | null {
-  let best: ContractPick | null = null;
-  for (const c of candidates) {
-    if (!(c.bid > 0 && c.ask > 0 && c.ask >= c.bid)) continue;
-    if (!(c.delta >= MIN_DELTA && c.delta <= MAX_DELTA)) continue;
-    if (!(c.bidSize >= MIN_QUOTE_SIZE && c.askSize >= MIN_QUOTE_SIZE)) continue;
-    const spreadPct = spreadPctOf(c.bid, c.ask);
-    if (!(spreadPct <= MAX_SPREAD_PCT)) continue;
-    const costUsd = entryCostUsd(c.ask);
-    if (costUsd > budgetUsd) continue;
-    if (!best || Math.abs(c.delta - TARGET_DELTA) < Math.abs(best.contract.delta - TARGET_DELTA)) {
-      best = { contract: c, costUsd, spreadPct };
-    }
+/** The quote gates every leg must pass, long or short: a real two-sided market, size behind
+ *  both sides, and a quoted spread inside the ceiling. Extracted so the short leg of a
+ *  vertical is held to exactly the same standard as the long — a tight long against a
+ *  garbage short is not a tradeable spread. */
+export function tradeable(c: Contract): boolean {
+  if (!(c.bid > 0 && c.ask > 0 && c.ask >= c.bid)) return false;
+  if (!(c.bidSize >= MIN_QUOTE_SIZE && c.askSize >= MIN_QUOTE_SIZE)) return false;
+  return spreadPctOf(c.bid, c.ask) <= MAX_SPREAD_PCT;
+}
+
+// ---------- Vertical spread cash flows ----------
+// The SELECTION of a spread moved to options-structures.ts on Sep 10 2026 — it compares every
+// shape and every expiry against the market's own expected move, which this file's simpler
+// "closest to target delta that fits the budget" rule could not do. Only the cash-flow
+// arithmetic stays here, because it is the vocabulary the rest of the book is written in.
+//
+// The compromise a vertical represents has not changed and is not hidden: this book has no
+// take-profit precisely because capping winners is what turns a trend rule negative, and a
+// vertical caps the winner by construction. It is used when the naked call will not fit the
+// budget, which below roughly $4,500 is most of the time on a liquid name. Every row records
+// its structure so the record can settle whether the cap cost more than it bought.
+
+/** Net cash to open a vertical: pay the long's ask, receive the short's bid, both legs' fees. */
+export function spreadDebitUsd(longAsk: number, shortBid: number, contracts = 1): number {
+  return (longAsk - shortBid) * 100 * contracts + 2 * REG_FEE_PER_CONTRACT * contracts;
+}
+/** Net cash to close a vertical: receive the long's bid, pay the short's ask, both legs' fees.
+ *  The gross is floored at zero — a vertical cannot be worth less than nothing, and a crossed
+ *  or stale pair of quotes must not book a loss deeper than the debit. */
+export function spreadProceedsUsd(longBid: number, shortAsk: number, contracts = 1): number {
+  return Math.max(0, (longBid - shortAsk) * 100 * contracts) - 2 * REG_FEE_PER_CONTRACT * contracts;
+}
+
+// ---------- Credit structures: the inverted money math ----------
+//
+// A debit position is one you PAID for: your risk is the cash out, and the position is worth
+// whatever you can sell it for. A credit position is one you were PAID for: your risk is the
+// COLLATERAL the broker holds, and the position is a liability you must buy back.
+//
+// Getting this backwards does not throw. It books a loss as a profit. So the whole thing is
+// funnelled through ONE definition that both kinds share:
+//
+//     mark = capital at risk + unrealised P&L
+//
+// For a debit position that reduces to "what it is worth today", which is exactly what the
+// original single-leg book already stored — so every existing exit rule, the peak tracker and
+// the premium stop keep working untouched, and a credit spread that has lost half its
+// collateral trips the same stop as a call that has lost half its premium.
+export type StoredStructure = "call" | "call_spread" | "put_credit_spread";
+
+export function isCreditStructure(structure: string | null | undefined): boolean {
+  return structure === "put_credit_spread" || structure === "call_credit_spread";
+}
+
+/** Cash received opening a credit spread: sell the short leg at its bid, buy the protective
+ *  long at its ask, both legs paying a fee. */
+export function spreadCreditUsd(shortBid: number, longAsk: number, contracts = 1): number {
+  return (shortBid - longAsk) * 100 * contracts - 2 * REG_FEE_PER_CONTRACT * contracts;
+}
+
+/**
+ * Cash to close a credit spread right now: buy the short leg back at its ask, sell the long
+ * leg at its bid, both legs paying a fee.
+ *
+ * FLOORED AT ZERO **AND CAPPED AT THE WIDTH** (`maxUsd`, which is collateral + credit). The
+ * cap is not cosmetic and does not need a crossed market to matter — mere parity does it.
+ * Short 95p / long 90p on a $5 wide spread with the stock at 82.50 quotes 12.60 ask / 7.40
+ * bid: crossing both legs costs $5.20 of a $5.00-wide spread. Without the cap that books a
+ * 105% loss on a defined-risk position, contradicting settleAtExpiry (which caps at the
+ * collateral) and poisoning every average return that includes it. A vertical is worth at
+ * most its width; quotes implying more are a market you would not trade into.
+ */
+export function creditCloseCostUsd(shortAsk: number, longBid: number, maxUsd: number, contracts = 1): number {
+  const gross = Math.max(0, (shortAsk - longBid) * 100 * contracts) + 2 * REG_FEE_PER_CONTRACT * contracts;
+  return Math.min(gross, Math.max(0, maxUsd) * contracts);
+}
+
+/**
+ * The one mark definition. `capitalAtRiskUsd` is the debit for a debit position and the
+ * collateral (width − credit) for a credit one; `creditUsd` is zero unless it is a credit.
+ *
+ * Floored at zero: a defined-risk position cannot be worth negative capital, and a crossed or
+ * stale pair of quotes must never mark one below its own maximum loss.
+ */
+export function positionMarkUsd(p: {
+  structure: string | null;
+  capitalAtRiskUsd: number;
+  creditUsd: number;
+  longBid: number;
+  shortAsk?: number | null;
+  contracts?: number;
+}): number {
+  const n = p.contracts ?? 1;
+  if (isCreditStructure(p.structure)) {
+    // width === collateral + credit, always — so the cap needs no extra argument.
+    //
+    // FEES ARE EXCLUDED HERE, deliberately and symmetrically with the debit side: a debit
+    // position marks at bid × 100 and only pays its exit fee when it actually closes. The
+    // mark answers "what is this worth", not "what would I net after closing it".
+    const width = p.capitalAtRiskUsd + p.creditUsd;
+    const grossToClose = Math.min(Math.max(0, ((p.shortAsk ?? 0) - p.longBid) * 100 * n), width * n);
+    return Math.max(0, p.capitalAtRiskUsd + p.creditUsd - grossToClose);
   }
-  return best;
+  const value = p.shortAsk != null
+    ? Math.max(0, (p.longBid - p.shortAsk) * 100 * n)
+    : p.longBid * 100 * n;
+  return Math.max(0, value);
+}
+
+/** The moves a payoff grid is shown at. Lives here, beside settleAtExpiry, because the grid
+ *  is built from STORED positions rather than from selection candidates. */
+export const SCENARIO_MOVES = [-0.10, -0.05, -0.02, 0, 0.02, 0.05, 0.10] as const;
+
+export interface ScenarioPoint { move: number; price: number; pnl: number }
+
+/**
+ * What this position is worth at expiry if the underlying moves by each of SCENARIO_MOVES.
+ *
+ * Terminal values only — no attempt to model what it is worth BEFORE expiry, which would
+ * need a price model this book deliberately does not use. Stated on the page rather than
+ * implied, so nobody reads a −2% row as "what happens tomorrow".
+ */
+export function scenarioGrid(p: {
+  structure: string | null; longStrike: number; shortStrike?: number | null;
+  widthUsd?: number | null; capitalAtRiskUsd: number; creditUsd: number; spot: number;
+}): ScenarioPoint[] {
+  if (!(p.spot > 0)) return [];
+  return SCENARIO_MOVES.map((move) => {
+    const price = p.spot * (1 + move);
+    return { move, price, pnl: settleAtExpiry({ ...p, close: price }).pnlUsd };
+  });
+}
+
+/**
+ * Settlement at expiry from the underlying's close on the expiry date.
+ *
+ * Returns the position's terminal VALUE (what the capital at risk turned into) and the P&L,
+ * so the caller books one number and displays the other without re-deriving either.
+ *
+ * `longStrike` is always the leg we bought. For a put credit spread that is the LOWER strike —
+ * the protective one — and `shortStrike` is the higher strike we sold.
+ */
+export function settleAtExpiry(p: {
+  structure: string | null;
+  longStrike: number;
+  shortStrike?: number | null;
+  widthUsd?: number | null;
+  close: number;
+  capitalAtRiskUsd: number;
+  creditUsd: number;
+}): { valueUsd: number; pnlUsd: number } {
+  if (isCreditStructure(p.structure)) {
+    // The short leg is the one that can hurt: a put credit spread loses as the close falls
+    // through the short strike, and stops losing at the long strike. Capped at the width.
+    const short = p.shortStrike ?? p.longStrike;
+    const width = p.widthUsd ?? Math.abs(short - p.longStrike) * 100;
+    const loss = Math.min(Math.max(0, (short - p.close) * 100), width);
+    const pnlUsd = p.creditUsd - loss;
+    return { valueUsd: Math.max(0, p.capitalAtRiskUsd + pnlUsd), pnlUsd };
+  }
+  // Debit: intrinsic on the long leg, capped at the width when there is a short leg above it.
+  const rawIntrinsic = Math.max(0, p.close - p.longStrike) * 100;
+  const cap = p.shortStrike != null && p.widthUsd != null ? p.widthUsd : Infinity;
+  const valueUsd = Math.min(rawIntrinsic, cap);
+  return { valueUsd, pnlUsd: valueUsd - p.capitalAtRiskUsd };
 }
 
 // ---------- Position budget + book caps ----------
@@ -289,7 +453,7 @@ export function isExitSignal(bars: Bar[]): boolean {
 // the single structural fact that makes short-dated options a bad instrument.
 export const DTE_FLOOR = 21;
 export const PREMIUM_STOP_FRAC = 0.50;
-export type ExitReason = "trend exit" | "dte floor" | "premium stop" | null;
+export type ExitReason = "trend exit" | "dte floor" | "premium stop" | "assignment risk" | null;
 
 export function exitReason(p: { trendExit: boolean; dte: number; markUsd: number; costUsd: number }): ExitReason {
   if (p.trendExit) return "trend exit";

@@ -6,9 +6,17 @@ import { Note, PageHeader, Panel, PanelBody, PanelHeader } from "@/components/ui
 import { ago, minutesSince } from "@/lib/format";
 
 // ============ SYSTEM HEALTH ============
-// Kraken MARGIN era (spot trend bot retired Aug 2026). One job: prove the LIVE machinery is
-// alive — the margin scanner + guardian crons, trade sync, the webhook — and go amber/red the
-// moment any piece stops writing its heartbeat. Plus the executor's real-money arm-state.
+// Two jobs now.
+//
+// KRAKEN (real money): prove the live machinery is alive — the margin scanner + guardian
+// crons, trade sync, the webhook — and go amber/red the moment any piece stops writing its
+// heartbeat. Plus the executor's arm-state.
+//
+// ROBINHOOD OPTIONS (paper): prove the quote inbox is still being fed. That book's data path
+// is a scheduled agent on Spencer's Mac, because Robinhood has no server credentials. If the
+// agent stops, the book freezes silently — positions stop marking, stops go unchecked, and
+// every page still renders perfectly. The options page carries its own banner, but nobody
+// watches a paper page daily. It belongs here, next to the crons, for the same reason.
 
 interface CommandData {
   heartbeats: {
@@ -19,6 +27,16 @@ interface CommandData {
   };
   config: { marginAuto: boolean; marginValidateOnly: boolean; shadowAutotrack: boolean; drawdownDisarmed: boolean };
   execLock: { held: boolean; since: string | null };
+  paper: {
+    optionsScan: string | null;
+    stockScan: string | null;
+    optionsAutotrack: boolean;
+    stockAutotrack: boolean;
+    robinhood: {
+      newestQuoteTs: string | null; quoteAgeMinutes: number | null; quotesStale: boolean;
+      quoteRows: number; openPositions: number; optionLevel: string | null; accountAt: string | null;
+    };
+  };
   error?: string;
 }
 
@@ -87,11 +105,13 @@ export default function SystemHealthPage() {
     { label: "Drawdown breaker", on: data.config.drawdownDisarmed, onText: "tripped", offText: "clear", onTone: "red", offTone: "green" },
   ];
 
+  const rh = data.paper.robinhood;
+
   return (
     <div className="space-y-5">
       <PageHeader
         title="System Health"
-        sub="Kraken margin machinery heartbeats — refreshes every 30s"
+        sub="Kraken margin machinery and the Robinhood options feed — refreshes every 30s"
         right={<Chip tone={armed ? "red" : "grey"} dot={armed} size="md">{armed ? "Executor armed — real orders" : "Paper / tracked — no real money"}</Chip>}
       />
 
@@ -124,7 +144,54 @@ export default function SystemHealthPage() {
         </Panel>
       </div>
 
-      <Note>The spot trend bot was retired; its machinery is no longer monitored here.</Note>
+      <Panel tone={rh.quotesStale ? "red" : undefined}>
+        <PanelHeader
+          title="Options paper book — Robinhood"
+          aside={
+            <Chip tone={rh.quotesStale ? "red" : "green"} dot={rh.quotesStale} size="md">
+              {rh.newestQuoteTs ? `quotes ${ago(rh.newestQuoteTs)}` : "no quotes ever pushed"}
+            </Chip>
+          }
+        />
+        <PanelBody className="divide-y divide-border">
+          <HealthRow
+            label="Quote inbox"
+            sub="pushed by the scheduled agent — weekdays 17:32 after the close"
+            chip={<Chip tone={rh.quotesStale ? "red" : "green"} dot={rh.quotesStale}>{rh.newestQuoteTs ? ago(rh.newestQuoteTs) : "never"}</Chip>}
+          >
+            {rh.quoteRows > 0 && <span>{rh.quoteRows} contracts</span>}
+          </HealthRow>
+          <HealthRow
+            label="Options scan"
+            sub="daily cron, 6pm ET"
+            chip={<Chip tone={ageTone(data.paper.optionsScan, 60 * 30, 60 * 50)}>{data.paper.optionsScan ? ago(data.paper.optionsScan) : "never"}</Chip>}
+          />
+          <HealthRow
+            label="Open paper positions"
+            chip={<Chip tone={rh.openPositions > 0 ? "blue" : "grey"}>{rh.openPositions}</Chip>}
+          />
+          <HealthRow
+            label="Account snapshot"
+            sub={rh.optionLevel === "option_level_3" ? "Level 3 — spreads available" : rh.optionLevel === "option_level_2" ? "Level 2 — long premium only" : undefined}
+            chip={<Chip tone={rh.accountAt ? "green" : "grey"}>{rh.accountAt ? ago(rh.accountAt) : "never"}</Chip>}
+          />
+          <HealthRow
+            label="New paper entries"
+            chip={<Chip tone={data.paper.optionsAutotrack ? "green" : "amber"}>{data.paper.optionsAutotrack ? "tracking" : "paused"}</Chip>}
+          />
+        </PanelBody>
+        {rh.quotesStale && (
+          <PanelBody className="pt-0">
+            <Note className="text-down">
+              The quote inbox is stale, so this book is frozen rather than quiet: positions are not marking and no entry can open.
+              Robinhood cannot be read from the server — check the agent on the Mac
+              (<code>launchctl print gui/$(id -u)/com.esbueno.options-desk</code>) and that its login is still authenticated.
+            </Note>
+          </PanelBody>
+        )}
+      </Panel>
+
+      <Note>The spot trend bot and the stock paper book were both retired; their machinery is no longer monitored here.</Note>
     </div>
   );
 }

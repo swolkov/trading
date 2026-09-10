@@ -20,19 +20,49 @@ interface Sleeve {
   voided: number; days: number; tStat: number | null; verdict: string;
   avgSpreadPct: number | null; entriesThisMonth: number;
 }
+interface StructureStat {
+  structure: string; resolved: number; wins: number; hitRate: number | null;
+  totalPnl: number; avgPnlPct: number | null; open: number; openPremium: number;
+}
 interface TradeRow {
   id: number; time: string; symbol: string; source: string; occ: string; strike: number | null;
+  structure: string; shortStrike: number | null; widthUsd: number | null; creditUsd: number;
+  proceedsUsd: number | null; crossingUsd: number | null;
+  assignmentLevel: string | null; assignmentNote: string | null;
   expiry: string | null; entryAsk: number; costUsd: number; markUsd: number | null; peakUsd: number | null;
   exitBid: number | null; pnl: number | null; pnlPct: number | null; status: string; reason: string | null;
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
 }
 interface Rules { maxEntriesPerMonth: number; maxConcurrent: number; maxSpreadPct: number; minDte: number; maxDte: number; minDelta: number; maxDelta: number }
 interface LastResult { at: string; scanned: number; signals: string[]; fresh: string[]; opened: string[]; refused: string[] }
+interface Account {
+  accountNumber: string; type: string; optionLevel: string; cash: number;
+  buyingPower: number; optionsValue: number; totalValue: number; at: string; minutesAgo: number;
+}
+interface QuoteStore { newestQuoteTs: string | null; rows: number; ageMinutes: number | null; stale: boolean }
+interface ChainRequest {
+  symbol: string; spot: number; budgetUsd: number;
+  expiryFrom: string; expiryTo: string; strikeMin: number; strikeMax: number; requestedAt: string;
+}
+interface ScenarioSet { id: number; symbol: string; spot: number; points: { move: number; price: number; pnl: number }[] }
 interface Payload {
   simVersion: string; rules: Rules; universe: { symbol: string; group: string }[];
   excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[];
   lastRun: string | null; lastResult: LastResult | null;
+  account: Account | null; quoteStore: QuoteStore; chainRequests: ChainRequest[];
+  structures: StructureStat[];
+  scenarios: ScenarioSet[];
 }
+
+const mask = (a: string) => `••••${a.slice(-4)}`;
+const structureLabel = (s: string) =>
+  s === "call_spread" ? "Call debit spread"
+  : s === "put_credit_spread" ? "Put credit spread"
+  : "Naked ITM call";
+const levelLabel = (l: string) =>
+  l === "option_level_3" ? "Level 3 — spreads unlocked"
+  : l === "option_level_2" ? "Level 2 — long premium only"
+  : l || "no options access";
 
 export default function OptionsPaperPage() {
   const { data } = useSWR<Payload>("/api/options/paper", fetcher, { refreshInterval: 60_000 });
@@ -42,6 +72,15 @@ export default function OptionsPaperPage() {
   const groups = (data?.universe ?? []).reduce<Record<string, string[]>>((acc, n) => {
     (acc[n.group] ||= []).push(n.symbol); return acc;
   }, {});
+  const account = data?.account ?? null;
+  const chainRequests = data?.chainRequests ?? [];
+  const structures = data?.structures ?? [];
+  const scenarios = data?.scenarios ?? [];
+  // Quotes are PUSHED by a scheduled agent, not fetched by this app — so their age is a
+  // safety number, not a nicety. Staleness is decided on the server against the very same
+  // threshold the reads enforce, so this banner can never disagree with the behaviour.
+  // While data is still loading, say nothing rather than cry wolf.
+  const quotesStale = !!data && data.quoteStore.stale;
 
   return (
     <div className="space-y-5">
@@ -53,8 +92,88 @@ export default function OptionsPaperPage() {
           <Chip tone="grey" size="md" title="Runs once a day after the close, Mon–Fri">
             {data?.lastRun ? `Scanned ${ago(data.lastRun)}` : "No run yet"}
           </Chip>
+          {account && (
+            <Chip tone={account.optionLevel === "option_level_3" ? "green" : "amber"} size="md"
+                  title="Level 3 unlocks spreads; Level 2 can only buy premium">
+              {levelLabel(account.optionLevel)}
+            </Chip>
+          )}
+          <Chip tone={quotesStale ? "red" : "green"} size="md" dot={quotesStale}
+                title="Robinhood quotes are pushed in by a scheduled agent — the app holds no Robinhood credentials.">
+            {data?.quoteStore?.newestQuoteTs ? `Quotes ${ago(data.quoteStore.newestQuoteTs)}` : "No quotes pushed yet"}
+          </Chip>
         </>}
       />
+
+      {quotesStale && (
+        <Panel tone="red"><PanelBody className="py-3">
+          <p className="text-[13px] font-semibold text-down">Quote inbox is stale — this book is frozen, not quiet.</p>
+          <Note className="mt-1">
+            Robinhood has no server credentials, so quotes only arrive when the scheduled agent runs.
+            {data?.quoteStore?.newestQuoteTs
+              ? ` The freshest quote is ${ago(data.quoteStore.newestQuoteTs)} old.`
+              : " No quotes have ever been pushed."}
+            {" "}Past 36 hours the book refuses them outright: open positions stop marking and no entry can open.
+            Run the <code>options-desk</code> skill, or check that the agent&apos;s Robinhood login is still authenticated.
+          </Note>
+        </PanelBody></Panel>
+      )}
+
+      {chainRequests.length > 0 && (
+        <Panel tone="amber">
+          <PanelHeader title={`Waiting on ${chainRequests.length} option chain${chainRequests.length === 1 ? "" : "s"}`}
+                       aside={<Label>the scanner found a signal it could not price</Label>} />
+          <PanelBody className="p-0">
+            <DataTable dense>
+              <thead><tr><Th>Symbol</Th><Th num>Spot</Th><Th num>Budget</Th><Th>Expiry window</Th><Th>Requested</Th></tr></thead>
+              <tbody>
+                {chainRequests.map((r) => (
+                  <Row key={r.symbol}>
+                    <Td strong>{r.symbol}</Td>
+                    <Td num>{r.spot > 0 ? usd(r.spot) : "—"}</Td>
+                    <Td num muted>{r.budgetUsd > 0 ? usd(r.budgetUsd) : "—"}</Td>
+                    <Td muted>{r.expiryFrom} → {r.expiryTo}</Td>
+                    <Td muted>{when(r.requestedAt)}</Td>
+                  </Row>
+                ))}
+              </tbody>
+            </DataTable>
+          </PanelBody>
+          <PanelBody className="pt-0">
+            <Note>
+              These are real signals held up on data, not refusals. The next agent run fetches the chain and the entry is
+              decided then. On a book that takes two entries a month with 60–120 day holds, an hour of latency costs nothing —
+              but a request sitting here for days means the agent is not running.
+            </Note>
+          </PanelBody>
+        </Panel>
+      )}
+
+      <Panel>
+        <PanelHeader title="Robinhood account"
+                     aside={account ? <Label title={`Pushed ${when(account.at)}`}>as of {ago(account.at)}</Label> : undefined} />
+        <PanelBody>
+          {account ? (
+            <>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+                <Stat label="Buying power" value={usd(account.buyingPower)} sub={`${mask(account.accountNumber)} · ${account.type.replace(/_/g, " ")}`} />
+                <Stat label="Cash" value={usd(account.cash)} />
+                <Stat label="Options value" value={usd(account.optionsValue)} />
+                <Stat label="Account value" value={usd(account.totalValue)} />
+                <Stat label="Options level" value={account.optionLevel === "option_level_3" ? "Level 3" : "Level 2"} sub={levelLabel(account.optionLevel)} />
+              </div>
+              {account.optionLevel !== "option_level_3" && (
+                <Note className="mt-3">
+                  At Level 2 the only strategy available is <strong>buying premium</strong> — which is what this book does. Level 3 (spreads) was applied
+                  for on Sep 9 2026; this flips automatically once Robinhood approves it.
+                </Note>
+              )}
+            </>
+          ) : (
+            <Note>No account snapshot yet — the scheduled agent writes this on its first run.</Note>
+          )}
+        </PanelBody>
+      </Panel>
 
       <Explainer title="What this is testing, and why it is slow on purpose">
         <p>
@@ -76,10 +195,15 @@ export default function OptionsPaperPage() {
           require real size behind the bid and a recent quote, so a phantom price on an untraded strike cannot book a profit.
         </p>
         <p>
-          <strong>One caveat, stated plainly:</strong> this account is not signed up for the OPRA agreement, so quotes come from Alpaca&apos;s
-          <em> indicative</em> feed rather than the executable NBBO. That is real market data, not a model — but the true tradeable spread may be wider than
-          what is recorded here, which means these results are, if anything, <strong>flattering</strong>. Signing the OPRA agreement in the Alpaca dashboard
-          upgrades every number on this page with no other change.
+          <strong>Quotes now come from Robinhood</strong> (moved off Alpaca on Sep 9 2026) — the venue these trades would actually be placed on, with real
+          bid/ask, quote sizes, implied volatility and greeks. Measuring on the broker you would trade at removes a whole class of doubt: the spread recorded
+          here is the spread you would have paid.
+        </p>
+        <p>
+          <strong>The caveat that replaces the old one:</strong> Robinhood has no server credentials — its only official route is a login bound to a Claude
+          session — so quotes are <em>pushed in</em> by a scheduled agent rather than fetched live by this app. A quote older than 36 hours is refused
+          outright, so a position is left unmarked rather than marked at a stale price, and a stale chain can never open a trade. The freshness of the
+          data is shown at the top of this page: if it is red, believe the timestamp, not the prices.
         </p>
         <p>
           The other trade-off: this can only measure forward. At two entries a month, a 30-trade verdict is roughly <strong>15 months</strong> away. It is a
@@ -168,6 +292,78 @@ export default function OptionsPaperPage() {
         </Panel>
       )}
 
+      {scenarios.length > 0 && (
+        <Panel>
+          <PanelHeader title="Payoff at expiry" aside={<Label>open positions, terminal values only</Label>} />
+          <PanelBody className="p-0">
+            <DataTable dense>
+              <thead>
+                <tr>
+                  <Th>Position</Th>
+                  {scenarios[0].points.map((pt) => (
+                    <Th key={pt.move} num>{pt.move === 0 ? "flat" : `${pt.move > 0 ? "+" : "−"}${Math.abs(pt.move * 100).toFixed(0)}%`}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {scenarios.map((sc) => (
+                  <Row key={sc.id}>
+                    <Td strong>{sc.symbol}<span className="ml-2 text-[11px] text-muted-foreground">spot {usd(sc.spot)}</span></Td>
+                    {sc.points.map((pt) => (
+                      <Td key={pt.move} num className={tone(pt.pnl)} title={`underlying ${usd(pt.price)}`}>{pnl2(pt.pnl)}</Td>
+                    ))}
+                  </Row>
+                ))}
+              </tbody>
+            </DataTable>
+          </PanelBody>
+          <PanelBody className="pt-0">
+            <Note>
+              These are values <strong>at expiry</strong>, not tomorrow. Working out what a position is worth part-way through
+              would need a price model, and this book deliberately never models a price — it buys at the quoted ask and sells at
+              the quoted bid. A losing column here is what the position settles at if the stock simply sits there.
+            </Note>
+          </PanelBody>
+        </Panel>
+      )}
+
+      {structures.length > 0 && (
+        <Panel>
+          <PanelHeader title="Naked calls vs spreads" aside={<Label>did capping the winner cost more than it bought?</Label>} />
+          <PanelBody className="p-0">
+            <DataTable>
+              <thead>
+                <tr><Th>Structure</Th><Th num>Resolved</Th><Th num>Hit rate</Th><Th num>Avg return</Th><Th num>Net P&L</Th><Th num>Open</Th></tr>
+              </thead>
+              <tbody>
+                {structures.map((st) => (
+                  <Row key={st.structure}>
+                    <Td strong>{structureLabel(st.structure)}</Td>
+                    <Td num>{st.resolved}</Td>
+                    <Td num>{st.hitRate != null ? pct(st.hitRate) : "—"}</Td>
+                    <Td num className={st.avgPnlPct != null ? tone(st.avgPnlPct) : ""}>
+                      {st.avgPnlPct != null ? `${st.avgPnlPct < 0 ? "−" : "+"}${Math.abs(st.avgPnlPct * 100).toFixed(0)}%` : "—"}
+                    </Td>
+                    <Td num className={tone(st.totalPnl)}>{pnl2(st.totalPnl)}</Td>
+                    <Td num muted>{st.open}{st.openPremium > 0 ? ` · ${usd(st.openPremium)}` : ""}</Td>
+                  </Row>
+                ))}
+              </tbody>
+            </DataTable>
+          </PanelBody>
+          <PanelBody className="pt-0">
+            <Note>
+              Capital at risk is what every column below is measured against — the debit for a debit position, the collateral
+              (width minus credit) for a credit one. A credit spread risks <em>more</em> than it collects, always.
+              {" "}A debit spread is a <strong>compromise, not an upgrade</strong>. This book has no take-profit because capping winners is what turns a
+              trend rule negative — and a vertical caps the winner by construction. It is used only when the naked call will not fit the budget,
+              which below roughly $4,500 is most of the time on a liquid name. This table is how we find out whether the cap cost more than it bought,
+              instead of assuming either way.
+            </Note>
+          </PanelBody>
+        </Panel>
+      )}
+
       <Panel>
         <PanelHeader title="Position log" aside={<Label>{trades.length} shown</Label>} />
         <PanelBody>
@@ -175,7 +371,7 @@ export default function OptionsPaperPage() {
             <thead>
               <tr>
                 <Th>When</Th><Th>Sleeve</Th><Th>Contract</Th><Th num>Δ / spread</Th>
-                <Th num>Paid</Th><Th num>Mark / exit</Th><Th num>P&L <span className="normal-case opacity-60">(open = unreal.)</span></Th><Th>Status</Th>
+                <Th num>At risk</Th><Th num>Mark / exit</Th><Th num>P&L <span className="normal-case opacity-60">(open = unreal.)</span></Th><Th>Status</Th>
               </tr>
             </thead>
             <tbody>
@@ -183,20 +379,44 @@ export default function OptionsPaperPage() {
               <Row key={t.id}>
                 <Td title={when(t.time)}>{ago(t.time)}</Td>
                 <Td>{t.source}</Td>
-                <Td className="whitespace-nowrap">{t.symbol} ${t.strike ?? "—"} {t.expiry ?? ""}</Td>
-                <Td num>{t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}</Td>
+                <Td className="whitespace-nowrap">
+                  {/* A credit spread is quoted short-strike-first, the way it is traded. */}
+                  {t.symbol}{" "}
+                  {t.structure === "put_credit_spread" && t.shortStrike != null
+                    ? <>${t.shortStrike}<span className="text-muted-foreground">/${t.strike}p</span></>
+                    : <>${t.strike ?? "—"}{t.shortStrike != null && <span className="text-muted-foreground">/${t.shortStrike}</span>}</>}
+                  {" "}{t.expiry ?? ""}
+                  {t.structure === "call_spread" && <Chip tone="blue" className="ml-1.5">debit</Chip>}
+                  {t.structure === "put_credit_spread" && <Chip tone="amber" className="ml-1.5" title={`$${t.creditUsd.toFixed(0)} credit received`}>credit</Chip>}
+                </Td>
+                <Td num title={t.crossingUsd != null ? `${usd(t.crossingUsd)} crossed on entry, all legs` : undefined}>
+                  {t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}
+                  {t.crossingUsd != null && <span className="ml-1 text-[11px] text-muted-foreground">{usd(t.crossingUsd)}</span>}
+                </Td>
                 <Td num>{usd(t.costUsd)}</Td>
-                <Td num>{t.status === "resolved" ? (t.exitBid != null ? usd(t.exitBid * 100) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>
+                {/* On exit this must be what the WHOLE position was worth. exit_bid is only
+                    the long leg, so on any spread it contradicted the P&L in the next column —
+                    a winning credit spread showed +$80 P&L beside a $40 "exit". */}
+                <Td num>{t.status === "resolved" ? (t.proceedsUsd != null ? usd(t.proceedsUsd) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>
                 {/* An open row has everything needed to show its P&L (paid vs mark); a bare dash
                     hides exactly the spread cost this book exists to measure. Shown in parentheses
                     so it reads as unrealized and is never mistaken for a booked result. */}
                 <Td num className={t.pnl != null ? tone(t.pnl) : t.markUsd != null ? tone(t.markUsd - t.costUsd) : ""}>
                   {t.pnl != null ? pnl2(t.pnl) : t.markUsd != null ? `(${pnl2(t.markUsd - t.costUsd)})` : "—"}
                 </Td>
-                <Td title={t.reason ?? ""}>
+                <Td title={t.reason ?? t.assignmentNote ?? ""}>
                   <Chip tone={t.status === "resolved" ? (t.pnl != null && t.pnl >= 0 ? "green" : "red") : t.status === "void" ? "amber" : "paper"}>
                     {t.status === "resolved" ? (t.reason ?? "closed") : t.status}
                   </Chip>
+                  {/* Every assignment finding describes somewhere the 21-day floor should
+                      already have taken us out of. Seeing one on an OPEN row means the floor
+                      did not fire — which on this desk means the agent stopped. */}
+                  {t.status === "open" && t.assignmentLevel && (
+                    <Chip tone={t.assignmentLevel === "high" ? "red" : "amber"} dot={t.assignmentLevel === "high"}
+                          className="ml-1.5" title={t.assignmentNote ?? undefined}>
+                      {t.assignmentLevel === "high" ? "assignment risk" : "watch"}
+                    </Chip>
+                  )}
                 </Td>
               </Row>
             ))}

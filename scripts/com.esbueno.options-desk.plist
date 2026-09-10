@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.esbueno.options-desk</string>
+
+  <!-- Robinhood's options quotes cannot be fetched from a server: the login lives on this
+       machine. This job is the options paper book's entire data path. It runs after the US
+       close so the daily bars the trend signal reads are settled and the option quotes are
+       the day's real closing marks — running before the open returns the PREVIOUS session's
+       quote, which is stale by a day. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>S=/Users/user/trading/scripts/options-desk-run.sh; if [ -x "$S" ]; then exec "$S"; else echo "$(date -u +%FT%TZ) [skip] runner not installed at $S (Robinhood port not merged yet)" >> "$HOME/Library/Logs/options-desk.log"; fi</string>
+  </array>
+
+  <!-- Weekdays, 17:32 local. After the 16:00 close, before the Vercel cron at 18:00 ET.
+       Off the :00/:30 marks on purpose. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>32</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>32</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>32</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>32</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>32</integer></dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/Users/user/Library/Logs/options-desk-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/Library/Logs/options-desk-launchd.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
