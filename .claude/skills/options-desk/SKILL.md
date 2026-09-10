@@ -76,7 +76,10 @@ is the cost of comparing expiries and structures properly; the book still takes 
 entries a month, so it is paid rarely.
 
 ### 4. Write the payload and run
-Write JSON to the scratchpad — quotes in **Robinhood's own shape**; the script derives the
+Write the JSON to a **temp path outside the repo** — `"$TMPDIR/options-payload.json"` or the
+session scratchpad. **Never the repo root:** the scheduled job runs from a machine-managed
+checkout that is reset and cleaned every run, and a stray file there is either wiped without
+warning or quietly accumulates. Quotes go in **Robinhood's own shape**; the script derives the
 OCC key and rejects anything that does not round-trip:
 ```json
 {
@@ -92,7 +95,7 @@ OCC key and rejects anything that does not round-trip:
 ```
 Then:
 ```bash
-node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest <payload.json>
+node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest "$TMPDIR/options-payload.json"
 ```
 This writes the quotes and then runs **the same scan the daily cron runs**, so a chain
 filled now can open a position now. Report what it prints: quotes written, resolved, opened,
@@ -141,6 +144,13 @@ The runner drives `claude -p` with a tight `--allowedTools` list (the Robinhood 
 tools plus the two script invocations) and an explicit `--disallowedTools` list naming every
 Robinhood order tool. That allowlist, not this document's prose, is what actually prevents
 an unattended session from placing an order.
+
+It runs from a **dedicated checkout at `/Users/user/trading-rh-options`**, not the main working
+tree — that tree belongs to interactive sessions and usually carries dozens of uncommitted
+money-path files, which a scheduled job must never depend on or disturb. The checkout is
+fast-forwarded to `origin/main` and cleaned BEFORE the runner is invoked (before, so a script is
+never replaced while bash is still reading it). If the update fails the run proceeds anyway:
+marking open positions and checking their stops matters more than being current.
 
 Log: `~/Library/Logs/options-desk.log`. Manage with:
 ```bash

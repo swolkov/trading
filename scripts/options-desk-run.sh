@@ -16,9 +16,10 @@
 # mistake. Both lists must be edited to break that, which is the point.
 set -u
 
-# Defaults to the main checkout; OPTIONS_DESK_REPO overrides it so the job can be tested
-# against a worktree before the port merges.
-REPO="${OPTIONS_DESK_REPO:-/Users/user/trading}"
+# Defaults to the DEDICATED desk checkout, not the main working tree — that tree belongs to
+# interactive sessions and usually carries uncommitted money-path work. OPTIONS_DESK_REPO
+# overrides it for testing.
+REPO="${OPTIONS_DESK_REPO:-/Users/user/trading-rh-options}"
 LOG="$HOME/Library/Logs/options-desk.log"
 mkdir -p "$(dirname "$LOG")"
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ }
