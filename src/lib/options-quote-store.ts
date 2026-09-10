@@ -145,6 +145,12 @@ export async function getStoredChain(p: {
 }
 
 // ---------- Chain requests ----------
+/** File (or widen) a request for a symbol's chain.
+ *
+ *  Keyed by symbol alone, and the strike window WIDENS on conflict rather than replacing.
+ *  The scanner asks twice per symbol — once for the call window, once for the narrow put band
+ *  the expected-move straddle needs — and a plain overwrite would leave only the second one,
+ *  so the agent would fetch puts and no calls and the symbol would silently never trade. */
 export async function requestChain(p: {
   symbol: string; spot: number; budgetUsd: number;
   expiryFrom: string; expiryTo: string; strikeMin: number; strikeMax: number;
@@ -154,8 +160,11 @@ export async function requestChain(p: {
     `INSERT INTO options_chain_requests (symbol, spot, budget_usd, expiry_from, expiry_to, strike_min, strike_max, requested_at, fulfilled_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7, now(), NULL)
      ON CONFLICT (symbol) DO UPDATE SET
-       spot=EXCLUDED.spot, budget_usd=EXCLUDED.budget_usd, expiry_from=EXCLUDED.expiry_from,
-       expiry_to=EXCLUDED.expiry_to, strike_min=EXCLUDED.strike_min, strike_max=EXCLUDED.strike_max,
+       spot=EXCLUDED.spot, budget_usd=EXCLUDED.budget_usd,
+       expiry_from=LEAST(options_chain_requests.expiry_from, EXCLUDED.expiry_from),
+       expiry_to=GREATEST(options_chain_requests.expiry_to, EXCLUDED.expiry_to),
+       strike_min=LEAST(options_chain_requests.strike_min, EXCLUDED.strike_min),
+       strike_max=GREATEST(options_chain_requests.strike_max, EXCLUDED.strike_max),
        requested_at=now(), fulfilled_at=NULL`,
     p.symbol, p.spot, p.budgetUsd, p.expiryFrom, p.expiryTo, p.strikeMin, p.strikeMax,
   );

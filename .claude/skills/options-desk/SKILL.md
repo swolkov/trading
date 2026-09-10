@@ -51,14 +51,26 @@ never by OCC):
    `strike_price` = its strike, `type` → the instrument UUID.
 3. `get_option_quotes` on those UUIDs, batched ≤ 20.
 
-For each entry in `chainRequests`:
-1. `get_option_chains` → the expirations inside `[expiryFrom, expiryTo]`.
-2. `get_option_instruments` per matching expiry, `type: "call"`, following `next` only until
-   the strikes span `[strikeMin, strikeMax]`.
-3. `get_option_quotes` on those strikes, batched ≤ 20. Cap at ~60 contracts per symbol; if
-   the window holds more, keep the ones nearest **0.80 × spot** — the 0.70–0.85 delta band
-   the model selects from sits there. **Do not pre-filter on delta or spread yourself**;
-   `pickContract` applies the real gates and skipping them would bypass the review.
+For each entry in `chainRequests` — **fetch BOTH calls and puts**:
+1. `get_option_chains` → the expirations inside `[expiryFrom, expiryTo]`. Fetch **every**
+   expiry in that window, not just the nearest: the engine compares them against each other.
+2. `get_option_instruments` per matching expiry, once with `type: "call"` and once with
+   `type: "put"`, following `next` only until the strikes span `[strikeMin, strikeMax]`.
+3. `get_option_quotes` on those strikes, batched ≤ 20.
+   - **Calls** are what the position is built from — long leg deep in the money, short leg
+     above spot. Keep the ones between roughly **0.60 × and 1.30 × spot**.
+   - **Puts** are needed only for the at-the-money straddle, which is what supplies the
+     expected move every structure is ranked against. A few strikes either side of spot is
+     enough — roughly **0.92 × to 1.08 × spot**.
+   - **Without a put near the money there is no straddle, no expected move, and that expiry
+     is skipped entirely.** If a symbol keeps producing no trade, check the puts arrived.
+4. **Do not pre-filter on delta, spread or price yourself.** The engine applies the real
+   gates — liquidity on every leg, budget, and profitability at the expected move — and
+   filtering first would quietly bypass rules that were reviewed.
+
+Budget: roughly 120–150 contracts per requested symbol now that both sides are fetched. That
+is the cost of comparing expiries and structures properly; the book still takes at most two
+entries a month, so it is paid rarely.
 
 ### 4. Write the payload and run
 Write JSON to the scratchpad — quotes in **Robinhood's own shape**; the script derives the

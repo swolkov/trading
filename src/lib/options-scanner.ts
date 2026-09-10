@@ -9,8 +9,11 @@
 import { getDailyBars, getOptionChain } from "@/lib/rh-options-data";
 import {
   MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type Structure,
-  isEntrySignal, pickPosition,
+  isEntrySignal,
 } from "@/lib/options-paper-model";
+import {
+  type Candidate, atmOf, buildCandidates, expectedMove, selectStructure,
+} from "@/lib/options-structures";
 
 export interface TrendCandidate { symbol: string; close: number; bars: { t: string; c: number; h: number; l: number }[] }
 
@@ -66,29 +69,69 @@ export async function pickContractFor(symbol: string, underlying: number, budget
   // `symbol` is the ticker the chain is requested for; `underlying` is its spot price and
   // only shapes the strike window. Keeping them distinct matters — an earlier draft passed
   // the price where the ticker belongs and a type assertion hid it.
-  // budgetUsd and spot are passed through so that, when the chain is not yet in the push
-  // inbox, the request filed for the agent carries everything it needs to fetch it.
-  const quotes = await getOptionChain({
-    underlying: symbol, expiryFrom: from, expiryTo: to,
-    strikeMin: underlying * 0.60, strikeMax: underlying * 0.97, type: "call",
-    budgetUsd, spot: underlying,
+  //
+  // The call window runs from deep in the money (the long leg) out past spot (the short leg
+  // of a vertical). Puts are fetched in a narrow band around spot for one reason only: the
+  // at-the-money straddle is what gives the expected move, and the expected move is the
+  // yardstick every structure is ranked against.
+  const [calls, puts] = await Promise.all([
+    getOptionChain({
+      underlying: symbol, expiryFrom: from, expiryTo: to,
+      strikeMin: underlying * 0.60, strikeMax: underlying * 1.30, type: "call",
+      budgetUsd, spot: underlying,
+    }),
+    getOptionChain({
+      underlying: symbol, expiryFrom: from, expiryTo: to,
+      strikeMin: underlying * 0.92, strikeMax: underlying * 1.08, type: "put",
+      budgetUsd, spot: underlying,
+    }),
+  ]);
+  if (!calls.length) return null;
+
+  const asContract = (q: (typeof calls)[number]): Contract => ({
+    occ: q.occ, strike: q.strike, expiry: q.expiry, delta: q.delta ?? 0,
+    bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize,
   });
-  const candidates: Contract[] = quotes
-    .filter((q) => q.delta != null)
-    .map((q) => ({
-      occ: q.occ, strike: q.strike, expiry: q.expiry, delta: q.delta as number,
-      bid: q.bid, ask: q.ask, bidSize: q.bidSize, askSize: q.askSize,
-    }));
-  const pick = pickPosition(candidates, budgetUsd);
-  if (!pick) return null;
-  const iv = quotes.find((q) => q.occ === pick.contract.occ)?.iv ?? null;
+  const callContracts = calls.filter((q) => q.delta != null).map(asContract);
+  const putContracts = puts.map(asContract);
+
+  // COMPARE EVERY LISTED EXPIRY IN THE WINDOW, rather than defaulting to the nearest one.
+  // Each expiry is judged against ITS OWN expected move, because a 60-day move and a
+  // 120-day move are not the same benchmark.
+  const expiries = [...new Set(callContracts.map((c) => c.expiry))].sort();
+  let best: { cand: Candidate; ret: number; iv: number | null } | null = null;
+  for (const expiry of expiries) {
+    const em = expectedMove(atmOf(callContracts, underlying, expiry), atmOf(putContracts, underlying, expiry), underlying);
+    // No straddle, no yardstick, no trade on that expiry. Guessing one would put a modelled
+    // number at the centre of a book whose whole claim is that it never models a price.
+    if (em == null || !(em > 0)) continue;
+    const cands = buildCandidates({
+      calls: callContracts, puts: putContracts, spot: underlying, expiry, budgetUsd,
+      // Credit structures are BUILT and tested in options-structures.ts but not enabled here:
+      // the position lifecycle (opening mark, exit fill, expiry settlement) is written for a
+      // position you paid for, and inverting it for one you were paid for is a separate change
+      // with its own review. Enabling them before that would book credit trades through
+      // debit-shaped arithmetic.
+      kinds: ["long_call", "call_debit"],
+    });
+    const sel = selectStructure(cands, underlying, em);
+    if (!sel) continue;
+    if (!best || sel.returnAtRef > best.ret) {
+      const iv = calls.find((q) => q.occ === sel.best.legs[0].contract.occ)?.iv ?? null;
+      best = { cand: sel.best, ret: sel.returnAtRef, iv };
+    }
+  }
+  if (!best) return null;
+
+  const longLeg = best.cand.legs.find((l) => l.side === "buy")!.contract;
+  const shortLeg = best.cand.legs.find((l) => l.side === "sell")?.contract;
   return {
-    structure: pick.structure,
-    contract: pick.contract,
-    short: pick.structure === "call_spread" ? pick.short : undefined,
-    costUsd: pick.costUsd,
-    spreadPct: pick.spreadPct,
-    widthUsd: pick.structure === "call_spread" ? pick.widthUsd : undefined,
-    symbol, underlying, iv,
+    structure: shortLeg ? "call_spread" : "call",
+    contract: longLeg,
+    short: shortLeg,
+    costUsd: best.cand.capitalAtRiskUsd,
+    spreadPct: ((longLeg.ask - longLeg.bid) / ((longLeg.ask + longLeg.bid) / 2)) * 100,
+    widthUsd: shortLeg ? Math.abs(shortLeg.strike - longLeg.strike) * 100 : undefined,
+    symbol, underlying, iv: best.iv,
   };
 }
