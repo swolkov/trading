@@ -28,11 +28,27 @@ interface TradeRow {
 }
 interface Rules { maxEntriesPerMonth: number; maxConcurrent: number; maxSpreadPct: number; minDte: number; maxDte: number; minDelta: number; maxDelta: number }
 interface LastResult { at: string; scanned: number; signals: string[]; fresh: string[]; opened: string[]; refused: string[] }
+interface Account {
+  accountNumber: string; type: string; optionLevel: string; cash: number;
+  buyingPower: number; optionsValue: number; totalValue: number; at: string; minutesAgo: number;
+}
+interface QuoteStore { newestQuoteTs: string | null; rows: number; ageMinutes: number | null; stale: boolean }
+interface ChainRequest {
+  symbol: string; spot: number; budgetUsd: number;
+  expiryFrom: string; expiryTo: string; strikeMin: number; strikeMax: number; requestedAt: string;
+}
 interface Payload {
   simVersion: string; rules: Rules; universe: { symbol: string; group: string }[];
   excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[];
   lastRun: string | null; lastResult: LastResult | null;
+  account: Account | null; quoteStore: QuoteStore; chainRequests: ChainRequest[];
 }
+
+const mask = (a: string) => `••••${a.slice(-4)}`;
+const levelLabel = (l: string) =>
+  l === "option_level_3" ? "Level 3 — spreads unlocked"
+  : l === "option_level_2" ? "Level 2 — long premium only"
+  : l || "no options access";
 
 export default function OptionsPaperPage() {
   const { data } = useSWR<Payload>("/api/options/paper", fetcher, { refreshInterval: 60_000 });
@@ -42,6 +58,13 @@ export default function OptionsPaperPage() {
   const groups = (data?.universe ?? []).reduce<Record<string, string[]>>((acc, n) => {
     (acc[n.group] ||= []).push(n.symbol); return acc;
   }, {});
+  const account = data?.account ?? null;
+  const chainRequests = data?.chainRequests ?? [];
+  // Quotes are PUSHED by a scheduled agent, not fetched by this app — so their age is a
+  // safety number, not a nicety. Staleness is decided on the server against the very same
+  // threshold the reads enforce, so this banner can never disagree with the behaviour.
+  // While data is still loading, say nothing rather than cry wolf.
+  const quotesStale = !!data && data.quoteStore.stale;
 
   return (
     <div className="space-y-5">
@@ -53,8 +76,88 @@ export default function OptionsPaperPage() {
           <Chip tone="grey" size="md" title="Runs once a day after the close, Mon–Fri">
             {data?.lastRun ? `Scanned ${ago(data.lastRun)}` : "No run yet"}
           </Chip>
+          {account && (
+            <Chip tone={account.optionLevel === "option_level_3" ? "green" : "amber"} size="md"
+                  title="Level 3 unlocks spreads; Level 2 can only buy premium">
+              {levelLabel(account.optionLevel)}
+            </Chip>
+          )}
+          <Chip tone={quotesStale ? "red" : "green"} size="md" dot={quotesStale}
+                title="Robinhood quotes are pushed in by a scheduled agent — the app holds no Robinhood credentials.">
+            {data?.quoteStore?.newestQuoteTs ? `Quotes ${ago(data.quoteStore.newestQuoteTs)}` : "No quotes pushed yet"}
+          </Chip>
         </>}
       />
+
+      {quotesStale && (
+        <Panel tone="red"><PanelBody className="py-3">
+          <p className="text-[13px] font-semibold text-down">Quote inbox is stale — this book is frozen, not quiet.</p>
+          <Note className="mt-1">
+            Robinhood has no server credentials, so quotes only arrive when the scheduled agent runs.
+            {data?.quoteStore?.newestQuoteTs
+              ? ` The freshest quote is ${ago(data.quoteStore.newestQuoteTs)} old.`
+              : " No quotes have ever been pushed."}
+            {" "}Past 36 hours the book refuses them outright: open positions stop marking and no entry can open.
+            Run the <code>options-desk</code> skill, or check that the agent&apos;s Robinhood login is still authenticated.
+          </Note>
+        </PanelBody></Panel>
+      )}
+
+      {chainRequests.length > 0 && (
+        <Panel tone="amber">
+          <PanelHeader title={`Waiting on ${chainRequests.length} option chain${chainRequests.length === 1 ? "" : "s"}`}
+                       aside={<Label>the scanner found a signal it could not price</Label>} />
+          <PanelBody className="p-0">
+            <DataTable dense>
+              <thead><tr><Th>Symbol</Th><Th num>Spot</Th><Th num>Budget</Th><Th>Expiry window</Th><Th>Requested</Th></tr></thead>
+              <tbody>
+                {chainRequests.map((r) => (
+                  <Row key={r.symbol}>
+                    <Td strong>{r.symbol}</Td>
+                    <Td num>{r.spot > 0 ? usd(r.spot) : "—"}</Td>
+                    <Td num muted>{r.budgetUsd > 0 ? usd(r.budgetUsd) : "—"}</Td>
+                    <Td muted>{r.expiryFrom} → {r.expiryTo}</Td>
+                    <Td muted>{when(r.requestedAt)}</Td>
+                  </Row>
+                ))}
+              </tbody>
+            </DataTable>
+          </PanelBody>
+          <PanelBody className="pt-0">
+            <Note>
+              These are real signals held up on data, not refusals. The next agent run fetches the chain and the entry is
+              decided then. On a book that takes two entries a month with 60–120 day holds, an hour of latency costs nothing —
+              but a request sitting here for days means the agent is not running.
+            </Note>
+          </PanelBody>
+        </Panel>
+      )}
+
+      <Panel>
+        <PanelHeader title="Robinhood account"
+                     aside={account ? <Label title={`Pushed ${when(account.at)}`}>as of {ago(account.at)}</Label> : undefined} />
+        <PanelBody>
+          {account ? (
+            <>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+                <Stat label="Buying power" value={usd(account.buyingPower)} sub={`${mask(account.accountNumber)} · ${account.type.replace(/_/g, " ")}`} />
+                <Stat label="Cash" value={usd(account.cash)} />
+                <Stat label="Options value" value={usd(account.optionsValue)} />
+                <Stat label="Account value" value={usd(account.totalValue)} />
+                <Stat label="Options level" value={account.optionLevel === "option_level_3" ? "Level 3" : "Level 2"} sub={levelLabel(account.optionLevel)} />
+              </div>
+              {account.optionLevel !== "option_level_3" && (
+                <Note className="mt-3">
+                  At Level 2 the only strategy available is <strong>buying premium</strong> — which is what this book does. Level 3 (spreads) was applied
+                  for on Sep 9 2026; this flips automatically once Robinhood approves it.
+                </Note>
+              )}
+            </>
+          ) : (
+            <Note>No account snapshot yet — the scheduled agent writes this on its first run.</Note>
+          )}
+        </PanelBody>
+      </Panel>
 
       <Explainer title="What this is testing, and why it is slow on purpose">
         <p>
@@ -76,10 +179,15 @@ export default function OptionsPaperPage() {
           require real size behind the bid and a recent quote, so a phantom price on an untraded strike cannot book a profit.
         </p>
         <p>
-          <strong>One caveat, stated plainly:</strong> this account is not signed up for the OPRA agreement, so quotes come from Alpaca&apos;s
-          <em> indicative</em> feed rather than the executable NBBO. That is real market data, not a model — but the true tradeable spread may be wider than
-          what is recorded here, which means these results are, if anything, <strong>flattering</strong>. Signing the OPRA agreement in the Alpaca dashboard
-          upgrades every number on this page with no other change.
+          <strong>Quotes now come from Robinhood</strong> (moved off Alpaca on Sep 9 2026) — the venue these trades would actually be placed on, with real
+          bid/ask, quote sizes, implied volatility and greeks. Measuring on the broker you would trade at removes a whole class of doubt: the spread recorded
+          here is the spread you would have paid.
+        </p>
+        <p>
+          <strong>The caveat that replaces the old one:</strong> Robinhood has no server credentials — its only official route is a login bound to a Claude
+          session — so quotes are <em>pushed in</em> by a scheduled agent rather than fetched live by this app. A quote older than 36 hours is refused
+          outright, so a position is left unmarked rather than marked at a stale price, and a stale chain can never open a trade. The freshness of the
+          data is shown at the top of this page: if it is red, believe the timestamp, not the prices.
         </p>
         <p>
           The other trade-off: this can only measure forward. At two entries a month, a 30-trade verdict is roughly <strong>15 months</strong> away. It is a

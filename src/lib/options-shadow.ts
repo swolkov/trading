@@ -15,7 +15,7 @@
 // keys prefixed `options_paper_`, and no import from any margin-* or kraken-* module. This
 // book cannot affect the Kraken margin system.
 import { prisma } from "@/lib/db";
-import { getDailyBars, getOptionQuotes, type OptionQuote } from "@/lib/alpaca-options";
+import { getDailyBars, getOptionQuotes, type OptionQuote } from "@/lib/rh-options-data";
 import {
   OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCES, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
   type BookState, type OptionSource,

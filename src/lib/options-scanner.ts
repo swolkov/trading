@@ -6,7 +6,7 @@
 // fired get an option-chain request. On a normal day that is zero to three chain calls, not
 // thirty-eight — which is what keeps this book inside a cron budget and inside the free
 // data plan.
-import { getDailyBars, getOptionChain } from "@/lib/alpaca-options";
+import { getDailyBars, getOptionChain } from "@/lib/rh-options-data";
 import {
   MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type ContractPick,
   isEntrySignal, pickContract,
@@ -56,9 +56,12 @@ export async function pickContractFor(symbol: string, underlying: number, budget
   // `symbol` is the ticker the chain is requested for; `underlying` is its spot price and
   // only shapes the strike window. Keeping them distinct matters — an earlier draft passed
   // the price where the ticker belongs and a type assertion hid it.
+  // budgetUsd and spot are passed through so that, when the chain is not yet in the push
+  // inbox, the request filed for the agent carries everything it needs to fetch it.
   const quotes = await getOptionChain({
     underlying: symbol, expiryFrom: from, expiryTo: to,
     strikeMin: underlying * 0.60, strikeMax: underlying * 0.97, type: "call",
+    budgetUsd, spot: underlying,
   });
   const candidates: Contract[] = quotes
     .filter((q) => q.delta != null)

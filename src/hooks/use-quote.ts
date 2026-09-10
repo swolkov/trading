@@ -12,7 +12,7 @@ interface QuoteData {
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export function useQuote(_symbol: string | null) {
-  // The Alpaca quote feed was removed and no live stock-quote source is wired, so this no longer
+  // The stock-quote feed went with the Alpaca retirement (Sep 9 2026) and no live source is wired, so this no longer
   // fetches (avoids polling a now-deleted route). Callers degrade to "…" in the price columns.
   return useSWR<QuoteData>(null, fetcher, { refreshInterval: 0 });
 }

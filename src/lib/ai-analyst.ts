@@ -48,7 +48,7 @@ interface AnalysisResult {
 }
 
 export async function analyzeStock(symbol: string): Promise<AnalysisResult> {
-  // Gather all data in parallel (Yahoo + Alpaca + Finnhub)
+  // Gather all data in parallel (Yahoo + Finnhub)
   const [profile, stats, earnings, analysts, news, bars, insiderTrades, sentiment, upgrades, earningsCal, volatility, incomeStatements, peers, recTrends, congressionalTrades, economicEvents, ownership, cashFlows, netInsiderActivity, insiderSentiment, supportResistance, epsEstimates, revenueEstimates, priceTargets] = await Promise.all([
     getCompanyProfile(symbol).catch(() => null),
     getKeyStats(symbol).catch(() => null),

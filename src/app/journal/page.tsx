@@ -6,22 +6,6 @@ import { formatCurrency, pnlColor } from "@/lib/utils";
 
 // ── Types ──────────────────────────────────────────────
 
-interface AlpacaTrade {
-  symbol: string;
-  underlying: string;
-  type: string;
-  openSide: string;
-  openDate: string;
-  openPrice: number;
-  openQty: number;
-  closeDate: string | null;
-  closePrice: number | null;
-  pnl: number | null;
-  pnlPct: number | null;
-  holdDays: number | null;
-  status: string;
-}
-
 interface FuturesActivity {
   id: string;
   symbol: string;
@@ -46,16 +30,12 @@ interface JournalDay {
   date: string;
   dateLabel: string;
   weekday: string;
-  alpacaTrades: AlpacaTrade[];
   futuresTrades: FuturesActivity[];
   totalPnl: number;
-  alpacaPnl: number;
   futuresPnl: number;
   tradeCount: number;
   winCount: number;
   lossCount: number;
-  alpacaWinCount: number;
-  alpacaLossCount: number;
   futuresWinCount: number;
   futuresLossCount: number;
 }
@@ -206,7 +186,8 @@ function CumulativePnl({ days }: { days: JournalDay[] }) {
 // ── Main Page ──────────────────────────────────────────
 
 export default function JournalPage() {
-  const [alpacaData] = useState<{ trades: AlpacaTrade[] } | null>(null); // Crypto/stock trades logged via vault journal, not Alpaca orders
+  // Crypto and stock trades are logged to the vault journal by their own agents. The
+  // Alpaca brokerage that once fed this panel was retired Sep 9 2026 with the move to Robinhood.
   const [futuresData, setFuturesData] = useState<FuturesData | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"all" | "futures">("futures");
@@ -227,24 +208,12 @@ export default function JournalPage() {
         date: dateKey,
         dateLabel: d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" }),
         weekday: d.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" }),
-        alpacaTrades: [], futuresTrades: [], totalPnl: 0, alpacaPnl: 0, futuresPnl: 0,
+        futuresTrades: [], totalPnl: 0, futuresPnl: 0,
         tradeCount: 0, winCount: 0, lossCount: 0,
-        alpacaWinCount: 0, alpacaLossCount: 0, futuresWinCount: 0, futuresLossCount: 0,
+        futuresWinCount: 0, futuresLossCount: 0,
       };
     }
 
-    for (const t of (alpacaData?.trades || [])) {
-      const dateKey = t.openDate.slice(0, 10);
-      if (!dayMap[dateKey]) dayMap[dateKey] = initDay(dateKey);
-      dayMap[dateKey].alpacaTrades.push(t);
-      dayMap[dateKey].tradeCount++;
-      if (t.pnl != null) {
-        dayMap[dateKey].alpacaPnl += t.pnl;
-        dayMap[dateKey].totalPnl += t.pnl;
-        if (t.pnl > 0) { dayMap[dateKey].winCount++; dayMap[dateKey].alpacaWinCount++; }
-        else if (t.pnl < 0) { dayMap[dateKey].lossCount++; dayMap[dateKey].alpacaLossCount++; }
-      }
-    }
 
     // Futures activity: use trades for counts, but P&L from balance history (source of truth)
     // DB trade P&L values are unreliable (double-logging inflates them).
@@ -303,7 +272,7 @@ export default function JournalPage() {
     }
 
     return Object.values(dayMap).sort((a, b) => b.date.localeCompare(a.date));
-  }, [alpacaData, futuresData]);
+  }, [futuresData]);
 
   const filteredDays = useMemo(() => {
     if (viewMode === "all") return journalDays;
@@ -444,7 +413,6 @@ export default function JournalPage() {
                   <span>{day.tradeCount} trades</span>
                   <span className="text-muted-foreground/20">|</span>
                   <span>{day.winCount}W {day.lossCount}L</span>
-                  {day.alpacaTrades.length > 0 && <span className="px-1 py-px rounded bg-blue-500/10 text-blue-400 text-[9px]">ALP</span>}
                   {day.futuresTrades.length > 0 && <span className="px-1 py-px rounded bg-amber-500/10 text-amber-400 text-[9px]">FUT</span>}
                   {day.futuresTrades.some(t => t.action.startsWith("paper_")) && <span className="px-1 py-px rounded bg-violet-500/10 text-violet-400 text-[9px]">PAPER</span>}
                 </div>
@@ -472,65 +440,6 @@ export default function JournalPage() {
                 </div>
               </div>
 
-              {/* Alpaca trades */}
-              {activeDayData.alpacaTrades.length > 0 && (
-                <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.02] overflow-hidden">
-                  <div className="px-4 py-2.5 border-b border-blue-500/10 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-blue-400" />
-                    <p className="text-xs font-bold text-blue-400">Alpaca ({activeDayData.alpacaTrades.length})</p>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-muted-foreground/40 border-b border-white/[0.06]">
-                          <th className="text-left px-4 py-2 font-medium">Symbol</th>
-                          <th className="text-left px-2 py-2 font-medium">Type</th>
-                          <th className="text-left px-2 py-2 font-medium">Side</th>
-                          <th className="text-right px-2 py-2 font-medium">Qty</th>
-                          <th className="text-right px-2 py-2 font-medium">Entry</th>
-                          <th className="text-right px-2 py-2 font-medium">Exit</th>
-                          <th className="text-right px-2 py-2 font-medium">P&L</th>
-                          <th className="text-center px-4 py-2 font-medium">Result</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activeDayData.alpacaTrades.map((t, i) => (
-                          <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                            <td className="px-4 py-2 font-bold">{t.underlying || t.symbol}</td>
-                            <td className="px-2 py-2">
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                t.type === "CALL" ? "bg-emerald-500/15 text-emerald-400" :
-                                t.type === "PUT" ? "bg-red-500/15 text-red-400" :
-                                "bg-blue-500/15 text-blue-400"
-                              }`}>{t.type}</span>
-                            </td>
-                            <td className="px-2 py-2">
-                              <span className={t.openSide === "buy" ? "text-emerald-400" : "text-red-400"}>
-                                {t.openSide.toUpperCase()}
-                              </span>
-                            </td>
-                            <td className="px-2 py-2 text-right tabular-nums">{t.openQty}</td>
-                            <td className="px-2 py-2 text-right tabular-nums">${t.openPrice.toFixed(2)}</td>
-                            <td className="px-2 py-2 text-right tabular-nums">{t.closePrice ? `$${t.closePrice.toFixed(2)}` : "—"}</td>
-                            <td className={`px-2 py-2 text-right font-bold tabular-nums ${t.pnl != null ? pnlColor(t.pnl) : ""}`}>
-                              {t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}${formatCurrency(t.pnl)}` : "Open"}
-                            </td>
-                            <td className="px-4 py-2 text-center">
-                              {t.status === "open" ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] bg-blue-500/15 text-blue-400 font-bold">OPEN</span>
-                              ) : t.status === "winner" ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/15 text-emerald-400 font-bold">WIN</span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] bg-red-500/15 text-red-400 font-bold">LOSS</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
 
               {/* Futures trades */}
               {activeDayData.futuresTrades.length > 0 && (

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { optionsSleeveBreakdown, recentOptionPaperTrades } from "@/lib/options-shadow";
+import { pendingChainRequests, quoteStoreFreshness, readAccountSnapshot } from "@/lib/options-quote-store";
 import {
   CRYPTO_PROXY_EXCLUDED, MAX_CONCURRENT, MAX_ENTRIES_PER_MONTH, MAX_SPREAD_PCT,
   MAX_DTE, MIN_DTE, MIN_DELTA, MAX_DELTA, OPTIONS_SIM_VERSION, OPTIONS_UNIVERSE,
@@ -8,11 +9,17 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const [sleeves, trades, lastRun, lastResultRaw] = await Promise.all([
+  const [sleeves, trades, lastRun, lastResultRaw, account, quoteStore, chainRequests] = await Promise.all([
     optionsSleeveBreakdown().catch(() => []),
     recentOptionPaperTrades(100).catch(() => []),
     prisma.agentConfig.findUnique({ where: { key: "options_scan_last_run" } }).then((r) => r?.value ?? null).catch(() => null),
     prisma.agentConfig.findUnique({ where: { key: "options_scan_last_result" } }).then((r) => r?.value ?? null).catch(() => null),
+    // Robinhood cannot be read from the app, so these three describe the PUSH path: what
+    // the agent last saw, how fresh the quote inbox is, and what the scanner is still
+    // waiting on. Without them a stalled agent looks exactly like a quiet market.
+    readAccountSnapshot().catch(() => null),
+    quoteStoreFreshness().catch(() => ({ newestQuoteTs: null, rows: 0, ageMinutes: null, stale: true })),
+    pendingChainRequests().catch(() => []),
   ]);
   let lastResult: unknown = null;
   try { lastResult = lastResultRaw ? JSON.parse(lastResultRaw) : null; } catch { lastResult = null; }
@@ -25,5 +32,6 @@ export async function GET() {
     },
     universe: OPTIONS_UNIVERSE, excluded: CRYPTO_PROXY_EXCLUDED,
     sleeves, trades, lastRun, lastResult,
+    account, quoteStore, chainRequests,
   });
 }

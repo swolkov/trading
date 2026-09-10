@@ -7,7 +7,7 @@ import {
   dteOf, entryRefusal, exitReason, groupOf, isEntrySignal, isExitSignal,
   pickContract, positionBudget, spreadPctOf,
 } from "../src/lib/options-paper-model";
-import { parseOcc } from "../src/lib/alpaca-options";
+import { parseOcc, toOcc } from "../src/lib/options-occ";
 
 const c = (o: Partial<Contract> = {}): Contract => ({
   occ: "WULF261218C00014000", strike: 14, expiry: "2026-12-18", delta: 0.78,
@@ -160,6 +160,14 @@ test("OCC symbols parse from the right, so variable-length roots work", () => {
   assert.deepEqual(parseOcc("WULF261218C00014000"), { root: "WULF", expiry: "2026-12-18", type: "call", strike: 14 });
   assert.deepEqual(parseOcc("SPY260908C00505000"), { root: "SPY", expiry: "2026-09-08", type: "call", strike: 505 });
   assert.equal(parseOcc("garbage"), null);
+  // toOcc is new with the Robinhood move: Robinhood identifies contracts by UUID, not OCC,
+  // so this book now BUILDS the key its table and quote inbox are indexed on. A padding or
+  // thousandths bug here would not throw — it would produce a symbol that never matches a
+  // stored quote, and open positions would silently stop marking.
+  assert.equal(toOcc("WULF", "2026-12-18", "call", 14), "WULF261218C00014000");
+  assert.equal(toOcc("SPY", "2026-09-08", "call", 505), "SPY260908C00505000");
+  assert.deepEqual(parseOcc(toOcc("IREN", "2026-11-20", "call", 37)), { root: "IREN", expiry: "2026-11-20", type: "call", strike: 37 });
+  assert.deepEqual(parseOcc(toOcc("AAPL", "2027-01-15", "put", 312.5)), { root: "AAPL", expiry: "2027-01-15", type: "put", strike: 312.5 });
 });
 
 test("dteOf counts days to expiry", () => {

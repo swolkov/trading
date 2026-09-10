@@ -1480,7 +1480,7 @@ tags: [brain, daily-brief]
 > - Contract quantity is stop-risk sized up to the active per-trade cap; five is a ceiling, never a fixed size
 > - Overnight MGC is capped at two and must pass the margin governor
 
-### Crypto (Alpaca)
+### Crypto
 > - **Regime:** ${cryptoRegime} → ${cryptoPlay}
 > - Max 3 concurrent, 6 trades/day
 
