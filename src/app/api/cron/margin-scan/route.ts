@@ -126,6 +126,15 @@ export async function GET(request: Request) {
   //   'swing-lev' / 'swing-spot' — gathering, slightly negative; 4h is not this container.
   const opened: { symbol: string; side: string; tier: string; source: string }[] = [];
   const live: string[] = [];
+  // WHAT THE DESK LOOKED AT, AND WHY IT PASSED. Every rejection below used to exist only as a
+  // `continue` — invisible once the tick ended. The options book already learned this lesson
+  // ("a refusal that exists only in an HTTP response nobody reads is not a finding, it is a
+  // rumour"); the margin scan persisted nothing but a timestamp. Recording is pure addition:
+  // nothing here changes what trades.
+  const look: { coin: string; tf: string; kind: string; tier?: string; outcome: string; detail?: string }[] = [];
+  const note_ = (coin: string, tf: string, kind: string, outcome: string, tier?: string, detail?: string) => {
+    if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}) });
+  };
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "").catch(() => "");
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
@@ -142,11 +151,17 @@ export async function GET(request: Request) {
         if (regime.btcUp == null) errors.push("btc regime unreadable — selective-btc and selective-short not opened this run");
       }
       for (const s of fresh) {
-        if (!(s.price > 0)) continue;
-        if (s.kind !== "breakout" && s.kind !== "breakdown") continue;
+        if (!(s.price > 0)) { note_(s.coin, s.timeframe, s.kind, "skipped", undefined, "no price"); continue; }
+        if (s.kind !== "breakout" && s.kind !== "breakdown") { note_(s.coin, s.timeframe, s.kind, "watched", undefined, "not a directional signal — awareness only"); continue; }
         const conv = scoreConviction(s, signals);
         const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime, s.symbol);
-        if (plans.length === 0) continue;
+        if (plans.length === 0) {
+          // The commonest rejection by far, and the one worth seeing: autoPlansFor's first
+          // line refuses anything below HIGH conviction, and swing-lev takes 4h only.
+          note_(s.coin, s.timeframe, s.kind, "no trade", conv.tier,
+            conv.tier !== "high" ? `${conv.tier} conviction — only high is traded` : `no sleeve takes ${s.kind} on ${s.timeframe}`);
+          continue;
+        }
         const side: "buy" | "sell" = s.kind === "breakout" ? "buy" : "sell";
         for (const plan of plans) {
           // One open trade per (strategy, coin) so entries can't stack within a strategy.
@@ -159,7 +174,12 @@ export async function GET(request: Request) {
              WHERE symbol=$1 AND source=$2 AND COALESCE(shadow_status,'open')='open' AND ${SIM_COHORT_SQL}`,
             s.symbol, plan.source,
           );
-          if (Number(n) > 0) continue;
+          if (Number(n) > 0) {
+            // NB this also skips the LIVE call below — paper's one-open-per-coin rule gates
+            // live too, so a coin paper is holding is unavailable live even when live is flat.
+            note_(s.coin, s.timeframe, s.kind, "blocked", conv.tier, `${plan.source} already holds ${s.coin} on paper`);
+            continue;
+          }
           const note = `auto: ${plan.source} ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
           // ENTRY CHASE (realism): a 5-min scan spots a break late, and a live order
           // chases it — so every paper entry pays 0.1% of adverse price, instead of
@@ -194,6 +214,7 @@ export async function GET(request: Request) {
               // dollar risk of a trade; it changes how many the account can carry.
               const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, deadlineMs: routeDeadlineMs });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
+              note_(s.coin, s.timeframe, s.kind, r.executed ? "TRADED LIVE" : "live refused", conv.tier, r.note.slice(0, 160));
               // Link the paper row to its live attempt: this is what the daily synthesis uses
               // to compare REAL fills against the paper model, trade by trade.
               if (rowId != null) {
@@ -202,7 +223,12 @@ export async function GET(request: Request) {
                   r.executed, r.validated, r.txid ?? null, r.note.slice(0, 300), rowId,
                 ).catch(() => {});
               }
-            } catch (e) { live.push(`${s.symbol} ${plan.source}: executor error ${String(e).slice(0, 100)}`); }
+            } catch (e) {
+              live.push(`${s.symbol} ${plan.source}: executor error ${String(e).slice(0, 100)}`);
+              note_(s.coin, s.timeframe, s.kind, "live ERROR", conv.tier, String(e).slice(0, 160));
+            }
+          } else {
+            note_(s.coin, s.timeframe, s.kind, "paper only", conv.tier, `${plan.source} is not armed for live`);
           }
         }
       }
@@ -331,5 +357,13 @@ export async function GET(request: Request) {
   }
 
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
-  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, autoOpened, shadowResolved, errors: errors.slice(0, 5) });
+  // PERSIST THE TICK. Same reasoning as the options book: what the desk REFUSED is at least
+  // as informative as what it took, and it is the only way to answer "why hasn't it traded?"
+  // without re-deriving the whole run by hand.
+  await prisma.agentConfig.upsert({
+    where: { key: "margin_scan_last_result" },
+    update: { value: JSON.stringify({ at: new Date().toISOString(), scanned: signals.length, fresh: fresh.length, suppressed: signals.length - fresh.length, look, errors: errors.slice(0, 5) }) },
+    create: { key: "margin_scan_last_result", value: JSON.stringify({ at: new Date().toISOString(), scanned: signals.length, fresh: fresh.length, suppressed: signals.length - fresh.length, look, errors: errors.slice(0, 5) }) },
+  }).catch(() => {});
+  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, autoOpened, shadowResolved, look, errors: errors.slice(0, 5) });
 }

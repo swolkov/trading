@@ -23,7 +23,10 @@ export async function GET() {
       candidateDetail(candSource).catch(() => null),
       capacityReport(candSource).catch(() => null),
     ]);
-    return Response.json({
+    const scanRaw = await prisma.agentConfig.findUnique({ where: { key: "margin_scan_last_result" } }).then((r) => r?.value ?? null).catch(() => null);
+    let scanLook: unknown = null;
+    try { scanLook = scanRaw ? JSON.parse(scanRaw) : null; } catch { scanLook = null; }
+    return Response.json({ scanLook,
       scoreboard,
       // Most recent 50 round trips for the cockpit's trade list.
       recentTrips: trips.slice(-50).reverse(),

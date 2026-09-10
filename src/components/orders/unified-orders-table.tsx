@@ -24,7 +24,12 @@ interface PaperTradeRow {
   simVersion?: string;
   usTradeable?: boolean;
 }
-interface ScoreData { log?: PaperTradeRow[]; recentTrips?: RoundTrip[] }
+interface ScanLook {
+  at: string; scanned: number; fresh: number; suppressed: number;
+  look: { coin: string; tf: string; kind: string; tier?: string; outcome: string; detail?: string }[];
+  errors?: string[];
+}
+interface ScoreData { log?: PaperTradeRow[]; recentTrips?: RoundTrip[]; scanLook?: ScanLook | null }
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json()).catch(() => null);
 
@@ -50,14 +55,15 @@ export function UnifiedOrdersTable() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
   const { data: score } = useSWR<ScoreData>("/api/margin/scoreboard", fetcher, { refreshInterval: 60000 });
-  const [view, setView] = useState<"live" | "paper">("live");
+  const [view, setView] = useState<"live" | "paper" | "scan">("live");
 
   return (
     <div className="space-y-4">
-      <Segmented value={view} onChange={setView} options={[{ k: "live", label: "Live · real money", tone: "red" }, { k: "paper", label: "Paper · no real money", tone: "paper" }]} />
+      <Segmented value={view} onChange={setView} options={[{ k: "live", label: "Live · real money", tone: "red" }, { k: "paper", label: "Paper · no real money", tone: "paper" }, { k: "scan", label: "Scanner · what it just looked at" }]} />
       {view === "live"
         ? <LiveView data={data} krk={krk} trips={score?.recentTrips ?? []} tripsLoading={score === undefined} />
-        : <PaperLogTable log={score?.log ?? []} loading={score === undefined} />}
+        : view === "paper" ? <PaperLogTable log={score?.log ?? []} loading={score === undefined} />
+          : <ScanLookTable scan={score?.scanLook ?? null} loading={score === undefined} />}
     </div>
   );
 }
@@ -271,6 +277,50 @@ function PaperLogTable({ log: fullLog, loading }: { log: PaperTradeRow[]; loadin
                   </Row>
                 );
               })}
+            </tbody>
+          </DataTable>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+// WHAT THE DESK JUST LOOKED AT. Every rejection in the scan used to be an invisible
+// `continue`; the run persists them now, and this is where they are read. It answers the
+// question the other two tabs cannot: "why hasn't it traded?" — separating "nothing
+// qualified" from "something qualified and was refused", which are very different problems.
+function ScanLookTable({ scan, loading }: { scan: ScanLook | null; loading: boolean }) {
+  if (loading) return <Note className="py-4">Loading the last scan…</Note>;
+  if (!scan) return <Note className="py-4">No scan recorded yet — the next tick writes one (the scanner runs every 5 minutes).</Note>;
+  const tone = (o: string): "up" | "down" | "warn" | "muted" =>
+    o === "TRADED LIVE" ? "up" : o.startsWith("live refused") || o === "live ERROR" ? "down" : o === "no trade" || o === "watched" ? "muted" : "warn";
+  const cls = { up: "text-up", down: "text-down", warn: "text-warn", muted: "text-muted-foreground" };
+  const traded = scan.look.filter((l) => l.outcome === "TRADED LIVE").length;
+  const refused = scan.look.filter((l) => l.outcome.startsWith("live refused") || l.outcome === "live ERROR").length;
+  return (
+    <div className="space-y-3">
+      <Note>
+        The most recent 5-minute scan, {when(scan.at)}. It saw <strong className="font-medium text-foreground/85">{scan.scanned}</strong> signals across 26 coins and 5 timeframes;
+        {" "}{scan.suppressed} were the same condition still pinging inside its re-alert window, leaving <strong className="font-medium text-foreground/85">{scan.fresh}</strong> fresh.
+        {" "}Of those, {traded} traded live and {refused} were refused.
+        {" "}<strong className="font-medium text-foreground/85">&ldquo;no trade&rdquo; is the normal outcome</strong> — only HIGH conviction is ever traded, and the live sleeve takes 4h breakouts only, so most of what the scanner sees is correctly ignored.
+      </Note>
+      {scan.errors?.length ? <Note className="text-warn">Scan errors: {scan.errors.join(" · ")}</Note> : null}
+      {scan.look.length === 0 ? <Note className="py-4">That tick saw nothing fresh — normal between setups.</Note> : (
+        <Panel>
+          <DataTable sticky maxH="60vh">
+            <thead><tr><Th>Coin</Th><Th>Timeframe</Th><Th>Signal</Th><Th>Conviction</Th><Th>Outcome</Th><Th>Why</Th></tr></thead>
+            <tbody>
+              {scan.look.map((l, i) => (
+                <Row key={`${l.coin}-${l.tf}-${l.kind}-${i}`}>
+                  <Td strong>{l.coin}</Td>
+                  <Td muted>{l.tf}</Td>
+                  <Td muted>{l.kind}</Td>
+                  <Td muted className="capitalize">{l.tier ?? "—"}</Td>
+                  <Td className={`font-medium ${cls[tone(l.outcome)]}`}>{l.outcome}</Td>
+                  <Td muted className="whitespace-normal">{l.detail ?? "—"}</Td>
+                </Row>
+              ))}
             </tbody>
           </DataTable>
         </Panel>
