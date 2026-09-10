@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { baseRiskForSlots, replaySlots, type CapacitySetup } from "../src/lib/margin-capacity";
 import { DEFAULT_ARM_SOURCE, liveContainerFor, LIVE_CONTAINERS, LIVE_RISK_CEILING_PCT } from "../src/lib/margin-live-risk";
 import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
+import { planOrder } from "../src/lib/margin-dry-run";
 import { policyCutFor, POLICY_CUT_AT, SWING_REACTIVATED_AT } from "../src/lib/margin-shadow";
 
 // SLOTS AND SIZE ARE THE SAME DIAL. The capacity card used to compare slot counts at one
@@ -148,5 +149,29 @@ test("whatever graduation writes, one trade still cannot trip the drawdown break
     const base = graduateTo(cur, to);
     // High conviction doubles the base, and the executor clamps at the ceiling.
     assert.ok(Math.min(LIVE_RISK_CEILING_PCT, base * 2) < 15, `base ${base}% must stay inside the 15% breaker`);
+  }
+});
+
+// THE DRY RUN MUST SIZE EXACTLY AS THE EXECUTOR DOES, or it proves nothing about the real
+// order. These pin planOrder to the same helpers in the same order.
+
+test("dry-run sizing reproduces the executor's: risk ÷ stop, fitted leverage, clamped stop", () => {
+  const i = { equity: 4522, freeMargin: 4522, baseRiskPct: 4, leverageCeiling: 9, perTradeCapUsd: 0, containerStopPct: 4, source: "swing-lev" };
+  const btc = planOrder("BTC/USD", 76887, i);
+  assert.equal(btc.leverage, 9, "9x is what leverageThatFitsStop allows on a 4% stop");
+  assert.equal(Number(btc.stopFrac.toFixed(4)), 0.04, "the stop clamps to exactly 4%");
+  // 8% of equity risked ÷ a 4% stop = 2x equity in notional.
+  assert.equal(Math.round(btc.notional), Math.round(4522 * 0.08 / 0.04));
+  assert.equal(Math.round(btc.marginUsd), Math.round(btc.notional / 9));
+  // A 5x-capped coin gets 5x, not the 9x ceiling.
+  const dot = planOrder("DOT/USD", 3, { ...i });
+  assert.equal(dot.leverage, 5, "the pair cap binds below the operator ceiling");
+});
+
+test("dry-run never sizes past the ceiling, whatever the config says", () => {
+  for (const base of [4, 6, 20, 100]) {
+    const p = planOrder("BTC/USD", 76887, { equity: 4522, freeMargin: 4522, baseRiskPct: base, leverageCeiling: 9, perTradeCapUsd: 0, containerStopPct: 4, source: "swing-lev" });
+    // risk is clamped at LIVE_RISK_CEILING_PCT (8%), so notional can never exceed 2x equity here
+    assert.ok(p.notional <= 4522 * (LIVE_RISK_CEILING_PCT / 100) / 0.04 + 1, `base ${base}% must clamp`);
   }
 });
