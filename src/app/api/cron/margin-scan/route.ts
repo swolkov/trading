@@ -212,7 +212,11 @@ export async function GET(request: Request) {
               // decides how much MARGIN a position posts — and therefore how many of them
               // fit at once. Notional is risk-based either way, so this does not change the
               // dollar risk of a trade; it changes how many the account can carry.
-              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, deadlineMs: routeDeadlineMs });
+              // CONVICTION MUST TRAVEL WITH THE PLAN, exactly as leverage does. This route already
+              // scored it and refused anything but "high" — throwing the tier away made the
+              // executor re-scan the coin 20-90s later over five timeframes, where a 5m
+              // volume-spike flipping between the two reads silently halves the position.
+              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, scoredConviction: conv.tier, deadlineMs: routeDeadlineMs });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
               note_(s.coin, s.timeframe, s.kind, r.executed ? "TRADED LIVE" : "live refused", conv.tier, r.note.slice(0, 160));
               // Link the paper row to its live attempt: this is what the daily synthesis uses
