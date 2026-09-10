@@ -29,7 +29,7 @@ test("long call: unbounded upside, loss floored at the debit, breakeven is exact
 });
 
 test("long put: upside is bounded by the stock reaching zero, not unbounded", () => {
-  const c = one(buildCandidates({ calls: [], puts: [K(100, { bid: 8.00, ask: 8.15, delta: -0.5 })], spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["long_put"] }));
+  const c = one(buildCandidates({ calls: [], puts: [K(100, { bid: 8.00, ask: 8.15, delta: -0.78 })], spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["long_put"] }));
   assert.ok(c.maxProfitUsd != null);
   assert.ok(Math.abs(c.maxProfitUsd! - (100 * 100 - 815.05)) < 1e-9);
   assert.ok(Math.abs(pnlAtExpiry(c, 0) - c.maxProfitUsd!) < 1e-9, "max profit is realised at zero");
@@ -51,7 +51,7 @@ test("call debit spread: the live INTC 85/115 numbers", () => {
 });
 
 test("put debit spread gains as the stock FALLS and is capped at the width", () => {
-  const puts = [K(100, { bid: 8.00, ask: 8.15, delta: -0.55 }), K(90, { bid: 3.00, ask: 3.06, delta: -0.28 })];
+  const puts = [K(100, { bid: 8.00, ask: 8.15, delta: -0.78 }), K(90, { bid: 3.00, ask: 3.06, delta: -0.28 })];
   const c = one(buildCandidates({ calls: [], puts, spot: 101.49, expiry: EXP, budgetUsd: 2000, kinds: ["put_debit"] }));
   assert.ok(Math.abs(c.debitUsd - (515 + 0.10)) < 1e-9);
   assert.ok(Math.abs(c.maxProfitUsd! - (1000 - 515.10)) < 1e-9);
@@ -87,7 +87,7 @@ test("call credit spread is the mirror image and loses when the stock RISES", ()
 
 test("every structure's pnl is zero at its own stated breakeven", () => {
   const calls = [INTC_85, INTC_115, K(110, { bid: 3.00, ask: 3.06, delta: 0.35 })];
-  const puts = [K(100, { bid: 8.00, ask: 8.15, delta: -0.55 }), K(95, { bid: 3.00, ask: 3.06, delta: -0.35 }), K(90, { bid: 1.40, ask: 1.44, delta: -0.20 })];
+  const puts = [K(100, { bid: 8.00, ask: 8.15, delta: -0.78 }), K(95, { bid: 3.00, ask: 3.06, delta: -0.35 }), K(90, { bid: 1.40, ask: 1.44, delta: -0.20 })];
   const all = [...BULLISH_KINDS, ...BEARISH_KINDS];
   const cands = buildCandidates({ calls, puts, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: all });
   assert.ok(cands.length >= 6, `expected candidates across all shapes, got ${cands.length}`);
@@ -128,20 +128,37 @@ test("a vertical that costs more than its own width can never be a candidate", (
   assert.equal(buildCandidates({ calls: [], puts, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["put_debit"] }).length, 0);
 });
 
-test("the far-OTM lottery ticket is rejected without anyone calling it cheap", () => {
-  // $0.30 call, 28% out of the money. Cheap, affordable, and still worthless at the
-  // expected move — which is exactly why the reference-price rule exists.
+test("two independent defences reject the out-of-the-money lottery ticket", () => {
+  // FIRST: the delta band. A 0.05-delta call is nowhere near the 0.70-0.85 stock-replacement
+  // band, so it is never even built into a candidate. This is the primary defence, and it is
+  // what stops the reference-price ranking from falling in love with a cheap call struck just
+  // below the reference — which would show a spectacular percentage return there.
   const lotto = K(130, { bid: 1.97, ask: 2.00, delta: 0.05 });
-  const cands = buildCandidates({ calls: [lotto], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 1925, kinds: ["long_call"] });
-  assert.equal(cands.length, 1, "it is affordable and liquid, so it is a candidate");
-  // Expected move 5% puts the stock at $106.56 — nowhere near the $130 strike.
-  assert.equal(selectStructure(cands, 101.49, 0.05), null, "but it never survives selection");
+  assert.equal(buildCandidates({ calls: [lotto], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 1925, kinds: ["long_call"] }).length, 0);
 
-  // And the truly cheap ones never even get that far: a 2-cent spread on a 29-cent contract
-  // is 6.9% wide, so the liquidity gate rejects it before any of this runs. Measured on the
-  // live chain 2026-09-10 — SOFI 5.3%, APLD 9.5%, UBER 11.7%, all sub-$11 contracts.
-  const penny = K(130, { bid: 0.28, ask: 0.30, delta: 0.05 });
+  // SECOND: the reference price. Even a properly in-band contract is rejected when it is not
+  // profitable at the move the market is actually pricing. The $85 call costs $2,370.05, so
+  // with a 1% expected move ($102.50) it is still $620 underwater at expiry.
+  const inBand = buildCandidates({ calls: [INTC_85], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["long_call"] });
+  assert.equal(inBand.length, 1, "in-band and affordable, so it IS a candidate");
+  assert.ok(pnlAtExpiry(inBand[0], 101.49 * 1.01) < 0);
+  assert.equal(selectStructure(inBand, 101.49, 0.01), null, "but it needs more than the expected move");
+  assert.ok(selectStructure(inBand, 101.49, 0.10), "with a big enough expected move it qualifies");
+
+  // THIRD: the liquidity gate catches the genuinely cheap ones before any of this runs — a
+  // 2-cent spread on a 29-cent contract is 6.9% wide. Measured on the live chain 2026-09-10:
+  // SOFI 5.3%, APLD 9.5%, UBER 11.7%, all sub-$11 contracts.
+  const penny = K(130, { bid: 0.28, ask: 0.30, delta: 0.78 });
   assert.equal(buildCandidates({ calls: [penny], puts: [], spot: 101.49, expiry: EXP, budgetUsd: 1925, kinds: ["long_call"] }).length, 0);
+});
+
+test("a sold leg must be out of the money at entry", () => {
+  // Selling an in-the-money put is selling the move that already happened, and hands the
+  // buyer an immediate reason to exercise early.
+  const itmShort = [K(105, { bid: 5.00, ask: 5.10, delta: -0.62 }), K(95, { bid: 1.40, ask: 1.44, delta: -0.20 })];
+  assert.equal(buildCandidates({ calls: [], puts: itmShort, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["put_credit"] }).length, 0);
+  const otmShort = [K(95, { bid: 3.00, ask: 3.06, delta: -0.35 }), K(90, { bid: 1.40, ask: 1.44, delta: -0.20 })];
+  assert.equal(buildCandidates({ calls: [], puts: otmShort, spot: 101.49, expiry: EXP, budgetUsd: 5000, kinds: ["put_credit"] }).length, 1);
 });
 
 test("selection ranks on return at the market's own expected move", () => {

@@ -207,20 +207,6 @@ export const REG_FEE_PER_CONTRACT = 0.05;
  *  cap. Passing only the position budget lets this pick a $500 contract that the book cap
  *  then refuses, when a $295 contract one delta-step away would have passed everything —
  *  a silently missed entry rather than a bad one, but a missed entry all the same. */
-export function pickContract(candidates: Contract[], budgetUsd: number): ContractPick | null {
-  let best: ContractPick | null = null;
-  for (const c of candidates) {
-    if (!tradeable(c)) continue;
-    if (!(c.delta >= MIN_DELTA && c.delta <= MAX_DELTA)) continue;
-    const costUsd = entryCostUsd(c.ask);
-    if (costUsd > budgetUsd) continue;
-    if (!best || Math.abs(c.delta - TARGET_DELTA) < Math.abs(best.contract.delta - TARGET_DELTA)) {
-      best = { contract: c, costUsd, spreadPct: spreadPctOf(c.bid, c.ask) };
-    }
-  }
-  return best;
-}
-
 /** The quote gates every leg must pass, long or short: a real two-sided market, size behind
  *  both sides, and a quoted spread inside the ceiling. Extracted so the short leg of a
  *  vertical is held to exactly the same standard as the long — a tight long against a
@@ -231,39 +217,17 @@ export function tradeable(c: Contract): boolean {
   return spreadPctOf(c.bid, c.ask) <= MAX_SPREAD_PCT;
 }
 
-// ---------- Vertical debit spreads (added Sep 10 2026 with Level 3) ----------
+// ---------- Vertical spread cash flows ----------
+// The SELECTION of a spread moved to options-structures.ts on Sep 10 2026 — it compares every
+// shape and every expiry against the market's own expected move, which this file's simpler
+// "closest to target delta that fits the budget" rule could not do. Only the cash-flow
+// arithmetic stays here, because it is the vocabulary the rest of the book is written in.
 //
-// WHY THIS EXISTS, AND WHAT IT COSTS. A live screen on Sep 10 found the trap this book hits
-// between roughly $2k and $4.5k: the contracts a book that size can AFFORD are the ones
-// nobody trades (UBER's 0.74-delta December call quoted 11.7% wide on 132 open interest;
-// APLD's quoted 9.5% wide on TEN), while the ones that quote properly are unaffordable
-// (INTC's 0.76-delta December call quoted 2.35% wide on 3,852 open interest — and cost
-// $2,370 against a $1,925 budget). Selling a higher strike against the long leg brings that
-// exact contract inside the budget.
-//
-// THE COMPROMISE IS REAL AND IS NOT HIDDEN. This book has no take-profit precisely because
-// "capping the winners is what turns a trend rule negative" (see the exit rules below). A
-// vertical caps the winner by construction. It is accepted here only because at this account
-// size the alternative is not a cheaper naked call — it is no position, or a position in a
-// name whose quotes are fiction. Every row records its `structure`, so the record can answer
-// whether the cap cost more than it bought instead of anyone assuming either way.
-//
-// SELECTION RULE: keep the long leg the naked rule would have chosen, then sell the HIGHEST
-// strike that brings the net debit inside budget. Highest, not nearest — the short strike is
-// the ceiling on the trade, so pushing it as far out as affordability allows preserves the
-// most upside. Both legs pay the crossing cost, which roughly doubles the friction rate; that
-// is the price of the trade existing at all.
-export type Structure = "call" | "call_spread";
-
-export interface SpreadPick {
-  structure: "call_spread";
-  contract: Contract;   // long leg — the same ITM call the naked rule picks
-  short: Contract;      // short leg — higher strike, same expiry
-  costUsd: number;      // net debit, both legs' fees included
-  spreadPct: number;    // the long leg's quoted spread, kept for continuity of the record
-  widthUsd: number;     // (short strike − long strike) × 100 — the position's maximum value
-}
-export type PositionPick = (ContractPick & { structure: "call" }) | SpreadPick;
+// The compromise a vertical represents has not changed and is not hidden: this book has no
+// take-profit precisely because capping winners is what turns a trend rule negative, and a
+// vertical caps the winner by construction. It is used when the naked call will not fit the
+// budget, which below roughly $4,500 is most of the time on a liquid name. Every row records
+// its structure so the record can settle whether the cap cost more than it bought.
 
 /** Net cash to open a vertical: pay the long's ask, receive the short's bid, both legs' fees. */
 export function spreadDebitUsd(longAsk: number, shortBid: number, contracts = 1): number {
@@ -276,54 +240,98 @@ export function spreadProceedsUsd(longBid: number, shortAsk: number, contracts =
   return Math.max(0, (longBid - shortAsk) * 100 * contracts) - 2 * REG_FEE_PER_CONTRACT * contracts;
 }
 
-/** The long leg the naked rule would choose IGNORING budget — the anchor for a vertical. */
-export function bestLongLeg(candidates: Contract[]): Contract | null {
-  let best: Contract | null = null;
-  for (const c of candidates) {
-    if (!tradeable(c)) continue;
-    if (!(c.delta >= MIN_DELTA && c.delta <= MAX_DELTA)) continue;
-    if (!best || Math.abs(c.delta - TARGET_DELTA) < Math.abs(best.delta - TARGET_DELTA)) best = c;
-  }
-  return best;
+// ---------- Credit structures: the inverted money math ----------
+//
+// A debit position is one you PAID for: your risk is the cash out, and the position is worth
+// whatever you can sell it for. A credit position is one you were PAID for: your risk is the
+// COLLATERAL the broker holds, and the position is a liability you must buy back.
+//
+// Getting this backwards does not throw. It books a loss as a profit. So the whole thing is
+// funnelled through ONE definition that both kinds share:
+//
+//     mark = capital at risk + unrealised P&L
+//
+// For a debit position that reduces to "what it is worth today", which is exactly what the
+// original single-leg book already stored — so every existing exit rule, the peak tracker and
+// the premium stop keep working untouched, and a credit spread that has lost half its
+// collateral trips the same stop as a call that has lost half its premium.
+export type StoredStructure = "call" | "call_spread" | "put_credit_spread";
+
+export function isCreditStructure(structure: string | null | undefined): boolean {
+  return structure === "put_credit_spread" || structure === "call_credit_spread";
+}
+
+/** Cash received opening a credit spread: sell the short leg at its bid, buy the protective
+ *  long at its ask, both legs paying a fee. */
+export function spreadCreditUsd(shortBid: number, longAsk: number, contracts = 1): number {
+  return (shortBid - longAsk) * 100 * contracts - 2 * REG_FEE_PER_CONTRACT * contracts;
+}
+
+/** Cash to close a credit spread right now: buy the short leg back at its ask, sell the long
+ *  leg at its bid. Floored at zero — a vertical is never worth less than nothing — and both
+ *  legs pay a fee. */
+export function creditCloseCostUsd(shortAsk: number, longBid: number, contracts = 1): number {
+  return Math.max(0, (shortAsk - longBid) * 100 * contracts) + 2 * REG_FEE_PER_CONTRACT * contracts;
 }
 
 /**
- * Build the widest affordable vertical on the long leg the naked rule wanted. Returns null
- * when no short strike brings the debit inside budget — "nothing tradeable today" stays a
- * valid and common answer.
+ * The one mark definition. `capitalAtRiskUsd` is the debit for a debit position and the
+ * collateral (width − credit) for a credit one; `creditUsd` is zero unless it is a credit.
+ *
+ * Floored at zero: a defined-risk position cannot be worth negative capital, and a crossed or
+ * stale pair of quotes must never mark one below its own maximum loss.
  */
-export function pickSpread(candidates: Contract[], budgetUsd: number): SpreadPick | null {
-  const long = bestLongLeg(candidates);
-  if (!long) return null;
-  let best: SpreadPick | null = null;
-  for (const c of candidates) {
-    if (c.expiry !== long.expiry) continue;         // a vertical is one expiry
-    if (!(c.strike > long.strike)) continue;        // and a higher strike
-    if (!tradeable(c)) continue;
-    const costUsd = spreadDebitUsd(long.ask, c.bid);
-    if (!(costUsd > 0) || costUsd > budgetUsd) continue;
-    // Highest short strike that fits — the ceiling as far out as affordability allows.
-    if (!best || c.strike > best.short.strike) {
-      best = {
-        structure: "call_spread", contract: long, short: c, costUsd,
-        spreadPct: spreadPctOf(long.bid, long.ask),
-        widthUsd: (c.strike - long.strike) * 100,
-      };
-    }
+export function positionMarkUsd(p: {
+  structure: string | null;
+  capitalAtRiskUsd: number;
+  creditUsd: number;
+  longBid: number;
+  shortAsk?: number | null;
+  contracts?: number;
+}): number {
+  const n = p.contracts ?? 1;
+  if (isCreditStructure(p.structure)) {
+    const costToClose = Math.max(0, ((p.shortAsk ?? 0) - p.longBid) * 100 * n);
+    return Math.max(0, p.capitalAtRiskUsd + p.creditUsd - costToClose);
   }
-  return best;
+  const value = p.shortAsk != null
+    ? Math.max(0, (p.longBid - p.shortAsk) * 100 * n)
+    : p.longBid * 100 * n;
+  return Math.max(0, value);
 }
 
 /**
- * What this book opens on a signal: the naked ITM call when the budget allows it, otherwise
- * the widest affordable vertical on the same long leg. Naked is preferred deliberately —
- * uncapped upside and half the crossing cost. The vertical is the fallback that makes a
- * liquid name reachable, not an upgrade.
+ * Settlement at expiry from the underlying's close on the expiry date.
+ *
+ * Returns the position's terminal VALUE (what the capital at risk turned into) and the P&L,
+ * so the caller books one number and displays the other without re-deriving either.
+ *
+ * `longStrike` is always the leg we bought. For a put credit spread that is the LOWER strike —
+ * the protective one — and `shortStrike` is the higher strike we sold.
  */
-export function pickPosition(candidates: Contract[], budgetUsd: number): PositionPick | null {
-  const naked = pickContract(candidates, budgetUsd);
-  if (naked) return { ...naked, structure: "call" };
-  return pickSpread(candidates, budgetUsd);
+export function settleAtExpiry(p: {
+  structure: string | null;
+  longStrike: number;
+  shortStrike?: number | null;
+  widthUsd?: number | null;
+  close: number;
+  capitalAtRiskUsd: number;
+  creditUsd: number;
+}): { valueUsd: number; pnlUsd: number } {
+  if (isCreditStructure(p.structure)) {
+    // The short leg is the one that can hurt: a put credit spread loses as the close falls
+    // through the short strike, and stops losing at the long strike. Capped at the width.
+    const short = p.shortStrike ?? p.longStrike;
+    const width = p.widthUsd ?? Math.abs(short - p.longStrike) * 100;
+    const loss = Math.min(Math.max(0, (short - p.close) * 100), width);
+    const pnlUsd = p.creditUsd - loss;
+    return { valueUsd: Math.max(0, p.capitalAtRiskUsd + pnlUsd), pnlUsd };
+  }
+  // Debit: intrinsic on the long leg, capped at the width when there is a short leg above it.
+  const rawIntrinsic = Math.max(0, p.close - p.longStrike) * 100;
+  const cap = p.shortStrike != null && p.widthUsd != null ? p.widthUsd : Infinity;
+  const valueUsd = Math.min(rawIntrinsic, cap);
+  return { valueUsd, pnlUsd: valueUsd - p.capitalAtRiskUsd };
 }
 
 // ---------- Position budget + book caps ----------

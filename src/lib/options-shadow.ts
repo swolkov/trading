@@ -20,8 +20,9 @@ import {
   OPTIONS_COHORT_SQL, OPTIONS_SIM_VERSION, OPTION_SOURCES, OPTION_SOURCE_LABELS, OPTION_SOURCE_EQUITY,
   type BookState, type OptionSource,
   MIN_QUOTE_SIZE,
-  canExitAt, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf, isExitSignal,
-  isQuoteFresh, optionsVerdict, spreadProceedsUsd, tStatOf,
+  canExitAt, creditCloseCostUsd, dteOf, entryRefusal, exitProceedsUsd, exitReason, groupOf,
+  isCreditStructure, isExitSignal, isQuoteFresh, optionsVerdict, positionMarkUsd,
+  settleAtExpiry, spreadProceedsUsd, tStatOf,
 } from "@/lib/options-paper-model";
 
 /** How long past expiry a position may stay open while settlement data is unavailable
@@ -62,6 +63,7 @@ export async function ensureOptionsPaperTable(): Promise<void> {
   // `structure` defaults to 'call' so every pre-existing row reads correctly as a naked call.
   for (const col of [
     "structure text NOT NULL DEFAULT 'call'",
+    "credit_usd double precision NOT NULL DEFAULT 0",
     "short_occ text",
     "short_strike double precision",
     "entry_short_bid double precision",
@@ -134,7 +136,11 @@ export async function openOptionPaperTrade(p: {
   costUsd: number; underlying: number;
   // Present only for a vertical. `shortBid` is what the short leg was SOLD for at entry,
   // so the opening mark can be computed the same honest way a naked call's is.
-  structure?: "call" | "call_spread";
+  // `costUsd` is CAPITAL AT RISK, not "what was paid": the debit for a debit position, the
+  // collateral (width minus credit) for a credit one. Every book cap, every percentage and
+  // pnl_pct is measured against it, so both kinds of position are sized on the same basis.
+  structure?: "call" | "call_spread" | "put_credit_spread";
+  creditUsd?: number;
   shortOcc?: string; shortStrike?: number; shortBid?: number; shortAsk?: number; widthUsd?: number;
 }): Promise<OpenResult> {
   await ensureOptionsPaperTable();
@@ -167,24 +173,26 @@ export async function openOptionPaperTrade(p: {
     // what was paid for it. Seeding the mark with the cost would show every fresh position
     // as flat when it is in fact already down the spread, which is the single largest cost
     // this book exists to measure.
-    // For a vertical the opening mark is what the WHOLE position could be unwound for now:
-    // sell the long at its bid AND buy the short back at its ask. Marking only the long leg
-    // would show the position miles ahead of reality.
-    const isSpread = p.structure === "call_spread";
-    const openingMark = isSpread
-      ? Math.max(0, (p.bid - (p.shortAsk ?? 0)) * 100)
-      : p.bid * 100;
+    // One mark definition for both kinds — see positionMarkUsd. A fresh position is marked at
+    // what it could be UNWOUND for right now, which is already down the round trip. Seeding it
+    // at cost would hide the single largest expense this book exists to measure.
+    const creditUsd = p.creditUsd ?? 0;
+    const openingMark = positionMarkUsd({
+      structure: p.structure ?? "call",
+      capitalAtRiskUsd: p.costUsd, creditUsd,
+      longBid: p.bid, shortAsk: p.shortOcc ? (p.shortAsk ?? 0) : null,
+    });
     try {
       await tx.$executeRawUnsafe(
         `INSERT INTO options_paper_trades
           (symbol, corr_group, source, occ, strike, expiry, ref_equity, entry_delta, entry_iv,
            entry_spread_pct, entry_ask, cost_usd, underlying_at_entry, mark_usd, peak_usd, status, sim_version,
-           structure, short_occ, short_strike, entry_short_bid, width_usd)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15,$16,$17,$18,$19,$20)`,
+           structure, short_occ, short_strike, entry_short_bid, width_usd, credit_usd)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,'open',$15,$16,$17,$18,$19,$20,$21)`,
         p.symbol, group, p.source, p.occ, p.strike, p.expiry, refEquity, p.delta, p.iv,
         p.spreadPct, p.ask, p.costUsd, p.underlying, openingMark, OPTIONS_SIM_VERSION,
-        isSpread ? "call_spread" : "call",
-        p.shortOcc ?? null, p.shortStrike ?? null, p.shortBid ?? null, p.widthUsd ?? null,
+        p.structure ?? "call",
+        p.shortOcc ?? null, p.shortStrike ?? null, p.shortBid ?? null, p.widthUsd ?? null, creditUsd,
       );
     } catch (e) {
       if (/options_paper_one_open_idx|unique/i.test(String(e))) return { opened: false, reason: "already open" } as OpenResult;
@@ -201,7 +209,8 @@ export interface OptionResolution {
 interface OpenRow {
   id: number; time: Date; symbol: string; source: string; occ: string; strike: number | null;
   expiry: string | null; cost_usd: number; peak_usd: number | null;
-  structure: string | null; short_occ: string | null; short_strike: number | null; width_usd: number | null;
+  structure: string | null; short_occ: string | null; short_strike: number | null;
+  width_usd: number | null; credit_usd: number | null;
 }
 
 /**
@@ -223,7 +232,7 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
   // cohort and nothing else.
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, source, occ, strike, expiry, cost_usd, peak_usd,
-            structure, short_occ, short_strike, width_usd
+            structure, short_occ, short_strike, width_usd, COALESCE(credit_usd, 0) AS credit_usd
      FROM options_paper_trades WHERE status='open' ORDER BY time ASC LIMIT 200`,
   );
   if (!rows.length) return [];
@@ -265,44 +274,65 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
         }
         continue;
       }
-      // A vertical settles at the long leg's intrinsic value CAPPED AT ITS WIDTH — above the
-      // short strike the two legs cancel. Settling a spread on the long leg alone would book
-      // an unbounded profit that the short leg never allowed.
-      const rawIntrinsic = Math.max(0, expiryBar.c - r.strike) * 100;
-      const capUsd = r.structure === "call_spread" && r.width_usd != null ? r.width_usd : Infinity;
-      const intrinsic = Math.min(rawIntrinsic, capUsd);
-      const pnl = intrinsic - r.cost_usd;
+      // One settlement function for both kinds — see settleAtExpiry. A debit vertical is the
+      // long leg's intrinsic CAPPED AT ITS WIDTH (above the short strike the legs cancel); a
+      // credit vertical keeps its credit unless the close comes through the short strike.
+      const settled = settleAtExpiry({
+        structure: r.structure, longStrike: r.strike, shortStrike: r.short_strike,
+        widthUsd: r.width_usd, close: expiryBar.c,
+        capitalAtRiskUsd: r.cost_usd, creditUsd: r.credit_usd ?? 0,
+      });
+      const intrinsic = settled.valueUsd;
+      const pnl = settled.pnlUsd;
       const pnlPct = r.cost_usd > 0 ? pnl / r.cost_usd : 0;
       const won = await resolveOnce(
         `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
            reason=$5, resolved_at=now(), mark_usd=NULL WHERE id=$6 AND status='open'`,
         intrinsic / 100, intrinsic, pnl, pnlPct,
-        intrinsic > 0
-          ? (intrinsic === capUsd
-              ? `expired past the short strike — settled at the spread's full width $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`
-              : `expired in the money — settled at intrinsic $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`)
-          : `expired worthless — ${r.expiry} close $${expiryBar.c.toFixed(2)} below the $${r.strike} strike`,
+        isCreditStructure(r.structure)
+          ? (pnl >= 0
+              ? `expired above the short $${r.short_strike} strike — kept the $${(r.credit_usd ?? 0).toFixed(2)} credit, ${r.expiry} close $${expiryBar.c.toFixed(2)}`
+              : `expired through the short $${r.short_strike} strike — ${r.expiry} close $${expiryBar.c.toFixed(2)}`)
+          : intrinsic > 0
+            ? (r.width_usd != null && intrinsic >= r.width_usd
+                ? `expired past the short strike — settled at the spread's full width $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`
+                : `expired in the money — settled at intrinsic $${(intrinsic / 100).toFixed(2)} off the ${r.expiry} close`)
+            : `expired worthless — ${r.expiry} close $${expiryBar.c.toFixed(2)} below the $${r.strike} strike`,
         r.id);
       if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: intrinsic, pnl, pnlPct, reason: "expiry" });
       continue;
     }
 
     // ---- no usable quote this run: leave it open, never guess a mark ----
-    // The gate is the same one entry uses: a real bid, real size behind it, quoted recently.
+    //
+    // WHAT "CLOSEABLE" MEANS DEPENDS ON WHICH SIDE OF THE TRADE WE ARE ON.
+    //
+    // DEBIT: we SELL the long to get out, so it needs a real bid with real size behind it.
     // A $6.00 bid for zero contracts is not an exit anyone could have taken.
-    if (!q || !canExitAt({ bid: q.bid, bidSize: q.bidSize, quoteTs: q.quoteTs }, now)) continue;
+    //
+    // CREDIT: we BUY THE SHORT BACK to get out. That is the leg that costs money and the one
+    // that must be quoted. The long is only protection, and on a WINNING credit spread it
+    // decays toward worthless — bid $0.00, no size. Demanding a live bid there would freeze
+    // the position exactly when it is working: it would stop marking, never reach its 21-day
+    // exit, and drift into expiry week, which is the assignment and pin risk this book exists
+    // to avoid. So on a credit position the long only has to be QUOTED RECENTLY. A zero bid
+    // is a real price for a worthless option, and closing at it is the conservative
+    // assumption.
+    const hasShort = r.short_occ != null;
+    const isCredit = isCreditStructure(r.structure);
+    const sq = hasShort ? quotes[r.short_occ as string] : undefined;
 
-    // A vertical needs BOTH legs to be closeable: sell the long at its bid AND buy the short
-    // back at its ask. A short leg with no offer is a position you cannot actually exit, so
-    // it is left open rather than marked at a price nobody would fill.
-    const isSpread = r.structure === "call_spread" && r.short_occ != null;
-    const sq = isSpread ? quotes[r.short_occ as string] : undefined;
-    if (isSpread) {
+    if (!q || !isQuoteFresh(q.quoteTs, now)) continue;
+    if (!isCredit && !canExitAt({ bid: q.bid, bidSize: q.bidSize, quoteTs: q.quoteTs }, now)) continue;
+    if (hasShort) {
       const shortCloseable = !!sq && sq.ask > 0 && sq.askSize >= MIN_QUOTE_SIZE && isQuoteFresh(sq.quoteTs, now);
       if (!shortCloseable) continue;
     }
 
-    const markUsd = isSpread ? Math.max(0, (q.bid - (sq as OptionQuote).ask) * 100) : q.bid * 100;
+    const markUsd = positionMarkUsd({
+      structure: r.structure, capitalAtRiskUsd: r.cost_usd, creditUsd: r.credit_usd ?? 0,
+      longBid: q.bid, shortAsk: hasShort ? (sq as OptionQuote).ask : null,
+    });
     const trendExit = symBars.length >= 25 ? isExitSignal(symBars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l }))) : false;
     const reason = exitReason({ trendExit, dte, markUsd, costUsd: r.cost_usd });
 
@@ -314,14 +344,22 @@ export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
         markUsd, r.id);
       continue;
     }
-    const proceeds = isSpread ? spreadProceedsUsd(q.bid, (sq as OptionQuote).ask) : exitProceedsUsd(q.bid);
-    const pnl = proceeds - r.cost_usd;
+    // Closing a credit position COSTS money — buy the short back, sell the long — and the P&L
+    // is the credit kept minus that cost. Closing a debit position RECEIVES money. Both are
+    // then expressed as "what the capital at risk became", so proceeds_usd and pnl_pct mean
+    // the same thing on every row.
+    const pnl = isCredit
+      ? (r.credit_usd ?? 0) - creditCloseCostUsd((sq as OptionQuote).ask, q.bid)
+      : (hasShort
+          ? spreadProceedsUsd(q.bid, (sq as OptionQuote).ask)
+          : exitProceedsUsd(q.bid)) - r.cost_usd;
+    const proceeds = r.cost_usd + pnl;
     const pnlPct = r.cost_usd > 0 ? pnl / r.cost_usd : 0;
     const won = await resolveOnce(
       `UPDATE options_paper_trades SET status='resolved', exit_bid=$1, exit_short_ask=$8, proceeds_usd=$2, pnl=$3, pnl_pct=$4,
          reason=$5, resolved_at=now(), peak_usd=GREATEST(COALESCE(peak_usd,0), $6), mark_usd=NULL
        WHERE id=$7 AND status='open'`,
-      q.bid, proceeds, pnl, pnlPct, reason, markUsd, r.id, isSpread ? (sq as OptionQuote).ask : null);
+      q.bid, proceeds, pnl, pnlPct, reason, markUsd, r.id, hasShort ? (sq as OptionQuote).ask : null);
     if (won) out.push({ id: r.id, symbol: r.symbol, source: r.source, occ: r.occ, costUsd: r.cost_usd, proceedsUsd: proceeds, pnl, pnlPct, reason });
   }
   return out;
@@ -388,7 +426,7 @@ export interface OptionPaperRow {
   exitBid: number | null; pnl: number | null; pnlPct: number | null; status: string; reason: string | null;
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
   /** 'call' or 'call_spread'. The short leg and the width are null for a naked call. */
-  structure: string; shortStrike: number | null; widthUsd: number | null;
+  structure: string; shortStrike: number | null; widthUsd: number | null; creditUsd: number;
 }
 export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperRow[]> {
   await ensureOptionsPaperTable();
@@ -397,11 +435,11 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     expiry: string | null; entry_ask: number; cost_usd: number; mark_usd: number | null; peak_usd: number | null;
     exit_bid: number | null; pnl: number | null; pnl_pct: number | null; status: string | null;
     reason: string | null; entry_delta: number | null; entry_spread_pct: number | null; sim_version: string | null;
-    structure: string | null; short_strike: number | null; width_usd: number | null;
+    structure: string | null; short_strike: number | null; width_usd: number | null; credit_usd: number | null;
   }[]>(
     `SELECT id, time, symbol, source, occ, strike, expiry, entry_ask, cost_usd, mark_usd, peak_usd,
             exit_bid, pnl, pnl_pct, status, reason, entry_delta, entry_spread_pct, sim_version,
-            structure, short_strike, width_usd
+            structure, short_strike, width_usd, COALESCE(credit_usd, 0) AS credit_usd
      FROM options_paper_trades ORDER BY time DESC LIMIT $1`, Math.max(1, Math.min(500, limit)),
   );
   return rows.map((r) => ({
@@ -412,6 +450,7 @@ export async function recentOptionPaperTrades(limit = 100): Promise<OptionPaperR
     entryDelta: r.entry_delta, entrySpreadPct: r.entry_spread_pct,
     simVersion: r.sim_version ?? OPTIONS_SIM_VERSION,
     structure: r.structure ?? "call", shortStrike: r.short_strike, widthUsd: r.width_usd,
+    creditUsd: r.credit_usd ?? 0,
   }));
 }
 

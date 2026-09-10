@@ -20,7 +20,10 @@
 // is still worthless at the expected move, and a deep in-the-money call scores badly because
 // it costs a fortune to capture the same move. This is the honest version of "compare
 // strikes and expirations" — the comparison needs a benchmark, and the market supplies one.
-import { REG_FEE_PER_CONTRACT, type Contract, tradeable } from "@/lib/options-paper-model";
+import {
+  MAX_DELTA, MIN_DELTA, type Contract,
+  entryCostUsd, spreadCreditUsd, spreadDebitUsd, tradeable,
+} from "@/lib/options-paper-model";
 
 /** Every structure this book can express. Bearish shapes are BUILT but gated off at the
  *  caller (see `BULLISH_KINDS`): the only entry signal this desk has validated is a long
@@ -125,7 +128,7 @@ export function returnAt(c: Candidate, S: number): number | null {
 const halfSpread = (c: Contract) => ((c.ask - c.bid) / 2) * 100;
 
 function singleLeg(kind: "long_call" | "long_put", c: Contract): Candidate {
-  const debitUsd = c.ask * 100 + REG_FEE_PER_CONTRACT;
+  const debitUsd = entryCostUsd(c.ask);
   return {
     kind, legs: [{ contract: c, side: "buy" }], expiry: c.expiry,
     debitUsd, creditUsd: 0,
@@ -142,7 +145,7 @@ function singleLeg(kind: "long_call" | "long_put", c: Contract): Candidate {
 }
 
 function verticalDebit(kind: "call_debit" | "put_debit", long: Contract, short: Contract): Candidate {
-  const debitUsd = (long.ask - short.bid) * 100 + 2 * REG_FEE_PER_CONTRACT;
+  const debitUsd = spreadDebitUsd(long.ask, short.bid);
   const width = Math.abs(short.strike - long.strike) * 100;
   return {
     kind, legs: [{ contract: long, side: "buy" }, { contract: short, side: "sell" }], expiry: long.expiry,
@@ -158,7 +161,7 @@ function verticalDebit(kind: "call_debit" | "put_debit", long: Contract, short: 
 }
 
 function verticalCredit(kind: "put_credit" | "call_credit", short: Contract, long: Contract): Candidate {
-  const creditUsd = (short.bid - long.ask) * 100 - 2 * REG_FEE_PER_CONTRACT;
+  const creditUsd = spreadCreditUsd(short.bid, long.ask);
   const width = Math.abs(short.strike - long.strike) * 100;
   return {
     kind, legs: [{ contract: short, side: "sell" }, { contract: long, side: "buy" }], expiry: short.expiry,
@@ -198,27 +201,41 @@ export function buildCandidates(input: BuildInput): Candidate[] {
   const puts = input.puts.filter((c) => c.expiry === input.expiry && tradeable(c));
   const out: Candidate[] = [];
 
-  if (kinds.includes("long_call")) for (const c of calls) out.push(singleLeg("long_call", c));
-  if (kinds.includes("long_put")) for (const p of puts) out.push(singleLeg("long_put", p));
+  // THE STOCK-REPLACEMENT RULE, PRESERVED. The long leg of any bought structure must sit in
+  // the book's pre-registered delta band — deep enough in the money that most of the premium
+  // is intrinsic, so decay is a small fraction of the position and the premium itself is the
+  // floor. Ranking on return at the expected move does NOT reproduce this on its own: a cheap
+  // call struck just below the reference price shows a spectacular percentage return there
+  // and would win every time, which is precisely the out-of-the-money lottery ticket this
+  // book was built to avoid. The band is what keeps the thesis intact.
+  const longLegs = (cs: Contract[]) => cs.filter((c) => Math.abs(c.delta) >= MIN_DELTA && Math.abs(c.delta) <= MAX_DELTA);
+  const longCalls = longLegs(calls);
+  const longPuts = longLegs(puts);
+
+  if (kinds.includes("long_call")) for (const c of longCalls) out.push(singleLeg("long_call", c));
+  if (kinds.includes("long_put")) for (const p of longPuts) out.push(singleLeg("long_put", p));
 
   if (kinds.includes("call_debit")) {
-    for (const long of calls) for (const short of calls) {
+    for (const long of longCalls) for (const short of calls) {
       if (short.strike > long.strike) out.push(verticalDebit("call_debit", long, short));
     }
   }
   if (kinds.includes("put_debit")) {
-    for (const long of puts) for (const short of puts) {
+    for (const long of longPuts) for (const short of puts) {
       if (short.strike < long.strike) out.push(verticalDebit("put_debit", long, short));
     }
   }
+  // A SOLD leg must be OUT OF THE MONEY at entry. Structural, not a tuned threshold: selling
+  // something that already has intrinsic value is selling the move that has happened rather
+  // than the one that has not, and it hands the buyer an immediate reason to exercise early.
   if (kinds.includes("put_credit")) {
     for (const short of puts) for (const long of puts) {
-      if (long.strike < short.strike) out.push(verticalCredit("put_credit", short, long));
+      if (long.strike < short.strike && short.strike < input.spot) out.push(verticalCredit("put_credit", short, long));
     }
   }
   if (kinds.includes("call_credit")) {
     for (const short of calls) for (const long of calls) {
-      if (long.strike > short.strike) out.push(verticalCredit("call_credit", short, long));
+      if (long.strike > short.strike && short.strike > input.spot) out.push(verticalCredit("call_credit", short, long));
     }
   }
 

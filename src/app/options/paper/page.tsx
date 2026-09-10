@@ -26,7 +26,7 @@ interface StructureStat {
 }
 interface TradeRow {
   id: number; time: string; symbol: string; source: string; occ: string; strike: number | null;
-  structure: string; shortStrike: number | null; widthUsd: number | null;
+  structure: string; shortStrike: number | null; widthUsd: number | null; creditUsd: number;
   expiry: string | null; entryAsk: number; costUsd: number; markUsd: number | null; peakUsd: number | null;
   exitBid: number | null; pnl: number | null; pnlPct: number | null; status: string; reason: string | null;
   entryDelta: number | null; entrySpreadPct: number | null; simVersion: string;
@@ -51,6 +51,10 @@ interface Payload {
 }
 
 const mask = (a: string) => `••••${a.slice(-4)}`;
+const structureLabel = (s: string) =>
+  s === "call_spread" ? "Call debit spread"
+  : s === "put_credit_spread" ? "Put credit spread"
+  : "Naked ITM call";
 const levelLabel = (l: string) =>
   l === "option_level_3" ? "Level 3 — spreads unlocked"
   : l === "option_level_2" ? "Level 2 — long premium only"
@@ -294,7 +298,7 @@ export default function OptionsPaperPage() {
               <tbody>
                 {structures.map((st) => (
                   <Row key={st.structure}>
-                    <Td strong>{st.structure === "call_spread" ? "Vertical debit spread" : "Naked ITM call"}</Td>
+                    <Td strong>{structureLabel(st.structure)}</Td>
                     <Td num>{st.resolved}</Td>
                     <Td num>{st.hitRate != null ? pct(st.hitRate) : "—"}</Td>
                     <Td num className={st.avgPnlPct != null ? tone(st.avgPnlPct) : ""}>
@@ -309,7 +313,9 @@ export default function OptionsPaperPage() {
           </PanelBody>
           <PanelBody className="pt-0">
             <Note>
-              A spread is a <strong>compromise, not an upgrade</strong>. This book has no take-profit because capping winners is what turns a
+              Capital at risk is what every column below is measured against — the debit for a debit position, the collateral
+              (width minus credit) for a credit one. A credit spread risks <em>more</em> than it collects, always.
+              {" "}A debit spread is a <strong>compromise, not an upgrade</strong>. This book has no take-profit because capping winners is what turns a
               trend rule negative — and a vertical caps the winner by construction. It is used only when the naked call will not fit the budget,
               which below roughly $4,500 is most of the time on a liquid name. This table is how we find out whether the cap cost more than it bought,
               instead of assuming either way.
@@ -334,10 +340,14 @@ export default function OptionsPaperPage() {
                 <Td title={when(t.time)}>{ago(t.time)}</Td>
                 <Td>{t.source}</Td>
                 <Td className="whitespace-nowrap">
-                  {t.symbol} ${t.strike ?? "—"}
-                  {t.structure === "call_spread" && t.shortStrike != null && <span className="text-muted-foreground">/${t.shortStrike}</span>}
+                  {/* A credit spread is quoted short-strike-first, the way it is traded. */}
+                  {t.symbol}{" "}
+                  {t.structure === "put_credit_spread" && t.shortStrike != null
+                    ? <>${t.shortStrike}<span className="text-muted-foreground">/${t.strike}p</span></>
+                    : <>${t.strike ?? "—"}{t.shortStrike != null && <span className="text-muted-foreground">/${t.shortStrike}</span>}</>}
                   {" "}{t.expiry ?? ""}
-                  {t.structure === "call_spread" && <Chip tone="blue" className="ml-1.5">spread</Chip>}
+                  {t.structure === "call_spread" && <Chip tone="blue" className="ml-1.5">debit</Chip>}
+                  {t.structure === "put_credit_spread" && <Chip tone="amber" className="ml-1.5" title={`$${t.creditUsd.toFixed(0)} credit received`}>credit</Chip>}
                 </Td>
                 <Td num>{t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}</Td>
                 <Td num>{usd(t.costUsd)}</Td>

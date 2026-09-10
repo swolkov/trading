@@ -8,7 +8,7 @@
 // data plan.
 import { getDailyBars, getOptionChain } from "@/lib/rh-options-data";
 import {
-  MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type Structure,
+  MAX_DTE, MIN_DTE, OPTIONS_SYMBOLS, type Contract, type StoredStructure,
   isEntrySignal,
 } from "@/lib/options-paper-model";
 import {
@@ -38,12 +38,16 @@ export async function scanTrendSignals(): Promise<{ candidates: TrendCandidate[]
 }
 
 /** What the scan hands the opener. `short` and `widthUsd` are present only for a vertical —
- *  see pickPosition: naked when the budget allows it, otherwise the widest affordable spread. */
+ *  see options-structures.ts: the engine compares every shape and expiry on real quotes. */
 export interface ChainPick {
-  structure: Structure;
+  structure: StoredStructure;
+  /** Always the leg we BUY — the ITM call, or the protective lower-strike put of a credit
+   *  spread. The storage convention depends on this: `occ` is what we bought. */
   contract: Contract;
   short?: Contract;
+  /** Capital at risk: the debit, or the collateral (width − credit) for a credit spread. */
   costUsd: number;
+  creditUsd: number;
   spreadPct: number;
   widthUsd?: number;
   symbol: string; underlying: number; iv: number | null;
@@ -60,7 +64,7 @@ export interface ChainPick {
  *
  * The strike window is derived from delta, not guessed: a 0.70-0.85 delta call on a normal
  * equity is roughly 8-35% in the money, so the request asks for strikes between 60% and 97%
- * of spot and lets the delta filter in pickContract do the precise work.
+ * of spot and lets the structure engine's delta band do the precise work.
  */
 export async function pickContractFor(symbol: string, underlying: number, budgetUsd: number): Promise<ChainPick | null> {
   const now = Date.now();
@@ -82,7 +86,9 @@ export async function pickContractFor(symbol: string, underlying: number, budget
     }),
     getOptionChain({
       underlying: symbol, expiryFrom: from, expiryTo: to,
-      strikeMin: underlying * 0.92, strikeMax: underlying * 1.08, type: "put",
+      // Wide enough for put credit spreads (short just below spot, long below that) as well
+      // as the at-the-money straddle that supplies the expected move.
+      strikeMin: underlying * 0.80, strikeMax: underlying * 1.08, type: "put",
       budgetUsd, spot: underlying,
     }),
   ]);
@@ -107,12 +113,16 @@ export async function pickContractFor(symbol: string, underlying: number, budget
     if (em == null || !(em > 0)) continue;
     const cands = buildCandidates({
       calls: callContracts, puts: putContracts, spot: underlying, expiry, budgetUsd,
-      // Credit structures are BUILT and tested in options-structures.ts but not enabled here:
-      // the position lifecycle (opening mark, exit fill, expiry settlement) is written for a
-      // position you paid for, and inverting it for one you were paid for is a separate change
-      // with its own review. Enabling them before that would book credit trades through
-      // debit-shaped arithmetic.
-      kinds: ["long_call", "call_debit"],
+      // All three BULLISH shapes now that the position lifecycle handles a credit position
+      // (see positionMarkUsd / settleAtExpiry). Bearish shapes stay off: the only entry signal
+      // this desk has validated is a long trend break, and its own crypto record found the
+      // mirrored short lost on every slice.
+      //
+      // Note what the ranking does here without being told to: a put credit spread's ceiling
+      // is the credit, so its return at the expected move is usually far below a debit
+      // spread's. It only wins when the debit alternatives are genuinely poor — which is the
+      // right way round, given this desk's July finding that premium selling is not durable.
+      kinds: ["long_call", "call_debit", "put_credit"],
     });
     const sel = selectStructure(cands, underlying, em);
     if (!sel) continue;
@@ -125,11 +135,14 @@ export async function pickContractFor(symbol: string, underlying: number, budget
 
   const longLeg = best.cand.legs.find((l) => l.side === "buy")!.contract;
   const shortLeg = best.cand.legs.find((l) => l.side === "sell")?.contract;
+  const structure: StoredStructure =
+    best.cand.kind === "put_credit" ? "put_credit_spread" : shortLeg ? "call_spread" : "call";
   return {
-    structure: shortLeg ? "call_spread" : "call",
+    structure,
     contract: longLeg,
     short: shortLeg,
     costUsd: best.cand.capitalAtRiskUsd,
+    creditUsd: best.cand.creditUsd,
     spreadPct: ((longLeg.ask - longLeg.bid) / ((longLeg.ask + longLeg.bid) / 2)) * 100,
     widthUsd: shortLeg ? Math.abs(shortLeg.strike - longLeg.strike) * 100 : undefined,
     symbol, underlying, iv: best.iv,

@@ -59,9 +59,10 @@ For each entry in `chainRequests` — **fetch BOTH calls and puts**:
 3. `get_option_quotes` on those strikes, batched ≤ 20.
    - **Calls** are what the position is built from — long leg deep in the money, short leg
      above spot. Keep the ones between roughly **0.60 × and 1.30 × spot**.
-   - **Puts** are needed only for the at-the-money straddle, which is what supplies the
-     expected move every structure is ranked against. A few strikes either side of spot is
-     enough — roughly **0.92 × to 1.08 × spot**.
+   - **Puts** do two jobs, so the window is wider than it looks: the at-the-money ones supply
+     the straddle (and therefore the expected move every structure is ranked against), and the
+     ones below spot are the legs of a put credit spread. Fetch roughly
+     **0.80 × to 1.08 × spot**.
    - **Without a put near the money there is no straddle, no expected move, and that expiry
      is skipped entirely.** If a symbol keeps producing no trade, check the puts arrived.
 4. **Do not pre-filter on delta, spread or price yourself.** The engine applies the real
@@ -110,6 +111,17 @@ three days and the next run picks them up.
 - **A chain request sitting for days** → the agent is not running often enough. Say so.
 - **Quotes stale > 36 hours** → the book refuses them by design: positions stop marking and
   nothing can open. This is a real incident, not a quiet market. Say so plainly.
+
+## What the book can open
+Three bullish shapes, chosen by the engine on real quotes — never by a rule of thumb:
+**long in-the-money call**, **call debit spread**, **put credit spread**. It compares every
+listed expiry in the 60–120 day window, each against its own expected move, and takes the best
+return on capital at risk. "Nothing qualifies" is a normal answer.
+
+Bearish shapes (long put, put debit, call credit) are built and tested but **switched off**:
+the only entry signal this desk has validated is a long trend break, and its own crypto record
+found the mirrored short lost on every slice. Turning them on is a config change, not a
+rewrite — but it needs a validated bearish signal first, not a hunch.
 
 ## What the record means
 30+ resolved, positive net, t ≥ 2, across 7+ distinct days — same bar as every other desk.
