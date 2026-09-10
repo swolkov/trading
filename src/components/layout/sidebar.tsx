@@ -28,7 +28,7 @@ const sections = [
     label: "Trading",
     links: [
       { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart },
-      { href: "/margin/paper", label: "Road to Live", icon: Route },
+      { href: "/margin/paper", label: "Live Desk", icon: Route },
       { href: "/stocks/paper", label: "Stock Paper Book", icon: FlaskConical },
       { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
       { href: "/orders", label: "Orders", icon: ClipboardList },

@@ -60,11 +60,15 @@ const btnDanger = `${btn} border-down/50 bg-down/10 text-down hover:bg-down/20`;
 const btnGood = `${btn} border-up/50 bg-up/10 text-up hover:bg-up/20`;
 const btnPlain = `${btn} border-border bg-card text-foreground hover:bg-accent`;
 
-function Step({ n, title, status, tone, children }: { n: number; title: string; status: string; tone: ChipTone; children?: ReactNode }) {
+// Once the desk is armed these stop being STEPS on a road — the road has been walked. They
+// are a scorecard (is the edge real yet?), the controls (stop it), and a receipt (the plumbing
+// passed). Numbering them implied a sequence that no longer exists and put the least useful
+// one first.
+function Step({ title, status, tone, children }: { title: string; status: string; tone: ChipTone; children?: ReactNode }) {
   return (
     <Panel>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
-        <h2 className="text-[13px] font-semibold"><span className="mr-2 text-muted-foreground">{n}</span>{title}</h2>
+        <h2 className="text-[13px] font-semibold">{title}</h2>
         <Chip tone={tone} size="md" dot={tone === "red"}>{status}</Chip>
       </div>
       <PanelBody className="space-y-3">{children}</PanelBody>
@@ -197,20 +201,12 @@ export function GoLivePanel({ strategies, capacity = null }: { strategies: Strat
 
   return (
     <div className="space-y-3">
-      <Step n={1} title="Plumbing test — one real $20 trade through the whole system" status={plumbingStatus} tone={plumbingTone}>
+      <Step title="Is the edge real yet? — the armed sleeve's own scorecard" status={gateStatus} tone={gateTone}>
         <Note>
-          Proves Kraken behaves the way the code assumes: entry, attached stop, close, fees. It is not a strategy test and does not move step 2.
-          {rtPassed && <> <span className="text-up">All 14 checks passed.</span> It only needs to run again if the Kraken code changes.</>}
-        </Note>
-        <details open={!rtPassed}>
-          <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">{rtPassed ? "Show the test card (re-run, details)" : "Run the test"}</summary>
-          <div className="mt-2"><RoundTripCard /></div>
-        </details>
-      </Step>
-
-      <Step n={2} title="Paper gate — the live candidate has to prove itself" status={gateStatus} tone={gateTone}>
-        <Note>
-          Strategy under test: <strong className="font-medium text-foreground/85">{cand?.label ?? "high-conviction 5m/15m breakouts (selective)"}</strong>. All four must be green. Until then nothing trades real money.
+          Strategy under test: <strong className="font-medium text-foreground/85">{cand?.label ?? (cfg?.live.liveSources ?? []).join(", ") ?? "—"}</strong>.
+          {armed
+            ? <> ⚠️ This is a SCORECARD, not a gate — the desk is <strong className="font-medium text-foreground/85">already armed and trading real money</strong> on this sleeve, ahead of these four turning green. That was a deliberate call and it is logged. Until they are all green the edge is <strong className="font-medium text-foreground/85">undemonstrated</strong>, which is not the same as disproven: it means the sample is still too small to tell luck from skill.</>
+            : <> All four must be green. Until then nothing trades real money.</>}
         </Note>
         {cand ? (
           <div className="space-y-1.5">
@@ -225,7 +221,7 @@ export function GoLivePanel({ strategies, capacity = null }: { strategies: Strat
         ) : <Note>No resolved trades for the live candidate yet.</Note>}
       </Step>
 
-      <Step n={3} title="Arm — real money, one strategy, sized off the real account" status={armed ? `Armed · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "Disarmed"} tone={armed ? "red" : "grey"}>
+      <Step title="Live controls — real money, one strategy, sized off the real account" status={armed ? `Armed · ${(cfg?.live.liveSources ?? []).join(", ") || "?"}` : "Disarmed"} tone={armed ? "red" : "grey"}>
         <Note>
           What arming means: {cfg ? <><strong className="font-medium text-foreground/85">the same sizing rule paper is scored with</strong>: {cfg.live.baseRiskPct}% of the account at risk per trade, {cfg.live.baseRiskPct * 2}% on high conviction{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / 100).toLocaleString()} today)</>}. Size follows from that, not from a size setting: risk ÷ stop, so a high-conviction trade is {(cfg.live.baseRiskPct * 2 / cfg.live.stopPct).toFixed(1)}× the account in notional{eq > 0 && <> (about ${Math.round(eq * cfg.live.baseRiskPct * 2 / cfg.live.stopPct).toLocaleString()})</>}, posting {eq > 0 ? <>about ${Math.round(eq * cfg.live.baseRiskPct * 2 / cfg.live.stopPct / Math.max(1, cfg.live.maxLeverageCeiling)).toLocaleString()} of margin</> : <>margin</>} at the {cfg.live.maxLeverageCeiling}× ceiling. Guards: at most {cfg.live.maxPositions} position{cfg.live.maxPositions === 1 ? "" : "s"} at a time and {cfg.live.maxTradesPerDay} trades a day, a {cfg.live.stopPct}% stop that moves to breakeven and trails, and a {cfg.live.maxHoldH}-hour time limit{cfg.live.maxPositions === 1 && <>. One slot is a deliberate choice, not a limitation: it is what lets each trade carry the full {cfg.live.baseRiskPct * 2}% — and while a position is open the desk refuses every other setup</>}</> : "loading…"}.
           Arming is deliberate: type ARM, then press. Every arm and disarm is logged and paged to Slack.
@@ -235,6 +231,17 @@ export function GoLivePanel({ strategies, capacity = null }: { strategies: Strat
         <details>
           <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">Show the live-vs-paper settings check</summary>
           <div className="mt-2"><LiveMirrorCard /></div>
+        </details>
+      </Step>
+
+      <Step title="Plumbing receipt — one real $20 trade through the whole system" status={plumbingStatus} tone={plumbingTone}>
+        <Note>
+          Proves Kraken behaves the way the code assumes: entry, attached stop, close, fees. It is not a strategy test and does not move step 2.
+          {rtPassed && <> <span className="text-up">All 14 checks passed.</span> It only needs to run again if the Kraken code changes.</>}
+        </Note>
+        <details open={!rtPassed}>
+          <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">{rtPassed ? "Show the test card (re-run, details)" : "Run the test"}</summary>
+          <div className="mt-2"><RoundTripCard /></div>
         </details>
       </Step>
     </div>

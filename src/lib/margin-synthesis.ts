@@ -372,10 +372,10 @@ export async function maybeDemote(): Promise<Demotion | null> {
   await cfgSet(DEMOTION_KEY, JSON.stringify(d));
   try {
     const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
-    log.push(`${d.at} DEMOTED ${source} → paper (kraken_margin_auto=false): ${reason}. Re-arming needs the demotion acknowledged on Road to Live.`);
+    log.push(`${d.at} DEMOTED ${source} → paper (kraken_margin_auto=false): ${reason}. Re-arming needs the demotion acknowledged on Live Desk.`);
     await cfgSet("kraken_margin_arm_log", JSON.stringify(log.slice(-50)));
   } catch { /* log only */ }
-  const msg = `🛑 DEMOTED to paper: ${source} disarmed automatically — ${reason}. Open positions stay under the guardian. Re-arming needs the demotion acknowledged on Road to Live.`;
+  const msg = `🛑 DEMOTED to paper: ${source} disarmed automatically — ${reason}. Open positions stay under the guardian. Re-arming needs the demotion acknowledged on Live Desk.`;
   await sendNotification(msg, "margin_live").catch(() => {});
   await sendNotification(msg, "margin_urgent").catch(() => {});
   return d;

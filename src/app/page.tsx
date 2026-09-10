@@ -11,7 +11,7 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 // ============ DASHBOARD ============
 // One job: "how is the desk right now?" — four numbers, the executor's state, the open live
 // position, and the parked spot book labelled as what it is. No analytics here; the paper
-// record lives on Road to Live, the trade list on Orders, machinery on System Health.
+// record lives on Live Desk, the trade list on Orders, machinery on System Health.
 // Every read is an existing read-only endpoint; nothing on this page can place an order.
 
 interface Holding { coin: string; amount: number; price: number; value: number }
@@ -68,7 +68,7 @@ export default function DashboardPage() {
   const s3 = arm?.stage3 ?? null;
   const s3Pct = s3 && s3.target > 0 ? Math.min(100, (s3.done / s3.target) * 100) : 0;
 
-  // Paper gate, same four checks as Road to Live.
+  // The edge scorecard, same four checks as Live Desk.
   const cand = score?.strategies?.find((s) => s.key === LIVE_CANDIDATE) ?? null;
   const gateGreen = cand ? [cand.resolved >= 30, cand.resolved > 0 && cand.liveNet > 0, cand.tStat != null && cand.tStat >= 2, (cand.days ?? 0) >= 7].filter(Boolean).length : null;
   const gateOpen = gateGreen === 4;
@@ -156,7 +156,7 @@ export default function DashboardPage() {
             <Label>Last executor event</Label>
             <span className="text-xs text-muted-foreground tabular-nums">{lastEventAt ? `${when(lastEventAt)} · ${ago(lastEventAt)}` : ""}</span>
             <span className="min-w-0 flex-1 truncate text-[13px]" title={lastEventText ?? ""}>{lastEventText}</span>
-            <Link href="/margin/paper" className="text-xs text-primary hover:underline">Road to Live</Link>
+            <Link href="/margin/paper" className="text-xs text-primary hover:underline">Live Desk</Link>
           </div>
         </Panel>
       )}
@@ -180,7 +180,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
           { href: "/margin", title: "Margin Cockpit", sub: "Live account: positions, liquidation distance, charts, signals" },
-          { href: "/margin/paper", title: "Road to Live", sub: "The paper gate, the arm switch, the strategy scoreboard" },
+          { href: "/margin/paper", title: "Live Desk", sub: "Is the edge real yet, the controls to stop it, the strategy scoreboard" },
           { href: "/orders", title: "Orders", sub: "Every real fill and round trip, and the paper log" },
           { href: "/command", title: "System Health", sub: "Scanner and guardian heartbeats, switches, locks" },
         ].map((l) => (
