@@ -117,7 +117,7 @@ export async function POST(request: Request) {
     if (!d) return Response.json({ error: "nothing to acknowledge", ...(await status()) }, { status: 400 });
     await setKey(DEMOTION_KEY, null);
     await appendLog(`DEMOTION ACKNOWLEDGED (${d.source}, ${d.at}: ${d.reason}) from the admin page — still disarmed; arming is a separate act`);
-    await sendNotification(`⚪ Demotion acknowledged on Road to Live (${d.source}). Still disarmed.`, "margin_live").catch(() => {});
+    await sendNotification(`⚪ Demotion acknowledged on Live Desk (${d.source}). Still disarmed.`, "margin_live").catch(() => {});
     return Response.json({ ok: true, ...(await status()) });
   }
   if (action !== "arm") return Response.json({ error: "action must be arm | disarm | acknowledge-demotion" }, { status: 400 });

@@ -105,7 +105,7 @@ export function renderWeeklyMemo(i: WeeklyInput): string {
   const promos = rows.filter((s) => weeklyAction(s) === "PROMOTE-READY").map((s) => s.key);
   L.push("## 6 · What changes this week", "");
   if (!kills.length && !promos.length && !i.demoted) L.push("- **Nothing.** No rule fired. Leave every parameter alone; the samples are still being earned.");
-  if (promos.length) L.push(`- PROMOTE-READY: ${promos.join(", ")} — the paper gate is green; arming is Spencer's decision on Road to Live.`);
+  if (promos.length) L.push(`- PROMOTE-READY: ${promos.join(", ")} — the paper gate is green; arming is Spencer's decision on Live Desk.`);
   if (kills.length) L.push(`- KILL CANDIDATE: ${kills.join(", ")} — retire by adding to RETIRED_AUTO_SOURCES (open trades still resolve).`);
   if (i.demoted) L.push(`- DEMOTED: ${i.demoted.source} — read the record before acknowledging; arming again is a separate act.`);
   L.push("");

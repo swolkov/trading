@@ -9,7 +9,7 @@ import { Explainer, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat
 import { GoLivePanel, type CapacityView, type StrategyStat } from "@/components/margin/go-live-panel";
 import { money, pct, pnl2, tone } from "@/lib/format";
 
-// ============ ROAD TO LIVE ============
+// ============ LIVE DESK ============
 // The shadow experiment's home. Every strategy the system runs on paper — scored on real
 // Kraken prices with Spencer's real fees + rollover, zero money at risk — lives here:
 // the go-live panel (plumbing → paper gate → arm), the pooled paper record, the
@@ -71,8 +71,8 @@ export default function PaperTradesPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Road to Live"
-        sub="Three steps, in order. Every strategy is scored on paper first with real Kraken prices and your real fees. Nothing trades real money until step 2 is green."
+        title="Live Desk"
+        sub="The armed desk: whether its edge is real yet, the controls to stop it, and the plumbing receipt. Every strategy is scored on paper first with real Kraken prices and your real fees — but the desk is ALREADY trading real money ahead of a green scorecard, which was a deliberate call."
       />
 
       <GoLivePanel strategies={score?.strategies ?? []} capacity={score?.capacity ?? null} />

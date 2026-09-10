@@ -42,7 +42,7 @@ export function TopBar() {
             </div>
             {equity == null && krk && <Chip tone="red" title="Kraken did not answer the last read; the numbers will fill in on the next one">Kraken did not answer</Chip>}
             {parkedPnl != null && equity != null && (
-              <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="The parked BTC/ETH holdings versus what was deposited for them. Not the margin desk — that record is on Orders and Road to Live.">
+              <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="The parked BTC/ETH holdings versus what was deposited for them. Not the margin desk — that record is on Orders and Live Desk.">
                 <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Parked coins</span>
                 <span className={`text-[13px] font-semibold tabular-nums ${tone(parkedPnl)}`}>{pnl0(parkedPnl)}</span>
                 {parkedPct != null && (
