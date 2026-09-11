@@ -184,7 +184,7 @@ async function main() {
   console.log("Each line: the rule's own per-trade P&L, its t-stat, and the 95% confidence interval.");
   console.log("Anything whose CI straddles zero is NOT established, however good the average looks.\n");
   console.log("── the record as it stands ──");
-  const s4 = report("4h leg (as armed)", c4.map((x) => x.pnl));
+  report("4h leg (as armed)", c4.map((x) => x.pnl));
   const s1 = report("1d leg (as armed)", c1.map((x) => x.pnl));
   report("both, i.e. live today", [...c4, ...c1].map((x) => x.pnl));
 

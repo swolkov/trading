@@ -268,9 +268,9 @@ export async function GET(request: Request) {
     // tally must describe the RECORD the scoreboard keeps — the cloud routines read these
     // posts as the record. So the headline counts and net cover US-tradeable pairs only;
     // non-US results are listed separately and labelled, never folded into the total.
-    // Experiment twins (the ×5-size sleeve) are the SAME trades again at a different size:
-    // they are labelled and tallied apart so the cloud routines that read this channel as
-    // the record never count a candidate trade twice.
+    // Measurement sleeves (the ×5-size sleeve and the exit/entry twins) are the SAME trades
+    // again in a different container: they are labelled and tallied apart so the cloud
+    // routines that read this channel as the record never count a candidate trade twice.
     const isExperiment = (r: { source: string | null }) => EXPERIMENT_SOURCES.includes(r.source ?? "");
     const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol) && !isExperiment(r));
     const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol) && !isExperiment(r));
@@ -288,7 +288,7 @@ export async function GET(request: Request) {
         ? `\n_Set aside (non-US pairs, not in the record): ${setAside.length} resolved, net ${setAside.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(setAside.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
         : "";
       const expLine = experiments.length > 0
-        ? `\n_×5-size experiment (not the record — the same trades again, bigger): ${experiments.length} resolved, net ${experiments.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(experiments.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
+        ? `\n_Measurement sleeves (×5-size and twins — the same signals in a different container, not the record): ${experiments.length} resolved, net ${experiments.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(experiments.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
         : "";
       await sendNotification(
         `📊 ${counted.length} paper trades resolved this run (US-tradeable pairs) — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}${aside}${expLine}\n` +
