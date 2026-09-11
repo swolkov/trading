@@ -451,6 +451,15 @@ export async function optionsSleeveBreakdown(): Promise<OptionsSleeveStat[]> {
      FROM options_paper_trades WHERE ${OPTIONS_COHORT_SQL} GROUP BY source`,
   );
   const byKey = new Map(rows.map((r) => [r.source, r]));
+  // Positions from an EARLIER cohort are still evaluated to their finish (the evaluator is
+  // not cohort-filtered) and still appear in the position log, but they are not in this
+  // cohort's statistics. Count them per sleeve so the card can say so — a card reading
+  // "0 open" above a log row reading "open" is a contradiction, not a summary.
+  const legacy = await prisma.$queryRawUnsafe<{ source: string; n: bigint }[]>(
+    `SELECT source, count(*)::bigint AS n FROM options_paper_trades
+     WHERE status='open' AND NOT (${OPTIONS_COHORT_SQL}) GROUP BY source`,
+  );
+  const legacyOpen = new Map(legacy.map((r) => [r.source, Number(r.n)]));
   // ALWAYS return a card for EVERY sleeve, including one that has never traded.
   // `GROUP BY source` only emits rows that exist, so the $1k sleeve — which by design may
   // go long stretches unable to afford any contract — would vanish from the page entirely,
@@ -468,6 +477,7 @@ export async function optionsSleeveBreakdown(): Promise<OptionsSleeveStat[]> {
       resolved, wins: Number(r?.wins ?? 0), hitRate: resolved > 0 ? Number(r?.wins ?? 0) / resolved : null,
       expectancy: resolved > 0 ? net / resolved : null, totalPnl: net,
       open: Number(r?.open ?? 0), openPremium: r?.openprem || 0, openMark: r?.openmark || 0,
+      legacyOpen: legacyOpen.get(source) ?? 0,
       voided: Number(r?.voided ?? 0), days: Number(r?.days ?? 0), tStat: t,
       verdict: optionsVerdict(resolved, net, t, Number(r?.days ?? 0)),
       avgSpreadPct: r?.avgspread ?? null, entriesThisMonth: Number(r?.month ?? 0),

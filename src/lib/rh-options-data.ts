@@ -24,8 +24,8 @@
 // Everything here fails toward "no data" rather than toward a guess. An empty chain means
 // no entry; a missing quote means a position is left alone. Both are already handled by the
 // callers, and both are far safer than a modelled price.
-import { getHistoricalBars } from "@/lib/yahoo";
 import { parseOcc, toOcc } from "@/lib/options-occ";
+import { getStoredBars } from "@/lib/options-bars-store";
 import {
   getStoredChain, getStoredQuotes, requestChain, type OptionQuote,
 } from "@/lib/options-quote-store";
@@ -37,27 +37,37 @@ export type { OptionQuote };
 export { parseOcc, toOcc };
 export interface DailyBar { t: string; o: number; h: number; l: number; c: number; v: number }
 
-/** Daily bars for many symbols, split-adjusted. Yahoo is per-symbol, so this fans out with
- *  a small concurrency cap — enough to keep a 38-name universe inside the cron budget,
- *  low enough not to get rate-limited. A symbol that fails is simply absent; the scanner
- *  already reports "no bars" for it rather than treating it as a signal. */
-export async function getDailyBars(symbols: string[], days = 420): Promise<Record<string, DailyBar[]>> {
+/** Daily bars for many symbols, split-adjusted — from ROBINHOOD, via the bars inbox
+ *  (src/lib/options-bars-store.ts). The desk session pushes them; nothing here fetches.
+ *  A symbol with nothing stored is simply absent; the scanner already reports "no bars" for
+ *  it rather than treating it as a signal. A same-day bar is dropped while the session is
+ *  still open (see completedSessionsOnly), so a manual midday run cannot enter on a
+ *  half-finished bar. Both scheduled runs are after the close. */
+export async function getDailyBars(symbols: string[], days = 420, now = new Date()): Promise<Record<string, DailyBar[]>> {
+  const stored = await getStoredBars(symbols, days);
   const out: Record<string, DailyBar[]> = {};
-  const queue = [...symbols];
-  const CONCURRENCY = 6;
-  async function worker() {
-    for (;;) {
-      const symbol = queue.shift();
-      if (!symbol) return;
-      try {
-        const bars = await getHistoricalBars(symbol, days);
-        if (bars.length) out[symbol] = bars;
-      } catch { /* absent, not zero — see the header */ }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, symbols.length) }, worker));
-  for (const bars of Object.values(out)) bars.sort((a, b) => a.t.localeCompare(b.t));
+  for (const [symbol, bars] of Object.entries(stored)) if (bars.length) out[symbol] = completedSessionsOnly(bars, now);
   return out;
+}
+
+/**
+ * Drop a same-day bar while the session is still open. Both scheduled runs (the 22:00 UTC
+ * cron and the 17:32 ET desk job) are after the close, but the desk can be run by hand at
+ * any hour, and a 50-day breakout read off a half-finished bar is not the signal this book
+ * is measuring. Cut-off is 16:00 ET; the timestamp of Yahoo's daily bar is the session OPEN
+ * in UTC, so the comparison is on the ET calendar date, not the instant.
+ */
+export function completedSessionsOnly(bars: DailyBar[], now: Date): DailyBar[] {
+  const sorted = [...bars].sort((a, b) => a.t.localeCompare(b.t));
+  const last = sorted[sorted.length - 1];
+  if (!last) return sorted;
+  const et = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit" }).formatToParts(now);
+  const get = (t: string) => et.find((x) => x.type === t)?.value ?? "";
+  const todayEt = `${get("year")}-${get("month")}-${get("day")}`;
+  const hourEt = Number(get("hour")) % 24;
+  const lastEt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(last.t));
+  const lastDate = `${lastEt.find((x) => x.type === "year")?.value}-${lastEt.find((x) => x.type === "month")?.value}-${lastEt.find((x) => x.type === "day")?.value}`;
+  return lastDate === todayEt && hourEt < 16 ? sorted.slice(0, -1) : sorted;
 }
 
 
