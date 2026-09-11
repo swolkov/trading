@@ -6,6 +6,7 @@ import { openTsmomPaper, readBtcRegime } from "@/lib/margin-regime";
 import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
+import { propEntry } from "@/lib/prop-desk";
 import { isSourceArmed } from "@/lib/margin-live-risk";
 import { maybeGraduateStage3, maybeDemote } from "@/lib/margin-synthesis";
 
@@ -136,6 +137,9 @@ export async function GET(request: Request) {
     if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}) });
   };
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "").catch(() => "");
+  // One read per run: the prop hand-off below is skipped entirely while the desk is off.
+  const propArmed = await prisma.agentConfig.findUnique({ where: { key: "prop_armed" } }).then((r) => r?.value === "true").catch(() => false);
+  const propQueue: { symbol: string; coin: string; tf: string; kind: string; side: "buy" | "sell"; source: string; tier: "low" | "med" | "high"; entryPx: number }[] = [];
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
     if (flag?.value !== "false") {
@@ -234,11 +238,28 @@ export async function GET(request: Request) {
           } else {
             note_(s.coin, s.timeframe, s.kind, "paper only", conv.tier, `${plan.source} is not armed for live`);
           }
+          // PROP DESK — the same plan, on the Tradeify account, under Tradeify's rules. Queued
+          // here and run AFTER this loop, so a slow DXtrade minute can never delay a later
+          // coin's Kraken order. Every refusal lives inside propEntry (arm switch, source,
+          // long-only, guardian freshness, floors, one slot, one entry per day).
+          if (propArmed) propQueue.push({ symbol: s.symbol, coin: s.coin, tf: s.timeframe, kind: s.kind, side, source: plan.source, tier: conv.tier, entryPx });
         }
       }
     }
   } catch (e) {
     errors.push(`autoshadow: ${String(e).slice(0, 80)}`);
+  }
+  // PROP hand-off, after every Kraken decision above is made. Pure addition: a prop failure
+  // cannot touch the Kraken path, and propEntry itself refuses when the route is short on time.
+  for (const q of propQueue) {
+    try {
+      const pr = await propEntry({ symbol: q.symbol, side: q.side, source: q.source, tier: q.tier, entryPx: q.entryPx, deadlineMs: routeDeadlineMs });
+      live.push(`${q.symbol} ${q.source} [prop]: ${pr.executed ? "EXECUTED" : "refused"} — ${pr.note.slice(0, 140)}`);
+      note_(q.coin, q.tf, q.kind, pr.executed ? "TRADED PROP" : "prop refused", q.tier, pr.note.slice(0, 160));
+    } catch (e) {
+      live.push(`${q.symbol} ${q.source} [prop]: error ${String(e).slice(0, 100)}`);
+      note_(q.coin, q.tf, q.kind, "prop ERROR", q.tier, String(e).slice(0, 160));
+    }
   }
   // TSMOM — daily trend sleeve on the majors, once per UTC day (paper only, own row).
   try {
