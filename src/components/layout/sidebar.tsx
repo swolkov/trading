@@ -13,7 +13,6 @@ import {
   Activity,
   Wallet,
   Landmark,
-  Gauge,
   Menu,
   X,
 } from "lucide-react";
@@ -23,10 +22,9 @@ import {
 // REAL payouts; the bot places orders there) and Robinhood (US equity options, PAPER only —
 // measured, never traded, no server credentials). A page belongs to exactly one of them and
 // its section says which, so "is this real money?" is answered by the sidebar before the page
-// loads. Tradovate (futures) is PARKED since Aug 2026: its one page is the parked desk's
-// status and the reason it is parked; the old dashboard's sub-pages, the spot trend bot and
-// the futures-era research pages stay retired (redirected home by proxy.ts). Page titles
-// match these labels one-to-one.
+// loads. Tradovate/futures is RETIRED (Aug 2026; Spencer closed the question for good on
+// Sep 11): unlinked here, redirected home by proxy.ts along with the spot trend bot and the
+// futures-era research pages. Page titles match these labels one-to-one.
 const sections = [
   {
     label: "Overview",
@@ -58,12 +56,6 @@ const sections = [
     links: [
       { href: "/options", label: "Live Account", icon: Wallet },
       { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
-    ],
-  },
-  {
-    label: "Tradovate · futures · parked",
-    links: [
-      { href: "/futures", label: "Futures Desk", icon: Gauge },
     ],
   },
   {
