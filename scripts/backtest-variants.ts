@@ -76,6 +76,46 @@ function simulate(coin: string, bars: KrakenBar[], i: number, barH: number, p: E
 }
 
 /**
+ * PYRAMID: the same entry, but when a bar CLOSES at or above +1R a second unit of the same
+ * notional is added at that close (chased like the first), and from then on the 1R trail runs
+ * on the combined position. At the moment of the add the stop sits at the original entry
+ * (peak − 1R), so unit 1 is at breakeven and unit 2 risks 1R: the trade's worst case from
+ * that point is the SAME −1R it would have been without the add, with double the upside
+ * exposure. Second unit pays its own taker fee and rollover. Spencer's "imagine if we bought
+ * 5–15 ETH" — the disciplined version, where the extra size is bought with the trade's own
+ * open profit rather than with more initial risk.
+ */
+function simulatePyramid(coin: string, bars: KrakenBar[], i: number, barH: number, p: ExitProfile, entryFee: number): Result & { exitBar: number; added: boolean } {
+  const stopFrac = p.oneR;
+  const holdBars = Math.ceil(p.maxHoldH / barH);
+  const notional = RISK$ / stopFrac;
+  const roll = ROLLOVER_4H[coin] ?? 0.0003;
+  const entry = bars[i].c * (1 + CHASE);
+  const oneR = entry * stopFrac;
+  let stop = entry - oneR, peak = entry, exit = entry, reason = "time stop", closedAt = bars[Math.min(i + holdBars, bars.length - 1)].t;
+  let exitBar = Math.min(i + holdBars, bars.length - 1);
+  let add: { price: number; t: number } | null = null;
+  for (let j = i + 1; j < bars.length && j <= i + holdBars; j++) {
+    const b = bars[j];
+    if (b.l <= stop) { exit = stop; reason = stop >= entry ? "trail" : "initial stop"; closedAt = b.t; exitBar = j; break; }
+    peak = Math.max(peak, b.h);
+    stop = managedStop(1, entry, peak, stop, oneR, p);
+    exit = b.c; closedAt = b.t; exitBar = j;
+    if (!add && b.c >= entry + oneR) add = { price: b.c * (1 + CHASE), t: b.t };
+  }
+  const heldH = ((closedAt - bars[i].t) / 3600) || barH;
+  let gross = (notional * (exit - entry)) / entry;
+  let fees = notional * (entryFee + TAKER) + (p.carry ? notional * roll * (heldH / 4) : 0);
+  if (add) {
+    const heldH2 = ((closedAt - add.t) / 3600) || barH;
+    gross += (notional * (exit - add.price)) / add.price;
+    fees += notional * (TAKER + TAKER) + (p.carry ? notional * roll * (heldH2 / 4) : 0);
+  }
+  const pnl = gross - fees;
+  return { pnl, r: pnl / RISK$, reason, exitBar, added: !!add };
+}
+
+/**
  * ONE OPEN TRADE PER COIN, exactly as paper enforces. Without this, overlapping entries on
  * the same coin are counted as independent observations — they are not (they share the same
  * price move), and the t-stat inflates badly: the unfiltered 4h set is 189 "trades" at t=5.3
@@ -190,6 +230,25 @@ async function main() {
     const helped = dl.filter((d) => d > 0.005).length, hurt = dl.filter((d) => d < -0.005).length;
     console.log(`  kept MORE: ${helped} · kept LESS: ${hurt} · identical: ${dl.length - helped - hurt}`);
     console.log(`  ⇒ ${Math.abs(sl.t) >= 2 ? (sl.t > 0 ? "locking IS better" : "locking is WORSE") : "NOT established either way"}`);
+  }
+
+  // ---- Q2d: pyramid — add a second unit once +1R, 1R trail on the combined. PAIRED.
+  console.log("\n── Q2d pyramid: add a 2nd unit at +1R (stop already at breakeven), trail 1R on both? (paired) ──");
+  {
+    const py = all4h.map((x) => simulatePyramid(x.e.coin, x.bars, x.e.i, 4, CONTROL, TAKER));
+    const dp = py.map((x, i) => x.pnl - c4[i].pnl);
+    const nAdded = py.filter((x) => x.added).length;
+    report("pyramid (4h)", py.map((x) => x.pnl));
+    report("per-trade DIFFERENCE vs control", dp);
+    const sp = tOf(dp);
+    const helped = dp.filter((d) => d > 0.005).length, hurt = dp.filter((d) => d < -0.005).length;
+    console.log(`  added on ${nAdded}/${py.length} trades · kept MORE: ${helped} · kept LESS: ${hurt} · identical: ${dp.length - helped - hurt}`);
+    const onlyAdded = py.map((x, i) => [x, c4[i]] as const).filter(([x]) => x.added);
+    report("  on the trades that DID add — pyramid", onlyAdded.map(([x]) => x.pnl));
+    report("  on the trades that DID add — control", onlyAdded.map(([, c]) => c.pnl));
+    const worstP = Math.min(...py.map((x) => x.pnl)), worstC = Math.min(...c4.map((x) => x.pnl));
+    console.log(`  worst single trade: pyramid ${worstP.toFixed(0)} · control ${worstC.toFixed(0)}`);
+    console.log(`  ⇒ ${Math.abs(sp.t) >= 2 ? (sp.t > 0 ? "pyramiding IS better" : "pyramiding is WORSE") : "NOT established either way"}`);
   }
 
   // ---- Q3: maker entries. PAIRED — identical trades, only the entry fee differs.
