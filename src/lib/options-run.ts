@@ -166,7 +166,7 @@ export async function runOptionsScan(): Promise<OptionsScanResult> {
 
   if (opened.length) {
     await sendNotification(
-      `📈 Options paper book opened ${opened.length} position${opened.length === 1 ? "" : "s"}:\n${opened.map((o) => `• ${o}`).join("\n")}\n_In-the-money calls on a 50-day breakout. Paper only — no order was placed._`,
+      `📈 Options paper book opened ${opened.length} position${opened.length === 1 ? "" : "s"}:\n${opened.map((o) => `• ${o}`).join("\n")}\n_In-the-money options on a 50-day breakout — long book on new highs, short book on new lows. Paper only — no order was placed._`,
       "options",
     );
   }

@@ -134,7 +134,7 @@ export default function PaperTradesPage() {
               </div>
             )}
             <Note>
-              The ×5-size experiment is left out of these totals — it is the same trades again, bigger; its own row is in the scoreboard below. Estimate — each trade followed to a stop/target/48h outcome, net of fees: trade fee (0.25% taker in + 0.25% taker out — live enters at market, and the first real fills paid 0.215–0.223%/side); 4h rollover (BTC 0.015% verified, ETH ~0.02%, alts ~0.03%) on notional. Kraken&apos;s live rollover fluctuates — real fills are exact, these are conservative estimates. Spot swings pay no rollover.
+              The ×5-size and twin experiments (selective-x5 and the six twins: selective-tight, -launch, -btc, -majors, swing-wide, swing-lock) are left out of these totals — they are the same trades again at a different size or exit, so counting them would count one signal several times; each has its own row in the scoreboard below. Estimate — each trade followed to a stop/target/48h outcome, net of fees: trade fee (0.25% taker in + 0.25% taker out — live enters at market, and the first real fills paid 0.215–0.223%/side); 4h rollover (BTC 0.015% verified, ETH ~0.02%, alts ~0.03%) on notional. Kraken&apos;s live rollover fluctuates — real fills are exact, these are conservative estimates. Spot swings pay no rollover.
             </Note>
           </PanelBody>
         </Panel>
