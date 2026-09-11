@@ -41,7 +41,7 @@ export interface DailyBar { t: string; o: number; h: number; l: number; c: numbe
  *  a small concurrency cap — enough to keep a 38-name universe inside the cron budget,
  *  low enough not to get rate-limited. A symbol that fails is simply absent; the scanner
  *  already reports "no bars" for it rather than treating it as a signal. */
-export async function getDailyBars(symbols: string[], days = 420): Promise<Record<string, DailyBar[]>> {
+export async function getDailyBars(symbols: string[], days = 420, now = new Date()): Promise<Record<string, DailyBar[]>> {
   const out: Record<string, DailyBar[]> = {};
   const queue = [...symbols];
   const CONCURRENCY = 6;
@@ -50,14 +50,38 @@ export async function getDailyBars(symbols: string[], days = 420): Promise<Recor
       const symbol = queue.shift();
       if (!symbol) return;
       try {
-        const bars = await getHistoricalBars(symbol, days);
+        // includeToday: the scan's freshness gate only admits an entry when the newest bar is
+        // TODAY's. Yahoo's default end excludes the current session, so without this the gate
+        // could never pass and the book could never open a position (it could not, from the
+        // Sep 9 port until this was caught on Sep 11).
+        const bars = await getHistoricalBars(symbol, days, { includeToday: true });
         if (bars.length) out[symbol] = bars;
       } catch { /* absent, not zero — see the header */ }
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, symbols.length) }, worker));
-  for (const bars of Object.values(out)) bars.sort((a, b) => a.t.localeCompare(b.t));
+  for (const [symbol, bars] of Object.entries(out)) out[symbol] = completedSessionsOnly(bars, now);
   return out;
+}
+
+/**
+ * Drop a same-day bar while the session is still open. Both scheduled runs (the 22:00 UTC
+ * cron and the 17:32 ET desk job) are after the close, but the desk can be run by hand at
+ * any hour, and a 50-day breakout read off a half-finished bar is not the signal this book
+ * is measuring. Cut-off is 16:00 ET; the timestamp of Yahoo's daily bar is the session OPEN
+ * in UTC, so the comparison is on the ET calendar date, not the instant.
+ */
+export function completedSessionsOnly(bars: DailyBar[], now: Date): DailyBar[] {
+  const sorted = [...bars].sort((a, b) => a.t.localeCompare(b.t));
+  const last = sorted[sorted.length - 1];
+  if (!last) return sorted;
+  const et = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit" }).formatToParts(now);
+  const get = (t: string) => et.find((x) => x.type === t)?.value ?? "";
+  const todayEt = `${get("year")}-${get("month")}-${get("day")}`;
+  const hourEt = Number(get("hour")) % 24;
+  const lastEt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(last.t));
+  const lastDate = `${lastEt.find((x) => x.type === "year")?.value}-${lastEt.find((x) => x.type === "month")?.value}-${lastEt.find((x) => x.type === "day")?.value}`;
+  return lastDate === todayEt && hourEt < 16 ? sorted.slice(0, -1) : sorted;
 }
 
 

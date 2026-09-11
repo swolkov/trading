@@ -18,7 +18,7 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
 interface Sleeve {
   key: string; label: string; refEquity: number; resolved: number; wins: number; hitRate: number | null;
-  expectancy: number | null; totalPnl: number; open: number; openPremium: number; openMark: number;
+  expectancy: number | null; totalPnl: number; open: number; openPremium: number; openMark: number; legacyOpen?: number;
   voided: number; days: number; tStat: number | null; verdict: string;
   avgSpreadPct: number | null; entriesThisMonth: number;
 }
@@ -254,6 +254,11 @@ export default function OptionsPaperPage() {
                 <Stat label="Hit rate" value={s.hitRate != null ? pct(s.hitRate) : "—"} />
                 <Stat label="t-stat" value={s.tStat != null ? s.tStat.toFixed(2) : "—"} />
               </div>
+              {(s.legacyOpen ?? 0) > 0 && (
+                <Note className="mt-2">
+                  +{s.legacyOpen} position{s.legacyOpen === 1 ? "" : "s"} from the earlier rule set (before spreads and the four-sleeve split) — still tracked to its finish in the log below, not in this sleeve&apos;s numbers.
+                </Note>
+              )}
               {s.open === 0 && s.resolved === 0 && (
                 <Note className="mt-3">
                   Nothing opened yet. On this sleeve that is usually a <strong>result, not a gap</strong>: a breakout fired but no contract cleared the
@@ -302,6 +307,8 @@ export default function OptionsPaperPage() {
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <Stat label="Scanned" value={String(data.lastResult.scanned)} />
               <Stat label="Trend signals" value={data.lastResult.signals.length ? data.lastResult.signals.join(", ") : "none"} />
+              <Stat label="Fresh today" sub={data.lastResult.signals.length > (data.lastResult.fresh ?? []).length ? `${data.lastResult.signals.length - (data.lastResult.fresh ?? []).length} not from today's bar — never acted on` : undefined}
+                value={(data.lastResult.fresh ?? []).length ? (data.lastResult.fresh ?? []).join(", ") : "none"} />
               <Stat label="Opened" value={String(data.lastResult.opened.length)} />
               <Stat label="Refused" value={String(data.lastResult.refused.length)} />
             </div>
