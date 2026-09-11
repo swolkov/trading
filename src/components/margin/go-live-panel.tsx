@@ -17,7 +17,6 @@ import { LIVE_RISK_CEILING_PCT } from "@/lib/margin-live-risk";
 // was split out of the page; only the presentation changed.
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
-const LIVE_CANDIDATE = "selective";
 
 export interface StrategyStat {
   key: string; label: string; resolved: number; wins: number; hitRate: number | null;
@@ -177,10 +176,15 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
   );
 }
 
-export function GoLivePanel({ strategies, capacity = null }: { strategies: StrategyStat[]; capacity?: CapacityView | null }) {
+export function GoLivePanel({ strategies, capacity = null, candidateSource = null }: { strategies: StrategyStat[]; capacity?: CapacityView | null; candidateSource?: string | null }) {
   const { data: rt } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 30_000 });
   const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
-  const cand = strategies.find((s) => s.key === LIVE_CANDIDATE) ?? null;
+  // The scorecard scores the sleeve that is ACTUALLY armed (kraken_margin_live_sources, via
+  // the scoreboard API's candidate.source; the executor config as a fallback) — never a
+  // hardcoded name. A hardcoded "selective" here kept scoring the retired Sep 6 sleeve for
+  // three days after live moved to swing-lev on Sep 8.
+  const liveSource = candidateSource ?? cfg?.live.liveSources?.[0] ?? null;
+  const cand = liveSource ? strategies.find((s) => s.key === liveSource) ?? null : null;
   const rtState = rt?.state ?? null;
   const rtRunning = rtState != null && ["entering", "open", "closing"].includes(rtState.stage);
   const rtPassed = rtState?.stage === "done" && !!rt?.verdict?.allOk;

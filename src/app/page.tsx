@@ -31,7 +31,6 @@ interface Trip { closedAt: string; netPnl: number; pair: string }
 interface StrategyStat { key: string; resolved: number; liveNet: number; tStat: number | null; days?: number; verdict: string }
 interface Command { heartbeats: { marginScan: string | null; marginWatch: string | null }; error?: string }
 
-const LIVE_CANDIDATE = "selective";
 
 function startOfToday(): number { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
 
@@ -46,7 +45,7 @@ export default function DashboardPage() {
   const { data: status, error: statusErr } = useSWR<{ connected: boolean; health: MarginHealth | null; positions: MarginPosition[]; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 60_000 });
   const krakenDown = !!statusErr || (status != null && (status.connected === false || !!status.error));
   const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 60_000 });
-  const { data: score } = useSWR<{ recentTrips: Trip[]; strategies: StrategyStat[] }>("/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 });
+  const { data: score } = useSWR<{ recentTrips: Trip[]; strategies: StrategyStat[]; candidate?: { source: string } | null }>("/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 });
   const { data: cmd } = useSWR<Command>("/api/command", fetcher, { refreshInterval: 60_000 });
 
   const health = status?.health ?? null;
@@ -68,8 +67,11 @@ export default function DashboardPage() {
   const s3 = arm?.stage3 ?? null;
   const s3Pct = s3 && s3.target > 0 ? Math.min(100, (s3.done / s3.target) * 100) : 0;
 
-  // The edge scorecard, same four checks as Live Desk.
-  const cand = score?.strategies?.find((s) => s.key === LIVE_CANDIDATE) ?? null;
+  // The edge scorecard, same four checks as Live Desk — for the sleeve that is ACTUALLY armed.
+  // The scoreboard API reads kraken_margin_live_sources; a hardcoded "selective" here kept
+  // scoring the Sep 6 sleeve for three days after live moved to swing-lev on Sep 8.
+  const liveSource = score?.candidate?.source ?? arm?.sources?.[0] ?? null;
+  const cand = liveSource ? score?.strategies?.find((s) => s.key === liveSource) ?? null : null;
   const gateGreen = cand ? [cand.resolved >= 30, cand.resolved > 0 && cand.liveNet > 0, cand.tStat != null && cand.tStat >= 2, (cand.days ?? 0) >= 7].filter(Boolean).length : null;
   const gateOpen = gateGreen === 4;
 
@@ -89,7 +91,7 @@ export default function DashboardPage() {
         sub="The Kraken margin desk, right now."
         right={arm && (
           <>
-            <Chip tone={arm.armed ? "red" : "grey"} dot={arm.armed} size="md">{arm.armed ? `Armed · ${arm.sources.join(", ") || "selective"}` : "Disarmed"}</Chip>
+            <Chip tone={arm.armed ? "red" : "grey"} dot={arm.armed} size="md">{arm.armed ? `Armed · ${arm.sources.join(", ") || "?"}` : "Disarmed"}</Chip>
             {arm.ddTripped && <Chip tone="red" size="md">Drawdown breaker tripped</Chip>}
             <Chip tone={gateOpen ? "green" : cand ? "amber" : "grey"} size="md" title="The live candidate's paper gate: 30+ resolved, net > 0 at live sizing, t ≥ 2, 7+ days">
               {gateOpen ? "Paper gate open" : cand ? `Paper gate ${gateGreen} of 4` : "Paper gate — no data"}
