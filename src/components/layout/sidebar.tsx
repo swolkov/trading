@@ -17,14 +17,18 @@ import {
   X,
 } from "lucide-react";
 
-// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. Three platforms are traded:
-// Kraken (crypto margin, REAL money), Tradeify (the funded prop account — simulated capital,
-// REAL payouts; the bot places orders there) and Robinhood (US equity options, PAPER only —
-// measured, never traded, no server credentials). A page belongs to exactly one of them and
-// its section says which, so "is this real money?" is answered by the sidebar before the page
-// loads. Tradovate/futures is RETIRED (Aug 2026; Spencer closed the question for good on
-// Sep 11): unlinked here, redirected home by proxy.ts along with the spot trend bot and the
-// futures-era research pages. Page titles match these labels one-to-one.
+// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. The desks Spencer actually
+// wants: Kraken (crypto margin, REAL money), Robinhood (US equity options, PAPER only —
+// measured, never traded, no server credentials), and a FUTURES prop account (ES/NQ,
+// automated through the eval and the funded stage) — the latter is NOT bought yet, so it has
+// no section; one appears the day an account exists. Tradeify 247 is listed because the
+// account exists, not because it is wanted: it is a DXtrade CRYPTO prop account bought on
+// Sep 11 2026 by mistake (Spencer wanted futures; he already has Kraken for crypto). The
+// desk code stays deployed and DISARMED while a conversion/refund is pursued. The old
+// Tradovate retail engines are RETIRED (Aug 2026): unlinked here, redirected home by
+// proxy.ts along with the spot trend bot and the futures-era research pages. A page belongs
+// to exactly one section and its section says which, so "is this real money?" is answered by
+// the sidebar before the page loads. Page titles match these labels one-to-one.
 const sections = [
   {
     label: "Overview",
@@ -42,10 +46,13 @@ const sections = [
     ],
   },
   {
-    label: "Tradeify · prop account · real payouts",
-    tone: "live" as const,
+    // The account exists, so its page stays reachable (balance, floors, the disarm state,
+    // the conversion attempt). The label says what it is so nobody mistakes it for the
+    // futures desk.
+    label: "Tradeify 247 · crypto prop · bought in error, not in use",
+    tone: "paper" as const,
     links: [
-      { href: "/prop", label: "Prop Desk", icon: Landmark },
+      { href: "/prop", label: "Crypto Prop Account", icon: Landmark },
     ],
   },
   {
