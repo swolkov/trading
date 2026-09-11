@@ -118,6 +118,7 @@ async function main() {
   const bars: Record<string, { d: KrakenBar[]; h4: KrakenBar[] }> = JSON.parse(readFileSync(CACHE, "utf8"));
   const CONTROL = exitParams("swing-lev", 5, 1);
   const WIDE = exitParams("swing-wide", 5, 1);
+  const TIGHT = exitParams("swing-tight", 5, 1);
 
   // ---- collect entries once ----
   const raw4h: { e: Entry; bars: KrakenBar[] }[] = [], raw1d: { e: Entry; bars: KrakenBar[] }[] = [];
@@ -159,6 +160,18 @@ async function main() {
   report("per-trade DIFFERENCE vs control", d2);
   const s2 = tOf(d2);
   console.log(`  ⇒ ${Math.abs(s2.t) >= 2 ? (s2.t > 0 ? "the wider trail IS better" : "the wider trail is WORSE") : "NOT established either way — keep collecting"}`);
+
+  // ---- Q2b: swing-tight's 0.5R trail once +1R. PAIRED — the other half of Q2's question.
+  // Registered Sep 11 2026 after ETH ran +1.24R to a $459 peak and the 1R trail kept $62.
+  console.log("\n── Q2b does swing-tight's 0.5R trail (once +1R) beat the 1R trail? (paired, same entries) ──");
+  const t4 = run(all4h, 4, TIGHT, TAKER);
+  const dt = t4.map((x, i) => x.pnl - c4[i].pnl);
+  report("0.5R trail once +1R (4h)", t4.map((x) => x.pnl));
+  report("per-trade DIFFERENCE vs control", dt);
+  const st = tOf(dt);
+  const helped = dt.filter((d) => d > 0.005).length, hurt = dt.filter((d) => d < -0.005).length, same = dt.length - helped - hurt;
+  console.log(`  trades where it kept MORE: ${helped}  ·  kept LESS: ${hurt}  ·  identical: ${same}`);
+  console.log(`  ⇒ ${Math.abs(st.t) >= 2 ? (st.t > 0 ? "the tighter trail IS better" : "the tighter trail is WORSE") : "NOT established either way — keep collecting"}`);
 
   // ---- Q3: maker entries. PAIRED — identical trades, only the entry fee differs.
   console.log("\n── Q3  would maker entries pay? (paired, same trades, entry fee 0.25% → 0.16%) ──");

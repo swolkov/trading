@@ -41,7 +41,12 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //                      tests a NARROWER trail, so nothing on the desk could answer "are we
 //                      cutting winners short?" with a yes. Paper only — the guardian mirrors
 //                      a 1R trail, so it has no live container.
-export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide"] as const;
+//   swing-tight      — swing-lev's own signals trailing 0.5R behind the peak once +1R,
+//                      instead of 1R (registered Sep 11 2026). The other half of the
+//                      question swing-wide asks. With the average WIN at 0.93R, a 1R trail
+//                      on a ~1.2R move keeps almost nothing — ETH on Sep 11 turned a $459
+//                      peak into $62. Paper only, same container as swing-lev otherwise.
+export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-tight"] as const;
 // SELECTIVE-SHORT (registered Sep 8 2026) — NOT a twin: its own signals (high-conviction
 // BREAKDOWNS, 5m/15m, not stretched), opened ONLY while BTC's last complete daily close is
 // BELOW its 20-day average. Every short on the record (37, 11% won, −$5,140) was taken inside
@@ -115,6 +120,7 @@ export function autoShadowPlans(
     if (SWING_LEV_TFS.has(timeframe)) {
       plans.unshift({ source: "swing-lev", lev: capped });
       plans.push({ source: "swing-wide", lev: capped });
+      plans.push({ source: "swing-tight", lev: capped });
     }
     return plans;
   }

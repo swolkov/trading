@@ -54,10 +54,10 @@ test("plans: the two container twins always ride along; the regime twin only in 
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: false }).map((p) => p.source), base, "down-regime → no regime twin");
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: true }).map((p) => p.source), [...base, "selective-btc"]);
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5, { btcUp: true }), [], "twins never widen the entry rule");
-  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide"], "4h/1d go to the slow family and its own wide-trail twin, never to the fast twins");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide", "swing-tight"], "4h/1d go to the slow family and its own trail twins, never to the fast twins");
   assert.deepEqual(autoShadowPlans("breakout", "4h", { tier: "med", factors: [] }, 5), [], "slow family is high conviction only");
   assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }), [], "slow family is longs only; the 5m/15m short sleeve does not take 4h");
-  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide"]);
+  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-tight"]);
 });
 
 test("BTC regime and tsmom signals need 21 complete closes and read close vs 20-day average", () => {
@@ -153,4 +153,33 @@ test("swing-wide rides swing-lev's signals and is never pooled with the record",
   assert.ok(!autoShadowPlans("breakout", "5m", { tier: "high", factors: [] }, 5).map((p) => p.source).includes("swing-wide"));
   // Paper only: the guardian mirrors a 1R trail, so there is no live container to arm.
   assert.equal(liveContainerFor("swing-wide"), null);
+});
+
+// ── swing-tight (Sep 11 2026): the tighter-trail twin ────────────────────────────────────
+test("swing-tight is swing-lev's container with a 0.5R trail once +1R", () => {
+  const tight = exitParams("swing-tight", 2, 100);
+  const live = exitParams("swing-lev", 2, 100);
+  assert.equal(tight.maxHoldH, live.maxHoldH, "same hold as live — only the trail differs");
+  assert.equal(tight.oneR, live.oneR, "same 4% stop");
+  assert.equal(tight.carry, live.carry);
+  assert.equal(tight.tightAfterR, 1);
+  assert.equal(tight.tightTrailR, 0.5);
+});
+
+test("the tight trail keeps more of a ~1.2R move than the 1R trail — the ETH Sep 11 shape", () => {
+  // entry 100, oneR 4 → +1R at 104. Peak 104.96 (= +1.24R, ETH's actual peak in R).
+  const live = exitParams("swing-lev", 2, 100), tight = exitParams("swing-tight", 2, 100);
+  const stopLive = managedStop(1, 100, 104.96, 96, 4, live);
+  const stopTight = managedStop(1, 100, 104.96, 96, 4, tight);
+  assert.ok(Math.abs(stopLive - 100.96) < 1e-9, "1R trail: peak − 4 = +0.24R locked");
+  assert.ok(Math.abs(stopTight - 102.96) < 1e-9, "0.5R trail: peak − 2 = +0.74R locked");
+  // Below +1R the two are identical: the tight trail has not engaged yet.
+  assert.equal(managedStop(1, 100, 103.5, 96, 4, tight), managedStop(1, 100, 103.5, 96, 4, live));
+});
+
+test("swing-tight rides swing-lev's signals and is never pooled with the record", () => {
+  const sources = autoShadowPlans("breakout", "4h", { tier: "high", factors: [] }, 5).map((p) => p.source);
+  assert.ok(sources.includes("swing-lev") && sources.includes("swing-tight"), "same signal, both sleeves");
+  assert.ok(TWIN_SOURCES.includes("swing-tight" as never), "twins are excluded from the pooled totals");
+  assert.ok(!autoShadowPlans("breakout", "5m", { tier: "high", factors: [] }, 5).map((p) => p.source).includes("swing-tight"));
 });
