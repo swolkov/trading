@@ -159,7 +159,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
                 </Chip>
               ))
               : <Chip tone="grey" size="md">no open position — waiting for the next high-conviction breakout</Chip>}
-          <span className="text-xs text-muted-foreground">detail on Margin Cockpit</span>
+          <span className="text-xs text-muted-foreground">detail on Live Account</span>
         </div>
       )}
       {arm.stage3 && (

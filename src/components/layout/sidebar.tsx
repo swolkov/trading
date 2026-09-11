@@ -15,8 +15,13 @@ import {
   X,
 } from "lucide-react";
 
-// Curated IA around the single live pillar (Kraken margin). Futures/Tradovate was retired
-// Aug 2026 and the spot trend bot Aug 31 — their pages redirect home via proxy.ts.
+// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. Two platforms are traded:
+// Kraken (crypto margin, REAL money — the only place an order can be placed) and Robinhood
+// (US equity options, PAPER only — measured, never traded, no server credentials). A page
+// belongs to exactly one of them and its section says which, so "is this real money?" is
+// answered by the sidebar before the page loads. Futures/Tradovate (Aug 2026), the spot
+// trend bot (Aug 31) and the futures-era research pages are retired: unlinked here and
+// redirected home by proxy.ts. Page titles match these labels one-to-one.
 const sections = [
   {
     label: "Overview",
@@ -25,12 +30,19 @@ const sections = [
     ],
   },
   {
-    label: "Trading",
+    label: "Kraken · crypto margin · real money",
+    tone: "live" as const,
     links: [
-      { href: "/margin", label: "Margin Cockpit", icon: CandlestickChart },
+      { href: "/margin", label: "Live Account", icon: CandlestickChart },
       { href: "/margin/paper", label: "Live Desk", icon: Route },
-      { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
       { href: "/orders", label: "Orders", icon: ClipboardList },
+    ],
+  },
+  {
+    label: "Robinhood · options · paper only",
+    tone: "paper" as const,
+    links: [
+      { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
     ],
   },
   {
@@ -68,7 +80,10 @@ export function Sidebar() {
       <nav className="flex-1 overflow-auto py-3">
         {sections.map((section) => (
           <div key={section.label} className="mb-4">
-            <p className="px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+            <p className={cn(
+              "px-4 pb-1 text-[11px] font-medium uppercase tracking-wide",
+              "tone" in section && section.tone === "live" ? "text-down/80" : "tone" in section && section.tone === "paper" ? "text-paper/80" : "text-muted-foreground/70",
+            )}>
               {section.label}
             </p>
             <div className="space-y-0.5 px-2">

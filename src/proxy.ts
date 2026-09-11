@@ -18,6 +18,14 @@ const RETIRED_PREFIXES = [
   "/journal",
   "/fund",
   "/proof",
+  // Futures-era research surfaces (Sep 11 2026): reachable by URL, linked from nowhere,
+  // built on data feeds the desk no longer uses. Retired the same way.
+  "/ai",
+  "/brief",
+  "/calendar",
+  "/research",
+  "/watchlist",
+  "/positions",
 ];
 
 export default async function proxy(request: NextRequest, event: NextFetchEvent) {
