@@ -15,7 +15,7 @@ import { prisma } from "./db";
 // crypto desk, and putting its alerts in the crypto lane would undo that at a glance.
 export type NotifyChannel =
   | "futures" | "futures_demo" | "kraken" | "general"
-  | "margin_urgent" | "margin_signals" | "margin_results" | "margin_live" | "stocks" | "options";
+  | "margin_urgent" | "margin_signals" | "margin_results" | "margin_live" | "stocks" | "options" | "prop";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
@@ -28,6 +28,7 @@ const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   margin_live: "webhook_margin_live",
   stocks: "webhook_stocks",
   options: "webhook_options",
+  prop: "webhook_prop",
 };
 
 // The margin lanes fall back to the main kraken channel if their own webhook isn't set.
@@ -63,6 +64,14 @@ async function getWebhook(channel: NotifyChannel): Promise<string | null> {
   if (channel === "stocks") {
     const gen = await webhookFor("webhook_general");
     if (gen) return gen;
+  }
+  // The prop desk is real money (a funded account's payout). Without its own lane it goes
+  // where the Kraken live desk's events go, then kraken, then general — never dropped.
+  if (channel === "prop") {
+    for (const k of ["webhook_margin_live", "webhook_margin_urgent", "webhook_kraken", "webhook_general"]) {
+      const w = await webhookFor(k);
+      if (w) return w;
+    }
   }
 
   return webhookFor("notification_webhook");

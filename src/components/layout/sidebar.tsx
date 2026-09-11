@@ -12,17 +12,21 @@ import {
   Route,
   Activity,
   Wallet,
+  Landmark,
+  Gauge,
   Menu,
   X,
 } from "lucide-react";
 
-// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. Two platforms are traded:
-// Kraken (crypto margin, REAL money — the only place an order can be placed) and Robinhood
-// (US equity options, PAPER only — measured, never traded, no server credentials). A page
-// belongs to exactly one of them and its section says which, so "is this real money?" is
-// answered by the sidebar before the page loads. Futures/Tradovate (Aug 2026), the spot
-// trend bot (Aug 31) and the futures-era research pages are retired: unlinked here and
-// redirected home by proxy.ts. Page titles match these labels one-to-one.
+// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. Three platforms are traded:
+// Kraken (crypto margin, REAL money), Tradeify (the funded prop account — simulated capital,
+// REAL payouts; the bot places orders there) and Robinhood (US equity options, PAPER only —
+// measured, never traded, no server credentials). A page belongs to exactly one of them and
+// its section says which, so "is this real money?" is answered by the sidebar before the page
+// loads. Tradovate (futures) is PARKED since Aug 2026: its one page is the parked desk's
+// status and the reason it is parked; the old dashboard's sub-pages, the spot trend bot and
+// the futures-era research pages stay retired (redirected home by proxy.ts). Page titles
+// match these labels one-to-one.
 const sections = [
   {
     label: "Overview",
@@ -40,6 +44,13 @@ const sections = [
     ],
   },
   {
+    label: "Tradeify · prop account · real payouts",
+    tone: "live" as const,
+    links: [
+      { href: "/prop", label: "Prop Desk", icon: Landmark },
+    ],
+  },
+  {
     // Mirrors the Kraken section: the real account first, then where the trading happens.
     // On this platform the trading happens on PAPER — the section says so.
     label: "Robinhood · options · real account, paper trades",
@@ -47,6 +58,12 @@ const sections = [
     links: [
       { href: "/options", label: "Live Account", icon: Wallet },
       { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
+    ],
+  },
+  {
+    label: "Tradovate · futures · parked",
+    links: [
+      { href: "/futures", label: "Futures Desk", icon: Gauge },
     ],
   },
   {
