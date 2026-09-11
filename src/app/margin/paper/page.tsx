@@ -54,7 +54,7 @@ function edgeVerdict(e: EdgeStat): { label: string; tone: "grey" | "green" | "re
 const hitTone = (h: number | null) => (h != null && h >= 0.5 ? "text-up" : "text-warn");
 
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; degraded?: string[] }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
 
@@ -67,6 +67,10 @@ export default function PaperTradesPage() {
   const sh = score?.shadow ?? null;
   const shadowHasAny = sh != null && (sh.resolved > 0 || sh.open > 0 || (sh.legacyOpen ?? 0) > 0 || (sh.nonUsOpen ?? 0) > 0);
   const hasAny = !!score && (shadowHasAny || (score.strategies ?? []).some((s) => s.resolved > 0 || s.open > 0));
+  // A block that failed to load is a LOAD ERROR, never "no trades" — the empty state is
+  // only honest when the API actually answered in full.
+  const degraded = score?.degraded ?? [];
+  const loadFailed = !score || degraded.length > 0;
 
   return (
     <div className="space-y-5">
@@ -75,12 +79,12 @@ export default function PaperTradesPage() {
         sub="The armed desk: whether its edge is real yet, the controls to stop it, and the plumbing receipt. Every strategy is scored on paper first with real Kraken prices and your real fees — but the desk is ALREADY trading real money ahead of a green scorecard, which was a deliberate call."
       />
 
-      <GoLivePanel strategies={score?.strategies ?? []} capacity={score?.capacity ?? null} />
+      <GoLivePanel strategies={score?.strategies ?? []} capacity={score?.capacity ?? null} candidateSource={score?.candidate?.source ?? null} />
 
       <Explainer title="How to read this page">
         <ul className="space-y-1">
           <li><strong>Paper</strong> = the strategy ran on real prices with real fees, but no money moved. It is the evidence.</li>
-          <li><strong>Live candidate</strong> = the one strategy that can be armed: high-conviction 5-minute and 15-minute breakouts, longs only, 3% stop, breakeven then a trailing stop, 48-hour time limit.</li>
+          <li><strong>Live candidate</strong> = the one sleeve that is armed (since Sep 8: swing-lev — high-conviction 4-hour breakouts, longs only, 4% stop, breakeven then a 1R trailing stop, 4-day time limit). The scorecard and the sliced panel both follow whatever sleeve the arm switch names.</li>
           <li><strong>Confidence (t)</strong> = how far the average result is from zero, in units of its own noise. Below 2 a good run can still be luck. That is why the gate needs 2.</li>
           <li><strong>Distinct days</strong> = crypto coins move together, so 30 wins in one day are closer to one bet than thirty. The gate needs results spread over 7 days.</li>
           <li><strong>Universe</strong> = only the 26 coins a US retail Kraken account can margin-trade. Trades on other coins are kept in the log for honesty but count toward nothing{(sh?.nonUsResolved ?? 0) > 0 && <> ({sh?.nonUsResolved} set aside)</>}.</li>
@@ -88,7 +92,14 @@ export default function PaperTradesPage() {
         </ul>
       </Explainer>
 
-      {!hasAny && (
+      {degraded.length > 0 && (
+        <Panel tone="red"><PanelBody>
+          <p className="text-[13px] font-medium text-down">Part of this page did not load — the numbers below are incomplete, not zero.</p>
+          <Note className="mt-1">{degraded.join(" · ")}. It refreshes itself every minute; reload if it persists.</Note>
+        </PanelBody></Panel>
+      )}
+
+      {!hasAny && !loadFailed && (
         <Panel><PanelBody className="py-8 text-center">
           <p className="text-[13px] text-muted-foreground">No paper trades yet.</p>
           <Note className="mt-1">The scanner watches every US-tradeable margin coin. Paper opens only high-conviction 5m/15m longs that are not stretched. They appear here and score themselves.</Note>
