@@ -274,7 +274,7 @@ export default function OptionsPaperPage() {
               </div>
               {(s.legacyOpen ?? 0) > 0 && (
                 <Note className="mt-2">
-                  +{s.legacyOpen} position{s.legacyOpen === 1 ? "" : "s"} from the earlier rule set (before spreads and the four-sleeve split) — still tracked to its finish in the log below, not in this sleeve&apos;s numbers.
+                  +{s.legacyOpen} {s.legacyOpen === 1 ? "position" : "positions"}{" "}from the earlier rule set (before spreads and the four-sleeve split) — still tracked to its finish in the log below, not in this sleeve&apos;s numbers.
                 </Note>
               )}
               {s.open === 0 && s.resolved === 0 && (
