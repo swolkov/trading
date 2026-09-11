@@ -48,6 +48,8 @@ claude -p "Run one Robinhood data pull for the options paper book using the opti
     "mcp__robinhood-trading__get_option_quotes" \
     "mcp__robinhood-trading__get_equity_quotes" \
     "mcp__robinhood-trading__get_equity_historicals" \
+    "mcp__robinhood-trading__get_option_positions" \
+    "mcp__robinhood-trading__get_option_orders" \
   --disallowedTools \
     "mcp__robinhood-trading__place_option_order" \
     "mcp__robinhood-trading__place_equity_order" \

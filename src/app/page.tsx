@@ -222,12 +222,13 @@ export default function DashboardPage() {
       </Panel>
 
       {/* ── Where to go ── */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {[
-          { href: "/margin", title: "Live Account", sub: "Kraken, real money: positions, margin level, signals, ledger track record" },
+          { href: "/margin", title: "Live Account · Kraken", sub: "Real money: positions, margin level, signals, ledger track record" },
           { href: "/margin/paper", title: "Live Desk", sub: "Kraken: is the edge real yet, the arm switch, every sleeve on paper" },
           { href: "/orders", title: "Orders", sub: "Every real fill and round trip, the Kraken paper log, the options paper log" },
-          { href: "/options/paper", title: "Options Paper Book", sub: "Robinhood, paper only: four sleeves, structures, the pushed-data health" },
+          { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: cash, level, positions, orders — read only" },
+          { href: "/options/paper", title: "Options Paper Book", sub: "Robinhood, paper: four sleeves, structures, the pushed-data health" },
           { href: "/command", title: "System Health", sub: "Heartbeats, switches, locks — both platforms" },
         ].map((l) => (
           <Link key={l.href} href={l.href} className="rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/20 hover:bg-accent/40">

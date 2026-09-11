@@ -11,6 +11,7 @@ import {
   FlaskConical,
   Route,
   Activity,
+  Wallet,
   Menu,
   X,
 } from "lucide-react";
@@ -39,9 +40,12 @@ const sections = [
     ],
   },
   {
-    label: "Robinhood · options · paper only",
+    // Mirrors the Kraken section: the real account first, then where the trading happens.
+    // On this platform the trading happens on PAPER — the section says so.
+    label: "Robinhood · options · real account, paper trades",
     tone: "paper" as const,
     links: [
+      { href: "/options", label: "Live Account", icon: Wallet },
       { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
     ],
   },

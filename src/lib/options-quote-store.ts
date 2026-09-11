@@ -253,3 +253,40 @@ export async function readAccountSnapshot(): Promise<(AccountSnapshot & { minute
     return { ...s, minutesAgo: Math.round((Date.now() - Date.parse(s.at)) / 60_000) };
   } catch { return null; }
 }
+
+// ---------- LIVE ACCOUNT SNAPSHOT: positions and orders ----------
+// The real Robinhood account, as the desk session last saw it. This is the Robinhood
+// counterpart of the Kraken "Live Account" page — what the BROKER says, not what the paper
+// book thinks. Pushed by the same run that pushes bars and quotes, so its age is the same
+// age. The app never places an order here; a non-empty order list can only come from
+// Spencer's own hand in the Robinhood app (placed_agent "user") or from a desk session that
+// has been given an order tool it does not have today.
+export interface LivePosition {
+  symbol: string; type: "long" | "short"; optionType: "call" | "put" | null; strike: number | null;
+  expiry: string | null; quantity: number; averagePrice: number; pendingQuantity: number;
+}
+export interface LiveOrder {
+  id: string; symbol: string; state: string; strategy: string | null; side: string | null;
+  quantity: number; processedQuantity: number; premium: number | null; price: number | null;
+  orderType: string; placedAgent: string | null; createdAt: string | null;
+}
+export interface LiveSnapshot { positions: LivePosition[]; orders: LiveOrder[]; at: string }
+const LIVE_KEY = "options_live_snapshot";
+
+export async function saveLiveSnapshot(s: Omit<LiveSnapshot, "at">): Promise<void> {
+  const payload: LiveSnapshot = { positions: s.positions ?? [], orders: s.orders ?? [], at: new Date().toISOString() };
+  await prisma.agentConfig.upsert({
+    where: { key: LIVE_KEY },
+    create: { key: LIVE_KEY, value: JSON.stringify(payload) },
+    update: { value: JSON.stringify(payload) },
+  });
+}
+
+export async function readLiveSnapshot(): Promise<(LiveSnapshot & { minutesAgo: number }) | null> {
+  const r = await prisma.agentConfig.findUnique({ where: { key: LIVE_KEY } }).catch(() => null);
+  if (!r?.value) return null;
+  try {
+    const s = JSON.parse(r.value) as LiveSnapshot;
+    return { ...s, minutesAgo: Math.round((Date.now() - Date.parse(s.at)) / 60_000) };
+  } catch { return null; }
+}

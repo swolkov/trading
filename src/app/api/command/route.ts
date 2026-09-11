@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/db";
 import { execLockHeldSince } from "@/lib/margin-live-risk";
-import { quoteStoreFreshness, readAccountSnapshot } from "@/lib/options-quote-store";
+import { quoteStoreFreshness, readAccountSnapshot, readLiveSnapshot } from "@/lib/options-quote-store";
+import { barsStoreFreshness } from "@/lib/options-bars-store";
+import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
 import { OPTIONS_COHORT_SQL } from "@/lib/options-paper-model";
 
 // System-health API. Two halves, because there are now two kinds of failure.
@@ -29,6 +31,8 @@ const EMPTY = {
       newestQuoteTs: null as string | null, quoteAgeMinutes: null as number | null,
       quotesStale: true, quoteRows: 0, openPositions: 0,
       optionLevel: null as string | null, accountAt: null as string | null,
+      barsNewestDay: null as string | null, barsStale: true, barsStaleSymbols: 0,
+      liveAt: null as string | null, livePositions: 0, liveOrders: 0, liveForeignOrders: 0,
     },
   },
 };
@@ -47,12 +51,14 @@ export async function GET() {
 
     // Paper-desk health. Each read is independently caught: a paper book being unreachable
     // must never blank out the Kraken heartbeats, which are the ones tied to real money.
-    const [quotes, account, openOpts] = await Promise.all([
+    const [quotes, account, openOpts, bars, live] = await Promise.all([
       quoteStoreFreshness().catch(() => null),
       readAccountSnapshot().catch(() => null),
       prisma.$queryRawUnsafe<{ n: bigint }[]>(
         `SELECT count(*)::bigint AS n FROM options_paper_trades WHERE status='open' AND ${OPTIONS_COHORT_SQL}`,
       ).then((r) => Number(r[0]?.n ?? 0)).catch(() => 0),
+      barsStoreFreshness([...OPTIONS_SYMBOLS]).catch(() => null),
+      readLiveSnapshot().catch(() => null),
     ]);
 
     return Response.json({
@@ -85,6 +91,17 @@ export async function GET() {
           openPositions: openOpts,
           optionLevel: account?.optionLevel ?? null,
           accountAt: account?.at ?? null,
+          // The bars inbox (Robinhood daily bars) — a separate failure from stale quotes:
+          // stale bars mean the SIGNAL is blind. Fail closed like the quotes.
+          barsNewestDay: bars?.newestDay ?? null,
+          barsStale: bars ? bars.stale : true,
+          barsStaleSymbols: bars?.staleSymbols.length ?? 0,
+          // The real account's positions/orders snapshot, and the one thing that must never
+          // appear on it: an order placed by anything other than Spencer's own hand.
+          liveAt: live?.at ?? null,
+          livePositions: live?.positions.length ?? 0,
+          liveOrders: live?.orders.length ?? 0,
+          liveForeignOrders: (live?.orders ?? []).filter((o) => o.placedAgent && o.placedAgent !== "user").length,
         },
       },
     });
