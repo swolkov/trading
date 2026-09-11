@@ -95,8 +95,8 @@ export default function PropDeskPage() {
   return (
     <div className="space-y-4 p-4 md:p-6">
       <PageHeader
-        title="Prop Desk"
-        sub={<>Tradeify 247 · $100k 2-Step · {data.account?.account ?? "no account"} · swing-lev only, long only, one entry a day. Same signals as the Live Desk, sized to Tradeify&apos;s floors.</>}
+        title="Crypto Prop Account"
+        sub={<>Tradeify 247 · DXtrade <strong>crypto</strong> · $100k 2-Step · {data.account?.account ?? "no account"} · bought Sep 11 2026 in error (wanted: a futures prop account) · not in use, kept disarmed while a conversion or refund is pursued.</>}
         right={
           <>
             <Chip tone={c.armed ? "red" : "grey"} dot={c.armed} size="md">{c.armed ? "ARMED" : "disarmed"}</Chip>
@@ -105,6 +105,14 @@ export default function PropDeskPage() {
           </>
         }
       />
+
+      <Panel tone="amber">
+        <PanelBody>
+          <Note>
+            <strong>This is not the futures desk.</strong> Tradeify 247 trades crypto pairs, tokenized stocks, gold and oil — not ES, NQ or any CME contract. Spencer already trades crypto on Kraken and does not want this account; it was bought on Sep 11 2026 believing it was Tradeify&apos;s futures product. Status: <strong>{c.armed ? "ARMED — should be disarmed" : "disarmed"}</strong>, {data.record.trades} trades closed. The guardian keeps running so the 30-day inactivity rule cannot breach it while a conversion to a futures evaluation is requested from support. A futures prop account, when bought, gets its own section — this page will not become it.
+          </Note>
+        </PanelBody>
+      </Panel>
 
       {!data.configured && <Panel tone="red"><PanelBody><Note>Broker not configured on this deployment — TRADEIFY_DX_* environment variables are missing.</Note></PanelBody></Panel>}
       {data.brokerError && <Panel tone="red"><PanelBody><Note><strong className="text-down">DXtrade did not answer</strong> — {data.brokerError}. Positions unknown, not zero.</Note></PanelBody></Panel>}
@@ -224,8 +232,9 @@ export default function PropDeskPage() {
         )}
       </Panel>
 
-      <Explainer title="How this desk works, and how it differs from the Kraken desk">
+      <Explainer title="How this desk would work if it were armed, and how it differs from the Kraken desk">
         <ul>
+          <li><strong>Not in use.</strong> Everything below is what the code does when armed. It is kept deployed and disarmed; the only thing it does today is read the account, watch the floors and keep the account alive.</li>
           <li><strong>Same signals.</strong> The Live Desk&apos;s high-conviction 4h breakouts (swing-lev) are offered to this account on the same scan tick they are offered to Kraken. Long only. Paper keeps measuring either way.</li>
           <li><strong>Different sizing.</strong> Tradeify&apos;s limits are fixed dollars, so risk here is a fixed % of the $100k size, not of equity. A stop-out with slippage must fit inside today&apos;s room with a 10% buffer; when it does not, the trade is sized down, and below a quarter size it is refused.</li>
           <li><strong>Two floors, both on live equity.</strong> Daily: the 22:00 UTC closing balance minus $3,000. Static: $94,000, forever. An open position&apos;s unrealized loss counts. Touching either closes the account, so the desk refuses new risk once 80% of a limit is used and pages at 50%.</li>
