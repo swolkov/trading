@@ -36,9 +36,16 @@ Returns `bars` (per symbol: `fromDay`, the first day still needed), `barsStore`,
 (occ, symbol, expiry, strike, type), `chainRequests`, and `quoteStore`. **If `nothingToDo` is
 true and the account snapshot is fresh, stop.**
 
-### 2. Account snapshot
+### 2. Account snapshot — and what the real account HOLDS
 `get_accounts`, then `get_portfolio` on `685528705`. Carry `option_level` through — the page
-shows it. Level 3 was applied for on 2026-09-09; **if it has flipped to `option_level_3`,
+shows it. Then `get_option_positions` (`account_number: "685528705"`, `nonzero: true`) and
+`get_option_orders` (`account_number: "685528705"`, `created_at_gte` = 30 days ago). Pass both
+lists through in the payload as `positions` and `orders`, **in Robinhood's own field names**
+(`chain_symbol`, `type`, `quantity`, `average_price`, `expiration_date`; `id`, `state`,
+`opening_strategy`/`closing_strategy`, `premium`, `placed_agent`, `created_at`). They feed the
+Robinhood **Live Account** page — what the broker says it holds, beside the paper book. Both
+are normally empty; an order with `placed_agent` other than `user` is worth saying out loud,
+because nothing in this system is allowed to place one. Level 3 was applied for on 2026-09-09; **if it has flipped to `option_level_3`,
 say so**, because spreads unlock and that is worth telling Spencer.
 
 ### 3. Fetch from Robinhood
@@ -103,6 +110,8 @@ OCC key and rejects anything that does not round-trip:
 {
   "account": { "accountNumber": "685528705", "type": "limited_margin", "optionLevel": "option_level_2",
                "cash": 500, "buyingPower": 500, "optionsValue": 0, "totalValue": 500 },
+  "positions": [],
+  "orders": [],
   "bars": [ { "symbol": "IREN", "bars": [
               { "day": "2026-09-10", "o": 44.01, "h": 45.85, "l": 43.45, "c": 43.64, "v": 35839516 },
               { "day": "2026-09-11", "o": 43.20, "h": 45.10, "l": 43.05, "c": 44.72, "v": 31000000, "official": true } ] } ],

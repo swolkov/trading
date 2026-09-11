@@ -35,6 +35,8 @@ interface CommandData {
     robinhood: {
       newestQuoteTs: string | null; quoteAgeMinutes: number | null; quotesStale: boolean;
       quoteRows: number; openPositions: number; optionLevel: string | null; accountAt: string | null;
+      barsNewestDay: string | null; barsStale: boolean; barsStaleSymbols: number;
+      liveAt: string | null; livePositions: number; liveOrders: number; liveForeignOrders: number;
     };
   };
   error?: string;
@@ -146,7 +148,7 @@ export default function SystemHealthPage() {
 
       <Panel tone={rh.quotesStale ? "red" : undefined}>
         <PanelHeader
-          title="Options paper book — Robinhood"
+          title="Robinhood — live account snapshot and the options paper book"
           aside={
             <Chip tone={rh.quotesStale ? "red" : "green"} dot={rh.quotesStale} size="md">
               {rh.newestQuoteTs ? `quotes ${ago(rh.newestQuoteTs)}` : "no quotes ever pushed"}
@@ -160,6 +162,20 @@ export default function SystemHealthPage() {
             chip={<Chip tone={rh.quotesStale ? "red" : "green"} dot={rh.quotesStale}>{rh.newestQuoteTs ? ago(rh.newestQuoteTs) : "never"}</Chip>}
           >
             {rh.quoteRows > 0 && <span>{rh.quoteRows} contracts</span>}
+          </HealthRow>
+          <HealthRow
+            label="Bars inbox"
+            sub="Robinhood daily bars for the 39-name universe — the signal is read from these"
+            chip={<Chip tone={rh.barsStale ? "red" : "green"} dot={rh.barsStale}>{rh.barsNewestDay ? `to ${rh.barsNewestDay}` : "never"}</Chip>}
+          >
+            {rh.barsStaleSymbols > 0 && <span className="text-down">{rh.barsStaleSymbols} names behind</span>}
+          </HealthRow>
+          <HealthRow
+            label="Live account snapshot"
+            sub="positions and orders on the REAL account, pushed by the same run — the app never places an order here"
+            chip={<Chip tone={rh.liveForeignOrders > 0 ? "red" : rh.liveAt ? "green" : "grey"} dot={rh.liveForeignOrders > 0}>{rh.liveAt ? ago(rh.liveAt) : "never"}</Chip>}
+          >
+            {rh.liveAt && <span>{rh.livePositions} position{rh.livePositions === 1 ? "" : "s"} · {rh.liveOrders} order{rh.liveOrders === 1 ? "" : "s"}{rh.liveForeignOrders > 0 ? <span className="text-down"> · {rh.liveForeignOrders} NOT placed by you</span> : null}</span>}
           </HealthRow>
           <HealthRow
             label="Options scan"

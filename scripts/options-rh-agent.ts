@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { prisma } from "../src/lib/db";
 import {
   markChainFulfilled, pendingChainRequests, putQuotes, quoteStoreFreshness,
-  saveAccountSnapshot, type QuoteWithHint,
+  saveAccountSnapshot, saveLiveSnapshot, type LiveOrder, type LivePosition, type QuoteWithHint,
 } from "../src/lib/options-quote-store";
 import { parseOcc, toOcc } from "../src/lib/options-occ";
 import { runOptionsScan } from "../src/lib/options-run";
@@ -40,8 +40,23 @@ interface AgentQuote {
 // bar for TODAY `official: true` only after the close and only with the settled close from
 // get_equity_quotes — a provisional bar never overwrites an official one.
 interface AgentBars { symbol: string; bars: { day: string; o: number; h: number; l: number; c: number; v?: number; official?: boolean }[] }
+// The real account's positions and orders, in Robinhood's own field names (get_option_positions
+// with nonzero=true; get_option_orders, newest first). Passed through with light normalisation
+// so the page shows what the broker said, not a reinterpretation.
+interface AgentPosition {
+  chain_symbol: string; type: string; option_type?: string | null; strike_price?: number | string | null;
+  expiration_date?: string | null; quantity: number | string; average_price: number | string; pending_quantity?: number | string | null;
+}
+interface AgentOrder {
+  id: string; chain_symbol: string; state: string; opening_strategy?: string | null; closing_strategy?: string | null;
+  direction?: string | null; quantity: number | string; processed_quantity?: number | string | null;
+  premium?: number | string | null; price?: number | string | null; type?: string | null; trigger?: string | null;
+  placed_agent?: string | null; created_at?: string | null;
+}
 interface Payload {
   account?: { accountNumber: string; type: string; optionLevel: string; cash: number; buyingPower: number; optionsValue: number; totalValue: number };
+  positions?: AgentPosition[];
+  orders?: AgentOrder[];
   bars?: AgentBars[];
   quotes?: AgentQuote[];
   underlyings?: Record<string, number>;
@@ -123,6 +138,26 @@ async function ingest(path: string) {
   if (payload.account) {
     await saveAccountSnapshot(payload.account);
     console.log(`[account] ${payload.account.optionLevel} · buying power $${payload.account.buyingPower.toFixed(2)}`);
+  }
+
+  if (payload.positions || payload.orders) {
+    const num = (x: unknown) => { const n = Number(x); return Number.isFinite(n) ? n : 0; };
+    const positions: LivePosition[] = (payload.positions ?? []).map((p) => ({
+      symbol: String(p.chain_symbol ?? "").toUpperCase(), type: p.type === "short" ? "short" : "long",
+      optionType: p.option_type === "call" || p.option_type === "put" ? p.option_type : null,
+      strike: p.strike_price == null ? null : num(p.strike_price), expiry: p.expiration_date ?? null,
+      quantity: num(p.quantity), averagePrice: num(p.average_price), pendingQuantity: num(p.pending_quantity),
+    })).filter((p) => p.symbol && p.quantity !== 0);
+    const orders: LiveOrder[] = (payload.orders ?? []).map((o) => ({
+      id: String(o.id), symbol: String(o.chain_symbol ?? "").toUpperCase(), state: String(o.state ?? "unknown"),
+      strategy: o.opening_strategy ?? o.closing_strategy ?? null, side: o.direction ?? null,
+      quantity: num(o.quantity), processedQuantity: num(o.processed_quantity),
+      premium: o.premium == null ? null : num(o.premium), price: o.price == null ? null : num(o.price),
+      orderType: `${o.type ?? "?"}${o.trigger && o.trigger !== "immediate" ? `+${o.trigger}` : ""}`,
+      placedAgent: o.placed_agent ?? null, createdAt: o.created_at ?? null,
+    })).filter((o) => o.symbol);
+    await saveLiveSnapshot({ positions, orders });
+    console.log(`[live   ] ${positions.length} open position${positions.length === 1 ? "" : "s"} · ${orders.length} order${orders.length === 1 ? "" : "s"} on the real account`);
   }
 
   let barsWritten = 0, barsSymbols = 0;
