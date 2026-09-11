@@ -5,9 +5,8 @@ import { isPublicPath } from "@/lib/route-access";
 
 // Pages retired with futures trading (Aug 2026). Their code remains in the repo
 // for reversibility, but they are unlinked from the nav and redirect home.
-// "/futures" itself is BACK as the parked desk's status page (Sep 2026); the old dashboard's
-// sub-pages below stay retired.
 const RETIRED_PREFIXES = [
+  "/futures",         // Tradovate — retired Aug 2026, closed for good Sep 11 2026
   "/kraken",          // old BTC/ETH trend bot — disabled Aug 31 2026, capital parked in coins
   "/demo-vs-live",
   "/connect",
