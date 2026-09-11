@@ -54,3 +54,8 @@ data/
 !src/data/
 !src/data/**
 reports/
+
+# Options desk agent payloads — written by the headless session, never source
+.options-payload*.json
+options-rh-payload*.json
+options-payload*.json
