@@ -5,7 +5,7 @@ import { propGuard } from "@/lib/prop-desk";
 // re-protection, close settlement, keep-alive. It never opens a strategy trade; margin-scan
 // hands entries to propEntry(). The two crons CAN overlap in wall time — prop-desk.ts saves
 // state by merge, serialises entries with a lock and counts the day from broker history.
-export const maxDuration = 120;
+export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {

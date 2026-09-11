@@ -54,15 +54,17 @@ test("sizing: the 1.5% rung, fixed dollars, fits the room, refuses at the policy
   // Slots and the per-day cap refuse before any arithmetic.
   assert.match(propSize({ plan, equity: 100_000, floors: f, stopFrac: 0.04, entriesToday: 0, openPositions: 1 }).reason, /slots full/);
   assert.match(propSize({ plan, equity: 100_000, floors: f, stopFrac: 0.04, entriesToday: 1, openPositions: 0 }).reason, /daily entry cap/);
-  // After a $1,500 loss today the room is $1,500: a second full trade would breach the day,
-  // so it is sized DOWN (with the 0.3% slip allowance and the 90% buffer) rather than refused.
-  const down = propSize({ plan, equity: 98_500, floors: f, stopFrac: 0.04, entriesToday: 0, openPositions: 0, maxEntriesPerDay: 2 });
+  // After a $1,642 loss today (yesterday's position stopped out this morning) the room is
+  // $1,358: a full trade would breach the day, so it is sized DOWN rather than refused — and
+  // the worst case must still leave an ABSOLUTE margin of $500 above the floor, not 10% of
+  // whatever room is left.
+  const down = propSize({ plan, equity: 98_358, floors: f, stopFrac: 0.04, entriesToday: 0, openPositions: 0 });
   assert.equal(down.ok, true);
-  assert.ok(down.riskUsd < 1_500 && down.riskUsd > 1_000, `sized down to ${down.riskUsd}`);
-  // Total loss on a stop-out with slippage AND both fees must stay inside the room.
-  assert.ok(down.riskUsd * (1 + (0.003 + 0.0008) / 0.04) <= 1_500, "a stop-out with slip and fees stays above the floor");
+  assert.ok(down.riskUsd < 1_500 && down.riskUsd > 375, `sized down to ${down.riskUsd}`);
+  const worst = down.riskUsd * (1 + (0.003 + 0.0008 + 0.003) / 0.04);
+  assert.ok(1_358 - worst >= 500 - 1e-6, `margin after a slipped stop-out is ${(1_358 - worst).toFixed(0)}, must be ≥ $500`);
   // Room too small for a quarter-size trade → refuse.
-  const tiny = propSize({ plan, equity: 97_300, floors: f, stopFrac: 0.04, entriesToday: 0, openPositions: 0 });
+  const tiny = propSize({ plan, equity: 97_800, floors: f, stopFrac: 0.04, entriesToday: 0, openPositions: 0 });
   assert.equal(tiny.ok, false);
   assert.match(tiny.reason, /room too small/);
   // At or below a floor → refuse.
@@ -126,6 +128,8 @@ test("units and stop prices round DOWN — never more size, never a looser stop"
   assert.equal(dxQuantityStep(0.5), 1);
   // The venue gets an exact decimal string — no float tails, never rounded up.
   assert.equal(fmtQty(57 * 0.01, 0.01), "0.57");
+  assert.equal(fmtQty(0.29, 0.01), "0.29");
+  assert.equal(fmtQty(0.57, 0.01), "0.57");
   assert.equal(fmtQty(3 * 0.1, 0.1), "0.3");
   assert.equal(fmtQty(0.487, 0.01), "0.48");
   assert.equal(fmtQty(10_135_135_135.7, 1), "10135135135");

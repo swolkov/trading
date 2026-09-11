@@ -41,7 +41,9 @@ export const PROP_GUARDIAN_FRESH_MS = 15 * 60_000;
 // propEntry needs the broker several times plus a 2.5s settle; with 8s timeouts and retries
 // a bad broker minute is ~45s. Refuse when the calling route has less than this left.
 export const PROP_ENTRY_MIN_ROUTE_MS = 60_000;
-const ENTRY_LOCK_TTL_MS = 90_000;
+const ENTRY_LOCK_TTL_MS = 300_000;   // ≥ the calling route's maxDuration
+const BALANCE_WITNESS_FRESH_MS = 15 * 60_000;
+const SETTLE_MISSES_MAX = 3;
 const REALERT_MS = 60 * 60_000;
 const ORDER_PREFIX = "pd";
 const META = { desk: "prop" };
@@ -51,11 +53,12 @@ export interface ManagedPosition {
   symbol: string; coin: string; source: string; entry: number; oneR: number; peak: number; seenT: number;
   stop: number; openedAt: string; qty: number; ledgerId: number | null;
   stopFails?: number;   // consecutive runs the stop could not be moved/attached
+  settleMisses?: number; // runs the close could not be found in history yet
 }
 export interface PropState {
   alerts: Record<string, string>;
   snapshot?: { dayKey: string; balance: number; at: string; estimated?: boolean };
-  lastBalance?: number;                           // closed balance at the last guardian run (pre-reset witness)
+  lastBalance?: { balance: number; at: string };  // closed balance at the last guardian run (pre-reset witness)
   entries?: Record<string, number>;               // dayKey → entries placed (third vote only)
   managed?: Record<string, ManagedPosition>;      // positionCode → container
   lastTradeAt?: string;
@@ -113,10 +116,12 @@ function normalise(raw: unknown): PropState {
     const m = v as Partial<ManagedPosition>;
     if (typeof m.entry === "number" && m.entry > 0 && typeof m.oneR === "number" && m.oneR > 0 && typeof m.peak === "number" && typeof m.stop === "number" && typeof m.symbol === "string") {
       const openedAt = typeof m.openedAt === "string" && !Number.isNaN(Date.parse(m.openedAt)) ? m.openedAt : new Date().toISOString();
-      managed[k] = { symbol: m.symbol, coin: m.coin ?? m.symbol.split("/")[0], source: m.source ?? PROP_SOURCE_DEFAULT, entry: m.entry, oneR: m.oneR, peak: m.peak, seenT: typeof m.seenT === "number" ? m.seenT : 0, stop: m.stop, openedAt, qty: typeof m.qty === "number" ? m.qty : 0, ledgerId: typeof m.ledgerId === "number" ? m.ledgerId : null, stopFails: typeof m.stopFails === "number" ? m.stopFails : 0 };
+      managed[k] = { symbol: m.symbol, coin: m.coin ?? m.symbol.split("/")[0], source: m.source ?? PROP_SOURCE_DEFAULT, entry: m.entry, oneR: m.oneR, peak: m.peak, seenT: typeof m.seenT === "number" ? m.seenT : 0, stop: m.stop, openedAt, qty: typeof m.qty === "number" ? m.qty : 0, ledgerId: typeof m.ledgerId === "number" ? m.ledgerId : null, stopFails: typeof m.stopFails === "number" ? m.stopFails : 0, settleMisses: typeof m.settleMisses === "number" ? m.settleMisses : 0 };
     }
   }
-  return { ...p, alerts: p.alerts && typeof p.alerts === "object" ? p.alerts : {}, managed, entries: p.entries && typeof p.entries === "object" ? p.entries : {}, foreign: p.foreign && typeof p.foreign === "object" ? p.foreign : {} };
+  const lb = p.lastBalance as unknown;
+  const lastBalance = lb && typeof lb === "object" && typeof (lb as { balance?: unknown }).balance === "number" && typeof (lb as { at?: unknown }).at === "string" ? (lb as { balance: number; at: string }) : undefined;
+  return { ...p, lastBalance, alerts: p.alerts && typeof p.alerts === "object" ? p.alerts : {}, managed, entries: p.entries && typeof p.entries === "object" ? p.entries : {}, foreign: p.foreign && typeof p.foreign === "object" ? p.foreign : {} };
 }
 export async function loadState(): Promise<{ state: PropState; unreliable: boolean }> {
   let row: { value: string } | null = null;
@@ -141,7 +146,12 @@ async function saveState(mine: PropState, settled: string[] = []): Promise<void>
   if (keys.length > 14) for (const k of keys.slice(0, keys.length - 14)) delete mine.entries![k];
   let fresh: PropState | null = null;
   try { const row = await prisma.agentConfig.findUnique({ where: { key: PROP_STATE_KEY } }); fresh = row?.value ? normalise(JSON.parse(row.value)) : null; } catch { fresh = null; }
+  // Guardian-owned scalars (snapshot, balance witness, stamp, breach) belong to whichever copy
+  // ran the guardian later — a copy loaded 100s ago must not revert a fresh snapshot.
+  const mineG = mine.guardianAt ? Date.parse(mine.guardianAt) : 0, freshG = fresh?.guardianAt ? Date.parse(fresh.guardianAt) : 0;
+  const newer = mineG >= freshG ? mine : fresh!;
   const out: PropState = { ...(fresh ?? {}), ...mine, alerts: { ...(fresh?.alerts ?? {}), ...mine.alerts } };
+  if (fresh) { out.snapshot = newer.snapshot; out.lastBalance = newer.lastBalance; out.guardianAt = newer.guardianAt; out.breach = newer.breach; out.lastEquity = newer.lastEquity; }
   const entries: Record<string, number> = { ...(mine.entries ?? {}) };
   for (const [k, v] of Object.entries(fresh?.entries ?? {})) entries[k] = Math.max(entries[k] ?? 0, v);
   out.entries = entries;
@@ -151,6 +161,13 @@ async function saveState(mine: PropState, settled: string[] = []): Promise<void>
   const lt = [mine.lastTradeAt, fresh?.lastTradeAt].filter((x): x is string => typeof x === "string").sort();
   if (lt.length) out.lastTradeAt = lt[lt.length - 1];
   await setKey(PROP_STATE_KEY, JSON.stringify(out));
+}
+/** Field-scoped write: load the freshest row, apply `patch`, save by merge. For non-guardian callers. */
+async function patchState(patch: (s: PropState) => void, settled: string[] = []): Promise<void> {
+  const { state, unreliable } = await loadState();
+  if (unreliable) return;
+  patch(state);
+  await saveState(state, settled);
 }
 function shouldFire(state: PropState, key: string, everyMs = REALERT_MS): boolean {
   const last = state.alerts[key];
@@ -164,18 +181,20 @@ async function alert(state: PropState, key: string, text: string, everyMs = REAL
 }
 
 // ---- entry lock (serialises propEntry across overlapping scan runs) -----------------------
+/** Compare-and-set on the row's current value: two racers cannot both win. */
 async function acquireEntryLock(): Promise<string | null> {
   const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const now = Date.now();
   try {
     const row = await prisma.agentConfig.findUnique({ where: { key: PROP_ENTRY_LOCK_KEY } });
-    if (row?.value) {
-      const [, at] = row.value.split("@");
-      if (at && now - Number(at) < ENTRY_LOCK_TTL_MS) return null;
+    if (!row) {
+      try { await prisma.agentConfig.create({ data: { key: PROP_ENTRY_LOCK_KEY, value: `${token}@${now}` } }); return token; }
+      catch { return null; }   // someone created it first
     }
-    await setKey(PROP_ENTRY_LOCK_KEY, `${token}@${now}`);
-    const check = await prisma.agentConfig.findUnique({ where: { key: PROP_ENTRY_LOCK_KEY } });
-    return check?.value?.startsWith(token) ? token : null;
+    const [, at] = row.value.split("@");
+    if (row.value && at && now - Number(at) < ENTRY_LOCK_TTL_MS) return null;
+    const r = await prisma.agentConfig.updateMany({ where: { key: PROP_ENTRY_LOCK_KEY, value: row.value }, data: { value: `${token}@${now}` } });
+    return r.count === 1 ? token : null;
   } catch { return null; }
 }
 async function releaseEntryLock(token: string): Promise<void> {
@@ -252,7 +271,11 @@ export function floorsFor(plan: PropPlan, state: PropState, m: DxMetrics, nowMs 
 }
 
 // ---- the day's entry count, from broker truth ---------------------------------------------
-const isOurOpen = (o: DxOrder) => o.legs?.[0]?.positionEffect === "OPEN" && o.metadata?.desk === "prop" && o.metadata?.reason !== KEEPALIVE_REASON && o.status !== "REJECTED" && o.status !== "CANCELED";
+// Ours = our metadata echoed back, OR our client order id prefix (pd… strategy, ka… keep-alive).
+// The client id round-trips for certain (verified); metadata is belt-and-braces.
+const isOurs = (o: DxOrder) => o.metadata?.desk === "prop" || /^(pd|ka)[osc]-/.test(o.clientOrderId ?? "");
+const isKeepAlive = (o: DxOrder) => o.metadata?.reason === KEEPALIVE_REASON || /^ka[osc]-/.test(o.clientOrderId ?? "");
+const isOurOpen = (o: DxOrder) => o.legs?.[0]?.positionEffect === "OPEN" && isOurs(o) && !isKeepAlive(o) && o.status !== "REJECTED" && o.status !== "CANCELED";
 /** max(order history since the reset, ledger rows since the reset, the JSON counter). */
 async function entriesToday(plan: PropPlan, state: PropState, dayKey: string, nowMs: number): Promise<{ n: number; sources: string }> {
   const resetIso = new Date(nowMs - msSinceReset(plan, nowMs)).toISOString();
@@ -331,8 +354,8 @@ export async function propEntry(req: PropEntryRequest): Promise<PropEntryResult>
 
     // Count the entry in the JSON vote BEFORE sending (rolled back only on a definitive 4xx or
     // REJECTED). The broker-history and ledger votes cover the case where this write is lost.
-    state.entries = { ...(state.entries ?? {}), [f.dayKey]: today.n + 1 };
-    await saveState(state);
+    // Field-scoped: this must not carry a 100s-old snapshot over a fresh guardian's.
+    await patchState((st) => { st.entries = { ...(st.entries ?? {}), [f.dayKey]: Math.max(st.entries?.[f.dayKey] ?? 0, today.n + 1) }; });
 
     let opened;
     try {
@@ -371,10 +394,10 @@ export async function propEntry(req: PropEntryRequest): Promise<PropEntryResult>
     let ledgerId: number | null = null;
     try { ledgerId = await ledgerInsert({ positionCode, symbol: req.symbol, coin, source: req.source, tier: req.tier, qty: pos.quantity, entry, stop: stopOn ?? stopPx, oneR, riskUsd: sized.riskUsd, notional: pos.quantity * entry, riskPct: sized.riskPct, parentOrder: opened.parentCode, stopOrder: opened.stopCode, openedAt: pos.openTime, note: sized.reason }); }
     catch (e) { await sendNotification(`⚠️ PROP ledger write failed for ${req.symbol} ${positionCode}: ${String(e).slice(0, 120)} — the guardian still manages it from state`, "prop").catch(() => {}); }
-    const s2 = (await loadState()).state;
-    s2.managed = { ...(s2.managed ?? {}), [positionCode]: { symbol: req.symbol, coin, source: req.source, entry, oneR, peak: entry, seenT: Math.floor(Date.now() / 1000), stop: stopOn ?? stopPx, openedAt: pos.openTime, qty: pos.quantity, ledgerId, stopFails: 0 } };
-    s2.lastTradeAt = new Date().toISOString();   // AFTER a confirmed fill, never before
-    await saveState(s2);
+    await patchState((st) => {
+      st.managed = { ...(st.managed ?? {}), [positionCode]: { symbol: req.symbol, coin, source: req.source, entry, oneR, peak: entry, seenT: Math.floor(Date.now() / 1000), stop: stopOn ?? stopPx, openedAt: pos.openTime, qty: pos.quantity, ledgerId, stopFails: 0, settleMisses: 0 } };
+      st.lastTradeAt = new Date().toISOString();   // AFTER a confirmed fill, never before
+    });
     await sendNotification(
       `🟢 PROP LONG ${coin} · ${pos.quantity} @ $${entry} ($${Math.round(pos.quantity * entry).toLocaleString()}) · stop $${stopOn ?? "NONE"} · risk $${Math.round(sized.riskUsd)} (${sized.riskPct.toFixed(2)}% · ${sized.reason}) · room today $${Math.round(propRoom(c.plan, m.equity, f.floors).dailyRoom).toLocaleString()}`,
       "prop",
@@ -386,10 +409,11 @@ export async function propEntry(req: PropEntryRequest): Promise<PropEntryResult>
 }
 
 async function uncountEntry(dayKey: string): Promise<void> {
+  // saveState merges counters by MAX, which would undo a decrement — so this one write goes
+  // straight to the row, but on the freshest copy and touching only the counter.
   const { state, unreliable } = await loadState();
   if (unreliable) return;
   const n = state.entries?.[dayKey] ?? 0;
-  // saveState merges by max, so write the decrement directly.
   if (n > 0) { state.entries = { ...(state.entries ?? {}), [dayKey]: n - 1 }; await setKey(PROP_STATE_KEY, JSON.stringify(state)); }
 }
 
@@ -434,11 +458,14 @@ export async function propGuard(): Promise<PropGuardReport> {
   const dayKey = propDayKey(plan, nowMs);
   if (state.snapshot?.dayKey !== dayKey) {
     const late = msSinceReset(plan, nowMs) > PROP_LATE_SNAPSHOT_MS;
-    const balance = Math.max(m.balance, state.lastBalance ?? 0);
+    // The witness only counts if it is recent: after an outage it could be a stale HIGHER
+    // balance that would inflate the floor into a false breach.
+    const witness = state.lastBalance && nowMs - Date.parse(state.lastBalance.at) <= BALANCE_WITNESS_FRESH_MS ? state.lastBalance.balance : 0;
+    const balance = Math.max(m.balance, witness);
     state.snapshot = { dayKey, balance, at: new Date(nowMs).toISOString(), estimated: late };
     notes.push(`snapshot ${dayKey} balance $${balance}${late ? " (LATE — estimated, +2.2% buffer for sizing)" : ""}`);
   }
-  state.lastBalance = m.balance;
+  state.lastBalance = { balance: m.balance, at: new Date(nowMs).toISOString() };
   const floors: PropFloors = propFloors(plan, state.snapshot.balance);
   const room = propRoom(plan, m.equity, floors);
   const breach = propBreachState(plan, m.equity, floors);
@@ -471,10 +498,10 @@ export async function propGuard(): Promise<PropGuardReport> {
   for (const p of positions) {
     const code = String(p.positionCode);
     if (managed[code]) continue;
-    const linkedStop = orders.find((o) => String(o.legs?.[0]?.positionCode ?? "") === code && o.metadata?.desk === "prop");
+    const linkedStop = orders.find((o) => String(o.legs?.[0]?.positionCode ?? "") === code && isOurs(o));
     let opener: DxOrder | undefined = linkedStop;
     if (!opener) {
-      try { opener = (await dxOrderHistory(new Date(new Date(p.openTime).getTime() - 60_000).toISOString(), 100)).find((o) => String(o.orderId) === code && o.metadata?.desk === "prop"); }
+      try { opener = (await dxOrderHistory(new Date(new Date(p.openTime).getTime() - 60_000).toISOString(), 100)).find((o) => String(o.orderId) === code && isOurs(o)); }
       catch { opener = undefined; }
     }
     if (!opener) {
@@ -483,7 +510,15 @@ export async function propGuard(): Promise<PropGuardReport> {
       if ((state.foreign[code] ?? 0) === 1) await alert(state, `foreign-${code}`, `ℹ️ PROP: a position the desk did not open is on the account (${p.symbol} ${p.side} ${p.quantity}). It uses the slot and counts against the floors; the desk will not manage it.`, 0);
       continue;
     }
-    if (opener.metadata?.reason === KEEPALIVE_REASON) continue;   // a keep-alive mid-flight; it closes itself
+    if (isKeepAlive(opener)) {
+      // A keep-alive closes itself within ~25s. One still open minutes later is an orphan
+      // (its close failed): it holds the one slot, so close it now.
+      if (nowMs - Date.parse(p.openTime) > 2 * 60_000) {
+        try { await dxClosePosition({ symbol: p.symbol, positionCode: code, positionSide: p.side, codePrefix: "ka", metadata: { ...META, reason: KEEPALIVE_REASON } }); notes.push(`orphaned keep-alive ${code} closed`); }
+        catch (e) { errors.push(`orphaned keep-alive close failed ${String(e).slice(0, 80)}`); }
+      }
+      continue;
+    }
     const entry = p.openPrice;
     const openedAt = !Number.isNaN(Date.parse(p.openTime)) ? p.openTime : new Date(nowMs).toISOString();
     const source = opener.metadata?.source ?? PROP_SOURCE_DEFAULT;
@@ -528,7 +563,15 @@ export async function propGuard(): Promise<PropGuardReport> {
     let peak = mp.peak;
     for (const b of done) peak = Math.max(peak, b.h);
     const seenT = done.length ? done[done.length - 1].t : mp.seenT;
-    const stopOrder = orders.find((o) => o.type === "STOP" && !o.finalStatus && String(o.legs?.[0]?.positionCode ?? "") === code);
+    // Every working stop on this position, highest first. Exactly one should rest; a second
+    // (a half-finished attach+cancel) is cancelled so a later run cannot PUT the lower one.
+    const stopsFor = (list: DxOrder[]) => list.filter((o) => o.type === "STOP" && !o.finalStatus && String(o.legs?.[0]?.positionCode ?? "") === code).sort((a, b) => (b.legs?.[0]?.price ?? 0) - (a.legs?.[0]?.price ?? 0));
+    let stops = stopsFor(orders);
+    for (const extra of stops.slice(1)) {
+      try { await dxCancelOrder(extra.orderCode, ordersEtag); notes.push(`${mp.coin}: cancelled a duplicate stop at ${extra.legs?.[0]?.price}`); ordersEtag = (await dxOpenOrders()).etag; }
+      catch (e) { errors.push(`${mp.coin}: duplicate stop cancel failed ${String(e).slice(0, 80)}`); }
+    }
+    let stopOrder: DxOrder | undefined = stops[0];
     // The working order's own trigger is the truth for where the stop sits.
     const currentStop = stopOrder?.legs?.[0]?.price ?? p.stopLossPrice ?? mp.stop;
     const target = managedStop(1, mp.entry, peak, currentStop, mp.oneR, ex);
@@ -537,10 +580,16 @@ export async function propGuard(): Promise<PropGuardReport> {
     const floorTick = (x: number) => Number((Math.floor(x / tick) * tick).toFixed(10));
 
     if (!stopOrder) {
-      // NAKED. Confirm the position is still there THIS instant (its stop may have just filled),
-      // then re-protect at the better of the container's target and the initial stop.
+      // NAKED? Re-read BOTH orders and positions this instant: the stop may have just filled
+      // (position gone → settle next run), or an entry may have landed between this run's two
+      // reads (stop present → nothing to do). Only then re-protect.
       let still: DxPosition | undefined;
-      try { still = (await dxPositions()).positions.find((x) => String(x.positionCode) === code); } catch { still = undefined; }
+      try {
+        const fresh = await dxOpenOrders();
+        stops = stopsFor(fresh.orders);
+        if (stops[0]) { stopOrder = stops[0]; ordersEtag = fresh.etag; notes.push(`${mp.coin}: stop appeared on re-read — not naked`); mp.peak = peak; mp.seenT = seenT; mp.stop = Math.max(mp.stop, stopOrder.legs?.[0]?.price ?? 0); continue; }
+        still = (await dxPositions()).positions.find((x) => String(x.positionCode) === code);
+      } catch { still = undefined; }
       if (!still) { notes.push(`${mp.coin}: gone before re-protect — settled next run`); mp.peak = peak; mp.seenT = seenT; continue; }
       const px = floorTick(Math.max(target, mp.stop));
       try {
@@ -563,10 +612,13 @@ export async function propGuard(): Promise<PropGuardReport> {
         const first = e instanceof DxError ? e.message : String(e);
         try {
           await dxAttachStop({ symbol: mp.symbol, positionCode: code, positionSide: "BUY", stopPrice: px, codePrefix: ORDER_PREFIX, metadata: { ...META, reason: "trail" } });
+          // The new (higher) stop is on the book from here: record it even if the cancel below
+          // fails — the next run cancels the lower duplicate, never PUTs it.
+          mp.stop = px; moved = true;
           const again = await dxOpenOrders();
-          const old = again.orders.find((o) => o.orderCode === stopOrder.orderCode && !o.finalStatus);
+          const old = again.orders.find((o) => o.orderCode === stopOrder!.orderCode && !o.finalStatus);
           if (old) await dxCancelOrder(old.orderCode, again.etag);
-          moved = true; notes.push(`${mp.coin}: PUT failed (${first.slice(0, 60)}) — replaced via attach+cancel`);
+          notes.push(`${mp.coin}: PUT failed (${first.slice(0, 60)}) — replaced via attach+cancel`);
         } catch (e2) {
           mp.stopFails = (mp.stopFails ?? 0) + 1;
           errors.push(`${mp.coin}: stop move failed twice — ${first.slice(0, 80)} / ${String(e2).slice(0, 80)}`);
@@ -596,6 +648,12 @@ export async function propGuard(): Promise<PropGuardReport> {
         .sort((a, b) => Date.parse(b.transactionTime) - Date.parse(a.transactionTime))[0];
       if (closer) { exitPx = closer.legs?.[0]?.averagePrice ?? null; reason = closer.type === "STOP" ? "stop" : closer.metadata?.reason ?? "market"; }
     } catch (e) { errors.push(`${mp.coin}: history ${String(e).slice(0, 80)}`); }
+    if (exitPx == null && (mp.settleMisses ?? 0) < SETTLE_MISSES_MAX) {
+      // History lags the book by a little; give it a few runs before settling without a price.
+      mp.settleMisses = (mp.settleMisses ?? 0) + 1;
+      notes.push(`${mp.coin}: closed, close not in history yet (${mp.settleMisses}/${SETTLE_MISSES_MAX})`);
+      continue;
+    }
     const pnl = exitPx != null && exitPx > 0 ? mp.qty * (exitPx - mp.entry) - mp.qty * (exitPx + mp.entry) * 0.0004 : null;
     await ensurePropTables();
     await prisma.$executeRawUnsafe(`UPDATE prop_trades SET closed_at=now(), exit_px=$1, pnl_usd=$2, exit_reason=$3 WHERE position_code=$4 AND closed_at IS NULL`, exitPx, pnl, reason, code).catch((e) => errors.push(`ledger close ${String(e).slice(0, 80)}`));
@@ -651,6 +709,10 @@ export async function propKeepAlive(): Promise<void> {
 }
 
 // ---- ARM ----------------------------------------------------------------------------------
+/** Clears a standing disarm reason — field-scoped, never a blind whole-state write. */
+export async function clearPropDisarm(): Promise<void> {
+  await patchState((st) => { delete st.disarmed; });
+}
 export async function propArmLog(entry: Record<string, unknown>): Promise<void> {
   const raw = await cfg(PROP_ARM_LOG_KEY);
   let list: unknown[] = [];

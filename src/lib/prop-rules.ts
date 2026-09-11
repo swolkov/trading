@@ -41,6 +41,8 @@ export const PROP_RISK_STEP_AT_CUSHION_PCT = 10;   // cushion (equity − max fl
 export const PROP_STOP_FRAC = 0.04;                 // swing-lev's container: 4% initial stop
 export const PROP_SLIP_FRAC = 0.003;                // stop-fill allowance on their feed (replay used 0.2%)
 export const PROP_FEE_RT_FRAC = 0.0008;             // 0.04% per side, both sides, on notional
+export const PROP_BASIS_FRAC = 0.003;               // Kraken price (where the stop is anchored) vs DXtrade fill
+export const PROP_MIN_MARGIN_PCT = 0.005;           // a stop-out must leave ≥ 0.5% of size above the binding floor
 export const PROP_ROOM_BUFFER = 0.9;                // never plan to use more than 90% of the room left
 export const PROP_MIN_FIT_FRAC = 0.25;              // refuse rather than place a trade under ¼ size
 export const PROP_MAX_ENTRIES_PER_DAY = 1;          // the daily 3% is the binding rule — one bet per day
@@ -154,13 +156,16 @@ export function propSize(i: PropSizingInput): PropSizing {
   const riskPct = Math.min(cap, stepped);
   const wanted = plan.accountSize * (riskPct / 100);
 
-  // A stop-out costs the planned risk PLUS slippage and both fees on the whole notional. Fit
-  // that inside the room with a buffer; size DOWN rather than refuse, unless the fit is tiny.
+  // A stop-out costs the planned risk PLUS slippage, both fees and the Kraken→DXtrade basis on
+  // the whole notional. Fit that inside the room with a proportional buffer AND an absolute
+  // margin — after a loss the room is small and "10% of what is left" is tens of dollars.
+  // Size DOWN rather than refuse, unless the fit is tiny.
   const slip = i.slipFrac ?? PROP_SLIP_FRAC;
-  const lossPerRisk = 1 + (slip + PROP_FEE_RT_FRAC) / i.stopFrac;   // total loss ÷ planned risk
-  const fit = (room.room * PROP_ROOM_BUFFER) / lossPerRisk;
+  const lossPerRisk = 1 + (slip + PROP_FEE_RT_FRAC + PROP_BASIS_FRAC) / i.stopFrac;   // total loss ÷ planned risk
+  const usable = Math.min(room.room * PROP_ROOM_BUFFER, room.room - plan.accountSize * PROP_MIN_MARGIN_PCT);
+  const fit = usable / lossPerRisk;
   const risk = Math.min(wanted, fit);
-  if (risk < wanted * PROP_MIN_FIT_FRAC) return no(`room too small — ${Math.round(fit)} of ${Math.round(wanted)} fits`);
+  if (risk < wanted * PROP_MIN_FIT_FRAC) return no(`room too small — ${Math.round(Math.max(0, fit))} of ${Math.round(wanted)} fits`);
   const notional = risk / i.stopFrac;
   return { ok: true, reason: risk < wanted ? `sized down to fit today's room` : `full ${riskPct}% rung`, riskUsd: risk, notionalUsd: notional, riskPct: (risk / plan.accountSize) * 100 };
 }
@@ -227,7 +232,8 @@ export function decimalsOf(step: number): number {
  */
 export function fmtQty(units: number, step: number): string {
   const d = decimalsOf(step);
-  const floored = Math.floor(units * 10 ** d) / 10 ** d;
+  // +1e-9 absorbs float noise (0.57 × 100 = 56.99999…) so a clean value is not cut a step short.
+  const floored = Math.floor(units * 10 ** d + 1e-9) / 10 ** d;
   return floored.toFixed(d);
 }
 

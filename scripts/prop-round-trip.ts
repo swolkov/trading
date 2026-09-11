@@ -114,6 +114,9 @@ async function main() {
   try {
     const hist = await dxOrderHistory(new Date(openedAt - 60_000).toISOString(), 20);
     check("order history readable", hist.length >= 1, `${hist.length} orders · first: ${JSON.stringify(hist[0] ?? {}).slice(0, 300)}`);
+    const mine = hist.find((o) => String(o.orderId) === String(parentId));
+    check("metadata and clientOrderId echoed in history", mine?.metadata?.desk === "prop-round-trip" && !!mine?.clientOrderId?.startsWith("rto-"), `metadata ${JSON.stringify(mine?.metadata)} clientOrderId ${mine?.clientOrderId}`);
+    check("stop order in the OPEN list carried metadata", stopOrder?.metadata?.desk === "prop-round-trip" || /^rts-/.test(stopOrder?.clientOrderId ?? ""), `metadata ${JSON.stringify(stopOrder?.metadata)} clientOrderId ${stopOrder?.clientOrderId}`);
   } catch (e) { check("order history readable", false, e instanceof DxError ? `${e.status} ${e.code} ${e.body?.slice(0, 160)}` : String(e)); }
 
   await dxLogout();

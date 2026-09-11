@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
-import { PROP_SOURCE_DEFAULT, PROP_STATE_KEY, loadState, propArmLog, propConfig, propStatus } from "@/lib/prop-desk";
+import { PROP_SOURCE_DEFAULT, clearPropDisarm, loadState, propArmLog, propConfig, propStatus } from "@/lib/prop-desk";
 import { PROP_RISK_MAX_PCT } from "@/lib/prop-rules";
 import { dxAccountStatus, dxConfigured } from "@/lib/dxtrade";
 
@@ -30,8 +30,7 @@ export async function POST(request: Request) {
     if (unreliable) return Response.json({ error: "state unreadable" }, { status: 500 });
     if (!state.disarmed) return Response.json({ error: "nothing to clear" }, { status: 400 });
     const reason = state.disarmed.reason;
-    delete state.disarmed;
-    await setKey(PROP_STATE_KEY, JSON.stringify(state));
+    await clearPropDisarm();
     await propArmLog({ action: "clear-disarm", by: "admin page", cleared: reason });
     return Response.json({ ok: true, ...(await propStatus()) });
   }
