@@ -156,7 +156,7 @@ export const SWING_REACTIVATED_AT = "2026-09-08T14:55:00Z";
 
 /** The moment after which a sleeve's record tests the rule as it stands today. */
 export function policyCutFor(source: string): string {
-  return source === "swing-lev" || source === "swing-spot" || source === "swing-wide" || source === "swing-tight"
+  return source === "swing-lev" || source === "swing-spot" || source === "swing-wide" || source === "swing-lock"
     ? SWING_REACTIVATED_AT
     : POLICY_CUT_AT;
 }
@@ -228,20 +228,31 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   // replaces swing-lev only by beating it on the same signals. PAPER ONLY — the guardian
   // mirrors a 1R trail, so this deliberately has no live container and cannot be armed.
   if (source === "swing-wide") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2 };
-  // SWING-TIGHT (registered 2026-09-11) — swing-lev's container and signals with ONE change:
-  // once the peak clears +1R, trail 0.5R behind it instead of 1R. The mirror of swing-wide,
-  // and the arm the desk was missing: swing-wide asks "are we cutting winners short?",
-  // selective-tight asks the opposite on the 5m family, and NOTHING asked "are we giving
-  // back too much?" on the swing signal. Registered off a trade, then checked against the
-  // distribution: ETH on Sep 11 ran +1.24R to a $459 peak and the 1R trail kept $62 — with
-  // 134 resolved high-conviction trades averaging a 0.93R WIN, a 1R trail on a ~1.2R move is
-  // the MODAL outcome, not a fluke. A 0.5R trail would have kept $274 on that trade. Whether
-  // it does across thirty, or gets shaken out of the 3R runs that make the year, is exactly
-  // what this measures. Uses the same tightAfterR/tightTrailR machinery selective-tight has
-  // run since Sep 7. Judged like every sleeve: 30 resolved, t ≥ 2, 7+ days, replaces swing-lev
-  // only by beating it on the same signals. PAPER ONLY — the guardian mirrors a 1R trail, so
-  // this deliberately has no live container and cannot be armed.
-  if (source === "swing-tight") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true, tightAfterR: 1, tightTrailR: 0.5 };
+  // SWING-LOCK (registered 2026-09-11, replacing swing-tight the same day before it took a
+  // single trade). "When we're up a lot, don't give it back." swing-wide's 2R trail and
+  // 7-day hold, with ONE addition: once the peak clears +3R, trail 0.5R behind it instead.
+  // The modal ~1R winner is left entirely alone; only the genuinely big run gets locked.
+  //
+  // WHY THIS AND NOT swing-tight. The paired replay (scripts/backtest-variants.ts Q2b/Q2c,
+  // 88 identical 4h entries) said, per trade against the live 1R trail:
+  //     0.5R trail from +1R (swing-tight)   −$4   t = −0.13   42 better / 14 worse — a wash
+  //     1R trail, lock 0.5R after +2R       +$7   t =  0.55
+  //     1R trail, lock 0.5R after +3R      +$10   t =  1.01   13 better / 4 worse
+  //     2R trail (swing-wide)             +$104   t =  1.94
+  //     2R trail, lock 0.5R after +3R      +$78   t =  1.98   26 better / 33 worse, tighter CI
+  // Tightening from +1R clips the modal winner and gains nothing. The wide trail is the
+  // biggest lever. Adding the +3R lock to it costs ~$26/trade of expectation against pure
+  // wide, and buys a narrower outcome distribution — on a ~$4.6k account where a deep
+  // drawdown trips the breaker, that is a real trade-off and not obviously the wrong one.
+  //
+  // ⚠️ HONESTY ABOUT THE REPLAY. Five variants were tested and this is the best-looking one
+  // after seeing the numbers; its t = 1.98 does NOT survive a multiple-comparisons
+  // correction. It is registered because it encodes the rule Spencer asked for in the form
+  // the replay says is least likely to hurt — not because the replay proved it. The FORWARD
+  // record, against swing-wide on the same signals, is what decides. swing-tight was retired
+  // with zero forward trades, so nothing was thrown away.
+  // PAPER ONLY — the guardian mirrors a 1R trail, so this has no live container.
+  if (source === "swing-lock") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2, tightAfterR: 3, tightTrailR: 0.5 };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
   // the wide 6% control. BOTH RETIRED (Sep 1 / Sep 4). Exit profiles stay so already-open
@@ -679,7 +690,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
   "swing-lev": "Leveraged swing — high-conviction 4h/1d longs, 4% / 4d — REACTIVATED Sep 8 (slot-B candidate)",
   "swing-wide": "Swing WIDE TRAIL — swing-lev's trades, trailing 2R behind the peak instead of 1R, 7-day hold — twin (Sep 9), not pooled, paper only",
-  "swing-tight": "Swing TIGHT TRAIL — swing-lev's trades, trailing 0.5R behind the peak once +1R instead of 1R — twin (Sep 11), not pooled, paper only",
+  "swing-lock": "Swing WIDE + LOCK — swing-lev's trades on a 2R trail, locking 0.5R behind the peak once +3R — twin (Sep 11), not pooled, paper only",
   "swing-spot": "Spot swing — same entries, 1×, 6% / 14d, no rollover — REACTIVATED Sep 8 (spot, not margin-tradeable by the executor)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",

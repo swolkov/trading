@@ -118,7 +118,13 @@ async function main() {
   const bars: Record<string, { d: KrakenBar[]; h4: KrakenBar[] }> = JSON.parse(readFileSync(CACHE, "utf8"));
   const CONTROL = exitParams("swing-lev", 5, 1);
   const WIDE = exitParams("swing-wide", 5, 1);
-  const TIGHT = exitParams("swing-tight", 5, 1);
+  const TIGHT: ExitProfile = { ...exitParams("swing-lev", 5, 1), tightAfterR: 1, tightTrailR: 0.5 };   // the retired swing-tight
+  // "When we're up a lot, don't give it back": the NORMAL 1R trail until +2R, then 0.5R.
+  // Leaves the modal ~1R winner alone; only protects the big runs.
+  const LOCK2: ExitProfile = { ...exitParams("swing-lev", 5, 1), tightAfterR: 2, tightTrailR: 0.5 };
+  const LOCK3: ExitProfile = { ...exitParams("swing-lev", 5, 1), tightAfterR: 3, tightTrailR: 0.5 };
+  // The combination: let it run on a 2R trail, but once it is genuinely big (+3R) lock 0.5R.
+  const WIDE_LOCK = exitParams("swing-lock", 5, 1);   // registered as the swing-lock twin
 
   // ---- collect entries once ----
   const raw4h: { e: Entry; bars: KrakenBar[] }[] = [], raw1d: { e: Entry; bars: KrakenBar[] }[] = [];
@@ -172,6 +178,19 @@ async function main() {
   const helped = dt.filter((d) => d > 0.005).length, hurt = dt.filter((d) => d < -0.005).length, same = dt.length - helped - hurt;
   console.log(`  trades where it kept MORE: ${helped}  ·  kept LESS: ${hurt}  ·  identical: ${same}`);
   console.log(`  ⇒ ${Math.abs(st.t) >= 2 ? (st.t > 0 ? "the tighter trail IS better" : "the tighter trail is WORSE") : "NOT established either way — keep collecting"}`);
+
+  // ---- Q2c: lock in only the BIG winners. PAIRED. 1R trail as live, then 0.5R once +2R (and once +3R).
+  console.log("\n── Q2c lock the big ones: 1R trail until +2R / +3R, then 0.5R? (paired, same entries) ──");
+  for (const [label, prof] of [["lock after +2R", LOCK2], ["lock after +3R", LOCK3], ["2R trail + lock after +3R", WIDE_LOCK]] as const) {
+    const l4 = run(all4h, 4, prof, TAKER);
+    const dl = l4.map((x, i) => x.pnl - c4[i].pnl);
+    report(`${label} (4h)`, l4.map((x) => x.pnl));
+    report("per-trade DIFFERENCE vs control", dl);
+    const sl = tOf(dl);
+    const helped = dl.filter((d) => d > 0.005).length, hurt = dl.filter((d) => d < -0.005).length;
+    console.log(`  kept MORE: ${helped} · kept LESS: ${hurt} · identical: ${dl.length - helped - hurt}`);
+    console.log(`  ⇒ ${Math.abs(sl.t) >= 2 ? (sl.t > 0 ? "locking IS better" : "locking is WORSE") : "NOT established either way"}`);
+  }
 
   // ---- Q3: maker entries. PAIRED — identical trades, only the entry fee differs.
   console.log("\n── Q3  would maker entries pay? (paired, same trades, entry fee 0.25% → 0.16%) ──");

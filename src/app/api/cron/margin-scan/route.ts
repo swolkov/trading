@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, EXPERIMENT_SOURCES } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, EXPERIMENT_SOURCES, SIZE_MULTIPLIER } from "@/lib/margin-shadow";
 import { openTsmomPaper, readBtcRegime } from "@/lib/margin-regime";
 import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
@@ -296,16 +296,30 @@ export async function GET(request: Request) {
         "margin_results",
       );
     } else {
-      for (const r of resolutions) {
+      // ONE POST PER RECORD TRADE. Experiment twins ride the same signal in a different
+      // container — they are measurement, not trades, and their results belong on the paper
+      // page beside the record they are compared against. Posting each of them here made one
+      // ETH signal into four "Tracked ETH/USD" messages (swing-lev, swing-wide, swing-lock,
+      // swing-spot), three of them wearing a "×5-size experiment" label that was only ever
+      // true of selective-x5. Twins now get a single summary line per run, correctly named.
+      for (const r of [...counted, ...setAside]) {
         const win = r.pnl >= 0;
         const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
-        const tag = isExperiment(r)
-          ? ` 🧪 ×5-size experiment (${r.source}) — the same trade again, bigger; NOT in the record`
-          : isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
+        const tag = isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
         await sendNotification(
           `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
           `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
           `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}).${tag} Estimate — fees+rollover modeled; no real money moved.`,
+          "margin_results",
+        );
+      }
+      if (experiments.length) {
+        const byKind = (src: string | null) => (src && src in SIZE_MULTIPLIER ? "×5-size" : "twin");
+        const lines = experiments.map((r) =>
+          `• ${r.symbol} ${r.side.toUpperCase()} — ${r.source} (${byKind(r.source)}): ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${r.reason})`).join("\n");
+        await sendNotification(
+          `🧪 ${experiments.length} measurement sleeve${experiments.length === 1 ? "" : "s"} resolved — the same signals in a different container, NOT the record:\n${lines}\n` +
+          `_Compare them on the paper page; nothing here is a second trade._`,
           "margin_results",
         );
       }
@@ -315,15 +329,24 @@ export async function GET(request: Request) {
   }
 
   if (autoOpened) {
-    // One line per SETUP: the experiment twin rides the same signal and is not a second trade.
+    // One line per SIGNAL, not per sleeve. A 4h breakout opens swing-lev AND swing-spot — two
+    // containers on one signal — and listing both read as the desk taking ETH twice. The
+    // sleeves are named on the line instead; the twins are counted but never listed.
     const setups = opened.filter((o) => !EXPERIMENT_SOURCES.includes(o.source ?? ""));
     const twins = opened.length - setups.length;
-    const lines = setups
-      .map((o) => `• ${o.symbol} ${o.side.toUpperCase()} — ${o.tier} conviction`)
+    const bySignal = new Map<string, { symbol: string; side: string; tier: string; sources: string[] }>();
+    for (const o of setups) {
+      const k = `${o.symbol}|${o.side}`;
+      const g = bySignal.get(k) ?? { symbol: o.symbol, side: o.side, tier: o.tier, sources: [] };
+      if (o.source) g.sources.push(o.source);
+      bySignal.set(k, g);
+    }
+    const lines = [...bySignal.values()]
+      .map((g) => `• ${g.symbol} ${g.side.toUpperCase()} — ${g.tier} conviction${g.sources.length ? ` (${g.sources.join(", ")})` : ""}`)
       .join("\n");
     await sendNotification(
-      `👁 Opened ${setups.length} tracked paper trade${setups.length === 1 ? "" : "s"} from high-conviction 5m/15m longs:\n${lines}\n` +
-      `Longs only, not stretched. Paper only, no money moved.${twins > 0 ? ` (${twins} mirrored by the ×5-size experiment — same trades, not counted.)` : ""}`,
+      `👁 Opened ${bySignal.size} tracked paper signal${bySignal.size === 1 ? "" : "s"}:\n${lines}\n` +
+      `Paper only, no money moved.${twins > 0 ? ` (${twins} measurement twin${twins === 1 ? "" : "s"} ride the same signals — not counted, see the paper page.)` : ""}`,
       "margin_results",
     );
   }
