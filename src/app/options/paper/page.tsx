@@ -52,6 +52,7 @@ interface Payload {
   excluded: Record<string, string>; sleeves: Sleeve[]; trades: TradeRow[];
   lastRun: string | null; lastResult: LastResult | null;
   account: Account | null; quoteStore: QuoteStore; chainRequests: ChainRequest[];
+  barsStore?: { symbols: number; newestDay: string | null; oldestNewestDay: string | null; staleSymbols: string[]; stale: boolean };
   structures: StructureStat[];
   scenarios: ScenarioSet[];
 }
@@ -98,6 +99,7 @@ export default function OptionsPaperPage() {
   // threshold the reads enforce, so this banner can never disagree with the behaviour.
   // While data is still loading, say nothing rather than cry wolf.
   const quotesStale = !!data && data.quoteStore.stale;
+  const barsStale = !!data && !!data.barsStore?.stale;
 
   return (
     <div className="space-y-5">
@@ -115,6 +117,10 @@ export default function OptionsPaperPage() {
               {levelLabel(account.optionLevel)}
             </Chip>
           )}
+          <Chip tone={barsStale ? "red" : "green"} size="md" dot={barsStale}
+                title="Daily bars come from Robinhood, pushed in by the same scheduled agent as the quotes. The 50-day signal is read from these.">
+            {data?.barsStore?.newestDay ? `Bars to ${data.barsStore.newestDay}${data.barsStore.staleSymbols.length ? ` · ${data.barsStore.staleSymbols.length} stale` : ""}` : "No bars pushed yet"}
+          </Chip>
           <Chip tone={quotesStale ? "red" : "green"} size="md" dot={quotesStale}
                 title="Robinhood quotes are pushed in by a scheduled agent — the app holds no Robinhood credentials.">
             {data?.quoteStore?.newestQuoteTs ? `Quotes ${ago(data.quoteStore.newestQuoteTs)}` : "No quotes pushed yet"}
@@ -132,6 +138,18 @@ export default function OptionsPaperPage() {
               : " No quotes have ever been pushed."}
             {" "}Past 36 hours the book refuses them outright: open positions stop marking and no entry can open.
             Run the <code>options-desk</code> skill, or check that the agent&apos;s Robinhood login is still authenticated.
+          </Note>
+        </PanelBody></Panel>
+      )}
+
+      {barsStale && (
+        <Panel tone="red"><PanelBody className="py-3">
+          <p className="text-[13px] font-semibold text-down">Daily bars are stale — the signal is blind on {data?.barsStore?.symbols ? `${data.barsStore.staleSymbols.length} of ${data.barsStore.symbols}` : "every"} name{data?.barsStore?.symbols ? "s" : ""}.</p>
+          <Note className="mt-1">
+            The 50-day breakout is read from Robinhood daily bars that the scheduled agent pushes in.
+            {data?.barsStore?.newestDay ? ` Newest bar anywhere: ${data.barsStore.newestDay}; the name furthest behind stops at ${data.barsStore.oldestNewestDay}.` : " No bars have ever been pushed."}
+            {data?.barsStore?.staleSymbols?.length ? ` Behind: ${data.barsStore.staleSymbols.slice(0, 12).join(", ")}${data.barsStore.staleSymbols.length > 12 ? "…" : ""}.` : ""}
+            {" "}A name without today&apos;s bar cannot fire, so a quiet scan here is not evidence of a quiet market. Run the <code>options-desk</code> skill.
           </Note>
         </PanelBody></Panel>
       )}

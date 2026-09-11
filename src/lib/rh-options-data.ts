@@ -24,8 +24,8 @@
 // Everything here fails toward "no data" rather than toward a guess. An empty chain means
 // no entry; a missing quote means a position is left alone. Both are already handled by the
 // callers, and both are far safer than a modelled price.
-import { getHistoricalBars } from "@/lib/yahoo";
 import { parseOcc, toOcc } from "@/lib/options-occ";
+import { getStoredBars } from "@/lib/options-bars-store";
 import {
   getStoredChain, getStoredQuotes, requestChain, type OptionQuote,
 } from "@/lib/options-quote-store";
@@ -37,30 +37,16 @@ export type { OptionQuote };
 export { parseOcc, toOcc };
 export interface DailyBar { t: string; o: number; h: number; l: number; c: number; v: number }
 
-/** Daily bars for many symbols, split-adjusted. Yahoo is per-symbol, so this fans out with
- *  a small concurrency cap — enough to keep a 38-name universe inside the cron budget,
- *  low enough not to get rate-limited. A symbol that fails is simply absent; the scanner
- *  already reports "no bars" for it rather than treating it as a signal. */
+/** Daily bars for many symbols, split-adjusted — from ROBINHOOD, via the bars inbox
+ *  (src/lib/options-bars-store.ts). The desk session pushes them; nothing here fetches.
+ *  A symbol with nothing stored is simply absent; the scanner already reports "no bars" for
+ *  it rather than treating it as a signal. A same-day bar is dropped while the session is
+ *  still open (see completedSessionsOnly), so a manual midday run cannot enter on a
+ *  half-finished bar. Both scheduled runs are after the close. */
 export async function getDailyBars(symbols: string[], days = 420, now = new Date()): Promise<Record<string, DailyBar[]>> {
+  const stored = await getStoredBars(symbols, days);
   const out: Record<string, DailyBar[]> = {};
-  const queue = [...symbols];
-  const CONCURRENCY = 6;
-  async function worker() {
-    for (;;) {
-      const symbol = queue.shift();
-      if (!symbol) return;
-      try {
-        // includeToday: the scan's freshness gate only admits an entry when the newest bar is
-        // TODAY's. Yahoo's default end excludes the current session, so without this the gate
-        // could never pass and the book could never open a position (it could not, from the
-        // Sep 9 port until this was caught on Sep 11).
-        const bars = await getHistoricalBars(symbol, days, { includeToday: true });
-        if (bars.length) out[symbol] = bars;
-      } catch { /* absent, not zero — see the header */ }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, symbols.length) }, worker));
-  for (const [symbol, bars] of Object.entries(out)) out[symbol] = completedSessionsOnly(bars, now);
+  for (const [symbol, bars] of Object.entries(stored)) if (bars.length) out[symbol] = completedSessionsOnly(bars, now);
   return out;
 }
 

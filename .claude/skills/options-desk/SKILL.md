@@ -32,8 +32,9 @@ Nothing on that page advances unless this runs.
 ```bash
 node --env-file=.env.local --import tsx scripts/options-rh-agent.ts worklist
 ```
-Returns `openPositions` (occ, symbol, expiry, strike, type), `chainRequests`, and
-`quoteStore`. **If `nothingToDo` is true and the account snapshot is fresh, stop.**
+Returns `bars` (per symbol: `fromDay`, the first day still needed), `barsStore`, `openPositions`
+(occ, symbol, expiry, strike, type), `chainRequests`, and `quoteStore`. **If `nothingToDo` is
+true and the account snapshot is fresh, stop.**
 
 ### 2. Account snapshot
 `get_accounts`, then `get_portfolio` on `685528705`. Carry `option_level` through — the page
@@ -41,7 +42,22 @@ shows it. Level 3 was applied for on 2026-09-09; **if it has flipped to `option_
 say so**, because spreads unlock and that is worth telling Spencer.
 
 ### 3. Fetch from Robinhood
-**Open positions first — they are the safety-critical half.** An unmarked position is a
+**Daily bars first — the signal is read from them, and nothing else supplies them.** The
+book is measured on Robinhood's bars, not a third-party feed (decided 2026-09-11). For the
+`bars` list: `get_equity_historicals` with `interval: "day"`, `bounds: "regular"`,
+`adjustment_type: "split"` (the default), `start_time` = the earliest `fromDay` among the
+batch at `T00:00:00Z`, **up to 10 symbols per call** — so a normal day is 4 calls for the
+whole universe, and a first fill (420 days) is the same 4 calls. Push every bar returned for
+a day ≥ that symbol's own `fromDay`. Skip any bar with `interpolated: true`.
+
+Then **today's bar must be official**. Only if the run is AFTER 16:00 ET: call
+`get_equity_quotes` on the same symbols (≤ 20 per call) and, for each, push today's bar with
+`official: true` using the settled close it reports as the close (open/high/low/volume from
+the day bar if Robinhood returned one for today, else the quote's own day fields). Before
+16:00 ET push no bar for today at all — a half-finished session is not a daily bar, and the
+app drops one anyway. A provisional bar never overwrites an official one.
+
+**Open positions next — they are the safety-critical half.** An unmarked position is a
 stop that never gets checked; a missed entry costs one sample.
 
 For each entry in `openPositions` (Robinhood identifies contracts by symbol + expiry + strike +
@@ -87,6 +103,9 @@ OCC key and rejects anything that does not round-trip:
 {
   "account": { "accountNumber": "685528705", "type": "limited_margin", "optionLevel": "option_level_2",
                "cash": 500, "buyingPower": 500, "optionsValue": 0, "totalValue": 500 },
+  "bars": [ { "symbol": "IREN", "bars": [
+              { "day": "2026-09-10", "o": 44.01, "h": 45.85, "l": 43.45, "c": 43.64, "v": 35839516 },
+              { "day": "2026-09-11", "o": 43.20, "h": 45.10, "l": 43.05, "c": 44.72, "v": 31000000, "official": true } ] } ],
   "underlyings": { "IREN": 46.93 },
   "quotes": [ { "symbol": "IREN", "expiration": "2026-11-20", "strike": 37, "type": "call",
                 "bid": 11.4, "ask": 11.6, "bidSize": 10, "askSize": 5,
@@ -99,12 +118,14 @@ Then:
 ```bash
 node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest "$TMPDIR/options-payload.json"
 ```
-This writes the quotes and then runs **the same scan the daily cron runs**, so a chain
-filled now can open a position now. Report what it prints: quotes written, resolved, opened,
-refused.
+This writes the bars and quotes and then runs **the same scan the daily cron runs**, so a
+chain filled now can open a position now. Report what it prints: bars written, quotes
+written, resolved, opened, refused — and **how many signals were fresh**. A signal that is
+not fresh is one whose newest bar is not today's; if that happens after the close, the bars
+step was skipped or the official close was not pushed.
 
 ## Read budget
-About 2 + (3 × open POSITION LEGS — a spread counts as two) + (4–6 × chain requests). Concurrency is capped by the
+About 4 (bars) + 2 (official closes) + 2 + (3 × open POSITION LEGS — a spread counts as two) + (4–6 × chain requests). Concurrency is capped by the
 model at 3 open positions per sleeve, so a normal run is well under 40 calls. **If a run
 would exceed ~80, do the open positions and skip the chain requests** — they survive for
 three days and the next run picks them up.

@@ -22,6 +22,8 @@ import {
 } from "../src/lib/options-quote-store";
 import { parseOcc, toOcc } from "../src/lib/options-occ";
 import { runOptionsScan } from "../src/lib/options-run";
+import { barsWorklist, barsStoreFreshness, putBars, type StoredBar } from "../src/lib/options-bars-store";
+import { OPTIONS_SYMBOLS } from "../src/lib/options-paper-model";
 
 // Quotes arrive in ROBINHOOD's own shape — underlying symbol, expiration, strike, type —
 // and this script derives the OCC key. Asking the agent to hand-format OCC's eight-digit
@@ -33,8 +35,14 @@ interface AgentQuote {
   quoteTs?: string | null; delta?: number | null; theta?: number | null;
   iv?: number | null; dayVolume?: number;
 }
+// Daily bars arrive per symbol, in Robinhood's own shape (get_equity_historicals, interval
+// "day", regular session, split-adjusted). `day` is the session date. The agent marks the
+// bar for TODAY `official: true` only after the close and only with the settled close from
+// get_equity_quotes — a provisional bar never overwrites an official one.
+interface AgentBars { symbol: string; bars: { day: string; o: number; h: number; l: number; c: number; v?: number; official?: boolean }[] }
 interface Payload {
   account?: { accountNumber: string; type: string; optionLevel: string; cash: number; buyingPower: number; optionsValue: number; totalValue: number };
+  bars?: AgentBars[];
   quotes?: AgentQuote[];
   underlyings?: Record<string, number>;
   chainsFulfilled?: string[];
@@ -76,7 +84,17 @@ async function worklist() {
   );
   const chains = await pendingChainRequests();
   const fresh = await quoteStoreFreshness();
+  // Every name the signal reads, plus any held name that has left the universe.
+  const barSymbols = [...new Set([...OPTIONS_SYMBOLS, ...open.map((r) => r.symbol)])];
+  const bars = await barsWorklist(barSymbols);
+  const barsStore = await barsStoreFreshness(barSymbols);
   console.log(JSON.stringify({
+    // DAILY BARS FIRST. The signal is computed from these; a name with stale bars cannot
+    // fire. `fromDay` is the first day still needed (inclusive) — fetch get_equity_historicals
+    // interval "day" from there, up to 10 symbols per call. After the close, take today's
+    // settled close from get_equity_quotes and push today's bar with official: true.
+    bars,
+    barsStore,
     // Contracts we hold: they must be re-quoted every run or their stops go unchecked.
     // strike/type are spelled out so the agent can look the contract up on Robinhood
     // directly (it identifies contracts by symbol+expiry+strike+type, never by OCC).
@@ -95,7 +113,7 @@ async function worklist() {
     // Chains the scanner asked for and could not fetch itself.
     chainRequests: chains,
     quoteStore: fresh,
-    nothingToDo: open.length === 0 && chains.length === 0,
+    nothingToDo: open.length === 0 && chains.length === 0 && bars.length === 0,
   }, null, 2));
 }
 
@@ -106,6 +124,16 @@ async function ingest(path: string) {
     await saveAccountSnapshot(payload.account);
     console.log(`[account] ${payload.account.optionLevel} · buying power $${payload.account.buyingPower.toFixed(2)}`);
   }
+
+  let barsWritten = 0, barsSymbols = 0;
+  for (const b of payload.bars ?? []) {
+    if (!b?.symbol || !Array.isArray(b.bars)) continue;
+    const rows: StoredBar[] = b.bars.map((x) => ({ day: x.day, o: x.o, h: x.h, l: x.l, c: x.c, v: x.v ?? 0, official: !!x.official }));
+    const n = await putBars(b.symbol, rows);
+    if (n !== rows.length) console.log(`[bars   ] ${b.symbol}: ${rows.length - n} rejected — malformed day or OHLC`);
+    barsWritten += n; barsSymbols++;
+  }
+  if (barsSymbols) console.log(`[bars   ] ${barsWritten} bars written across ${barsSymbols} symbols`);
 
   const supplied = payload.quotes ?? [];
   const mapped = supplied.map(toStoreQuote).filter((q): q is QuoteWithHint => q !== null);

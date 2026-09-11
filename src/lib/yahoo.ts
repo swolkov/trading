@@ -4,20 +4,13 @@ const yahooFinance = new YahooFinanceClass({ suppressNotices: ["ripHistorical"] 
 
 // ---------- Historical Data Fallback ----------
 
-// ⚠️ `period2` is an EXCLUSIVE end at midnight UTC of the date given. With period2 = today,
-// the newest bar Yahoo returns is YESTERDAY's — the current session is never included, even
-// after the close. That is what every legacy caller has always received and they are left
-// alone. A caller that needs the session that just closed (the options book's freshness
-// gate requires the newest bar to be TODAY's) passes `includeToday: true`, which moves the
-// end to tomorrow. During market hours that bar is still in progress — the caller owns that.
 export async function getHistoricalBars(
   symbol: string,
-  days: number = 200,
-  opts: { includeToday?: boolean } = {},
+  days: number = 200
 ): Promise<{ t: string; o: number; h: number; l: number; c: number; v: number }[]> {
   try {
-    const endDate = new Date(Date.now() + (opts.includeToday ? 24 * 60 * 60 * 1000 : 0));
-    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
     const quotes = await yahooFinance.historical(symbol, {
       period1: startDate.toISOString().split("T")[0],
       period2: endDate.toISOString().split("T")[0],
