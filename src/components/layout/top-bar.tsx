@@ -20,6 +20,9 @@ interface KrakenStatus {
 export function TopBar() {
   const { data: krk, isLoading } = useSWR<KrakenStatus>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
   const { data: mode } = useSWR<{ armed?: boolean; auto?: boolean }>("/api/margin/mode", fetcher, { refreshInterval: 60000 });
+  // The second platform. Robinhood is paper-only and its snapshot is pushed by the desk
+  // session, so this is "what the agent last saw", with its age on the options page.
+  const { data: opt } = useSWR<{ account?: { totalValue: number; optionLevel: string } | null; barsStore?: { stale: boolean }; quoteStore?: { stale: boolean } }>("/api/options/paper", fetcher, { refreshInterval: 120000 });
   const armed = Boolean(mode?.armed);
 
   const equity = krk?.connected && (krk.totalValue ?? 0) > 0 ? krk.totalValue! : null;
@@ -36,8 +39,8 @@ export function TopBar() {
           </>
         ) : (
           <>
-            <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="Total Kraken account value: USD + coins, at today's prices">
-              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Account</span>
+            <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="Total Kraken account value: USD + coins, at today's prices. This is the real-money account.">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Kraken</span>
               <span className="text-[13px] font-semibold tabular-nums">{equity != null ? money(equity) : "—"}</span>
             </div>
             {equity == null && krk && <Chip tone="red" title="Kraken did not answer the last read; the numbers will fill in on the next one">Kraken did not answer</Chip>}
@@ -49,6 +52,14 @@ export function TopBar() {
                   <span className={`text-[11px] tabular-nums ${tone(parkedPnl)}`}>({parkedPct >= 0 ? "+" : ""}{(parkedPct * 100).toFixed(1)}%)</span>
                 )}
                 <span className="hidden text-[11px] text-muted-foreground sm:inline">vs deposits</span>
+              </div>
+            )}
+            {opt?.account && (
+              <div className="hidden items-baseline gap-1.5 whitespace-nowrap md:flex" title="Robinhood Agentic account, as the desk session last saw it. PAPER ONLY — the app never places an order here.">
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Robinhood</span>
+                <span className="text-[13px] font-semibold tabular-nums">{money(opt.account.totalValue)}</span>
+                <span className="text-[11px] text-paper">paper only</span>
+                {(opt.barsStore?.stale || opt.quoteStore?.stale) && <Chip tone="red" title="The options book's pushed data is stale — see Options Paper Book">stale feed</Chip>}
               </div>
             )}
           </>

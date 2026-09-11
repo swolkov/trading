@@ -10,7 +10,7 @@ import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { coinOf, money, pct, pnl2, timeOnly, tone, usd } from "@/lib/format";
 
-// ============ MARGIN COCKPIT ============
+// ============ LIVE ACCOUNT (Kraken) ============
 // The live account: open positions with EXACT liquidation prices, the account's margin-level
 // gauge, the scanner's signals, multi-timeframe charts on any margin-eligible pair, a
 // break-even calculator, and the real round-trip scoreboard from Kraken's own ledger.
@@ -127,8 +127,8 @@ export default function MarginCockpitPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Margin Cockpit"
-        sub="Kraken spot margin — margin call at 80% margin level, forced liquidation at 40%."
+        title="Live Account"
+        sub="What Kraken says right now — real money. Positions, margin level, signals, and the track record from the ledger. Margin call at 80% margin level, forced liquidation at 40%."
         right={krakenDown ? <Chip tone="red" size="md" dot>Kraken unreachable</Chip> : <Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : status ? "Margin not in use" : "Loading…"}</Chip>}
       />
 

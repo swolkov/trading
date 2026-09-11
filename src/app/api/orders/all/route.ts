@@ -3,7 +3,7 @@ import { pairBase } from "@/lib/kraken-pairs";
 
 // Real order/fill history — every actual Kraken execution from kraken_my_trades (synced from
 // TradesHistory), newest first. Replaced the retired trend-bot event log Aug 31 2026. Read-only.
-// This is the raw-fills companion to the Margin Cockpit's round-trip Track Record.
+// This is the raw-fills companion to the Live Account page's round-trip Track Record.
 export const dynamic = "force-dynamic";
 
 interface Fill {
