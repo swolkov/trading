@@ -46,23 +46,37 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 export async function putBars(symbol: string, bars: StoredBar[]): Promise<number> {
   await ensureBarsStore();
   const sym = symbol.toUpperCase().trim();
-  let n = 0;
-  for (const b of bars) {
-    if (!DAY.test(b.day)) continue;
-    if (![b.o, b.h, b.l, b.c].every((x) => Number.isFinite(x) && x > 0)) continue;
-    if (b.h < b.l || b.c > b.h + 1e-9 || b.c < b.l - 1e-9) continue;
+  const valid = bars.filter((b) =>
+    DAY.test(b.day)
+    && [b.o, b.h, b.l, b.c].every((x) => Number.isFinite(x) && x > 0)
+    && b.h >= b.l && b.c <= b.h + 1e-9 && b.c >= b.l - 1e-9);
+  // Batched: a first fill is ~290 bars × 39 names, and one round trip per row took ten
+  // minutes against the hosted database. 500 rows per statement keeps each well under the
+  // parameter limit. Later duplicates within one batch would make ON CONFLICT fail, so the
+  // batch is de-duplicated by day first (last one wins).
+  const byDay = new Map<string, StoredBar>();
+  for (const b of valid) byDay.set(b.day, b);
+  const rows = [...byDay.values()];
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    const params: unknown[] = [];
+    const values = chunk.map((b) => {
+      const base = params.length;
+      params.push(sym, b.day, b.o, b.h, b.l, b.c, b.v ?? 0, !!b.official);
+      return `($${base + 1}, $${base + 2}::date, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, now())`;
+    }).join(",");
     await prisma.$executeRawUnsafe(
       `INSERT INTO options_underlying_bars (symbol, day, o, h, l, c, v, official_close, pushed_at)
-       VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, now())
+       VALUES ${values}
        ON CONFLICT (symbol, day) DO UPDATE SET
          o = EXCLUDED.o, h = EXCLUDED.h, l = EXCLUDED.l, c = EXCLUDED.c, v = EXCLUDED.v,
          official_close = EXCLUDED.official_close, pushed_at = now()
        WHERE options_underlying_bars.official_close = false OR EXCLUDED.official_close = true`,
-      sym, b.day, b.o, b.h, b.l, b.c, b.v ?? 0, !!b.official,
+      ...params,
     );
-    n++;
   }
-  return n;
+  return rows.length;
 }
 
 /** Bars for many symbols in the shape the scanner and evaluator consume. `t` is the
