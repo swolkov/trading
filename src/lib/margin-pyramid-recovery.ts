@@ -40,7 +40,7 @@ export async function recoverPyramidWithIO(positions: PyramidPosition[], io: {
     const add = marker.txid ? positions.find((p) => p.ordertxid === marker.txid) : undefined;
     pair = parent?.pair ?? add?.pair;
     if (io.ledgerCorrupt) return blocked("ownership ledger is corrupt");
-    if (!marker.txid) return blocked("pending add has no confirmed order transaction ID");
+    if (!marker.txid) return blocked(`pending add has no confirmed order transaction ID (parent ${marker.parent}, marked ${new Date(marker.ts).toISOString()}) — if Kraken shows no bot order on that pair since then, clear kraken_margin_pyramid_pending`);
     if (io.ledgerHas(marker.txid)) {
       if (io.parentOf(marker.txid) !== marker.parent) return blocked("pending add's ledger parent does not match its marker");
       // Already durable: failure to tidy the marker does not invalidate the ledger receipt.
@@ -68,4 +68,12 @@ export function entryExposureRefusal(positions: { side: string; owned: boolean }
   if (positions.some((p) => !p.owned)) return "manual or unconfirmed position already exists on the pair";
   if (positions.some((p) => p.side !== wantSide)) return "opposing position already exists on the pair; entry would net against it";
   return null;
+}
+
+// After a FAILED AddOrder for a pyramid add, the executor may clear the write-ahead marker
+// ONLY on proof that the add never reached the book: both broker lookups succeeded, nothing
+// of ours rests on the pair since the send, and nothing of ours filled since the send. A lost
+// read is not proof — the marker stays and the guardian keeps reporting it.
+export function pyramidAddProvenAbsent(i: { openOrdersRead: boolean; closedOrdersRead: boolean; restingFound: number; filledFound: number }): boolean {
+  return i.openOrdersRead === true && i.closedOrdersRead === true && i.restingFound === 0 && i.filledFound === 0;
 }

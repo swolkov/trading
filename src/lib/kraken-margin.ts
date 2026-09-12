@@ -5,7 +5,7 @@
 // executor lives separately. All private calls go through kraken.ts's signed client;
 // keys come only from env and the module is inert without them.
 import { prisma } from "@/lib/db";
-import { krakenPublic, krakenPrivate, krakenPair } from "@/lib/kraken";
+import { krakenPublic, krakenPrivate, krakenPair, isUsdAsset, ledgerAssetToPair } from "@/lib/kraken";
 import { withReadRetry, displayCache } from "@/lib/kraken-read";
 
 // ---- multi-timeframe OHLC ----
@@ -493,16 +493,55 @@ export async function computeMarginScoreboard(): Promise<MarginScoreboard> {
 }
 
 // All round trips, for the analysis script and the cockpit's trade list.
+// Cash-day guard, not a claimed per-trade attribution. Overlapping margin fees can stop
+// entries early; rebates never add risk capacity. Kraken posts BTC and ETH rollover in the
+// BASE coin (XXBT / XETH on the ledger — 62 such rows on this account) and alt rollover in
+// ZUSD. A coin-denominated fee is valued at the current ticker; only a fee that cannot be
+// priced leaves `unknown` set. (Before Sep 12 2026 any coin-denominated fee was "unknown",
+// which refused every entry — the pyramid add included — for the rest of the UTC day after
+// the first 4h rollover on a BTC or ETH position.)
+export function valuePostedCosts(
+  rows: { asset: string; fee: number }[],
+  priceOfAsset: (asset: string) => number | null,
+): { usd: number; unknown: boolean } {
+  let usd = 0;
+  let unknown = false;
+  for (const r of rows) {
+    if (typeof r.asset !== "string" || typeof r.fee !== "number" || !Number.isFinite(r.fee)) throw new Error("Margin financing unavailable");
+    const fee = Math.max(0, r.fee);
+    if (fee === 0) continue;
+    if (isUsdAsset(r.asset)) { usd += fee; continue; }
+    const px = priceOfAsset(r.asset);
+    if (px == null || !Number.isFinite(px) || px <= 0) { unknown = true; continue; }
+    usd += fee * px;
+  }
+  return { usd, unknown };
+}
+
+async function ledgerAssetUsdPrice(asset: string): Promise<number | null> {
+  try {
+    const res = await krakenPublic("Ticker", { pair: ledgerAssetToPair(asset) });
+    const first = Object.values(res)[0] as { c?: string[] } | undefined;
+    const px = parseFloat(first?.c?.[0] ?? "");
+    return Number.isFinite(px) && px > 0 ? px : null;
+  } catch {
+    return null;   // unpriceable → the caller's `unknown`, never a guess
+  }
+}
+
 export async function postedMarginCostsSince(since: Date): Promise<{ usd: number; unknown: boolean }> {
-  // Cash-day guard, not a claimed per-trade attribution. Overlapping margin fees
-  // can stop entries early; rebates and unvalued currencies never add risk capacity.
-  const [row] = await prisma.$queryRawUnsafe<{ usd: number; unknown: number }[]>(
-    `SELECT COALESCE(sum(GREATEST(fee,0)) FILTER (WHERE asset IN ('USD','ZUSD')),0)::float AS usd,
-      count(*) FILTER (WHERE asset NOT IN ('USD','ZUSD') AND fee <> 0)::int AS unknown
-      FROM kraken_my_ledger WHERE time >= $1 AND ltype IN ('margin','rollover')`, since,
+  const rows = await prisma.$queryRawUnsafe<{ asset: string; fee: number }[]>(
+    `SELECT asset, COALESCE(sum(GREATEST(fee,0)),0)::float AS fee
+       FROM kraken_my_ledger WHERE time >= $1 AND ltype IN ('margin','rollover') GROUP BY asset`, since,
   );
-  if (!row || !Number.isFinite(row.usd) || !Number.isInteger(row.unknown)) throw new Error("Margin financing unavailable");
-  return { usd: Math.max(0, row.usd), unknown: row.unknown > 0 };
+  if (!Array.isArray(rows)) throw new Error("Margin financing unavailable");
+  // One public Ticker read per coin that actually carried a fee today (typically zero or one).
+  const prices = new Map<string, number | null>();
+  for (const r of rows) {
+    if (typeof r.asset !== "string" || isUsdAsset(r.asset) || !(r.fee > 0) || prices.has(r.asset)) continue;
+    prices.set(r.asset, await ledgerAssetUsdPrice(r.asset));
+  }
+  return valuePostedCosts(rows, (asset) => prices.get(asset) ?? null);
 }
 
 export async function listRoundTrips(): Promise<RoundTrip[]> {
