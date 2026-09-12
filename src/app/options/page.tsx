@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { OptionsResearchDesk } from "@/components/options/research-desk";
 import { Chip } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
@@ -140,6 +141,7 @@ export default function RobinhoodLiveAccountPage() {
         )}
       </Panel>
 
+      <OptionsResearchDesk />
       <Panel><PanelHeader title="Live trading limits" /><PanelBody>
         <Stat label="Maximum loss per trade" value={data?.execution.maxLossUsd != null ? money(data.execution.maxLossUsd) : "Not set"} sub="Includes fees. One position at a time." />
         <Note className="mt-3">Long calls, long puts and defined-risk spreads. Profit targets are not guaranteed returns.</Note>

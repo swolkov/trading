@@ -13,8 +13,8 @@ const DEFAULTS: Record<string, string> = {
   take_profit_pct: "25",
   cash_reserve_pct: "20",
   max_daily_trades: "6",
-  trade_options: "true", // legacy — kept for backward compat
-  options_mode: "paper", // disabled, paper, live — options entry gate mode
+  trade_options: "false", // legacy — kept for backward compat
+  options_mode: "disabled", // disabled, paper, live — options entry gate mode
   options_stop_loss_pct: "40",
   options_profit_pct: "50",
   focus_symbols: "", // comma-separated watchlist for agent to prioritize
@@ -116,6 +116,9 @@ export async function GET() {
       else if (tradingMode === "disabled") result.futures_mode = "disabled";
       else result.futures_mode = "demo";
     }
+    // Legacy switches do not control the Robinhood executor.
+    result.options_mode = "disabled";
+    result.trade_options = "false";
     return Response.json(result);
   } catch (error) {
     console.error("[/api/agent/config GET]", error);
@@ -136,6 +139,8 @@ export async function POST(request: Request) {
     if (livePassword !== process.env.LIVE_TRADING_PASSWORD) {
       return Response.json({ error: "Admin trading password required to change engine settings" }, { status: 403 });
     }
+
+    if ((updates.options_mode && updates.options_mode !== "disabled") || (updates.trade_options && updates.trade_options !== "false")) return Response.json({ error: "Use the Robinhood options desk. Legacy options activation and paper trading are retired." }, { status: 409 });
 
     const unknownKeys = Object.keys(updates).filter((key) => !(key in DEFAULTS));
     if (unknownKeys.length > 0) {

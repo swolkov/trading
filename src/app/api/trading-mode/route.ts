@@ -38,6 +38,8 @@ export async function POST(request: Request) {
       return Response.json({ error: `Invalid type: ${type}. Must be: ${VALID_TYPES.join(", ")}` }, { status: 400 });
     }
 
+    if (type === "options") return Response.json({ error: "Options use the dedicated Robinhood desk. This legacy switch cannot activate trading or restore retired paper trading.", href: "/options" }, { status: 409 });
+
     // Validate mode
     if (mode !== "paper" && mode !== "live") {
       return Response.json({ error: "Mode must be 'paper' or 'live'" }, { status: 400 });
