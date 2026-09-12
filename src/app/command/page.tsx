@@ -147,23 +147,28 @@ export default function SystemHealthPage() {
       </Panel>
 
       <Panel>
-        <PanelHeader title="Tradovate futures" aside={<Chip tone="paper">Paper-only requirement</Chip>} />
+        <PanelHeader title="Tradovate futures · demo desk" aside={<Chip tone="paper">Paper only, by design</Chip>} />
         <PanelBody className="divide-y divide-border">
-          <HealthRow label="Configured execution mode" sub="A mode setting does not prove an engine is running."
-            chip={<Chip tone={data.futures.executionMode === "paper" ? "paper" : "red"}>{data.futures.executionMode === "paper" ? "Paper" : data.futures.executionMode === "live" ? "Live configuration conflicts with paper-only requirement" : data.futures.executionMode === "disabled" ? "Disabled" : "Unknown"}</Chip>} />
-          <HealthRow label="Paper engine heartbeat" sub="Expected within 5 minutes, including when markets are closed."
-            chip={<Chip tone={data.futures.paper.fresh ? "green" : "red"}>{data.futures.paper.fresh ? "Reporting" : "Not reporting"}</Chip>}>
-            <span>{data.futures.paper.at ? ago(data.futures.paper.at) : "No valid timestamp"}</span>
+          <HealthRow label="Desk switch" sub="Typed ENABLE on the Futures Desk page. Off = alerts are recorded, nothing is sent to the demo."
+            chip={<Chip tone={data.futures.desk.enabled ? "green" : "grey"}>{data.futures.desk.enabled ? "Enabled" : "Disabled"}</Chip>}>
+            {data.futures.desk.disabledReason && <span>{data.futures.desk.disabledReason}</span>}
           </HealthRow>
-          <HealthRow label="Paper process lease" sub="Requires a demo heartbeat within 75 seconds. This is not trading authorization."
-            chip={<Chip tone={data.futures.paper.ready && data.futures.paper.reportedMode === "demo" ? "green" : "amber"}>{data.futures.paper.ready && data.futures.paper.reportedMode === "demo" ? "Reported active" : "Unverified"}</Chip>} />
-          <HealthRow label="Paper entry authorization" sub="Last engine report only. Broker access and fresh licensed quotes must also pass."
-            chip={<Chip tone={data.futures.executionMode === "paper" && data.futures.paper.reportedMode === "demo" && data.futures.paper.ready && data.futures.paper.entryAuthorizationReported ? "blue" : "amber"}>{data.futures.executionMode === "paper" && data.futures.paper.reportedMode === "demo" && data.futures.paper.ready && data.futures.paper.entryAuthorizationReported ? "Reported open" : "Closed or unverified"}</Chip>} />
-          <HealthRow label="Reported paper data source" sub="Source telemetry does not verify quote freshness or the data license."
-            chip={<Chip tone="grey">{data.futures.paper.marketData}</Chip>} />
-          <HealthRow label="Live engine heartbeat" sub="Live futures are not authorized. A reporting process is not proof of trading."
-            chip={<Chip tone={data.futures.live.fresh ? "red" : "grey"}>{data.futures.live.fresh ? "Reporting: inspect configuration" : "Not reporting"}</Chip>} />
-          <Note className="pt-3">Paper trading still needs working broker access and licensed market data. Confirm both before restarting the paper engine. TradingView charts do not establish data entitlement for this server.</Note>
+          <HealthRow label="Desk guardian" sub="Every 5 minutes. The desk refuses entries when it has not run in 20 minutes."
+            chip={<Chip tone={data.futures.desk.guardianFresh ? "green" : "red"}>{data.futures.desk.guardianFresh ? "Reporting" : "Not reporting"}</Chip>}>
+            <span>{data.futures.desk.guardianAt ? ago(data.futures.desk.guardianAt) : "No valid timestamp"}</span>
+          </HealthRow>
+          <HealthRow label="Broker and webhook credentials" sub="Tradovate demo login and the TradingView webhook secret on this server."
+            chip={<Chip tone={data.futures.desk.configured ? "green" : "red"}>{data.futures.desk.configured ? "Present" : "Missing"}</Chip>} />
+          <HealthRow label="CME session" sub="Sun 18:00 → Fri 17:00 ET with a daily 17:00–18:00 break. Alerts that land in a break are queued for the reopen."
+            chip={<Chip tone={data.futures.desk.cmeOpen ? "blue" : "grey"}>{data.futures.desk.cmeOpen ? "Open" : "Closed"}</Chip>} />
+          <HealthRow label="Demo equity (guardian's last read)" sub="Sizing uses the fixed $50k basis, not this number."
+            chip={<Chip tone="grey">{data.futures.desk.equity != null ? `$${Math.round(data.futures.desk.equity).toLocaleString()}` : "—"}</Chip>} />
+          {data.futures.desk.lastError && (
+            <HealthRow label="Last desk error" chip={<Chip tone="amber">Inspect</Chip>}><span>{data.futures.desk.lastError}</span></HealthRow>
+          )}
+          <HealthRow label="Retired Railway engines" sub="Closed for good (Sep 2026). Any heartbeat here means a process that should be dead is running."
+            chip={<Chip tone={data.futures.paper.fresh || data.futures.live.fresh ? "red" : "grey"}>{data.futures.paper.fresh || data.futures.live.fresh ? "Reporting: shut it down" : "Silent"}</Chip>} />
+          <Note className="pt-3">The desk trades only when TradingView sends it an alert: the two Pine rules must be loaded on real-time CME data with alerts pointed at the webhook. A green guardian with no alerts is a desk waiting, not a desk broken.</Note>
         </PanelBody>
       </Panel>
 
