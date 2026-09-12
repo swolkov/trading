@@ -43,6 +43,7 @@ test("the arm switch offers every live container that is a real sleeve — and n
   assert.ok(!a.includes("roundtrip"), "the plumbing test's label is not a sleeve");
   for (const s of a) { assert.ok(liveContainerFor(s), s); assert.ok(!RETIRED_AUTO_SOURCES.has(s), s); assert.match(s, /^[a-z0-9_-]{1,32}$/); }
   assert.ok(!a.includes("swing-lock") && !a.includes("selective-tight"), "no container, not armable");
+  assert.ok(!a.includes("tsmom") && !a.includes("tsmom-short"), "the scanner never hands tsmom to the executor — arming it live places nothing");
 });
 
 test("a book's trail is the trail its tranches were opened under; unknown or mixed = the record's 1R", () => {

@@ -100,7 +100,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
       setMsg(j.error ?? (body.action === "switch-source" ? `switched — live sleeve is now ${(j.sources ?? []).join(", ")}` : j.armed ? "ARMED — real orders from the next scan tick" : "disarmed"));
       await mutate();
     } catch (e) { setMsg(String(e)); }
-    finally { setBusy(false); setConfirm(""); setSwitchConfirm(""); }
+    finally { setBusy(false); setConfirm(""); setSwitchConfirm(""); setSwitchTo(""); }
   };
   if (!arm) return <Note>Loading arm state…</Note>;
   const canArm = confirm === "ARM" && rtPassed && !arm.ddTripped && !arm.demoted && !arm.roundTripRunning;

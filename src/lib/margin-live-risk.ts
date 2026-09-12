@@ -369,11 +369,18 @@ export function liveContainerFor(source: string | null | undefined): LiveContain
 /** The arm route's source rule, in one place: a sane name that is not a retired sleeve. */
 export const ARM_SOURCE_RE = /^[a-z0-9_-]{1,32}$/;
 /**
+ * Sleeves with a live container that the scan route never hands to the executor: tsmom's
+ * paper entries come from openTsmomPaper, not from a scanner signal, so arming one of these
+ * places nothing. Offering it would be a switch to "live does nothing" with no warning.
+ */
+const NOT_SCAN_FED = new Set(["tsmom", "tsmom-short"]);
+/**
  * The sleeves the arm switch offers: every live container that passes the arm route's own
- * checks (name, not retired). `roundtrip` is the plumbing test's label, not a sleeve.
+ * checks (name, not retired) AND that the scanner actually feeds live. `roundtrip` is the
+ * plumbing test's label, not a sleeve.
  */
 export function armableSources(): string[] {
-  return Object.keys(LIVE_CONTAINERS).filter((s) => ARM_SOURCE_RE.test(s) && !RETIRED_AUTO_SOURCES.has(s) && s !== "roundtrip");
+  return Object.keys(LIVE_CONTAINERS).filter((s) => ARM_SOURCE_RE.test(s) && !RETIRED_AUTO_SOURCES.has(s) && s !== "roundtrip" && !NOT_SCAN_FED.has(s));
 }
 /**
  * A book's time stop = the shortest hold across its tranches, where a tranche with no

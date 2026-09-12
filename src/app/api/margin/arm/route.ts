@@ -138,6 +138,10 @@ export async function POST(request: Request) {
     if (!liveContainerFor(to)) return Response.json({ error: `source "${to}" has no live container (its paper exit is not mirrored by the guardian yet) — it cannot be armed`, ...(await status()) }, { status: 400 });
     const s = await status();
     if (!s.armed) return Response.json({ error: "not armed — arm the sleeve you want instead of switching", ...s }, { status: 409 });
+    // A running round trip has ARMED the desk for "roundtrip" itself and restores the saved
+    // keys (kraken_margin_live_sources included) when it finishes — a switch now would be
+    // logged, paged, and silently undone minutes later.
+    if (s.roundTripRunning) return Response.json({ error: "a round trip is running — wait for it", ...s }, { status: 409 });
     const from = s.sources.join(",") || "(none)";
     if (s.sources.length === 1 && s.sources[0] === to) return Response.json({ error: `${to} is already the armed sleeve`, ...s }, { status: 400 });
     const c = liveContainerFor(to)!;
