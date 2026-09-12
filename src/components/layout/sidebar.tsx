@@ -11,7 +11,6 @@ import {
   Route,
   Activity,
   Wallet,
-  Landmark,
   Menu,
   X,
 } from "lucide-react";
@@ -20,12 +19,12 @@ import {
 // wants: Kraken (crypto margin, REAL money), Robinhood (US equity options, PAPER only —
 // measured, never traded, no server credentials), and a FUTURES prop account (ES/NQ,
 // automated through the eval and the funded stage) — the latter is NOT bought yet, so it has
-// no section; one appears the day an account exists. Tradeify 247 is listed because the
-// account exists, not because it is wanted: it is a DXtrade CRYPTO prop account bought on
-// Sep 11 2026 by mistake (Spencer wanted futures; he already has Kraken for crypto). The
-// desk code stays deployed and DISARMED while a conversion/refund is pursued. The old
-// Tradovate retail engines are RETIRED (Aug 2026): unlinked here, redirected home by
-// proxy.ts along with the spot trend bot and the futures-era research pages. A page belongs
+// no section; one appears the day an account exists. The Tradeify 247 DXtrade CRYPTO prop
+// account (bought Sep 11 2026 by mistake — Spencer wanted futures) is RETIRED as of Sep 12:
+// unlinked here, /prop redirected home by proxy.ts, its guardian cron removed, and the
+// scanner no longer hands plans to it. The code stays in the repo, disarmed, for
+// reversibility only. The old Tradovate retail engines are RETIRED the same way (Aug 2026),
+// along with the spot trend bot and the futures-era research pages. A page belongs
 // to exactly one section and its section says which, so "is this real money?" is answered by
 // the sidebar before the page loads. Page titles match these labels one-to-one.
 const sections = [
@@ -42,16 +41,6 @@ const sections = [
       { href: "/margin", label: "Live Account", icon: CandlestickChart },
       { href: "/margin/paper", label: "Live Desk", icon: Route },
       { href: "/orders", label: "Orders", icon: ClipboardList },
-    ],
-  },
-  {
-    // The account exists, so its page stays reachable (balance, floors, the disarm state,
-    // the conversion attempt). The label says what it is so nobody mistakes it for the
-    // futures desk.
-    label: "Tradeify 247 · crypto prop · bought in error, not in use",
-    tone: "paper" as const,
-    links: [
-      { href: "/prop", label: "Crypto Prop Account", icon: Landmark },
     ],
   },
   {

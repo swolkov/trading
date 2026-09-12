@@ -8,6 +8,7 @@ import { isPublicPath } from "@/lib/route-access";
 const RETIRED_PREFIXES = [
   "/futures",         // Tradovate — retired Aug 2026, closed for good Sep 11 2026
   "/kraken",          // old BTC/ETH trend bot — disabled Aug 31 2026, capital parked in coins
+  "/prop",            // Tradeify 247 crypto prop — bought in error, retired Sep 12 2026, never armed
   "/demo-vs-live",
   "/connect",
   "/performance",

@@ -19,10 +19,6 @@
     {
       "path": "/api/cron/margin-weekly",
       "schedule": "0 13 * * 1"
-    },
-    {
-      "path": "/api/cron/prop-watch",
-      "schedule": "*/5 * * * *"
     }
   ]
 }
