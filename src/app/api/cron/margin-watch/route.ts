@@ -14,6 +14,7 @@ import { MARGIN_USERREF, acquireCloseLock, botOwnership, executeAlert, recoverPe
 import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, FOUR_H_SEC, bookMaxHoldH, bookTrailR, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, fourHourBarComplete, groupPositionsByOrder, liveContainerFor, managedStopTarget, pyramidAddDue, pyramidBookOf } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
+import { bookExposureMatches, recoveryBlocksPair, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -389,6 +390,10 @@ export async function GET(request: Request) {
       // A manual position opened AFTER the stop existed fails both tests and the stop is an
       // orphan. An unreadable/corrupt ledger keeps everything.
       const own3b = await botOwnership().catch(() => null);
+      const recovery3b: PyramidRecovery = own3b
+        ? await recoverPendingPyramid(positions, own3b)
+        : { status: "unresolved", reason: "ownership unavailable during orphan reconciliation" };
+      if (recovery3b.status === "unresolved") errors.push(`orphan reconcile: ${recovery3b.reason}; affected stops preserved`);
       const stopProtectsLive = (o: { pair: string; side: string; opentm: number }) => positions.some((p) => {
         if (pairBase(p.pair) !== pairBase(o.pair)) return false;
         if (!((o.side === "sell" && p.side === "long") || (o.side === "buy" && p.side === "short"))) return false;
@@ -410,7 +415,7 @@ export async function GET(request: Request) {
         const isStop = o.ordertype.includes("stop");
         const isEntry = o.ordertype === "limit" || o.ordertype === "market";
         if (isStop) {
-          if (positionsUnreliable) continue;              // never touch stops on a bad read
+          if (positionsUnreliable || recoveryBlocksPair(recovery3b, o.pair)) continue; // preserve pending-add protection
           if (!stopProtectsLive(o)) {
             const seen = (priorOrphans[o.txid] ?? 0) + 1;  // this run's sighting
             // Only a stop OLDER than a fresh entry could belong to the flattened book: an
@@ -467,10 +472,9 @@ export async function GET(request: Request) {
     const positionsAll = await getKrakenMarginPositions();
     // A pyramid add whose ledger write was lost is recovered from its write-ahead marker BEFORE
     // books are formed — otherwise it is "not ours" and its stop reads as a duplicate below.
-    try {
-      const recovered = await recoverPendingPyramid(positionsAll, ownership);
-      if (recovered) { sent.push("pyramid-recovered"); ownership = await botOwnership(); }
-    } catch (e) { errors.push(`pyramid recovery: ${String(e).slice(0, 80)}`); }
+    const recovery = await recoverPendingPyramid(positionsAll, ownership);
+    if (recovery.status === "recovered") { sent.push("pyramid-recovered"); ownership = await botOwnership(); }
+    if (recovery.status === "unresolved") errors.push(`pyramid recovery: ${recovery.reason}; affected books left unchanged`);
     const positionsUnreliable = positionsAll.length === 0 && (marginUsedNow == null || marginUsedNow > 0);
     const managedPrev = state.managed ?? {};
     const managedNext: NonNullable<WatchState["managed"]> = {};
@@ -499,13 +503,19 @@ export async function GET(request: Request) {
       if (ordersUnreliable) errors.push(`protect/exit: zero open orders while holding bot positions (streak ${state.emptyOrdersStreak}) — ${bookConfirmedEmpty ? "book confirmed empty, protecting" : "withholding orders until confirmed"}`);
       const stopCfgPct = await cfgNum("kraken_margin_stop_pct", LIVE_STOP_DEFAULT_PCT);
       const maxHoldH = Math.max(1, await cfgNum("kraken_margin_max_hold_h", LIVE_MAX_HOLD_H));
-      let allCovered = !withhold;
+      let allCovered = !withhold && recovery.status !== "unresolved" && !ownership.ledgerCorrupt;
 
       for (const [bookKey, grp] of books) {
         // A PYRAMID book (parent + its ledgered add-ons) keeps the PARENT's state key, so its
         // 1R, peak and bar cursor survive the add instead of restarting from a 12h bar window.
         const pyr = pyramidBookOf(grp, (t) => ownership.addOnOf(t));
         const stateKey = `${bookKey}|${pyr ? pyr.parent.ordertxid : grp.map((g) => g.ordertxid).sort().join("+")}`;
+        if (ownership.ledgerCorrupt || recoveryBlocksPair(recovery, grp[0].pair)) {
+          allCovered = false;
+          if (managedPrev[stateKey]) managedNext[stateKey] = managedPrev[stateKey];
+          if (priorBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
+          continue;
+        }
         // Absolute budget: a book's work (30s lock wait + reads + one apply) must finish
         // before the route is killed mid-order. Books left over are not "covered" this run.
         if (Date.now() - routeStartedAt > 200_000) {
@@ -532,6 +542,7 @@ export async function GET(request: Request) {
         const youngestAgeMs = openedTimes.every(Number.isFinite) ? Date.now() - Math.max(...openedTimes) : Infinity;
         // GRACE: Kraken submits the attached close[] only after the fill.
         if (youngestAgeMs < 6 * 60_000) {
+          allCovered = false; // waiting for attached protection is not verification
           if (managedPrev[stateKey]) managedNext[stateKey] = managedPrev[stateKey];
           if (priorBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
           continue;
@@ -624,6 +635,11 @@ export async function GET(request: Request) {
           }
           if (withhold && (plan.place || plan.cancel.length)) { errors.push(`${pairRaw} (${why}): withholding stop changes on an unconfirmed empty book`); return false; }
           if (!plan.place && !plan.cancel.length) {
+            const currentExposure = await remainingVol();
+            if (currentExposure == null || !bookExposureMatches(currentExposure.book, wantVol)) {
+              errors.push(`${pairRaw} (${why}): exposure changed before protection verification`);
+              return false;
+            }
             // "Covered" on the run's snapshot is minutes old; a stop cancelled since would be
             // stamped as protection. Re-read the orders (no lock needed to LOOK) and re-plan;
             // only a still-clean plan counts.
@@ -710,10 +726,19 @@ export async function GET(request: Request) {
               // Ownership re-read NOW: the scanner may have ledgered a new entry on this
               // pair+side since the run started. A position not in the run's snapshot at all
               // (an entry whose ledger write is still in flight) counts as possibly ours.
-              const own = await botOwnership().catch(() => ownership);
+              const own = await botOwnership().catch(() => null);
+              if (!own || own.ledgerCorrupt) return null;
+              const recoveryNow = await recoverPendingPyramid(after, own);
+              if (recoveryBlocksPair(recoveryNow, pairRaw) || recoveryNow.status === "recovered") return null;
               const isOursNow = (p: { ordertxid: string; id: string }) => own.isOurs(p) || !positionsAll.some((q) => q.id === p.id);
               const onSide = after.filter((p) => samePair(p.pair, pairRaw) && p.side === side && isOursNow(p));
               const mine = onSide.filter((p) => grp.some((g) => g.ordertxid === p.ordertxid));
+              const bookVol = mine.reduce((sum, p) => sum + p.vol, 0);
+              const pairSideVol = after.filter((p) => samePair(p.pair, pairRaw) && p.side === side).reduce((sum, p) => sum + p.vol, 0);
+              if (!bookExposureMatches(bookVol, pairSideVol)) {
+                errors.push(`${pairRaw}: exposure outside the snapshot book appeared; stops preserved until the whole book is rebuilt`);
+                return null;
+              }
               return {
                 book: mine.reduce((s, p) => s + p.vol, 0),
                 botOnPairSide: onSide.reduce((s, p) => s + p.vol, 0),

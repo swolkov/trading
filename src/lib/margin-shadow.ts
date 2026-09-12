@@ -74,6 +74,10 @@ export async function ensureShadowColumns(): Promise<void> {
     "source text",                    // which strategy generated it: 'scanner' | 'manual'
     "shadow_unrealized double precision",  // live mark-to-market P&L while open ("if closed now")
     "shadow_fees double precision",        // fee+rollover $ deducted on resolve (for gross-vs-net)
+    "shadow_notional double precision",
+    "shadow_ref_equity double precision",
+    "shadow_risk_fraction double precision",
+    "shadow_sizing_verified boolean",
     "shadow_add_px double precision",      // PYRAMID: the second unit's entry price (null = no add yet)
     "shadow_add_t double precision",       // epoch secs of the 1-min bar (a 4h close) that triggered the add
     "shadow_add_notional double precision", // the second unit's notional (risk-sized to the stop)
@@ -188,6 +192,7 @@ interface OpenRow {
   mark_price: number; shadow_peak: number | null; shadow_stop: number | null;
   shadow_seen_t: number | null; conviction: string | null; source: string | null;
   shadow_add_px: number | null; shadow_add_t: number | null; shadow_add_notional: number | null;
+  shadow_notional: number | null;
 }
 
 // Per-strategy exit profile. Fast breakouts cut quickly (tight, leverage-scaled stop, 2-day
@@ -369,15 +374,40 @@ async function liveRiskParams(): Promise<number> {
 // conviction-scaled, 6% ceiling) via the same margin-live-risk.ts helpers so paper and
 // live cannot silently disagree. The separate key still exists so the two can be tuned
 // independently if you ever want a different live budget.
-async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }> {
+async function sizingParams(strict = false): Promise<{ refEquity: number; maxRiskPct: number }> {
   const eq = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_ref_equity" } })
-    .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
+    .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch((error) => { if (strict) throw error; return NaN; });
   const risk = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_max_risk_pct" } })
-    .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch(() => NaN);
+    .then((r) => (r?.value ? parseFloat(r.value) : NaN)).catch((error) => { if (strict) throw error; return NaN; });
+  if (strict && (!(eq > 0) || !Number.isFinite(eq) || !(risk > 0) || risk > 100 || !Number.isFinite(risk))) {
+    throw new Error("Entry sizing configuration unavailable or invalid");
+  }
   return {
     refEquity: Number.isFinite(eq) && eq > 0 ? eq : 5000,
     maxRiskPct: (Number.isFinite(risk) && risk > 0 ? risk : 3) / 100,
   };
+}
+
+// Freeze unit-one sizing before its outcome exists, just as the pyramid add is frozen.
+// Legacy rows can be reconstructed once for display but never labelled entry-verified.
+export async function snapshotShadowSizing(id: number, atEntry = true): Promise<number | null> {
+  const { refEquity, maxRiskPct } = await sizingParams(atEntry);
+  const rows = await prisma.$queryRawUnsafe<{ source: string | null; leverage: number; mark_price: number; conviction: string | null; time: Date }[]>(
+    `SELECT source, leverage, mark_price, conviction, time FROM tradingview_alerts WHERE id=$1`, id,
+  );
+  const row = rows[0];
+  if (!row || !(row.mark_price > 0)) return null;
+  const fraction = convictionRisk(row.conviction, maxRiskPct);
+  const notional = positionNotional(row.source, row.leverage || 2, row.mark_price, refEquity, fraction);
+  const frozen = await prisma.$queryRawUnsafe<{ shadow_notional: number }[]>(
+    `UPDATE tradingview_alerts SET shadow_notional=COALESCE(shadow_notional,$2),
+      shadow_ref_equity=CASE WHEN shadow_notional IS NULL THEN $3 ELSE shadow_ref_equity END,
+      shadow_risk_fraction=CASE WHEN shadow_notional IS NULL THEN $4 ELSE shadow_risk_fraction END,
+      shadow_sizing_verified=CASE WHEN shadow_notional IS NULL THEN $5 ELSE shadow_sizing_verified END
+      WHERE id=$1 RETURNING shadow_notional`,
+    id, notional, refEquity, fraction, atEntry && Date.now() - row.time.getTime() >= 0 && Date.now() - row.time.getTime() < 120_000,
+  );
+  return frozen[0]?.shadow_notional ?? null;
 }
 
 // Follow every open tracked entry with a MANAGED exit — the "stay in the trade, profit
@@ -396,7 +426,7 @@ async function sizingParams(): Promise<{ refEquity: number; maxRiskPct: number }
 // Fills are gap-aware: if the window OPENED beyond the stop, the fill is the (worse)
 // open, not the stop price. Peaks also come from candle extremes, so trailing capture
 // is measured fairly rather than under-counted.
-export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
+export async function evaluateShadowSignals(opts: { requiredSources?: string[] } = {}): Promise<ShadowResolution[]> {
   await ensureShadowColumns();
   // A webhook reserves its alert row before executing; if that request died (or was rate
   // limited) the row stays 'pending' with no price. It can never resolve — void it so it
@@ -405,14 +435,16 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     `UPDATE tradingview_alerts SET shadow_status='void', shadow_reason='pending alert never priced'
      WHERE exec_note IN ('pending','rate limited') AND mark_price IS NULL AND COALESCE(shadow_status,'open')='open' AND time < now() - interval '10 minutes'`,
   ).catch(() => {});
-  const { refEquity, maxRiskPct } = await sizingParams();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source,
-            shadow_add_px, shadow_add_t, shadow_add_notional
+            shadow_add_px, shadow_add_t, shadow_add_notional, shadow_notional
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 500`,
   );
+  if (opts.requiredSources?.length && rows.length >= 500) {
+    throw new Error("Shadow assessment incomplete: open-row limit reached");
+  }
   if (!rows.length) return [];
 
   // One OHLC lookup per distinct symbol: the last hour of 1-min candles. An hour (not
@@ -430,13 +462,15 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       // Kraken can return the in-progress bar twice when `since` falls inside the current
       // minute; dedupe by timestamp keeping the LAST (most complete) copy.
       const bars = raw.filter((b, i) => i === raw.length - 1 || raw[i + 1].t !== b.t);
-      if (bars.length) {
+      if (bars.length && Date.now() / 1000 - bars[bars.length - 1].t <= 120 && bars[bars.length - 1].t <= Date.now() / 1000) {
         price[sym] = bars[bars.length - 1].c;
         barsBySym[sym] = bars;
       }
     } catch { /* skip this symbol this run */ }
     await new Promise((r) => setTimeout(r, 120));
   }
+
+  if (rows.some((row) => opts.requiredSources?.includes(row.source ?? "") && !(price[row.symbol] > 0))) throw new Error("Paper prices unavailable; live entry assessment incomplete");
 
   const resolved: ShadowResolution[] = [];
   for (const r of rows) {
@@ -445,29 +479,14 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     const dir = r.side === "buy" ? 1 : -1;
     const profile = exitParams(r.source, lev, entry);   // per-strategy exit profile
     const { maxHoldH, oneR, carry } = profile;
-    const notional = positionNotional(r.source, lev, entry, refEquity, convictionRisk(r.conviction, maxRiskPct));   // risk-based, bigger on high-conviction
+    const notional = r.shadow_notional ?? await snapshotShadowSizing(r.id, false);
+    if (!(notional != null && notional > 0)) continue;
     const timeStopLabel = `${Math.round(maxHoldH)}h time stop`;
     const ageH = (Date.now() - r.time.getTime()) / 3600_000;
 
     const now = price[r.symbol];
-    // No fresh price this run: normally skip — but still honor the time stop so a
-    // persistently-unpriceable signal can't sit "open" forever. Resolve flat (at entry),
-    // which after fees is a small loss.
-    if (!(now > 0)) {
-      if (ageH >= maxHoldH) {
-        const rollPeriods = Math.ceil(ageH / 4);
-        const feeFrac = ENTRY_FEE + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
-        const netPct = -feeFrac;
-        const pnl = netPct * notional;
-        const affected = await prisma.$executeRawUnsafe(
-          `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_fees=$5 WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
-          entry, pnl, `${timeStopLabel} (no price)`, r.id, feeFrac * notional,
-        );
-        if (affected === 0) continue;
-        resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit: entry, pnl, pnlPct: netPct, reason: `${timeStopLabel} (no price)`, leverage: lev, conviction: r.conviction, source: r.source });
-      }
-      continue;
-    }
+    // An unknown price cannot establish an exit, including on an overdue pyramid.
+    if (!(now > 0)) continue;
 
     // Per-trade window: only 1-min bars this trade has actually LIVED through and that
     // have not been scored before. b.t >= tOpen drops the bar containing the entry (its
@@ -914,10 +933,10 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     id: number; time: Date; source: string | null; symbol: string; side: string;
     leverage: number | null; conviction: string | null; mark_price: number | null;
     shadow_exit: number | null; shadow_pnl: number | null; shadow_unrealized: number | null;
-    shadow_status: string | null; shadow_reason: string | null; sim_version: string | null;
+    shadow_status: string | null; shadow_reason: string | null; sim_version: string | null; shadow_notional: number | null;
   }[]>(
     `SELECT id, time, source, symbol, side, leverage, conviction, mark_price,
-            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason, sim_version
+            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason, sim_version, shadow_notional
      FROM tradingview_alerts
      WHERE side IN ('buy','sell')
      ORDER BY time DESC LIMIT $1`,
@@ -935,7 +954,7 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     exit: r.shadow_exit,
     unrealized: r.shadow_status === "resolved" ? null : r.shadow_unrealized,
     pnl: r.shadow_pnl,
-    notional: r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, convictionRisk(r.conviction, maxRiskPct)) : null,
+    notional: r.shadow_notional ?? (r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, convictionRisk(r.conviction, maxRiskPct)) : null),
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
     simVersion: r.sim_version ?? SIM_VERSION,

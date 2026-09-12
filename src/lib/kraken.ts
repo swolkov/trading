@@ -91,34 +91,27 @@ function sign(path: string, params: Record<string, string>, secret: string): str
   return hmac.digest("base64");
 }
 
-// Kraken requires a strictly increasing nonce per key. Two private calls in the same
-// millisecond (e.g. a Promise.all) would collide on Date.now() and one would fail with
-// EAPI:Invalid nonce — so the nonce is monotonic within this process.
-let lastNonce = 0;
-function nextNonce(): string {
-  lastNonce = Math.max(lastNonce + 1, Date.now() * 1000);
-  return String(lastNonce);
-}
-
 export async function krakenPrivate(method: string, params: Record<string, string> = {}): Promise<Record<string, unknown>> {
   if (!krakenConfigured()) throw new Error("Kraken not configured (KRAKEN_API_KEY/SECRET missing in env)");
   const path = `/0/private/${method}`;
-  const nonce = nextNonce();
-  const body = { nonce, ...params };
-  const signature = sign(path, body, krakenSecret());
-  const r = await fetch(`${API_URL}${path}`, {
-    method: "POST",
-    headers: {
-      "API-Key": krakenKey(),
-      "API-Sign": signature,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams(body).toString(),
-    signal: AbortSignal.timeout(15000),
+  const { orderedPrivateRequest } = await import("@/lib/kraken-private-state");
+  return orderedPrivateRequest(krakenKey(), method, params, async (nonce) => {
+    const body = { ...params, nonce };
+    const signature = sign(path, body, krakenSecret());
+    const r = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "API-Key": krakenKey(),
+        "API-Sign": signature,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(body).toString(),
+      signal: AbortSignal.timeout(15000),
+    });
+    const d = await r.json();
+    if (d.error?.length) throw new Error(`Kraken ${method}: ${d.error.join(", ")}`);
+    return d.result;
   });
-  const d = await r.json();
-  if (d.error?.length) throw new Error(`Kraken ${method}: ${d.error.join(", ")}`);
-  return d.result;
 }
 
 // All balances (asset → amount as string).
@@ -425,18 +418,21 @@ export type OpenOrder = {
   txid: string; userref?: number; opentm: number; pair: string; vol: number; volExec: number;
   ordertype: string;   // "limit" | "stop-loss" | "trailing-stop" | "market" | …
   side: string;        // "buy" | "sell"
+  reduceOnly?: boolean; // true only when the broker confirms it
   price: number;       // limit price, or the TRIGGER price of a stop order (0 if absent)
 };
 
 export async function krakenOpenOrders(): Promise<OpenOrder[]> {
   const res = await withReadRetry(() => krakenPrivate("OpenOrders"));
   const open = (res.open ?? {}) as Record<string, {
-    userref?: number; opentm?: number; vol?: string; vol_exec?: string;
+    userref?: number; opentm?: number; vol?: string; vol_exec?: string; reduce_only?: boolean;
     descr?: { pair?: string; ordertype?: string; type?: string; price?: string };
   }>;
-  return Object.entries(open).map(([txid, o]) => ({
+  const { withReduceOnlyReceipts } = await import("@/lib/kraken-private-state");
+  return withReduceOnlyReceipts(Object.entries(open).map(([txid, o]) => ({
     txid,
     userref: o.userref,
+    reduceOnly: typeof o.reduce_only === "boolean" ? o.reduce_only : undefined,
     opentm: o.opentm ?? 0,
     pair: o.descr?.pair ?? "",
     vol: parseFloat(o.vol ?? "0") || 0,
@@ -444,7 +440,7 @@ export async function krakenOpenOrders(): Promise<OpenOrder[]> {
     ordertype: o.descr?.ordertype ?? "",
     side: o.descr?.type ?? "",
     price: parseFloat(o.descr?.price ?? "0") || 0,
-  }));
+  })));
 }
 
 /** ClosedOrders filtered by userref and start time (epoch secs) — what the executor's

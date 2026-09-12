@@ -3,7 +3,7 @@ import test from "node:test";
 import { applyReconcile, planReconcile, safeStopString, type BookStop } from "../src/lib/margin-book";
 
 const stop = (txid: string, price: number, vol: number, extra: Partial<BookStop> = {}): BookStop =>
-  ({ txid, ordertype: "stop-loss", side: "sell", price, vol, volExec: 0, opentm: 1, ...extra });
+  ({ txid, ordertype: "stop-loss", side: "sell", price, vol, volExec: 0, opentm: 1, reduceOnly: true, ...extra });
 const book = (vol: number, targetLevel: number, px = 105) => ({ side: "long" as const, vol, targetLevel, px, priceDecimals: 2, lotDecimals: 4 });
 
 test("flat book: every stop of ours on the pair+side is swept (a resting stop would OPEN)", () => {
@@ -103,7 +103,7 @@ test("applyReconcile: place first; a failed placement cancels nothing; failed ca
   let n = 0;
   const failCancel = { placeStop: async () => "NEW", cancel: async () => { n++; throw new Error("EOrder:Unknown order"); } };
   const o3 = await applyReconcile(plan, failCancel);
-  assert.deepEqual(o3.failedCancels, ["A"]); assert.equal(n, 2, "one retry"); assert.equal(o3.covered, true);
+  assert.deepEqual(o3.failedCancels, ["A"]); assert.equal(n, 2, "one retry"); assert.equal(o3.covered, false);
   const blocked = await applyReconcile(planReconcile(book(1, 97, 0), []), okIO);
   assert.equal(blocked.covered, false);
 });
@@ -118,4 +118,57 @@ test("round 6: a stop at or through the market is never a keeper", () => {
   const p = planReconcile(book(1, 97, 95), [stop("A", 97, 1)]);
   assert.equal(p.keeper, null);
   assert.ok(p.blocked, "target through the market → blocked for the breach path");
+});
+
+test("attached stops require reduce-only evidence before they can be kept", () => {
+  for (const reduceOnly of [false, undefined]) {
+    const p = planReconcile(book(1, 97), [stop("attached", 97, 1, { reduceOnly })]);
+    assert.equal(p.keeper, null);
+    assert.deepEqual(p.place, { level: "97.00", vol: "1.0000" });
+    assert.deepEqual(p.cancel, ["attached"]);
+  }
+});
+
+test("missing or empty placement ID never cancels existing protection", async () => {
+  const plan = planReconcile(book(1, 100), [stop("old", 97, 1)]);
+  for (const id of [undefined, ""]) {
+    const cancelled: string[] = [];
+    const out = await applyReconcile(plan, {
+      placeStop: async () => id,
+      cancel: async (txid) => { cancelled.push(txid); },
+    });
+    assert.deepEqual(cancelled, []);
+    assert.equal(out.covered, false);
+    assert.equal(out.placed, null);
+    assert.match(out.placeFailed ?? "", /no order id/);
+  }
+});
+
+test("unverified trailing stops are left untouched and never certified as cover", () => {
+  for (const reduceOnly of [false, undefined]) {
+    const plan = planReconcile(book(1, 97), [stop("T", 3, 1, { ordertype: "trailing-stop", reduceOnly }), stop("F", 97, 1)]);
+    assert.match(plan.blocked ?? "", /not confirmed reduce-only/);
+    assert.equal(plan.covered, false);
+    assert.equal(plan.place, null);
+    assert.deepEqual(plan.cancel, []);
+  }
+});
+
+test("trailing shortfall requires a safe, sufficiently protective reduce-only fixed stop", () => {
+  const trailing = stop("T", 3, 0.5, { ordertype: "trailing-stop" });
+  for (const fixed of [stop("F", 97, 0.5, { reduceOnly: false }), stop("F", 96, 0.5), stop("F", 106, 0.5)]) {
+    const plan = planReconcile(book(1, 97), [trailing, fixed]);
+    assert.deepEqual(plan.place, { level: "97.00", vol: "0.5000" });
+    assert.deepEqual(plan.cancel, ["F"]);
+  }
+});
+
+test("a failed cancellation leaves a flat book unverified", async () => {
+  const plan = planReconcile(book(0, 97), [stop("stranded", 97, 1)]);
+  const out = await applyReconcile(plan, {
+    placeStop: async () => { throw new Error("must not place for flat book"); },
+    cancel: async () => { throw new Error("broker unavailable"); },
+  });
+  assert.equal(out.covered, false);
+  assert.deepEqual(out.failedCancels, ["stranded"]);
 });

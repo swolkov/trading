@@ -62,8 +62,11 @@ import { sendNotification } from "@/lib/notifications";
 import { krakenPrivate, krakenPair, getKrakenPrice, getPairMeta, krakenTouch, krakenOpenOrders, krakenCancelOrder } from "@/lib/kraken";
 import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
-import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips } from "@/lib/kraken-margin";
+import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips, postedMarginCostsSince } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
+import { bookExposureMatches, entryExposureRefusal, parsePyramidMarker, recoverPyramidWithIO, recoveryBlocksPair, type PyramidMarker, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
+import { parseDayState, nextDayReservation, type DayState } from "@/lib/margin-day-state";
+export type { PyramidMarker } from "@/lib/margin-pyramid-recovery";
 import {
   DEFAULT_MAX_LEVERAGE,
   EXEC_LOCK_TTL_MS,
@@ -261,16 +264,13 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
 
 /** The write-ahead marker's shape. `txid` is set once AddOrder answers; `ledgered` once the
  *  ownership ledger holds it. Recovery acts ONLY on a marker with a txid and ledgered:false. */
-export interface PyramidMarker { parent: string; ts: number; txid?: string; ledgered?: boolean }
 export async function writePyramidMarker(m: PyramidMarker): Promise<void> {
   const value = JSON.stringify(m);
   await prisma.agentConfig.upsert({ where: { key: PYRAMID_PENDING_KEY }, update: { value }, create: { key: PYRAMID_PENDING_KEY, value } });
 }
 export async function readPyramidMarker(): Promise<PyramidMarker | null> {
   const raw = await cfgStrict(PYRAMID_PENDING_KEY);   // throws on a DB failure — callers decide
-  if (!raw) return null;
-  const m = JSON.parse(raw) as Partial<PyramidMarker>;
-  return typeof m.parent === "string" && typeof m.ts === "number" ? { parent: m.parent, ts: m.ts, ...(typeof m.txid === "string" ? { txid: m.txid } : {}), ...(m.ledgered === true ? { ledgered: true } : {}) } : null;
+  return parsePyramidMarker(raw);
 }
 
 /**
@@ -280,40 +280,40 @@ export async function readPyramidMarker(): Promise<PyramidMarker | null> {
  * add-on with the parent's container, so the guardian manages the book as one pyramid instead
  * of cancelling the add's stop as a duplicate. It never matches on "a position that is not
  * ours" — that would be Spencer's next manual buy. Called by the guardian each run; returns a
- * note when it recovered something.
+ * an explicit unresolved state whenever ownership cannot yet be proven.
  */
 export async function recoverPendingPyramid(
   positions: { ordertxid: string; id: string; pair: string; side: string; openedAt: string }[],
   own: Awaited<ReturnType<typeof botOwnership>>,
-): Promise<string | null> {
-  let marker: PyramidMarker | null = null;
-  try { marker = await readPyramidMarker(); } catch { return null; }
-  if (!marker || marker.ledgered || !marker.txid || Date.now() - marker.ts > 6 * 3600_000) return null;
-  const { parent: parentTxid, txid } = marker;
-  if (own.ledger.has(txid)) { await writePyramidMarker({ ...marker, ledgered: true }).catch(() => {}); return null; }   // ledgered after all
-  const parent = positions.find((p) => p.ordertxid === parentTxid && own.isOurs(p));
-  if (!parent) return null;
-  const add = positions.find((p) => p.ordertxid === txid && pairBase(p.pair) === pairBase(parent.pair) && p.side === parent.side);
-  if (!add) return null;
-  const meta = { maxHoldH: own.maxHoldHOf(parent.ordertxid) ?? undefined, source: own.sourceOf(parent.ordertxid) ?? undefined, trailR: own.trailROf(parent.ordertxid) ?? undefined, addOnOf: parent.ordertxid };
-  const ok = await recordBotEntry(txid, parent.pair, meta);
-  if (!ok) return null;
-  await writePyramidMarker({ ...marker, ledgered: true }).catch(() => {});
-  const note = `recovered pyramid add ${txid} on ${parent.pair} as an add-on of ${parent.ordertxid} from the write-ahead marker`;
-  await sendNotification(`🛠 ${parent.pair}: ${note}. The book now manages as one pyramid.`, "margin_live").catch(() => {});
-  return note;
+): Promise<PyramidRecovery> {
+  const result = await recoverPyramidWithIO(positions, {
+    readMarker: readPyramidMarker,
+    ledgerCorrupt: own.ledgerCorrupt,
+    isOurs: own.isOurs,
+    ledgerHas: (txid) => own.ledger.has(txid),
+    parentOf: own.addOnOf,
+    record: (marker, parent) => recordBotEntry(marker.txid!, parent.pair, {
+      maxHoldH: own.maxHoldHOf(parent.ordertxid) ?? undefined,
+      source: own.sourceOf(parent.ordertxid) ?? undefined,
+      trailR: own.trailROf(parent.ordertxid) ?? undefined,
+      addOnOf: parent.ordertxid,
+    }),
+    markLedgered: (marker) => writePyramidMarker({ ...marker, ledgered: true }),
+  });
+  if (result.status === "recovered") await sendNotification(`🛠 ${result.note}. The book now manages as one pyramid.`, "margin_live").catch(() => {});
+  return result;
 }
 
 // THE CLOSE LOCK — shared by every path that flattens or re-covers a book (webhook close,
 // guardian close/reconcile). Kraken nets FIFO, so two closes reading the same snapshot can
 // both pass the ownership guard and the second reduces a NEWER manual position. The lease
-// is created at ACQUISITION (never nearly-expired on arrival), TTL 120s (a dead holder
-// expires; a live close finishes well inside it), and a caller that cannot acquire it in
+// is created at ACQUISITION (never nearly-expired on arrival), TTL exceeds the route
+// lifetime (an expired holder can no longer act), and a caller that cannot acquire it in
 // its wait budget gets `null` — it must NOT proceed unlocked.
 export const CLOSE_LOCK_KEY = "kraken_margin_close_lock";
-// TTL exceeds any holder's bounded work (executor: ≤60s of tranches + a handful of 15s-timeout
-// reads; guardian: two reads + one apply) — "expired means dead" must hold, as for the exec lock.
-export const CLOSE_LOCK_TTL_MS = 240_000;
+// Stop reconciliation and pyramid submission share this lock. Its lifetime exceeds the
+// route limit, so a slow accepted order cannot outlive the lock protecting its ledger write.
+export const CLOSE_LOCK_TTL_MS = EXEC_LOCK_TTL_MS;
 export async function acquireCloseLock(waitMs: number): Promise<string | null> {
   const deadline = Date.now() + waitMs;
   await prisma.agentConfig.upsert({ where: { key: CLOSE_LOCK_KEY }, update: {}, create: { key: CLOSE_LOCK_KEY, value: "" } }).catch(() => {});
@@ -347,30 +347,30 @@ async function cfgNum(key: string, fallback: number): Promise<number> {
   return Number.isFinite(n) ? n : fallback;
 }
 
-// Self-contained per-day counter for the trade-frequency governor. Resets at UTC
-// midnight. Only real (executed) entries are counted, so validate-mode testing does not
-// burn the daily cap.
-const DAY_STATE_KEY = "kraken_margin_day_state";
-interface DayState { date: string; entries: number; lastEntryIso: string | null }
-async function loadDayState(): Promise<DayState> {
-  const today = new Date().toISOString().slice(0, 10);
-  const raw = await cfg(DAY_STATE_KEY);
-  if (raw) {
-    try {
-      const s = JSON.parse(raw) as DayState;
-      if (s.date === today) return s;
-    } catch { /* fall through to fresh */ }
-  }
-  return { date: today, entries: 0, lastEntryIso: null };
+async function cfgNumStrict(key: string, fallback: number): Promise<number> {
+  const raw = await cfgStrict(key);
+  if (raw == null || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${key} is invalid; failing closed`);
+  return value;
 }
-async function bumpDayState(prev: DayState): Promise<void> {
-  const next: DayState = { date: prev.date, entries: prev.entries + 1, lastEntryIso: new Date().toISOString() };
-  const value = JSON.stringify(next);
+
+// Self-contained per-day counter for the trade-frequency governor. Resets at UTC
+// midnight, while cooldown survives. Every live submission attempt reserves an entry;
+// validate-mode testing does not consume the daily cap.
+const DAY_STATE_KEY = "kraken_margin_day_state";
+async function loadDayState(): Promise<DayState> {
+  return parseDayState(await cfgStrict(DAY_STATE_KEY));
+}
+// Reserve before the broker call. Rejected or ambiguous sends consume a slot too; an
+// accepted order can never become uncounted because its post-send database write failed.
+async function reserveDayEntry(prev: DayState): Promise<void> {
+  const value = JSON.stringify(nextDayReservation(prev));
   await prisma.agentConfig.upsert({
     where: { key: DAY_STATE_KEY },
     update: { value },
     create: { key: DAY_STATE_KEY, value },
-  }).catch(() => {});
+  });
 }
 
 // Execution lock — serializes the ENTRY path so two webhook invocations landing at once
@@ -481,6 +481,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         }
         // Authorised to flatten the pair regardless of ownership: proceed as if nothing is ours.
         ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null, sourceOf: () => null, trailROf: () => null, addOnOf: () => null };
+      }
+      if (!closeAllAuthorised) {
+        const recovery = await recoverPendingPyramid(allAccount, ownership);
+        if (recoveryBlocksPair(recovery, pair)) {
+          return { executed: false, validated: false, note: "close not attempted: pyramid ownership is unresolved; existing stops preserved, reconcile the exact add transaction first" };
+        }
+        if (recovery.status === "recovered") ownership = await botOwnership();
       }
       // ONE-SHOT AND PAIR-SCOPED. Sticky, an emergency flag set once would silently flatten
       // Spencer's manual book on every later close for that pair. Global, it would be burned
@@ -791,21 +798,20 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   // operator to "adopt" a position that is his own, because nothing was ever sent.
   let addOrderSent = false;
   let sentAtSec = 0;
+  let pyramidCloseToken: string | null = null;
   let stopPctSent = 0;                       // the stop distance this entry was sized with
   let ledgerMeta: { maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string } = {};
-  let dayStateRef: DayState | null = null;   // so a recovered fill still counts toward the day
   try {
     // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
     const dayState = await loadDayState();
-    dayStateRef = dayState;
-    const maxPerDay = Math.max(1, await cfgNum("kraken_margin_max_trades_per_day", 6));
+    const maxPerDay = Math.min(5, Math.max(0, Math.floor(await cfgNumStrict("kraken_margin_max_trades_per_day", 5))));
     if (dayState.entries >= maxPerDay) {
-      return { executed: false, validated: false, note: `entry refused: ${dayState.entries}/${maxPerDay} trades already today` };
+      return { executed: false, validated: false, note: `entry refused: ${dayState.entries}/${maxPerDay} submission attempts already today` };
     }
     // A pyramid add is the SAME trade pressing on, not a new one: it counts toward the day's
     // entries (above) but is not held back by the between-trades cooldown.
     const pyramid = alert.pyramid ?? null;
-    const cooldownMin = pyramid ? 0 : Math.max(0, await cfgNum("kraken_margin_cooldown_min", 30));
+    const cooldownMin = pyramid ? 0 : Math.max(0, await cfgNumStrict("kraken_margin_cooldown_min", 30));
     if (dayState.lastEntryIso && Date.now() - new Date(dayState.lastEntryIso).getTime() < cooldownMin * 60_000) {
       const waited = Math.round((Date.now() - new Date(dayState.lastEntryIso).getTime()) / 60_000);
       return { executed: false, validated: false, note: `entry refused: cooldown (${waited}/${cooldownMin} min since last entry)` };
@@ -857,9 +863,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const dayStart = new Date();
     dayStart.setUTCHours(0, 0, 0, 0);
     const trips = await listRoundTrips();
+    const postedCosts = await postedMarginCostsSince(dayStart);
+    if (postedCosts.unknown || !Number.isFinite(postedCosts.usd)) {
+      return { executed: false, validated: false, note: "entry refused: today's margin financing costs are incomplete or unvalued" };
+    }
     const realizedToday = trips
       .filter((t) => new Date(t.closedAt) >= dayStart)
-      .reduce((s, t) => s + t.netPnl, 0);
+      .reduce((s, t) => s + t.netPnl, 0) - Math.max(0, postedCosts.usd);
     const health = await getKrakenMarginHealth();
     const equity = health.equity;
     // Fail closed if equity reads 0/unreadable — otherwise risk-based sizing below would
@@ -957,7 +967,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       let pending: PyramidMarker | null = null;
       try { pending = await readPyramidMarker(); }
       catch { return { executed: false, validated: false, note: "pyramid add refused: could not read the pending-add marker — failing closed" }; }
-      const pendingHere = pending?.parent === pyramid.parentTxid && Date.now() - pending.ts < PYRAMID_PENDING_MS;
+      const pendingHere = pending != null && (!pending.ledgered || (pending.parent === pyramid.parentTxid && Date.now() - pending.ts < PYRAMID_PENDING_MS));
       const why = !conflicting.length ? "no position on the pair"
         : notOurs.length ? `${notOurs.length} position(s) on the pair are NOT the bot's`
         : wrongSide.length ? "a position on the other side"
@@ -968,6 +978,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         : pendingHere ? "an add for this parent was sent in the last 15 minutes (positions may not show it yet)"
         : null;
       if (why) return { executed: false, validated: false, note: `pyramid add refused: ${why}` };
+    }
+    if (!pyramid && conflicting.length) {
+      const ownership = await botOwnership();
+      const refusal = ownership.ledgerCorrupt ? "ownership ledger is corrupt" : entryExposureRefusal(
+        conflicting.map((p) => ({ side: p.side, owned: ownership.isOurs(p) })),
+        alert.side === "buy" ? "long" : "short",
+      );
+      if (refusal) return { executed: false, validated: false, note: `entry refused: ${refusal}` };
     }
     // ALL our resting orders count — stops included. A bot stop resting on a pair with no
     // position is by definition stranded (the guardian's sweep needs two runs), and a new
@@ -1172,6 +1190,22 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       return { executed: false, validated: false, note: "entry refused: not enough route time left to send AND record ownership — next scan" };
     }
     let res;
+    if (pyramid && !validate) {
+      pyramidCloseToken = await acquireCloseLock(15_000);
+      if (!pyramidCloseToken) return { executed: false, validated: false, note: "pyramid add refused: protection reconciliation is busy" };
+      // The guardian may have closed or changed the book while the entry checks ran.
+      // Hold its mutation lock through submission and ownership persistence.
+      const freshPositions = (await getKrakenMarginPositions()).filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
+      const freshOwnership = await botOwnership();
+      const sameOrders = freshPositions.every((p) => conflicting.some((old) => old.ordertxid === p.ordertxid));
+      const sameVolume = bookExposureMatches(freshPositions.reduce((sum, p) => sum + p.vol, 0), conflicting.reduce((sum, p) => sum + p.vol, 0));
+      if (freshOwnership.ledgerCorrupt || !sameOrders || !sameVolume || !freshPositions.some((p) => p.ordertxid === pyramid.parentTxid)
+        || entryExposureRefusal(freshPositions.map((p) => ({ side: p.side, owned: freshOwnership.isOurs(p) })), alert.side === "buy" ? "long" : "short")) {
+        return { executed: false, validated: false, note: "pyramid add refused: parent book changed during entry checks" };
+      }
+      if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 75_000) return { executed: false, validated: false, note: "pyramid add refused: insufficient time after waiting for protection lock" };
+    }
+    if (!validate) await reserveDayEntry(dayState);
     // Pyramid: the write-ahead marker goes down BEFORE the order (see PYRAMID_PENDING_KEY). If it
     // cannot be written, the add is not sent — an unmarked add is what the double-add race needs.
     if (pyramid && !validate) {
@@ -1224,9 +1258,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Consumed: a ledgered add must never be "recovered" again, and nothing else may be.
     if (pyramid && !validate && txid && ledgered) await writePyramidMarker({ parent: pyramid.parentTxid, ts: sentAtSec * 1000, txid, ledgered: true }).catch(() => {});
 
-    // Count on acceptance (conservative — an unfilled maker rest still consumes a slot,
-    // which caps churn; the guardian sweeps unfilled entries). Real executions only.
-    if (!validate) await bumpDayState(dayState);
+    // This acceptance already owns a durable daily reservation made before AddOrder.
 
     const stopDesc = (trailPct > 0 ? `trailing stop ${trailPct.toFixed(1)}%` : `stop ${(stopPct * 100).toFixed(1)}%`) + (marginClamped ? ` — size fitted to free margin ($${unclamped.toFixed(0)} wanted, $${notional.toFixed(0)} sent; risk ≈${((notional * riskDist) / equity * 100).toFixed(1)}%)` : "");
     return {
@@ -1267,7 +1299,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           // recover it if this ledger write failed.
           if (ledgerMeta.addOnOf) await writePyramidMarker({ parent: ledgerMeta.addOnOf, ts: sentAtSec * 1000, txid: o.txid, ledgered: done }).catch(() => {});
         }
-        if (dayStateRef) await bumpDayState(dayStateRef);
         await sendNotification(
           bad.length
             ? `🚨 Entry on ${pair} errored after sending; our resting order ${bad.join(", ")} was found but could NOT be ledgered — adopt it via kraken_margin_adopt_txids now. Error: ${String(e).slice(0, 120)}`
@@ -1302,7 +1333,6 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
             if (ledgerMeta.addOnOf) await writePyramidMarker({ parent: ledgerMeta.addOnOf, ts: sentAtSec * 1000, txid, ledgered: done }).catch(() => {});
           }
           recovered = ledgered;
-          if (recovered.length && dayStateRef) await bumpDayState(dayStateRef);   // it counts as an entry
         } catch { recovered = []; }
       }
       if (recovered.length) {
@@ -1323,6 +1353,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     } catch { /* best-effort confirmation only */ }
     return { executed: false, validated: validate, note: `order failed: ${e}` };
   } finally {
+    if (pyramidCloseToken) await releaseCloseLock(pyramidCloseToken);
     await releaseExecLock(lockToken_);
   }
 }
