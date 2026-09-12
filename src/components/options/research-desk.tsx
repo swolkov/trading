@@ -1,5 +1,6 @@
 "use client";
 import useSWR from "swr";
+import { OptionsEvidenceDesk } from "./evidence-desk";
 import { Chip } from "@/components/ui/chip";
 import { Panel, PanelHeader, PanelBody, Note, Stat, Empty } from "@/components/ui/panel";
 import { DataTable, Row, Th, Td } from "@/components/ui/data-table";
@@ -30,9 +31,10 @@ export function OptionsResearchDesk(){
         <Stat label="Expiration window" value={`${data.rules.minDte}–${data.rules.maxDte} days`} sub={`Exit review before ${data.rules.exitBeforeDte} days remain`}/>
         <Stat label="Open positions" value="1 maximum" sub="No averaging down or automatic size increases"/>
       </div>
-      <Note className="mt-4">Recommendation: start with $10–$25 planned risk if a liquid contract fits; $100 is a ceiling, not a target. Skip trades that cannot meet the budget without weak liquidity or far-out-of-the-money contracts. Screening reserves $1 per contract for round-trip fees; the actual broker fee review must still pass.</Note>
+      <Note className="mt-4">Use the account-based risk illustration below as a starting point only when a liquid contract fits. The approved dollar ceiling is not a spending target. Skip trades that cannot meet the budget without weak liquidity or far-out-of-the-money contracts. Screening reserves $1 per contract for round-trip fees; the actual broker fee review must still pass.</Note>
       <Note className="mt-2">At least {data.rules.minOpenInterest} open contracts, {data.rules.minVolume} daily volume and bid/ask spread no wider than {data.rules.maxSpreadPct}% of the midpoint. No naked shorts, expiry-day entries or separate-leg spread orders.</Note>
     </PanelBody></Panel>
+    <OptionsEvidenceDesk />
     <Panel><PanelHeader title="Strategy playbook" aside="Rules under review; no proven profit claim"/><PanelBody><div className="grid gap-4 md:grid-cols-3">{data.strategies.map(s=><div key={s.name}><h3 className="text-sm font-semibold">{s.name}</h3><p className="mt-1 text-xs">{s.structures}</p><Note className="mt-2">{s.rule}</Note></div>)}</div></PanelBody></Panel>
     <Panel><PanelHeader title="Robinhood scanners" aside={data.research?`Collected ${ago(data.research.capturedAt)}`:"Waiting for collection"}/>
       {data.research?.scans.length?<PanelBody><div className="grid gap-4 md:grid-cols-3">{data.research.scans.map(s=><div key={s.id}><h3 className="text-sm font-semibold">{s.name}</h3><p className="mt-1 text-xs">{s.resultCount==null?"Saved in Robinhood; results not collected":`${s.resultCount} matches${s.at?` as of ${ago(s.at)}`:""}`}</p><Note className="mt-2">{s.symbols.slice(0,12).join(", ")||"No matching symbols captured"}</Note><details className="mt-2 text-xs"><summary className="cursor-pointer">Applied broker filters</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-[10px]">{JSON.stringify(s.filters,null,2)}</pre></details></div>)}</div></PanelBody>:<Empty>No verified saved scanners collected yet.</Empty>}

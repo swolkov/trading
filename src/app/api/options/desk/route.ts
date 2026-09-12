@@ -12,15 +12,16 @@ export async function GET(){
     prisma.agentConfig.findMany({where:{key:{in:[OPTIONS_RESEARCH_KEY,OPTIONS_MAX_LOSS_KEY,"options_live_armed"]}}}),readAccountSnapshot(),news()]);
   const values=Object.fromEntries(rows.map(r=>[r.key,r.value]));
   let research:OptionsResearch|null=null;try{research=values[OPTIONS_RESEARCH_KEY]?JSON.parse(values[OPTIONS_RESEARCH_KEY]):null;if(!isOptionsResearch(research))research=null;}catch{}
+  const watchlist=[...new Set([...OPTIONS_WATCHLIST,...Object.keys(research?.bars??{}),...(research?.contracts??[]).map(c=>c.symbol)])];
   const maxLoss=parseOptionsMaxLoss(values[OPTIONS_MAX_LOSS_KEY]);
   const blockers=["Direct broker execution is not connected and verified","Fill recovery and automatic position exits are not operational"];
   if(!context.earningsAvailable)blockers.push("Earnings calendar unavailable");
   if(!context.macroAvailable)blockers.push("Economic calendar unavailable");
   if(!research)blockers.push("Waiting for broker research collection");
   else if(!research.contracts.some(c=>Date.now()-Date.parse(c.at)<=15000&&Date.parse(c.at)<=Date.now()))blockers.push("No executable option quotes within 15 seconds");
-  return Response.json({at:new Date().toISOString(),execution:{armed:values.options_live_armed==="true",canPlaceOrders:false,blockers},maxLoss,riskPct:account&&maxLoss?maxLoss/account.totalValue*100:null,rules:OPTIONS_DESK_RULES,watchlist:OPTIONS_WATCHLIST,
+  return Response.json({at:new Date().toISOString(),execution:{armed:values.options_live_armed==="true",canPlaceOrders:false,blockers},maxLoss,riskPct:account&&maxLoss?maxLoss/account.totalValue*100:null,rules:OPTIONS_DESK_RULES,watchlist,
     research:research?{capturedAt:research.capturedAt,source:research.source,contractCount:research.contracts.length,scans:research.scans,errors:research.errors}:null,
-    signals:research?researchSignals(research.bars):[],candidates:research&&maxLoss?screenResearchContracts(research,maxLoss,account?.buyingPower??0):[],news:{...context,earnings:context.earnings.filter(e=>OPTIONS_WATCHLIST.includes(e.symbol))},
+    signals:research?researchSignals(research.bars):[],candidates:research&&maxLoss?screenResearchContracts(research,maxLoss,account?.buyingPower??0):[],news:{...context,earnings:context.earnings.filter(e=>watchlist.includes(e.symbol))},
     strategies:[{name:"Bullish breakout",structures:"Long call or call debit spread",rule:"20-session breakout with price above the 50/200-day trend"},{name:"Bearish breakdown",structures:"Long put or put debit spread",rule:"20-session breakdown with price below the 50/200-day trend"},{name:"Defined-risk credit",structures:"Put credit in bullish trends; call credit in bearish trends",rule:"Out-of-the-money short leg with same-expiry protective leg; event and assignment review required"}],
   });
 }

@@ -1,4 +1,4 @@
-import type { OptionsResearch, ResearchBar, ResearchContract, NativeScan } from "./options-desk-model";
+import { OPTIONS_WATCHLIST, type OptionsResearch, type ResearchBar, type ResearchContract, type NativeScan } from "./options-desk-model";
 const obj=(x:unknown):Record<string,unknown>=>x&&typeof x==="object"&&!Array.isArray(x)?x as Record<string,unknown>:{};
 const num=(x:unknown):number=>typeof x==="number"||typeof x==="string"&&x.trim()!==""?Number(x):NaN;
 const text=(x:unknown):string=>typeof x==="string"?x:"";
@@ -45,11 +45,11 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
       if(name==="get_option_quotes")for(const item of rows(data.results)){const quote=obj(item.quote);quotes.set(text(quote.instrument_id),quote);}
       if(name==="get_scans"||name==="create_scan"){
         const entries=Array.isArray(data.scans)?rows(data.scans):data.scan?[obj(data.scan)]:[obj(data.result??data)];
-        for(const scan of entries){const id=text(scan.scan_id)||text(scan.id),scanName=text(scan.scan_title)||text(scan.name);if(id&&scanName.startsWith("Esbueno "))scans.set(id,{id,name:scanName,filters:scan.filters_applied??scan.filters??null,symbols:[],resultCount:null,at:null});}
+        for(const scan of entries){const id=text(scan.scan_id)||text(scan.id),scanName=text(scan.scan_title)||text(scan.name);if(id&&scanName.startsWith("Esbueno "))scans.set(id,{id,name:scanName,filters:scan.filters_applied??scan.filters??null,symbols:scans.get(id)?.symbols??[],resultCount:scans.get(id)?.resultCount??null,at:scans.get(id)?.at??null});}
       }
       if(name==="run_scan"){
         const detail=obj(data.result??data);const id=text(use.input.scan_id);const scan=scans.get(id);
-        if(scan){const matches=rows(detail.results);scan.symbols=matches.map(x=>text(x.ticker)||text(x.symbol)||text(obj(x.instrument).symbol)).filter(Boolean);scan.resultCount=Number.isSafeInteger(detail.total_items)?Number(detail.total_items):Array.isArray(detail.results)?matches.length:null;scan.at=capturedAt;}
+        if(scan){const matches=rows(detail.results);scan.symbols=[...new Set([...scan.symbols,...matches.map(x=>text(x.ticker)||text(x.symbol)||text(obj(x.instrument).symbol)).filter(Boolean)])];scan.resultCount=Number.isSafeInteger(detail.total_items)?Number(detail.total_items):Array.isArray(detail.results)?Math.max(scan.resultCount??0,scan.symbols.length):scan.resultCount;scan.at=capturedAt;}
       }
     }
   }
@@ -62,5 +62,35 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
       ||[contract.delta,contract.iv,contract.theta].some(n=>n!==null&&!Number.isFinite(n))){result.errors.push("Malformed contract or quote rejected");continue;}
     result.contracts.push(contract);
   }
+  const unmatched=instruments.size-result.contracts.length;
+  if(unmatched>0)result.errors.push(`${unmatched} option instruments lacked usable matched quotes`);
+  for(const symbol of Object.keys(result.bars))if(!result.contracts.some(c=>c.symbol===symbol))result.errors.push(`${symbol}: no matched option quotes in this collection`);
   result.scans=[...scans.values()];return result;
+}
+
+// Current display keeps the base universe plus at most six current discoveries.
+// The archive is built from `next` alone, never from this inherited display state.
+export function mergeResearchSnapshot(prior: OptionsResearch | null, next: OptionsResearch): OptionsResearch {
+  const observed = [...new Set([...Object.keys(next.bars), ...next.contracts.map(c => c.symbol)])];
+  const pool = observed.length ? observed : [...Object.keys(prior?.bars ?? {}), ...(prior?.contracts ?? []).map(c => c.symbol)];
+  const extras = [...new Set(pool.filter(s => !OPTIONS_WATCHLIST.includes(s)))].sort().slice(0, 6);
+  const selected = new Set([...OPTIONS_WATCHLIST, ...extras]);
+  const bars = Object.fromEntries([...selected].flatMap(symbol => {
+    const rows = next.bars[symbol] ?? prior?.bars[symbol];
+    return rows ? [[symbol, rows]] : [];
+  }));
+  return { ...next, bars,
+    contracts: [...selected].flatMap(symbol => {
+      const fresh = next.contracts.filter(c => c.symbol === symbol);
+      return fresh.length ? fresh : (prior?.contracts ?? []).filter(c => c.symbol === symbol);
+    }),
+    scans: next.scans.length ? next.scans : prior?.scans ?? [] };
+}
+
+// Small deterministic seed list extracted by code from actual broker scan pages,
+// including oversized tool responses that the conversational collector cannot read.
+export function discoverySymbols(scans: NativeScan[]): string[] {
+  const selected = scans.filter(s => ["Esbueno Bullish Trend", "Esbueno Bearish Trend"].includes(s.name));
+  const candidates = selected.flatMap(s => s.symbols.filter(x => /^[A-Z.]{1,10}$/.test(x)).slice(0, 25));
+  return [...new Set(candidates)].filter(s => !OPTIONS_WATCHLIST.includes(s)).slice(0, 50);
 }
