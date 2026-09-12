@@ -8,7 +8,6 @@ import {
   LayoutDashboard,
   CandlestickChart,
   ClipboardList,
-  FlaskConical,
   Route,
   Activity,
   Wallet,
@@ -56,13 +55,10 @@ const sections = [
     ],
   },
   {
-    // Mirrors the Kraken section: the real account first, then where the trading happens.
-    // On this platform the trading happens on PAPER — the section says so.
-    label: "Robinhood · options · real account, paper trades",
-    tone: "paper" as const,
+    // The real account remains visible while live execution is completed.
+    label: "Robinhood · options · real account",
     links: [
       { href: "/options", label: "Live Account", icon: Wallet },
-      { href: "/options/paper", label: "Options Paper Book", icon: FlaskConical },
     ],
   },
   {

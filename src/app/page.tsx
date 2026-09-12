@@ -12,7 +12,7 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 // One job: "how is the desk right now?" — four numbers, the executor's state, the open live
 // position, and the parked spot book labelled as what it is. No analytics here; the paper
 // record lives on Live Desk, the trade list on Orders, machinery on System Health. The
-// Robinhood options book (paper only) gets its own panel so the dashboard covers BOTH platforms.
+// Robinhood real account gets its own panel so the dashboard covers BOTH platforms.
 // Every read is an existing read-only endpoint; nothing on this page can place an order.
 
 interface Holding { coin: string; amount: number; price: number; value: number }
@@ -48,16 +48,11 @@ export default function DashboardPage() {
   const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 60_000 });
   const { data: score } = useSWR<{ recentTrips: Trip[]; strategies: StrategyStat[]; candidate?: { source: string } | null }>("/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 });
   const { data: cmd } = useSWR<Command>("/api/command", fetcher, { refreshInterval: 60_000 });
-  // The second platform, paper only. Everything here is pushed by the desk session, so the
-  // freshness of bars and quotes is the health signal, not a nicety.
   const { data: opt } = useSWR<{
-    sleeves?: { key: string; label: string; resolved: number; open: number; totalPnl: number; openMark: number; openPremium: number; legacyOpen?: number }[];
-    account?: { totalValue: number; optionLevel: string; at: string } | null;
-    barsStore?: { newestDay: string | null; stale: boolean; staleSymbols: string[] };
-    quoteStore?: { newestQuoteTs: string | null; stale: boolean };
-    lastRun?: string | null;
-    lastResult?: { signals: string[]; fresh: string[]; opened: string[] } | null;
-  }>("/api/options/paper", fetcher, { refreshInterval: 120_000 });
+    account?: { totalValue: number; optionLevel: string; buyingPower: number; at: string } | null;
+    live?: { positions: unknown[]; orders: unknown[]; at: string } | null;
+    execution?: { canPlaceOrders: boolean; maxLossUsd: number | null; why: string };
+  }>("/api/options/live", fetcher, { refreshInterval: 120_000 });
 
   const health = status?.health ?? null;
   const equity = health?.equity ?? (krk?.connected ? krk.totalValue : null);
@@ -189,35 +184,16 @@ export default function DashboardPage() {
         </PanelBody>
       </Panel>
 
-      {/* ── Robinhood options — the second platform, paper only ── */}
-      <Panel tone="paper">
-        <PanelHeader
-          title="Robinhood options — paper book"
-          aside={<>
-            {opt?.account && <Chip tone={opt.account.optionLevel === "option_level_3" ? "green" : "amber"}>{opt.account.optionLevel === "option_level_3" ? "Level 3" : "Level 2"}</Chip>}
-            <Chip tone={opt ? (opt.barsStore?.stale ? "red" : "green") : "grey"} dot={!!opt?.barsStore?.stale} title="Daily bars pushed from Robinhood by the desk session">{opt?.barsStore?.newestDay ? `bars to ${opt.barsStore.newestDay}` : "no bars"}</Chip>
-            <Chip tone={opt ? (opt.quoteStore?.stale ? "red" : "green") : "grey"} dot={!!opt?.quoteStore?.stale} title="Option quotes pushed from Robinhood by the desk session">{opt?.quoteStore?.newestQuoteTs ? `quotes ${ago(opt.quoteStore.newestQuoteTs)}` : "no quotes"}</Chip>
-            <span>no real money</span>
-          </>}
-        />
+      <Panel>
+        <PanelHeader title="Robinhood options" aside={<Chip tone="amber">Live execution inactive</Chip>} />
         <PanelBody>
-          {opt?.sleeves ? (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              {opt.sleeves.map((sl) => (
-                <Stat key={sl.key}
-                  label={sl.label.split(" — ")[0]}
-                  value={sl.resolved > 0 ? <span className={tone(sl.totalPnl)}>{pnl0(sl.totalPnl)}</span> : <span className="text-muted-foreground">—</span>}
-                  sub={`${sl.resolved} resolved · ${sl.open} open${sl.open > 0 ? ` (${pnl0(sl.openMark - sl.openPremium)} floating)` : ""}${(sl.legacyOpen ?? 0) > 0 ? ` · +${sl.legacyOpen} earlier cohort` : ""}`}
-                />
-              ))}
-            </div>
-          ) : <Skeleton />}
-          <Note className="mt-3">
-            {opt?.lastResult
-              ? `Last scan: ${opt.lastResult.signals.length} signal${opt.lastResult.signals.length === 1 ? "" : "s"} (${opt.lastResult.fresh?.length ?? 0} fresh today), ${opt.lastResult.opened.length} opened.`
-              : "No scan recorded yet."}
-            {" "}Robinhood account {opt?.account ? money(opt.account.totalValue) : "—"}. The app holds no Robinhood credentials and never places an order there — the desk session pushes bars and quotes after the close, and the book measures.
-          </Note>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <Stat label="Account value" value={opt?.account ? money(opt.account.totalValue) : "—"} />
+            <Stat label="Buying power" value={opt?.account ? money(opt.account.buyingPower) : "—"} />
+            <Stat label="Open positions" value={opt?.live ? String(opt.live.positions.length) : "—"} />
+            <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="Including fees" />
+          </div>
+          <Note className="mt-3">{opt?.execution?.why ?? "Loading account status..."} {opt?.account ? `Account snapshot ${ago(opt.account.at)}.` : ""}</Note>
         </PanelBody>
       </Panel>
 
@@ -226,9 +202,8 @@ export default function DashboardPage() {
         {[
           { href: "/margin", title: "Live Account · Kraken", sub: "Real money: positions, margin level, signals, ledger track record" },
           { href: "/margin/paper", title: "Live Desk", sub: "Kraken: is the edge real yet, the arm switch, every sleeve on paper" },
-          { href: "/orders", title: "Orders", sub: "Every real fill and round trip, the Kraken paper log, the options paper log" },
+          { href: "/orders", title: "Orders", sub: "Every real fill and round trip, the Kraken paper log, Robinhood account orders" },
           { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: cash, level, positions, orders — read only" },
-          { href: "/options/paper", title: "Options Paper Book", sub: "Robinhood, paper: four sleeves, structures, the pushed-data health" },
           { href: "/command", title: "System Health", sub: "Heartbeats, switches, locks — both platforms" },
         ].map((l) => (
           <Link key={l.href} href={l.href} className="rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/20 hover:bg-accent/40">

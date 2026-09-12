@@ -1,19 +1,8 @@
-// THE ROBINHOOD BRIDGE for the options paper book.
-//
-// Robinhood has no server credentials — its only official programmatic route is an OAuth
-// MCP bound to a Claude session — so option quotes cannot be fetched by the app or its
-// cron. A scheduled Claude session fetches them and hands them to this script, which is
-// the ONLY way data enters the book. See `.claude/skills/options-desk/SKILL.md` for the
-// runbook and `src/lib/options-quote-store.ts` for why the design looks like this.
-//
-//   node --env-file=.env.local --import tsx scripts/options-rh-agent.ts worklist
-//   node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest <payload.json>
-//
-// (--env-file=.env.local is the prod database in this repo, NOT `railway run`.)
-//
-// `worklist` prints what the agent must fetch. `ingest` writes it in, then runs the SAME
-// scan the daily cron runs, so a chain filled now can open a position now rather than
-// waiting for tomorrow's cron.
+import { OPTIONS_PAPER_RETIRED } from "../src/lib/options-operation";
+// Read-only real account collector. Options simulation is retired.
+// node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest <payload.json>
+// Historical quote/scan code below is unreachable while retirement is active.
+import { assertCompleteOptionsSnapshot } from "../src/lib/options-snapshot-validation";
 import { readFileSync } from "node:fs";
 import { prisma } from "../src/lib/db";
 import {
@@ -54,6 +43,8 @@ interface AgentOrder {
   placed_agent?: string | null; created_at?: string | null;
 }
 interface Payload {
+  positionsComplete?: boolean;
+  ordersComplete?: boolean;
   account?: { accountNumber: string; type: string; optionLevel: string; cash: number; buyingPower: number; optionsValue: number; totalValue: number };
   positions?: AgentPosition[];
   orders?: AgentOrder[];
@@ -81,6 +72,10 @@ function toStoreQuote(q: AgentQuote): QuoteWithHint | null {
 }
 
 async function worklist() {
+  if (OPTIONS_PAPER_RETIRED) {
+    console.log(JSON.stringify({ paperRetired: true, accountSnapshotsOnly: true, openPositions: [], chainRequests: [], bars: [], nothingToDo: true }));
+    return;
+  }
   // BOTH LEGS, and NOT cohort-filtered.
   //
   // Both of those were bugs. Selecting only `occ` meant a spread's SHORT leg was quoted once
@@ -134,6 +129,7 @@ async function worklist() {
 
 async function ingest(path: string) {
   const payload = JSON.parse(readFileSync(path, "utf8")) as Payload;
+  assertCompleteOptionsSnapshot(payload);
 
   if (payload.account) {
     await saveAccountSnapshot(payload.account);
@@ -159,6 +155,8 @@ async function ingest(path: string) {
     await saveLiveSnapshot({ positions, orders });
     console.log(`[live   ] ${positions.length} open position${positions.length === 1 ? "" : "s"} · ${orders.length} order${orders.length === 1 ? "" : "s"} on the real account`);
   }
+
+  if (OPTIONS_PAPER_RETIRED) return;
 
   let barsWritten = 0, barsSymbols = 0;
   for (const b of payload.bars ?? []) {

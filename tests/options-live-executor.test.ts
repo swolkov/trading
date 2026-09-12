@@ -277,3 +277,14 @@ test("failed readback of an existing submission stays unknown, and broker reject
   assert.equal((await executeOptionsIntent(intent(), rejected.deps)).status, "settled");
   assert.equal(rejected.records.get(REF)?.state, "settled");
 });
+
+test("the approved $100 loss cap includes the full round-trip fee reserve", () => {
+  const f = fixture();
+  f.policy.maxLossUsd = 100;
+  f.policy.feeBudgetUsd = 10;
+  const order = intent();
+  order.limitPrice = 0.90;
+  assert.equal(prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW).theoreticalMaxLossUsd, 90);
+  order.limitPrice = 0.91;
+  assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /maximum loss plus fee reserve/);
+});

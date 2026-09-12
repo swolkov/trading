@@ -1,3 +1,4 @@
+import { OPTIONS_PAPER_RETIRED } from "@/lib/options-operation";
 // OPTIONS PAPER BOOK — the I/O half: the table, opening paper positions, marking them from
 // real option quotes, resolving them, and the scoreboard queries. The model (universe,
 // sleeves, contract selection, caps, signal, exits, verdict) is in options-paper-model.ts
@@ -96,6 +97,7 @@ export async function refEquityFor(source: OptionSource): Promise<number> {
 }
 /** `options_paper_autotrack=false` stops NEW entries; open positions still resolve. */
 export async function autotrackEnabled(): Promise<boolean> {
+  if (OPTIONS_PAPER_RETIRED) return false;
   const v = await prisma.agentConfig.findUnique({ where: { key: "options_paper_autotrack" } })
     .then((r) => r?.value).catch(() => null);
   return v !== "false";
@@ -153,6 +155,7 @@ export async function openOptionPaperTrade(p: {
   crossingUsd?: number;
   shortOcc?: string; shortStrike?: number; shortBid?: number; shortAsk?: number; widthUsd?: number;
 }): Promise<OpenResult> {
+  if (OPTIONS_PAPER_RETIRED) return { opened: false, reason: "Options paper trading retired by owner" };
   await ensureOptionsPaperTable();
   const refEquity = await refEquityFor(p.source);
   const group = groupOf(p.symbol);
@@ -235,6 +238,7 @@ interface OpenRow {
  * guessed at.
  */
 export async function evaluateOptionsPaper(): Promise<OptionResolution[]> {
+  if (OPTIONS_PAPER_RETIRED) return [];
   await ensureOptionsPaperTable();
   // DELIBERATELY NOT cohort-filtered. Bumping the sim version starts a new SAMPLE; it does
   // not abandon a position that is still open. An o1 call left unmanaged would never mark

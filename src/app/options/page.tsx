@@ -1,7 +1,6 @@
 "use client";
 
 import useSWR from "swr";
-import Link from "next/link";
 import { Chip } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
@@ -30,11 +29,9 @@ interface LiveOrder {
 interface Payload {
   account: Account | null;
   live: { positions: LivePosition[]; orders: LiveOrder[]; at: string; minutesAgo: number } | null;
-  quoteStore: { newestQuoteTs: string | null; stale: boolean };
-  barsStore: { newestDay: string | null; stale: boolean; staleSymbols: string[] };
   lastRun: string | null;
   foreignOrders: LiveOrder[];
-  execution: { canPlaceOrders: boolean; why: string };
+  execution: { canPlaceOrders: boolean; why: string; maxLossUsd: number | null };
 }
 
 const levelLabel = (l: string) => l === "option_level_3" ? "Level 3 — spreads unlocked" : l === "option_level_2" ? "Level 2 — long premium only" : l;
@@ -42,9 +39,6 @@ const orderTone = (state: string) => state === "filled" ? "green" : ["rejected",
 
 export default function RobinhoodLiveAccountPage() {
   const { data } = useSWR<Payload>("/api/options/live", fetcher, { refreshInterval: 60_000 });
-  const { data: paper } = useSWR<{ sleeves?: { resolved: number; open: number }[] }>("/api/options/paper", fetcher, { refreshInterval: 120_000 });
-  const paperResolved = (paper?.sleeves ?? []).reduce((n, s) => n + s.resolved, 0);
-  const paperOpen = (paper?.sleeves ?? []).reduce((n, s) => n + s.open, 0);
   const acct = data?.account ?? null;
   const live = data?.live ?? null;
   const snapshotStale = !!data && (!live || live.minutesAgo > 36 * 60);
@@ -55,7 +49,7 @@ export default function RobinhoodLiveAccountPage() {
     <div className="space-y-5">
       <PageHeader
         title="Live Account"
-        sub="What Robinhood says right now — the real Agentic account, as the desk session last saw it. Positions, orders, buying power. Trades on this platform happen on paper; see Options Paper Book."
+        sub="Your real Robinhood account: positions, orders and buying power from the latest broker snapshot. Live order placement is not active yet."
         right={<>
           <Chip tone="grey" size="md" title="Robinhood holds the money; the app holds no credentials and reads only what the desk pushes">Real account · read only</Chip>
           {acct && <Chip tone={acct.optionLevel === "option_level_3" ? "green" : "amber"} size="md">{levelLabel(acct.optionLevel)}</Chip>}
@@ -75,7 +69,7 @@ export default function RobinhoodLiveAccountPage() {
       {snapshotStale && (
         <Panel tone="red"><PanelBody className="py-3">
           <p className="text-[13px] font-semibold text-down">This snapshot is stale — the numbers below are what the broker said {live ? ago(live.at) : "at some earlier point"}, not now.</p>
-          <Note className="mt-1">The desk session pushes positions and orders after each close. If it has not run, the paper book&apos;s bars and quotes are stale too. Run the <code>options-desk</code> skill, or check that the Robinhood login is still authenticated.</Note>
+          <Note className="mt-1">The account collector refreshes positions and orders after each close. Check the scheduled collector and Robinhood connection.</Note>
         </PanelBody></Panel>
       )}
 
@@ -100,7 +94,7 @@ export default function RobinhoodLiveAccountPage() {
         <PanelHeader title="Open option positions — what the broker holds" aside={<span>{live ? `as of ${ago(live.at)}` : "not pushed yet"}</span>} />
         {positions.length === 0 ? (
           <PanelBody><Empty>{live ? "No open option positions on the real account." : "Positions have not been pushed yet."}</Empty>
-            {live && <Note className="mt-2">That is the expected state: this platform trades on paper. The paper book&apos;s positions are on the <Link href="/options/paper" className="text-primary hover:underline">Options Paper Book</Link>.</Note>}
+
           </PanelBody>
         ) : (
           <DataTable>
@@ -146,14 +140,13 @@ export default function RobinhoodLiveAccountPage() {
         )}
       </Panel>
 
-      {/* ── What live would take ── */}
-      <Explainer title="Can this account trade live? — no, and here is exactly why">
-        <p>{data?.execution.why ?? "The app holds no Robinhood credentials and the desk session runs with every order tool disallowed."}</p>
-        <ul className="mt-2 space-y-1">
-          <li><strong>What exists:</strong> a funded account ({acct ? money(acct.totalValue) : "—"}), option level 3, a paper book with four sleeves measuring the rule on real quotes, and a scheduled read-only desk session that pushes bars, quotes, positions and orders.</li>
-          <li><strong>What does not:</strong> an executor that can place a Robinhood order, an arm switch for it, a guardian that manages its stops, and a paper record that has earned it — the paper book has {paper ? `${paperResolved} resolved and ${paperOpen} open` : "—"} today, against a gate of 30 resolved.</li>
-          <li><strong>What decides:</strong> the same gate the Kraken desk uses — a paper record with enough trades, positive net at live sizing, t ≥ 2, spread over days. Until then, live on Robinhood is a decision that has not been earned, not a feature that is missing.</li>
-        </ul>
+      <Panel><PanelHeader title="Live trading limits" /><PanelBody>
+        <Stat label="Maximum loss per trade" value={data?.execution.maxLossUsd != null ? money(data.execution.maxLossUsd) : "Not set"} sub="Includes fees. One position at a time." />
+        <Note className="mt-3">Long calls, long puts and defined-risk spreads. Profit targets are not guaranteed returns.</Note>
+      </PanelBody></Panel>
+      <Explainer title="Live execution status">
+        <p>{data?.execution.why ?? "Checking execution status..."}</p>
+        <p className="mt-2">Your approved loss limit is a ceiling. An order must also fit available buying power, pass broker review and have active position monitoring.</p>
       </Explainer>
     </div>
   );

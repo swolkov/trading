@@ -1,6 +1,5 @@
-import { readAccountSnapshot, readLiveSnapshot, quoteStoreFreshness } from "@/lib/options-quote-store";
-import { barsStoreFreshness } from "@/lib/options-bars-store";
-import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
+import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "@/lib/options-operation";
+import { readAccountSnapshot, readLiveSnapshot } from "@/lib/options-quote-store";
 import { prisma } from "@/lib/db";
 
 // The real Robinhood account, as the desk session last pushed it — the counterpart of the
@@ -9,23 +8,23 @@ import { prisma } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const [account, live, quoteStore, barsStore, lastRun] = await Promise.all([
+  const [account, live, maxLoss] = await Promise.all([
     readAccountSnapshot().catch(() => null),
     readLiveSnapshot().catch(() => null),
-    quoteStoreFreshness().catch(() => ({ newestQuoteTs: null, rows: 0, ageMinutes: null, stale: true })),
-    barsStoreFreshness([...OPTIONS_SYMBOLS]).catch(() => ({ symbols: 0, newestDay: null, oldestNewestDay: null, staleSymbols: [], stale: true })),
-    prisma.agentConfig.findUnique({ where: { key: "options_scan_last_run" } }).then((r) => r?.value ?? null).catch(() => null),
+    prisma.agentConfig.findUnique({ where: { key: OPTIONS_MAX_LOSS_KEY } }).then((r) => parseOptionsMaxLoss(r?.value)).catch(() => null),
   ]);
   // Anything the desk did not put there. The runner's allowlist has no order tool, so a
   // non-"user" agent on an order is the one thing on this page that should never appear.
   const foreignOrders = (live?.orders ?? []).filter((o) => o.placedAgent && o.placedAgent !== "user");
   return Response.json({
-    account, live, quoteStore, barsStore, lastRun,
+    account, live, lastRun: live?.at ?? account?.at ?? null,
     foreignOrders,
     // Plain statement of what can and cannot happen here, for the page to show verbatim.
     execution: {
       canPlaceOrders: false,
-      why: "The app holds no Robinhood credentials, and the scheduled desk session runs with every order tool disallowed. Going live on Robinhood is a separate build: an executor inside the desk session, its own arm switch, its own guardian — none of which exists today.",
+      maxLossUsd: maxLoss,
+      paperEnabled: false,
+      why: "Live order placement is not active. The broker connection and position monitor must be completed and verified before trading can start.",
     },
   });
 }
