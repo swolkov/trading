@@ -23,7 +23,8 @@ interface Signal { id: number; received_at: string; edge: string; root: string; 
 interface Status {
   enabled: boolean; disabledReason: string | null; configured: boolean;
   limits: { sizingBasisUsd: number; riskPct: number; maxContracts: number; maxPositions: number; maxEntriesPerDay: number; dailyLossPausePct: number; drawdownDisablePct: number };
-  state: { equity?: number; equityHigh?: number; dayStartEquity?: number; dayKey?: string; entries: Record<string, number> };
+  state: { equity?: number; equityHigh?: number; dayStartEquity?: number; dayKey?: string };
+  entriesToday: number;
   guardian: { at: string | null; fresh: boolean; lastError: string | null };
   broker: { balance: number; netLiq: number; positions: { contractId: number; netPos: number; netPrice: number }[]; workingOrders: number } | null;
   brokerError: string | null; open: Trade[]; ledger: Trade[]; signals: Signal[]; cards: Card[];
@@ -55,7 +56,7 @@ export default function FuturesDeskPage() {
   if (!data) return <div className="p-6 text-[13px] text-muted-foreground">Loading the futures desk…</div>;
   if (data.error) return <div className="p-6 text-[13px] text-down">The desk read failed: {data.error}</div>;
   const L = data.limits, s = data.state;
-  const day = s.dayKey ? s.entries[s.dayKey] ?? 0 : 0;
+  const day = data.entriesToday;
   const dayPnl = s.equity != null && s.dayStartEquity != null ? s.equity - s.dayStartEquity : 0;
   const ddFromHigh = s.equity != null && s.equityHigh ? (s.equity / s.equityHigh - 1) * 100 : 0;
   const canEnable = confirm === "ENABLE" && data.configured && data.guardian.fresh && !data.brokerError;

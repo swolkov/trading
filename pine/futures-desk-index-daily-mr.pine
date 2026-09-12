@@ -27,7 +27,7 @@ var float stopPx = na
 var int entryTime = na
 
 root = syminfo.root
-msg(action, stop) =>
+msg(string action, float stop) =>
     '{"secret":"' + secret + '","desk":"futures","edge":"index_daily_mr","symbol":"' + root + '","action":"' + action +
      '","side":"long","price":' + str.tostring(close) + ',"stop":' + (na(stop) ? "null" : str.tostring(stop)) +
      ',"bar":' + str.tostring(time) + ',"tf":"1D"}'
@@ -47,10 +47,11 @@ if barstate.isconfirmed
         label.new(bar_index, low, "LONG\nstop " + str.tostring(stopPx, format.mintick), style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white)
     else if stopHit
         inPos := false
+        alert(msg("exit", float(na)), alert.freq_once_per_bar_close)   // harmless if the broker's stop already filled
         label.new(bar_index, low, "stop", style = label.style_label_up, color = color.new(color.red, 20), textcolor = color.white)
     else if ruleExit or timeUp
         inPos := false
-        alert(msg("exit", na), alert.freq_once_per_bar_close)
+        alert(msg("exit", float(na)), alert.freq_once_per_bar_close)
         label.new(bar_index, high, ruleExit ? "exit RSI≥50" : "exit 30d", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white)
 
 plot(sma * smaFilter, "SMA200 × 0.92", color = color.new(color.orange, 40))

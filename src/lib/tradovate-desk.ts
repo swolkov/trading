@@ -154,6 +154,15 @@ export async function placeStop(p: { contractId: number; action: "Buy" | "Sell";
   return r.orderId;
 }
 
+/** Move a working stop to a new price in ONE request — no cancel-then-place window with zero or
+ *  two stops. Used to re-anchor the bracket to the actual fill. */
+export async function modifyStop(orderId: number, qty: number, stopPrice: number): Promise<void> {
+  const r = await tradovateRequest<{ failureReason?: string; failureText?: string }>("/order/modifyorder", {
+    method: "POST", body: JSON.stringify({ orderId, orderQty: qty, orderType: "Stop", stopPrice, timeInForce: "GTC", isAutomated: true }),
+  }, MODE);
+  if (r?.failureReason) throw new Error(r.failureText || r.failureReason);
+}
+
 export async function cancelDeskOrder(orderId: number): Promise<void> {
   await tradovateRequest("/order/cancelorder", { method: "POST", body: JSON.stringify({ orderId, isAutomated: true }) }, MODE);
 }

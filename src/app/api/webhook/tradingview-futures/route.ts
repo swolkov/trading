@@ -21,10 +21,12 @@ function secretMatches(provided: unknown): boolean {
 }
 
 export async function POST(request: Request) {
-  const len = Number(request.headers.get("content-length") || "0");
-  if (len > 4096) return Response.json({ error: "payload too large" }, { status: 413 });
+  // Cap on the BODY, not the header — a chunked request carries no content-length.
+  let text: string;
+  try { text = await request.text(); } catch { return Response.json({ error: "unreadable body" }, { status: 400 }); }
+  if (text.length > 4096) return Response.json({ error: "payload too large" }, { status: 413 });
   let body: unknown;
-  try { body = await request.json(); } catch { return Response.json({ error: "invalid JSON" }, { status: 400 }); }
+  try { body = JSON.parse(text); } catch { return Response.json({ error: "invalid JSON" }, { status: 400 }); }
   if (typeof body !== "object" || body === null) return Response.json({ error: "invalid JSON" }, { status: 400 });
   if (!secretMatches((body as Record<string, unknown>).secret)) return Response.json({ error: "unauthorized" }, { status: 401 });
 

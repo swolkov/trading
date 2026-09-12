@@ -20,7 +20,7 @@ var bool inPos = false
 var float stopPx = na
 
 root = syminfo.root
-msg(action, stop) =>
+msg(string action, float stop) =>
     '{"secret":"' + secret + '","desk":"futures","edge":"donchian_60m_long","symbol":"' + root + '","action":"' + action +
      '","side":"long","price":' + str.tostring(close) + ',"stop":' + (na(stop) ? "null" : str.tostring(stop)) +
      ',"bar":' + str.tostring(time) + ',"tf":"60"}'
@@ -37,10 +37,11 @@ if barstate.isconfirmed
         label.new(bar_index, low, "LONG\nstop " + str.tostring(stopPx, format.mintick), style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white)
     else if stopHit
         inPos := false
+        alert(msg("exit", float(na)), alert.freq_once_per_bar_close)   // harmless if the broker's stop already filled
         label.new(bar_index, low, "stop", style = label.style_label_up, color = color.new(color.red, 20), textcolor = color.white)
     else if channelExit
         inPos := false
-        alert(msg("exit", na), alert.freq_once_per_bar_close)
+        alert(msg("exit", float(na)), alert.freq_once_per_bar_close)
         label.new(bar_index, high, "exit 50-low", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white)
 
 plot(hh, "100-bar high", color = color.new(color.green, 50))
