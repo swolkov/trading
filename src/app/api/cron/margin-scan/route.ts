@@ -213,7 +213,10 @@ export async function GET(request: Request) {
   };
 
   // One read per run: the prop hand-off below is skipped entirely while the desk is off.
-  const propArmed = await prisma.agentConfig.findUnique({ where: { key: "prop_armed" } }).then((r) => r?.value === "true").catch(() => false);
+  // PROP DESK RETIRED (Sep 12 2026): the Tradeify 247 account was bought in error and is not
+  // wanted. The hand-off below is pinned OFF — no config key can re-enable it — so the scanner
+  // never touches DXtrade again. The desk code stays in the repo for reversibility only.
+  const propArmed = false;
   const propQueue: { symbol: string; coin: string; tf: string; kind: string; side: "buy" | "sell"; source: string; tier: "low" | "med" | "high"; entryPx: number }[] = [];
   try {
     const flag = await prisma.agentConfig.findUnique({ where: { key: "kraken_shadow_autotrack" } }).catch(() => null);
