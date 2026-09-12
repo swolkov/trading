@@ -8,6 +8,7 @@ import { money, ago } from "@/lib/format";
 import type { StrategySignal, ResearchCandidate, NativeScan } from "@/lib/options-desk-model";
 import type { OptionsNews } from "@/lib/options-news";
 interface Desk {
+  connection:{at:string|null;lastCheckOk:boolean;status:string;recovery:string};
   execution:{canPlaceOrders:boolean;blockers:string[]};maxLoss:number|null;riskPct:number|null;
   rules:{maxContracts:number;maxPositions:number;minDte:number;maxDte:number;exitBeforeDte:number;minOpenInterest:number;minVolume:number;maxSpreadPct:number};
   research:{capturedAt:string;source:string;contractCount:number;scans:NativeScan[];errors:string[]}|null;
@@ -21,6 +22,7 @@ export function OptionsResearchDesk(){
   if(!data)return <Panel><Empty>Loading scanners, news and readiness checks...</Empty></Panel>;
   return <div className="space-y-5">
     <Panel tone="amber"><PanelHeader title="Live readiness" aside={<Chip tone="amber">Entries blocked</Chip>}/><PanelBody>
+      <div className="mb-3 flex flex-wrap items-center gap-2"><Chip tone={data.connection?.lastCheckOk?"green":"amber"}>{data.connection?.status??"Connection check unavailable"}</Chip><span className="text-xs text-muted-foreground">{data.connection?.at?`Checked ${ago(data.connection.at)}`:"No direct check recorded"}</span></div>
       <p className="text-sm">Research scanners can run now. Automatic orders and exits are not operational.</p>
       <ul className="mt-2 list-disc space-y-1 pl-5 text-xs">{data.execution.blockers.map(reason=><li key={reason}>{reason}</li>)}</ul>
     </PanelBody></Panel>

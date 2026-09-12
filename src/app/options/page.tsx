@@ -117,9 +117,9 @@ export default function RobinhoodLiveAccountPage() {
 
       {/* ── Orders ── */}
       <Panel>
-        <PanelHeader title="Orders — last 30 days" aside={<span>newest first · placed by you in the Robinhood app, or by nothing</span>} />
+        <PanelHeader title="Orders in the latest broker snapshot" aside={<span>newest first · placed by you in the Robinhood app, or by nothing</span>} />
         {orders.length === 0 ? (
-          <PanelBody><Empty>{live ? "No orders in the last 30 days." : "Orders have not been pushed yet."}</Empty></PanelBody>
+          <PanelBody><Empty>{live ? "No orders returned in the latest broker snapshot." : "Orders have not been pushed yet."}</Empty></PanelBody>
         ) : (
           <DataTable>
             <thead><tr><Th>When</Th><Th>Contract</Th><Th>Strategy</Th><Th>Type</Th><Th num>Qty</Th><Th num>Premium</Th><Th>State</Th><Th>Placed by</Th></tr></thead>

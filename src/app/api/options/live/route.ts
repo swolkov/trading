@@ -24,7 +24,7 @@ export async function GET() {
       canPlaceOrders: false,
       maxLossUsd: maxLoss,
       paperEnabled: false,
-      why: "Live order placement is not active. The broker connection and position monitor must be completed and verified before trading can start.",
+      why: "Live order placement is not active. Direct account reads are separate from live execution. The execution adapter, fill recovery and position guardian are not verified.",
     },
   });
 }

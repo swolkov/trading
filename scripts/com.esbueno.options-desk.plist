@@ -5,27 +5,13 @@
   <key>Label</key>
   <string>com.esbueno.options-desk</string>
 
-  <!-- Robinhood's options quotes cannot be fetched from a server: the login lives on this
-       machine. This job is the options paper book's entire data path. It runs after the US
-       close so the daily bars are settled and the option quotes are the day's real closing
-       marks — running before the open returns the PREVIOUS session's quote, stale by a day.
-
-       IT RUNS FROM A DEDICATED CHECKOUT (/Users/user/trading-rh-options), NOT the main
-       working tree. That tree belongs to interactive sessions: it sits on a feature branch
-       with dozens of uncommitted money-path files at any given moment, and a scheduled job
-       must never depend on, or disturb, work in progress.
-
-       The checkout is fast-forwarded to origin/main BEFORE the runner is invoked — before,
-       so a script is never replaced while bash is still reading it. If the update fails the
-       run proceeds on the existing checkout: marking open positions and checking their stops
-       matters more than being current. THIS CHECKOUT IS MACHINE-MANAGED — it is reset hard
-       and cleaned every run, so never edit it by hand. (clean -fdq removes untracked scratch
-       files the agent leaves behind; .env and node_modules are gitignored and survive.) -->
+  <!-- Read-only account snapshots after each weekday close. OAuth stays on this Mac.
+       The dedicated checkout is advanced without discarding other sessions' files. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>D=/Users/user/trading-rh-options; L="$HOME/Library/Logs/options-desk.log"; if ! (git -C "$D" fetch --quiet origin main &amp;&amp; git -C "$D" reset --hard --quiet FETCH_HEAD &amp;&amp; git -C "$D" clean -fdq); then echo "$(date -u +%FT%TZ) [warn] could not update $D — running the existing checkout" &gt;&gt; "$L"; fi; if [ -x "$D/scripts/options-desk-run.sh" ]; then OPTIONS_DESK_REPO="$D" exec "$D/scripts/options-desk-run.sh"; else echo "$(date -u +%FT%TZ) [fail] runner missing at $D" &gt;&gt; "$L"; fi</string>
+    <string>D=/Users/user/trading-rh-options; L="$HOME/Library/Logs/options-desk.log"; if ! (git -C "$D" fetch --quiet origin main &amp;&amp; git -C "$D" merge --ff-only --quiet FETCH_HEAD); then echo "$(date -u +%FT%TZ) [warn] could not update $D — running the existing checkout" &gt;&gt; "$L"; fi; if [ -x "$D/scripts/options-desk-run.sh" ]; then OPTIONS_DESK_REPO="$D" exec "$D/scripts/options-desk-run.sh"; else echo "$(date -u +%FT%TZ) [fail] runner missing at $D" &gt;&gt; "$L"; fi</string>
   </array>
 
   <!-- Weekdays, 17:32 local. After the 16:00 close, before the Vercel cron at 18:00 ET.
