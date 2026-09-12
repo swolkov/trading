@@ -1,0 +1,57 @@
+//@version=6
+// FUTURES DESK — Index daily mean-reversion, LONG only.
+// Rule (scripts/daily-swing-validation.ts, 15 yr, two vendors): daily RSI(14) < 30 AND close > SMA200 × 0.92 → long
+// at the next open; exit when RSI(14) ≥ 50, or price hits entry − 1.5×ATR(14) (the broker holds that stop), or 30 days.
+// Apply to ES1!, NQ1!, YM1! on the 1D chart. Chart setting "Adjust for contract changes" ON. Create ONE alert per
+// chart: condition = this indicator → "Any alert() function call", webhook = the desk URL, message left empty
+// (the script writes the message). The desk sizes off a fixed $50k and refuses anything it does not recognise.
+indicator("Futures Desk — Index daily MR (long)", overlay = true, max_labels_count = 200)
+
+secret = input.string("", "Desk webhook secret")
+rsiLen = 14
+atrLen = 14
+smaLen = 200
+rsiEntry = 30.0
+rsiExit = 50.0
+smaFilter = 0.92
+stopAtr = 1.5
+maxHoldDays = 30
+
+// Wilder smoothing (ta.rsi and ta.atr both use RMA) — matches the validation script.
+rsi = ta.rsi(close, rsiLen)
+atr = ta.atr(atrLen)
+sma = ta.sma(close, smaLen)
+
+var bool inPos = false
+var float stopPx = na
+var int entryTime = na
+
+root = syminfo.root
+msg(action, stop) =>
+    '{"secret":"' + secret + '","desk":"futures","edge":"index_daily_mr","symbol":"' + root + '","action":"' + action +
+     '","side":"long","price":' + str.tostring(close) + ',"stop":' + (na(stop) ? "null" : str.tostring(stop)) +
+     ',"bar":' + str.tostring(time) + ',"tf":"1D"}'
+
+entrySig = not inPos and rsi < rsiEntry and close > sma * smaFilter and not na(sma)
+// The broker's stop fills intraday; the chart only knows at the close. `low <= stop` is the honest proxy.
+stopHit = inPos and low <= stopPx
+timeUp = inPos and (time - entryTime) >= maxHoldDays * 86400000
+ruleExit = inPos and rsi >= rsiExit
+
+if barstate.isconfirmed
+    if entrySig
+        stopPx := close - stopAtr * atr
+        entryTime := time
+        inPos := true
+        alert(msg("entry", stopPx), alert.freq_once_per_bar_close)
+        label.new(bar_index, low, "LONG\nstop " + str.tostring(stopPx, format.mintick), style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white)
+    else if stopHit
+        inPos := false
+        label.new(bar_index, low, "stop", style = label.style_label_up, color = color.new(color.red, 20), textcolor = color.white)
+    else if ruleExit or timeUp
+        inPos := false
+        alert(msg("exit", na), alert.freq_once_per_bar_close)
+        label.new(bar_index, high, ruleExit ? "exit RSI≥50" : "exit 30d", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white)
+
+plot(sma * smaFilter, "SMA200 × 0.92", color = color.new(color.orange, 40))
+plot(inPos ? stopPx : na, "stop", color = color.new(color.red, 30), style = plot.style_linebr)

@@ -1,0 +1,48 @@
+//@version=6
+// FUTURES DESK — 60-minute Donchian 100/50, LONG only.
+// Rule (scripts/trend-portfolio.ts, 10 markets, 2011-2026, t=2.93): close above the PRIOR 100-bar high → long at the
+// next open; exit on a close below the PRIOR 50-bar low; 4×ATR(20) stop held by the broker. Short side is negative
+// and is not sent. Apply to ES1!, NQ1!, YM1!, GC1!, SI1!, HG1! on the 60-minute chart, "Adjust for contract changes"
+// ON, ONE alert per chart → "Any alert() function call" → the desk webhook, message left empty.
+indicator("Futures Desk — Donchian 100/50 60m (long)", overlay = true, max_labels_count = 200)
+
+secret = input.string("", "Desk webhook secret")
+entryN = 100
+exitM = 50
+atrLen = 20
+stopAtr = 4.0
+
+hh = ta.highest(high, entryN)[1]   // prior N bars, excluding this one
+ll = ta.lowest(low, exitM)[1]
+atr = ta.atr(atrLen)
+
+var bool inPos = false
+var float stopPx = na
+
+root = syminfo.root
+msg(action, stop) =>
+    '{"secret":"' + secret + '","desk":"futures","edge":"donchian_60m_long","symbol":"' + root + '","action":"' + action +
+     '","side":"long","price":' + str.tostring(close) + ',"stop":' + (na(stop) ? "null" : str.tostring(stop)) +
+     ',"bar":' + str.tostring(time) + ',"tf":"60"}'
+
+entrySig = not inPos and close > hh and not na(hh) and not na(atr)
+stopHit = inPos and low <= stopPx
+channelExit = inPos and close < ll
+
+if barstate.isconfirmed
+    if entrySig
+        stopPx := close - stopAtr * atr
+        inPos := true
+        alert(msg("entry", stopPx), alert.freq_once_per_bar_close)
+        label.new(bar_index, low, "LONG\nstop " + str.tostring(stopPx, format.mintick), style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white)
+    else if stopHit
+        inPos := false
+        label.new(bar_index, low, "stop", style = label.style_label_up, color = color.new(color.red, 20), textcolor = color.white)
+    else if channelExit
+        inPos := false
+        alert(msg("exit", na), alert.freq_once_per_bar_close)
+        label.new(bar_index, high, "exit 50-low", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white)
+
+plot(hh, "100-bar high", color = color.new(color.green, 50))
+plot(ll, "50-bar low", color = color.new(color.red, 50))
+plot(inPos ? stopPx : na, "stop", color = color.new(color.red, 20), style = plot.style_linebr)

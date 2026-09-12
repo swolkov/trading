@@ -29,6 +29,10 @@
  */
 export const ACTIVE_MONTH_CODES: Record<string, Set<string>> = {
   GC: new Set(["G", "J", "M", "Q", "V", "Z"]),
+  // Silver and copper trade Mar/May/Jul/Sep/Dec (H/K/N/U/Z); the other listed months are thin.
+  // Added Sep 2026 for the futures desk's micros (SIL, MHG); the engine never traded either.
+  SI: new Set(["H", "K", "N", "U", "Z"]),
+  HG: new Set(["H", "K", "N", "U", "Z"]),
 };
 
 /** "GCQ6" -> "Q". Returns "" when the name doesn't start with the root, so callers can't crash. */
