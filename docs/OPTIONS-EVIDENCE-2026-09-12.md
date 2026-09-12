@@ -21,3 +21,9 @@ The next performance milestone requires those actual broker fields and reconcili
 ## Validation
 
 42 focused offline tests passed, including deposit handling, full-premium affordability, stale/future snapshot labels, shared screening gates, zero ask, scan pagination, raw capture replay after intervening data, bounded symbol rotation, deduplicated observations and missing-performance handling. Both independent reviewers approved after fixes. Tests that alter production trading snapshots were excluded. Production build, type/lint checks and real collector/admin readback are verified separately during release.
+
+## Production verification and coverage correction
+
+PR #149 deployed READY at commit `3bb0485`. The production browser showed the confirmed $1,500 account, $15–$30 risk illustration, fixed $100 ceiling, archived source quotes, and unavailable performance metrics. The expanded read-only collection saved 100 matched contracts across 10 symbols and daily history across 12. SPY/QQQ instrument requests failed at the broker and remain explicitly missing. No candidates passed the complete research screen.
+
+Whole-chain instrument discovery included many unselected strikes. A follow-up correction counts missing quotes only among contract IDs actually requested from `get_option_quotes`, preserving genuine request errors without calling unselected strikes failures. The current display's obsolete whole-chain warning was removed with an optimistic update; original archived observations remain unchanged. The focused offline suite now has 43 passing tests.

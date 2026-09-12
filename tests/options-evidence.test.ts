@@ -135,3 +135,19 @@ test("discovery seeds come only from validated actual scanner symbols", () => {
   assert.deepEqual(discoverySymbols([scan]), ["AAA", "BRK.B"]);
   assert.deepEqual(discoverySymbols([{ ...scan, name: "Unrelated scan" }]), []);
 });
+
+test("unselected chain instruments are not missing quote requests", () => {
+  const prefix = "mcp__robinhood-trading__";
+  const discovery = [
+    { type: "tool_use", id: "instruments", name: prefix + "get_option_instruments", input: {} },
+    { type: "tool_result", tool_use_id: "instruments", content: JSON.stringify({ data: { instruments: ["A", "B", "C"].map(id => ({ id, state: "active", tradability: "tradable" })) } }) },
+  ];
+  const parse = (content: unknown[]) => parseRobinhoodResearchEvents(JSON.stringify({ message: { content } }), account.at);
+  assert.deepEqual(parse(discovery).errors, []);
+  const requested = parse([...discovery,
+    { type: "tool_use", id: "quote", name: prefix + "get_option_quotes", input: { instrument_ids: ["A", "A"] } },
+    { type: "tool_result", tool_use_id: "quote", is_error: true, content: "broker request failed" },
+  ]);
+  assert.ok(requested.errors.includes("1 requested contracts lacked usable matched quotes"));
+  assert.equal(requested.errors.length, 2);
+});
