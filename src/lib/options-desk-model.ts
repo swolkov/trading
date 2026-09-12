@@ -43,17 +43,23 @@ export function researchSignals(bars: OptionsResearch["bars"], now=Date.now()): 
       reason:breakout||breakdown?"Price cleared the prior 20-session range with the 50/200-day trend aligned.":"Watchlist only. A trend alone is not an entry signal."}];
   });
 }
+// Shared by screening and diagnostics so admin explains the actual research gates.
+export function contractQualityFailures(c: ResearchContract, now = Date.now()): string[] {
+  const r = OPTIONS_DESK_RULES, failures: string[] = [];
+  const dte = (Date.parse(c.expiry + "T00:00:00Z") - now) / 86400000;
+  const mid = (c.bid + c.ask) / 2;
+  if (c.multiplier !== 100) failures.push("Nonstandard contract");
+  if (!(c.bid > 0 && c.ask >= c.bid && c.bidSize >= 1 && c.askSize >= 1)) failures.push("No usable two-sided market");
+  if (c.openInterest < r.minOpenInterest || c.volume < r.minVolume) failures.push("Insufficient liquidity");
+  if (!(mid > 0) || (c.ask - c.bid) / mid * 100 > r.maxSpreadPct) failures.push("Bid/ask spread too wide");
+  if (!(dte >= r.minDte && dte <= r.maxDte)) failures.push("Outside expiration window");
+  if (!Number.isFinite(Date.parse(c.at)) || Date.parse(c.at) > now) failures.push("Invalid quote timestamp");
+  return failures;
+}
 export function screenResearchContracts(data: OptionsResearch, cap: number, buyingPower: number, now=Date.now()): ResearchCandidate[] {
   if (!Number.isFinite(cap)||cap<=0||!Number.isFinite(buyingPower)||buyingPower<=0) return [];
   const rules=OPTIONS_DESK_RULES, signals=researchSignals(data.bars,now), result: ResearchCandidate[]=[];
-  const good=data.contracts.filter(c=>{
-    const dte=(Date.parse(c.expiry+"T00:00:00Z")-now)/86400000;
-    const mid=(c.bid+c.ask)/2;
-    return c.multiplier===100&&c.bid>0&&c.ask>=c.bid&&c.bidSize>=1&&c.askSize>=1
-      && c.openInterest>=rules.minOpenInterest&&c.volume>=rules.minVolume
-      && mid>0&&(c.ask-c.bid)/mid*100<=rules.maxSpreadPct
-      &&dte>=rules.minDte&&dte<=rules.maxDte&&Date.parse(c.at)<=now;
-  });
+  const good=data.contracts.filter(c=>contractQualityFailures(c,now).length===0);
   for (const signal of signals.filter(s=>["20-session breakout","20-session breakdown"].includes(s.setup))) {
     const bull=signal.direction==="bullish", cs=good.filter(c=>c.symbol===signal.symbol);
     const push=(kind:string,long:ResearchContract,short?:ResearchContract)=>{
