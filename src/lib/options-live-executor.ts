@@ -3,7 +3,7 @@
 import {
   OPTIONS_LIVE_ACCOUNT, LIVE_SNAPSHOT_MAX_AGE_MS, prepareOptionsOrder, validateOptionsSnapshot,
   type OptionsLiveIntent, type OptionsLivePolicy, type OptionsBrokerSnapshot,
-  type OwnedOptionsPosition, type NormalizedOptionsOrder, type PreparedOptionsOrder,
+  type OwnedOptionsPosition, type NormalizedOptionsOrder, type PreparedOptionsOrder, type OptionOrderParams,
 } from "@/lib/options-live-policy";
 
 export interface OptionsOrderReview {
@@ -23,6 +23,8 @@ export interface OptionsIntentRecord {
   refId: string; accountNumber: string; action: "open" | "close"; positionId?: string;
   fingerprint: string; state: "submitting" | "unknown" | "accepted" | "settled";
   order?: NormalizedOptionsOrder;
+  canonicalOrder?: OptionOrderParams;
+  intent?: OptionsLiveIntent;
   maxFilledQuantity?: number; // Monotonic evidence; a later zero cannot erase a fill.
 }
 export interface OptionsLiveStore {
@@ -135,7 +137,7 @@ export async function executeOptionsIntent(intent: OptionsLiveIntent, deps: Opti
       if (freshPrepared.fingerprint !== prepared.fingerprint || snapshot.orders.some((o) => o.refId === intent.refId)) throw new Error("order identity changed during review");
       checkReview(review, freshPrepared, policy, snapshot, intent.action, deps.now());
       const record: OptionsIntentRecord = { refId: intent.refId, accountNumber: OPTIONS_LIVE_ACCOUNT,
-        action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting" };
+        action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting", canonicalOrder: structuredClone(prepared.params), intent: structuredClone(intent) };
       // Durable reservation BEFORE the broker call. If the process dies here, zero orders
       // on a later lookup is still unknown, never permission to blindly retry.
       await deps.store.putIntent(record);

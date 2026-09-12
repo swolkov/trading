@@ -77,6 +77,7 @@ export function prepareOptionsOrder(intent: OptionsLiveIntent, policy: OptionsLi
   const active = snapshot.orders.filter((o) => !["filled", "cancelled", "rejected"].includes(o.state));
   if (active.length) fail("outstanding broker orders must resolve first");
   if (intent.action === "open") {
+    if (intent.quantity !== 1) fail("initial live entries allow exactly one contract per leg");
     if (!policy.armed) fail("live entries are disarmed");
     if (!positive(policy.maxLossUsd)) fail("explicit positive maximum loss required");
     if (!fresh(policy.guardianHealthyAtMs, now, LIVE_GUARDIAN_MAX_AGE_MS)) fail("live guardian is not healthy");
