@@ -10,8 +10,8 @@ import {
 } from "@/lib/kraken-margin";
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
-import { MARGIN_USERREF, acquireCloseLock, botOwnership, releaseCloseLock } from "@/lib/margin-executor";
-import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, bookMaxHoldH, bookTrailR, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
+import { MARGIN_USERREF, acquireCloseLock, botOwnership, executeAlert, recoverPendingPyramid, releaseCloseLock } from "@/lib/margin-executor";
+import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, FOUR_H_SEC, bookMaxHoldH, bookTrailR, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, fourHourBarComplete, groupPositionsByOrder, liveContainerFor, managedStopTarget, pyramidAddDue, pyramidBookOf } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
 
@@ -45,7 +45,7 @@ type WatchState = {
   // ordertxid → the paper container's state for a bot position: 1R fixed at entry, the
   // best price reached (from completed 1-min bars), and the last bar scored — exactly the
   // shadow_peak / shadow_stop / shadow_seen_t trio the paper record persists.
-  managed?: Record<string, { oneR: number; peak: number; seenT: number }>;
+  managed?: Record<string, { oneR: number; peak: number; seenT: number; addTriedT?: number }>;   // addTriedT: the 4h bar (open time) a pyramid add was last attempted on
   // consecutive runs the order book read back EMPTY while bot positions existed. A rescue
   // stop on an empty read is placed only on the SECOND such run: a false-empty read with
   // the real attached stop resting at the same level would otherwise pair a reduce-only
@@ -88,9 +88,10 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
     for (const [k, v] of Object.entries(parsed.orphans ?? {})) { const n = num(v); if (n != null && n >= 0) orphans[k] = Math.floor(n); }
     const managed: NonNullable<WatchState["managed"]> = {};
     for (const [k, v] of Object.entries(parsed.managed ?? {})) {
-      const m = v as { oneR?: unknown; peak?: unknown; seenT?: unknown };
-      const oneR = num(m?.oneR), peak = num(m?.peak), seenT = num(m?.seenT);
-      if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT };
+      const m = v as { oneR?: unknown; peak?: unknown; seenT?: unknown; addTriedT?: unknown };
+      const oneR = num(m?.oneR), peak = num(m?.peak), seenT = num(m?.seenT), addTriedT = num(m?.addTriedT);
+      // addTriedT must survive the round trip: it is the "one pyramid attempt per 4h bar" guard.
+      if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}) };
     }
     return {
       state: { ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined },
@@ -458,12 +459,18 @@ export async function GET(request: Request) {
   let protectOk = false;
   try {
     if (stateUnreliable) throw new Error("skip: state unreadable");
-    const ownership = await botOwnership();
+    let ownership = await botOwnership();
     if (ownership.ledgerCorrupt && shouldFire(state, "ledger-corrupt")) {
       await sendNotification(`🚨 kraken_margin_bot_txids is CORRUPT (unparseable). Positions recorded only there are NOT being protected or managed. Repair it, or adopt them via kraken_margin_adopt_txids.`, "margin_urgent").catch(() => {});
       state.alerts["ledger-corrupt"] = new Date().toISOString();
     }
     const positionsAll = await getKrakenMarginPositions();
+    // A pyramid add whose ledger write was lost is recovered from its write-ahead marker BEFORE
+    // books are formed — otherwise it is "not ours" and its stop reads as a duplicate below.
+    try {
+      const recovered = await recoverPendingPyramid(positionsAll, ownership);
+      if (recovered) { sent.push("pyramid-recovered"); ownership = await botOwnership(); }
+    } catch (e) { errors.push(`pyramid recovery: ${String(e).slice(0, 80)}`); }
     const positionsUnreliable = positionsAll.length === 0 && (marginUsedNow == null || marginUsedNow > 0);
     const managedPrev = state.managed ?? {};
     const managedNext: NonNullable<WatchState["managed"]> = {};
@@ -495,7 +502,10 @@ export async function GET(request: Request) {
       let allCovered = !withhold;
 
       for (const [bookKey, grp] of books) {
-        const stateKey = `${bookKey}|${grp.map((g) => g.ordertxid).sort().join("+")}`;
+        // A PYRAMID book (parent + its ledgered add-ons) keeps the PARENT's state key, so its
+        // 1R, peak and bar cursor survive the add instead of restarting from a 12h bar window.
+        const pyr = pyramidBookOf(grp, (t) => ownership.addOnOf(t));
+        const stateKey = `${bookKey}|${pyr ? pyr.parent.ordertxid : grp.map((g) => g.ordertxid).sort().join("+")}`;
         // Absolute budget: a book's work (30s lock wait + reads + one apply) must finish
         // before the route is killed mid-order. Books left over are not "covered" this run.
         if (Date.now() - routeStartedAt > 200_000) {
@@ -509,9 +519,12 @@ export async function GET(request: Request) {
         const side = grp[0].side;
         const pairRaw = grp[0].pair;
         const vol = grp.reduce((s, g) => s + g.vol, 0);
-        const entryPrice = vol > 0 ? grp.reduce((s, g) => s + g.entryPrice * g.vol, 0) / vol : grp[0].entryPrice;
+        // A PYRAMID book is one position on the PARENT's entry and R — the replay's rule — and
+        // is ratcheted like a single-order book. Any other multi-order group is stacked:
+        // protected and time-stopped, never ratcheted.
+        const entryPrice = pyr ? pyr.parent.entryPrice : vol > 0 ? grp.reduce((s, g) => s + g.entryPrice * g.vol, 0) / vol : grp[0].entryPrice;
         const leverage = Math.max(...grp.map((g) => g.leverage));
-        const stacked = grp.length > 1;
+        const stacked = grp.length > 1 && !pyr;
         const openedTimes = grp.map((g) => new Date(g.openedAt).getTime());
         const oldestMs = openedTimes.every(Number.isFinite) ? Math.min(...openedTimes) : NaN;
         const newestOpenedAt = grp.every((g) => g.newestOpenedAt) ? grp.map((g) => g.newestOpenedAt).sort()[grp.length - 1] : "";
@@ -566,8 +579,11 @@ export async function GET(request: Request) {
         // else the signed resting distance (single-order books), else the shared clamp.
         let oneR = prev?.oneR ?? 0;
         if (!(oneR > 0)) {
-          const perOrder = grp.map((g) => { const f = ownership.stopFracOf(g.ordertxid); return f && f > 0 ? g.entryPrice * f : 0; }).filter((x) => x > 0);
-          if (perOrder.length === grp.length) oneR = Math.min(...perOrder);
+          // A pyramid book's R is the PARENT's: an add-on's ledgered stopFrac is its distance
+          // to the resting stop at the time of the add, not a risk unit.
+          const rUnits = pyr ? [pyr.parent] : grp;
+          const perOrder = rUnits.map((g) => { const f = ownership.stopFracOf(g.ordertxid); return f && f > 0 ? g.entryPrice * f : 0; }).filter((x) => x > 0);
+          if (perOrder.length === rUnits.length) oneR = Math.min(...perOrder);
         }
         const fixedNow = ourStopsOnBook().filter((o) => o.ordertype === "stop-loss" && o.price > 0);
         if (!(oneR > 0) && !stacked && fixedNow.length) {
@@ -575,7 +591,7 @@ export async function GET(request: Request) {
           if (restingDist > 0 && restingDist / entryPrice >= 0.001 && restingDist / entryPrice <= 0.5) oneR = restingDist;
         }
         if (!(oneR > 0)) oneR = entryPrice * clampLiveStopFrac(stopCfgPct, leverage);
-        managedNext[stateKey] = { oneR, peak, seenT };
+        managedNext[stateKey] = { oneR, peak, seenT, ...(prev?.addTriedT ? { addTriedT: prev.addTriedT } : {}) };
         const initialStop = side === "long" ? entryPrice - oneR : entryPrice + oneR;
         const bestResting = fixedNow.length ? (side === "long" ? Math.max(...fixedNow.map((o) => o.price)) : Math.min(...fixedNow.map((o) => o.price))) : null;
         // The managed level is computed from the AUTHORISED stop and the peak — never from
@@ -853,7 +869,51 @@ export async function GET(request: Request) {
           continue;
         }
         // 3) RECONCILE to the managed level (this IS the ratchet for single-order books).
-        if (!(await reconcile(vol, target, "managed cover"))) allCovered = false;
+        const coveredNow = await reconcile(vol, target, "managed cover");
+        if (!coveredNow) allCovered = false;
+        // 4) PYRAMID (swing-pyr): one risk-sized add when a COMPLETED 4h bar closed at or
+        // beyond +addAtR from the first unit's entry. Only on a single-tranche book of ours
+        // whose sleeve's container says so, only once per book, once per 4h bar attempted,
+        // and only when the book is covered at its managed level this run — the add's own
+        // stop is placed at that level. The executor re-checks everything (armed, source,
+        // breaker, day cap, the book is exactly ours, sizing to the stop, margin floor).
+        // An orphaned add-on (its parent closed by hand) is a single tranche too — never a base
+        // for another add.
+        if (coveredNow && grp.length === 1 && !pyr && ownership.addOnOf(grp[0].ordertxid) == null && !fifoBlocked && !withhold && px > 0) {
+          const src = ownership.sourceOf(grp[0].ordertxid);
+          const container = liveContainerFor(src);
+          if (container?.addAtR != null && container.addAtR > 0) {
+            try {
+              const nowSec = Math.floor(Date.now() / 1000);
+              // Bars that CLOSED after the fill, exactly as the replay walks from bar i+1 and paper
+              // walks 1-min bars from the fill: the signal's own 4h bar closed before the fill
+              // (the scan runs ~2 min after the close) and is excluded; the very next 4h bar
+              // opened before the fill but closes after it, and is the bar most likely to add.
+              const h4 = (await getKrakenOHLC(publicPair, 240)).filter((b) => fourHourBarComplete(b.t, nowSec) && (b.t + FOUR_H_SEC) * 1000 > oldestMs);
+              const last = h4.length ? h4[h4.length - 1] : null;
+              const tried = managedNext[stateKey]?.addTriedT ?? prev?.addTriedT ?? 0;
+              if (last && last.t > tried) {
+                const closeR = (side === "long" ? last.c - entryPrice : entryPrice - last.c) / oneR;
+                if (pyramidAddDue(container.addAtR, closeR, false)) {
+                  managedNext[stateKey] = { ...(managedNext[stateKey] ?? { oneR, peak, seenT }), addTriedT: last.t };
+                  // The add's stop = where the book's cover rests now: the better of the managed
+                  // target and the best resting stop (never looser than what is already there).
+                  const stopLevel = bestResting != null && (side === "long" ? bestResting > target : bestResting < target) ? bestResting : target;
+                  const r = await executeAlert({
+                    symbol: `${pairBase(pairRaw)}/USD`, side: side === "long" ? "buy" : "sell", leverage,
+                    source: src ?? undefined, scoredConviction: "high", deadlineMs: routeStartedAt + maxDuration * 1000 - 20_000,
+                    note: `pyramid add: 4h close ${last.c} = +${closeR.toFixed(2)}R from ${entryPrice}`,
+                    // riskUsd = what the FIRST unit risks at its authorised stop (vol × its R), the
+                    // same anchor paper sizes its add with — not today's risk % of today's equity.
+                    pyramid: { parentTxid: grp[0].ordertxid, stopLevel, unitNotional: grp[0].vol * grp[0].entryPrice, riskUsd: grp[0].vol * oneR },
+                  });
+                  sent.push(`pyramid-${r.executed ? "added" : "refused"}-${pairRaw}`);
+                  await sendNotification(`${r.executed ? "🔺" : "▫️"} ${pairRaw} ${side}: PYRAMID add ${r.executed ? "PLACED" : "refused"} on the 4h close at ${last.c} (+${closeR.toFixed(2)}R) — ${r.note.slice(0, 220)}`, r.executed ? "margin_live" : "margin_urgent").catch(() => {});
+                }
+              }
+            } catch (e) { errors.push(`${pairRaw}: pyramid check failed (${String(e).slice(0, 80)})`); }
+          }
+        }
         } catch (err) {
           allCovered = false;
           errors.push(`protect/exit ${bookKey}: ${String(err).slice(0, 120)}`);

@@ -19,6 +19,7 @@ import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, po
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { pairBase } from "@/lib/kraken-pairs";
 import { dailyLossCapUsd } from "@/lib/margin-live-risk";
+import { botOwnership } from "@/lib/margin-executor";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -45,17 +46,23 @@ export interface LiveFill {
 }
 
 /** Match each live-traded paper row to its Kraken fills. Entry = the trades on our order
- *  txid; exit = the next closing fills on the same pair after it, FIFO, never reused. */
-export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[]): LiveFill[] {
+ *  txid PLUS any pyramid add-on ledgered against it (`addOnOf`, from the ownership ledger) —
+ *  paper's P&L for a swing-pyr row includes its add, so live's must too, or the divergence
+ *  referee reads a paying pyramid as "live under-earns" and demotes it; exit = the next
+ *  closing fills on the same pair after it, FIFO, never reused, for the COMBINED volume. */
+export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf: (ordertxid: string) => string | null = () => null): LiveFill[] {
   const byTime = [...trades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
   const consumed = new Map<string, number>();   // trade txid → volume already allocated
   const out: LiveFill[] = [];
   const sortedRows = [...rows].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
   for (const r of sortedRows) {
-    const entries = byTime.filter((t) => t.ordertxid === r.liveTxid);
+    const entries = byTime.filter((t) => t.ordertxid === r.liveTxid || addOnOf(t.ordertxid) === r.liveTxid);
     const vol = entries.reduce((s, t) => s + t.vol, 0);
     if (!(vol > 0)) continue;
     const cost = entries.reduce((s, t) => s + t.cost, 0);
+    // Paper is rescaled by the FIRST unit's size (its notional is the first unit's); the add is
+    // inside both P&Ls already.
+    const parentCost = entries.filter((t) => t.ordertxid === r.liveTxid).reduce((s, t) => s + t.cost, 0) || cost;
     const realEntry = cost / vol;
     const entryFee = entries.reduce((s, t) => s + t.fee, 0);
     const entryAt = entries[0].time;
@@ -82,7 +89,7 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[]): LiveFi
     const realNet = realExit != null ? (side === "long" ? (realExit - realEntry) : (realEntry - realExit)) * vol - entryFee - exitFee : null;
     const signal = r.markPrice != null && r.markPrice > 0 ? (r.side === "buy" ? r.markPrice / (1 + MODEL_CHASE_BP / 1e4) : r.markPrice / (1 - MODEL_CHASE_BP / 1e4)) : null;
     const entrySlipBp = signal ? (side === "long" ? realEntry / signal - 1 : 1 - realEntry / signal) * 1e4 : null;
-    const paperPnlAtLiveSize = r.shadowPnl != null && r.paperNotional != null && r.paperNotional > 0 ? r.shadowPnl * (cost / r.paperNotional) : null;
+    const paperPnlAtLiveSize = r.shadowPnl != null && r.paperNotional != null && r.paperNotional > 0 ? r.shadowPnl * (parentCost / r.paperNotional) : null;
     out.push({
       rowId: r.id, source: r.source ?? "manual", symbol: r.symbol, side, liveTxid: r.liveTxid,
       signalPrice: signal, paperEntry: r.markPrice, paperExit: r.shadowExit, paperPnl: r.shadowPnl, paperFees: r.shadowFees, paperReason: r.shadowReason,
@@ -228,10 +235,14 @@ export async function loadLiveFills(): Promise<LiveFill[]> {
   const trades = await prisma.$queryRawUnsafe<{ txid: string; ordertxid: string; pair: string; time: Date; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string }[]>(
     `SELECT txid, ordertxid, pair, time, type, price, cost, fee, vol, margin, posstatus FROM kraken_my_trades WHERE time >= $1 ORDER BY time`, since,
   );
+  // The ownership ledger names each pyramid add-on's parent; without it an add's fills would
+  // be matched to nothing and its close would be mis-attributed.
+  const own = await botOwnership().catch(() => null);
   return matchLiveFills(
     rows.map((r) => ({ id: r.id, time: r.time.toISOString(), symbol: r.symbol, side: r.side, source: r.source, leverage: r.leverage, markPrice: r.mark_price, shadowStatus: r.shadow_status, shadowExit: r.shadow_exit, shadowPnl: r.shadow_pnl, shadowFees: r.shadow_fees, shadowReason: r.shadow_reason, shadowResolvedAt: r.shadow_resolved_at?.toISOString() ?? null, liveTxid: r.live_txid,
       paperNotional: r.mark_price != null && r.mark_price > 0 ? positionNotional(r.source, r.leverage ?? 1, r.mark_price, refEquity, paperRisk) : null })),
     trades.map((t) => ({ ...t, time: t.time.toISOString(), price: t.price ?? 0, cost: t.cost ?? 0, fee: t.fee ?? 0, vol: t.vol ?? 0, margin: t.margin ?? 0, posstatus: t.posstatus ?? "" })),
+    (ordertxid) => own?.addOnOf(ordertxid) ?? null,
   );
 }
 

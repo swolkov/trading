@@ -78,6 +78,7 @@ import {
   parseLiveRiskBasePct,
   pairHasExposure,
   liveContainerFor,
+  pyramidAddNotional,
   MAX_LIVE_POSITIONS,
   MIN_ENTRY_MARGIN_LEVEL,
   dailyLossCapUsd,
@@ -113,7 +114,22 @@ export interface AlertOrder {
   // could land after the route is killed is an accepted order nobody owns — so an entry is
   // refused unless there is time to send it AND record it.
   deadlineMs?: number;
+  // INTERNAL (guardian) ONLY — a PYRAMID add onto a book the bot already holds. The guardian
+  // sets it when the sleeve's container says addAtR and a completed 4h bar closed beyond it.
+  // The add is sized to `stopLevel` (the book's managed stop, where its cover rests) so the
+  // book's worst case stays one R, capped at the first unit's notional, and ledgered as an
+  // add-on of `parentTxid`. Its attached stop is placed AT stopLevel, not entry − stop%.
+  // The webhook's explicit field list never populates this.
+  pyramid?: { parentTxid: string; stopLevel: number; unitNotional: number; riskUsd: number };
 }
+// WRITE-AHEAD MARKER for a pyramid add: set under the exec lock immediately before the add is
+// sent, read by the next add's gate. Two guardian runs can overlap (5-min cron, 300s budget),
+// and OpenPositions can lag a fill by a call or two — so the second run could see one
+// position, no add-on, no resting entry, and add AGAIN (a ~2R book). The exec lock serialises
+// the calls; this marker makes the second one refuse. The ledger's addOnOf takes over once
+// the position is visible. 15 minutes covers the lag with margin.
+const PYRAMID_PENDING_KEY = "kraken_margin_pyramid_pending";
+const PYRAMID_PENDING_MS = 15 * 60_000;
 
 export interface ExecResult {
   executed: boolean;
@@ -149,14 +165,16 @@ const BOT_TXIDS_KEY = "kraken_margin_bot_txids";
 const BOT_TXID_TTL_MS = 180 * 24 * 3600_000;
 const BOT_TXID_MAX = 2000;
 
-export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number }
+// `addOnOf` marks a PYRAMID tranche: the txid of the first unit it was added to. The guardian
+// manages parent + add-ons as ONE book on the parent's entry and R (not as a stacked book).
+export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string }
 // Returns true only when the entry is durably written. STRICT read: a failed read must
 // never be treated as an empty ledger — writing [B] over a ledger that held A would strip
 // A's ownership (unclosable by alert, unprotected by the guardian). A corrupt existing
 // ledger is backed up, then replaced. `stopFrac` is the entry's authorised 1R, stored so
 // the guardian's managed exit never has to re-derive it from a stop that may already
 // have been ratcheted.
-async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number }): Promise<boolean> {
+async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string }): Promise<boolean> {
   try {
     const raw = await cfgStrict(BOT_TXIDS_KEY);
     const cutoff = Date.now() - BOT_TXID_TTL_MS;
@@ -170,7 +188,7 @@ async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: nu
       }
     }
     const next = prev.filter((e) => e && e.ts > cutoff && e.txid !== txid);
-    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}), ...(meta?.maxHoldH ? { maxHoldH: meta.maxHoldH } : {}), ...(meta?.source ? { source: meta.source } : {}), ...(meta?.trailR && meta.trailR > 0 ? { trailR: meta.trailR } : {}) });
+    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}), ...(meta?.maxHoldH ? { maxHoldH: meta.maxHoldH } : {}), ...(meta?.source ? { source: meta.source } : {}), ...(meta?.trailR && meta.trailR > 0 ? { trailR: meta.trailR } : {}), ...(meta?.addOnOf ? { addOnOf: meta.addOnOf } : {}) });
     await prisma.agentConfig.upsert({
       where: { key: BOT_TXIDS_KEY },
       update: { value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
@@ -202,7 +220,7 @@ export async function botTxids(): Promise<Set<string>> {
 // and managed exit cannot disagree about which positions are the bot's. STRICT reads: a
 // DB failure THROWS rather than reading as "nothing is ours" (which made a close a silent
 // no-op with the wrong reason, and would leave adopted positions unprotected).
-export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null; maxHoldHOf: (ordertxid: string) => number | null; sourceOf: (ordertxid: string) => string | null; trailROf: (ordertxid: string) => number | null }> {
+export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null; maxHoldHOf: (ordertxid: string) => number | null; sourceOf: (ordertxid: string) => string | null; trailROf: (ordertxid: string) => number | null; addOnOf: (ordertxid: string) => string | null }> {
   const raw = await cfgStrict(BOT_TXIDS_KEY);
   const adoptRaw = (await cfgStrict("kraken_margin_adopt_txids")) ?? "";
   const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
@@ -211,6 +229,7 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
   const maxHoldH = new Map<string, number>();
   const source = new Map<string, string>();
   const trailR = new Map<string, number>();
+  const addOnOf = new Map<string, string>();
   let ledgerCorrupt = false;
   if (raw) {
     // A corrupt ledger must not take the ADOPTION list and the emergency override down
@@ -225,6 +244,7 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
         if (e.txid && e.maxHoldH && e.maxHoldH > 0) maxHoldH.set(e.txid, e.maxHoldH);
         if (e.txid && e.source) source.set(e.txid, e.source);
         if (e.txid && e.trailR && e.trailR > 0) trailR.set(e.txid, e.trailR);
+        if (e.txid && e.addOnOf) addOnOf.set(e.txid, e.addOnOf);
       }
     } catch { ledgerCorrupt = true; }
   }
@@ -235,7 +255,53 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
     maxHoldHOf: (ordertxid) => maxHoldH.get(ordertxid) ?? null,
     sourceOf: (ordertxid) => source.get(ordertxid) ?? null,
     trailROf: (ordertxid) => trailR.get(ordertxid) ?? null,
+    addOnOf: (ordertxid) => addOnOf.get(ordertxid) ?? null,
   };
+}
+
+/** The write-ahead marker's shape. `txid` is set once AddOrder answers; `ledgered` once the
+ *  ownership ledger holds it. Recovery acts ONLY on a marker with a txid and ledgered:false. */
+export interface PyramidMarker { parent: string; ts: number; txid?: string; ledgered?: boolean }
+export async function writePyramidMarker(m: PyramidMarker): Promise<void> {
+  const value = JSON.stringify(m);
+  await prisma.agentConfig.upsert({ where: { key: PYRAMID_PENDING_KEY }, update: { value }, create: { key: PYRAMID_PENDING_KEY, value } });
+}
+export async function readPyramidMarker(): Promise<PyramidMarker | null> {
+  const raw = await cfgStrict(PYRAMID_PENDING_KEY);   // throws on a DB failure — callers decide
+  if (!raw) return null;
+  const m = JSON.parse(raw) as Partial<PyramidMarker>;
+  return typeof m.parent === "string" && typeof m.ts === "number" ? { parent: m.parent, ts: m.ts, ...(typeof m.txid === "string" ? { txid: m.txid } : {}), ...(m.ledgered === true ? { ledgered: true } : {}) } : null;
+}
+
+/**
+ * RECOVER A PYRAMID ADD THE LEDGER MISSED. The marker names the add's own order txid (written
+ * the moment AddOrder answered) and whether the ledger holds it. If it does not, and a position
+ * with EXACTLY that ordertxid is open on the parent's pair+side, ledger it as the parent's
+ * add-on with the parent's container, so the guardian manages the book as one pyramid instead
+ * of cancelling the add's stop as a duplicate. It never matches on "a position that is not
+ * ours" — that would be Spencer's next manual buy. Called by the guardian each run; returns a
+ * note when it recovered something.
+ */
+export async function recoverPendingPyramid(
+  positions: { ordertxid: string; id: string; pair: string; side: string; openedAt: string }[],
+  own: Awaited<ReturnType<typeof botOwnership>>,
+): Promise<string | null> {
+  let marker: PyramidMarker | null = null;
+  try { marker = await readPyramidMarker(); } catch { return null; }
+  if (!marker || marker.ledgered || !marker.txid || Date.now() - marker.ts > 6 * 3600_000) return null;
+  const { parent: parentTxid, txid } = marker;
+  if (own.ledger.has(txid)) { await writePyramidMarker({ ...marker, ledgered: true }).catch(() => {}); return null; }   // ledgered after all
+  const parent = positions.find((p) => p.ordertxid === parentTxid && own.isOurs(p));
+  if (!parent) return null;
+  const add = positions.find((p) => p.ordertxid === txid && pairBase(p.pair) === pairBase(parent.pair) && p.side === parent.side);
+  if (!add) return null;
+  const meta = { maxHoldH: own.maxHoldHOf(parent.ordertxid) ?? undefined, source: own.sourceOf(parent.ordertxid) ?? undefined, trailR: own.trailROf(parent.ordertxid) ?? undefined, addOnOf: parent.ordertxid };
+  const ok = await recordBotEntry(txid, parent.pair, meta);
+  if (!ok) return null;
+  await writePyramidMarker({ ...marker, ledgered: true }).catch(() => {});
+  const note = `recovered pyramid add ${txid} on ${parent.pair} as an add-on of ${parent.ordertxid} from the write-ahead marker`;
+  await sendNotification(`🛠 ${parent.pair}: ${note}. The book now manages as one pyramid.`, "margin_live").catch(() => {});
+  return note;
 }
 
 // THE CLOSE LOCK — shared by every path that flattens or re-covers a book (webhook close,
@@ -414,7 +480,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           return { executed: false, validated: false, note: `close not attempted: ownership ledger unreadable — retry` };
         }
         // Authorised to flatten the pair regardless of ownership: proceed as if nothing is ours.
-        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null, sourceOf: () => null, trailROf: () => null };
+        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null, sourceOf: () => null, trailROf: () => null, addOnOf: () => null };
       }
       // ONE-SHOT AND PAIR-SCOPED. Sticky, an emergency flag set once would silently flatten
       // Spencer's manual book on every later close for that pair. Global, it would be burned
@@ -726,7 +792,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   let addOrderSent = false;
   let sentAtSec = 0;
   let stopPctSent = 0;                       // the stop distance this entry was sized with
-  let ledgerMeta: { maxHoldH?: number; source?: string; trailR?: number } = {};
+  let ledgerMeta: { maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string } = {};
   let dayStateRef: DayState | null = null;   // so a recovered fill still counts toward the day
   try {
     // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
@@ -736,7 +802,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (dayState.entries >= maxPerDay) {
       return { executed: false, validated: false, note: `entry refused: ${dayState.entries}/${maxPerDay} trades already today` };
     }
-    const cooldownMin = Math.max(0, await cfgNum("kraken_margin_cooldown_min", 30));
+    // A pyramid add is the SAME trade pressing on, not a new one: it counts toward the day's
+    // entries (above) but is not held back by the between-trades cooldown.
+    const pyramid = alert.pyramid ?? null;
+    const cooldownMin = pyramid ? 0 : Math.max(0, await cfgNum("kraken_margin_cooldown_min", 30));
     if (dayState.lastEntryIso && Date.now() - new Date(dayState.lastEntryIso).getTime() < cooldownMin * 60_000) {
       const waited = Math.round((Date.now() - new Date(dayState.lastEntryIso).getTime()) / 60_000);
       return { executed: false, validated: false, note: `entry refused: cooldown (${waited}/${cooldownMin} min since last entry)` };
@@ -843,7 +912,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // in that state the desk does not know its own configuration — so it takes the smallest
     // number of positions that still lets it trade, rather than the largest it is allowed.
     const maxPositions = Math.min(MAX_LIVE_POSITIONS, Math.max(1, await cfgNum("kraken_margin_max_positions", 1)));
-    if (exposureCount >= maxPositions) {
+    // A pyramid add does not take a slot — it presses the slot the book already holds — so the
+    // count gate is skipped for it; its OWN gate is below (the book must be exactly ours).
+    if (!pyramid && exposureCount >= maxPositions) {
       return { executed: false, validated: false, note: `entry refused: ${exposureCount} positions+resting orders already (max ${maxPositions})` };
     }
     const allowStacking = (await cfg("kraken_margin_allow_stacking")) === "true";
@@ -864,11 +935,45 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       return { executed: false, validated: false, note: "positions read empty while margin is in use (or unreadable) — failing closed rather than risk netting against an existing position" };
     }
     const conflicting = openPositions.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
+    // THE PYRAMID'S OWN GATE. The pair's exposure must be exactly the bot's book this add
+    // belongs to: every position on the pair is ours, on the alert's side, and one of them
+    // is the parent; no add-on exists yet (one add per book, ever); no entry order of ours is
+    // resting on the pair (an add whose response was lost is still an add). Anything else —
+    // a manual position (FIFO would let our stop reduce Spencer's), a position of ours the
+    // ledger cannot vouch for, an opposing side — refuses. The generic netting guard below is
+    // then skipped: this gate is stricter than it, not looser.
+    if (pyramid) {
+      if (alert.side !== "buy" && alert.side !== "sell") return { executed: false, validated: false, note: "pyramid add refused: side must be buy or sell" };
+      const own = await botOwnership();
+      const wantSide = alert.side === "buy" ? "long" : "short";
+      const notOurs = conflicting.filter((p) => !own.isOurs(p));
+      const wrongSide = conflicting.filter((p) => p.side !== wantSide);
+      const parent = conflicting.find((p) => p.ordertxid === pyramid.parentTxid);
+      const addOns = conflicting.filter((p) => own.addOnOf(p.ordertxid) != null);
+      const restingEntries = ourEntryOrders.filter((o) => pairMatchesSymbol(o.pair, alert.symbol));
+      // The write-ahead marker (see PYRAMID_PENDING_KEY): an add sent for this parent in the
+      // last 15 minutes that the positions read may not show yet. STRICT read — unreadable
+      // means "maybe pending", and a maybe is a refusal here.
+      let pending: PyramidMarker | null = null;
+      try { pending = await readPyramidMarker(); }
+      catch { return { executed: false, validated: false, note: "pyramid add refused: could not read the pending-add marker — failing closed" }; }
+      const pendingHere = pending?.parent === pyramid.parentTxid && Date.now() - pending.ts < PYRAMID_PENDING_MS;
+      const why = !conflicting.length ? "no position on the pair"
+        : notOurs.length ? `${notOurs.length} position(s) on the pair are NOT the bot's`
+        : wrongSide.length ? "a position on the other side"
+        : !parent ? `parent ${pyramid.parentTxid} not found on the pair`
+        : own.addOnOf(pyramid.parentTxid) ? "the named parent is itself an add-on"
+        : addOns.length ? "the book already has an add-on (one add per book)"
+        : restingEntries.length ? `${restingEntries.length} entry order(s) of ours still resting on the pair`
+        : pendingHere ? "an add for this parent was sent in the last 15 minutes (positions may not show it yet)"
+        : null;
+      if (why) return { executed: false, validated: false, note: `pyramid add refused: ${why}` };
+    }
     // ALL our resting orders count — stops included. A bot stop resting on a pair with no
     // position is by definition stranded (the guardian's sweep needs two runs), and a new
     // opposing entry inside that window would be DOUBLED when the old stop fired — as an
     // unowned, stop-less position. Refusing entry is strictly safe.
-    if (!allowStacking && pairHasExposure(
+    if (!pyramid && !allowStacking && pairHasExposure(
       alert.symbol,
       openPositions.map((p) => p.pair),
       ourOrders.map((o) => o.pair),
@@ -911,21 +1016,27 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // sleeve scored with a wider stop (tsmom is 8%) would have been run tighter than its
     // paper record — the container drift the Sep 5 audit closed, re-entering through the
     // leverage door. Drop leverage until the scored stop fits instead.
-    const leverage = leverageThatFitsStop(container.stopPct, leverageRaw);
-    const stopPct = clampLiveStopFrac(container.stopPct, leverage);
+    // A pyramid add only exists for a container that says so — the guardian checks the same
+    // thing, and this is the layer that holds if it is ever called with anything else.
+    if (pyramid && !(container.addAtR != null && container.addAtR > 0)) {
+      return { executed: false, validated: false, note: `pyramid add refused: ${alert.source}'s container has no addAtR` };
+    }
+    let leverage = leverageThatFitsStop(container.stopPct, leverageRaw);
+    let stopPct = clampLiveStopFrac(container.stopPct, leverage);
     if (Math.abs(stopPct * 100 - container.stopPct) > 1e-9) {
       return { executed: false, validated: false, note: `entry refused: ${alert.source}'s ${container.stopPct}% stop does not survive the leverage clamp even at ${leverage}× (applied ${(stopPct * 100).toFixed(2)}%) — live would not be running the container this sleeve was scored in` };
     }
-    stopPctSent = stopPct;
     // A sleeve's container DEFINES its exit (fixed stop, guardian-managed); the global
     // trailing-stop knob applies only to sources without a container. Otherwise arming
     // swing-lev with kraken_margin_trail_pct set would send a trailing stop while the
     // ledger claims the 4% fixed one.
     const trailPct = 0;   // a container's exit is its fixed stop, guardian-managed; the global trailing knob is retired for entries
-    const makerEntries = container.makerEntries ?? ((await cfg("kraken_margin_maker_entries")) !== "false");
+    // The add is always a MARKET order: the replay chased the 4h close; a post-only bid that
+    // never fills is a pyramid that never happens, silently.
+    const makerEntries = pyramid ? false : (container.makerEntries ?? ((await cfg("kraken_margin_maker_entries")) !== "false"));
     // The trail travels with the entry: the guardian manages this position on the trail its
     // container had when it was opened, not whatever the table says later.
-    ledgerMeta = { maxHoldH: container.maxHoldH, source: alert.source ?? undefined, trailR: container.trailR };
+    ledgerMeta = { maxHoldH: container.maxHoldH, source: alert.source ?? undefined, trailR: container.trailR, ...(pyramid ? { addOnOf: pyramid.parentTxid } : {}) };
     const meta = await getPairMeta(pair);
 
     // The entry reference price: the resting limit for a maker order, else the last trade.
@@ -937,6 +1048,18 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       entryPx = await getKrakenPrice(alert.symbol);
     }
     if (!(entryPx > 0)) return { executed: false, validated: false, note: "no entry price available — skipped" };
+    // THE ADD'S STOP DISTANCE is to the book's resting stop, not the container's %. It is what
+    // the add is sized to (one R to that level) and what its attached stop is placed at. The
+    // level must sit on the protective side of the market by the ratchet minimum, and the
+    // distance must survive the leverage clamp at some rung, or the add is refused.
+    if (pyramid) {
+      const dist = alert.side === "buy" ? (entryPx - pyramid.stopLevel) / entryPx : (pyramid.stopLevel - entryPx) / entryPx;
+      if (!(dist >= 0.001)) return { executed: false, validated: false, note: `pyramid add refused: the book's stop $${pyramid.stopLevel} is not below/above the price $${entryPx} by ≥0.1%` };
+      leverage = leverageThatFitsStop(dist * 100, leverageRaw);
+      stopPct = clampLiveStopFrac(dist * 100, leverage);
+      if (Math.abs(stopPct - dist) > 1e-9) return { executed: false, validated: false, note: `pyramid add refused: ${(dist * 100).toFixed(2)}% to the resting stop does not fit the leverage clamp even at ${leverage}×` };
+    }
+    stopPctSent = stopPct;
 
     // RISK-BASED SIZING: notional capped so a stop-out loses ≤ max_risk_pct of equity.
     //
@@ -973,8 +1096,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     // SIZE = risk × equity ÷ stop, capped at leverage × equity — paper's positionNotional
     // on the REAL account's equity, so dollar size grows with the account automatically.
-    const unclamped = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade);
-    const notional = liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade, health.freeMargin);
+    // PYRAMID: risk × equity ÷ (distance to the resting stop) — pyramidAddNotional, the same
+    // function paper sizes its add with — and never more than the first unit. liveNotional's
+    // formula is that same risk ÷ distance; the caps below (leverage × equity, free margin,
+    // operator cap) then apply exactly as they do to a first entry.
+    const unclamped = pyramid
+      ? Math.min(pyramidAddNotional(pyramid.riskUsd, alert.side === "buy" ? "long" : "short", entryPx, pyramid.stopLevel, pyramid.unitNotional), liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade))
+      : liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade);
+    const notional = Math.min(unclamped, liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade, health.freeMargin));
     if (!(notional > 0)) return { executed: false, validated: false, note: `sizing produced no notional (free margin $${health.freeMargin.toFixed(0)}) — skipped` };
     // Layer 6b: the entry must LEAVE the account above the margin-level floor. Sizing is
     // capped at 90% of free margin, which only guarantees Kraken accepts the order — it
@@ -1005,7 +1134,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       return { executed: false, validated: false, note: `size ${rawVol} below Kraken minimum ${meta.orderMin} after risk cap — skipped` };
     }
     const volume = rawVol.toFixed(meta.lotDecimals);
-    const stopPrice = alert.side === "buy" ? entryPx * (1 - stopPct) : entryPx * (1 + stopPct);
+    // The add's attached stop rests AT the book's level, so both units share one line; the
+    // guardian then dedupes the two stops into one full-volume stop on its next pass.
+    const stopPrice = pyramid ? pyramid.stopLevel : alert.side === "buy" ? entryPx * (1 - stopPct) : entryPx * (1 + stopPct);
     const closeParams: Record<string, string> = trailPct > 0
       ? { "close[ordertype]": "trailing-stop", "close[price]": `+${trailPct.toFixed(2)}%` }
       : { "close[ordertype]": "stop-loss", "close[price]": stopPrice.toFixed(meta.priceDecimals) };
@@ -1041,6 +1172,15 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       return { executed: false, validated: false, note: "entry refused: not enough route time left to send AND record ownership — next scan" };
     }
     let res;
+    // Pyramid: the write-ahead marker goes down BEFORE the order (see PYRAMID_PENDING_KEY). If it
+    // cannot be written, the add is not sent — an unmarked add is what the double-add race needs.
+    if (pyramid && !validate) {
+      try {
+        await writePyramidMarker({ parent: pyramid.parentTxid, ts: Date.now() });
+      } catch (e) {
+        return { executed: false, validated: false, note: `pyramid add refused: could not write the pending-add marker (${String(e).slice(0, 60)}) — not sent` };
+      }
+    }
     sentAtSec = Math.floor(Date.now() / 1000);
     addOrderSent = true;   // from here on, an exception may mean an ACCEPTED order
     try {
@@ -1053,12 +1193,36 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
     const txid = (res.txid as string[] | undefined)?.[0];
     const descr = (res.descr as { order?: string } | undefined)?.order;
+    // Pyramid: the marker now names the add itself. Recovery (recoverPendingPyramid) matches on
+    // THIS txid and nothing else — never on "a position that is not ours", which would be
+    // Spencer's next manual buy on the pair. Best effort: a failed update leaves a marker with
+    // no txid, which recovers nothing and only blocks the same parent for 15 minutes.
+    if (pyramid && !validate && txid) await writePyramidMarker({ parent: pyramid.parentTxid, ts: sentAtSec * 1000, txid, ledgered: false }).catch(() => {});
 
     // Record ownership BEFORE anything else can fail: this txid is how the close path and
     // the guardian's naked-position check know the resulting position is ours rather than
     // Spencer's. A missing entry here makes a close skip that position (safe); it can
     // never cause us to close one that is not ours.
-    const ledgered = !validate && txid ? await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }) : true;
+    let ledgered = !validate && txid ? await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }) : true;
+    // AN UNLEDGERED PYRAMID ADD IS RECOVERED, NEVER "UNWOUND". A tranche cannot be targeted on
+    // Kraken (it nets FIFO on the pair+side — a reduce-only sell of the add's volume would close
+    // the PARENT). And an add the ledger cannot vouch for sits beside the parent's book: not
+    // "ours", so the guardian's next reconcile would cancel its attached stop as a duplicate.
+    // So: retry the ledger write here (a transient DB read error is the usual cause); if it
+    // still fails, the marker (parent, txid, ledgered:false) lets the guardian ledger it with
+    // the parent's container on its next pass. No adoption list: adoption carries no hold or
+    // add-on link, so it would turn the book into a 48h stacked one.
+    if (pyramid && !ledgered && txid) {
+      for (let attempt = 0; attempt < 3 && !ledgered; attempt++) {
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        ledgered = await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta });
+      }
+      if (!ledgered) {
+        await sendNotification(`⚠️ ${pair}: pyramid add ${txid} could not be ledgered after 4 tries. The guardian will ledger it from the write-ahead marker on its next pass (≤5 min); until then its attached stop rests. If that page does not arrive, add {"txid":"${txid}","pair":"${pair}","addOnOf":"${pyramid.parentTxid}"} to kraken_margin_bot_txids by hand.`, "margin_urgent").catch(() => {});
+      }
+    }
+    // Consumed: a ledgered add must never be "recovered" again, and nothing else may be.
+    if (pyramid && !validate && txid && ledgered) await writePyramidMarker({ parent: pyramid.parentTxid, ts: sentAtSec * 1000, txid, ledgered: true }).catch(() => {});
 
     // Count on acceptance (conservative — an unfilled maker rest still consumes a slot,
     // which caps churn; the guardian sweeps unfilled entries). Real executions only.
@@ -1069,7 +1233,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
+      note: `${pyramid ? "PYRAMID ADD " : ""}${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
     };
   } catch (e) {
     if (!addOrderSent) {
@@ -1096,7 +1260,13 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       if (restingEntries.length) {
         const ok: string[] = [];
         const bad: string[] = [];
-        for (const o of restingEntries) { if (await recordBotEntry(o.txid, pair, { stopFrac: stopPctSent || undefined, ...ledgerMeta })) ok.push(o.txid); else bad.push(o.txid); }
+        for (const o of restingEntries) {
+          const done = await recordBotEntry(o.txid, pair, { stopFrac: stopPctSent || undefined, ...ledgerMeta });
+          if (done) ok.push(o.txid); else bad.push(o.txid);
+          // A pyramid add found here gets its txid onto the marker, so the guardian can still
+          // recover it if this ledger write failed.
+          if (ledgerMeta.addOnOf) await writePyramidMarker({ parent: ledgerMeta.addOnOf, ts: sentAtSec * 1000, txid: o.txid, ledgered: done }).catch(() => {});
+        }
         if (dayStateRef) await bumpDayState(dayStateRef);
         await sendNotification(
           bad.length
@@ -1126,7 +1296,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
               && parseFloat(o.vol_exec ?? "0") > 0)
             .map(([txid]) => txid);
           const ledgered: string[] = [];
-          for (const txid of recovered) { if (await recordBotEntry(txid, pair, { stopFrac: stopPctSent || undefined, ...ledgerMeta })) ledgered.push(txid); }
+          for (const txid of recovered) {
+            const done = await recordBotEntry(txid, pair, { stopFrac: stopPctSent || undefined, ...ledgerMeta });
+            if (done) ledgered.push(txid);
+            if (ledgerMeta.addOnOf) await writePyramidMarker({ parent: ledgerMeta.addOnOf, ts: sentAtSec * 1000, txid, ledgered: done }).catch(() => {});
+          }
           recovered = ledgered;
           if (recovered.length && dayStateRef) await bumpDayState(dayStateRef);   // it counts as an entry
         } catch { recovered = []; }

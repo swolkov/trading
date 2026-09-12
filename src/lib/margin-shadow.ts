@@ -14,6 +14,9 @@ import {
   LIVE_RISK_DEFAULT_PCT,
   liveRiskFraction,
   parseLiveRiskBasePct,
+  isFourHourClose,
+  pyramidAddDue,
+  pyramidAddNotional,
 } from "@/lib/margin-live-risk";
 import { RETIRED_AUTO_SOURCES, TWIN_SOURCES } from "@/lib/margin-auto-plans";
 
@@ -71,6 +74,9 @@ export async function ensureShadowColumns(): Promise<void> {
     "source text",                    // which strategy generated it: 'scanner' | 'manual'
     "shadow_unrealized double precision",  // live mark-to-market P&L while open ("if closed now")
     "shadow_fees double precision",        // fee+rollover $ deducted on resolve (for gross-vs-net)
+    "shadow_add_px double precision",      // PYRAMID: the second unit's entry price (null = no add yet)
+    "shadow_add_t double precision",       // epoch secs of the 1-min bar (a 4h close) that triggered the add
+    "shadow_add_notional double precision", // the second unit's notional (risk-sized to the stop)
     "shadow_seen_t double precision",      // epoch secs of the last 1-min bar already evaluated —
                                            // bars are never scored twice, so a ratcheted stop
                                            // can't be retro-applied to wicks it didn't exist for
@@ -156,7 +162,7 @@ export const SWING_REACTIVATED_AT = "2026-09-08T14:55:00Z";
 
 /** The moment after which a sleeve's record tests the rule as it stands today. */
 export function policyCutFor(source: string): string {
-  return source === "swing-lev" || source === "swing-spot" || source === "swing-wide" || source === "swing-lock"
+  return source === "swing-lev" || source === "swing-spot" || source === "swing-wide" || source === "swing-lock" || source === "swing-pyr"
     ? SWING_REACTIVATED_AT
     : POLICY_CUT_AT;
 }
@@ -181,6 +187,7 @@ interface OpenRow {
   id: number; time: Date; symbol: string; side: string; leverage: number | null;
   mark_price: number; shadow_peak: number | null; shadow_stop: number | null;
   shadow_seen_t: number | null; conviction: string | null; source: string | null;
+  shadow_add_px: number | null; shadow_add_t: number | null; shadow_add_notional: number | null;
 }
 
 // Per-strategy exit profile. Fast breakouts cut quickly (tight, leverage-scaled stop, 2-day
@@ -192,6 +199,7 @@ export interface ExitProfile {
   trailR?: number;                              // BASE trail width behind the peak, in R (default 1)
   tightAfterR?: number; tightTrailR?: number;   // once the peak reaches tightAfterR, trail tightTrailR behind it (default 1R)
   launchH?: number; launchMinR?: number;        // failure to launch: still below launchMinR after launchH hours → close
+  addAtR?: number;                              // PYRAMID: one risk-sized add when a 4h bar closes ≥ +addAtR (default: never)
 }
 /**
  * Paper's managed exit as ONE pure function (the guardian mirrors the default form in
@@ -255,6 +263,16 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   // PAPER ONLY — the guardian mirrors a base trail (1R, or a container's trailR) but not the
   // +3R tightening, so this has no live container.
   if (source === "swing-lock") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2, tightAfterR: 3, tightTrailR: 0.5 };
+  // SWING-PYR (registered 2026-09-12). swing-wide's container with ONE addition: when a completed
+  // 4h bar closes at or beyond +1R, a second unit is added at that close (chased like the first),
+  // sized so it risks exactly one R to the stop resting at that moment (pyramidAddNotional), and
+  // the 2R trail then runs on the combined position from the FIRST unit's entry and R. Paired
+  // replay on 88 identical 4h entries (scripts/backtest-variants.ts Q2f): +$125/trade over
+  // swing-wide, t=2.63; adds fired on 40/88; worst trade −$499 vs −$403 (the second unit's fees
+  // and carry — price risk stays one R). Same-notional adds were rejected: on a 2R trail a unit
+  // added at +1.8R with the stop still at breakeven risks ~2R (worst −$694). LIVE-CAPABLE: the
+  // guardian triggers the add and the executor sizes it with the same functions.
+  if (source === "swing-pyr") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2, addAtR: 1 };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
   // the wide 6% control. BOTH RETIRED (Sep 1 / Sep 4). Exit profiles stay so already-open
@@ -389,7 +407,8 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
   ).catch(() => {});
   const { refEquity, maxRiskPct } = await sizingParams();
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
-    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source
+    `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source,
+            shadow_add_px, shadow_add_t, shadow_add_notional
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 500`,
@@ -479,6 +498,14 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     let stopPx = r.shadow_stop ?? entry - dir * oneR;
     let exit: number | null = null;
     let reason = "";
+    // PYRAMID (swing-pyr): the second unit, if one has been added. Persisted on the row so a
+    // later run carries it; sized by the same function live uses, to the stop as it stood
+    // on the 4h close that triggered it. The trail stays on the FIRST unit's entry and R.
+    let add: { px: number; t: number; notional: number } | null =
+      r.shadow_add_px != null && r.shadow_add_px > 0 && r.shadow_add_notional != null && r.shadow_add_notional > 0
+        ? { px: r.shadow_add_px, t: r.shadow_add_t ?? 0, notional: r.shadow_add_notional }
+        : null;
+    const riskUsd = entry > 0 ? notional * (oneR / entry) : 0;   // what the first unit risks at its stop
     // Breakeven once +1R, then trail behind the peak — ratchet only (never loosen). The
     // trail width is the profile's (1R for the record; selective-tight narrows after +2R).
     const ratchet = () => { stopPx = managedStop(dir, entry, peak, stopPx, oneR, profile); };
@@ -493,6 +520,14 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       }
       peak = dir > 0 ? Math.max(peak, b.h) : Math.min(peak, b.l);
       ratchet();
+      // The add fires on a completed 4h CLOSE (the 1-min bar that closes the 4h bar), after
+      // that bar's stop test and ratchet — exactly the replay's order of operations. Chased
+      // 0.1% like the first unit. Only bars the trade has lived through qualify (b.t ≥ tOpen).
+      if (!add && isFourHourClose(b.t) && pyramidAddDue(profile.addAtR, (dir * (b.c - entry)) / oneR, false)) {
+        const px = dir > 0 ? b.c * 1.001 : b.c * 0.999;
+        const n2 = pyramidAddNotional(riskUsd, dir > 0 ? "long" : "short", px, stopPx, notional);
+        if (n2 > 0) add = { px, t: b.t, notional: n2 };
+      }
     }
     if (exit == null && liveBar) {
       // In-progress bar: stop touch only, against the stop as it stood after the last
@@ -529,13 +564,19 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
       const uGross = (dir * (now - entry)) / entry;
       const uRoll = Math.ceil(ageH / 4);
       const uNet = uGross - ENTRY_FEE - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
-      const unrealized = uNet * notional;
+      let unrealized = uNet * notional;
+      if (add) {
+        // The second unit: taker in and out, its own rollover from its own fill time.
+        const addAgeH = Math.max(0, (Date.now() / 1000 - add.t) / 3600);
+        const aGross = (dir * (now - add.px)) / add.px;
+        unrealized += (aGross - TAKER - TAKER - (carry ? Math.ceil(addAgeH / 4) * rollover4h(r.symbol) : 0)) * add.notional;
+      }
       // Still-open guard: an overlapping cron run working from an older SELECT must not
       // overwrite peak/stop on a row the other run has since resolved — shadow_peak
       // feeds the give-back metric and must freeze at resolution.
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5 WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
-        peak, stopPx, unrealized, r.id, nextSeenT,
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5, shadow_add_px=COALESCE(shadow_add_px,$6), shadow_add_t=COALESCE(shadow_add_t,$7), shadow_add_notional=COALESCE(shadow_add_notional,$8) WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
+        peak, stopPx, unrealized, r.id, nextSeenT, add?.px ?? null, add?.t ?? null, add?.notional ?? null,
       );
       continue;
     }
@@ -546,16 +587,23 @@ export async function evaluateShadowSignals(): Promise<ShadowResolution[]> {
     // Spot swings (carry=false) pay NO rollover — nothing is borrowed.
     const feeFrac = ENTRY_FEE + TAKER + (carry ? rollPeriods * rollover4h(r.symbol) : 0);
     const netPct = grossPct - feeFrac;
-    const pnl = netPct * notional;
-    const feeDollars = feeFrac * notional;   // the fee drag on this trade (for gross-vs-net)
+    let pnl = netPct * notional;
+    let feeDollars = feeFrac * notional;   // the fee drag on this trade (for gross-vs-net)
+    if (add) {
+      // The second unit exits with the first, at the same price; its own fees and carry.
+      const addAgeH = Math.max(0, (Date.now() / 1000 - add.t) / 3600);
+      const aFeeFrac = TAKER + TAKER + (carry ? Math.ceil(addAgeH / 4) * rollover4h(r.symbol) : 0);
+      pnl += ((dir * (exit - add.px)) / add.px - aFeeFrac) * add.notional;
+      feeDollars += aFeeFrac * add.notional;
+    }
 
     // The walk stops crediting peak/stop at the fatal bar, so the persisted peak is the
     // PRE-stop-out peak — the give-back metric can't credit green that appeared after
     // death. The still-open guard makes overlapping cron runs harmless: whichever run
     // resolves the row first wins, the loser affects 0 rows and reports nothing.
     const affected = await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7 WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
-      exit, pnl, reason, peak, stopPx, r.id, feeDollars,
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7, shadow_add_px=COALESCE(shadow_add_px,$8), shadow_add_t=COALESCE(shadow_add_t,$9), shadow_add_notional=COALESCE(shadow_add_notional,$10) WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
+      exit, pnl, reason, peak, stopPx, r.id, feeDollars, add?.px ?? null, add?.t ?? null, add?.notional ?? null,
     );
     if (affected === 0) continue;
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction, source: r.source });
@@ -693,6 +741,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   "swing-lev": "Leveraged swing — high-conviction 4h/1d longs, 4% / 4d — REACTIVATED Sep 8 (slot-B candidate)",
   "swing-wide": "Swing WIDE TRAIL — swing-lev's trades, trailing 2R behind the peak instead of 1R, 7-day hold — twin (Sep 9), not pooled, live-capable (Sep 12)",
   "swing-lock": "Swing WIDE + LOCK — swing-lev's trades on a 2R trail, locking 0.5R behind the peak once +3R — twin (Sep 11), not pooled, paper only",
+  "swing-pyr": "Swing WIDE + PYRAMID — swing-wide plus one risk-sized add when a 4h bar closes ≥ +1R, 2R trail on both — twin (Sep 12), not pooled, live-capable",
   "swing-spot": "Spot swing — same entries, 1×, 6% / 14d, no rollover — REACTIVATED Sep 8 (spot, not margin-tradeable by the executor)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",

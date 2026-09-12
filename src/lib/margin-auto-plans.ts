@@ -48,7 +48,13 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //                      2R trail is the biggest lever (+$104/trade, t=1.94); the +3R lock
 //                      costs ~$26 of that for a tighter outcome distribution. Forward
 //                      record decides. Paper only.
-export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-lock"] as const;
+//   swing-pyr        — swing-wide plus ONE risk-sized add when a completed 4h bar closes ≥ +1R
+//                      (registered Sep 12 2026). Paired replay Q2f: +$125/trade over swing-wide,
+//                      t=2.63; worst trade −$499 vs −$403 (second unit's fees and carry — price
+//                      risk stays one R because the add is sized to the resting stop). Same-
+//                      notional adds were rejected (worst −$694). Live-capable: the guardian
+//                      triggers the add, the executor sizes it with the same function.
+export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-lock", "swing-pyr"] as const;
 // SELECTIVE-SHORT (registered Sep 8 2026) — NOT a twin: its own signals (high-conviction
 // BREAKDOWNS, 5m/15m, not stretched), opened ONLY while BTC's last complete daily close is
 // BELOW its 20-day average. Every short on the record (37, 11% won, −$5,140) was taken inside
@@ -123,6 +129,7 @@ export function autoShadowPlans(
       plans.unshift({ source: "swing-lev", lev: capped });
       plans.push({ source: "swing-wide", lev: capped });
       plans.push({ source: "swing-lock", lev: capped });
+      plans.push({ source: "swing-pyr", lev: capped });
     }
     return plans;
   }
