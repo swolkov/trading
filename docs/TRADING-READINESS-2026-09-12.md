@@ -25,3 +25,7 @@ Sources: https://databento.com/docs/portal/live-data and https://tradovate.zende
 System Health now includes paper-only futures configuration, paper/live heartbeat reporting, a 75-second process-lease view, separately reported entry authorization, and raw data-source telemetry. Stale/future/malformed heartbeats cannot appear ready. Disabled and unknown modes remain distinct from paper. Source names are not colored as proof of data entitlement. The top status explicitly identifies Kraken so it cannot imply Robinhood is live.
 
 Seven focused offline tests cover these distinctions. Production build and independent reviews are required before release. This health display does not connect a broker, enable execution, certify a license, or establish a profitable strategy.
+
+## Databento retirement correction
+
+After Spencer clarified that Databento is no longer used, both futures_databento_md and live_futures_databento_md were changed from true to false and read back. The leftover databento-sidecar deployment was stopped; Railway readback showed no active deployment. The service configuration was retained. No replacement data subscription was purchased. No broker orders, live arming or risk sizing were changed.
