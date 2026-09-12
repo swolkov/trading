@@ -288,3 +288,12 @@ test("the approved $100 loss cap includes the full round-trip fee reserve", () =
   order.limitPrice = 0.91;
   assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /maximum loss plus fee reserve/);
 });
+
+test("initial live entries cannot increase to multiple contracts", async () => {
+  const f = fixture();
+  const order = intent();
+  order.quantity = 2;
+  const result = await executeOptionsIntent(order, f.deps);
+  assert.equal(result.status, "refused");
+  assert.match(result.reason ?? "", /exactly one contract/);
+});

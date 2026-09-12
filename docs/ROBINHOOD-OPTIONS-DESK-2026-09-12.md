@@ -26,4 +26,4 @@ Complete owner OAuth authorization and verify native MCP sessions against actual
 
 ## Validation
 
-29 offline tests passed, including stale data, completed candles, malformed feeds, fee-inclusive rounding, OAuth state safety, read-only tool boundary, immutable durable recovery identity and existing execution/retirement cases. TypeScript, targeted lint, shell syntax, whitespace and production webpack build passed. Two independent reviewers approved this read-only release after fixes. Tests that overwrite production account snapshots were explicitly excluded.
+30 offline tests passed, including stale data, completed candles, malformed feeds, fee-inclusive rounding, OAuth state safety, read-only tool boundary, immutable durable recovery identity and existing execution/retirement cases. TypeScript, targeted lint, shell syntax, whitespace and production webpack build passed. Two independent reviewers approved this read-only release after fixes. Tests that overwrite production account snapshots were explicitly excluded.
