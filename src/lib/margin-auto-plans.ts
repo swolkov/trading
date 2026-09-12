@@ -39,8 +39,8 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //                      average a 0.93R WIN against a 3.3R best, and most exit on the trailing
 //                      stop: the 1R trail may be cutting the right tail off. selective-tight
 //                      tests a NARROWER trail, so nothing on the desk could answer "are we
-//                      cutting winners short?" with a yes. Paper only — the guardian mirrors
-//                      a 1R trail, so it has no live container.
+//                      cutting winners short?" with a yes. Live-capable from Sep 12 2026 —
+//                      the guardian mirrors a container's trail width (LIVE_CONTAINERS).
 //   swing-lock       — swing-lev's own signals on swing-wide's 2R trail, locking 0.5R
 //                      behind the peak once +3R (registered Sep 11 2026, replacing
 //                      swing-tight before it took a trade). "When we're up a lot, don't

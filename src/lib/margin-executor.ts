@@ -149,14 +149,14 @@ const BOT_TXIDS_KEY = "kraken_margin_bot_txids";
 const BOT_TXID_TTL_MS = 180 * 24 * 3600_000;
 const BOT_TXID_MAX = 2000;
 
-export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number; maxHoldH?: number; source?: string }
+export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number }
 // Returns true only when the entry is durably written. STRICT read: a failed read must
 // never be treated as an empty ledger — writing [B] over a ledger that held A would strip
 // A's ownership (unclosable by alert, unprotected by the guardian). A corrupt existing
 // ledger is backed up, then replaced. `stopFrac` is the entry's authorised 1R, stored so
 // the guardian's managed exit never has to re-derive it from a stop that may already
 // have been ratcheted.
-async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string }): Promise<boolean> {
+async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number }): Promise<boolean> {
   try {
     const raw = await cfgStrict(BOT_TXIDS_KEY);
     const cutoff = Date.now() - BOT_TXID_TTL_MS;
@@ -170,7 +170,7 @@ async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: nu
       }
     }
     const next = prev.filter((e) => e && e.ts > cutoff && e.txid !== txid);
-    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}), ...(meta?.maxHoldH ? { maxHoldH: meta.maxHoldH } : {}), ...(meta?.source ? { source: meta.source } : {}) });
+    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}), ...(meta?.maxHoldH ? { maxHoldH: meta.maxHoldH } : {}), ...(meta?.source ? { source: meta.source } : {}), ...(meta?.trailR && meta.trailR > 0 ? { trailR: meta.trailR } : {}) });
     await prisma.agentConfig.upsert({
       where: { key: BOT_TXIDS_KEY },
       update: { value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
@@ -202,13 +202,15 @@ export async function botTxids(): Promise<Set<string>> {
 // and managed exit cannot disagree about which positions are the bot's. STRICT reads: a
 // DB failure THROWS rather than reading as "nothing is ours" (which made a close a silent
 // no-op with the wrong reason, and would leave adopted positions unprotected).
-export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null; maxHoldHOf: (ordertxid: string) => number | null }> {
+export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null; maxHoldHOf: (ordertxid: string) => number | null; sourceOf: (ordertxid: string) => string | null; trailROf: (ordertxid: string) => number | null }> {
   const raw = await cfgStrict(BOT_TXIDS_KEY);
   const adoptRaw = (await cfgStrict("kraken_margin_adopt_txids")) ?? "";
   const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
   let ledger = new Set<string>();
   const stopFrac = new Map<string, number>();
   const maxHoldH = new Map<string, number>();
+  const source = new Map<string, string>();
+  const trailR = new Map<string, number>();
   let ledgerCorrupt = false;
   if (raw) {
     // A corrupt ledger must not take the ADOPTION list and the emergency override down
@@ -221,6 +223,8 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
       for (const e of entries) {
         if (e.txid && e.stopFrac && e.stopFrac > 0) stopFrac.set(e.txid, e.stopFrac);
         if (e.txid && e.maxHoldH && e.maxHoldH > 0) maxHoldH.set(e.txid, e.maxHoldH);
+        if (e.txid && e.source) source.set(e.txid, e.source);
+        if (e.txid && e.trailR && e.trailR > 0) trailR.set(e.txid, e.trailR);
       }
     } catch { ledgerCorrupt = true; }
   }
@@ -229,6 +233,8 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
     isOurs: (p) => ledger.has(p.ordertxid) || adopted.has(p.ordertxid) || adopted.has(p.id),
     stopFracOf: (ordertxid) => stopFrac.get(ordertxid) ?? null,
     maxHoldHOf: (ordertxid) => maxHoldH.get(ordertxid) ?? null,
+    sourceOf: (ordertxid) => source.get(ordertxid) ?? null,
+    trailROf: (ordertxid) => trailR.get(ordertxid) ?? null,
   };
 }
 
@@ -408,7 +414,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           return { executed: false, validated: false, note: `close not attempted: ownership ledger unreadable — retry` };
         }
         // Authorised to flatten the pair regardless of ownership: proceed as if nothing is ours.
-        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null };
+        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null, sourceOf: () => null, trailROf: () => null };
       }
       // ONE-SHOT AND PAIR-SCOPED. Sticky, an emergency flag set once would silently flatten
       // Spencer's manual book on every later close for that pair. Global, it would be burned
@@ -720,7 +726,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   let addOrderSent = false;
   let sentAtSec = 0;
   let stopPctSent = 0;                       // the stop distance this entry was sized with
-  let ledgerMeta: { maxHoldH?: number; source?: string } = {};
+  let ledgerMeta: { maxHoldH?: number; source?: string; trailR?: number } = {};
   let dayStateRef: DayState | null = null;   // so a recovered fill still counts toward the day
   try {
     // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
@@ -917,7 +923,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // ledger claims the 4% fixed one.
     const trailPct = 0;   // a container's exit is its fixed stop, guardian-managed; the global trailing knob is retired for entries
     const makerEntries = container.makerEntries ?? ((await cfg("kraken_margin_maker_entries")) !== "false");
-    ledgerMeta = { maxHoldH: container.maxHoldH, source: alert.source ?? undefined };
+    // The trail travels with the entry: the guardian manages this position on the trail its
+    // container had when it was opened, not whatever the table says later.
+    ledgerMeta = { maxHoldH: container.maxHoldH, source: alert.source ?? undefined, trailR: container.trailR };
     const meta = await getPairMeta(pair);
 
     // The entry reference price: the resting limit for a maker order, else the last trade.

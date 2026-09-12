@@ -151,8 +151,28 @@ test("swing-wide rides swing-lev's signals and is never pooled with the record",
   assert.ok(TWIN_SOURCES.includes("swing-wide" as never), "twins are excluded from the pooled totals");
   // 5m/15m breakouts belong to the fast family — the wide twin must not appear there.
   assert.ok(!autoShadowPlans("breakout", "5m", { tier: "high", factors: [] }, 5).map((p) => p.source).includes("swing-wide"));
-  // Paper only: the guardian mirrors a 1R trail, so there is no live container to arm.
-  assert.equal(liveContainerFor("swing-wide"), null);
+  // Live-capable from Sep 12: its live container carries the 2R trail the guardian mirrors.
+  assert.deepEqual(liveContainerFor("swing-wide"), { stopPct: 4, maxHoldH: 24 * 7, makerEntries: null, trailR: 2 });
+});
+
+test("the guardian's managed exit on the 2R trail is paper's swing-wide exit, level for level", () => {
+  const wide = exitParams("swing-wide", 2, 100);   // entry 100, oneR = 4
+  const c = liveContainerFor("swing-wide")!;
+  assert.equal(c.trailR, wide.trailR, "the container's trail IS the paper profile's trail");
+  // Longs: every peak from below +1R through +4R, and a pullback after each.
+  for (const peak of [101, 103.9, 104, 106, 108, 108.5, 110, 112, 116]) {
+    assert.equal(managedStopTarget("long", 100, peak, 96, wide.oneR, c.trailR), managedStop(1, 100, peak, 96, wide.oneR, wide), `long peak ${peak}`);
+  }
+  // Shorts mirror.
+  for (const peak of [99, 96.1, 96, 94, 92, 88, 84]) {
+    assert.equal(managedStopTarget("short", 100, peak, 104, wide.oneR, c.trailR), managedStop(-1, 100, peak, 104, wide.oneR, wide), `short peak ${peak}`);
+  }
+  // The dollar shape Spencer asked about: on a 2R trail a +1.24R peak (ETH, Sep 11) sits at
+  // breakeven; a +3R peak keeps +1R; the 1R trail keeps +0.24R and +2R respectively.
+  assert.equal(managedStopTarget("long", 100, 104.96, 96, 4, 2), 100);
+  assert.equal(managedStopTarget("long", 100, 104.96, 96, 4, 1), 100.96);
+  assert.equal(managedStopTarget("long", 100, 112, 96, 4, 2), 104);
+  assert.equal(managedStopTarget("long", 100, 112, 96, 4, 1), 108);
 });
 
 // ── swing-lock (Sep 11 2026): the wide-trail-plus-lock twin ──────────────────────────

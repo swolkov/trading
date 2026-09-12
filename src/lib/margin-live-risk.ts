@@ -1,6 +1,7 @@
 // Shared LIVE risk math — paper scoreboard and the Kraken executor MUST use this
 // module so the "At LIVE sizing" column cannot drift from what would actually be risked.
 // Defaults match the agreed policy: 3% base, conviction 2×/0.5×, 6% ceiling.
+import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 
 export const LIVE_RISK_DEFAULT_PCT = 3;
 /**
@@ -323,15 +324,28 @@ export const LIVE_MAX_HOLD_H = 48;           // = paper MAX_HOLD_H
  * are deliberately absent until the guardian mirrors them. The values here are pinned by
  * test to margin-shadow's exitParams, so paper and live cannot drift apart silently.
  */
-export interface LiveContainer { stopPct: number; maxHoldH: number; makerEntries: boolean | null }   // null = kraken_margin_maker_entries decides
-const FAST: LiveContainer = { stopPct: 3, maxHoldH: 48, makerEntries: false };   // market entries: a post-only bid rarely fills a breakout
+export interface LiveContainer {
+  stopPct: number; maxHoldH: number;
+  makerEntries: boolean | null;   // null = kraken_margin_maker_entries decides
+  // The managed exit's trail width behind the peak, in R — paper's exitParams.trailR. The
+  // guardian reads it per book (managedStopTarget); it is written into the ownership ledger
+  // at entry so a position keeps the trail it was opened under even if this table changes.
+  trailR: number;
+}
+const FAST: LiveContainer = { stopPct: 3, maxHoldH: 48, makerEntries: false, trailR: 1 };   // market entries: a post-only bid rarely fills a breakout
 export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
   selective: FAST, "selective-btc": FAST, "selective-majors": FAST, "selective-short": FAST, roundtrip: FAST,
   // "manual" (raw webhook alerts) is deliberately absent: paper scores it in the default
   // 0.3/leverage container, which the guardian does not mirror — so it cannot be armed.
-  "swing-lev": { stopPct: 4, maxHoldH: 24 * 4, makerEntries: null },
-  tsmom: { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
-  "tsmom-short": { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null },
+  "swing-lev": { stopPct: 4, maxHoldH: 24 * 4, makerEntries: null, trailR: 1 },
+  // SWING-WIDE LIVE (Sep 12 2026). swing-lev's signals and stop with the ONE change the paired
+  // replay found to be the biggest lever on the desk: a 2R trail behind the peak instead of 1R
+  // (+$104/trade, t=1.94 over 88 identical 4h entries) and the 7-day hold that gives it room.
+  // The guardian mirrors it through managedStopTarget's trailR. Judged like every sleeve — the
+  // FORWARD record, against swing-lev on the same signals, decides whether it stays armed.
+  "swing-wide": { stopPct: 4, maxHoldH: 24 * 7, makerEntries: null, trailR: 2 },
+  tsmom: { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null, trailR: 1 },
+  "tsmom-short": { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null, trailR: 1 },
 };
 /**
  * THE SLEEVE AN ARM DEFAULTS TO when the request body names none.
@@ -351,6 +365,15 @@ export function liveContainerFor(source: string | null | undefined): LiveContain
   // Own properties only: "constructor" / "__proto__" pass the arm route's source regex and
   // would otherwise resolve to Object.prototype members and read as armable.
   return Object.hasOwn(LIVE_CONTAINERS, source) ? LIVE_CONTAINERS[source] : null;
+}
+/** The arm route's source rule, in one place: a sane name that is not a retired sleeve. */
+export const ARM_SOURCE_RE = /^[a-z0-9_-]{1,32}$/;
+/**
+ * The sleeves the arm switch offers: every live container that passes the arm route's own
+ * checks (name, not retired). `roundtrip` is the plumbing test's label, not a sleeve.
+ */
+export function armableSources(): string[] {
+  return Object.keys(LIVE_CONTAINERS).filter((s) => ARM_SOURCE_RE.test(s) && !RETIRED_AUTO_SOURCES.has(s) && s !== "roundtrip");
 }
 /**
  * A book's time stop = the shortest hold across its tranches, where a tranche with no
@@ -387,18 +410,40 @@ export function liveNotional(equity: number, riskFrac: number, stopFrac: number,
 
 /**
  * Paper's managed exit, as a pure function the guardian can apply to a real resting stop:
- * once the best price reached is ≥ +1R, the stop is at least breakeven and trails 1R
- * behind the peak; it only ever ratchets in the trade's favour. Returns the stop level
- * that should be resting now (unchanged when no ratchet is due).
+ * once the best price reached is ≥ +1R, the stop is at least breakeven and trails `trailR`
+ * R behind the peak (1R = the record's rule; swing-wide's container says 2R); it only ever
+ * ratchets in the trade's favour. Returns the stop level that should be resting now
+ * (unchanged when no ratchet is due). Same arithmetic as margin-shadow's managedStop with a
+ * base trail and no tightening — pinned to it by test, so paper and live cannot drift.
+ * A wider trail never risks more: the breakeven floor still holds from +1R, so a 2R trail
+ * sits at breakeven until the peak clears +2R and only then rides behind it.
  */
-export function managedStopTarget(side: "long" | "short", entry: number, peak: number, currentStop: number, oneR: number): number {
+export function managedStopTarget(side: "long" | "short", entry: number, peak: number, currentStop: number, oneR: number, trailR = 1): number {
   if (!(entry > 0) || !(oneR > 0) || !Number.isFinite(peak) || !Number.isFinite(currentStop)) return currentStop;
   const dir = side === "long" ? 1 : -1;
   const peakR = (dir * (peak - entry)) / oneR;
   if (peakR < 1) return currentStop;
-  const trail = peak - dir * oneR;
+  const width = Number.isFinite(trailR) && trailR > 0 ? trailR : 1;
+  const trail = peak - dir * oneR * width;
   const candidate = dir > 0 ? Math.max(entry, trail) : Math.min(entry, trail);
   return dir > 0 ? Math.max(currentStop, candidate) : Math.min(currentStop, candidate);
+}
+/**
+ * The trail a BOOK is managed with, from its tranches' ledger entries. A tranche's own
+ * ledgered `trailR` wins (written at entry from its container); a tranche ledgered before
+ * trailR existed falls back to its source's container today; anything else — no source, a
+ * source without a container, or tranches that disagree — is managed on the record's 1R,
+ * never on the widest rule present. Stacked books are not ratcheted at all (no single 1R),
+ * so the disagreement case only ever decides a message, not a stop.
+ */
+export function bookTrailR(tranches: { trailR?: number | null; source?: string | null }[]): number {
+  const each = tranches.map((t) => {
+    if (t.trailR != null && Number.isFinite(t.trailR) && t.trailR > 0) return t.trailR;
+    const c = liveContainerFor(t.source);
+    return c ? c.trailR : 1;
+  });
+  if (!each.length) return 1;
+  return each.every((r) => r === each[0]) ? each[0] : 1;
 }
 
 /**

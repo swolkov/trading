@@ -6,7 +6,7 @@ import { STAGE3_KEY, DEMOTION_KEY, readStage3, readDemotion, loadLiveFills, dive
 import { marginDisplaySnapshot } from "@/lib/kraken-margin";
 import { botOwnership } from "@/lib/margin-executor";
 import { krakenConfigured } from "@/lib/kraken";
-import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd, DEFAULT_ARM_SOURCE } from "@/lib/margin-live-risk";
+import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd, DEFAULT_ARM_SOURCE, ARM_SOURCE_RE, armableSources } from "@/lib/margin-live-risk";
 
 // THE ARM SWITCH — the one deliberate act that lets the executor place real orders.
 // Owner-only (the proxy protects everything outside /api/cron and /api/webhook). Arming
@@ -15,6 +15,12 @@ import { emptyReadIsUnconfirmed, liveContainerFor, dailyLossCapUsd, DEFAULT_ARM_
 // arm/disarm is appended to kraken_margin_arm_log and paged to Slack. Disarming needs no
 // confirmation: it only ever reduces risk (kraken_margin_auto=false; the guardian keeps
 // managing whatever is open).
+//
+// SWITCHING THE SLEEVE while armed ("switch-source", typed word "SWITCH") changes ONE key —
+// kraken_margin_live_sources — and nothing else. Re-arming would also reset per-trade risk to
+// the stage-3 starting base and restart its 20-trade clock, which is not what "run the same
+// money on the 2R trail instead" means. Open positions keep the trail they were opened under
+// (it is ledgered per entry); only NEW entries come from the new sleeve.
 export const dynamic = "force-dynamic";
 
 const ARM_LOG = "kraken_margin_arm_log";
@@ -85,6 +91,7 @@ async function status() {
     marketEntries: c.kraken_margin_maker_entries === "false",
     symbols: c.kraken_margin_symbols ?? null,
     riskPct: parseFloat(c.kraken_margin_live_max_risk_pct ?? "3") || 3,
+    armable: armableSources(),
     ddTripped: c.kraken_margin_disarmed_dd === "true",
     demoted,
     roundTripPassed: rtPassed,
@@ -120,10 +127,29 @@ export async function POST(request: Request) {
     await sendNotification(`⚪ Demotion acknowledged on Live Desk (${d.source}). Still disarmed.`, "margin_live").catch(() => {});
     return Response.json({ ok: true, ...(await status()) });
   }
-  if (action !== "arm") return Response.json({ error: "action must be arm | disarm | acknowledge-demotion" }, { status: 400 });
+  // Change the armed sleeve and NOTHING else. Every check the arm switch makes on a source is
+  // made here too; the arm-only gates (round trip, breaker, demotion) are not re-checked
+  // because they gate the ACT of arming — an armed desk has already passed them, and a
+  // tripped breaker or demotion disarms by itself, which "armed" below then refuses.
+  if (action === "switch-source") {
+    if (String(body.confirm ?? "") !== "SWITCH") return Response.json({ error: "type SWITCH to confirm", ...(await status()) }, { status: 400 });
+    const to = String(body.source ?? "").trim().toLowerCase();
+    if (!ARM_SOURCE_RE.test(to) || RETIRED_AUTO_SOURCES.has(to)) return Response.json({ error: `source "${to}" cannot be armed`, ...(await status()) }, { status: 400 });
+    if (!liveContainerFor(to)) return Response.json({ error: `source "${to}" has no live container (its paper exit is not mirrored by the guardian yet) — it cannot be armed`, ...(await status()) }, { status: 400 });
+    const s = await status();
+    if (!s.armed) return Response.json({ error: "not armed — arm the sleeve you want instead of switching", ...s }, { status: 409 });
+    const from = s.sources.join(",") || "(none)";
+    if (s.sources.length === 1 && s.sources[0] === to) return Response.json({ error: `${to} is already the armed sleeve`, ...s }, { status: 400 });
+    const c = liveContainerFor(to)!;
+    await setKey("kraken_margin_live_sources", to);
+    await appendLog(`SWITCHED live sleeve ${from} → ${to} (kraken_margin_live_sources only; risk ${s.riskPct}% base, ${s.maxPositions} slot(s), ${s.maxTradesPerDay}/day unchanged) — ${c.stopPct}% stop, ${c.trailR}R trail, ${c.maxHoldH}h hold; open positions keep the trail they were opened under — from the admin page`);
+    await sendNotification(`🔁 Kraken margin live sleeve SWITCHED ${from} → ${to} from the admin page. Sizing untouched (${s.riskPct}% base, ${s.riskPct * 2}% high conviction, ${s.maxPositions} slot(s)). New entries: ${c.stopPct}% stop, trail ${c.trailR}R behind the peak, ${c.maxHoldH / 24}-day hold. Anything already open keeps the trail it was opened under.`, "margin_live").catch(() => {});
+    return Response.json({ ok: true, ...(await status()) });
+  }
+  if (action !== "arm") return Response.json({ error: "action must be arm | disarm | switch-source | acknowledge-demotion" }, { status: 400 });
   if (String(body.confirm ?? "") !== "ARM") return Response.json({ error: 'type ARM to confirm', ...(await status()) }, { status: 400 });
   const source = String(body.source ?? DEFAULT_SOURCE).trim().toLowerCase();
-  if (!/^[a-z0-9_-]{1,32}$/.test(source) || RETIRED_AUTO_SOURCES.has(source)) return Response.json({ error: `source "${source}" cannot be armed`, ...(await status()) }, { status: 400 });
+  if (!ARM_SOURCE_RE.test(source) || RETIRED_AUTO_SOURCES.has(source)) return Response.json({ error: `source "${source}" cannot be armed`, ...(await status()) }, { status: 400 });
   if (!liveContainerFor(source)) return Response.json({ error: `source "${source}" has no live container (its paper exit is not mirrored by the guardian yet) — it cannot be armed`, ...(await status()) }, { status: 400 });
   // One position at a time to start: a 3%-risk trade with a 3% stop is notional = equity =
   // 50% of the account as margin at 2×; a second one would use the other half exactly.

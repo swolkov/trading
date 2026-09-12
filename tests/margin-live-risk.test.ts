@@ -176,6 +176,24 @@ test("managedStopTarget reproduces paper's exit: breakeven at +1R, then trail 1R
   assert.equal(managedStopTarget("long", entry, NaN, initial, oneR), initial);
 });
 
+test("managedStopTarget with a wider trail: breakeven floor from +1R still holds, the trail rides trailR behind", () => {
+  const entry = 100, oneR = 4, initial = 96;
+  // 2R (swing-wide's container): +1R → breakeven, +2R → still breakeven, +3R → +1R, +4R → +2R.
+  assert.equal(managedStopTarget("long", entry, 103.9, initial, oneR, 2), initial, "below +1R: unchanged");
+  assert.equal(managedStopTarget("long", entry, 104, initial, oneR, 2), 100, "+1R: breakeven — a wider trail never risks more than the record");
+  assert.equal(managedStopTarget("long", entry, 108, initial, oneR, 2), 100, "+2R: still breakeven on a 2R trail");
+  assert.equal(managedStopTarget("long", entry, 112, initial, oneR, 2), 104, "+3R: 2R behind the peak");
+  assert.equal(managedStopTarget("long", entry, 116, initial, oneR, 2), 108);
+  assert.equal(managedStopTarget("long", entry, 110, 104, oneR, 2), 104, "a pullback never loosens");
+  assert.equal(managedStopTarget("short", entry, 88, 104, oneR, 2), 96, "shorts mirror");
+  assert.equal(managedStopTarget("short", entry, 92, 104, oneR, 2), 100);
+  // The default and junk widths are the record's 1R.
+  assert.equal(managedStopTarget("long", entry, 112, initial, oneR), 108);
+  assert.equal(managedStopTarget("long", entry, 112, initial, oneR, 0), 108);
+  assert.equal(managedStopTarget("long", entry, 112, initial, oneR, NaN), 108);
+  assert.equal(managedStopTarget("long", entry, 112, initial, oneR, -2), 108);
+});
+
 test("stopNeedsRatchet only moves a resting order for a real improvement (≥0.05% of price)", () => {
   assert.equal(stopNeedsRatchet("long", 97, 100, 105), true);
   assert.equal(stopNeedsRatchet("long", 100, 100.01, 105), false);   // 0.01% — not worth an order

@@ -11,7 +11,7 @@ import {
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, releaseCloseLock } from "@/lib/margin-executor";
-import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, bookMaxHoldH, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
+import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, bookMaxHoldH, bookTrailR, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, groupPositionsByOrder, managedStopTarget } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
 
@@ -581,7 +581,11 @@ export async function GET(request: Request) {
         // The managed level is computed from the AUTHORISED stop and the peak — never from
         // whatever stop happens to be resting (a temporary breach guard must not become the
         // permanent target). The planner keeps a resting stop that is already better.
-        const target = stacked ? initialStop : managedStopTarget(side, entryPrice, peak, initialStop, oneR);
+        // The trail width is the book's own: ledgered at entry from its sleeve's container
+        // (swing-wide 2R, everything else 1R); a pre-container tranche reads its source's
+        // container today; unknown or mixed = the record's 1R.
+        const trailR = bookTrailR(grp.map((g) => ({ trailR: ownership.trailROf(g.ordertxid), source: ownership.sourceOf(g.ordertxid) })));
+        const target = stacked ? initialStop : managedStopTarget(side, entryPrice, peak, initialStop, oneR, trailR);
         if (stacked && shouldFire(state, `stacked-${bookKey}`)) {
           await sendNotification(`⚠️ ${pairRaw} ${side}: ${grp.length} bot orders stacked on one pair+side — protected and time-stopped as one book, but NOT ratcheted (no single 1R). Avoid adopting or stacking on a pair the bot holds.`, "margin_urgent").catch(() => {});
           state.alerts[`stacked-${bookKey}`] = new Date().toISOString();
