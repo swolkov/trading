@@ -64,7 +64,7 @@ import { pairMatchesSymbol, pairBase, isUsMarginSymbol, usRetailMaxLeverage, mar
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { getKrakenMarginPositions, getKrakenMarginHealth, listRoundTrips, postedMarginCostsSince } from "@/lib/kraken-margin";
 import { convictionForAlert } from "@/lib/margin-scanner";
-import { bookExposureMatches, entryExposureRefusal, parsePyramidMarker, recoverPyramidWithIO, recoveryBlocksPair, type PyramidMarker, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
+import { bookExposureMatches, entryExposureRefusal, parsePyramidMarker, pyramidAddProvenAbsent, recoverPyramidWithIO, recoveryBlocksPair, type PyramidMarker, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
 import { parseDayState, nextDayReservation, type DayState } from "@/lib/margin-day-state";
 export type { PyramidMarker } from "@/lib/margin-pyramid-recovery";
 import {
@@ -267,6 +267,11 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
 export async function writePyramidMarker(m: PyramidMarker): Promise<void> {
   const value = JSON.stringify(m);
   await prisma.agentConfig.upsert({ where: { key: PYRAMID_PENDING_KEY }, update: { value }, create: { key: PYRAMID_PENDING_KEY, value } });
+}
+/** Empty value = no marker (parsePyramidMarker reads "" as null). Called only on PROOF that a
+ *  failed add never reached the book — see pyramidAddProvenAbsent. */
+export async function clearPyramidMarker(): Promise<void> {
+  await prisma.agentConfig.upsert({ where: { key: PYRAMID_PENDING_KEY }, update: { value: "" }, create: { key: PYRAMID_PENDING_KEY, value: "" } });
 }
 export async function readPyramidMarker(): Promise<PyramidMarker | null> {
   const raw = await cfgStrict(PYRAMID_PENDING_KEY);   // throws on a DB failure — callers decide
@@ -1229,8 +1234,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const descr = (res.descr as { order?: string } | undefined)?.order;
     // Pyramid: the marker now names the add itself. Recovery (recoverPendingPyramid) matches on
     // THIS txid and nothing else — never on "a position that is not ours", which would be
-    // Spencer's next manual buy on the pair. Best effort: a failed update leaves a marker with
-    // no txid, which recovers nothing and only blocks the same parent for 15 minutes.
+    // Spencer's next manual buy on the pair. A marker left WITHOUT a txid (this update failed,
+    // or AddOrder itself was rejected) is "unresolved" to the guardian until the executor proves
+    // the add absent (the catch below) or the operator clears kraken_margin_pyramid_pending.
     if (pyramid && !validate && txid) await writePyramidMarker({ parent: pyramid.parentTxid, ts: sentAtSec * 1000, txid, ledgered: false }).catch(() => {});
 
     // Record ownership BEFORE anything else can fail: this txid is how the close path and
@@ -1276,10 +1282,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // An AddOrder that times out may still have been ACCEPTED — the request succeeded and
     // only the response was lost. Reporting "order failed" would leave Spencer believing
     // nothing happened while a real levered position exists. Look before we say that.
+    let markerCleared = false;
     try {
+      let openOrdersRead = true;
       const [pos, ords] = await Promise.all([
         getKrakenMarginPositions().catch(() => []),
-        krakenOpenOrders().catch(() => []),
+        krakenOpenOrders().catch(() => { openOrdersRead = false; return []; }),
       ]);
       const livePos = pos.filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
       const liveOrd = ords.filter((o) => o.userref === MARGIN_USERREF && pairBase(o.pair) === pairBase(pair));
@@ -1314,9 +1322,12 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       // carries the same userref and must never be ledgered as an entry. Nothing to
       // recover on a validate run — nothing could have been placed.
       let recovered: string[] = [];
+      let closedOrdersRead = false;
+      let filledFound = 0;
       if (!validate) {
         try {
           const closed = await krakenPrivate("ClosedOrders", { userref: String(MARGIN_USERREF), start: String(sentAtSec - 2) });
+          closedOrdersRead = true;
           const entries = Object.entries((closed.closed ?? {}) as Record<string, { descr?: { pair?: string; ordertype?: string; type?: string }; status?: string; opentm?: number; vol_exec?: string }>);
           recovered = entries
             // Filled, or partially filled then cancelled — any executed volume is real exposure.
@@ -1326,6 +1337,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
               && (o.opentm ?? 0) >= sentAtSec - 2
               && parseFloat(o.vol_exec ?? "0") > 0)
             .map(([txid]) => txid);
+          filledFound = recovered.length;   // executed volume exists, ledgered or not
           const ledgered: string[] = [];
           for (const txid of recovered) {
             const done = await recordBotEntry(txid, pair, { stopFrac: stopPctSent || undefined, ...ledgerMeta });
@@ -1339,6 +1351,19 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         await sendNotification(`⚠️ Entry on ${pair} errored after sending, but Kraken confirms it filled (${recovered.join(", ")}) — ledgered; the guardian will protect it. Error: ${String(e).slice(0, 120)}`, "margin_urgent").catch(() => {});
         return { executed: !validate, validated: validate, txid: recovered[0], note: `order errored but was filled and recovered on ${pair}: ${e}` };
       }
+      // A pyramid add whose order was REJECTED (not merely lost) must not leave its write-ahead
+      // marker behind: to the guardian a marker with no order id is unresolved for ever — it
+      // stops managing the parent's book (no trail, no time exit) and, through the protection
+      // stamp, stops every new entry on every pair. Both lookups above succeeded and found
+      // nothing of ours resting and nothing of ours filled since the send: that is the proof.
+      // Only THIS parent's txid-less marker is cleared; one carrying a txid is never touched.
+      const addParent = alert.pyramid?.parentTxid ?? null;
+      if (addParent && !validate && pyramidAddProvenAbsent({ openOrdersRead, closedOrdersRead, restingFound: restingEntries.length, filledFound })) {
+        try {
+          const m = await readPyramidMarker();
+          if (m && !m.txid && m.parent === addParent) { await clearPyramidMarker(); markerCleared = true; }
+        } catch { /* leave it: the guardian reports it and the operator can clear it */ }
+      }
       if (livePos.length) {
         // Last resort. These positions were NOT confirmed as ours — any of them may be
         // Spencer's own. Adoption puts a position under the bot's full container, so the
@@ -1351,7 +1376,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         return { executed: false, validated: validate, note: `order errored, unconfirmed; positions exist on ${pair} — verify manually: ${e}` };
       }
     } catch { /* best-effort confirmation only */ }
-    return { executed: false, validated: validate, note: `order failed: ${e}` };
+    return { executed: false, validated: validate, note: `order failed: ${e}${markerCleared ? " — pyramid add rejected by Kraken, pending-add marker cleared (nothing reached the book)" : ""}` };
   } finally {
     if (pyramidCloseToken) await releaseCloseLock(pyramidCloseToken);
     await releaseExecLock(lockToken_);

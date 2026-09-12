@@ -230,12 +230,12 @@ export interface KrakenCashFlow {
   approximate: boolean;           // true only if transfer-date pricing was unavailable and spot was used
 }
 
-function isUsdAsset(asset: string): boolean {
+export function isUsdAsset(asset: string): boolean {
   const base = asset.replace(/\.[A-Z]+$/, "");   // strip .F / .S (earn / staked) suffixes
   return base === "ZUSD" || base === "USD";
 }
 // Kraken ledger asset codes carry legacy prefixes (XXBT, XETH). Reduce to something Ticker accepts.
-function ledgerAssetToPair(asset: string): string {
+export function ledgerAssetToPair(asset: string): string {
   const base = asset.replace(/\.[A-Z]+$/, "").replace(/^X(?=[A-Z]{3,})/, "");
   return `${base}USD`;
 }

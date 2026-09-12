@@ -114,3 +114,27 @@ test("reservation records each attempted broker entry before any receipt is need
   assert.equal(reserved.entries, 5);
   assert.equal(parseDayState(JSON.stringify(reserved), now).entries, 5, "restart sees consumed allowance even without a broker response");
 });
+
+// A REJECTED add (not a lost one) must not leave a txid-less marker that freezes the desk.
+// The executor may clear it only on proof: both lookups succeeded and found nothing.
+import { pyramidAddProvenAbsent } from "../src/lib/margin-pyramid-recovery";
+
+test("a rejected add is proven absent only when both lookups succeeded and found nothing", () => {
+  assert.equal(pyramidAddProvenAbsent({ openOrdersRead: true, closedOrdersRead: true, restingFound: 0, filledFound: 0 }), true);
+  assert.equal(pyramidAddProvenAbsent({ openOrdersRead: false, closedOrdersRead: true, restingFound: 0, filledFound: 0 }), false);
+  assert.equal(pyramidAddProvenAbsent({ openOrdersRead: true, closedOrdersRead: false, restingFound: 0, filledFound: 0 }), false);
+  assert.equal(pyramidAddProvenAbsent({ openOrdersRead: true, closedOrdersRead: true, restingFound: 1, filledFound: 0 }), false);
+  assert.equal(pyramidAddProvenAbsent({ openOrdersRead: true, closedOrdersRead: true, restingFound: 0, filledFound: 1 }), false);
+});
+
+test("a txid-less marker still blocks its parent's pair and names the fix", async () => {
+  const r = await recoverPyramidWithIO([{ ordertxid: "P1", id: "p", pair: "XBTUSD:BTNL", side: "long" }], {
+    readMarker: async () => ({ parent: "P1", ts: 1_000 }),
+    ledgerCorrupt: false, isOurs: () => true, ledgerHas: () => false, parentOf: () => null,
+    record: async () => true, markLedgered: async () => {},
+  });
+  assert.equal(r.status, "unresolved");
+  assert.equal(recoveryBlocksPair(r, "XBTUSD:BTNL"), true);
+  assert.equal(recoveryBlocksPair(r, "ETHUSD:BTNL"), false);
+  assert.match((r as { reason: string }).reason, /clear kraken_margin_pyramid_pending/);
+});
