@@ -15,11 +15,18 @@ function response(content:unknown):Record<string,unknown>{
 export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().toISOString()):OptionsResearch{
   const result:OptionsResearch={capturedAt,source:"Robinhood MCP",bars:{},contracts:[],scans:[],errors:[]};
   const uses=new Map<string,{name:string;input:Record<string,unknown>}>();
+  const requestedQuotes=new Set<string>();
   const instruments=new Map<string,Record<string,unknown>>(),quotes=new Map<string,Record<string,unknown>>(),scans=new Map<string,NativeScan>();
   for(const line of jsonl.split("\n").filter(Boolean)){
     const event=obj(JSON.parse(line));
     for(const block of rows(obj(event.message).content)){
-      if(block.type==="tool_use")uses.set(text(block.id),{name:text(block.name),input:obj(block.input)});
+      if(block.type==="tool_use"){
+        uses.set(text(block.id),{name:text(block.name),input:obj(block.input)});
+        if(block.name==="mcp__robinhood-trading__get_option_quotes"){
+          const ids=obj(block.input).instrument_ids;
+          if(Array.isArray(ids))for(const id of ids)if(typeof id==="string"&&id)requestedQuotes.add(id);
+        }
+      }
       if(block.type!=="tool_result")continue;
       const use=uses.get(text(block.tool_use_id));if(!use||!use.name.startsWith("mcp__robinhood-trading__"))continue;
       if(block.is_error){result.errors.push(`${use.name}: broker read failed`);continue;}
@@ -62,8 +69,9 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
       ||[contract.delta,contract.iv,contract.theta].some(n=>n!==null&&!Number.isFinite(n))){result.errors.push("Malformed contract or quote rejected");continue;}
     result.contracts.push(contract);
   }
-  const unmatched=instruments.size-result.contracts.length;
-  if(unmatched>0)result.errors.push(`${unmatched} option instruments lacked usable matched quotes`);
+  const matched=new Set(result.contracts.map(c=>c.id));
+  const unmatched=[...requestedQuotes].filter(id=>!matched.has(id)).length;
+  if(unmatched>0)result.errors.push(`${unmatched} requested contracts lacked usable matched quotes`);
   for(const symbol of Object.keys(result.bars))if(!result.contracts.some(c=>c.symbol===symbol))result.errors.push(`${symbol}: no matched option quotes in this collection`);
   result.scans=[...scans.values()];return result;
 }
