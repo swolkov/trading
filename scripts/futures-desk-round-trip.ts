@@ -10,7 +10,7 @@
  */
 import {
   avgFill, cancelDeskOrder, contractExpiry, deskAccount, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
-  isWorking, liquidate, orderItem, placeEntryWithStop,
+  findOrderByClOrdId, isWorking, liquidate, modifyStop, orderItem, placeEntryWithStop, workingCloseOrders,
 } from "../src/lib/tradovate-desk";
 import { cmeOpen, roundToTick, tradePnlUsd } from "../src/lib/futures-desk-rules";
 
@@ -47,6 +47,19 @@ async function main() {
   const orders = await deskOrders();
   const stop = orders.find((o) => o.contractId === c.id && isWorking(o) && o.action === "Sell");
   ok(stop, `protective stop WORKING: #${stop?.id} ${stop?.ordStatus} (oso1Id ${r.stopOrderId ?? "not returned"})`);
+  console.log("   Order entity fields on /order/list:", Object.keys(stop ?? {}).join(", "));
+  ok(r.stopOrderId != null && r.stopOrderId === stop?.id, `placeoso returned the bracket id (oso1Id ${r.stopOrderId}) and it IS the working stop`);
+  const found = await findOrderByClOrdId(clOrdId);
+  ok(found && found.id === r.orderId, `clOrdId recovery: ${clOrdId} → order #${found?.id} (entry was #${r.orderId})`);
+  const wco = await workingCloseOrders(c.id, "Sell");
+  ok(wco.length === 1 && wco[0].id === stop?.id, `workingCloseOrders sees exactly the one stop (${wco.length})`);
+  const newStop = roundToTick(fill.price * 0.975, c.tickSize);
+  await modifyStop(stop!.id, 1, newStop);
+  await sleep(1000);
+  const afterMod = await orderItem(stop!.id);
+  ok(afterMod && isWorking(afterMod), `modifyStop to ${newStop}: still ONE working stop (${afterMod?.ordStatus}), id unchanged`);
+  const wco2 = await workingCloseOrders(c.id, "Sell");
+  ok(wco2.length === 1, `after modify, working close-side orders = ${wco2.length}`);
   const pos = (await deskPositions()).find((p) => p.contractId === c.id);
   ok(pos && pos.netPos === 1, `broker position: ${pos?.netPos} @ ${pos?.netPrice}`);
 

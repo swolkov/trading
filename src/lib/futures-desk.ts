@@ -23,7 +23,7 @@ import {
 import {
   avgFill, cancelDeskOrder, contractExpiry, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
   findOrderByClOrdId, forgetContract, isWorking, liquidate, modifyStop, orderItem, placeEntryWithStop, placeStop, rollGuardDays,
-  type DxOrder,
+  workingCloseOrders, type DxOrder,
 } from "@/lib/tradovate-desk";
 
 const STATE_KEY = "futures_desk_state";
@@ -210,18 +210,40 @@ async function contextNow(s: DeskState): Promise<DeskContext> {
 }
 
 /** Exactly one working stop, or no position. Returns the working stop id, or null when the
- *  position had to be closed because it could not be protected. */
+ *  position had to be closed because it could not be protected.
+ *  Order of preference: the remembered id (polled briefly — an OSO bracket is not visible the
+ *  same instant the entry fills) → any working close-side order on the contract (a stop whose
+ *  response was lost, or the bracket under a different id) → place one → if THAT fails, re-list
+ *  once more (the response may have been lost) → only then close. */
 async function ensureProtected(p: { contractId: number; contract: string; side: Side; qty: number; stopPx: number; stopOrderId: number | null; clOrdId: string; why: string }): Promise<number | null> {
-  if (p.stopOrderId) { const o = await orderItem(p.stopOrderId); if (o && isWorking(o)) return p.stopOrderId; }
   const closeAction = p.side === "long" ? "Sell" : "Buy";
-  const working = (await deskOrders()).filter((o) => o.contractId === p.contractId && isWorking(o) && o.orderType === "Stop" && o.action === closeAction);
+  if (p.stopOrderId) {
+    for (let i = 0; i < 4; i++) {
+      const o = await orderItem(p.stopOrderId);
+      if (o && isWorking(o)) return p.stopOrderId;
+      if (o && (o.ordStatus === "Rejected" || o.ordStatus === "Canceled" || o.ordStatus === "Filled")) break;
+      await new Promise((r) => setTimeout(r, 750));
+    }
+  }
+  const working = await workingCloseOrders(p.contractId, closeAction);
   if (working.length) return working[0].id;
   try { return await placeStop({ contractId: p.contractId, action: closeAction, qty: p.qty, stopPrice: p.stopPx, clOrdId: `${p.clOrdId}-p${Date.now().toString(36)}` }); }
   catch (e) {
+    const again = await workingCloseOrders(p.contractId, closeAction).catch(() => []);
+    if (again.length) return again[0].id;   // the POST went through; only the response was lost
     const r = await liquidate(p.contractId).catch((err) => ({ orderId: null, failure: String(err) }));
     await sendNotification(`🛑 FUTURES DESK ${p.contract}: the stop could not be placed (${String(e).slice(0, 100)}) — ${p.why} — position CLOSED at market${r.failure ? ` (close refused: ${r.failure} — CHECK THE ACCOUNT)` : ""}.`, LANE).catch(() => {});
     return null;
   }
+}
+
+/** A flat contract must have NO working close-side orders — not just the one we remembered. A stop
+ *  whose placement response was lost is still a real stop. */
+async function sweepStops(contractId: number, side: Side): Promise<number> {
+  const closeAction = side === "long" ? "Sell" : "Buy";
+  const working = await workingCloseOrders(contractId, closeAction).catch(() => []);
+  for (const o of working) await cancelDeskOrder(o.id).catch(() => {});
+  return working.length;
 }
 
 export async function enterFromSignal(signalId: number, a: AlertPayload): Promise<AlertOutcome> {
@@ -245,7 +267,10 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const prior = await findOrderByClOrdId(clOrdId).catch(() => null);
     if (prior) orderId = prior.id;
     else {
-      const provisional = roundToTick(a.stop!, contract.tickSize);   // re-anchored to the fill below
+      // The bracket exists only for the crash window until it is re-anchored to the fill. It is placed
+      // deliberately FAR (the chart's stop, one more stop-distance away): the chart may be on another
+      // month, and a provisional level at or above the fill would trigger as a phantom stop-out.
+      const provisional = roundToTick(a.side === "long" ? a.stop! - stopDist : a.stop! + stopDist, contract.tickSize);
       try {
         const r = await placeEntryWithStop({ contractId: contract.id, action, qty: size.contracts, stopPrice: provisional, clOrdId });
         if (r.failure && !r.orderId) throw new Error(r.failure);
@@ -271,6 +296,14 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     }
     if (fill.qty === 0) {
       const o = await orderItem(orderId);
+      if (o && (o.ordStatus === "Filled" || o.ordStatus === "Completed")) {
+        // Filled, but the fill reads failed: a position exists that this run cannot describe. Never
+        // "refused" — that would leave a real position with no ledger row. The guardian reports it.
+        const why = `entry ${orderId} is ${o.ordStatus} but its fills could not be read — position exists, not recorded`;
+        await markSignal(signalId, "error", why);
+        await sendNotification(`🚨 FUTURES DESK ${contract.name}: ${why}. Check the account.`, LANE).catch(() => {});
+        return { status: "error", reason: why, signalId };
+      }
       if (o && isWorking(o)) await cancelDeskOrder(orderId).catch(() => {});
       const why = `entry ${orderId} did not fill (${o?.ordStatus ?? "unknown"})`;
       await markSignal(signalId, "refused", why);
@@ -279,19 +312,25 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     // A partial fill stops here: the remainder must not keep filling after the row is written.
     if (fill.qty < size.contracts) { const o = await orderItem(orderId); if (o && isWorking(o)) await cancelDeskOrder(orderId).catch(() => {}); }
 
-    // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
-    // fill may differ from the signal close. Risk is defined from where we got in.
+    // The ledger row exists the moment the fill is confirmed — BEFORE protection work that can throw —
+    // so the guardian manages this position whatever happens next.
     const stopPx = roundToTick(a.side === "long" ? fill.price - stopDist : fill.price + stopDist, contract.tickSize);
-    if (stopOrderId) { try { await modifyStop(stopOrderId, fill.qty, stopPx); } catch { /* verified below */ } }
-    const stopId = await ensureProtected({ contractId: contract.id, contract: contract.name, side: a.side, qty: fill.qty, stopPx, stopOrderId, clOrdId, why: "entry" });
     const spec = MICRO_FOR_ROOT[a.root];
     const riskUsd = fill.qty * size.riskPerContractUsd;
     const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-      `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note, exit_reason)
-       VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16,$17::text) RETURNING id`,
-      a.edge, a.root, size.micro, contract.name, contract.id, a.side, fill.qty, fill.price, stopPx, orderId, stopId, clOrdId, signalId,
-      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note, stopId == null ? "unprotected" : null);
+      `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note)
+       VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16) RETURNING id`,
+      a.edge, a.root, size.micro, contract.name, contract.id, a.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, signalId,
+      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note);
     const tradeId = rows[0].id;
+
+    // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
+    // fill may differ from the signal close. Risk is defined from where we got in.
+    let anchored = false;
+    if (stopOrderId) { try { await modifyStop(stopOrderId, fill.qty, stopPx); anchored = true; } catch { /* verified below */ } }
+    const stopId = await ensureProtected({ contractId: contract.id, contract: contract.name, side: a.side, qty: fill.qty, stopPx, stopOrderId, clOrdId, why: "entry" });
+    const note = stopId != null && stopId === stopOrderId && !anchored ? "stop at the provisional (chart) level — modify failed" : null;
+    await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET stop_order_id = $2::bigint, exit_reason = $3::text, note = COALESCE($4::text, note) WHERE id = $1`, tradeId, stopId, stopId == null ? "unprotected" : null, note);
     if (stopId == null) {
       // ensureProtected closed it; the guardian settles the round trip from the fills.
       await markSignal(signalId, "error", `filled ${fill.qty}× ${contract.name} but could not be protected — closed`, tradeId);
@@ -333,7 +372,9 @@ async function closeTrade(t: TradeRow, reason: string): Promise<{ ok: boolean; f
   try { r = await liquidate(t.contract_id); } catch (e) { r = { orderId: null, failure: String(e).slice(0, 160) }; }
   if (r.failure || !r.orderId) {
     const why = r.failure ?? "no order id";
-    if (cancelled) {
+    // A thrown liquidation may still have gone through: never rest a stop on a flat contract.
+    const stillOpen = await deskPositions().then((ps) => ps.some((p) => p.contractId === t.contract_id)).catch(() => true);
+    if (cancelled && stillOpen) {
       const id = await ensureProtected({ contractId: t.contract_id, contract: t.contract, side: t.side, qty: t.qty, stopPx: t.stop_price, stopOrderId: null, clOrdId: t.cl_ord_id, why: `close (${reason}) refused` });
       if (id) await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET stop_order_id = $2::bigint WHERE id = $1`, t.id, id);
       else await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET exit_reason = 'unprotected' WHERE id = $1`, t.id);
@@ -423,8 +464,10 @@ async function guardBody(): Promise<GuardReport> {
 
 /** The broker is flat in this contract: cancel any stop that survived, find the exit fill, book the round trip. */
 async function settle(t: TradeRow, orders: DxOrder[]): Promise<boolean> {
-  // A stop left working on a flat contract opens a reverse position on the next touch. Always first.
-  if (t.stop_order_id) { const so = await orderItem(t.stop_order_id); if (so && isWorking(so)) await cancelDeskOrder(t.stop_order_id).catch(() => {}); }
+  // A stop left working on a flat contract opens a reverse position on the next touch. Always first,
+  // and EVERY close-side order on the contract — a stop whose placement response was lost is still real.
+  const swept = await sweepStops(t.contract_id, t.side);
+  if (swept > 1) await sendNotification(`⚠️ FUTURES DESK ${t.contract}: ${swept} working stops found on a flat contract — all cancelled.`, LANE).catch(() => {});
   const candidates = [t.exit_order_id, t.stop_order_id].filter((x): x is number => !!x);
   let fill = { qty: 0, price: 0 }; let via = "";
   for (const id of candidates) { const f = avgFill(await fillsForOrder(id)); if (f.qty > 0) { fill = f; via = id === t.stop_order_id ? "stop" : (t.exit_reason ?? "close"); break; } }
@@ -461,7 +504,9 @@ async function rollTrade(t: TradeRow, notes: string[]): Promise<void> {
   if (prior) orderId = prior.id;
   else {
     try {
-      const provisional = roundToTick(t.side === "long" ? t.entry_price - stopDist : t.entry_price + stopDist, next.tickSize);
+      // Far provisional (2× the distance from the OLD month's entry): months differ by the calendar
+      // spread, and this bracket exists only until it is re-anchored to the new fill.
+      const provisional = roundToTick(t.side === "long" ? t.entry_price - 2 * stopDist : t.entry_price + 2 * stopDist, next.tickSize);
       const r = await placeEntryWithStop({ contractId: next.id, action, qty: t.qty, stopPrice: provisional, clOrdId });
       if (!r.orderId) throw new Error(r.failure ?? "no orderId");
       orderId = r.orderId; stopOrderId = r.stopOrderId;
@@ -475,14 +520,14 @@ async function rollTrade(t: TradeRow, notes: string[]): Promise<void> {
   for (let i = 0; i < 8 && fill.qty === 0; i++) { await new Promise((r) => setTimeout(r, 750)); fill = avgFill(await fillsForOrder(orderId)); }
   if (fill.qty === 0) { const o = await orderItem(orderId); if (o && isWorking(o)) await cancelDeskOrder(orderId).catch(() => {}); await sendNotification(`🚨 FUTURES DESK roll into ${next.name}: entry ${orderId} not filled (${o?.ordStatus ?? "?"}). Position is CLOSED, not rolled.`, LANE).catch(() => {}); return; }
   const stopPx = roundToTick(t.side === "long" ? fill.price - stopDist : fill.price + stopDist, next.tickSize);
+  // Ledger row first (the new leg keeps the ORIGINAL opened_at so the time stop does not restart), then protection.
+  const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
+    `INSERT INTO futures_desk_trades (opened_at, edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, rolled_from, note)
+     VALUES ($1::timestamptz,$2,$3,$4,$5,$6::int,$7,$8::int,$9::float8,$10::float8,$11::bigint,$12::bigint,$13,$14::int,'open',$15::float8,$16::float8,$17::int,$18) RETURNING id`,
+    t.opened_at, t.edge, t.root, t.micro, next.name, next.id, t.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, t.signal_id, t.risk_usd, t.point_value, t.id, `rolled from ${t.contract}`);
   if (stopOrderId) { try { await modifyStop(stopOrderId, fill.qty, stopPx); } catch { /* verified below */ } }
   const stopId = await ensureProtected({ contractId: next.id, contract: next.name, side: t.side, qty: fill.qty, stopPx, stopOrderId, clOrdId, why: "roll" });
-  // The new leg keeps the ORIGINAL opened_at so the time stop does not restart on a roll.
-  await prisma.$executeRawUnsafe(
-    `INSERT INTO futures_desk_trades (opened_at, edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, rolled_from, note, exit_reason)
-     VALUES ($1::timestamptz,$2,$3,$4,$5,$6::int,$7,$8::int,$9::float8,$10::float8,$11::bigint,$12::bigint,$13,$14::int,'open',$15::float8,$16::float8,$17::int,$18,$19::text)`,
-    t.opened_at, t.edge, t.root, t.micro, next.name, next.id, t.side, fill.qty, fill.price, stopPx, orderId, stopId, clOrdId, t.signal_id, t.risk_usd, t.point_value, t.id,
-    `rolled from ${t.contract}`, stopId == null ? "unprotected" : null);
+  await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET stop_order_id = $2::bigint, exit_reason = $3::text WHERE id = $1`, rows[0].id, stopId, stopId == null ? "unprotected" : null);
   notes.push(`${t.contract} → ${next.name} rolled${stopId == null ? " — UNPROTECTABLE, closed" : ""}`);
   await sendNotification(`🔁 FUTURES DESK rolled ${t.contract} → ${next.name}: ${fill.qty}× @ ${fill.price}, stop ${stopPx}.`, LANE).catch(() => {});
 }

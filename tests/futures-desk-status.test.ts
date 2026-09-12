@@ -4,7 +4,7 @@ import { mergeRollChains } from "../src/lib/futures-desk-status";
 import { normaliseRow } from "../src/lib/futures-desk";
 
 test("normaliseRow: bigint order ids become numbers and Dates become ISO strings", () => {
-  const r = normaliseRow({ id: 1, entry_order_id: 632115024898n, stop_order_id: null, exit_order_id: 7n, opened_at: new Date("2026-09-14T22:05:00Z"), closed_at: null, note: "x" });
+  const r = normaliseRow({ id: 1, entry_order_id: BigInt(632115024898), stop_order_id: null, exit_order_id: BigInt(7), opened_at: new Date("2026-09-14T22:05:00Z"), closed_at: null, note: "x" });
   assert.equal(r.entry_order_id, 632115024898);
   assert.equal(typeof r.exit_order_id, "number");
   assert.equal(r.opened_at, "2026-09-14T22:05:00.000Z");

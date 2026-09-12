@@ -118,9 +118,24 @@ export function avgFill(fills: DxFill[]): { qty: number; price: number } {
   return { qty, price };
 }
 
+/** Recover an order by our client id. Tradovate's Order entity may not echo `clOrdId`; the Command
+ *  entity (one per order request) does, so both are consulted. The round trip asserts this works. */
 export async function findOrderByClOrdId(clOrdId: string): Promise<DxOrder | null> {
   const orders = await deskOrders();
-  return orders.find((o) => o.clOrdId === clOrdId) ?? null;
+  const direct = orders.find((o) => o.clOrdId === clOrdId);
+  if (direct) return direct;
+  try {
+    const cmds = await tradovateRequest<{ id: number; orderId: number; clOrdId?: string }[]>("/command/list", undefined, MODE);
+    const c = (Array.isArray(cmds) ? cmds : []).find((x) => x.clOrdId === clOrdId);
+    if (c?.orderId) return orders.find((o) => o.id === c.orderId) ?? (await orderItem(c.orderId));
+  } catch { /* fall through */ }
+  return null;
+}
+
+/** Working orders on a contract on the CLOSING side. The desk rests nothing but stops, so every one
+ *  of these is a stop — no dependence on `orderType` being present on the Order entity. */
+export async function workingCloseOrders(contractId: number, closeAction: "Buy" | "Sell"): Promise<DxOrder[]> {
+  return (await deskOrders()).filter((o) => o.contractId === contractId && isWorking(o) && o.action === closeAction);
 }
 
 export interface OsoResult { orderId: number; stopOrderId: number | null; failure: string | null }
