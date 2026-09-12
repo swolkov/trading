@@ -1,14 +1,14 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
-import { evaluateShadowSignals, ensureShadowColumns, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, EXPERIMENT_SOURCES, SIZE_MULTIPLIER } from "@/lib/margin-shadow";
+import { evaluateShadowSignals, ensureShadowColumns, snapshotShadowSizing, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, EXPERIMENT_SOURCES, SIZE_MULTIPLIER } from "@/lib/margin-shadow";
 import { openTsmomPaper, readBtcRegime } from "@/lib/margin-regime";
 import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
 import { propEntry } from "@/lib/prop-desk";
 import { isSourceArmed } from "@/lib/margin-live-risk";
-import { maybeGraduateStage3, maybeDemote } from "@/lib/margin-synthesis";
+import { maybeDemote } from "@/lib/margin-synthesis";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -66,6 +66,81 @@ export async function GET(request: Request) {
 
   const state = await loadState();
   const { signals, errors } = await scanUniverse();
+  const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "");
+  let entryChecksPassed = errors.length === 0;
+  // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
+  // notify the would-be result — "that ETH long would have made +$X / stopped −$Y".
+  let shadowResolved = 0;
+  try {
+    const resolutions = await evaluateShadowSignals({ requiredSources: armedSources.split(",").map((s) => s.trim()).filter(Boolean) });   // risk-based sizing read from config inside
+    shadowResolved = resolutions.length;
+    // Every open trade resolves (including the winding-down non-US ones), but the Slack
+    // tally must describe the RECORD the scoreboard keeps — the cloud routines read these
+    // posts as the record. So the headline counts and net cover US-tradeable pairs only;
+    // non-US results are listed separately and labelled, never folded into the total.
+    // Measurement sleeves (the ×5-size sleeve and the exit/entry twins) are the SAME trades
+    // again in a different container: they are labelled and tallied apart so the cloud
+    // routines that read this channel as the record never count a candidate trade twice.
+    const isExperiment = (r: { source: string | null }) => EXPERIMENT_SOURCES.includes(r.source ?? "");
+    const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol) && !isExperiment(r));
+    const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol) && !isExperiment(r));
+    const experiments = resolutions.filter(isExperiment);
+    const fmtLine = (r: (typeof resolutions)[number]) =>
+      `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`;
+    if (resolutions.length > 10) {
+      // A burst (market-wide move stopping many trades at once) becomes ONE message —
+      // per-trade posts at this volume risk Slack rate limits and eat the cron's budget.
+      const total = counted.reduce((s, r) => s + r.pnl, 0);
+      const wins = counted.filter((r) => r.pnl >= 0).length;
+      const lines = counted.slice(0, 12).map(fmtLine).join("\n");
+      const more = counted.length > 12 ? `\n…and ${counted.length - 12} more` : "";
+      const aside = setAside.length > 0
+        ? `\n_Set aside (non-US pairs, not in the record): ${setAside.length} resolved, net ${setAside.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(setAside.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
+        : "";
+      const expLine = experiments.length > 0
+        ? `\n_Measurement sleeves (×5-size and twins — the same signals in a different container, not the record): ${experiments.length} resolved, net ${experiments.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(experiments.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
+        : "";
+      await sendNotification(
+        `📊 ${counted.length} paper trades resolved this run (US-tradeable pairs) — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}${aside}${expLine}\n` +
+        `Estimate — fees+rollover modeled; no real money moved.`,
+        "margin_results",
+      );
+    } else {
+      // ONE POST PER RECORD TRADE. Experiment twins ride the same signal in a different
+      // container — they are measurement, not trades, and their results belong on the paper
+      // page beside the record they are compared against. Posting each of them here made one
+      // ETH signal into four "Tracked ETH/USD" messages (swing-lev, swing-wide, swing-lock,
+      // swing-spot), three of them wearing a "×5-size experiment" label that was only ever
+      // true of selective-x5. Twins now get a single summary line per run, correctly named.
+      for (const r of [...counted, ...setAside]) {
+        const win = r.pnl >= 0;
+        const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
+        const tag = isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
+        await sendNotification(
+          `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
+          `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
+          `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}).${tag} Estimate — fees+rollover modeled; no real money moved.`,
+          "margin_results",
+        );
+      }
+      if (experiments.length) {
+        const byKind = (src: string | null) => (src && src in SIZE_MULTIPLIER ? "×5-size" : "twin");
+        const lines = experiments.map((r) =>
+          `• ${r.symbol} ${r.side.toUpperCase()} — ${r.source} (${byKind(r.source)}): ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${r.reason})`).join("\n");
+        await sendNotification(
+          `🧪 ${experiments.length} measurement sleeve${experiments.length === 1 ? "" : "s"} resolved — the same signals in a different container, NOT the record:\n${lines}\n` +
+          `_Compare them on the paper page; nothing here is a second trade._`,
+          "margin_results",
+        );
+      }
+    }
+  } catch (e) {
+    entryChecksPassed = false; errors.push(`shadow: ${String(e).slice(0, 80)}`);
+  }
+
+
+  try { await maybeDemote(); } catch (e) { entryChecksPassed = false; errors.push(`risk assessment: ${String(e).slice(0, 100)}`); }
+
 
   // Keep only signals whose exact (coin, timeframe, kind) has not fired inside its
   // re-alert window — so a persistent condition pings once, not every 15 minutes.
@@ -136,7 +211,7 @@ export async function GET(request: Request) {
   const note_ = (coin: string, tf: string, kind: string, outcome: string, tier?: string, detail?: string) => {
     if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}) });
   };
-  const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "").catch(() => "");
+
   // One read per run: the prop hand-off below is skipped entirely while the desk is off.
   const propArmed = await prisma.agentConfig.findUnique({ where: { key: "prop_armed" } }).then((r) => r?.value === "true").catch(() => false);
   const propQueue: { symbol: string; coin: string; tf: string; kind: string; side: "buy" | "sell"; source: string; tier: "low" | "med" | "high"; entryPx: number }[] = [];
@@ -200,12 +275,13 @@ export async function GET(request: Request) {
             s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
           );
           const rowId = inserted[0]?.id ?? null;
+          const frozenNotional = rowId != null ? await snapshotShadowSizing(rowId) : null;
           opened.push({ symbol: s.symbol, side, tier: conv.tier, source: plan.source });
           // LIVE — only for a sleeve explicitly ARMED in kraken_margin_live_sources (the
           // go-live plan's "arm ONE strategy"). The executor applies every guard (arm
           // switch, validate-only, breaker, guardian freshness, universe, netting, sizing);
           // the paper row above is unaffected either way — paper keeps measuring.
-          if (armedSources && isSourceArmed(armedSources, plan.source)) {
+          if (entryChecksPassed && frozenNotional != null && frozenNotional > 0 && armedSources && isSourceArmed(armedSources, plan.source)) {
             try {
               // LEVERAGE MUST TRAVEL WITH THE PLAN. The executor takes
               // min(equity ladder, the pair's US-retail max, Math.max(2, alert.leverage ?? 2)) —
@@ -273,81 +349,11 @@ export async function GET(request: Request) {
   const autoOpened = opened.length;
   if (live.length) await sendNotification(`💸 LIVE executor (armed sources: ${armedSources}):\n${live.map((l) => `• ${l}`).join("\n")}`, "margin_live").catch(() => {});
   // Stage 3 bookkeeping: count closed live trades; graduate to paper's full size at 20 if live matches paper.
-  if (armedSources) await maybeGraduateStage3().catch(() => null);
+  // Automatic risk increases remain disabled pending complete financing evidence.
   // Kill criteria that fire by themselves: forward record not paying, or live diverging from paper.
-  if (armedSources) await maybeDemote().catch(() => null);
+
 
   await saveState(state);
-
-  // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
-  // notify the would-be result — "that ETH long would have made +$X / stopped −$Y".
-  let shadowResolved = 0;
-  try {
-    const resolutions = await evaluateShadowSignals();   // risk-based sizing read from config inside
-    shadowResolved = resolutions.length;
-    // Every open trade resolves (including the winding-down non-US ones), but the Slack
-    // tally must describe the RECORD the scoreboard keeps — the cloud routines read these
-    // posts as the record. So the headline counts and net cover US-tradeable pairs only;
-    // non-US results are listed separately and labelled, never folded into the total.
-    // Measurement sleeves (the ×5-size sleeve and the exit/entry twins) are the SAME trades
-    // again in a different container: they are labelled and tallied apart so the cloud
-    // routines that read this channel as the record never count a candidate trade twice.
-    const isExperiment = (r: { source: string | null }) => EXPERIMENT_SOURCES.includes(r.source ?? "");
-    const counted = resolutions.filter((r) => isUsMarginSymbol(r.symbol) && !isExperiment(r));
-    const setAside = resolutions.filter((r) => !isUsMarginSymbol(r.symbol) && !isExperiment(r));
-    const experiments = resolutions.filter(isExperiment);
-    const fmtLine = (r: (typeof resolutions)[number]) =>
-      `• ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${r.conviction ? ` [${r.conviction}]` : ""}: ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} (${r.reason})`;
-    if (resolutions.length > 10) {
-      // A burst (market-wide move stopping many trades at once) becomes ONE message —
-      // per-trade posts at this volume risk Slack rate limits and eat the cron's budget.
-      const total = counted.reduce((s, r) => s + r.pnl, 0);
-      const wins = counted.filter((r) => r.pnl >= 0).length;
-      const lines = counted.slice(0, 12).map(fmtLine).join("\n");
-      const more = counted.length > 12 ? `\n…and ${counted.length - 12} more` : "";
-      const aside = setAside.length > 0
-        ? `\n_Set aside (non-US pairs, not in the record): ${setAside.length} resolved, net ${setAside.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(setAside.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
-        : "";
-      const expLine = experiments.length > 0
-        ? `\n_Measurement sleeves (×5-size and twins — the same signals in a different container, not the record): ${experiments.length} resolved, net ${experiments.reduce((s, r) => s + r.pnl, 0) >= 0 ? "+" : "−"}$${Math.abs(experiments.reduce((s, r) => s + r.pnl, 0)).toFixed(0)}._`
-        : "";
-      await sendNotification(
-        `📊 ${counted.length} paper trades resolved this run (US-tradeable pairs) — ${wins} green, net ${total >= 0 ? "+" : "−"}$${Math.abs(total).toFixed(0)}:\n${lines}${more}${aside}${expLine}\n` +
-        `Estimate — fees+rollover modeled; no real money moved.`,
-        "margin_results",
-      );
-    } else {
-      // ONE POST PER RECORD TRADE. Experiment twins ride the same signal in a different
-      // container — they are measurement, not trades, and their results belong on the paper
-      // page beside the record they are compared against. Posting each of them here made one
-      // ETH signal into four "Tracked ETH/USD" messages (swing-lev, swing-wide, swing-lock,
-      // swing-spot), three of them wearing a "×5-size experiment" label that was only ever
-      // true of selective-x5. Twins now get a single summary line per run, correctly named.
-      for (const r of [...counted, ...setAside]) {
-        const win = r.pnl >= 0;
-        const conv = r.conviction ? ` [${r.conviction} conviction]` : "";
-        const tag = isUsMarginSymbol(r.symbol) ? "" : " ⚠️ non-US pair — winding down, NOT in the record";
-        await sendNotification(
-          `📊 Tracked ${r.symbol} ${r.side.toUpperCase()} ${r.leverage}x${conv} from $${r.entry.toLocaleString()} → ` +
-          `${win ? "✅ WOULD PROFIT" : "❌ WOULD LOSE"} ~${win ? "+" : "−"}$${Math.abs(r.pnl).toFixed(2)} ` +
-          `(${(r.pnlPct * 100).toFixed(1)}%, ${r.reason}).${tag} Estimate — fees+rollover modeled; no real money moved.`,
-          "margin_results",
-        );
-      }
-      if (experiments.length) {
-        const byKind = (src: string | null) => (src && src in SIZE_MULTIPLIER ? "×5-size" : "twin");
-        const lines = experiments.map((r) =>
-          `• ${r.symbol} ${r.side.toUpperCase()} — ${r.source} (${byKind(r.source)}): ${r.pnl >= 0 ? "+" : "−"}$${Math.abs(r.pnl).toFixed(0)} (${r.reason})`).join("\n");
-        await sendNotification(
-          `🧪 ${experiments.length} measurement sleeve${experiments.length === 1 ? "" : "s"} resolved — the same signals in a different container, NOT the record:\n${lines}\n` +
-          `_Compare them on the paper page; nothing here is a second trade._`,
-          "margin_results",
-        );
-      }
-    }
-  } catch (e) {
-    errors.push(`shadow: ${String(e).slice(0, 80)}`);
-  }
 
   if (autoOpened) {
     // One line per SIGNAL, not per sleeve. A 4h breakout opens swing-lev AND swing-spot — two

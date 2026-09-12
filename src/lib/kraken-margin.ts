@@ -365,7 +365,7 @@ function holdBucket(minutes: number): string {
 // scoreboard and the analysis script so the two can never disagree.
 interface Lot { vol: number; price: number; fee: number; openedAt: Date }
 
-function reconstructTrips(rows: DbTradeRow[]): { trips: RoundTrip[]; openPositions: number } {
+export function reconstructTrips(rows: DbTradeRow[]): { trips: RoundTrip[]; openPositions: number } {
   const trips: RoundTrip[] = [];
   // Per-pair FIFO queue of open lots. dir: +1 = long lots, -1 = short lots.
   const book = new Map<string, { dir: 1 | -1; lots: Lot[] }>();
@@ -386,7 +386,7 @@ function reconstructTrips(rows: DbTradeRow[]): { trips: RoundTrip[]; openPositio
           ? (r.price - lot.price) * closeVol
           : (lot.price - r.price) * closeVol;
         const entryFeeShare = lot.fee * (closeVol / lot.vol);
-        const exitFeeShare = r.vol > 0 ? feeRemaining * (closeVol / r.vol) : 0;
+        const exitFeeShare = remaining > 0 ? feeRemaining * (closeVol / remaining) : 0;
         trips.push({
           pair: r.pair,
           side,
@@ -493,6 +493,18 @@ export async function computeMarginScoreboard(): Promise<MarginScoreboard> {
 }
 
 // All round trips, for the analysis script and the cockpit's trade list.
+export async function postedMarginCostsSince(since: Date): Promise<{ usd: number; unknown: boolean }> {
+  // Cash-day guard, not a claimed per-trade attribution. Overlapping margin fees
+  // can stop entries early; rebates and unvalued currencies never add risk capacity.
+  const [row] = await prisma.$queryRawUnsafe<{ usd: number; unknown: number }[]>(
+    `SELECT COALESCE(sum(GREATEST(fee,0)) FILTER (WHERE asset IN ('USD','ZUSD')),0)::float AS usd,
+      count(*) FILTER (WHERE asset NOT IN ('USD','ZUSD') AND fee <> 0)::int AS unknown
+      FROM kraken_my_ledger WHERE time >= $1 AND ltype IN ('margin','rollover')`, since,
+  );
+  if (!row || !Number.isFinite(row.usd) || !Number.isInteger(row.unknown)) throw new Error("Margin financing unavailable");
+  return { usd: Math.max(0, row.usd), unknown: row.unknown > 0 };
+}
+
 export async function listRoundTrips(): Promise<RoundTrip[]> {
   const rows = await loadMarginFills();
   return reconstructTrips(rows).trips;

@@ -15,10 +15,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
-import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, positionNotional, candidateDetail, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
+import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, candidateDetail, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { pairBase } from "@/lib/kraken-pairs";
-import { dailyLossCapUsd } from "@/lib/margin-live-risk";
 import { botOwnership } from "@/lib/margin-executor";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
@@ -218,29 +217,33 @@ export function journalBlock(f: LiveFill): string {
 async function cfgGet(key: string): Promise<string | null> {
   return (await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null))?.value ?? null;
 }
+async function cfgRequired(key: string): Promise<string> {
+  const row = await prisma.agentConfig.findUnique({ where: { key } });
+  if (!row?.value) throw new Error(`Required risk config unavailable: ${key}`);
+  return row.value;
+}
 async function cfgSet(key: string, value: string): Promise<void> {
   await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
 }
 
 export async function loadLiveFills(): Promise<LiveFill[]> {
   await ensureShadowColumns();
-  const rows = await prisma.$queryRawUnsafe<{ id: number; time: Date; symbol: string; side: string; source: string | null; leverage: number | null; mark_price: number | null; shadow_status: string | null; shadow_exit: number | null; shadow_pnl: number | null; shadow_fees: number | null; shadow_reason: string | null; shadow_resolved_at: Date | null; live_txid: string }[]>(
-    `SELECT id, time, symbol, side, source, leverage, mark_price, shadow_status, shadow_exit, shadow_pnl, shadow_fees, shadow_reason, shadow_resolved_at, live_txid
+  const rows = await prisma.$queryRawUnsafe<{ id: number; time: Date; symbol: string; side: string; source: string | null; leverage: number | null; mark_price: number | null; shadow_notional: number | null; shadow_status: string | null; shadow_exit: number | null; shadow_pnl: number | null; shadow_fees: number | null; shadow_reason: string | null; shadow_resolved_at: Date | null; live_txid: string }[]>(
+    `SELECT id, time, symbol, side, source, leverage, mark_price, shadow_notional, shadow_status, shadow_exit, shadow_pnl, shadow_fees, shadow_reason, shadow_resolved_at, live_txid
      FROM tradingview_alerts WHERE live_txid IS NOT NULL AND executed = true AND side IN ('buy','sell') ORDER BY time`,
   );
   if (!rows.length) return [];
-  const refEquity = parseFloat((await cfgGet("kraken_shadow_ref_equity")) ?? "") || 5000;
-  const paperRisk = parseFloat((await cfgGet("kraken_margin_max_risk_pct")) ?? "") || 3;
   const since = new Date(Math.min(...rows.map((r) => r.time.getTime())) - 3600_000);
   const trades = await prisma.$queryRawUnsafe<{ txid: string; ordertxid: string; pair: string; time: Date; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string }[]>(
     `SELECT txid, ordertxid, pair, time, type, price, cost, fee, vol, margin, posstatus FROM kraken_my_trades WHERE time >= $1 ORDER BY time`, since,
   );
   // The ownership ledger names each pyramid add-on's parent; without it an add's fills would
   // be matched to nothing and its close would be mis-attributed.
-  const own = await botOwnership().catch(() => null);
+  const own = await botOwnership();
+  if (own.ledgerCorrupt) throw new Error("Ownership ledger corrupt: cannot assess live fills");
   return matchLiveFills(
     rows.map((r) => ({ id: r.id, time: r.time.toISOString(), symbol: r.symbol, side: r.side, source: r.source, leverage: r.leverage, markPrice: r.mark_price, shadowStatus: r.shadow_status, shadowExit: r.shadow_exit, shadowPnl: r.shadow_pnl, shadowFees: r.shadow_fees, shadowReason: r.shadow_reason, shadowResolvedAt: r.shadow_resolved_at?.toISOString() ?? null, liveTxid: r.live_txid,
-      paperNotional: r.mark_price != null && r.mark_price > 0 ? positionNotional(r.source, r.leverage ?? 1, r.mark_price, refEquity, paperRisk) : null })),
+      paperNotional: r.shadow_notional != null && Number.isFinite(r.shadow_notional) && r.shadow_notional > 0 ? r.shadow_notional : null })),
     trades.map((t) => ({ ...t, time: t.time.toISOString(), price: t.price ?? 0, cost: t.cost ?? 0, fee: t.fee ?? 0, vol: t.vol ?? 0, margin: t.margin ?? 0, posstatus: t.posstatus ?? "" })),
     (ordertxid) => own?.addOnOf(ordertxid) ?? null,
   );
@@ -286,43 +289,12 @@ export async function readStage3(): Promise<Stage3 | null> {
 }
 export async function maybeGraduateStage3(): Promise<Stage3 | null> {
   const st = await readStage3();
-  if (!st) return null;
-  const fills = await loadLiveFills().catch(() => [] as LiveFill[]);
-  const div = divergenceSummary(fills);
-  st.done = div.closed; st.updatedAt = new Date().toISOString();
-  if (st.status === "running" && div.closed >= st.target) {
-    if (/DIVERGES/.test(div.verdict)) {
-      st.status = "held"; st.note = div.verdict;
-      await sendNotification(`⚠️ Stage 3: ${div.closed} live trades closed but LIVE DIVERGES FROM PAPER — holding at half size (base ${st.fromBase}%). ${div.verdict}`, "margin_live").catch(() => {});
-    } else {
-      // GRADUATION MAY ONLY EVER RAISE. Stage 3's whole job is to start live BELOW paper's
-      // rule and move up once real fills match — it has no business reducing anything. But it
-      // wrote `toBase` unconditionally, and `toBase` is a snapshot taken on the day the record
-      // was created. On 2026-09-09 the base was deliberately raised 3% -> 4% (8% on high
-      // conviction) while the record still said toBase: 3. Sixteen trades later this line
-      // would have silently written it back to 3, cutting the position from $9,044 to $6,783
-      // — and announced it in Slack as "Stage 3 complete", which reads as good news.
-      // Taking the max makes a stale record harmless: graduation can lift a reduced base, and
-      // can never undo a deliberate increase made after the record was written.
-      const currentBase = parseFloat((await cfgGet("kraken_margin_live_max_risk_pct")) ?? "");
-      const graduateTo = Number.isFinite(currentBase) ? Math.max(currentBase, st.toBase) : st.toBase;
-      await cfgSet("kraken_margin_live_max_risk_pct", String(graduateTo));
-      const ws = await cfgGet("margin_watch_state");
-      let eq = 0; try { const p = ws ? (JSON.parse(ws) as { lastEquity?: number }) : null; eq = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : 0; } catch { eq = 0; }
-      const cap = dailyLossCapUsd(eq, graduateTo);   // two full losses end the day
-      // Reported, not frozen: clearing the override lets the executor derive this same rule
-      // live, so graduating to a bigger base risk raises the cap by itself and it keeps
-      // tracking equity afterwards. Writing the dollars would pin it at graduation day.
-      await cfgSet("kraken_margin_daily_loss_cap", "");
-      st.status = "graduated"; st.note = `graduated after ${div.closed} closed live trades: ${div.verdict}`;
-      try {
-        const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
-        log.push(`${new Date().toISOString()} STAGE 3 GRADUATED: base ${st.fromBase}% → ${graduateTo}% (high conviction ${graduateTo * 2}%), daily loss cap $${cap}, after ${div.closed} closed live trades (${div.verdict})`);
-        await cfgSet("kraken_margin_arm_log", JSON.stringify(log.slice(-50)));
-      } catch { /* log only */ }
-      await sendNotification(`🎓 Stage 3 complete: ${div.closed} live trades closed and real fills match paper (${div.verdict}). Sizing moved to paper's full rule — base ${graduateTo}%, ${graduateTo * 2}% on high conviction — daily loss cap $${cap}.`, "margin_live").catch(() => {});
-    }
-  }
+  if (!st || st.status !== "running") return st;
+  // Matching a paper loss is not evidence for more real risk. Financing and current-
+  // campaign profitability must be reconciled before automatic graduation is restored.
+  st.status = "held";
+  st.note = "Automatic risk growth held: complete financing and current-campaign profitability are not verified.";
+  st.updatedAt = new Date().toISOString();
   await cfgSet(STAGE3_KEY, JSON.stringify(st));
   return st;
 }
@@ -370,11 +342,11 @@ export async function readDemotion(): Promise<Demotion | null> {
 
 /** Runs after every armed scan tick and in the daily synthesis. Disarms when a rule fires. */
 export async function maybeDemote(): Promise<Demotion | null> {
-  const [auto, validate, sources] = await Promise.all([cfgGet("kraken_margin_auto"), cfgGet("kraken_margin_validate_only"), cfgGet("kraken_margin_live_sources")]);
+  const [auto, validate, sources] = await Promise.all([cfgRequired("kraken_margin_auto"), cfgRequired("kraken_margin_validate_only"), cfgRequired("kraken_margin_live_sources")]);
   if (!(auto === "true" && validate === "false")) return null;   // only an ARMED executor can be demoted
   const source = (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0];
-  if (!source) return null;
-  const [detail, fills] = await Promise.all([candidateDetail(source).catch(() => null), loadLiveFills().catch(() => [] as LiveFill[])]);
+  if (!source) throw new Error("Armed source unavailable");
+  const [detail, fills] = await Promise.all([candidateDetail(source), loadLiveFills()]);
   const forward = detail?.forward ? { resolved: detail.forward.resolved, net: detail.forward.net } : null;
   const reason = demotionVerdict(forward, divergenceSummary(fills));
   if (!reason) return null;

@@ -15,7 +15,7 @@
 // If exposure is zero: no stop of ours on the pair+side at all.
 import { LIVE_STOP_RATCHET_MIN_FRAC } from "@/lib/margin-live-risk";
 
-export interface BookStop { txid: string; ordertype: string; side: string; price: number; vol: number; volExec: number; opentm: number }
+export interface BookStop { txid: string; ordertype: string; side: string; price: number; vol: number; volExec: number; opentm: number; reduceOnly?: boolean }
 export interface BookState { side: "long" | "short"; vol: number; targetLevel: number; px: number; priceDecimals: number; lotDecimals: number }
 export interface ReconcilePlan {
   place: { level: string; vol: string } | null;   // a new reduce-only stop to place FIRST
@@ -58,12 +58,14 @@ export function planReconcile(book: BookState, ours: BookStop[]): ReconcilePlan 
   // A fixed stop whose trigger we cannot read is an UNKNOWN, not a zero — do not act.
   if (fixed.some((o) => !(o.price > 0))) return { ...none, blocked: "a resting stop has no readable trigger price" };
   if (!(book.px > 0)) return { ...none, blocked: "no price" };
+  const safeSide = (o: BookStop) => (book.side === "long" ? o.price < book.px : o.price > book.px);
 
   // A trailing stop is Kraken-managed; we never second-guess its level. If trailing cover
   // alone is complete, leave the book alone (a fixed stop beside a non-reduce-only trailing
   // one could fire first and strand it). If it is short, cover ONLY the shortfall.
   const trailingVol = trailing.reduce((s, o) => s + remaining(o), 0);
   if (trailing.length) {
+    if (trailing.some((o) => o.reduceOnly !== true)) return { ...none, blocked: "trailing stop is not confirmed reduce-only; needs manual attention" };
     // More than one trailing stop, or one bigger than the book, is a state this planner
     // cannot make safe by adding orders (a non-reduce-only trailing order of excess volume
     // OPENS on fire). It needs a human: block, and let the caller page.
@@ -71,7 +73,7 @@ export function planReconcile(book: BookState, ours: BookStop[]): ReconcilePlan 
     const short = book.vol - trailingVol;
     const fixedVol = fixed.reduce((s, o) => s + remaining(o), 0);
     if (short <= book.vol * 0.01) return { ...none, cancel: fixed.map((o) => o.txid), keeper: null, covered: true, reason: "trailing covers the book" };
-    if (fixedVol >= short * 0.99 && fixedVol <= short * 1.01) return { ...none, covered: true, reason: "trailing + fixed cover the book" };
+    if (fixed.every((o) => o.reduceOnly === true && safeSide(o) && atLeastAsGood(book.side, o.price, book.targetLevel, book.px)) && fixedVol >= short * 0.99 && fixedVol <= short * 1.01) return { ...none, covered: true, reason: "trailing + fixed cover the book" };
     const level = safeStopString(book.side, book.targetLevel, book.px, book.priceDecimals);
     if (!level) return { ...none, blocked: "no safe level for the trailing shortfall" };
     return { ...none, place: { level, vol: short.toFixed(book.lotDecimals) }, cancel: fixed.map((o) => o.txid), covered: true, reason: "cover the trailing shortfall" };
@@ -82,8 +84,7 @@ export function planReconcile(book: BookState, ours: BookStop[]): ReconcilePlan 
   const volOk = (o: BookStop) => remaining(o) >= book.vol * 0.99 && remaining(o) <= book.vol * 1.01;
   // A keeper must also rest on the SAFE side of the market: a stop at/through price has
   // triggered (or is about to) and is not protection; it is a close in progress.
-  const safeSide = (o: BookStop) => (book.side === "long" ? o.price < book.px : o.price > book.px);
-  const good = fixed.filter((o) => volOk(o) && safeSide(o) && atLeastAsGood(book.side, o.price, book.targetLevel, book.px));
+  const good = fixed.filter((o) => o.reduceOnly === true && volOk(o) && safeSide(o) && atLeastAsGood(book.side, o.price, book.targetLevel, book.px));
   if (good.length) {
     // Best-priced, tie → newest. Everything else goes (duplicates, partials, oversized).
     const keeper = [...good].sort((a, b) => (book.side === "long" ? b.price - a.price : a.price - b.price) || b.opentm - a.opentm)[0];
@@ -118,7 +119,9 @@ export async function applyReconcile(plan: ReconcilePlan, io: ReconcileIO): Prom
   if (plan.blocked) return out;
   if (plan.place) {
     try {
-      out.placed = (await io.placeStop(plan.place.level, plan.place.vol)) ?? "placed";
+      const txid = await io.placeStop(plan.place.level, plan.place.vol);
+      if (!txid) throw new Error("stop placement returned no order id");
+      out.placed = txid;
     } catch (e) {
       out.placeFailed = String(e).slice(0, 160);
       return out;   // do not cancel anything: the old cover is all there is
@@ -128,6 +131,6 @@ export async function applyReconcile(plan: ReconcilePlan, io: ReconcileIO): Prom
     try { await io.cancel(txid); out.cancelled.push(txid); }
     catch { try { await io.cancel(txid); out.cancelled.push(txid); } catch { out.failedCancels.push(txid); } }
   }
-  out.covered = plan.covered && out.placeFailed == null;
+  out.covered = plan.covered && out.placeFailed == null && out.failedCancels.length === 0;
   return out;
 }
