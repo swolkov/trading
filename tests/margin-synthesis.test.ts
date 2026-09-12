@@ -61,3 +61,25 @@ test("journal block carries both books", () => {
   const b = journalBlock(f);
   assert.match(b, /book: "live"/); assert.match(b, /paper_pnl: 50.00/); assert.match(b, /strategy: "kraken-margin\/selective"/);
 });
+
+test("a pyramid add-on's fills belong to the parent row: combined entry, combined close, paper rescaled by the FIRST unit", () => {
+  const rows = [row(1, "O1", "2026-09-12T04:02:00Z", { source: "swing-pyr", paperNotional: 100, shadowPnl: 10 })];
+  const trades = [
+    trade("T1", "O1", "2026-09-12T04:02:01Z", "buy", 100, 1, { margin: 50 }),            // unit 1: $100
+    trade("T2", "OADD", "2026-09-12T08:00:30Z", "buy", 104, 0.5, { margin: 25 }),       // the add: $52
+    trade("T3", "O9", "2026-09-13T00:00:00Z", "sell", 110, 1.5, { posstatus: "closed" }), // one close for both
+  ];
+  const withLedger = matchLiveFills(rows, trades, (o) => (o === "OADD" ? "O1" : null));
+  assert.equal(withLedger.length, 1);
+  const f = withLedger[0];
+  assert.equal(f.closed, true);
+  assert.equal(f.realVol, 1.5, "both units");
+  assert.ok(Math.abs(f.realEntry - 152 / 1.5) < 1e-9, "blended entry");
+  assert.equal(f.realExit, 110);
+  // net = (110 − 101.33) × 1.5 − fees(entry 0.38 + exit 0.4125)
+  assert.ok(f.realNet != null && Math.abs(f.realNet - ((110 - 152 / 1.5) * 1.5 - (152 * 0.0025) - (165 * 0.0025))) < 1e-9);
+  assert.ok(Math.abs((f.paperPnlAtLiveSize ?? 0) - 10 * (100 / 100)) < 1e-9, "paper rescaled by unit 1's $100, not the $152 combined");
+  // Without the ledger the add is invisible: only unit 1 matches and the close is consumed for 1.0 only.
+  const without = matchLiveFills(rows, trades);
+  assert.equal(without[0].realVol, 1);
+});

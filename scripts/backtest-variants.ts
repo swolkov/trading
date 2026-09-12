@@ -85,7 +85,7 @@ function simulate(coin: string, bars: KrakenBar[], i: number, barH: number, p: E
  * 5–15 ETH" — the disciplined version, where the extra size is bought with the trade's own
  * open profit rather than with more initial risk.
  */
-function simulatePyramid(coin: string, bars: KrakenBar[], i: number, barH: number, p: ExitProfile, entryFee: number): Result & { exitBar: number; added: boolean } {
+function simulatePyramid(coin: string, bars: KrakenBar[], i: number, barH: number, p: ExitProfile, entryFee: number, sizeToStop = false): Result & { exitBar: number; added: boolean } {
   const stopFrac = p.oneR;
   const holdBars = Math.ceil(p.maxHoldH / barH);
   const notional = RISK$ / stopFrac;
@@ -94,22 +94,29 @@ function simulatePyramid(coin: string, bars: KrakenBar[], i: number, barH: numbe
   const oneR = entry * stopFrac;
   let stop = entry - oneR, peak = entry, exit = entry, reason = "time stop", closedAt = bars[Math.min(i + holdBars, bars.length - 1)].t;
   let exitBar = Math.min(i + holdBars, bars.length - 1);
-  let add: { price: number; t: number } | null = null;
+  let add: { price: number; t: number; notional: number } | null = null;
   for (let j = i + 1; j < bars.length && j <= i + holdBars; j++) {
     const b = bars[j];
     if (b.l <= stop) { exit = stop; reason = stop >= entry ? "trail" : "initial stop"; closedAt = b.t; exitBar = j; break; }
     peak = Math.max(peak, b.h);
     stop = managedStop(1, entry, peak, stop, oneR, p);
     exit = b.c; closedAt = b.t; exitBar = j;
-    if (!add && b.c >= entry + oneR) add = { price: b.c * (1 + CHASE), t: b.t };
+    if (!add && b.c >= entry + oneR) {
+      const price = b.c * (1 + CHASE);
+      // RISK-SIZED ADD: the second unit risks exactly RISK$ to the stop that is resting at the
+      // moment of the add — so the combined worst case from here is the same −1R as without
+      // the add, whatever trail is running. (Same-notional adds on a 2R trail can risk ~2R.)
+      const n2 = sizeToStop ? Math.min(notional, (RISK$ * price) / Math.max(price - stop, 1e-9)) : notional;
+      add = { price, t: b.t, notional: n2 };
+    }
   }
   const heldH = ((closedAt - bars[i].t) / 3600) || barH;
   let gross = (notional * (exit - entry)) / entry;
   let fees = notional * (entryFee + TAKER) + (p.carry ? notional * roll * (heldH / 4) : 0);
   if (add) {
     const heldH2 = ((closedAt - add.t) / 3600) || barH;
-    gross += (notional * (exit - add.price)) / add.price;
-    fees += notional * (TAKER + TAKER) + (p.carry ? notional * roll * (heldH2 / 4) : 0);
+    gross += (add.notional * (exit - add.price)) / add.price;
+    fees += add.notional * (TAKER + TAKER) + (p.carry ? add.notional * roll * (heldH2 / 4) : 0);
   }
   const pnl = gross - fees;
   return { pnl, r: pnl / RISK$, reason, exitBar, added: !!add };
@@ -249,6 +256,46 @@ async function main() {
     const worstP = Math.min(...py.map((x) => x.pnl)), worstC = Math.min(...c4.map((x) => x.pnl));
     console.log(`  worst single trade: pyramid ${worstP.toFixed(0)} · control ${worstC.toFixed(0)}`);
     console.log(`  ⇒ ${Math.abs(sp.t) >= 2 ? (sp.t > 0 ? "pyramiding IS better" : "pyramiding is WORSE") : "NOT established either way"}`);
+  }
+
+  // ---- Q2e: pyramid ON THE 2R TRAIL (the live rule from Sep 12). PAIRED against swing-wide alone.
+  // Q2d measured the add on the 1R control; the desk now trails 2R, so the add is re-measured
+  // in the container it would actually run in. Same trigger (a 4h close ≥ +1R), same size
+  // (a second unit of the same notional), the 2R trail on the combined position.
+  console.log("\n── Q2e pyramid on the 2R trail: add a 2nd unit at +1R, trail 2R on both? (paired vs swing-wide) ──");
+  {
+    const pw = all4h.map((x) => simulatePyramid(x.e.coin, x.bars, x.e.i, 4, WIDE, TAKER));
+    const dw = pw.map((x, i) => x.pnl - w4[i].pnl);
+    const nAdded = pw.filter((x) => x.added).length;
+    report("swing-wide alone (4h)", w4.map((x) => x.pnl));
+    report("pyramid + 2R trail (4h)", pw.map((x) => x.pnl));
+    report("per-trade DIFFERENCE vs swing-wide", dw);
+    const sw = tOf(dw);
+    const helped = dw.filter((d) => d > 0.005).length, hurt = dw.filter((d) => d < -0.005).length;
+    console.log(`  added on ${nAdded}/${pw.length} trades · kept MORE: ${helped} · kept LESS: ${hurt} · identical: ${dw.length - helped - hurt}`);
+    const onlyAdded = pw.map((x, i) => [x, w4[i]] as const).filter(([x]) => x.added);
+    report("  on the trades that DID add — pyramid+2R", onlyAdded.map(([x]) => x.pnl));
+    report("  on the trades that DID add — swing-wide", onlyAdded.map(([, c]) => c.pnl));
+    const worstP = Math.min(...pw.map((x) => x.pnl)), worstW = Math.min(...w4.map((x) => x.pnl));
+    console.log(`  worst single trade: pyramid+2R ${worstP.toFixed(0)} · swing-wide ${worstW.toFixed(0)}`);
+    // And against the ORIGINAL control, so the two levers can be read together.
+    const dc = pw.map((x, i) => x.pnl - c4[i].pnl);
+    report("per-trade DIFFERENCE vs 1R control", dc);
+    console.log(`  ⇒ ${Math.abs(sw.t) >= 2 ? (sw.t > 0 ? "pyramiding on 2R IS better" : "pyramiding on 2R is WORSE") : "NOT established either way"}`);
+    // RISK-SIZED: the add is sized so it risks exactly one R to the resting stop (capped at a
+    // full unit). Combined worst case stays −1R; this is the only version the breaker math allows.
+    console.log("\n── Q2f pyramid on the 2R trail, RISK-SIZED add (unit 2 risks exactly 1R to the resting stop) ──");
+    const pr = all4h.map((x) => simulatePyramid(x.e.coin, x.bars, x.e.i, 4, WIDE, TAKER, true));
+    const dr = pr.map((x, i) => x.pnl - w4[i].pnl);
+    report("pyramid(risk-sized) + 2R (4h)", pr.map((x) => x.pnl));
+    report("per-trade DIFFERENCE vs swing-wide", dr);
+    const sr = tOf(dr);
+    const helpedR = dr.filter((d) => d > 0.005).length, hurtR = dr.filter((d) => d < -0.005).length;
+    console.log(`  added on ${pr.filter((x) => x.added).length}/${pr.length} trades · kept MORE: ${helpedR} · kept LESS: ${hurtR} · identical: ${dr.length - helpedR - hurtR}`);
+    const worstR = Math.min(...pr.map((x) => x.pnl));
+    console.log(`  worst single trade: risk-sized pyramid ${worstR.toFixed(0)} · swing-wide ${worstW.toFixed(0)}`);
+    report("per-trade DIFFERENCE vs 1R control", pr.map((x, i) => x.pnl - c4[i].pnl));
+    console.log(`  ⇒ ${Math.abs(sr.t) >= 2 ? (sr.t > 0 ? "risk-sized pyramiding on 2R IS better" : "risk-sized pyramiding on 2R is WORSE") : "NOT established either way"}`);
   }
 
   // ---- Q3: maker entries. PAIRED — identical trades, only the entry fee differs.

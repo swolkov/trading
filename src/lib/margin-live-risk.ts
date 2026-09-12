@@ -331,6 +331,11 @@ export interface LiveContainer {
   // guardian reads it per book (managedStopTarget); it is written into the ownership ledger
   // at entry so a position keeps the trail it was opened under even if this table changes.
   trailR: number;
+  // PYRAMID: when a completed 4h bar CLOSES at or beyond +addAtR (measured from the first
+  // unit's entry in its own R), ONE more unit is added, risk-sized to the resting stop
+  // (pyramidAddNotional) so the book's worst case stays exactly one R. Absent = never add.
+  // Paper's exitParams.addAtR, pinned by test.
+  addAtR?: number;
 }
 const FAST: LiveContainer = { stopPct: 3, maxHoldH: 48, makerEntries: false, trailR: 1 };   // market entries: a post-only bid rarely fills a breakout
 export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
@@ -344,6 +349,13 @@ export const LIVE_CONTAINERS: Record<string, LiveContainer> = {
   // The guardian mirrors it through managedStopTarget's trailR. Judged like every sleeve — the
   // FORWARD record, against swing-lev on the same signals, decides whether it stays armed.
   "swing-wide": { stopPct: 4, maxHoldH: 24 * 7, makerEntries: null, trailR: 2 },
+  // SWING-PYR (Sep 12 2026). swing-wide plus ONE risk-sized add when a 4h bar closes ≥ +1R.
+  // Paired replay on the same 88 entries (scripts/backtest-variants.ts Q2f): +$125/trade over
+  // swing-wide alone, t=2.63; +$229 over the 1R control, t=2.38. Same-notional adds on a 2R
+  // trail were REJECTED (worst trade −$694 vs −$403: a unit added at +1.8R with the stop still
+  // at breakeven risks ~2R). Risk-sizing the add to the resting stop keeps the book's worst
+  // case at one R; the only extra downside is the second unit's fees and carry (−$499 worst).
+  "swing-pyr": { stopPct: 4, maxHoldH: 24 * 7, makerEntries: null, trailR: 2, addAtR: 1 },
   tsmom: { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null, trailR: 1 },
   "tsmom-short": { stopPct: 8, maxHoldH: 24 * 14, makerEntries: null, trailR: 1 },
 };
@@ -443,6 +455,52 @@ export function managedStopTarget(side: "long" | "short", entry: number, peak: n
  * never on the widest rule present. Stacked books are not ratcheted at all (no single 1R),
  * so the disagreement case only ever decides a message, not a stop.
  */
+/** Seconds per 4h bar; Kraken's 4h bars open on UTC 00/04/08/12/16/20. */
+export const FOUR_H_SEC = 4 * 3600;
+/** The 1-minute bar whose close is a 4h close: it opens at the last minute of the 4h bar. */
+export function isFourHourClose(oneMinBarT: number): boolean {
+  return Number.isFinite(oneMinBarT) && (oneMinBarT + 60) % FOUR_H_SEC === 0;
+}
+/** The 4h bar (by its open time) is complete once its close time has passed. */
+export function fourHourBarComplete(barT: number, nowSec: number): boolean {
+  return Number.isFinite(barT) && barT + FOUR_H_SEC <= nowSec;
+}
+/**
+ * THE PYRAMID ADD, sized to the stop. Paper and live call this one function.
+ * The second unit risks exactly `riskUsd` to the stop that is resting at the moment of the
+ * add, and never more notional than the first unit. Long: stop below price; short: above.
+ * Zero when the stop is not on the protective side of the price (no distance to size to),
+ * when inputs are unusable, or when the distance is under 0.1% (a stop that close is noise).
+ */
+export function pyramidAddNotional(riskUsd: number, side: "long" | "short", price: number, stop: number, unitNotional: number): number {
+  if (!(riskUsd > 0) || !(price > 0) || !(stop > 0) || !(unitNotional > 0)) return 0;
+  const dist = side === "long" ? (price - stop) / price : (stop - price) / price;
+  if (!(dist >= 0.001)) return 0;
+  return Math.min(unitNotional, riskUsd / dist);
+}
+/**
+ * Is the first unit far enough along for the add? `closeR` is the completed 4h bar's close
+ * measured from the FIRST unit's entry in its R. One add per book, ever — the caller passes
+ * `alreadyAdded`.
+ */
+export function pyramidAddDue(addAtR: number | undefined, closeR: number, alreadyAdded: boolean): boolean {
+  return addAtR != null && addAtR > 0 && !alreadyAdded && Number.isFinite(closeR) && closeR >= addAtR;
+}
+/**
+ * A PYRAMID BOOK is exactly one parent tranche plus add-ons that all name it. It is managed
+ * as ONE position on the parent's entry and R (the replay's rule), never as a stacked book.
+ * Anything else with more than one tranche — two independent entries, an add-on whose parent
+ * is gone, an add-on of an add-on — is stacked and is not ratcheted. Returns null when the
+ * group is not a pyramid book.
+ */
+export function pyramidBookOf<T extends { ordertxid: string }>(grp: T[], addOnOf: (ordertxid: string) => string | null): { parent: T; addOns: T[] } | null {
+  if (grp.length < 2) return null;
+  const parents = grp.filter((g) => addOnOf(g.ordertxid) == null);
+  if (parents.length !== 1) return null;
+  const parent = parents[0];
+  const addOns = grp.filter((g) => g !== parent);
+  return addOns.every((g) => addOnOf(g.ordertxid) === parent.ordertxid) ? { parent, addOns } : null;
+}
 export function bookTrailR(tranches: { trailR?: number | null; source?: string | null }[]): number {
   const each = tranches.map((t) => {
     if (t.trailR != null && Number.isFinite(t.trailR) && t.trailR > 0) return t.trailR;
