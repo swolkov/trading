@@ -35,3 +35,23 @@ test("process lease and entry authorization are separate, source remains raw tel
     assert.equal(h.ready, true); assert.equal(h.entryAuthorizationReported, false); assert.equal(h.marketData, mdHealth);
   }
 });
+
+// The DESK (TradingView → Tradovate demo) — the panel reads the desk's own keys, not the
+// retired engines' heartbeats.
+test("desk health reads the switch and guardian from the desk's own state", () => {
+  const cfg = { futures_desk_enabled: "true", futures_desk_state: JSON.stringify({ guardianAt: "2026-09-12T17:50:00Z", equity: 57794.27, alerts: {} }) };
+  const d = futuresHealth(cfg, now, true).desk;
+  assert.equal(d.enabled, true); assert.equal(d.guardianFresh, true); assert.equal(d.guardianAt, "2026-09-12T17:50:00.000Z");
+  assert.equal(d.configured, true); assert.equal(d.equity, 57794.27); assert.equal(d.lastError, null); assert.equal(d.disabledReason, null);
+  assert.equal(d.cmeOpen, false);   // Saturday 14:00 ET
+});
+test("desk health fails to red on a stale, missing or malformed guardian report", () => {
+  assert.equal(futuresHealth({ futures_desk_state: JSON.stringify({ guardianAt: "2026-09-12T17:39:00Z" }) }, now).desk.guardianFresh, false); // 21 min
+  assert.equal(futuresHealth({ futures_desk_state: JSON.stringify({ guardianAt: "2026-09-12T18:01:00Z" }) }, now).desk.guardianAt, null);     // future
+  for (const raw of [undefined, "{", "[]", "null"]) {
+    const d = futuresHealth(raw == null ? {} : { futures_desk_state: raw }, now).desk;
+    assert.equal(d.guardianFresh, false); assert.equal(d.enabled, false); assert.equal(d.configured, false);
+  }
+  const d = futuresHealth({ futures_desk_enabled: "false", futures_desk_state: JSON.stringify({ disabledReason: "equity −20% from high", lastError: "auth 401" }) }, now).desk;
+  assert.equal(d.enabled, false); assert.equal(d.disabledReason, "equity −20% from high"); assert.equal(d.lastError, "auth 401");
+});

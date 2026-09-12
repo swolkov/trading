@@ -3,10 +3,10 @@ import type { NextFetchEvent, NextRequest } from "next/server";
 import { evaluateOwnerAuthorization } from "@/auth/owner-policy";
 import { isPublicPath } from "@/lib/route-access";
 
-// Pages retired with futures trading (Aug 2026). Their code remains in the repo
-// for reversibility, but they are unlinked from the nav and redirect home.
+// Pages retired with the futures ENGINE (Aug 2026). Their code remains in the repo for
+// reversibility, but they are unlinked from the nav and redirect home. /futures itself is live
+// again since Sep 11 2026 as the Futures Desk (Tradovate demo, TradingView alerts).
 const RETIRED_PREFIXES = [
-  "/futures",         // Tradovate — retired Aug 2026, closed for good Sep 11 2026
   "/kraken",          // old BTC/ETH trend bot — disabled Aug 31 2026, capital parked in coins
   "/prop",            // Tradeify 247 crypto prop — bought in error, retired Sep 12 2026, never armed
   "/demo-vs-live",

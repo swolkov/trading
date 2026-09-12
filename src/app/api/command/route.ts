@@ -49,7 +49,7 @@ export async function GET() {
     ]);
 
     return Response.json({
-      futures: futuresHealth(c),
+      futures: futuresHealth(c, Date.now(), Boolean(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET)),
       heartbeats: {
         marginScan: c["margin_scan_last_run"] || null,
         marginWatch: c["margin_watch_last_run"] || null,

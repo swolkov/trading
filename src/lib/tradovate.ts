@@ -109,14 +109,48 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
   }
 
   const data = await res.json();
-  _tokenCache[mode] = {
-    token: data.accessToken,
-    // Token valid for ~24 hours, refresh at 23 hours
-    expires: Date.now() + 23 * 60 * 60 * 1000,
-    accountId: 0,
-  };
+  // Tradovate reports the real expiry; the 23h assumption stays as the fallback only.
+  const reported = typeof data.expirationTime === "string" ? Date.parse(data.expirationTime) : NaN;
+  const expires = Number.isFinite(reported) && reported > Date.now() + 60_000 ? reported : Date.now() + 23 * 60 * 60 * 1000;
+  _tokenCache[mode] = { token: data.accessToken, expires, accountId: 0 };
+
+  // Persist the token for every other Vercel instance. Serverless has no shared memory, so without
+  // this each cold start would call /auth/accesstokenrequest again — which is exactly how the May 20
+  // 429 lockout happened. The Railway engine used to own this write; with the engines down (Aug 31
+  // 2026) the futures desk's own calls are the only writer, so the app writes it itself.
+  try {
+    const { prisma } = await import("./db");
+    const shareKey = mode === "live" ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+    const value = JSON.stringify({ token: data.accessToken, expires: new Date(expires).toISOString(), accountId: 0, by: "vercel" });
+    await prisma.agentConfig.upsert({ where: { key: shareKey }, update: { value }, create: { key: shareKey, value } });
+  } catch { /* persistence is an optimisation; auth already succeeded */ }
 
   return data.accessToken;
+}
+
+/** Record the account id beside the shared token so later instances skip /account/list too. */
+async function rememberSharedAccountId(mode: TradingMode, accountId: number): Promise<void> {
+  if (!accountId) return;
+  try {
+    const { prisma } = await import("./db");
+    const shareKey = mode === "live" ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+    const row = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+    if (!row?.value) return;
+    const parsed = JSON.parse(row.value);
+    if (parsed.accountId === accountId) return;
+    await prisma.agentConfig.update({ where: { key: shareKey }, data: { value: JSON.stringify({ ...parsed, accountId }) } });
+  } catch { /* optional */ }
+}
+
+/** Authenticated request against the mode's REST base — exported for the futures desk client
+ *  (src/lib/tradovate-desk.ts), which passes mode "paper" on every call. */
+export async function tradovateRequest<T = unknown>(path: string, options?: RequestInit, modeOverride?: TradingMode): Promise<T> {
+  return tvFetch(path, options, modeOverride) as Promise<T>;
+}
+
+/** The account id for a mode, resolving through the shared token or /account/list. */
+export async function tradovateAccountId(modeOverride?: TradingMode): Promise<number> {
+  return getAccountIdForMode(modeOverride);
 }
 
 async function tvFetch(path: string, options?: RequestInit, modeOverride?: TradingMode): Promise<unknown> {
@@ -201,6 +235,7 @@ export async function checkTradovateAuth(modeOverride?: TradingMode): Promise<{ 
     if (active) {
       if (_tokenCache[mode]) _tokenCache[mode].accountId = active.id;
       _accountId = active.id;
+      await rememberSharedAccountId(mode, active.id);
       return { authenticated: true, accountId: active.id, accountName: active.name };
     }
     return { authenticated: false, accountId: 0, accountName: "" };
@@ -291,6 +326,9 @@ export const TRADOVATE_CONTRACTS: Record<string, { name: string; exchange: strin
   MES: { name: "Micro E-mini S&P 500", exchange: "CME", multiplier: 5, tickSize: 0.25 },
   MNQ: { name: "Micro E-mini Nasdaq 100", exchange: "CME", multiplier: 2, tickSize: 0.25 },
   MGC: { name: "Micro Gold", exchange: "COMEX", multiplier: 10, tickSize: 0.1 },
+  SIL: { name: "Micro Silver", exchange: "COMEX", multiplier: 1000, tickSize: 0.005 },
+  MHG: { name: "Micro Copper", exchange: "COMEX", multiplier: 2500, tickSize: 0.0005 },
+  MCL: { name: "Micro Crude", exchange: "NYMEX", multiplier: 100, tickSize: 0.01 },
   MYM: { name: "Micro E-mini Dow", exchange: "CBOT", multiplier: 0.5, tickSize: 1 },
   M2K: { name: "Micro E-mini Russell 2000", exchange: "CME", multiplier: 5, tickSize: 0.1 },
   // Crypto micros (CME GLBX.MDP3). All are observation-only until an edge clears the
