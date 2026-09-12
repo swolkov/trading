@@ -1,6 +1,6 @@
 # Robinhood Level 3 execution core
 
-Status: offline execution policy and orchestration implemented; **not connected, armed, scheduled, or deployed for live trading**. The existing options runner remains paper-only. Its tool allowlist is unchanged. No broker order was reviewed, placed, or cancelled during implementation.
+Status: maximum loss of $100 per options trade including fees authorized by Spencer on September 12 and stored in `options_live_max_loss_usd`. Options paper trading is retired. Offline execution policy and orchestration implemented; **not connected, armed, scheduled, or deployed for live trading**. The scheduled options runner now collects real account snapshots only. Its broker allowlist remains read-only. No broker order was reviewed, placed, or cancelled during implementation.
 
 The connected-account inspection supplied to this implementation identified account `685528705` as active, Agentic, `agentic_allowed=true`, `option_level_3`, `limited_margin`, with $500 options buying power. This is an observed snapshot, not a permanent balance or authorization for a particular loss amount. The core pins the account identity and requires a fresh complete broker snapshot each time. Maximum loss and a round-trip fee reserve must be explicitly supplied; there is no dollar-risk default.
 
@@ -53,8 +53,8 @@ A rejected/cancelled order releases its reservation only when reconciliation con
 
 ## Required before live activation
 
-1. Obtain explicit maximum loss and fee reserve from the user. Keep live arming false until then.
-2. Implement the authorized OAuth/client adapter and durable store. Preserve the current paper runner's allowlist until a separate integration is reviewed.
+1. Enforce the approved $100 total maximum loss from configuration. Establish a conservative round-trip fee reserve from verified broker fees inside that limit. Keep live arming false until the integration checks below pass.
+2. Implement the authorized OAuth/client adapter and durable store. Preserve the snapshot collector's read-only allowlist until a separate integration is reviewed.
 3. Capture and verify real review, placement, cancellation, lookup, position, contract, quote and session responses. Test malformed responses, lost responses, pagination and stale data.
 4. Implement live monitoring, ownership ingestion and account-wide locking. Cover stale-order cancellation, partial fills, exits, expiry, exercise/assignment, missing legs and lost data. Assignment can create underlying exposure; contractual spread payoff is not a guarantee against additional operational exposure or costs.
 5. Reconcile broker fees, collateral and review amounts against this policy for each structure. Use broker-supported nonfunding review/simulation where available. The offline test broker is not a Robinhood paper account.

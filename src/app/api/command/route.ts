@@ -3,7 +3,6 @@ import { execLockHeldSince } from "@/lib/margin-live-risk";
 import { quoteStoreFreshness, readAccountSnapshot, readLiveSnapshot } from "@/lib/options-quote-store";
 import { barsStoreFreshness } from "@/lib/options-bars-store";
 import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
-import { OPTIONS_COHORT_SQL } from "@/lib/options-paper-model";
 
 // System-health API. Two halves, because there are now two kinds of failure.
 //
@@ -26,7 +25,7 @@ const EMPTY = {
   execLock: { held: false, since: null as string | null },
   paper: {
     optionsScan: null as string | null, stockScan: null as string | null,
-    optionsAutotrack: true, stockAutotrack: true,
+    optionsAutotrack: false, stockAutotrack: true,
     robinhood: {
       newestQuoteTs: null as string | null, quoteAgeMinutes: null as number | null,
       quotesStale: true, quoteRows: 0, openPositions: 0,
@@ -51,12 +50,9 @@ export async function GET() {
 
     // Paper-desk health. Each read is independently caught: a paper book being unreachable
     // must never blank out the Kraken heartbeats, which are the ones tied to real money.
-    const [quotes, account, openOpts, bars, live] = await Promise.all([
+    const [quotes, account, bars, live] = await Promise.all([
       quoteStoreFreshness().catch(() => null),
       readAccountSnapshot().catch(() => null),
-      prisma.$queryRawUnsafe<{ n: bigint }[]>(
-        `SELECT count(*)::bigint AS n FROM options_paper_trades WHERE status='open' AND ${OPTIONS_COHORT_SQL}`,
-      ).then((r) => Number(r[0]?.n ?? 0)).catch(() => 0),
       barsStoreFreshness([...OPTIONS_SYMBOLS]).catch(() => null),
       readLiveSnapshot().catch(() => null),
     ]);
@@ -79,7 +75,7 @@ export async function GET() {
       paper: {
         optionsScan: c["options_scan_last_run"] || null,
         stockScan: c["stock_scan_last_run"] || null,
-        optionsAutotrack: c["options_paper_autotrack"] !== "false",
+        optionsAutotrack: false,
         stockAutotrack: c["stock_paper_autotrack"] !== "false",
         robinhood: {
           newestQuoteTs: quotes?.newestQuoteTs ?? null,
@@ -88,7 +84,7 @@ export async function GET() {
           // healthy. An unknown state on a silent-failure path is not a green light.
           quotesStale: quotes ? quotes.stale : true,
           quoteRows: quotes?.rows ?? 0,
-          openPositions: openOpts,
+          openPositions: 0,
           optionLevel: account?.optionLevel ?? null,
           accountAt: account?.at ?? null,
           // The bars inbox (Robinhood daily bars) — a separate failure from stale quotes:

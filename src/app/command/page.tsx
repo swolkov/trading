@@ -146,65 +146,15 @@ export default function SystemHealthPage() {
         </Panel>
       </div>
 
-      <Panel tone={rh.quotesStale ? "red" : undefined}>
-        <PanelHeader
-          title="Robinhood — live account snapshot and the options paper book"
-          aside={
-            <Chip tone={rh.quotesStale ? "red" : "green"} dot={rh.quotesStale} size="md">
-              {rh.newestQuoteTs ? `quotes ${ago(rh.newestQuoteTs)}` : "no quotes ever pushed"}
-            </Chip>
-          }
-        />
+      <Panel>
+        <PanelHeader title="Robinhood account connection" aside={<Chip tone="amber">Live execution inactive</Chip>} />
         <PanelBody className="divide-y divide-border">
-          <HealthRow
-            label="Quote inbox"
-            sub="pushed by the scheduled agent — weekdays 17:32 after the close"
-            chip={<Chip tone={rh.quotesStale ? "red" : "green"} dot={rh.quotesStale}>{rh.newestQuoteTs ? ago(rh.newestQuoteTs) : "never"}</Chip>}
-          >
-            {rh.quoteRows > 0 && <span>{rh.quoteRows} contracts</span>}
+          <HealthRow label="Real account snapshot" sub="Collected after each weekday close; this is not a live position monitor."
+            chip={<Chip tone={ageTone(rh.liveAt, 60 * 30, 60 * 50)}>{rh.liveAt ? ago(rh.liveAt) : "never"}</Chip>}>
+            {rh.liveAt && <span>{rh.livePositions} positions · {rh.liveOrders} orders</span>}
           </HealthRow>
-          <HealthRow
-            label="Bars inbox"
-            sub="Robinhood daily bars for the 39-name universe — the signal is read from these"
-            chip={<Chip tone={rh.barsStale ? "red" : "green"} dot={rh.barsStale}>{rh.barsNewestDay ? `to ${rh.barsNewestDay}` : "never"}</Chip>}
-          >
-            {rh.barsStaleSymbols > 0 && <span className="text-down">{rh.barsStaleSymbols} names behind</span>}
-          </HealthRow>
-          <HealthRow
-            label="Live account snapshot"
-            sub="positions and orders on the REAL account, pushed by the same run — the app never places an order here"
-            chip={<Chip tone={rh.liveForeignOrders > 0 ? "red" : rh.liveAt ? "green" : "grey"} dot={rh.liveForeignOrders > 0}>{rh.liveAt ? ago(rh.liveAt) : "never"}</Chip>}
-          >
-            {rh.liveAt && <span>{rh.livePositions} position{rh.livePositions === 1 ? "" : "s"} · {rh.liveOrders} order{rh.liveOrders === 1 ? "" : "s"}{rh.liveForeignOrders > 0 ? <span className="text-down"> · {rh.liveForeignOrders} NOT placed by you</span> : null}</span>}
-          </HealthRow>
-          <HealthRow
-            label="Options scan"
-            sub="daily cron, 6pm ET"
-            chip={<Chip tone={ageTone(data.paper.optionsScan, 60 * 30, 60 * 50)}>{data.paper.optionsScan ? ago(data.paper.optionsScan) : "never"}</Chip>}
-          />
-          <HealthRow
-            label="Open paper positions"
-            chip={<Chip tone={rh.openPositions > 0 ? "blue" : "grey"}>{rh.openPositions}</Chip>}
-          />
-          <HealthRow
-            label="Account snapshot"
-            sub={rh.optionLevel === "option_level_3" ? "Level 3 — spreads available" : rh.optionLevel === "option_level_2" ? "Level 2 — long premium only" : undefined}
-            chip={<Chip tone={rh.accountAt ? "green" : "grey"}>{rh.accountAt ? ago(rh.accountAt) : "never"}</Chip>}
-          />
-          <HealthRow
-            label="New paper entries"
-            chip={<Chip tone={data.paper.optionsAutotrack ? "green" : "amber"}>{data.paper.optionsAutotrack ? "tracking" : "paused"}</Chip>}
-          />
+          <HealthRow label="Options permission" chip={<Chip tone={rh.optionLevel === "option_level_3" ? "green" : "grey"}>{rh.optionLevel === "option_level_3" ? "Level 3" : rh.optionLevel ?? "unknown"}</Chip>} />
         </PanelBody>
-        {rh.quotesStale && (
-          <PanelBody className="pt-0">
-            <Note className="text-down">
-              The quote inbox is stale, so this book is frozen rather than quiet: positions are not marking and no entry can open.
-              Robinhood cannot be read from the server — check the agent on the Mac
-              (<code>launchctl print gui/$(id -u)/com.esbueno.options-desk</code>) and that its login is still authenticated.
-            </Note>
-          </PanelBody>
-        )}
       </Panel>
 
       <Note>The spot trend bot and the stock paper book were both retired; their machinery is no longer monitored here.</Note>

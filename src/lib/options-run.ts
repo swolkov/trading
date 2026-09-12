@@ -1,3 +1,4 @@
+import { OPTIONS_PAPER_RETIRED } from "@/lib/options-operation";
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { pickContractFor, scanTrendSignals } from "@/lib/options-scanner";
@@ -48,6 +49,7 @@ function etDate(at: Date): string {
 }
 
 export async function runOptionsScan(): Promise<OptionsScanResult> {
+  if (OPTIONS_PAPER_RETIRED) return { ok: true, simVersion: OPTIONS_SIM_VERSION, scanned: 0, trendSignals: [], freshSignals: [], staleSkipped: 0, resolved: 0, opened: [], refused: ["Options paper trading retired by owner"], tracking: false, sleeves: [], errors: [] };
   await prisma.agentConfig.upsert({
     where: { key: "options_scan_last_run" },
     update: { value: new Date().toISOString() },

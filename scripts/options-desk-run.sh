@@ -2,16 +2,16 @@
 # DURABLE RUNNER for the Robinhood options desk.
 #
 # Robinhood has no server credentials — its only official route is an OAuth login held on
-# THIS machine — so the options paper book's data path cannot live on Vercel. This script is
+# THIS machine — so the real account snapshot collection cannot live on Vercel. This script is
 # that path: a launchd job runs it each weekday after the close, it drives one Claude session
-# through the `options-desk` skill, and that session pushes quotes into the book.
+# to refresh the real account snapshot. It performs no paper simulation.
 #
 # Installed at: ~/Library/LaunchAgents/com.esbueno.options-desk.plist
 # Log:          ~/Library/Logs/options-desk.log
 #
 # SAFETY. This runs unattended, so the tool allowlist below is the real guard rather than the
-# skill's prose. It permits exactly the Robinhood READ tools this job needs and the two
-# script invocations — nothing else. Every Robinhood write tool is ALSO named in the
+# skill's prose. It permits exactly the Robinhood READ tools this job needs and the snapshot
+# ingest invocation — nothing else. Every Robinhood write tool is ALSO named in the
 # disallow list, so an order cannot be placed even if the allowlist is later widened by
 # mistake. Both lists must be edited to break that, which is the point.
 set -u
@@ -35,19 +35,13 @@ fi
 
 echo "$(stamp) [start] options desk pull" >> "$LOG"
 
-claude -p "Run one Robinhood data pull for the options paper book using the options-desk skill. Follow it exactly. This is PAPER ONLY: never place, cancel or modify any order. If the Robinhood MCP is not authenticated, report that and stop rather than retrying." \
+claude -p "Refresh only the real Robinhood Agentic account 685528705 snapshot. Read scripts/options-rh-agent.ts to see the ingest Payload fields, then use get_accounts, get_portfolio, get_option_positions and get_option_orders. Include complete positions and orders with pagination, setting positionsComplete and ordersComplete to true only after all pages succeed; do not turn failed reads into empty arrays. Write one snapshot payload file and call node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest <file>. Options paper trading is retired: do not use the options-desk skill, fetch paper worklists, run scans or simulate trades. Never review, place, cancel, exercise or modify an order. If Robinhood is not authenticated, report it and stop." \
   --allowedTools \
-    "Skill" \
     "Read" \
     "Write" \
-    "Bash(node --env-file=.env.local --import tsx scripts/options-rh-agent.ts:*)" \
+    "Bash(node --env-file=.env.local --import tsx scripts/options-rh-agent.ts ingest:*)" \
     "mcp__robinhood-trading__get_accounts" \
     "mcp__robinhood-trading__get_portfolio" \
-    "mcp__robinhood-trading__get_option_chains" \
-    "mcp__robinhood-trading__get_option_instruments" \
-    "mcp__robinhood-trading__get_option_quotes" \
-    "mcp__robinhood-trading__get_equity_quotes" \
-    "mcp__robinhood-trading__get_equity_historicals" \
     "mcp__robinhood-trading__get_option_positions" \
     "mcp__robinhood-trading__get_option_orders" \
   --disallowedTools \

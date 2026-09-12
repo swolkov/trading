@@ -6,8 +6,7 @@ import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 import { Chip } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { ago, coinOf, hold, pnl0, pnl2, tone, usd, usd0, when } from "@/lib/format";
-import { isBearishSource, isCreditStructure, isPutStructure } from "@/lib/options-paper-model";
+import { coinOf, hold, pnl0, pnl2, tone, usd, usd0, when } from "@/lib/format";
 import Link from "next/link";
 
 interface Fill {
@@ -57,82 +56,20 @@ export function UnifiedOrdersTable() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
   const { data: score } = useSWR<ScoreData>("/api/margin/scoreboard", fetcher, { refreshInterval: 60000 });
-  // The second platform's log lives here too, so "every trade in one place" is true.
-  const { data: opt } = useSWR<{ trades?: OptionRow[] }>("/api/options/paper", fetcher, { refreshInterval: 120000 });
-  const [view, setView] = useState<"live" | "paper" | "options" | "scan">("live");
+  const [view, setView] = useState<"live" | "paper" | "scan">("live");
 
   return (
     <div className="space-y-4">
+      <Note>Robinhood account orders are on <Link href="/options" className="text-primary hover:underline">Live Account</Link>.</Note>
       <Segmented value={view} onChange={setView} options={[
         { k: "live", label: "Kraken live · real money", tone: "red" },
         { k: "paper", label: "Kraken paper · no real money", tone: "paper" },
-        { k: "options", label: "Robinhood options · paper", tone: "paper" },
         { k: "scan", label: "Scanner · what it just looked at" },
       ]} />
       {view === "live"
         ? <LiveView data={data} krk={krk} trips={score?.recentTrips ?? []} tripsLoading={score === undefined} />
         : view === "paper" ? <PaperLogTable log={score?.log ?? []} loading={score === undefined} />
-          : view === "options" ? <OptionsLogTable trades={opt?.trades ?? []} loading={opt === undefined} />
-            : <ScanLookTable scan={score?.scanLook ?? null} loading={score === undefined} />}
-    </div>
-  );
-}
-
-// ── Robinhood options paper log — the same rows as the Options Paper Book's position log ──
-interface OptionRow {
-  id: number; time: string; symbol: string; source: string; structure: string; strike: number | null;
-  shortStrike: number | null; creditUsd: number; expiry: string | null; costUsd: number;
-  markUsd: number | null; proceedsUsd: number | null; pnl: number | null; status: string; reason: string | null;
-  entryDelta: number | null; entrySpreadPct: number | null;
-}
-const STRUCTURE_LABEL: Record<string, string> = {
-  call: "Naked ITM call", call_spread: "Call debit spread", put_credit_spread: "Put credit spread",
-  put: "Naked ITM put", put_spread: "Put debit spread", call_credit_spread: "Call credit spread",
-};
-function OptionsLogTable({ trades, loading }: { trades: OptionRow[]; loading: boolean }) {
-  if (loading) return <Note className="py-4">Loading options paper trades…</Note>;
-  return (
-    <div className="space-y-3">
-      <Note>
-        Robinhood options paper book — <strong className="font-medium text-foreground/85">no real money moved, no order ever placed</strong>. In-the-money options and verticals on a 50-day breakout, bought at the quoted ask and sold at the quoted bid, marked from quotes the desk session pushes after the close. Sleeves, structures and the pushed-data health are on the <Link href="/options/paper" className="text-primary hover:underline">Options Paper Book</Link>.
-      </Note>
-      {trades.length === 0 ? <Empty>No options paper trades yet.</Empty> : (
-        <DataTable>
-          <thead>
-            <tr>
-              <Th>When</Th><Th>Sleeve</Th><Th>Contract</Th><Th>Structure</Th><Th num>Δ / spread</Th>
-              <Th num>At risk</Th><Th num>Mark / exit</Th><Th num>P&L <span className="normal-case opacity-60">(open = unreal.)</span></Th><Th>Status</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((t) => (
-              <Row key={t.id}>
-                <Td title={when(t.time)}>{ago(t.time)}</Td>
-                <Td>{t.source}{isBearishSource(t.source) && <Chip tone="red" className="ml-1.5">short</Chip>}</Td>
-                <Td className="whitespace-nowrap">
-                  {t.symbol}{" "}
-                  {isCreditStructure(t.structure) && t.shortStrike != null
-                    ? <>${t.shortStrike}<span className="text-muted-foreground">/${t.strike}{isPutStructure(t.structure) ? "p" : "c"}</span></>
-                    : <>${t.strike ?? "—"}{t.shortStrike != null && <span className="text-muted-foreground">/${t.shortStrike}</span>}</>}
-                  {" "}{t.expiry ?? ""}
-                </Td>
-                <Td>{STRUCTURE_LABEL[t.structure] ?? t.structure}{isCreditStructure(t.structure) && <span className="ml-1 text-[11px] text-muted-foreground">${t.creditUsd.toFixed(0)} credit</span>}</Td>
-                <Td num>{t.entryDelta != null ? t.entryDelta.toFixed(2) : "—"} / {t.entrySpreadPct != null ? `${t.entrySpreadPct.toFixed(1)}%` : "—"}</Td>
-                <Td num>{usd(t.costUsd)}</Td>
-                <Td num>{t.status === "resolved" ? (t.proceedsUsd != null ? usd(t.proceedsUsd) : "—") : (t.markUsd != null ? usd(t.markUsd) : "—")}</Td>
-                <Td num className={t.pnl != null ? tone(t.pnl) : t.markUsd != null ? tone(t.markUsd - t.costUsd) : ""}>
-                  {t.pnl != null ? pnl2(t.pnl) : t.markUsd != null ? `(${pnl2(t.markUsd - t.costUsd)})` : "—"}
-                </Td>
-                <Td title={t.reason ?? ""}>
-                  <Chip tone={t.status === "resolved" ? (t.pnl != null && t.pnl >= 0 ? "green" : "red") : t.status === "void" ? "amber" : "paper"}>
-                    {t.status === "resolved" ? (t.reason ?? "closed") : t.status}
-                  </Chip>
-                </Td>
-              </Row>
-            ))}
-          </tbody>
-        </DataTable>
-      )}
+          : <ScanLookTable scan={score?.scanLook ?? null} loading={score === undefined} />}
     </div>
   );
 }
