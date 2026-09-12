@@ -225,8 +225,9 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   // entry. selective-tight is already testing a NARROWER trail (0.5R after +2R); nothing
   // was testing a wider one, so the question "are we cutting winners short?" had no arm
   // that could answer yes. Judged like every sleeve: 30 resolved, t ≥ 2, 7+ days, and it
-  // replaces swing-lev only by beating it on the same signals. PAPER ONLY — the guardian
-  // mirrors a 1R trail, so this deliberately has no live container and cannot be armed.
+  // replaces swing-lev only by beating it on the same signals. LIVE-CAPABLE from Sep 12 2026:
+  // the guardian's managedStopTarget takes the container's trailR, so this has a live
+  // container (margin-live-risk LIVE_CONTAINERS, pinned to these values by test).
   if (source === "swing-wide") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2 };
   // SWING-LOCK (registered 2026-09-11, replacing swing-tight the same day before it took a
   // single trade). "When we're up a lot, don't give it back." swing-wide's 2R trail and
@@ -251,7 +252,8 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   // the replay says is least likely to hurt — not because the replay proved it. The FORWARD
   // record, against swing-wide on the same signals, is what decides. swing-tight was retired
   // with zero forward trades, so nothing was thrown away.
-  // PAPER ONLY — the guardian mirrors a 1R trail, so this has no live container.
+  // PAPER ONLY — the guardian mirrors a base trail (1R, or a container's trailR) but not the
+  // +3R tightening, so this has no live container.
   if (source === "swing-lock") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2, tightAfterR: 3, tightTrailR: 0.5 };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
@@ -689,7 +691,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   scanner: "Fast — wide 6% stop — RETIRED Sep 4 (spray, not paying)",
   "fast-tight": "Fast — tight 2% stop — RETIRED Sep 1 (proven loser)",
   "swing-lev": "Leveraged swing — high-conviction 4h/1d longs, 4% / 4d — REACTIVATED Sep 8 (slot-B candidate)",
-  "swing-wide": "Swing WIDE TRAIL — swing-lev's trades, trailing 2R behind the peak instead of 1R, 7-day hold — twin (Sep 9), not pooled, paper only",
+  "swing-wide": "Swing WIDE TRAIL — swing-lev's trades, trailing 2R behind the peak instead of 1R, 7-day hold — twin (Sep 9), not pooled, live-capable (Sep 12)",
   "swing-lock": "Swing WIDE + LOCK — swing-lev's trades on a 2R trail, locking 0.5R behind the peak once +3R — twin (Sep 11), not pooled, paper only",
   "swing-spot": "Spot swing — same entries, 1×, 6% / 14d, no rollover — REACTIVATED Sep 8 (spot, not margin-tradeable by the executor)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",

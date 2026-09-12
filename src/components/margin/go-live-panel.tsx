@@ -49,7 +49,7 @@ interface RtView {
   verdict: { complete: boolean; allOk: boolean; failed: string[] } | null;
   dryRun?: { at: string; symbol: string; ok: boolean; note: string; restoreFailed: string[] } | null;
 }
-interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; ddTripped: boolean; demoted?: { at: string; source: string; reason: string } | null; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
+interface ArmStatus { liveNow?: { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }[] | null; stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null; armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; maxPositions: number; maxTradesPerDay: number; marketEntries: boolean; riskPct: number; armable?: string[]; ddTripped: boolean; demoted?: { at: string; source: string; reason: string } | null; roundTripPassed: boolean; roundTripRunning: boolean; log: string[]; error?: string }
 
 const OkMark = ({ ok }: { ok: boolean | null | undefined }) =>
   ok === true ? <Check className="h-3.5 w-3.5 text-up" /> : ok === false ? <X className="h-3.5 w-3.5 text-down" /> : <span className="inline-block h-1 w-1 rounded-full bg-muted-foreground/50" />;
@@ -88,6 +88,8 @@ function GateRow({ label, value, target, ok, hint }: { label: string; value: str
 function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean }) {
   const { data: arm, mutate } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 30_000 });
   const [confirm, setConfirm] = useState("");
+  const [switchTo, setSwitchTo] = useState("");
+  const [switchConfirm, setSwitchConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const post = async (body: Record<string, unknown>) => {
@@ -95,10 +97,10 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
     try {
       const r = await fetch("/api/margin/arm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
-      setMsg(j.error ?? (j.armed ? "ARMED — real orders from the next scan tick" : "disarmed"));
+      setMsg(j.error ?? (body.action === "switch-source" ? `switched — live sleeve is now ${(j.sources ?? []).join(", ")}` : j.armed ? "ARMED — real orders from the next scan tick" : "disarmed"));
       await mutate();
     } catch (e) { setMsg(String(e)); }
-    finally { setBusy(false); setConfirm(""); }
+    finally { setBusy(false); setConfirm(""); setSwitchConfirm(""); setSwitchTo(""); }
   };
   if (!arm) return <Note>Loading arm state…</Note>;
   const canArm = confirm === "ARM" && rtPassed && !arm.ddTripped && !arm.demoted && !arm.roundTripRunning;
@@ -106,12 +108,37 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
   // record of what it runs — never a literal in this file. `sources` survives a disarm, so it
   // still reads correctly here; the API's own fallback covers the case where it is empty.
   const armSource = arm.sources[0] ?? "swing-lev";
+  // The other sleeves the desk could run instead — the API's list (every live container that
+  // passes the arm switch's own checks), minus what is armed now.
+  const switchable = (arm.armable ?? []).filter((s) => !arm.sources.includes(s));
+  const canSwitch = switchConfirm === "SWITCH" && switchable.includes(switchTo);
   return (
     <div className="space-y-2.5">
       {arm.armed ? (
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-          <button disabled={busy} onClick={() => post({ action: "disarm" })} className={`${btnDanger} w-full sm:w-auto`}>{busy ? "…" : "Disarm — stop new entries"}</button>
-          <Note>Live: {arm.sources.join(", ")} · {arm.riskPct}% base, {arm.riskPct * 2}% high conviction · max {arm.maxPositions} position{arm.maxPositions === 1 ? "" : "s"} · {arm.maxTradesPerDay} trades/day · {arm.marketEntries ? "market" : "maker"} entries. Open positions stay under the guardian after a disarm.</Note>
+        <div className="space-y-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+            <button disabled={busy} onClick={() => post({ action: "disarm" })} className={`${btnDanger} w-full sm:w-auto`}>{busy ? "…" : "Disarm — stop new entries"}</button>
+            <Note>Live: {arm.sources.join(", ")} · {arm.riskPct}% base, {arm.riskPct * 2}% high conviction · max {arm.maxPositions} position{arm.maxPositions === 1 ? "" : "s"} · {arm.maxTradesPerDay} trades/day · {arm.marketEntries ? "market" : "maker"} entries. Open positions stay under the guardian after a disarm.</Note>
+          </div>
+          {switchable.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <select value={switchTo} onChange={(e) => setSwitchTo(e.target.value)} aria-label="Sleeve to switch to"
+                  className="h-8 w-full rounded-md border border-input bg-background px-2 text-[13px] sm:w-44">
+                  <option value="">switch sleeve to…</option>
+                  {switchable.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <input value={switchConfirm} onChange={(e) => setSwitchConfirm(e.target.value)} placeholder="type SWITCH" aria-label="Type SWITCH to enable the switch button"
+                  className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-[13px] tabular-nums sm:w-28" />
+                <button disabled={busy || !canSwitch} onClick={() => post({ action: "switch-source", confirm: switchConfirm, source: switchTo })} className={`${btnPlain} w-full sm:w-auto`}>
+                  {busy ? "…" : switchTo ? `Switch to ${switchTo}` : "Switch sleeve"}
+                </button>
+              </div>
+              {/* Switching changes kraken_margin_live_sources and nothing else. Re-arming would
+                  also reset risk to the stage-3 starting base and restart its 20-trade clock. */}
+              <Note>Changes only which sleeve the next entry comes from — risk, slots and the trade/day cap stay exactly as they are. Anything already open keeps the exit it was opened under.</Note>
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-2">
