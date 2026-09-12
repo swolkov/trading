@@ -2,24 +2,15 @@ import { prisma } from "@/lib/db";
 import { execLockHeldSince } from "@/lib/margin-live-risk";
 import { quoteStoreFreshness, readAccountSnapshot, readLiveSnapshot } from "@/lib/options-quote-store";
 import { barsStoreFreshness } from "@/lib/options-bars-store";
+import { futuresHealth } from "@/lib/futures-health";
 import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
 
-// System-health API. Two halves, because there are now two kinds of failure.
-//
-// KRAKEN (real money): the margin scanner + guardian crons, trade sync, the TradingView
-// webhook, and the executor's arm-state + drawdown breaker + lock.
-//
-// THE PAPER DESKS (Sep 10 2026): the stock and options books. The options book is the one
-// that needs watching from here rather than only from its own page, because its data path is
-// a scheduled agent on Spencer's Mac — Robinhood has no server credentials. If that agent
-// stops, the book silently freezes: positions stop marking, stops go unchecked, and every
-// page still renders perfectly. A stale quote inbox is therefore a first-class heartbeat,
-// exactly like a dead cron.
-// Reads live DB state every call — never statically cached. Returns a fully-shaped body even on
-// error so the page never white-screens.
+// Read-only telemetry for Kraken, Robinhood and the paper-only futures requirement.
+// Missing or stale engine telemetry must not appear ready.
 export const dynamic = "force-dynamic";
 
 const EMPTY = {
+  futures: futuresHealth({}),
   heartbeats: { marginScan: null, marginWatch: null, tradeSync: null, tradingViewAlert: null },
   config: { marginAuto: false, marginValidateOnly: true, shadowAutotrack: true, drawdownDisarmed: false },
   execLock: { held: false, since: null as string | null },
@@ -58,6 +49,7 @@ export async function GET() {
     ]);
 
     return Response.json({
+      futures: futuresHealth(c),
       heartbeats: {
         marginScan: c["margin_scan_last_run"] || null,
         marginWatch: c["margin_watch_last_run"] || null,

@@ -3,22 +3,11 @@
 import useSWR from "swr";
 import { Chip, type ChipTone } from "@/components/ui/chip";
 import { Note, PageHeader, Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
+import type { FuturesHealth } from "@/lib/futures-health";
 import { ago, minutesSince } from "@/lib/format";
 
-// ============ SYSTEM HEALTH ============
-// Two jobs now.
-//
-// KRAKEN (real money): prove the live machinery is alive — the margin scanner + guardian
-// crons, trade sync, the webhook — and go amber/red the moment any piece stops writing its
-// heartbeat. Plus the executor's arm-state.
-//
-// ROBINHOOD OPTIONS (paper): prove the quote inbox is still being fed. That book's data path
-// is a scheduled agent on Spencer's Mac, because Robinhood has no server credentials. If the
-// agent stops, the book freezes silently — positions stop marking, stops go unchecked, and
-// every page still renders perfectly. The options page carries its own banner, but nobody
-// watches a paper page daily. It belongs here, next to the crons, for the same reason.
-
 interface CommandData {
+  futures: FuturesHealth;
   heartbeats: {
     marginScan: string | null;
     marginWatch: string | null;
@@ -113,8 +102,8 @@ export default function SystemHealthPage() {
     <div className="space-y-5">
       <PageHeader
         title="System Health"
-        sub="Kraken margin machinery and the Robinhood options feed — refreshes every 30s"
-        right={<Chip tone={armed ? "red" : "grey"} dot={armed} size="md">{armed ? "Executor armed — real orders" : "Paper / tracked — no real money"}</Chip>}
+        sub="Kraken, Robinhood and futures paper readiness. Refreshes every 30s"
+        right={<Chip tone={armed ? "red" : "grey"} dot={armed} size="md">{armed ? "Kraken armed: real orders" : "Kraken entries disarmed"}</Chip>}
       />
 
       {lockStuck && (
@@ -154,6 +143,27 @@ export default function SystemHealthPage() {
             {rh.liveAt && <span>{rh.livePositions} positions · {rh.liveOrders} orders</span>}
           </HealthRow>
           <HealthRow label="Options permission" chip={<Chip tone={rh.optionLevel === "option_level_3" ? "green" : "grey"}>{rh.optionLevel === "option_level_3" ? "Level 3" : rh.optionLevel ?? "unknown"}</Chip>} />
+        </PanelBody>
+      </Panel>
+
+      <Panel>
+        <PanelHeader title="Tradovate futures" aside={<Chip tone="paper">Paper-only requirement</Chip>} />
+        <PanelBody className="divide-y divide-border">
+          <HealthRow label="Configured execution mode" sub="A mode setting does not prove an engine is running."
+            chip={<Chip tone={data.futures.executionMode === "paper" ? "paper" : "red"}>{data.futures.executionMode === "paper" ? "Paper" : data.futures.executionMode === "live" ? "Live configuration conflicts with paper-only requirement" : data.futures.executionMode === "disabled" ? "Disabled" : "Unknown"}</Chip>} />
+          <HealthRow label="Paper engine heartbeat" sub="Expected within 5 minutes, including when markets are closed."
+            chip={<Chip tone={data.futures.paper.fresh ? "green" : "red"}>{data.futures.paper.fresh ? "Reporting" : "Not reporting"}</Chip>}>
+            <span>{data.futures.paper.at ? ago(data.futures.paper.at) : "No valid timestamp"}</span>
+          </HealthRow>
+          <HealthRow label="Paper process lease" sub="Requires a demo heartbeat within 75 seconds. This is not trading authorization."
+            chip={<Chip tone={data.futures.paper.ready && data.futures.paper.reportedMode === "demo" ? "green" : "amber"}>{data.futures.paper.ready && data.futures.paper.reportedMode === "demo" ? "Reported active" : "Unverified"}</Chip>} />
+          <HealthRow label="Paper entry authorization" sub="Last engine report only. Broker access and fresh licensed quotes must also pass."
+            chip={<Chip tone={data.futures.executionMode === "paper" && data.futures.paper.reportedMode === "demo" && data.futures.paper.ready && data.futures.paper.entryAuthorizationReported ? "blue" : "amber"}>{data.futures.executionMode === "paper" && data.futures.paper.reportedMode === "demo" && data.futures.paper.ready && data.futures.paper.entryAuthorizationReported ? "Reported open" : "Closed or unverified"}</Chip>} />
+          <HealthRow label="Reported paper data source" sub="Source telemetry does not verify quote freshness or the data license."
+            chip={<Chip tone="grey">{data.futures.paper.marketData}</Chip>} />
+          <HealthRow label="Live engine heartbeat" sub="Live futures are not authorized. A reporting process is not proof of trading."
+            chip={<Chip tone={data.futures.live.fresh ? "red" : "grey"}>{data.futures.live.fresh ? "Reporting: inspect configuration" : "Not reporting"}</Chip>} />
+          <Note className="pt-3">Paper trading still needs working broker access and licensed market data. Confirm both before restarting the paper engine. TradingView charts do not establish data entitlement for this server.</Note>
         </PanelBody>
       </Panel>
 
