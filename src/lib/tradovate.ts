@@ -86,6 +86,9 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
     }
   } catch { /* DB lookup optional — fall through to direct auth */ }
 
+  const backoff = await authBackoffInForce(mode);
+  if (backoff) throw new Error(`Tradovate auth backing off until ${backoff.until} (${backoff.message}) — no login attempted`);
+
   const baseUrl = mode === "live" ? LIVE_URL : DEMO_URL;
 
   const res = await fetch(`${baseUrl}/auth/accesstokenrequest`, {
@@ -109,10 +112,17 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
   }
 
   const data = await res.json();
-  // Tradovate reports the real expiry; the 23h assumption stays as the fallback only.
-  const reported = typeof data.expirationTime === "string" ? Date.parse(data.expirationTime) : NaN;
-  const expires = Number.isFinite(reported) && reported > Date.now() + 60_000 ? reported : Date.now() + 23 * 60 * 60 * 1000;
-  _tokenCache[mode] = { token: data.accessToken, expires, accountId: 0 };
+  const parsed = parseTradovateAuthResponse(data, Date.now());
+  if (!parsed.ok) {
+    // A p-ticket / captcha answer is NOT a token. Writing it would leave a tokenless shared row
+    // that every instance then "refreshes" with another login — which is exactly how the rate
+    // limit stays tripped (the May 20 2026 lockout, and again Sep 13 2026). Back off instead:
+    // every caller in every instance sees the backoff row and refuses to log in until it passes.
+    await setAuthBackoff(mode, parsed.backoffUntil, parsed.message).catch(() => {});
+    throw new Error(`Tradovate auth challenged (${parsed.message}) — backing off until ${new Date(parsed.backoffUntil).toISOString()}`);
+  }
+  const expires = parsed.expires;
+  _tokenCache[mode] = { token: parsed.token, expires, accountId: 0 };
 
   // Persist the token for every other Vercel instance. Serverless has no shared memory, so without
   // this each cold start would call /auth/accesstokenrequest again — which is exactly how the May 20
@@ -121,11 +131,45 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
   try {
     const { prisma } = await import("./db");
     const shareKey = mode === "live" ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
-    const value = JSON.stringify({ token: data.accessToken, expires: new Date(expires).toISOString(), accountId: 0, by: "vercel" });
+    const value = JSON.stringify({ token: parsed.token, expires: new Date(expires).toISOString(), accountId: 0, by: "vercel" });
     await prisma.agentConfig.upsert({ where: { key: shareKey }, update: { value }, create: { key: shareKey, value } });
   } catch { /* persistence is an optimisation; auth already succeeded */ }
 
-  return data.accessToken;
+  return parsed.token;
+}
+
+/** Tradovate answers a login with either a token or a p-ticket challenge (rate limit / captcha).
+ *  Pure, so the distinction is unit-tested: a challenge is never mistaken for a session. */
+export function parseTradovateAuthResponse(data: unknown, nowMs: number): { ok: true; token: string; expires: number } | { ok: false; message: string; backoffUntil: number } {
+  const d = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+  if (typeof d.accessToken === "string" && d.accessToken.length > 0) {
+    // Tradovate reports the real expiry; the 23h assumption stays as the fallback only.
+    const reported = typeof d.expirationTime === "string" ? Date.parse(d.expirationTime) : NaN;
+    return { ok: true, token: d.accessToken, expires: Number.isFinite(reported) && reported > nowMs + 60_000 ? reported : nowMs + 23 * 60 * 60 * 1000 };
+  }
+  const message = typeof d["p-message"] === "string" ? d["p-message"] : typeof d.errorText === "string" ? d.errorText : "no access token in the auth response";
+  // "Rate limit exceeded: more than 5 requests per hour" → stay out for the whole window; any
+  // other challenge (captcha, unknown) → 20 minutes, long enough for a human to notice.
+  const backoffMs = /rate limit/i.test(message) ? 65 * 60_000 : 20 * 60_000;
+  return { ok: false, message, backoffUntil: nowMs + backoffMs };
+}
+const AUTH_BACKOFF_KEY = (mode: TradingMode) => (mode === "live" ? "tradovate_live_auth_backoff" : "tradovate_demo_auth_backoff");
+async function setAuthBackoff(mode: TradingMode, untilMs: number, message: string): Promise<void> {
+  const { prisma } = await import("./db");
+  const key = AUTH_BACKOFF_KEY(mode);
+  const value = JSON.stringify({ until: new Date(untilMs).toISOString(), message });
+  await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
+}
+/** Refuse to call /auth/accesstokenrequest while a backoff row from ANY instance is in force. */
+async function authBackoffInForce(mode: TradingMode): Promise<{ until: string; message: string } | null> {
+  try {
+    const { prisma } = await import("./db");
+    const row = await prisma.agentConfig.findUnique({ where: { key: AUTH_BACKOFF_KEY(mode) } });
+    if (!row?.value) return null;
+    const parsed = JSON.parse(row.value) as { until?: string; message?: string };
+    const until = Date.parse(parsed.until ?? "");
+    return Number.isFinite(until) && until > Date.now() ? { until: parsed.until!, message: parsed.message ?? "" } : null;
+  } catch { return null; }
 }
 
 /** Record the account id beside the shared token so later instances skip /account/list too. */
