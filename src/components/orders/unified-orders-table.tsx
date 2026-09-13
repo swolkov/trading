@@ -6,8 +6,10 @@ import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 import { Chip } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { coinOf, hold, pnl0, pnl2, tone, usd, usd0, when } from "@/lib/format";
+import { ago, coinOf, hold, pnl0, pnl2, tone, usd, usd0, when } from "@/lib/format";
 import Link from "next/link";
+import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
+import { OptionOrdersTable, OptionPositionsTable, type LiveOrder, type LivePosition } from "@/components/options/account-tables";
 
 interface Fill {
   symbol: string; action: string; price: number; vol: number; notional: number; fee: number; leveraged: boolean; time: string;
@@ -50,26 +52,89 @@ function Segmented<T extends string>({ value, onChange, options }: { value: T; o
   );
 }
 
-// The one place for EVERY trade — Live (real) vs Paper (shadow), never blended. Live defaults
-// to ROUND TRIPS (paired buy→sell with real P&L); a fills view shows every raw execution.
+// THE ONE PLACE FOR EVERY TRADE, BROKEN DOWN BY PLATFORM. Each platform is its own segment
+// with its own money state in the label — Kraken (real money, live vs paper never blended),
+// the Tradovate futures DEMO (paper, by design), and the real Robinhood account (a broker
+// snapshot; the app places nothing there yet). The tables are the same components the
+// platform pages render, so this page and those pages can never disagree about a row.
+type Platform = "kraken" | "futures" | "robinhood";
 export function UnifiedOrdersTable() {
+  const [platform, setPlatform] = useState<Platform>("kraken");
+  return (
+    <div className="space-y-4">
+      <Segmented value={platform} onChange={setPlatform} options={[
+        { k: "kraken", label: "Kraken · crypto margin · real money", tone: "red" },
+        { k: "futures", label: "Tradovate · futures · demo", tone: "paper" },
+        { k: "robinhood", label: "Robinhood · options · real account" },
+      ]} />
+      {platform === "kraken" ? <KrakenOrders /> : platform === "futures" ? <FuturesOrders /> : <RobinhoodOrders />}
+    </div>
+  );
+}
+
+// Kraken — Live (real) vs Paper (shadow), never blended. Live defaults to ROUND TRIPS (paired
+// buy→sell with real P&L); a fills view shows every raw execution.
+function KrakenOrders() {
   const { data } = useSWR<Data>("/api/orders/all", fetcher, { refreshInterval: 30000 });
   const { data: krk } = useSWR<{ connected?: boolean; totalValue?: number; totalInvested?: number }>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
   const { data: score } = useSWR<ScoreData>("/api/margin/scoreboard", fetcher, { refreshInterval: 60000 });
   const [view, setView] = useState<"live" | "paper" | "scan">("live");
-
   return (
     <div className="space-y-4">
-      <Note>Robinhood account orders are on <Link href="/options" className="text-primary hover:underline">Live Account</Link>.</Note>
       <Segmented value={view} onChange={setView} options={[
-        { k: "live", label: "Kraken live · real money", tone: "red" },
-        { k: "paper", label: "Kraken paper · no real money", tone: "paper" },
+        { k: "live", label: "Live · real money", tone: "red" },
+        { k: "paper", label: "Paper · no real money", tone: "paper" },
         { k: "scan", label: "Scanner · what it just looked at" },
       ]} />
       {view === "live"
         ? <LiveView data={data} krk={krk} trips={score?.recentTrips ?? []} tripsLoading={score === undefined} />
         : view === "paper" ? <PaperLogTable log={score?.log ?? []} loading={score === undefined} />
           : <ScanLookTable scan={score?.scanLook ?? null} loading={score === undefined} />}
+    </div>
+  );
+}
+
+// Tradovate futures DEMO — the desk's own ledger and inbox, from the same route the Futures
+// Desk page reads. Paper only, by design: nothing here can reach a live account.
+interface FuturesDeskData {
+  enabled: boolean; open: FuturesTrade[]; ledger: FuturesTrade[]; signals: FuturesSignal[];
+  record: { trades: number; wins: number; pnl: number }; limits: { maxPositions: number };
+  guardian: { at: string | null; fresh: boolean }; error?: string;
+}
+function FuturesOrders() {
+  const { data } = useSWR<FuturesDeskData>("/api/futures/desk", fetcher, { refreshInterval: 30000 });
+  if (data === undefined) return <Panel><PanelBody><Empty>Loading the futures desk…</Empty></PanelBody></Panel>;
+  if (!data || data.error) return <Panel><PanelBody><Empty>The futures desk did not answer{data?.error ? `: ${data.error}` : ""}.</Empty></PanelBody></Panel>;
+  return (
+    <div className="space-y-4">
+      <Note>
+        Demo account, paper only — sized off a fixed $50,000 basis. Desk is <strong>{data.enabled ? "enabled" : "disabled"}</strong>
+        {data.guardian.at ? `; guardian ran ${ago(data.guardian.at)}` : "; guardian has not run yet"}. Edges, the switch and the TradingView setup are on <Link href="/futures" className="text-primary hover:underline">Futures Desk</Link>.
+      </Note>
+      <FuturesOpenTable open={data.open} maxPositions={data.limits.maxPositions} />
+      <FuturesLedgerTable ledger={data.ledger} record={data.record} />
+      <FuturesAlertInbox signals={data.signals} emptyHint="No alerts received yet — the desk trades only when TradingView sends one." />
+    </div>
+  );
+}
+
+// Robinhood — the REAL account's positions and orders, as the collector last pushed them.
+interface RobinhoodLive {
+  live: { positions: LivePosition[]; orders: LiveOrder[]; at: string; minutesAgo: number } | null;
+  execution?: { canPlaceOrders: boolean; maxLossUsd: number | null; why: string };
+}
+function RobinhoodOrders() {
+  const { data } = useSWR<RobinhoodLive>("/api/options/live", fetcher, { refreshInterval: 60000 });
+  if (data === undefined) return <Panel><PanelBody><Empty>Loading the Robinhood snapshot…</Empty></PanelBody></Panel>;
+  const live = data?.live ?? null;
+  return (
+    <div className="space-y-4">
+      <Note>
+        Real account, read from a broker snapshot{live ? ` taken ${ago(live.at)}` : ""}. {data?.execution?.canPlaceOrders ? "Live order placement is active." : "The app places no orders here yet"}
+        {data?.execution?.maxLossUsd != null ? ` — approved maximum loss per trade ${usd0(data.execution.maxLossUsd)}, fees included.` : "."} Account, buying power and the research desk are on <Link href="/options" className="text-primary hover:underline">Live Account</Link>.
+      </Note>
+      <OptionPositionsTable positions={live?.positions ?? []} at={live?.at ?? null} />
+      <OptionOrdersTable orders={live?.orders ?? []} at={live?.at ?? null} />
     </div>
   );
 }

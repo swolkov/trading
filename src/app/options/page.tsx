@@ -2,10 +2,10 @@
 
 import useSWR from "swr";
 import { OptionsResearchDesk } from "@/components/options/research-desk";
+import { OptionOrdersTable, OptionPositionsTable, type LiveOrder, type LivePosition } from "@/components/options/account-tables";
 import { Chip } from "@/components/ui/chip";
-import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { ago, money, usd, when } from "@/lib/format";
+import { ago, money } from "@/lib/format";
 
 // ROBINHOOD · LIVE ACCOUNT. The counterpart of the Kraken Live Account page: what the
 // BROKER says — cash, buying power, option level, open option positions, recent orders —
@@ -18,15 +18,6 @@ interface Account {
   accountNumber: string; type: string; optionLevel: string; cash: number;
   buyingPower: number; optionsValue: number; totalValue: number; at: string; minutesAgo: number;
 }
-interface LivePosition {
-  symbol: string; type: "long" | "short"; optionType: "call" | "put" | null; strike: number | null;
-  expiry: string | null; quantity: number; averagePrice: number; pendingQuantity: number;
-}
-interface LiveOrder {
-  id: string; symbol: string; state: string; strategy: string | null; side: string | null;
-  quantity: number; processedQuantity: number; premium: number | null; price: number | null;
-  orderType: string; placedAgent: string | null; createdAt: string | null;
-}
 interface Payload {
   account: Account | null;
   live: { positions: LivePosition[]; orders: LiveOrder[]; at: string; minutesAgo: number } | null;
@@ -36,7 +27,6 @@ interface Payload {
 }
 
 const levelLabel = (l: string) => l === "option_level_3" ? "Level 3 — spreads unlocked" : l === "option_level_2" ? "Level 2 — long premium only" : l;
-const orderTone = (state: string) => state === "filled" ? "green" : ["rejected", "failed", "cancelled", "voided"].includes(state) ? "red" : ["queued", "confirmed", "partially_filled", "pending_cancelled"].includes(state) ? "amber" : "grey";
 
 export default function RobinhoodLiveAccountPage() {
   const { data } = useSWR<Payload>("/api/options/live", fetcher, { refreshInterval: 60_000 });
@@ -90,56 +80,8 @@ export default function RobinhoodLiveAccountPage() {
         </PanelBody>
       </Panel>
 
-      {/* ── Positions ── */}
-      <Panel>
-        <PanelHeader title="Open option positions — what the broker holds" aside={<span>{live ? `as of ${ago(live.at)}` : "not pushed yet"}</span>} />
-        {positions.length === 0 ? (
-          <PanelBody><Empty>{live ? "No open option positions on the real account." : "Positions have not been pushed yet."}</Empty>
-
-          </PanelBody>
-        ) : (
-          <DataTable>
-            <thead><tr><Th>Contract</Th><Th>Side</Th><Th num>Qty</Th><Th num>Avg price</Th><Th num>Pending</Th></tr></thead>
-            <tbody>
-              {positions.map((p, i) => (
-                <Row key={`${p.symbol}-${p.strike}-${p.expiry}-${i}`}>
-                  <Td strong>{p.symbol} {p.strike != null ? `$${p.strike}` : ""}{p.optionType ? p.optionType[0] : ""} {p.expiry ?? ""}</Td>
-                  <Td><Chip tone={p.type === "short" ? "red" : "green"}>{p.type}</Chip></Td>
-                  <Td num>{p.quantity}</Td>
-                  <Td num>{usd(p.averagePrice)}</Td>
-                  <Td num className={p.pendingQuantity ? "text-warn" : ""}>{p.pendingQuantity || "—"}</Td>
-                </Row>
-              ))}
-            </tbody>
-          </DataTable>
-        )}
-      </Panel>
-
-      {/* ── Orders ── */}
-      <Panel>
-        <PanelHeader title="Orders in the latest broker snapshot" aside={<span>newest first · placed by you in the Robinhood app, or by nothing</span>} />
-        {orders.length === 0 ? (
-          <PanelBody><Empty>{live ? "No orders returned in the latest broker snapshot." : "Orders have not been pushed yet."}</Empty></PanelBody>
-        ) : (
-          <DataTable>
-            <thead><tr><Th>When</Th><Th>Contract</Th><Th>Strategy</Th><Th>Type</Th><Th num>Qty</Th><Th num>Premium</Th><Th>State</Th><Th>Placed by</Th></tr></thead>
-            <tbody>
-              {orders.map((o) => (
-                <Row key={o.id}>
-                  <Td title={o.createdAt ? when(o.createdAt) : ""}>{o.createdAt ? ago(o.createdAt) : "—"}</Td>
-                  <Td strong>{o.symbol}</Td>
-                  <Td>{o.strategy ?? "—"}{o.side ? <span className="ml-1 text-muted-foreground">{o.side}</span> : null}</Td>
-                  <Td>{o.orderType}{o.price != null ? ` @ ${usd(o.price)}` : ""}</Td>
-                  <Td num>{o.processedQuantity && o.processedQuantity !== o.quantity ? `${o.processedQuantity}/${o.quantity}` : o.quantity}</Td>
-                  <Td num>{o.premium != null ? usd(o.premium) : "—"}</Td>
-                  <Td><Chip tone={orderTone(o.state)}>{o.state}</Chip></Td>
-                  <Td><Chip tone={!o.placedAgent || o.placedAgent === "user" ? "grey" : "red"}>{o.placedAgent ?? "user"}</Chip></Td>
-                </Row>
-              ))}
-            </tbody>
-          </DataTable>
-        )}
-      </Panel>
+      <OptionPositionsTable positions={positions} at={live?.at ?? null} />
+      <OptionOrdersTable orders={orders} at={live?.at ?? null} />
 
       <OptionsResearchDesk />
       <Panel><PanelHeader title="Live trading limits" /><PanelBody>
