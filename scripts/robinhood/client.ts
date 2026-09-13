@@ -46,11 +46,21 @@ export class RobinhoodReadClient{
     return parseRpcResponse(await r.text(),id);
   }
   async listTools(){return this.rpc("tools/list",{});}
+  /** The tools this connection may call. The read client never grows; RobinhoodTradeClient adds the three order tools. */
+  protected allowed():ReadonlySet<string>{return READ_TOOLS;}
   async call(name:string,args:Record<string,unknown>){
-    if(!READ_TOOLS.has(name))throw Error("This connection is read-only; broker mutations are not installed");
+    if(!this.allowed().has(name))throw Error("This connection is read-only; broker mutations are not installed");
     if(args.account_number&&args.account_number!=="685528705")throw Error("Wrong account");
     return this.rpc("tools/call",{name,arguments:args});
   }
+}
+
+// THE ONE CONNECTION THAT MAY MOVE MONEY (Sep 13 2026). Used ONLY by scripts/robinhood/live-desk.ts —
+// the account collector and the research sessions keep RobinhoodReadClient. Review, place and cancel
+// are the whole write surface: no exercise, no equity orders, no settings. The account pin still applies.
+const TRADE_TOOLS=new Set([...READ_TOOLS,"review_option_order","place_option_order","cancel_option_order"]);
+export class RobinhoodTradeClient extends RobinhoodReadClient{
+  protected allowed():ReadonlySet<string>{return TRADE_TOOLS;}
 }
 
 export function validOAuthState(returned:string,expected:string):boolean{

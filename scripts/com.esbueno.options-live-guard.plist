@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.esbueno.options-live-guard</string>
+  <!-- The options GUARDIAN: every 5 minutes; the script exits immediately outside 09:30–16:05 ET. The checkout is advanced without discarding other sessions' files. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>D=/Users/user/trading-rh-options; L="$HOME/Library/Logs/options-live.log"; if ! (git -C "$D" fetch --quiet origin main &amp;&amp; git -C "$D" merge --ff-only --quiet FETCH_HEAD); then echo "$(date -u +%FT%TZ) [warn] could not update $D — running the existing checkout" &gt;&gt; "$L"; fi; if [ -x "$D/scripts/options-live-run.sh" ]; then OPTIONS_DESK_REPO="$D" exec "$D/scripts/options-live-run.sh" guard; else echo "$(date -u +%FT%TZ) [fail] runner missing at $D" &gt;&gt; "$L"; fi</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/user/Library/Logs/options-live-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/Library/Logs/options-live-launchd.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

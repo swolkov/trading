@@ -78,6 +78,13 @@ export async function GET() {
           quoteRows: quotes?.rows ?? 0,
           openPositions: 0,
           optionLevel: account?.optionLevel ?? null,
+          // The live desk on the Mac: the switch, the adapter verification, the guardian heartbeat.
+          liveDesk: {
+            armed: c["options_live_armed"] === "true",
+            verified: c["options_live_integration_verified"] === "true",
+            guardianAt: c["options_live_guardian_ok_at"] || null,
+            guardianFresh: !!c["options_live_guardian_ok_at"] && Date.now() - Date.parse(c["options_live_guardian_ok_at"]) < 10 * 60_000,
+          },
           accountAt: account?.at ?? null,
           // The bars inbox (Robinhood daily bars) — a separate failure from stale quotes:
           // stale bars mean the SIGNAL is blind. Fail closed like the quotes.
