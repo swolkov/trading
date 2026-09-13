@@ -19,10 +19,10 @@ interface KrakenStatus {
 // on every page); it fails safe to "disarmed" if unreadable.
 export function TopBar() {
   const { data: krk, isLoading } = useSWR<KrakenStatus>("/api/kraken-agent", fetcher, { refreshInterval: 60000 });
-  const { data: mode } = useSWR<{ armed?: boolean; auto?: boolean }>("/api/margin/mode", fetcher, { refreshInterval: 60000 });
-  // The second platform. Robinhood has live execution disabled and its snapshot is pushed by the desk
-  // session, so this is "what the agent last saw", with its age on the options page.
-  const { data: opt } = useSWR<{ account?: { totalValue: number; optionLevel: string; at: string } | null; live?: { at: string } | null }>("/api/options/live", fetcher, { refreshInterval: 120000 });
+  const { data: mode } = useSWR<{ armed?: boolean; auto?: boolean; ddTripped?: boolean }>("/api/margin/mode", fetcher, { refreshInterval: 60000 });
+  // The second platform. Robinhood's snapshot is pushed by the collector after each close, so this is
+  // "what the desk last saw", with its age; the live-desk state comes from the same route.
+  const { data: opt } = useSWR<{ account?: { totalValue: number; optionLevel: string; at: string } | null; live?: { at: string } | null; execution?: { canPlaceOrders: boolean; armed?: boolean } }>("/api/options/live", fetcher, { refreshInterval: 120000 });
   const armed = Boolean(mode?.armed);
 
   const equity = krk?.connected && (krk.totalValue ?? 0) > 0 ? krk.totalValue! : null;
@@ -58,15 +58,16 @@ export function TopBar() {
               <div className="hidden items-baseline gap-1.5 whitespace-nowrap md:flex" title="Robinhood Agentic account, as the desk session last saw it. Live execution is not active.">
                 <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Robinhood</span>
                 <span className="text-[13px] font-semibold tabular-nums">{money(opt.account.totalValue)}</span>
-                <span className="text-[11px] text-muted-foreground">live inactive</span>
+                <span className={`text-[11px] ${opt.execution?.canPlaceOrders ? "font-semibold text-down" : "text-muted-foreground"}`}>{opt.execution?.canPlaceOrders ? "live desk armed" : opt.execution?.armed ? "armed · unverified" : "live inactive"}</span>
                 <span className="text-[11px] text-muted-foreground" title="Age of the saved broker snapshot">{ago(opt.live?.at ?? opt.account.at)}</span>
               </div>
             )}
           </>
         )}
       </div>
-      <Chip tone={armed ? "red" : "grey"} dot={armed} title={armed ? "The margin executor is placing real orders" : "The margin executor is not placing real orders"}>
-        {armed ? "Executor armed" : "Executor disarmed"}
+      <Chip tone={armed ? (mode?.ddTripped ? "amber" : "red") : "grey"} dot={armed && !mode?.ddTripped}
+        title={armed ? (mode?.ddTripped ? "Armed, but the drawdown breaker has paused new entries; open positions stay under the guardian" : "The margin executor is placing real orders") : "The margin executor is not placing real orders"}>
+        {armed ? (mode?.ddTripped ? "Armed · breaker tripped" : "Executor armed") : "Executor disarmed"}
       </Chip>
     </header>
   );

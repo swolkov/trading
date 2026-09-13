@@ -9,16 +9,16 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const rows = await prisma.agentConfig.findMany({
-      where: { key: { in: ["kraken_margin_auto", "kraken_margin_validate_only"] } },
+      where: { key: { in: ["kraken_margin_auto", "kraken_margin_validate_only", "kraken_margin_disarmed_dd"] } },
     });
     const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     const auto = m["kraken_margin_auto"] === "true";
     // validate-only defaults ON (safe) unless explicitly "false".
     const validateOnly = m["kraken_margin_validate_only"] !== "false";
     const armed = auto && !validateOnly;
-    return Response.json({ armed, auto, validateOnly });
+    return Response.json({ armed, auto, validateOnly, ddTripped: m["kraken_margin_disarmed_dd"] === "true" });
   } catch {
     // Fail SAFE: if we can't read the flags, report NOT armed (never falsely show "live").
-    return Response.json({ armed: false, auto: false, validateOnly: true });
+    return Response.json({ armed: false, auto: false, validateOnly: true, ddTripped: false });
   }
 }
