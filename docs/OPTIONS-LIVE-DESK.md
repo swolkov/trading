@@ -1,0 +1,53 @@
+# Options live desk — Robinhood, real money, one contract (Sep 13 2026)
+
+Spencer: "go live Monday and keep learning… you do it all, that's why it's agentic." This is that desk.
+It places real options orders on the Robinhood account, one contract at a time, inside the approved
+**$100 maximum loss per trade including fees**, debit structures only. It runs on the Mac (the OAuth
+credential lives there; Vercel never holds it) and reports to the admin like the other two desks.
+
+## The pieces
+
+| Piece | File | Job |
+|---|---|---|
+| Trade client | `scripts/robinhood/client.ts` → `RobinhoodTradeClient` | The ONE connection that may call `review_option_order`, `place_option_order`, `cancel_option_order`. The collector and research sessions keep the read-only class. Account pinned. |
+| Broker adapter | `src/lib/options-live-broker.ts` | Snapshot (account, positions, orders, fresh quotes), review/placement decoders, ref_id binding, lost-response recovery (see below). |
+| Core | `src/lib/options-live-executor.ts` + `options-live-policy.ts` (Codex, Sep 12) | review → durable reservation → place → reconcile, under the account lock; every limit enforced before any call. Unchanged except a `createdAtMs` stamp on intents. |
+| Store | `src/lib/options-live-store.ts` on `DATABASE_URL_UNPOOLED` | Intents + owned positions, session advisory lock, autocommitted. |
+| Guardian rules | `src/lib/options-live-guardian.ts` | Pure: exit rules, drawdown halt, executable prices. |
+| Runner | `scripts/robinhood/live-desk.ts` `guard | entry | probe` | Every 5 min in the session: reconcile intents, ingest fills into ownership, manage exits, cancel stale entries, drawdown halt, stamp `options_live_guardian_ok_at`. On `entry` ticks (:05/:35): at most one entry a day from the research screen, re-priced on quotes fetched that second. |
+| Schedulers | `scripts/com.esbueno.options-live-guard.plist` (StartInterval 300), `scripts/com.esbueno.options-live-entry.plist` (:05/:35, 09–15 h weekdays), `scripts/options-live-run.sh` | Install once: copy both plists to `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$UID <plist>`. They fast-forward `/Users/user/trading-rh-options` from `main` before each run. |
+| Admin | `/options` → Live desk panel (typed **ARM** / Disarm, state, probe, intents, log); `/api/options/live-desk`; System Health rows; Orders → Robinhood segment | The switch the runner reads on every tick. |
+
+## Rules in force (`OPTIONS_LIVE_RULES`)
+
+Debit structures only (long call, long put, call/put debit spread) so max loss = premium paid + fees ·
+one contract · one open position · one entry per day · no entries in the last 30 minutes · premium
+stop at 50% of entry · target at 2× entry · out 7 days before expiry · unfilled entry cancelled after
+15 min · account value $300 under its high-water mark → desk disarms itself (positions stay managed).
+Entry signal = the research screen's 20-session breakout/breakdown with 50/200-day alignment, on the
+day's broker bars; the structure is chosen by the screen and re-priced on live quotes.
+
+## How the first live order happens (Monday Sep 14)
+
+1. Spencer types **ARM** on the Live Account page (sets `options_live_armed=true`, fee reserve $2 if unset).
+2. 09:35 ET entry tick: adapter unverified → the desk runs a **review only** on the top candidate (or,
+   with no signal, on the cheapest quality-passing debit spread). It must decode fees and buying
+   power from the real response. Success sets `options_live_integration_verified=true` and pages Slack.
+3. 10:05 ET tick onward: if a candidate fits the cap on live quotes, the core reviews and places
+   **one contract**. Fills page Slack; the guardian takes over.
+4. If nothing fits, nothing trades. That is the rule working, not the desk broken.
+
+## The lost-response problem, solved the broker's way
+
+Robinhood accepts `ref_id` on placement but never returns it. The adapter binds our ref_id to the
+broker order: on the placement response (same call), then by the saved broker order id. Only for a
+LOST placement response does it match an order Robinhood labels `placed_agent="agentic"`, created
+inside the intent's window, with exactly our legs/quantity/price. Nothing else on the account places
+agentic orders and the store allows one unsettled intent at a time, so one such order is ours; two
+are ambiguous and the intent stays `unknown` — the desk refuses new entries until a human resolves it.
+
+## Operating
+
+- Log: `~/Library/Logs/options-live.log`; the admin shows the last 40 lines and every intent.
+- Disarm: the button, or `options_live_armed=false`. Takes effect within 5 minutes; never touches an open position.
+- An `unknown` intent: check the Robinhood app for the order, then either mark the intent settled (no order) or set its `order.id` (order exists) in `options_live_intents`. The desk will not trade past it by itself — by design.

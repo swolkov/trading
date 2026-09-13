@@ -8,23 +8,33 @@ import { prisma } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const [account, live, maxLoss] = await Promise.all([
+  const [account, live, maxLoss, flags] = await Promise.all([
     readAccountSnapshot().catch(() => null),
     readLiveSnapshot().catch(() => null),
     prisma.agentConfig.findUnique({ where: { key: OPTIONS_MAX_LOSS_KEY } }).then((r) => parseOptionsMaxLoss(r?.value)).catch(() => null),
+    prisma.agentConfig.findMany({ where: { key: { in: ["options_live_armed", "options_live_integration_verified"] } } }).then((rows) => Object.fromEntries(rows.map((r) => [r.key, r.value]))).catch(() => ({} as Record<string, string>)),
   ]);
-  // Anything the desk did not put there. The runner's allowlist has no order tool, so a
-  // non-"user" agent on an order is the one thing on this page that should never appear.
-  const foreignOrders = (live?.orders ?? []).filter((o) => o.placedAgent && o.placedAgent !== "user");
+  // The live desk (scripts/robinhood/live-desk.ts on the Mac) records every order it sends as a
+  // durable intent. A non-"user" order the desk does not recognise is the one thing on this page
+  // that should never appear: it means another session was given an order tool.
+  let ours = new Set<string>();
+  try { ours = new Set((await prisma.$queryRawUnsafe<{ id: string | null }[]>(`SELECT payload->'order'->>'id' AS id FROM options_live_intents`)).map((r) => r.id ?? "").filter(Boolean)); } catch { /* no desk tables yet */ }
+  const foreignOrders = (live?.orders ?? []).filter((o) => o.placedAgent && o.placedAgent !== "user" && !ours.has(o.id));
+  const armed = flags.options_live_armed === "true", verified = flags.options_live_integration_verified === "true";
   return Response.json({
     account, live, lastRun: live?.at ?? account?.at ?? null,
     foreignOrders,
     // Plain statement of what can and cannot happen here, for the page to show verbatim.
     execution: {
-      canPlaceOrders: false,
+      canPlaceOrders: armed && verified,
+      armed, verified,
       maxLossUsd: maxLoss,
       paperEnabled: false,
-      why: "Live order placement is not active. Direct account reads are separate from live execution. The execution adapter, fill recovery and position guardian are not verified.",
+      why: armed && verified
+        ? "The live desk is armed and its broker adapter is verified: it may place one contract at a time, debit structures only, inside the approved maximum loss including fees. It runs on the Mac every 5 minutes during the session."
+        : armed
+          ? "The live desk is armed but its broker adapter has not yet been verified on a real review response. The first session tick sends a review only; entries follow once that verifies."
+          : "The live desk is disarmed. Direct account reads continue; no order can be placed.",
     },
   });
 }

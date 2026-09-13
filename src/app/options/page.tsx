@@ -2,9 +2,10 @@
 
 import useSWR from "swr";
 import { OptionsResearchDesk } from "@/components/options/research-desk";
+import { OptionsLiveDeskPanel } from "@/components/options/live-desk-panel";
 import { OptionOrdersTable, OptionPositionsTable, type LiveOrder, type LivePosition } from "@/components/options/account-tables";
 import { Chip } from "@/components/ui/chip";
-import { Empty, Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
+import { Empty, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { ago, money } from "@/lib/format";
 
 // ROBINHOOD · LIVE ACCOUNT. The counterpart of the Kraken Live Account page: what the
@@ -40,9 +41,9 @@ export default function RobinhoodLiveAccountPage() {
     <div className="space-y-5">
       <PageHeader
         title="Live Account"
-        sub="Your real Robinhood account: positions, orders and buying power from the latest broker snapshot. Live order placement is not active yet."
+        sub={`Your real Robinhood account: positions, orders and buying power from the latest broker snapshot. ${data?.execution.canPlaceOrders ? "The live desk is armed: it may place one contract at a time inside the approved cap." : "Live order placement is not active."}`}
         right={<>
-          <Chip tone="grey" size="md" title="Robinhood holds the money; the app holds no credentials and reads only what the desk pushes">Real account · read only</Chip>
+          <Chip tone={data?.execution.canPlaceOrders ? "red" : "grey"} size="md" dot={!!data?.execution.canPlaceOrders} title="Robinhood holds the money; orders come only from the live desk on the Mac, never from this page">{data?.execution.canPlaceOrders ? "Real account · live desk armed" : "Real account · read only"}</Chip>
           {acct && <Chip tone={acct.optionLevel === "option_level_3" ? "green" : "amber"} size="md">{levelLabel(acct.optionLevel)}</Chip>}
           <Chip tone={snapshotStale ? "red" : "green"} size="md" dot={snapshotStale} title="Pushed by the scheduled desk session after each close">
             {live ? `Snapshot ${ago(live.at)}` : acct ? `Account ${ago(acct.at)} · positions not pushed yet` : "Nothing pushed yet"}
@@ -53,7 +54,7 @@ export default function RobinhoodLiveAccountPage() {
       {data && data.foreignOrders.length > 0 && (
         <Panel tone="red"><PanelBody className="py-3">
           <p className="text-[13px] font-semibold text-down">{data.foreignOrders.length} order{data.foreignOrders.length === 1 ? "" : "s"} on this account were NOT placed by you.</p>
-          <Note className="mt-1">Nothing in this system is allowed to place a Robinhood order. An order with a non-&ldquo;user&rdquo; agent means a session was given an order tool. Check the Robinhood app, then check the desk runner&apos;s allowlist.</Note>
+          <Note className="mt-1">Only the live desk may place a Robinhood order, and it records every one it sends. An agentic order the desk does not recognise means another session was given an order tool. Check the Robinhood app, then the desk log below.</Note>
         </PanelBody></Panel>
       )}
 
@@ -84,14 +85,7 @@ export default function RobinhoodLiveAccountPage() {
       <OptionOrdersTable orders={orders} at={live?.at ?? null} />
 
       <OptionsResearchDesk />
-      <Panel><PanelHeader title="Live trading limits" /><PanelBody>
-        <Stat label="Maximum loss per trade" value={data?.execution.maxLossUsd != null ? money(data.execution.maxLossUsd) : "Not set"} sub="Includes fees. One position at a time." />
-        <Note className="mt-3">Long calls, long puts and defined-risk spreads. Profit targets are not guaranteed returns.</Note>
-      </PanelBody></Panel>
-      <Explainer title="Live execution status">
-        <p>{data?.execution.why ?? "Checking execution status..."}</p>
-        <p className="mt-2">Your approved loss limit is a ceiling. An order must also fit available buying power, pass broker review and have active position monitoring.</p>
-      </Explainer>
+      <OptionsLiveDeskPanel />
     </div>
   );
 }

@@ -38,6 +38,17 @@ export class PostgresOptionsLiveStore implements OptionsLiveStore {
   }
   async unsettledIntents(account:string){if(account!==OPTIONS_LIVE_ACCOUNT)throw Error("Wrong options account");const r=await this.client().query<{payload:OptionsIntentRecord}>("SELECT payload FROM options_live_intents WHERE account_number=$1 AND state<>'settled' ORDER BY updated_at",[account]);return r.rows.map(x=>x.payload);}
   async ownedPosition(id:string):Promise<OwnedOptionsPosition|null>{const r=await this.client().query<{payload:OwnedOptionsPosition}>("SELECT payload FROM options_live_owned_positions WHERE position_id=$1 AND account_number=$2",[id,OPTIONS_LIVE_ACCOUNT]);return r.rows[0]?.payload??null;}
+  // Ownership is written ONLY from a confirmed fill of our own accepted intent (the guardian) and
+  // released ONLY when the broker no longer shows any of its legs. Under the account lock like every write.
+  async ownedPositions():Promise<OwnedOptionsPosition[]>{const r=await this.client().query<{payload:OwnedOptionsPosition}>("SELECT payload FROM options_live_owned_positions WHERE account_number=$1 ORDER BY updated_at",[OPTIONS_LIVE_ACCOUNT]);return r.rows.map(x=>x.payload);}
+  async putOwnedPosition(p:OwnedOptionsPosition){
+    if(p.accountNumber!==OPTIONS_LIVE_ACCOUNT||!p.id||!p.openingRefId||!Array.isArray(p.legs)||!p.legs.length)throw Error("Invalid owned position");
+    await this.client().query(`INSERT INTO options_live_owned_positions(position_id,account_number,payload) VALUES($1,$2,$3::jsonb)
+      ON CONFLICT(position_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now()`,[p.id,p.accountNumber,JSON.stringify(p)]);
+  }
+  /** Every intent reserved at or after `sinceMs` (by its own createdAtMs), for the entries-per-day count. */
+  async intentsSince(sinceMs:number):Promise<OptionsIntentRecord[]>{const r=await this.client().query<{payload:OptionsIntentRecord}>("SELECT payload FROM options_live_intents WHERE account_number=$1 AND COALESCE((payload->>'createdAtMs')::double precision,0) >= $2 ORDER BY updated_at",[OPTIONS_LIVE_ACCOUNT,sinceMs]);return r.rows.map(x=>x.payload);}
+  async releaseOwnedPosition(id:string){await this.client().query("DELETE FROM options_live_owned_positions WHERE position_id=$1 AND account_number=$2",[id,OPTIONS_LIVE_ACCOUNT]);}
 }
 
 export function assertDurableOptionsIntent(record:OptionsIntentRecord,prior:OptionsIntentRecord|null):void{

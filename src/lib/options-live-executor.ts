@@ -25,6 +25,7 @@ export interface OptionsIntentRecord {
   order?: NormalizedOptionsOrder;
   canonicalOrder?: OptionOrderParams;
   intent?: OptionsLiveIntent;
+  createdAtMs?: number;       // When the reservation was written — the adapter's lost-response recovery window starts here.
   maxFilledQuantity?: number; // Monotonic evidence; a later zero cannot erase a fill.
 }
 export interface OptionsLiveStore {
@@ -137,7 +138,7 @@ export async function executeOptionsIntent(intent: OptionsLiveIntent, deps: Opti
       if (freshPrepared.fingerprint !== prepared.fingerprint || snapshot.orders.some((o) => o.refId === intent.refId)) throw new Error("order identity changed during review");
       checkReview(review, freshPrepared, policy, snapshot, intent.action, deps.now());
       const record: OptionsIntentRecord = { refId: intent.refId, accountNumber: OPTIONS_LIVE_ACCOUNT,
-        action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting", canonicalOrder: structuredClone(prepared.params), intent: structuredClone(intent) };
+        action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting", canonicalOrder: structuredClone(prepared.params), intent: structuredClone(intent), createdAtMs: deps.now() };
       // Durable reservation BEFORE the broker call. If the process dies here, zero orders
       // on a later lookup is still unknown, never permission to blindly retry.
       await deps.store.putIntent(record);

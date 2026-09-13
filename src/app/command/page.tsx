@@ -22,6 +22,7 @@ interface CommandData {
     optionsAutotrack: boolean;
     stockAutotrack: boolean;
     robinhood: {
+      liveDesk?: { armed: boolean; verified: boolean; guardianAt: string | null; guardianFresh: boolean };
       newestQuoteTs: string | null; quoteAgeMinutes: number | null; quotesStale: boolean;
       quoteRows: number; openPositions: number; optionLevel: string | null; accountAt: string | null;
       barsNewestDay: string | null; barsStale: boolean; barsStaleSymbols: number;
@@ -136,13 +137,21 @@ export default function SystemHealthPage() {
       </div>
 
       <Panel>
-        <PanelHeader title="Robinhood account connection" aside={<Chip tone="amber">Live execution inactive</Chip>} />
+        <PanelHeader title="Robinhood options · live desk" aside={<Chip tone={rh.liveDesk?.armed && rh.liveDesk.verified ? "red" : rh.liveDesk?.armed ? "amber" : "grey"} dot={!!(rh.liveDesk?.armed && rh.liveDesk.verified)}>{rh.liveDesk?.armed && rh.liveDesk.verified ? "Live: armed and verified" : rh.liveDesk?.armed ? "Armed, adapter unverified" : "Live execution inactive"}</Chip>} />
         <PanelBody className="divide-y divide-border">
           <HealthRow label="Real account snapshot" sub="Collected after each weekday close; this is not a live position monitor."
             chip={<Chip tone={ageTone(rh.liveAt, 60 * 30, 60 * 50)}>{rh.liveAt ? ago(rh.liveAt) : "never"}</Chip>}>
             {rh.liveAt && <span>{rh.livePositions} positions · {rh.liveOrders} orders</span>}
           </HealthRow>
           <HealthRow label="Options permission" chip={<Chip tone={rh.optionLevel === "option_level_3" ? "green" : "grey"}>{rh.optionLevel === "option_level_3" ? "Level 3" : rh.optionLevel ?? "unknown"}</Chip>} />
+          <HealthRow label="Live desk switch" sub="Typed ARM on the Live Account page. Real money: one contract, inside the approved cap."
+            chip={<Chip tone={rh.liveDesk?.armed ? "red" : "grey"}>{rh.liveDesk?.armed ? "Armed" : "Disarmed"}</Chip>} />
+          <HealthRow label="Broker adapter" sub="Verified only after a real broker review decoded fees and buying power. Unverified = the desk refuses to place."
+            chip={<Chip tone={rh.liveDesk?.verified ? "green" : "amber"}>{rh.liveDesk?.verified ? "Verified" : "Unverified"}</Chip>} />
+          <HealthRow label="Desk guardian" sub="Every 5 minutes in the regular session, on the Mac. Silence outside the session is normal."
+            chip={<Chip tone={rh.liveDesk?.guardianFresh ? "green" : "grey"}>{rh.liveDesk?.guardianFresh ? "Reporting" : "Not reporting"}</Chip>}>
+            <span>{rh.liveDesk?.guardianAt ? ago(rh.liveDesk.guardianAt) : "has not run"}</span>
+          </HealthRow>
         </PanelBody>
       </Panel>
 
