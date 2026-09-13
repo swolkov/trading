@@ -157,7 +157,7 @@ export default function DashboardPage() {
               <div className="mt-1.5 text-xs text-muted-foreground">
                 {s3.status === "running" && <>{s3.fromBase}% risk until live matches paper, then {s3.toBase}%</>}
                 {s3.status === "graduated" && <span className="text-up">graduated — paper&apos;s full sizing is on</span>}
-                {s3.status === "held" && <span className="text-down">held at {s3.fromBase}% — {s3.note ?? "live diverged from paper"}</span>}
+                {s3.status === "held" && <span className="text-down">held at {arm?.riskPct ?? s3.fromBase}% base — {s3.note ?? "live diverged from paper"}</span>}
               </div>
             </div>
           ) : (

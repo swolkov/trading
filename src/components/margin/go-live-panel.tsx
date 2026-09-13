@@ -194,7 +194,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
           <span className="text-muted-foreground">Stage 3</span>
           {arm.stage3.status === "running" && <><Chip tone="blue" size="md">{arm.stage3.done} of {arm.stage3.target} closed</Chip><span className="text-xs text-muted-foreground">first {arm.stage3.target} live trades at {arm.stage3.fromBase}% risk; moves to paper&apos;s {arm.stage3.toBase}% automatically when real fills match paper</span></>}
           {arm.stage3.status === "graduated" && <Chip tone="green" size="md">graduated — {arm.stage3.toBase}% base, {arm.stage3.toBase * 2}% high conviction</Chip>}
-          {arm.stage3.status === "held" && <Chip tone="red" size="md">held at {arm.stage3.fromBase}% — {arm.stage3.note}</Chip>}
+          {arm.stage3.status === "held" && <Chip tone="red" size="md">held at {arm.riskPct ?? arm.stage3.fromBase}% base — {arm.stage3.note}</Chip>}
         </div>
       )}
       {msg && <Note className="text-foreground/80">{msg}</Note>}
