@@ -51,8 +51,17 @@ export default function DashboardPage() {
   const { data: opt } = useSWR<{
     account?: { totalValue: number; optionLevel: string; buyingPower: number; at: string } | null;
     live?: { positions: unknown[]; orders: unknown[]; at: string } | null;
-    execution?: { canPlaceOrders: boolean; maxLossUsd: number | null; why: string };
+    execution?: { canPlaceOrders: boolean; armed?: boolean; verified?: boolean; maxLossUsd: number | null; why: string };
   }>("/api/options/live", fetcher, { refreshInterval: 120_000 });
+  // The third desk: Tradovate futures on the DEMO account — paper by design, sized as a $50k basis.
+  const { data: fut } = useSWR<{
+    enabled: boolean; disabledReason: string | null; entriesToday: number;
+    limits: { sizingBasisUsd: number; riskPct: number; maxPositions: number; maxEntriesPerDay: number };
+    guardian: { at: string | null; fresh: boolean; lastError: string | null };
+    broker: { netLiq: number; positions: unknown[]; workingOrders: number } | null; brokerError: string | null;
+    open: { contract: string; side: string; qty: number; entry_price: number; stop_price: number; edge: string }[];
+    record: { trades: number; wins: number; pnl: number }; error?: string;
+  }>("/api/futures/desk", fetcher, { refreshInterval: 120_000 });
 
   const health = status?.health ?? null;
   const equity = health?.equity ?? (krk?.connected ? krk.totalValue : null);
@@ -94,7 +103,7 @@ export default function DashboardPage() {
     <div className="space-y-5">
       <PageHeader
         title="Dashboard"
-        sub="The Kraken margin desk, right now."
+        sub="Every desk, right now: Kraken real money · Tradovate futures demo · Robinhood options."
         right={arm && (
           <>
             <Chip tone={arm.armed ? "red" : "grey"} dot={arm.armed} size="md">{arm.armed ? `Armed · ${arm.sources.join(", ") || "?"}` : "Disarmed"}</Chip>
@@ -185,13 +194,34 @@ export default function DashboardPage() {
       </Panel>
 
       <Panel>
-        <PanelHeader title="Robinhood options" aside={<Chip tone="amber">Live execution inactive</Chip>} />
+        <PanelHeader title="Tradovate futures · demo" aside={fut && !fut.error ? (
+          <div className="flex items-center gap-2">
+            <Chip tone={fut.enabled ? "paper" : "grey"} dot={fut.enabled}>{fut.enabled ? "Desk enabled" : "Desk disabled"}</Chip>
+            <Chip tone={fut.guardian.fresh ? "green" : "grey"} title={fut.guardian.at ? `guardian ${ago(fut.guardian.at)}` : "guardian has not run"}>{fut.guardian.fresh ? "Guardian reporting" : "Guardian quiet"}</Chip>
+          </div>
+        ) : <Chip tone="grey">loading…</Chip>} />
+        <PanelBody>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <Stat label="Demo equity" value={fut?.broker ? money(fut.broker.netLiq) : "—"} sub={fut?.brokerError ? <span className="text-down">broker not read</span> : fut ? `sized off a fixed ${money(fut.limits.sizingBasisUsd)} at ${fut.limits.riskPct}% a trade` : undefined} />
+            <Stat label="Open positions" value={fut ? `${fut.open.length} of ${fut.limits.maxPositions}` : "—"} sub={fut?.open.length ? fut.open.map((o) => `${o.side === "long" ? "▲" : "▼"} ${o.contract} × ${o.qty}`).join(" · ") : fut?.enabled ? "waiting for a TradingView alert" : "nothing opens while disabled"} />
+            <Stat label="Entries today" value={fut ? `${fut.entriesToday} of ${fut.limits.maxEntriesPerDay}` : "—"} />
+            <Stat label="Record" value={fut ? `${fut.record.trades} closed` : "—"} sub={fut && fut.record.trades ? <>{fut.record.wins} wins · <span className={tone(fut.record.pnl)}>{pnl0(fut.record.pnl)}</span> after modeled fees</> : "no desk trades yet"} />
+          </div>
+          <Note className="mt-3">{fut?.disabledReason ? `Disabled: ${fut.disabledReason}. ` : ""}Paper only, by design: two registered rules evaluated on TradingView, executed on the demo with the stop attached. The edges&apos; verdicts and the enable switch are on the Futures Desk.</Note>
+        </PanelBody>
+      </Panel>
+
+      <Panel>
+        <PanelHeader title="Robinhood options" aside={
+          <Chip tone={opt?.execution?.canPlaceOrders ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={!!opt?.execution?.canPlaceOrders}>
+            {opt?.execution?.canPlaceOrders ? "Live desk armed · verified" : opt?.execution?.armed ? "Armed · adapter unverified" : "Live execution inactive"}
+          </Chip>} />
         <PanelBody>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Account value" value={opt?.account ? money(opt.account.totalValue) : "—"} />
             <Stat label="Buying power" value={opt?.account ? money(opt.account.buyingPower) : "—"} />
             <Stat label="Open positions" value={opt?.live ? String(opt.live.positions.length) : "—"} />
-            <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="Including fees" />
+            <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="including fees · one contract · one position" />
           </div>
           <Note className="mt-3">{opt?.execution?.why ?? "Loading account status..."} {opt?.account ? `Account snapshot ${ago(opt.account.at)}.` : ""}</Note>
         </PanelBody>
@@ -203,8 +233,9 @@ export default function DashboardPage() {
           { href: "/margin", title: "Live Account · Kraken", sub: "Real money: positions, margin level, signals, ledger track record" },
           { href: "/margin/paper", title: "Live Desk", sub: "Kraken: is the edge real yet, the arm switch, every sleeve on paper" },
           { href: "/orders", title: "Orders", sub: "Every platform, broken down: Kraken fills and paper, futures demo ledger and alerts, Robinhood account orders" },
-          { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: cash, level, positions, orders — read only" },
-          { href: "/command", title: "System Health", sub: "Heartbeats, switches, locks — both platforms" },
+          { href: "/futures", title: "Futures Desk · Tradovate demo", sub: "Two registered rules, their verdicts, the enable switch, the TradingView setup" },
+          { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: positions, orders, the research screen, the live desk switch" },
+          { href: "/command", title: "System Health", sub: "Heartbeats, switches, locks — all three desks" },
         ].map((l) => (
           <Link key={l.href} href={l.href} className="rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/20 hover:bg-accent/40">
             <p className="text-[13px] font-semibold">{l.title}</p>
