@@ -202,7 +202,7 @@ export default function DashboardPage() {
         {[
           { href: "/margin", title: "Live Account · Kraken", sub: "Real money: positions, margin level, signals, ledger track record" },
           { href: "/margin/paper", title: "Live Desk", sub: "Kraken: is the edge real yet, the arm switch, every sleeve on paper" },
-          { href: "/orders", title: "Orders", sub: "Every real fill and round trip, the Kraken paper log, Robinhood account orders" },
+          { href: "/orders", title: "Orders", sub: "Every platform, broken down: Kraken fills and paper, futures demo ledger and alerts, Robinhood account orders" },
           { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: cash, level, positions, orders — read only" },
           { href: "/command", title: "System Health", sub: "Heartbeats, switches, locks — both platforms" },
         ].map((l) => (

@@ -3,9 +3,9 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { Chip, verdictTone } from "@/components/ui/chip";
-import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
-import { Empty, Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { ago, money, pnl0, tone, when } from "@/lib/format";
+import { Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
+import { ago, money, pnl0, tone } from "@/lib/format";
+import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
 
 // ============ FUTURES DESK — Tradovate DEMO ============
 // The futures edge lab. TradingView evaluates each registered rule on real-time CME data and
@@ -18,8 +18,8 @@ import { ago, money, pnl0, tone, when } from "@/lib/format";
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
 interface Card { key: string; name: string; timeframe: string; roots: string[]; evidence: string; resolved: number; open: number; wins: number; net: number; meanR: number | null; tStat: number | null; days: number; verdict: string }
-interface Trade { id: number; opened_at: string; edge: string; root: string; contract: string; side: string; qty: number; entry_price: number; stop_price: number; status: string; exit_price: number | null; closed_at: string | null; exit_reason: string | null; pnl_usd: number | null; risk_usd: number; note: string | null }
-interface Signal { id: number; received_at: string; edge: string; root: string; action: string; side: string; price: number; stop: number | null; status: string; reason: string | null; trade_id: number | null }
+type Trade = FuturesTrade;
+type Signal = FuturesSignal;
 interface Status {
   enabled: boolean; disabledReason: string | null; configured: boolean;
   limits: { sizingBasisUsd: number; riskPct: number; maxContracts: number; maxPositions: number; maxEntriesPerDay: number; dailyLossPausePct: number; drawdownDisablePct: number };
@@ -34,7 +34,6 @@ interface Status {
 const btn = "inline-flex h-8 items-center justify-center rounded-md border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40";
 const btnDanger = `${btn} border-down/50 bg-down/10 text-down hover:bg-down/20`;
 const btnGo = `${btn} border-up/50 bg-up/10 text-up hover:bg-up/20`;
-const statusTone = (s: string) => (s === "executed" ? "green" : s === "queued" ? "amber" : s === "refused" || s === "error" || s === "expired" ? "red" : "grey");
 
 export default function FuturesDeskPage() {
   const { data, mutate } = useSWR<Status>("/api/futures/desk", fetcher, { refreshInterval: 30_000 });
@@ -134,46 +133,12 @@ export default function FuturesDeskPage() {
           </PanelBody>
         </Panel>
 
-        <Panel>
-          <PanelHeader title="Open positions" aside={<span>{data.open.length} of {L.maxPositions}</span>} />
-          {data.open.length === 0 ? <PanelBody><Empty>Flat. The next registered alert opens here.</Empty></PanelBody> : (
-            <DataTable dense>
-              <thead><tr><Th>Contract</Th><Th>Edge</Th><Th num>Qty</Th><Th num>Entry</Th><Th num>Stop</Th><Th num>Risk</Th><Th>Opened</Th></tr></thead>
-              <tbody>{data.open.map((t) => (
-                <Row key={t.id}><Td strong>{t.side === "long" ? "▲" : "▼"} {t.contract}</Td><Td muted>{t.edge}</Td><Td num>{t.qty}</Td><Td num>{t.entry_price}</Td><Td num>{t.stop_price}</Td><Td num>{money(t.risk_usd)}</Td><Td muted>{ago(t.opened_at)}</Td></Row>
-              ))}</tbody>
-            </DataTable>
-          )}
-        </Panel>
+        <FuturesOpenTable open={data.open} maxPositions={L.maxPositions} />
       </div>
 
-      <Panel>
-        <PanelHeader title="Ledger" aside={<>{data.record.trades} closed · {data.record.wins} wins · <span className={tone(data.record.pnl)}>{pnl0(data.record.pnl)}</span></>} />
-        {data.ledger.length === 0 ? <PanelBody><Empty>No desk trades yet.</Empty></PanelBody> : (
-          <DataTable dense maxH="24rem">
-            <thead><tr><Th>Opened</Th><Th>Contract</Th><Th>Edge</Th><Th num>Qty</Th><Th num>Entry</Th><Th num>Exit</Th><Th>Reason</Th><Th num>P&amp;L</Th><Th num>R</Th></tr></thead>
-            <tbody>{data.ledger.map((t) => (
-              <Row key={t.id}>
-                <Td muted>{when(t.opened_at)}</Td><Td strong>{t.side === "long" ? "▲" : "▼"} {t.contract}</Td><Td muted>{t.edge}</Td><Td num>{t.qty}</Td><Td num>{t.entry_price}</Td>
-                <Td num>{t.exit_price ?? "—"}</Td><Td muted>{t.status === "open" ? "open" : t.exit_reason ?? t.status}</Td>
-                <Td num className={tone(t.pnl_usd ?? 0)}>{t.pnl_usd != null ? pnl0(t.pnl_usd) : "—"}</Td><Td num>{t.pnl_usd != null && t.risk_usd > 0 ? (t.pnl_usd / t.risk_usd).toFixed(2) : "—"}</Td>
-              </Row>
-            ))}</tbody>
-          </DataTable>
-        )}
-      </Panel>
+      <FuturesLedgerTable ledger={data.ledger} record={data.record} />
 
-      <Panel>
-        <PanelHeader title="Alert inbox" aside={<span>every alert TradingView sent, and what the desk did with it</span>} />
-        {data.signals.length === 0 ? <PanelBody><Empty>No alerts received yet. Set up the TradingView alerts below.</Empty></PanelBody> : (
-          <DataTable dense maxH="20rem">
-            <thead><tr><Th>Received</Th><Th>Edge</Th><Th>Market</Th><Th>Action</Th><Th num>Price</Th><Th num>Stop</Th><Th>Status</Th><Th>Why</Th></tr></thead>
-            <tbody>{data.signals.map((g) => (
-              <Row key={g.id}><Td muted>{when(g.received_at)}</Td><Td>{g.edge}</Td><Td strong>{g.root}</Td><Td>{g.action} {g.side}</Td><Td num>{g.price}</Td><Td num>{g.stop ?? "—"}</Td><Td><Chip tone={statusTone(g.status)}>{g.status}</Chip></Td><Td muted>{g.reason ?? ""}</Td></Row>
-            ))}</tbody>
-          </DataTable>
-        )}
-      </Panel>
+      <FuturesAlertInbox signals={data.signals} emptyHint="No alerts received yet. Set up the TradingView alerts below." />
 
       <Explainer title="TradingView setup — the exact alerts, and what the desk does with them">
         <ul>
