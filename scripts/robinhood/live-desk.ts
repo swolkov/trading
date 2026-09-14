@@ -109,8 +109,11 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
       }
 
       // 2) Broker snapshot: account, positions, orders, quotes for our legs.
+      // The adapter reads intents and owned positions from the store while building a snapshot, and
+      // the store refuses any read outside the account lock — so the snapshot is taken under it.
+      // (The core takes its own lock around its snapshots; this is the guardian's standalone read.)
       let snapshot: Awaited<ReturnType<typeof broker.snapshot>> | null = null;
-      try { snapshot = await broker.snapshot([], ""); } catch (e) { fail("broker snapshot", e); }
+      try { snapshot = await store.withAccountLock(ACCOUNT, () => broker.snapshot([], "")); } catch (e) { fail("broker snapshot", e); }
       const owned = await store.withAccountLock(ACCOUNT, () => store.ownedPositions()) as OwnedPositionRecord[];
       state.owned = owned.map((o) => ({ id: o.id, kind: o.kind, underlying: o.underlying, expiry: o.expiry, entryPrice: o.entryPrice }));
       if (snapshot) {
@@ -256,7 +259,8 @@ async function probe(broker: RobinhoodLiveBroker, snapshot: Awaited<ReturnType<t
   // quality-passing adjacent-strike debit spread on the watchlist.
   if (!pick.intent) pick = await probeStructure(broker, maxLoss, fee);
   if (!pick.intent) return { at, ok: false, reason: `no structure to review: ${pick.note}` };
-  const fresh = await broker.snapshot(pick.intent.legs.map((l) => l.optionId), pick.intent.refId);
+  const legIds = pick.intent.legs.map((l) => l.optionId), refId = pick.intent.refId;
+  const fresh = await store.withAccountLock(ACCOUNT, () => broker.snapshot(legIds, refId));
   let prepared;
   try { prepared = prepareOptionsOrder(pick.intent, probePolicy, fresh, null, Date.now()); }
   catch (e) { return { at, ok: false, reason: `policy refused the probe order: ${String(e).slice(0, 200)}`, candidate: pick.note }; }
@@ -265,7 +269,6 @@ async function probe(broker: RobinhoodLiveBroker, snapshot: Awaited<ReturnType<t
   const review = broker.decodeReview(raw) as { approved: boolean; estimatedFeeUsd: number; buyingPowerRequiredUsd: number; maxLossUsd: number; missing: string[]; blocking: string[] };
   const keys = (x: unknown, d = 0): string[] => (x && typeof x === "object" && d < 3 ? Object.entries(x as Record<string, unknown>).flatMap(([k, v]) => [k, ...keys(v, d + 1).map((s) => `${k}.${s}`)]) : []);
   const shape = keys(raw).slice(0, 80);
-  void store;
   if (!review.approved) return { at, ok: false, reason: `review ${review.missing.length ? `missing ${review.missing.join(",")}` : ""}${review.blocking.length ? ` blocking: ${review.blocking.join("; ")}` : ""}`, candidate: pick.note, shape };
   return { at, ok: true, candidate: pick.note, fee: review.estimatedFeeUsd, buyingPower: review.buyingPowerRequiredUsd, maxLoss: review.maxLossUsd, shape };
 }
