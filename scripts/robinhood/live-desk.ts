@@ -23,8 +23,8 @@ import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOp
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../../src/lib/options-operation";
 import type { StructureKind } from "../../src/lib/options-structures";
 
-const MODE = process.argv[2];
-if (!["guard", "entry", "probe"].includes(MODE ?? "")) { console.error("mode must be guard | entry | probe"); process.exit(2); }
+export type LiveDeskMode = "guard" | "entry" | "probe";
+let MODE: LiveDeskMode = "guard";
 const ACCOUNT = OPTIONS_LIVE_ACCOUNT;
 const STATE_KEY = "options_live_state";
 const GUARDIAN_KEY = "options_live_guardian_ok_at";
@@ -34,7 +34,7 @@ const VERIFIED_KEY = "options_live_integration_verified";
 const ARMED_KEY = "options_live_armed";
 const LOG_KEY = "options_live_log";
 
-const lines: string[] = [];
+let lines: string[] = [];
 const log = (s: string) => { const line = `${new Date().toISOString()} ${s}`; lines.push(line); console.log(line); };
 async function cfg(key: string): Promise<string | null> { return (await prisma.agentConfig.findUnique({ where: { key } }))?.value ?? null; }
 async function setCfg(key: string, value: string): Promise<void> { await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } }); }
@@ -50,7 +50,9 @@ function sessionNow(now: number): { open: boolean; session: { opensAtMs: number;
   return { open: !!session && now >= session.opensAtMs && now < session.closesAtMs + 5 * 60_000, session };
 }
 
-async function main() {
+/** One desk tick. Safe to call repeatedly from a long-lived worker; every run starts with fresh state. */
+export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
+  MODE = mode; lines = [];
   const now0 = Date.now();
   const { open, session } = sessionNow(now0);
   if (!open) { console.log(`${new Date(now0).toISOString()} outside the regular session — nothing to do`); return; }
@@ -184,7 +186,6 @@ async function main() {
   } finally {
     await appendLog().catch(() => {});
     await pool.end().catch(() => {});
-    await prisma.$disconnect().catch(() => {});
   }
 }
 
@@ -269,4 +270,11 @@ async function probe(broker: RobinhoodLiveBroker, snapshot: Awaited<ReturnType<t
   return { at, ok: true, candidate: pick.note, fee: review.estimatedFeeUsd, buyingPower: review.buyingPowerRequiredUsd, maxLoss: review.maxLossUsd, shape };
 }
 
-main().catch((e) => { console.error(`live-desk ${MODE} failed: ${String(e).slice(0, 300)}`); process.exitCode = 1; });
+// CLI: `live-desk.ts guard|entry|probe` (the Mac's launchd runner). The Railway worker imports runLiveDesk instead.
+if (process.argv[1] && /live-desk\.ts$/.test(process.argv[1])) {
+  const arg = process.argv[2];
+  if (!["guard", "entry", "probe"].includes(arg ?? "")) { console.error("mode must be guard | entry | probe"); process.exit(2); }
+  runLiveDesk(arg as LiveDeskMode)
+    .catch((e) => { console.error(`live-desk ${arg} failed: ${String(e).slice(0, 300)}`); process.exitCode = 1; })
+    .finally(() => prisma.$disconnect().catch(() => {}));
+}

@@ -1,0 +1,12 @@
+# THE OPTIONS DESK WORKER on Railway — scripts/robinhood/desk-worker.ts. Same base as the engines.
+FROM node:22-bookworm-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY prisma ./prisma/
+COPY prisma.config.ts ./
+RUN npm ci --ignore-scripts && npx prisma generate
+COPY src ./src/
+COPY scripts/robinhood ./scripts/robinhood/
+COPY tsconfig.json ./
+# The Robinhood credential lives on the mounted volume (ROBINHOOD_AUTH_DIR=/data/robinhood).
+CMD ["node", "--import", "tsx", "scripts/robinhood/desk-worker.ts"]

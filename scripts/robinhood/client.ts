@@ -5,7 +5,10 @@ import { timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 export const RESOURCE="https://agent.robinhood.com/mcp/trading";
-export const AUTH_DIR=join(homedir(),".config","esbueno-robinhood");
+// The credential directory: a Railway volume (ROBINHOOD_AUTH_DIR=/data/robinhood) or the Mac default.
+// ONE consumer at a time — Robinhood rotates the refresh token on every use, so whoever refreshed
+// last owns the credential; a second copy elsewhere goes stale the moment this one refreshes.
+export const AUTH_DIR=process.env.ROBINHOOD_AUTH_DIR?.trim()||join(homedir(),".config","esbueno-robinhood");
 export const AUTH_FILE=join(AUTH_DIR,"oauth.json");
 export interface Credentials {clientId:string;accessToken:string;refreshToken:string;expiresAt:number}
 export async function saveCredentials(value:Credentials){
