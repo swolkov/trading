@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
-import { isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
+import { isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
 import { loadOptionsNews } from "../src/lib/options-news";
 import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scripts/robinhood/client";
 import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
@@ -78,4 +78,22 @@ test("an empty entry tick names the gate: no breakout, or a breakout nothing und
  assert.match(noCandidateNote(withSignal,100,now),/signal on TEST bullish but no long call\/put or debit spread fits the \$100 cap/);
  const quiet=research(); quiet.bars.TEST=quiet.bars.TEST.map(b=>({...b,high:101,close:100}));
  assert.match(noCandidateNote(quiet,100,now),/no 20-session breakout or breakdown among the 1 researched names/);
+});
+
+test("single leg vs spread follows implied-versus-realized vol; ranking is payoff per dollar at the market's expected move; lottery tickets are rejected",()=>{
+ const base=research(); const c0=base.contracts[0]; // ATM call 105 @ 0.90, delta 0.5, spot 105
+ const put={...c0,id:"p",type:"put" as const,strike:105,bid:0.85,ask:0.9,delta:-0.5};
+ const far={...c0,id:"far",strike:110,bid:0.28,ask:0.3,delta:0.35};
+ const rich=structuredClone(base); rich.contracts=[{...c0,iv:0.9},{...put,iv:0.9},{...far,iv:0.9}];  // realized ≈ low (flat bars), implied 90% → rich → spread first
+ const rv=realizedVol20(rich.bars.TEST)!; assert.ok(rv>0&&rv<0.9);
+ const em=impliedMoveFrac(rich.contracts,"2026-10-16",105)!; assert.ok(Math.abs(em-1.75/105)<1e-9);
+ const r1=screenResearchContracts(rich,100,500,now);
+ assert.deepEqual(r1.map(x=>x.kind),["call_debit","long_call"]);                  // the 110 single is worth nothing at the expected move → rejected
+ assert.ok(r1[0].ivToRealized!>1.15); assert.match(r1[0].reason,/spread preferred/);
+ assert.equal(r1[0].payoffAtMoveUsd,Math.round(payoffAtUsd("call_debit",c0,far,105*(1+em),0.62,2)*100)/100);
+ const fair=structuredClone(rich); for(const x of fair.contracts)x.iv=rv*1.1;         // implied within 15% of realized → single first
+ const r2=screenResearchContracts(fair,100,500,now);
+ assert.deepEqual(r2.map(x=>x.kind),["long_call","call_debit"]); assert.match(r2[0].reason,/single leg preferred/);
+ const noIv=structuredClone(rich); for(const x of noIv.contracts)x.iv=null;           // unknown vol → spreads by default
+ assert.equal(screenResearchContracts(noIv,100,500,now)[0].kind,"call_debit");
 });

@@ -18,7 +18,7 @@ interface Owned { id: string; kind: string; underlying: string; expiry: string; 
 interface Data {
   armed: boolean; verified: boolean; maxLossUsd: number | null; feeReserveUsd: number | null;
   guardian: { at: string | null; fresh: boolean };
-  rules: { premiumStopFrac: number; premiumTargetMult: number; exitBeforeDte: number; drawdownHaltUsd: number; maxEntriesPerDay: number; entryKinds: string[] };
+  rules: { premiumStopFrac: number; trailArmMult: number; trailLockFrac: number; exitBeforeDte: number; drawdownHaltUsd: number; maxEntriesPerDay: number; entryKinds: string[] };
   state: { at?: string; mode?: string; lastError?: string; candidate?: string; buyingPower?: number; totalValue?: number; equityHigh?: number; guardianOk?: boolean } | null;
   probe: { at: string; ok: boolean; reason?: string; candidate?: string; fee?: number; buyingPower?: number } | null;
   log: string[]; armLog: string[]; intents: Intent[]; owned: Owned[];
@@ -52,7 +52,7 @@ export function OptionsLiveDeskPanel() {
           </div>
           <Note>
             Rules in force: debit structures only (long call, long put, call or put debit spread), so the most a trade can lose is what it paid plus fees.
-            One contract, one position at a time, {data.rules.maxEntriesPerDay} entry a day. The guardian runs every 5 minutes in the session: it sells at half the premium, takes profit at {data.rules.premiumTargetMult}× the premium, and gets out {data.rules.exitBeforeDte} days before expiry.
+            One contract, one position at a time, {data.rules.maxEntriesPerDay} entry a day. The guardian runs every 5 minutes in the session: it sells at half the premium, has no fixed target — once a position has been worth {data.rules.trailArmMult}× the premium a trail keeps {Math.round(data.rules.trailLockFrac * 100)}% of the best gain seen — and gets out {data.rules.exitBeforeDte} days before expiry.
             Entries come from the research screen&apos;s 20-session breakout rule on real Robinhood quotes fetched at the moment of the order. Before the first order the desk sends a broker review only and must decode fees and buying power from the real response; that is the adapter verification above.
           </Note>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
