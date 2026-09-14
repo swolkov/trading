@@ -29,7 +29,7 @@ export class PostgresOptionsLiveStore implements OptionsLiveStore {
       client.removeListener("error",onError);client.release(!healthy);
     }
   }
-  async getIntent(refId:string){const r=await this.client().query<{payload:OptionsIntentRecord}>("SELECT payload FROM options_live_intents WHERE ref_id=$1 AND account_number=$2",[refId,OPTIONS_LIVE_ACCOUNT]);return r.rows[0]?.payload??null;}
+  async getIntent(refId:string){if(!/^[0-9a-f-]{36}$/i.test(refId))return null;const r=await this.client().query<{payload:OptionsIntentRecord}>("SELECT payload FROM options_live_intents WHERE ref_id=$1 AND account_number=$2",[refId,OPTIONS_LIVE_ACCOUNT]);return r.rows[0]?.payload??null;}
   async putIntent(record:OptionsIntentRecord){
     const prior=await this.getIntent(record.refId);
     assertDurableOptionsIntent(record,prior);
