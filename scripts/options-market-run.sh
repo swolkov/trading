@@ -7,17 +7,30 @@ LOG="$HOME/Library/Logs/options-market.log"
 cd "$REPO"
 mkdir -p "$(dirname "$LOG")"
 CAPTURE=$(mktemp /private/tmp/options-market.XXXXXX)
-trap 'rm -f "$CAPTURE"' EXIT
+ERR=$(mktemp /private/tmp/options-market-err.XXXXXX)
+trap 'rm -f "$CAPTURE" "$ERR"' EXIT
+# launchd hands this job a login shell whose PATH resolves `claude` to /usr/local/bin — a stale
+# 2.1.85 the API began rejecting on Sep 14 2026 (four silent exit-1 runs). The current CLI lives in
+# ~/.npm-global/bin. Prefer it, and when a session fails, say so in the log instead of dying mute.
+CLAUDE_BIN="${CLAUDE_BIN:-}"
+if [ -z "$CLAUDE_BIN" ]; then
+  for c in "$HOME/.npm-global/bin/claude" "$HOME/.local/bin/claude" "$(command -v claude || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then CLAUDE_BIN="$c"; break; fi
+  done
+fi
+[ -n "$CLAUDE_BIN" ] || { echo "$(date -u +%FT%TZ) no claude CLI found — research not run" >> "$LOG"; exit 1; }
+# The API's refusal arrives on stdout (stream-json), so quote the tail of both streams.
+fail() { echo "$(date -u +%FT%TZ) $1 failed ($CLAUDE_BIN $("$CLAUDE_BIN" --version 2>/dev/null | head -1)): $({ cat "$ERR"; grep -o -m1 'API Error: [^"]*\|"error":{[^}]*}' "$CAPTURE"; } 2>/dev/null | tr '\n' ' ' | head -c 400)" >> "$LOG"; exit 1; }
 # Decode actual scanner output outside the model: oversized MCP responses cannot be
 # read by this deliberately restricted agent, whose local tools are all disabled.
-claude -p 'Collect READ-ONLY scanner results. Get saved scans and run only Esbueno Bullish Trend, Esbueno Bearish Trend and Esbueno Volume Expansion. Request small pages if supported. Never change scans or account settings. If a result is oversized, stop trying to read its file: the calling process decodes the saved actual response. No other tools or actions.' \
+"$CLAUDE_BIN" -p 'Collect READ-ONLY scanner results. Get saved scans and run only Esbueno Bullish Trend, Esbueno Bearish Trend and Esbueno Volume Expansion. Request small pages if supported. Never change scans or account settings. If a result is oversized, stop trying to read its file: the calling process decodes the saved actual response. No other tools or actions.' \
   --tools '' --permission-mode dontAsk --no-session-persistence --output-format stream-json --verbose \
-  --allowedTools mcp__robinhood-trading__get_scans mcp__robinhood-trading__run_scan > "$CAPTURE"
+  --allowedTools mcp__robinhood-trading__get_scans mcp__robinhood-trading__run_scan < /dev/null > "$CAPTURE" 2> "$ERR" || fail "scanner session"
 # The base list lives in code (OPTIONS_WATCHLIST) so the prompt, the admin page and the screen agree.
 BASE_SYMBOLS=$(node --import tsx -e 'import("./src/lib/options-desk-model.ts").then(m => console.log((m.OPTIONS_WATCHLIST ?? m.default.OPTIONS_WATCHLIST).join(", ")))')
 [ -n "$BASE_SYMBOLS" ] || { echo "$(date -u +%FT%TZ) base symbol list unavailable — research not run" >> "$LOG"; exit 1; }
 DISCOVERY_SYMBOLS=$(node --env-file="${OPTIONS_DESK_ENV_FILE:-.env.local}" --import tsx scripts/options-research-ingest.ts "$CAPTURE" --discovery-symbols)
-claude -p "Collect READ-ONLY options research. Never trade, review, cancel, exercise, transfer, or change settings. Get equity quotes for ${BASE_SYMBOLS} and these actual broker scanner symbols: ${DISCOVERY_SYMBOLS:-none}. From verified quotes choose up to six additional symbols priced 10 to 100 dollars, ordered by price ascending then ticker. Exclude leveraged/inverse funds when identified in broker metadata. Research only, not recommendations. For the base list plus selected extra symbols, get daily regular-session historical bars for the last 420 days. Then get option chains, select the nearest standard monthly expiration 28-60 days away, and retrieve active standard 100-share calls and puts at five consecutive strikes around the underlying price. Get actual option quotes in batches of at most 20 IDs until EVERY retrieved contract ID has a quote response. A single batch does not complete a larger collection. Do not invent prices, bars, Greeks or identifiers. If a result is oversized, the calling process reads the saved response; do not try local tools. Stop after these reads and report missing data." \
+"$CLAUDE_BIN" -p "Collect READ-ONLY options research. Never trade, review, cancel, exercise, transfer, or change settings. Get equity quotes for ${BASE_SYMBOLS} and these actual broker scanner symbols: ${DISCOVERY_SYMBOLS:-none}. From verified quotes choose up to six additional symbols priced 10 to 100 dollars, ordered by price ascending then ticker. Exclude leveraged/inverse funds when identified in broker metadata. Research only, not recommendations. For the base list plus selected extra symbols, get daily regular-session historical bars for the last 420 days. Then get option chains, select the nearest standard monthly expiration 28-60 days away, and retrieve active standard 100-share calls and puts at five consecutive strikes around the underlying price. Get actual option quotes in batches of at most 20 IDs until EVERY retrieved contract ID has a quote response. A single batch does not complete a larger collection. Do not invent prices, bars, Greeks or identifiers. If a result is oversized, the calling process reads the saved response; do not try local tools. Stop after these reads and report missing data." \
   --tools '' --permission-mode dontAsk --no-session-persistence --output-format stream-json --verbose \
-  --allowedTools mcp__robinhood-trading__get_equity_historicals mcp__robinhood-trading__get_equity_quotes mcp__robinhood-trading__get_option_chains mcp__robinhood-trading__get_option_instruments mcp__robinhood-trading__get_option_quotes >> "$CAPTURE"
+  --allowedTools mcp__robinhood-trading__get_equity_historicals mcp__robinhood-trading__get_equity_quotes mcp__robinhood-trading__get_option_chains mcp__robinhood-trading__get_option_instruments mcp__robinhood-trading__get_option_quotes < /dev/null >> "$CAPTURE" 2> "$ERR" || fail "research session"
 node --env-file="${OPTIONS_DESK_ENV_FILE:-.env.local}" --import tsx scripts/options-research-ingest.ts "$CAPTURE" >> "$LOG" 2>&1
