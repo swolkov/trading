@@ -66,7 +66,7 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
       const verified = (await cfg(VERIFIED_KEY)) === "true";
       const broker = new RobinhoodLiveBroker(client, {
         verified, now: () => Date.now(), log,
-        lookupIntent: (refId) => store.getIntent(refId),
+        lookupIntent: (refId) => (refId ? store.getIntent(refId) : Promise.resolve(null)),   // the guardian's standalone snapshot has no intent
         ownedPositions: () => store.ownedPositions(),
       });
       const deps: OptionsExecutorDependencies = { broker, store, policy: readOptionsExecutionPolicy, now: () => Date.now() };
