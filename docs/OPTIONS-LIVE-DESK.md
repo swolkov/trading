@@ -70,3 +70,15 @@ refresh token on every use, so exactly one consumer may hold the credential.
 3. `railway variables --service options-desk --set OPTIONS_DESK_WORKER=on` (the worker reads it per tick after a redeploy; redeploy to be safe).
 4. Watch the deploy logs: the next scheduled tick should log `guard tick … ET` and the admin's Live desk panel should show the guardian reporting. If a tick logs "Robinhood direct connection is not authorized", the credential copy failed — stop the worker and re-copy before re-enabling the Mac jobs.
 The research sessions (`options-market-run.sh`, `claude -p`) stay on the Mac: they use Claude's own Robinhood login.
+
+## Why the desk sat out a day (Sep 14 2026)
+
+The desk already buys single long calls, long puts (on breakdowns) and debit verticals — never
+credit spreads. What it lacked was names it could afford: at a $100 max loss, nothing on a $300+
+stock fits, and the six-name base list was all index ETFs and mega-caps. The research base now
+carries an **affordable core** (`OPTIONS_WATCHLIST` in `src/lib/options-desk-model.ts`): $11–$30
+names with deep option markets, where an at-the-money contract 21–60 days out costs $50–$100.
+The 20-session breakout rule and every quality gate are unchanged; the research prompt reads the
+list from code so the prompt, the admin page and the screen cannot drift apart. The entry log now
+says which gate blocked: no breakout among the researched names, or a breakout nothing could
+afford.

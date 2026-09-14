@@ -1,6 +1,13 @@
 // Research uses broker prices. It never simulates fills or authorizes an order.
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
-export const OPTIONS_WATCHLIST = ["SPY", "QQQ", "IWM", "AAPL", "AMD", "NVDA"];
+// The base research list. The index and mega-cap names give the desk its regime read, but at a
+// $100 max loss a single contract on a $300+ stock never fits, so the AFFORDABLE CORE (Sep 14 2026)
+// is where the live desk can actually buy delta: $11-$30 names with deep, tight option markets.
+// The screen still applies every quality gate; a name on this list earns nothing by being here.
+export const OPTIONS_WATCHLIST = [
+  "SPY", "QQQ", "IWM", "AAPL", "AMD", "NVDA",
+  "F", "AAL", "T", "PFE", "CCL", "NCLH", "WBD", "DKNG", "RIOT", "SOFI", "MARA", "RIVN",
+];
 export const OPTIONS_DESK_RULES = {
   maxContracts: 1, maxPositions: 1, maxEntriesPerDay: 1,
   minDte: 21, maxDte: 60, exitBeforeDte: 7,
@@ -101,4 +108,13 @@ export function isOptionsResearch(value:unknown):value is OptionsResearch{
     &&Array.isArray(r.contracts)&&r.contracts.every(c=>c&&typeof c.id==="string"&&typeof c.symbol==="string"&&["call","put"].includes(c.type)&&Number.isFinite(Date.parse(c.at))&&Number.isFinite(Date.parse(c.expiry))&&[c.bid,c.ask,c.strike,c.multiplier,c.bidSize,c.askSize,c.openInterest,c.volume].every(Number.isFinite))
     &&Array.isArray(r.scans)&&r.scans.every(s=>s&&typeof s.id==="string"&&typeof s.name==="string"&&Array.isArray(s.symbols)&&s.symbols.every(x=>typeof x==="string"))
     &&Array.isArray(r.errors)&&r.errors.every(e=>typeof e==="string");
+}
+
+/** Says WHICH gate left the live desk empty-handed, so "no trade" reads as a fact and not a mystery:
+ *  no 20-session breakout among the researched names, or a breakout nothing under the cap could express. */
+export function noCandidateNote(data: OptionsResearch, cap: number, now = Date.now()): string {
+  const names = Object.keys(data.bars).length;
+  const breaks = researchSignals(data.bars, now).filter((s) => s.setup === "20-session breakout" || s.setup === "20-session breakdown");
+  if (!breaks.length) return `no entry: no 20-session breakout or breakdown among the ${names} researched names (cap $${cap})`;
+  return `no entry: signal on ${breaks.map((s) => `${s.symbol} ${s.direction}`).join(", ")} but no long call/put or debit spread fits the $${cap} cap`;
 }
