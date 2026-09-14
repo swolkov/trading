@@ -95,7 +95,7 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
                 entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "" };
               await store.putOwnedPosition(owned);
               await store.putIntent({ ...rec, state: "settled" });
-              await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${rec.intent!.quantity} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, target double, out 7 days before expiry.`);
+              await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${rec.intent!.quantity} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), out 7 days before expiry.`);
             } else if (rec.action === "close" && rec.positionId) {
               await store.releaseOwnedPosition(rec.positionId);
               await store.putIntent({ ...rec, state: "settled" });
@@ -128,6 +128,8 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
           }
           const decision = exitDecision(pos, snapshot.contracts, Date.now());
           log(`${pos.underlying} ${pos.kind}: ${decision.reason}`);
+          // The trail's anchor lives on the owned record, so a restart cannot forget the best mark seen.
+          if (decision.peakNet != null && decision.peakNet !== pos.peakNet) await store.withAccountLock(ACCOUNT, () => store.putOwnedPosition({ ...pos, peakNet: decision.peakNet }));
           if (!decision.exit || decision.limitPrice == null) continue;
           const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity: pos.legs[0].quantity, limitPrice: decision.limitPrice,
             legs: pos.legs.map((l) => ({ optionId: l.optionId, side: l.side === "long" ? "sell" as const : "buy" as const })) };

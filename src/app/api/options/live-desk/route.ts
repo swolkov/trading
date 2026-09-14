@@ -64,7 +64,7 @@ export async function POST(request: Request) {
     const fee = parseOptionsMaxLoss((await prisma.agentConfig.findUnique({ where: { key: "options_live_verified_fee_reserve_usd" } }))?.value);
     if (!fee) await set("options_live_verified_fee_reserve_usd", String(DEFAULT_FEE_RESERVE_USD));
     await set("options_live_armed", "true");
-    await log(`ARMED from the admin page: max loss $${maxLoss} incl. fees (reserve $${fee ?? DEFAULT_FEE_RESERVE_USD}), one contract, one position, ${OPTIONS_LIVE_RULES.maxEntriesPerDay}/day, debit structures only, stop ${OPTIONS_LIVE_RULES.premiumStopFrac * 100}% / target ${OPTIONS_LIVE_RULES.premiumTargetMult}x / out ${OPTIONS_LIVE_RULES.exitBeforeDte}d before expiry, halt at −$${OPTIONS_LIVE_RULES.drawdownHaltUsd}`);
+    await log(`ARMED from the admin page: max loss $${maxLoss} incl. fees (reserve $${fee ?? DEFAULT_FEE_RESERVE_USD}), one contract, one position, ${OPTIONS_LIVE_RULES.maxEntriesPerDay}/day, debit structures only, stop ${OPTIONS_LIVE_RULES.premiumStopFrac * 100}% / trail from ${OPTIONS_LIVE_RULES.trailArmMult}x keeping ${OPTIONS_LIVE_RULES.trailLockFrac * 100}% of the best gain / out ${OPTIONS_LIVE_RULES.exitBeforeDte}d before expiry, halt at −$${OPTIONS_LIVE_RULES.drawdownHaltUsd}`);
     await sendNotification(`🔴 Options live desk ARMED from the admin page: real money, one contract, max loss $${maxLoss} including fees. The first tick reviews an order without placing it; only after that verifies does an entry go through.`, "options").catch(() => {});
     return Response.json({ ok: true, ...(await view()) });
   }

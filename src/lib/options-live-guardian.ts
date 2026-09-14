@@ -7,7 +7,11 @@ import type { LiveContract, OwnedOptionsPosition } from "./options-live-policy";
 
 export const OPTIONS_LIVE_RULES = {
   premiumStopFrac: 0.5,     // close when the structure is worth half what we paid
-  premiumTargetMult: 2.0,   // close when it is worth double
+  // No fixed target (Sep 14 2026, was 2×): a capped win is the one outcome that cannot ever be large.
+  // Once the structure has been worth 1.5× entry, a trail replaces it — exit when the mark gives back
+  // half of the best gain seen (entry + (peak − entry) × 0.5). A spread at its full width exits: nothing left to earn.
+  trailArmMult: 1.5,
+  trailLockFrac: 0.5,
   exitBeforeDte: 7,         // close inside the last week regardless (gamma/assignment window)
   staleEntryMinutes: 15,    // an unfilled entry is cancelled after this
   drawdownHaltUsd: 300,     // account value this far under its high → disarm entries (20% of $1,500)
@@ -19,6 +23,8 @@ export const OPTIONS_LIVE_RULES = {
 /** What the guardian remembers about a structure it opened, beside the legs the policy needs. */
 export interface OwnedPositionRecord extends OwnedOptionsPosition {
   kind: StructureKind; direction: "debit" | "credit"; entryPrice: number; width: number; openedAtMs: number; expiry: string; underlying: string;
+  /** Best executable close net seen since entry — the trail's anchor. Absent on records written before the trail existed. */
+  peakNet?: number;
 }
 
 /** Executable net price to CLOSE a debit structure now: sell the long at its bid, buy the short back at its ask. */
@@ -35,17 +41,22 @@ export function closeNetBid(pos: OwnedPositionRecord, contracts: LiveContract[])
 export function dteOf(expiry: string, nowMs: number): number {
   return (Date.parse(`${expiry}T20:00:00Z`) - nowMs) / 86_400_000;
 }
-export interface ExitDecision { exit: boolean; reason: string; limitPrice: number | null; markNet: number | null }
+export interface ExitDecision { exit: boolean; reason: string; limitPrice: number | null; markNet: number | null; /** The peak the caller must persist on the owned record. */ peakNet?: number }
 export function exitDecision(pos: OwnedPositionRecord, contracts: LiveContract[], nowMs: number, rules = OPTIONS_LIVE_RULES): ExitDecision {
   if (pos.direction !== "debit") return { exit: false, reason: "credit structures are not managed by this guardian version", limitPrice: null, markNet: null };
   const net = closeNetBid(pos, contracts);
   if (net == null) return { exit: false, reason: "quote missing for a leg", limitPrice: null, markNet: null };
   const dte = dteOf(pos.expiry, nowMs);
+  const entry = pos.entryPrice, peak = Math.max(pos.peakNet ?? entry, net);
   const limit = net > 0 ? Math.min(net, pos.width > 0 ? pos.width : net) : null;
-  if (net <= pos.entryPrice * rules.premiumStopFrac) return { exit: limit != null, reason: limit != null ? `premium stop: ${net.toFixed(2)} ≤ ${(pos.entryPrice * rules.premiumStopFrac).toFixed(2)}` : "worthless: no bid to sell into, letting it expire", limitPrice: limit, markNet: net };
-  if (net >= pos.entryPrice * rules.premiumTargetMult) return { exit: true, reason: `target: ${net.toFixed(2)} ≥ ${(pos.entryPrice * rules.premiumTargetMult).toFixed(2)}`, limitPrice: limit, markNet: net };
-  if (dte <= rules.exitBeforeDte) return { exit: limit != null, reason: limit != null ? `time exit: ${dte.toFixed(1)} days to expiry` : "expiring worthless, no bid", limitPrice: limit, markNet: net };
-  return { exit: false, reason: `holding: mark ${net.toFixed(2)} vs entry ${pos.entryPrice.toFixed(2)}, ${dte.toFixed(1)} dte`, limitPrice: null, markNet: net };
+  if (net <= entry * rules.premiumStopFrac) return { exit: limit != null, reason: limit != null ? `premium stop: ${net.toFixed(2)} ≤ ${(entry * rules.premiumStopFrac).toFixed(2)}` : "expiring worthless, no bid", limitPrice: limit, markNet: net, peakNet: peak };
+  if (pos.width > 0 && net >= pos.width) return { exit: true, reason: `max value: spread is worth its full ${pos.width.toFixed(2)} width`, limitPrice: limit, markNet: net, peakNet: peak };
+  if (peak >= entry * rules.trailArmMult) {
+    const floor = entry + (peak - entry) * rules.trailLockFrac;
+    if (net <= floor) return { exit: true, reason: `trail: ${net.toFixed(2)} ≤ ${floor.toFixed(2)} after a peak of ${peak.toFixed(2)} (entry ${entry.toFixed(2)})`, limitPrice: limit, markNet: net, peakNet: peak };
+  }
+  if (dte <= rules.exitBeforeDte) return { exit: limit != null, reason: limit != null ? `time exit: ${dte.toFixed(1)} days to expiry` : "expiring worthless, no bid", limitPrice: limit, markNet: net, peakNet: peak };
+  return { exit: false, reason: `holding: mark ${net.toFixed(2)} vs entry ${entry.toFixed(2)}, peak ${peak.toFixed(2)}${peak >= entry * rules.trailArmMult ? " (trail armed)" : ""}, ${dte.toFixed(1)} dte`, limitPrice: null, markNet: net, peakNet: peak };
 }
 
 /** Executable net price to OPEN a debit structure now: buy the long at its ask, sell the short at its bid. */

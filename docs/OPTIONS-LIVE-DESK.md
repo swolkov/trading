@@ -22,7 +22,7 @@ credential lives there; Vercel never holds it) and reports to the admin like the
 
 Debit structures only (long call, long put, call/put debit spread) so max loss = premium paid + fees ·
 one contract · one open position · one entry per day · no entries in the last 30 minutes · premium
-stop at 50% of entry · target at 2× entry · out 7 days before expiry · unfilled entry cancelled after
+stop at 50% of entry · no fixed target: once worth 1.5× entry a trail keeps half the best gain (a spread at full width exits) · out 7 days before expiry · unfilled entry cancelled after
 15 min · account value $300 under its high-water mark → desk disarms itself (positions stay managed).
 Entry signal = the research screen's 20-session breakout/breakdown with 50/200-day alignment, on the
 day's broker bars; the structure is chosen by the screen and re-priced on live quotes.
@@ -82,3 +82,23 @@ The 20-session breakout rule and every quality gate are unchanged; the research 
 list from code so the prompt, the admin page and the screen cannot drift apart. The entry log now
 says which gate blocked: no breakout among the researched names, or a breakout nothing could
 afford.
+
+## When the desk does what (Sep 14 2026)
+
+**Expiry.** Research pulls the nearest monthly 28–60 days out; the desk is out 7 days before expiry.
+A breakout takes days to weeks to pay. At-the-money decay per day as a share of premium: ~1.1% at
+45 days, ~1.8% at 28, ~2.4% at 21, ~7% at 7, 36% or worse at 1. Seven-day and one-day options are
+not a setting this desk offers: at $100 a contract on a cheap name is $0.10–$0.30 wide on a nickel
+spread, so friction alone is 15–30% a side, and the decay means a flat week is the stop.
+
+**Single leg or spread.** Decided by the market, not by mood: ATM implied vol ÷ 20-day realized vol.
+At or under 1.15× the option is fairly priced against how the stock actually moves → a long call (or
+long put on a breakdown) with its upside uncapped. Above that the option is rich → a debit vertical,
+which sells the richness back. Sep 14 examples: SOFI 0.90× and AAPL 1.10× → single; SPY 1.44× → spread.
+
+**Which contract.** Within the preferred family, the most P&L per dollar at risk if the stock moves
+exactly the move the options market is pricing (ATM straddle ÷ spot), in the signal's direction. A
+structure worth nothing at that move is rejected outright — that is a lottery ticket.
+
+**Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
+trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
