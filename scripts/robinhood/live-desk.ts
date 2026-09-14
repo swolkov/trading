@@ -19,7 +19,7 @@ import { PostgresOptionsLiveStore } from "../../src/lib/options-live-store";
 import { readOptionsExecutionPolicy } from "../../src/lib/options-live-runtime";
 import { RobinhoodLiveBroker, regularSessionFor } from "../../src/lib/options-live-broker";
 import { OPTIONS_LIVE_RULES, drawdownHalt, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
-import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
+import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../../src/lib/options-operation";
 import type { StructureKind } from "../../src/lib/options-structures";
 
@@ -201,7 +201,7 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
   const cap = policy.maxLossUsd ?? 0, fee = policy.feeBudgetUsd ?? 0;
   if (!data) return { intent: null, note: "no broker research on file", maxLossUsd: 0, underlying: "", expiry: "" };
   const candidates = screenResearchContracts(data, cap, buyingPower).filter((c) => OPTIONS_LIVE_RULES.entryKinds.includes(c.kind as StructureKind));
-  if (!candidates.length) return { intent: null, note: `no debit candidate passes the research screen (cap $${cap})`, maxLossUsd: 0, underlying: "", expiry: "" };
+  if (!candidates.length) return { intent: null, note: noCandidateNote(data, cap), maxLossUsd: 0, underlying: "", expiry: "" };
   for (const c of candidates.slice(0, 3)) {
     const legs = c.legs.map((id, i) => ({ optionId: id, side: i === 0 ? "buy" as const : "sell" as const }));
     const contracts = await broker.contracts(c.legs);

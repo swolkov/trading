@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
-import { isOptionsResearch, screenResearchContracts, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
+import { isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
 import { loadOptionsNews } from "../src/lib/options-news";
 import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scripts/robinhood/client";
 import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
@@ -71,4 +71,11 @@ test("durable records preserve canonical order, UUID, ownership and broker ID",(
  for(const changed of [{refId:"wrong"},{action:"close"},{positionId:"foreign"},{canonicalOrder:undefined},{intent:{...r.intent,quantity:2}}])assert.throws(()=>assertDurableOptionsIntent({...r,...changed} as OptionsIntentRecord,null));
  const accepted={...r,state:"accepted" as const,order:{id:"known",accountNumber:OPTIONS_LIVE_ACCOUNT,refId:r.refId,requestFingerprint:r.fingerprint,state:"open" as const,filledQuantity:0}};
  assert.throws(()=>assertDurableOptionsIntent({...accepted,order:{...accepted.order,id:"other"}},accepted));
+});
+
+test("an empty entry tick names the gate: no breakout, or a breakout nothing under the cap could express",()=>{
+ const withSignal=research();
+ assert.match(noCandidateNote(withSignal,100,now),/signal on TEST bullish but no long call\/put or debit spread fits the \$100 cap/);
+ const quiet=research(); quiet.bars.TEST=quiet.bars.TEST.map(b=>({...b,high:101,close:100}));
+ assert.match(noCandidateNote(quiet,100,now),/no 20-session breakout or breakdown among the 1 researched names/);
 });
