@@ -3,7 +3,8 @@ import { RobinhoodReadClient, withCredentialLock } from "./client";
 import { prisma } from "../../src/lib/db";
 import { collectRobinhoodAccount, inspectRobinhoodCapabilities, OPTIONS_DIRECT_STATUS_KEY } from "../../src/lib/options-direct-collector";
 
-async function run() {
+/** One account snapshot: read the broker, validate, save all three keys atomically. Throws on any failure. */
+export async function collectAndSave() {
   return withCredentialLock(async () => {
     const client = new RobinhoodReadClient();
     await client.connect();
@@ -22,10 +23,13 @@ async function run() {
       optionLevel: snapshot.account.optionLevel, positions: snapshot.live.positions.length, orders: snapshot.live.orders.length, capabilities, canPlaceOrders: false}));
   });
 }
-run().catch(async () => {
+export async function recordCollectionFailure() {
   // Do not log broker responses, account details or credentials from thrown errors.
   console.error("Direct Robinhood collection failed; prior account snapshots retained.");
   const value = JSON.stringify({at: new Date().toISOString(), ok: false, error: "Direct collection failed; inspect connection or response schema"});
   await prisma.agentConfig.upsert({where: {key: OPTIONS_DIRECT_STATUS_KEY}, create: {key: OPTIONS_DIRECT_STATUS_KEY, value}, update: {value}}).catch(() => {});
-  process.exitCode = 1;
-}).finally(() => prisma.$disconnect());
+}
+// CLI (the Mac's 17:32 launchd job). The Railway worker imports collectAndSave instead.
+if (process.argv[1] && /collect\.ts$/.test(process.argv[1])) {
+  collectAndSave().catch(async () => { await recordCollectionFailure(); process.exitCode = 1; }).finally(() => prisma.$disconnect());
+}
