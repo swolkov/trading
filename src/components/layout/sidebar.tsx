@@ -16,8 +16,8 @@ import {
 } from "lucide-react";
 
 // IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. The desks Spencer actually
-// wants: Kraken (crypto margin, REAL money), Robinhood (US equity options, PAPER only —
-// measured, never traded, no server credentials), and futures on the Tradovate DEMO — the
+// wants: Kraken (crypto margin, REAL money), Robinhood (US equity options, REAL account — the
+// live desk armed Sep 13 2026, one contract, $100 max loss), and futures on the Tradovate DEMO — the
 // edge lab (TradingView alerts → demo fills with the stop attached, Sep 11 2026), paper only
 // by design. Futures prop firms were researched and DROPPED (capped payouts); Tradovate LIVE is
 // closed for good. The Tradeify 247 DXtrade CRYPTO prop account (bought Sep 11 2026 by
@@ -36,12 +36,20 @@ const sections = [
     ],
   },
   {
+    // Orders is cross-platform by construction (Kraken fills and round trips, the Tradovate demo
+    // ledger, the Robinhood account's positions and orders), so it is its own tab, not a Kraken
+    // page (Sep 14 2026). Sitting under one platform's heading told the reader the wrong thing.
+    label: "Orders · every platform",
+    links: [
+      { href: "/orders", label: "Orders", icon: ClipboardList },
+    ],
+  },
+  {
     label: "Kraken · crypto margin · real money",
     tone: "live" as const,
     links: [
       { href: "/margin", label: "Live Account", icon: CandlestickChart },
       { href: "/margin/paper", label: "Live Desk", icon: Route },
-      { href: "/orders", label: "Orders", icon: ClipboardList },
     ],
   },
   {
