@@ -51,3 +51,22 @@ are ambiguous and the intent stays `unknown` — the desk refuses new entries un
 - Log: `~/Library/Logs/options-live.log`; the admin shows the last 40 lines and every intent.
 - Disarm: the button, or `options_live_armed=false`. Takes effect within 5 minutes; never touches an open position.
 - An `unknown` intent: check the Robinhood app for the order, then either mark the intent settled (no order) or set its `order.id` (order exists) in `options_live_intents`. The desk will not trade past it by itself — by design.
+
+## Railway worker (Sep 14 2026) — the desk leaves the laptop
+
+Service **options-desk** in Railway project `futures-engine` (service id 866dd190-3f2f-437b-abf1-daf99ef58d41),
+built from `Dockerfile.options-desk`, running `scripts/robinhood/desk-worker.ts`: every minute it asks
+`src/lib/options-desk-schedule.ts` what is due (guard every 5 min 09:30–16:05 ET, entry :05/:35
+09:35–15:35, account snapshot 17:32) and runs it in-process. Variables: `OPTIONS_DESK_WORKER`
+(`on`/`off`), `ROBINHOOD_AUTH_DIR=/data/robinhood` (volume `options-desk-credential` at `/data`),
+`DATABASE_URL`, `DATABASE_URL_UNPOOLED` (the account lock needs a direct connection),
+`RAILWAY_DOCKERFILE_PATH=Dockerfile.options-desk`. Deploy with `railway up --service options-desk`
+from a checkout of main (the `railway volume` CLI subcommand panics; use the Railway MCP/dashboard).
+
+**Cutover from the Mac — do it OUTSIDE the session, in this order, once.** Robinhood rotates the
+refresh token on every use, so exactly one consumer may hold the credential.
+1. Unload the Mac jobs: `for l in options-live-guard options-live-entry options-desk; do launchctl bootout gui/$(id -u)/com.esbueno.$l; done`.
+2. Copy `~/.config/esbueno-robinhood/oauth.json` to the volume as `/data/robinhood/oauth.json` (Railway dashboard → service → volume → files, or a one-off `railway ssh`). Mode 0600. Delete any stale `session.lock` there.
+3. `railway variables --service options-desk --set OPTIONS_DESK_WORKER=on` (the worker reads it per tick after a redeploy; redeploy to be safe).
+4. Watch the deploy logs: the next scheduled tick should log `guard tick … ET` and the admin's Live desk panel should show the guardian reporting. If a tick logs "Robinhood direct connection is not authorized", the credential copy failed — stop the worker and re-copy before re-enabling the Mac jobs.
+The research sessions (`options-market-run.sh`, `claude -p`) stay on the Mac: they use Claude's own Robinhood login.
