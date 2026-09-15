@@ -343,3 +343,20 @@ test("the second slot: a second position is refused at maxOpenPositions 1 and ac
   const r4 = await executeOptionsIntent({ ...intent(), refId: REF2 }, f.deps);
   assert.equal(r4.status, "refused"); assert.match(r4.reason ?? "", /position limit: 2 open, policy allows 2/);
 });
+
+test("a partial close: one contract of an owned 2-lot is accepted; a close for more than is owned is refused", async () => {
+  const f = fixture(); f.policy.armed = false;
+  const position = { id: "two", legs: [{ optionId: "A", side: "long" as const, quantity: 2 }] };
+  f.snapshot.positions = [position];
+  f.owned.set(position.id, { ...position, accountNumber: OPTIONS_LIVE_ACCOUNT, openingRefId: REF2 });
+  const partial: OptionsLiveIntent = { ...intent(), action: "close", positionId: position.id, quantity: 1, legs: [{ optionId: "A", side: "sell" }] };
+  assert.equal((await executeOptionsIntent(partial, f.deps)).status, "accepted");
+  assert.equal(f.calls[1].params.quantity, "1");
+  assert.equal(prepareOptionsOrder({ ...partial, refId: REF2, quantity: 2 }, f.policy, f.snapshot, f.owned.get(position.id)!, NOW).params.quantity, "2", "the whole 2-lot may close too");
+  assert.throws(() => prepareOptionsOrder({ ...partial, refId: REF2, quantity: 3 }, f.policy, f.snapshot, f.owned.get(position.id)!, NOW), /not exceed their quantity/);
+  // After the partial filled, the runner rewrote the record to 1 and the broker shows 1: a 2-lot close is now refused, a 1-lot accepted.
+  const one = { ...position, legs: [{ optionId: "A", side: "long" as const, quantity: 1 }] };
+  f.snapshot.positions = [one]; f.owned.set(position.id, { ...one, accountNumber: OPTIONS_LIVE_ACCOUNT, openingRefId: REF2 });
+  assert.throws(() => prepareOptionsOrder({ ...partial, refId: REF2, quantity: 2 }, f.policy, f.snapshot, f.owned.get(position.id)!, NOW), /not exceed their quantity/);
+  assert.equal(prepareOptionsOrder({ ...partial, refId: REF2, quantity: 1 }, f.policy, f.snapshot, f.owned.get(position.id)!, NOW).params.quantity, "1");
+});

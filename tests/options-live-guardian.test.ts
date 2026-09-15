@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { closeNetBid, drawdownHalt, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../src/lib/options-live-guardian";
+import { OPTIONS_LIVE_RULES, closeNetBid, drawdownHalt, etDay, exitDecision, openNetAsk, ownedRecordAfter, type OwnedPositionRecord } from "../src/lib/options-live-guardian";
 import { OPTIONS_LIVE_ACCOUNT, type LiveContract } from "../src/lib/options-live-policy";
 import { guardianExDivExit } from "../src/lib/options-events";
 
@@ -71,4 +71,45 @@ test("ex-dividend exit: a call debit spread with its short call in the money clo
   assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-25", exDivSource: "projected" }, q(101.5), now).exit, false);   // window opens Sep 18 → 3.9 days out
   assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10", exDivSource: "projected" }, q(101.5), now).exit, true);    // window runs to Sep 17 — still live
   assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-05", exDivSource: "projected" }, q(101.5), now).exit, false);   // window closed Sep 12
+});
+
+test("thesis invalidation: the underlying must trade beyond the range edge on two consecutive ticks; inside, stale or missing quotes reset the count", () => {
+  const single: OwnedPositionRecord = { ...spread, kind: "long_call", width: 0, legs: [{ optionId: "L", side: "long", quantity: 1 }], invalidationPx: 99, signalDirection: "bullish", invalidationTicks: 0 };
+  const held = [c("L", 0.6, 0.65, 100)];   // 1.2× entry: no other rule fires
+  const q = (last: number, ageMin = 1) => ({ last, atMs: now - ageMin * 60_000 });
+  const first = exitDecision(single, held, now, OPTIONS_LIVE_RULES, q(98.5));
+  assert.equal(first.exit, false); assert.equal(first.invalidationTicks, 1); assert.match(first.reason, /SPY 98.5 below its 99 level \(tick 1 of 2\)/);
+  const second = exitDecision({ ...single, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, q(98.7));
+  assert.equal(second.exit, true); assert.equal(second.quantity, undefined); assert.equal(second.limitPrice, 0.6); assert.match(second.reason, /thesis invalidated: SPY 98.7 below its 99 level on 2 consecutive ticks/);
+  assert.equal(exitDecision({ ...single, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, q(99.2)).invalidationTicks, 0, "back inside resets");
+  assert.equal(exitDecision({ ...single, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, q(98.5, 16)).invalidationTicks, 0, "a 16-minute-old quote is no quote");
+  assert.equal(exitDecision({ ...single, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, null).invalidationTicks, 0);
+  assert.equal(exitDecision({ ...single, invalidationTicks: 1 }, held, now).exit, false, "no spot passed → rule skipped");
+  assert.equal(exitDecision({ ...single, invalidationPx: null, invalidationTicks: 5 }, held, now, OPTIONS_LIVE_RULES, q(50)).invalidationTicks, 0, "no level on the record");
+  const bear: OwnedPositionRecord = { ...single, kind: "long_put", signalDirection: "bearish", invalidationPx: 101, invalidationTicks: 1 };
+  assert.equal(exitDecision(bear, held, now, OPTIONS_LIVE_RULES, q(101.5)).exit, true);
+  assert.equal(exitDecision(bear, held, now, OPTIONS_LIVE_RULES, q(100.5)).exit, false);
+  // The premium stop still wins, and carries the tick count for persistence.
+  const stopped = exitDecision({ ...single, invalidationTicks: 1 }, [c("L", 0.2, 0.25, 100)], now, OPTIONS_LIVE_RULES, q(98.5));
+  assert.match(stopped.reason, /premium stop/); assert.equal(stopped.invalidationTicks, 2);
+  // What the guardian loop persists: the count (and the peak) — and nothing when neither moved.
+  assert.deepEqual(ownedRecordAfter(single, first), { ...single, peakNet: 0.6, invalidationTicks: 1 });
+  assert.equal(ownedRecordAfter({ ...single, peakNet: 0.6, invalidationTicks: 1 }, first), null);
+  assert.equal(ownedRecordAfter({ ...single, peakNet: 0.6, invalidationTicks: 1 }, exitDecision({ ...single, peakNet: 0.6, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, q(99.2)))?.invalidationTicks, 0);
+});
+
+test("partial exits: a 2-lot banks one contract at 2× entry and trails the rest; a 1-lot never partials; a spread at 91% of its width closes whole", () => {
+  const two: OwnedPositionRecord = { ...spread, kind: "long_call", width: 0, legs: [{ optionId: "L", side: "long", quantity: 2 }] };   // entry 0.50
+  const under = exitDecision(two, [c("L", 0.99, 1.05, 100)], now);
+  assert.equal(under.exit, false); assert.equal(under.quantity, undefined);
+  const partial = exitDecision(two, [c("L", 1.0, 1.05, 100)], now);
+  assert.equal(partial.exit, true); assert.equal(partial.quantity, 1); assert.equal(partial.limitPrice, 1); assert.match(partial.reason, /partial: 1.00 ≥ 2× entry 0.50 — closing 1 of 2, trailing the rest/);
+  const remainder = exitDecision({ ...two, legs: [{ optionId: "L", side: "long", quantity: 1 }], peakNet: 1 }, [c("L", 1.0, 1.05, 100)], now);
+  assert.equal(remainder.exit, false); assert.match(remainder.reason, /trail armed/);
+  assert.equal(exitDecision({ ...two, legs: [{ optionId: "L", side: "long", quantity: 1 }] }, [c("L", 1.5, 1.55, 100)], now).exit, false, "a 1-lot at 3× just trails");
+  const twoSpread: OwnedPositionRecord = { ...spread, legs: spread.legs.map((l) => ({ ...l, quantity: 2 })) };   // width 1, entry 0.50
+  const wide = exitDecision(twoSpread, [c("L", 1.7, 1.75, 100), c("S", 0.7, 0.79, 101)], now);   // net 0.91 = 91% of the width
+  assert.equal(wide.exit, true); assert.equal(wide.quantity, undefined); assert.match(wide.reason, /max value: 0.91 is 91% of the 1.00 width — closing all/);
+  assert.equal(exitDecision({ ...twoSpread, entryPrice: 0.4 }, [c("L", 1.6, 1.65, 100), c("S", 0.7, 0.79, 101)], now).quantity, 1, "at 81% of the width (2× a 0.40 entry) a 2-lot spread partials");
+  assert.equal(exitDecision({ ...spread, entryPrice: 0.4 }, [c("L", 1.6, 1.65, 100), c("S", 0.7, 0.79, 101)], now).exit, false, "a 1-lot spread at 81% holds");
 });

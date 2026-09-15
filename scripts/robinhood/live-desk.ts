@@ -19,7 +19,7 @@ import { executeOptionsIntent, reconcileOptionsIntent, type OptionsExecutorDepen
 import { PostgresOptionsLiveStore } from "../../src/lib/options-live-store";
 import { readOptionsExecutionPolicy } from "../../src/lib/options-live-runtime";
 import { RobinhoodLiveBroker, regularSessionFor } from "../../src/lib/options-live-broker";
-import { OPTIONS_LIVE_RULES, drawdownHalt, dteOf, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
+import { OPTIONS_LIVE_RULES, drawdownHalt, dteOf, etDay, exitDecision, openNetAsk, ownedRecordAfter, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
 import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
 import { OPTIONS_EVENT_RULES, guardianExDivExit, spansEarnings } from "../../src/lib/options-events";
 import { chaseCheck, directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
@@ -106,12 +106,18 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
               const shortLeg = legs.find((l) => l.side === "short");
               const shortStrike = shortLeg ? contracts.find((c) => c.optionId === shortLeg.optionId)?.strike ?? null : null;
               const event = (await research())?.events?.[contracts[0]?.underlying ?? ""];
+              // The thesis the runner stashed on the record after acceptance: the range edge the signal cleared becomes the invalidation level.
+              const cand = rec.candidate as Partial<CandidateStash> | undefined;
+              const signalDirection = cand?.direction === "bullish" || cand?.direction === "bearish" ? cand.direction : undefined;
+              const edge = signalDirection === "bullish" ? cand?.rangeLow : signalDirection === "bearish" ? cand?.rangeHigh : undefined;
+              const invalidationPx = typeof edge === "number" && Number.isFinite(edge) && edge > 0 ? edge : null;
               const owned: OwnedPositionRecord = { id: rec.refId, accountNumber: ACCOUNT, openingRefId: rec.refId, legs, kind: rec.intent!.kind, direction: rec.canonicalOrder!.direction,
                 entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "",
-                exDivAt: event?.exDivAt ?? null, ...(event?.exDivSource ? { exDivSource: event.exDivSource } : {}), shortStrike };
+                exDivAt: event?.exDivAt ?? null, ...(event?.exDivSource ? { exDivSource: event.exDivSource } : {}), shortStrike,
+                invalidationPx, ...(signalDirection ? { signalDirection } : {}), invalidationTicks: 0 };
               await store.putOwnedPosition(owned);
               await store.putIntent({ ...rec, state: "settled" });
-              await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${filledQty}${filledQty < rec.intent!.quantity ? ` of ${rec.intent!.quantity} (rest ${rec.order!.state})` : ""} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), out 7 days before expiry.`);
+              await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${filledQty}${filledQty < rec.intent!.quantity ? ` of ${rec.intent!.quantity} (rest ${rec.order!.state})` : ""} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), ${invalidationPx != null ? `out if ${owned.underlying} trades ${signalDirection === "bullish" ? "below" : "above"} ${invalidationPx} on two ticks, ` : ""}${filledQty >= 2 ? "one contract banked at 2×, " : ""}out 7 days before expiry.`);
             } else if (rec.action === "close" && rec.positionId) {
               // A close that filled fewer contracts than the position holds leaves a remainder the guardian keeps managing.
               const pos = await store.ownedPosition(rec.positionId) as OwnedPositionRecord | null;
@@ -149,26 +155,31 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
             await page(`⚠️ Options position ${pos.id} (${pos.kind} ${pos.underlying}) is no longer at the broker — expired, assigned or closed by hand. Released from the guardian.`);
             continue;
           }
-          const decision = exitDecision(pos, snapshot.contracts, Date.now());
+          // The underlying's live quote feeds the thesis-invalidation rule and the ex-dividend rule. Fail-soft: no quote, both skipped and said so.
+          const needsSpot = pos.invalidationPx != null || (pos.kind === "call_debit" && !!pos.exDivAt);
+          const q = needsSpot ? await broker.underlyingQuote(pos.underlying) : null;
+          const decision = exitDecision(pos, snapshot.contracts, Date.now(), OPTIONS_LIVE_RULES, q);
           log(`${pos.underlying} ${pos.kind}: ${decision.reason}`);
-          // The trail's anchor lives on the owned record, so a restart cannot forget the best mark seen.
-          if (decision.peakNet != null && decision.peakNet !== pos.peakNet) await store.withAccountLock(ACCOUNT, () => store.putOwnedPosition({ ...pos, peakNet: decision.peakNet }));
+          // The trail's anchor and the invalidation tick count live on the owned record, so a restart cannot forget either.
+          const next = ownedRecordAfter(pos, decision);
+          if (next) await store.withAccountLock(ACCOUNT, () => store.putOwnedPosition(next));
           // Ex-dividend assignment rule: a call debit spread with its short call in the money and the ex-date ≤ 2 days out closes at
-          // its executable mark. The underlying quote is fail-soft — no quote, rule skipped and said so.
+          // its executable mark.
           if (!decision.exit && pos.kind === "call_debit" && pos.exDivAt) {
-            const q = await broker.underlyingQuote(pos.underlying);
             const ex = guardianExDivExit(pos, q, Date.now());
             log(`${pos.underlying} ${pos.kind}: ${ex.reason}`);
             if (ex.exit && decision.markNet != null && decision.markNet > 0) { decision.exit = true; decision.reason = ex.reason; decision.limitPrice = Math.min(decision.markNet, pos.width > 0 ? pos.width : decision.markNet); }
             else if (ex.exit) log(`${pos.underlying} ${pos.kind}: ex-dividend exit wanted but no bid — will retry next tick`);
           }
           if (!decision.exit || decision.limitPrice == null) continue;
-          const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity: pos.legs[0].quantity, limitPrice: decision.limitPrice,
+          // A partial closes fewer contracts than are held (the policy allows ≤ owned); the fill ingest above reduces the record by what filled.
+          const quantity = Math.min(decision.quantity ?? pos.legs[0].quantity, pos.legs[0].quantity);
+          const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity, limitPrice: decision.limitPrice,
             legs: pos.legs.map((l) => ({ optionId: l.optionId, side: l.side === "long" ? "sell" as const : "buy" as const })) };
           broker.noteTheoreticalMaxLoss(0);
           const res = await executeOptionsIntent(closeIntent, deps);
-          log(`close ${pos.id}: ${res.status}${res.reason ? ` — ${res.reason}` : ""}`);
-          if (res.status === "accepted") await page(`📤 Options CLOSE sent for ${pos.underlying} ${pos.kind} at ${decision.limitPrice.toFixed(2)} (${decision.reason}).`);
+          log(`close ${pos.id} × ${quantity}: ${res.status}${res.reason ? ` — ${res.reason}` : ""}`);
+          if (res.status === "accepted") await page(`📤 Options CLOSE sent for ${pos.underlying} ${pos.kind} × ${quantity}${quantity < pos.legs[0].quantity ? ` of ${pos.legs[0].quantity}` : ""} at ${decision.limitPrice.toFixed(2)} (${decision.reason}).`);
           else if (res.status !== "refused") { clean = false; await page(`🚨 Options close for ${pos.id} ended ${res.status}: ${res.reason}`); }
         }
         // 4) Drawdown tier on account value: sizing scales down through the tiers; tier 4 disarms entries.
@@ -221,7 +232,12 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
             broker.noteTheoreticalMaxLoss(pick.maxLossUsd);
             const res = await executeOptionsIntent(pick.intent, entryDeps);
             log(`ENTRY ${pick.intent.kind} ${pick.underlying} × ${pick.intent.quantity} [${pick.grade} cap $${pick.cap}]: ${res.status}${res.reason ? ` — ${res.reason}` : ""}${res.orderId ? ` order ${res.orderId}` : ""}`);
-            if (res.status === "accepted") await page(`📥 Options ENTRY placed: ${pick.intent.kind} ${pick.underlying} ${pick.expiry} × ${pick.intent.quantity} at ${pick.intent.limitPrice.toFixed(2)} (grade ${pick.grade}, max loss $${pick.maxLossUsd.toFixed(0)} + fees under a $${pick.cap} cap${tier && tier.tier > 0 ? `, drawdown tier ${tier.tier} ×${tier.mult}` : ""}). Order ${res.orderId}.`);
+            if (res.status === "accepted") {
+              // Stash the thesis on the reservation RECORD (the intent stays canonical): the fill ingest copies the range edge onto the owned record.
+              if (pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
+                .catch((e) => log(`could not stash the candidate on ${pick.intent!.refId} (invalidation rule will be skipped for it): ${String(e).slice(0, 160)}`));
+              await page(`📥 Options ENTRY placed: ${pick.intent.kind} ${pick.underlying} ${pick.expiry} × ${pick.intent.quantity} at ${pick.intent.limitPrice.toFixed(2)} (grade ${pick.grade}, max loss $${pick.maxLossUsd.toFixed(0)} + fees under a $${pick.cap} cap${tier && tier.tier > 0 ? `, drawdown tier ${tier.tier} ×${tier.mult}` : ""}; invalidation ${pick.candidate?.direction === "bullish" ? `below ${pick.candidate.rangeLow}` : `above ${pick.candidate?.rangeHigh}`}). Order ${res.orderId}.`);
+            }
             else if (res.status === "refused") log(`entry refused by the core: ${res.reason}`);
             else await page(`🚨 Options entry ended ${res.status}: ${res.reason}. No retry until reconciled.`);
           }
@@ -247,7 +263,9 @@ async function accountValue(): Promise<number | null> {
 interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
 /** What the ladder sizes against: account value, the drawdown tier, the A+ switch and what is already owned. */
 interface SizingContext { equity: number | null; tier: DrawdownTier | null; promoted: boolean; owned: OwnedPositionRecord[] }
-interface Pick { intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string; market?: MarketView; grade: OptionsGrade | null; cap: number }
+/** What the runner remembers about the setup beside the canonical intent — written on the reservation record after acceptance. */
+interface CandidateStash { symbol: string; kind: string; setup: string; direction: "bullish" | "bearish"; rangeLow: number; rangeHigh: number; grade: OptionsGrade; cap: number; spreadPct: number | null; quantity: number }
+interface Pick { intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string; market?: MarketView; grade: OptionsGrade | null; cap: number; candidate?: CandidateStash }
 /** Top debit candidate from the research screen, re-priced on quotes fetched THIS second and sized by the ladder:
  *  cap = min(ceiling, maxLossFor(grade, equity)) × drawdown multiplier; two contracts only on a Strong-or-better grade whose structure fits twice. */
 async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePolicy, buyingPower: number, ctx: SizingContext): Promise<Pick> {
@@ -295,7 +313,8 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     const net = openNetAsk(legs, contracts);
     if (net == null || net <= 0) continue;
     // Grade on LIVE spreads (the research stamp is the same rule on older quotes), then the cap this grade earns at this equity and tier.
-    const verdict = gradeFor({ ...c, spreadPct: legSpreadPct(contracts.filter((k) => c.legs.includes(k.optionId))) }, ctx.promoted);
+    const spreadPct = legSpreadPct(contracts.filter((k) => c.legs.includes(k.optionId)));
+    const verdict = gradeFor({ ...c, spreadPct }, ctx.promoted);
     const gradeCap = Math.round(maxLossFor(verdict.grade, ctx.equity, ceiling) * mult * 100) / 100;
     const perContract = net * 100 + fee;
     if (perContract > gradeCap) { refusals.push(`${c.symbol} ${c.kind}: $${perContract.toFixed(0)} max loss over the $${gradeCap} ${verdict.grade} cap (${verdict.reasons[0]})`); continue; }
@@ -315,7 +334,8 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
       log(`earnings ${c.symbol}: next ${live.earningsAt}${live.verified ? "" : " (tentative)"} after expiry ${c.expiry} (via ${live.via}); research row ${earnings.note}`);
     }
     log(`grade ${c.symbol} ${c.kind}: ${verdict.grade} (${verdict.reasons.join("; ")}) → cap $${gradeCap}${mult < 1 ? ` after ×${mult} drawdown tier` : ""}, ${quantity} contract${quantity === 1 ? "" : "s"}`);
-    return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} × ${quantity} @ ${net.toFixed(2)} [${verdict.grade} cap $${gradeCap} · dte ${c.dteBucket} · hold ${c.expectedHoldDays}d · theta ${c.thetaDragUsd == null ? "unknown" : `$${c.thetaDragUsd}`} · delta ${c.deltaBand} · chase ${chase.ratio ?? "unknown"} · cluster ${clusterOf(c.symbol) ?? "none"}] (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market, grade: verdict.grade, cap: gradeCap };
+    return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} × ${quantity} @ ${net.toFixed(2)} [${verdict.grade} cap $${gradeCap} · dte ${c.dteBucket} · hold ${c.expectedHoldDays}d · theta ${c.thetaDragUsd == null ? "unknown" : `$${c.thetaDragUsd}`} · delta ${c.deltaBand} · chase ${chase.ratio ?? "unknown"} · cluster ${clusterOf(c.symbol) ?? "none"}] (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market, grade: verdict.grade, cap: gradeCap,
+      candidate: { symbol: c.symbol, kind: c.kind, setup: c.setup, direction: directionOfKind(c.kind), rangeLow: c.rangeLow, rangeHigh: c.rangeHigh, grade: verdict.grade, cap: gradeCap, spreadPct, quantity } };
   }
   return none(refusals.length ? `refused: ${refusals.join("; ")}` : "the research candidates no longer fit the cap on live quotes", market);
 }

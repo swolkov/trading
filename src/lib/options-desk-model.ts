@@ -56,11 +56,17 @@ export interface OptionsResearch {
   /** Earnings and ex-dividend rows per researched symbol (Sep 15 2026). Absent on snapshots written before the calendar was collected. */
   events?: ResearchEvents;
 }
-export interface StrategySignal { symbol: string; direction: "bullish" | "bearish" | "neutral"; setup: string; close: number; day: string; relativeVolume: number | null; reason: string }
+export interface StrategySignal {
+  symbol: string; direction: "bullish" | "bearish" | "neutral"; setup: string; close: number; day: string; relativeVolume: number | null; reason: string;
+  /** The prior 20-session range the signal cleared — the thesis-invalidation edges the guardian watches (below rangeLow for bullish, above rangeHigh for bearish). */
+  rangeLow: number; rangeHigh: number;
+}
 export interface ResearchCandidate {
   symbol: string; kind: string; expiry: string; legs: string[]; strikes: number[];
   /** The signal's setup ("20-session breakout" / "20-session breakdown") and the widest leg's bid/ask as % of mid — the grade (options-risk-ladder.ts) reads both. */
   setup: string; spreadPct: number | null;
+  /** The signal's 20-session range edges, carried to the owned record as the invalidation level. */
+  rangeLow: number; rangeHigh: number;
   quantity: 1; limit: number; plannedLoss: number; feeReserve: number; maxProfit: number | null;
   quoteAt: string; quoteFresh: boolean; reason: string;
   /** Market-implied move to expiry (ATM straddle ÷ spot), the yardstick every structure is ranked on. */
@@ -95,11 +101,12 @@ export function researchSignals(bars: OptionsResearch["bars"], now=Date.now()): 
     const sma50=mean(rows.slice(-50).map(b=>b.close)), sma200=mean(rows.slice(-200).map(b=>b.close));
     const vol=mean(prior.map(b=>b.volume)); const relativeVolume=vol>0?last.volume/vol:null;
     const bull=last.close>sma50&&sma50>sma200, bear=last.close<sma50&&sma50<sma200;
-    const breakout=bull&&last.close>Math.max(...prior.map(b=>b.high));
-    const breakdown=bear&&last.close<Math.min(...prior.map(b=>b.low));
+    const rangeHigh=Math.max(...prior.map(b=>b.high)), rangeLow=Math.min(...prior.map(b=>b.low));
+    const breakout=bull&&last.close>rangeHigh;
+    const breakdown=bear&&last.close<rangeLow;
     return [{symbol, direction:bull?"bullish" as const:bear?"bearish" as const:"neutral" as const,
       setup:breakout?"20-session breakout":breakdown?"20-session breakdown":bull||bear?"Trend watch":"No directional setup",
-      close:last.close,day:last.day,relativeVolume,
+      close:last.close,day:last.day,relativeVolume,rangeLow,rangeHigh,
       reason:breakout||breakdown?"Price cleared the prior 20-session range with the 50/200-day trend aligned.":"Watchlist only. A trend alone is not an entry signal."}];
   });
 }
@@ -195,7 +202,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const single=!short, singlePreferred=ivToRealized!=null&&ivToRealized<=rules.singleLegMaxIvToRealized;
       const volNote=ivToRealized==null?"implied vs realized vol unavailable → spreads preferred":`implied vol ${(iv!*100).toFixed(0)}% vs realized ${(rv!*100).toFixed(0)}% (${ivToRealized}×) → ${singlePreferred?"single leg preferred":"spread preferred"}${single===singlePreferred?"":" (this is the other family)"}`;
       const moveNote=em==null?"expected move unavailable":`worth $${payoff} at the market's expected ±${(em*100).toFixed(1)}% move`;
-      result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,setup:signal.setup,spreadPct:legSpreadPct([long,...(short?[short]:[])]),
+      result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,setup:signal.setup,spreadPct:legSpreadPct([long,...(short?[short]:[])]),rangeLow:signal.rangeLow,rangeHigh:signal.rangeHigh,
         limit:Math.round(price*100)/100,plannedLoss:Math.round(loss*100)/100,feeReserve:fee,maxProfit:maxProfit==null?null:Math.round(maxProfit*100)/100,
         quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:emPct,payoffAtMoveUsd:payoff,ivToRealized,
         earningsClass:earnings.earningsClass,earningsAt:earnings.earningsAt,exDivAt:data.events?.[signal.symbol]?.exDivAt??null,

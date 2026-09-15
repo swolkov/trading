@@ -137,7 +137,19 @@ exactly the move the options market is pricing (ATM straddle ÷ spot), in the si
 move is rejected outright — that is a lottery ticket.
 
 **Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
-trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
+trail keeps half of the best gain seen. A spread worth 90% or more of its width exits whole. Out 7
+days before expiry. **Thesis invalidation (Sep 15 2026):** the entry stashes the signal's 20-session
+range edges on the reservation record (`candidate`, beside the canonical intent); at fill the edge the
+signal cleared becomes `invalidationPx` on the owned record (`rangeLow` for bullish, `rangeHigh` for
+bearish) with `signalDirection`. The guardian reads the underlying's live quote each tick
+(`underlyingQuote`, fail-soft) and exits at the executable mark once the stock has TRADED beyond that
+level on **two consecutive ticks** (`invalidationTicks`, persisted on the record so a restart cannot
+forget) — trades, not closes, because the premium stop already fires intraday; a quote inside the level,
+stale (>15 min) or missing resets the count. Premium stop, width, trail and time exits take precedence.
+**Partials:** only a 2-lot (Strong-or-better structure that fit twice) banks one contract at 2× entry
+(a close intent with `quantity: 1`) and trails the rest; the policy's close check is now *owned ≥
+intent quantity*, the fill ingest rewrites the owned record with the remainder, and the guardian never
+releases a position while a close intent is unsettled (a 1-lot remainder must not be misread as gone).
 
 ## Earnings and ex-dividend (Sep 15 2026)
 

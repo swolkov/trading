@@ -103,16 +103,16 @@ export function prepareOptionsOrder(intent: OptionsLiveIntent, policy: OptionsLi
     if (!fresh(c.quoteAtMs, now, LIVE_SNAPSHOT_MAX_AGE_MS) || !nonnegative(c.bid) || !positive(c.ask) || c.ask < c.bid) fail("missing, stale or crossed quote");
     return c;
   });
-  // Close only the complete, explicitly owned structure; never sell an unowned long or
-  // buy back a manual short just because it shares a ticker.
+  // Close only the explicitly owned structure, whole or in part (a partial closes fewer contracts than are owned,
+  // never more); never sell an unowned long or buy back a manual short just because it shares a ticker.
   if (intent.action === "close") {
     const actual = snapshot.positions.filter((p) => p.id === intent.positionId);
     if (!owned || owned.accountNumber !== OPTIONS_LIVE_ACCOUNT || owned.id !== intent.positionId || actual.length !== 1
       || owned.legs.length !== intent.legs.length || actual[0].legs.length !== intent.legs.length) fail("closing position ownership is unverified");
     for (const leg of intent.legs) {
       const side = leg.side === "sell" ? "long" : "short";
-      if (!owned!.legs.some((l) => l.optionId === leg.optionId && l.side === side && l.quantity === intent.quantity)
-        || !actual[0].legs.some((l) => l.optionId === leg.optionId && l.side === side && l.quantity === intent.quantity)) fail("close must exactly match owned remaining legs and quantity");
+      if (!owned!.legs.some((l) => l.optionId === leg.optionId && l.side === side && l.quantity >= intent.quantity)
+        || !actual[0].legs.some((l) => l.optionId === leg.optionId && l.side === side && l.quantity >= intent.quantity)) fail("close must match owned remaining legs and not exceed their quantity");
     }
   }
   const entrySides = intent.legs.map((l) => intent.action === "open" ? l.side : l.side === "buy" ? "sell" : "buy");
