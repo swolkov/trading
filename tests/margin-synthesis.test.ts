@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { matchLiveFills, divergenceSummary, journalBlock, type PaperLiveRow, type TradeRow } from "../src/lib/margin-synthesis";
+import { matchLiveFills, divergenceSummary, journalBlock, MODEL_STOP_SLIP_BP, type PaperLiveRow, type TradeRow } from "../src/lib/margin-synthesis";
 
 const row = (id: number, liveTxid: string, time: string, extra: Partial<PaperLiveRow> = {}): PaperLiveRow => ({
   id, time, symbol: "BTC/USD", side: "buy", source: "selective", leverage: 2, markPrice: 100_100, shadowStatus: "resolved", shadowExit: 103_000, shadowPnl: 50, shadowFees: 4, shadowReason: "trail", shadowResolvedAt: null, liveTxid, ...extra,
@@ -82,4 +82,64 @@ test("a pyramid add-on's fills belong to the parent row: combined entry, combine
   // Without the ledger the add is invisible: only unit 1 matches and the close is consumed for 1.0 only.
   const without = matchLiveFills(rows, trades);
   assert.equal(without[0].realVol, 1);
+});
+
+// ---- A4: stop-fill slippage against the ledgered level, and the journal's new fields ----
+
+test("stop-fill slippage: measured against the ledgered stop level on STOP exits only, positive = worse, both sides", () => {
+  // The short lives on another pair: on ONE pair Kraken nets FIFO, so a sell after a long IS its close.
+  const rows = [row(1, "O1", "2026-09-06T10:00:00Z"), row(2, "O2", "2026-09-06T10:05:00Z", { side: "sell", symbol: "ETH/USD" })];
+  const trades = [
+    trade("T1", "O1", "2026-09-06T10:00:01Z", "buy", 100_000, 0.001, { margin: 50 }),
+    trade("T2", "O2", "2026-09-06T10:05:01Z", "sell", 100_000, 0.001, { margin: 50, pair: "ETHUSD" }),
+    // The long's stop at 96,000 filled at 95,904 (10bp worse); the short's stop at 104,000 filled at 104,208 (20bp worse).
+    trade("T3", "OS1", "2026-09-06T12:00:00Z", "sell", 95_904, 0.001, { posstatus: "closed", ordertype: "stop-loss" }),
+    trade("T4", "OS2", "2026-09-06T12:30:00Z", "buy", 104_208, 0.001, { posstatus: "closed", ordertype: "stop-loss", pair: "ETHUSD" }),
+  ];
+  const levels: Record<string, number> = { O1: 96_000, O2: 104_000 };
+  const [a, b] = matchLiveFills(rows, trades, () => null, { lastStopLevelOf: (t) => levels[t] ?? null });
+  assert.equal(a.exitKind, "stop"); assert.equal(a.lastStopLevel, 96_000);
+  assert.ok(Math.abs((a.stopFillSlipBp ?? 0) - 10) < 1e-6, `long: (96,000 − 95,904) ÷ 96,000 = 10bp, got ${a.stopFillSlipBp}`);
+  assert.equal(b.exitKind, "stop");
+  assert.ok(Math.abs((b.stopFillSlipBp ?? 0) - 20) < 1e-6, `short: −1 × (104,000 − 104,208) ÷ 104,000 = 20bp, got ${b.stopFillSlipBp}`);
+  // A market close (time stop / by hand) is not a stop fill: no slippage number, whatever the level says.
+  const closedByMarket = matchLiveFills([row(1, "O1", "2026-09-06T10:00:00Z")], [trades[0], trade("T5", "OM", "2026-09-06T13:00:00Z", "sell", 95_000, 0.001, { posstatus: "closed", ordertype: "market" })], () => null, { lastStopLevelOf: () => 96_000 });
+  assert.equal(closedByMarket[0].exitKind, "close"); assert.equal(closedByMarket[0].stopFillSlipBp, null);
+  // No ledgered level → no number (never a guess); an open position → no exit kind.
+  assert.equal(matchLiveFills(rows, trades)[0].stopFillSlipBp, null);
+  assert.equal(matchLiveFills([row(1, "O1", "2026-09-06T10:00:00Z")], [trades[0]], () => null, { lastStopLevelOf: () => 96_000 })[0].exitKind, null);
+});
+
+test("divergence: stop-fill slippage over twice the replay's 70bp flags STOP; under it does not", () => {
+  assert.equal(MODEL_STOP_SLIP_BP, 70);
+  const mk = (slipBp: number) => {
+    const level = 96_000; const fill = level * (1 - slipBp / 1e4);
+    return matchLiveFills(
+      [row(1, "O1", "2026-09-06T10:00:00Z")],
+      [trade("T1", "O1", "2026-09-06T10:00:01Z", "buy", 100_000, 0.001, { margin: 50 }), trade("T3", "OS", "2026-09-06T12:00:00Z", "sell", fill, 0.001, { posstatus: "closed", ordertype: "stop-loss" })],
+      () => null, { lastStopLevelOf: () => level },
+    );
+  };
+  const bad = divergenceSummary(mk(150));
+  assert.ok(Math.abs((bad.avgStopSlipBp ?? 0) - 150) < 1e-6); assert.equal(bad.stopSlipN, 1);
+  assert.match(bad.verdict, /DIVERGES/); assert.match(bad.verdict, /stop-fill slippage 150bp vs 70bp modelled/);
+  const fine = divergenceSummary(mk(100));
+  assert.ok(!/stop-fill/.test(fine.verdict), "100bp is inside 2× the model");
+  assert.equal(divergenceSummary([]).avgStopSlipBp, null);
+});
+
+test("journal block carries MAE/MFE, the stop-fill slippage, the regime, the risk tier and the grade", () => {
+  const [f] = matchLiveFills(
+    [row(1, "O1", "2026-09-06T10:00:00Z", { btcRegime: "up" })],
+    [trade("T1", "O1", "2026-09-06T10:00:01Z", "buy", 100_000, 0.001, { margin: 50 }), trade("T2", "OS", "2026-09-06T11:00:00Z", "sell", 95_904, 0.001, { posstatus: "closed", ordertype: "stop-loss" })],
+    () => null,
+    { lastStopLevelOf: () => 96_000, journalOf: () => ({ mfeR: 0.4, maeR: 1.02, exitReason: null, riskTier: "1", grade: "A+" }) },
+  );
+  const b = journalBlock(f);
+  for (const line of ['exit_kind: "stop"', "stop_fill_slippage_bp: 10.0", "mfe_r: 0.40", "mae_r: 1.02", 'regime: "up"', 'risk_tier: "1"', 'grade: "A+"']) assert.ok(b.includes(line), `journal is missing ${line}`);
+  // The old fields are still there.
+  assert.match(b, /book: "live"/); assert.match(b, /paper_pnl_at_live_size/);
+  // Without any context every new field prints an empty/zero value, never throws.
+  const bare = journalBlock(matchLiveFills([row(1, "O1", "2026-09-06T10:00:00Z")], [trade("T1", "O1", "2026-09-06T10:00:01Z", "buy", 100_000, 0.001, { margin: 50 })])[0]);
+  assert.ok(bare.includes('regime: ""') && bare.includes("mae_r: 0") && bare.includes('exit_kind: ""'));
 });

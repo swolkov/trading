@@ -22,6 +22,8 @@ import { DECAY_FULL_MULT, DECAY_MULT_KEY, applyDecay, readDecay, type DecayRead 
 import type { RollingState } from "@/lib/margin-metrics";
 import { pairBase } from "@/lib/kraken-pairs";
 import { botOwnership } from "@/lib/margin-executor";
+import { EXPECTED_SLIP_PCT } from "@/lib/margin-trade-card";
+import { loadClosedRoundTripTxids, loadRoundTripJournal, upsertRoundTripClose } from "@/lib/margin-round-trips";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -36,8 +38,14 @@ export interface PaperLiveRow {
   markPrice: number | null; shadowStatus: string | null; shadowExit: number | null; shadowPnl: number | null;
   shadowFees: number | null; shadowReason: string | null; shadowResolvedAt: string | null; liveTxid: string;
   paperNotional?: number | null;   // the paper model's position size for this row (ref equity × risk ÷ stop)
+  btcRegime?: string | null;       // the BTC daily regime stamped on the row at entry (A4)
 }
-export interface TradeRow { txid: string; ordertxid: string; pair: string; time: string; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string }
+export interface TradeRow { txid: string; ordertxid: string; pair: string; time: string; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string; ordertype?: string | null }
+/** Per-live-txid context the journal needs beyond the fills (margin_round_trips + the trade card). */
+export interface FillContext {
+  lastStopLevelOf?: (txid: string) => number | null;
+  journalOf?: (txid: string) => { mfeR: number | null; maeR: number | null; exitReason: string | null; riskTier: string | null; grade: string | null } | null;
+}
 export interface LiveFill {
   rowId: number; source: string; symbol: string; side: "long" | "short"; liveTxid: string;
   signalPrice: number | null; paperEntry: number | null; paperExit: number | null; paperPnl: number | null; paperFees: number | null; paperReason: string | null;
@@ -45,6 +53,12 @@ export interface LiveFill {
   realExit: number | null; realExitFee: number; realExitAt: string | null; realNet: number | null;
   paperPnlAtLiveSize: number | null;   // paper P&L rescaled to the live notional — the like-for-like number
   entrySlipBp: number | null; feePctSide: number | null; closed: boolean;
+  // A4 journal fields. exitKind: "stop" when a closing fill came from a stop order (Kraken's
+  // ordertype), else "close" (a market close — the guardian's time stop / breach, or by hand).
+  exitKind: "stop" | "close" | null;
+  lastStopLevel: number | null;        // the level the guardian last ledgered for this book
+  stopFillSlipBp: number | null;       // dir × (lastStopLevel − realExit) ÷ lastStopLevel × 1e4, stop exits only
+  mfeR: number | null; maeR: number | null; regime: string | null; riskTier: string | null; grade: string | null;
 }
 
 /** Match each live-traded paper row to its Kraken fills. Entry = the trades on our order
@@ -52,7 +66,7 @@ export interface LiveFill {
  *  paper's P&L for a swing-pyr row includes its add, so live's must too, or the divergence
  *  referee reads a paying pyramid as "live under-earns" and demotes it; exit = the next
  *  closing fills on the same pair after it, FIFO, never reused, for the COMBINED volume. */
-export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf: (ordertxid: string) => string | null = () => null): LiveFill[] {
+export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf: (ordertxid: string) => string | null = () => null, ctx: FillContext = {}): LiveFill[] {
   const byTime = [...trades].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
   const consumed = new Map<string, number>();   // trade txid → volume already allocated
   const out: LiveFill[] = [];
@@ -71,7 +85,7 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf
     const side: "long" | "short" = entries[0].type === "buy" ? "long" : "short";
     const closeType = side === "long" ? "sell" : "buy";
     // Closing fills: opposite type, same pair, after the entry, flagged as position-closing.
-    let need = vol; let exitCost = 0; let exitFee = 0; let exitAt: string | null = null;
+    let need = vol; let exitCost = 0; let exitFee = 0; let exitAt: string | null = null; let exitByStop = false;
     for (const t of byTime) {
       if (need <= vol * 1e-6) break;
       const samePair = pairBase(t.pair) === pairBase(entries[0].pair) || pairBase(t.pair) === pairBase(r.symbol.replace("/", ""));
@@ -83,6 +97,7 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf
       const take = Math.min(left, need);
       const frac = take / t.vol;
       exitCost += t.cost * frac; exitFee += t.fee * frac; need -= take; exitAt = t.time;
+      if (/stop/i.test(t.ordertype ?? "")) exitByStop = true;
       consumed.set(t.txid, (consumed.get(t.txid) ?? 0) + take);
     }
     const closed = need <= vol * 1e-6;
@@ -92,12 +107,22 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf
     const signal = r.markPrice != null && r.markPrice > 0 ? (r.side === "buy" ? r.markPrice / (1 + MODEL_CHASE_BP / 1e4) : r.markPrice / (1 - MODEL_CHASE_BP / 1e4)) : null;
     const entrySlipBp = signal ? (side === "long" ? realEntry / signal - 1 : 1 - realEntry / signal) * 1e4 : null;
     const paperPnlAtLiveSize = r.shadowPnl != null && r.paperNotional != null && r.paperNotional > 0 ? r.shadowPnl * (parentCost / r.paperNotional) : null;
+    // STOP-FILL SLIPPAGE: the ledgered stop level vs where the stop actually filled, in bp of the
+    // level, positive = worse than the level. Only when the exit WAS a stop — a time-stop market
+    // close is not a stop fill, and measuring it against the stop level would read as slippage.
+    const exitKind: LiveFill["exitKind"] = closed ? (exitByStop ? "stop" : "close") : null;
+    const lastStopLevel = ctx.lastStopLevelOf?.(r.liveTxid) ?? null;
+    const dirN = side === "long" ? 1 : -1;
+    const stopFillSlipBp = exitKind === "stop" && realExit != null && lastStopLevel != null && lastStopLevel > 0 ? (dirN * (lastStopLevel - realExit)) / lastStopLevel * 1e4 : null;
+    const j = ctx.journalOf?.(r.liveTxid) ?? null;
     out.push({
       rowId: r.id, source: r.source ?? "manual", symbol: r.symbol, side, liveTxid: r.liveTxid,
       signalPrice: signal, paperEntry: r.markPrice, paperExit: r.shadowExit, paperPnl: r.shadowPnl, paperFees: r.shadowFees, paperReason: r.shadowReason,
       realEntry, realVol: vol, realEntryFee: entryFee, realEntryAt: entryAt,
       realExit, realExitFee: closed ? exitFee : 0, realExitAt: closed ? exitAt : null, realNet, paperPnlAtLiveSize,
       entrySlipBp, feePctSide: cost > 0 ? (entryFee / cost) * 100 : null, closed,
+      exitKind, lastStopLevel, stopFillSlipBp,
+      mfeR: j?.mfeR ?? null, maeR: j?.maeR ?? null, regime: r.btcRegime ?? null, riskTier: j?.riskTier ?? null, grade: j?.grade ?? null,
     });
   }
   return out;
@@ -106,7 +131,10 @@ export function matchLiveFills(rows: PaperLiveRow[], trades: TradeRow[], addOnOf
 export interface Divergence {
   fills: number; closed: number; avgEntrySlipBp: number | null; modelChaseBp: number;
   avgFeePctSide: number | null; modelFeePct: number; realNet: number; paperNet: number; verdict: string;
+  avgStopSlipBp: number | null; stopSlipN: number; modelStopSlipBp: number;   // A4: stop fills vs the ledgered level
 }
+/** The replay's stop-fill assumption, in bp (EXPECTED_SLIP_PCT = 0.7% → 70bp). */
+export const MODEL_STOP_SLIP_BP = EXPECTED_SLIP_PCT * 100;
 export function divergenceSummary(fills: LiveFill[]): Divergence {
   const measured = fills.filter((f) => f.source !== "roundtrip");
   const slips = measured.map((f) => f.entrySlipBp).filter((x): x is number => x != null);
@@ -118,15 +146,20 @@ export function divergenceSummary(fills: LiveFill[]): Divergence {
   // per-entry cap). Compare paper RESCALED to each trade's live size, never raw dollars.
   const paperNet = closed.reduce((s, f) => s + (f.paperPnlAtLiveSize ?? 0), 0);
   const avgSlip = avg(slips); const avgFee = avg(fees);
+  const stopSlips = measured.map((f) => f.stopFillSlipBp).filter((x): x is number => x != null && Number.isFinite(x));
+  const avgStopSlip = avg(stopSlips);
   let verdict = "no live fills yet";
   if (measured.length) {
     const bad: string[] = [];
     if (avgSlip != null && avgSlip > MODEL_CHASE_BP * 2) bad.push(`entry slippage ${avgSlip.toFixed(0)}bp vs ${MODEL_CHASE_BP}bp modelled`);
     if (avgFee != null && avgFee > MODEL_TAKER_FEE_PCT * 1.2) bad.push(`fee ${avgFee.toFixed(3)}%/side vs ${MODEL_TAKER_FEE_PCT}% modelled`);
+    // Stop fills landing more than twice the replay's 0.7% beyond the ledgered level: the stop
+    // is not doing what the sweep assumed it does. Judged on stop exits only.
+    if (avgStopSlip != null && avgStopSlip > MODEL_STOP_SLIP_BP * 2) bad.push(`stop-fill slippage ${avgStopSlip.toFixed(0)}bp vs ${MODEL_STOP_SLIP_BP}bp modelled (${stopSlips.length} stop exits)`);
     if (closed.length >= 5 && paperNet > 0 && realNet < paperNet * 0.5) bad.push(`real net $${realNet.toFixed(0)} vs paper $${paperNet.toFixed(0)} (paper rescaled to live size) on the same trades`);
     verdict = bad.length ? `LIVE DIVERGES FROM PAPER — ${bad.join("; ")}. Stop and recalibrate the paper model before scaling.` : closed.length >= 20 ? "live matches paper on 20+ trades — stage 3 reconciliation passed" : `live tracking paper so far (${closed.length}/20 closed trades reconciled)`;
   }
-  return { fills: measured.length, closed: closed.length, avgEntrySlipBp: avgSlip, modelChaseBp: MODEL_CHASE_BP, avgFeePctSide: avgFee, modelFeePct: MODEL_TAKER_FEE_PCT, realNet, paperNet, verdict };
+  return { fills: measured.length, closed: closed.length, avgEntrySlipBp: avgSlip, modelChaseBp: MODEL_CHASE_BP, avgFeePctSide: avgFee, modelFeePct: MODEL_TAKER_FEE_PCT, realNet, paperNet, verdict, avgStopSlipBp: avgStopSlip, stopSlipN: stopSlips.length, modelStopSlipBp: MODEL_STOP_SLIP_BP };
 }
 
 // ---- Rendering -----------------------------------------------------------------------------
@@ -143,7 +176,7 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
   lines.push("## Live book", "");
   lines.push(`- Executor: **${input.live.armed ? "ARMED" : "disarmed"}** · armed sources: ${input.live.sources.length ? input.live.sources.join(", ") : "none"} · equity at last guardian run: ${input.live.equity != null ? money(input.live.equity) : "?"}`);
   lines.push(`- Live vs paper: **${input.div.verdict}**`);
-  lines.push(`- Fills matched: ${input.div.fills} (${input.div.closed} closed) · avg entry slippage ${input.div.avgEntrySlipBp != null ? `${input.div.avgEntrySlipBp.toFixed(1)}bp` : "—"} (model ${input.div.modelChaseBp}bp) · avg fee/side ${input.div.avgFeePctSide != null ? `${input.div.avgFeePctSide.toFixed(3)}%` : "—"} (model ${input.div.modelFeePct}%) · real net ${money(input.div.realNet)} vs paper ${money(input.div.paperNet)} on the same closed trades`, "");
+  lines.push(`- Fills matched: ${input.div.fills} (${input.div.closed} closed) · avg entry slippage ${input.div.avgEntrySlipBp != null ? `${input.div.avgEntrySlipBp.toFixed(1)}bp` : "—"} (model ${input.div.modelChaseBp}bp) · avg fee/side ${input.div.avgFeePctSide != null ? `${input.div.avgFeePctSide.toFixed(3)}%` : "—"} (model ${input.div.modelFeePct}%) · stop-fill slip ${input.div.avgStopSlipBp != null ? `${input.div.avgStopSlipBp.toFixed(0)}bp (${input.div.stopSlipN} stop exits, model ${input.div.modelStopSlipBp}bp)` : "— (no stop exits yet)"} · real net ${money(input.div.realNet)} vs paper ${money(input.div.paperNet)} on the same closed trades`, "");
   if (input.fills.length) {
     lines.push("| when | sleeve | pair | side | real entry | paper entry | slip bp | real exit | paper exit | real net | paper net (at live size) |", "|---|---|---|---|---|---|---|---|---|---|---|");
     for (const f of input.fills.slice(-30)) {
@@ -218,6 +251,9 @@ export function journalBlock(f: LiveFill): string {
     `fees_dollars: ${(f.realEntryFee + f.realExitFee).toFixed(4)}`, `pnl_dollars: ${f.realNet?.toFixed(2) ?? 0}`,
     `paper_entry: ${f.paperEntry?.toFixed(2) ?? 0}`, `paper_exit: ${f.paperExit?.toFixed(2) ?? 0}`, `paper_pnl: ${f.paperPnl?.toFixed(2) ?? 0}`, `paper_pnl_at_live_size: ${f.paperPnlAtLiveSize?.toFixed(2) ?? 0}`, `paper_reason: "${f.paperReason ?? ""}"`,
     `entry_slippage_bp: ${f.entrySlipBp?.toFixed(1) ?? 0}`,
+    `exit_kind: "${f.exitKind ?? ""}"`, `stop_fill_slippage_bp: ${f.stopFillSlipBp?.toFixed(1) ?? 0}`,
+    `mfe_r: ${f.mfeR?.toFixed(2) ?? 0}`, `mae_r: ${f.maeR?.toFixed(2) ?? 0}`,
+    `regime: "${f.regime ?? ""}"`, `risk_tier: "${f.riskTier ?? ""}"`, `grade: "${f.grade ?? ""}"`,
     "```", "",
   ].join("\n");
 }
@@ -238,25 +274,66 @@ async function cfgSet(key: string, value: string): Promise<void> {
 
 export async function loadLiveFills(): Promise<LiveFill[]> {
   await ensureShadowColumns();
-  const rows = await prisma.$queryRawUnsafe<{ id: number; time: Date; symbol: string; side: string; source: string | null; leverage: number | null; mark_price: number | null; shadow_notional: number | null; shadow_status: string | null; shadow_exit: number | null; shadow_pnl: number | null; shadow_fees: number | null; shadow_reason: string | null; shadow_resolved_at: Date | null; live_txid: string }[]>(
-    `SELECT id, time, symbol, side, source, leverage, mark_price, shadow_notional, shadow_status, shadow_exit, shadow_pnl, shadow_fees, shadow_reason, shadow_resolved_at, live_txid
+  const rows = await prisma.$queryRawUnsafe<{ id: number; time: Date; symbol: string; side: string; source: string | null; leverage: number | null; mark_price: number | null; shadow_notional: number | null; shadow_status: string | null; shadow_exit: number | null; shadow_pnl: number | null; shadow_fees: number | null; shadow_reason: string | null; shadow_resolved_at: Date | null; live_txid: string; btc_regime: string | null }[]>(
+    `SELECT id, time, symbol, side, source, leverage, mark_price, shadow_notional, shadow_status, shadow_exit, shadow_pnl, shadow_fees, shadow_reason, shadow_resolved_at, live_txid, btc_regime
      FROM tradingview_alerts WHERE live_txid IS NOT NULL AND executed = true AND side IN ('buy','sell') ORDER BY time`,
   );
   if (!rows.length) return [];
   const since = new Date(Math.min(...rows.map((r) => r.time.getTime())) - 3600_000);
-  const trades = await prisma.$queryRawUnsafe<{ txid: string; ordertxid: string; pair: string; time: Date; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string }[]>(
-    `SELECT txid, ordertxid, pair, time, type, price, cost, fee, vol, margin, posstatus FROM kraken_my_trades WHERE time >= $1 ORDER BY time`, since,
+  const trades = await prisma.$queryRawUnsafe<{ txid: string; ordertxid: string; pair: string; time: Date; type: string; price: number; cost: number; fee: number; vol: number; margin: number; posstatus: string; ordertype: string | null }[]>(
+    `SELECT txid, ordertxid, pair, time, type, price, cost, fee, vol, margin, posstatus, ordertype FROM kraken_my_trades WHERE time >= $1 ORDER BY time`, since,
   );
   // The ownership ledger names each pyramid add-on's parent; without it an add's fills would
   // be matched to nothing and its close would be mis-attributed.
   const own = await botOwnership();
   if (own.ledgerCorrupt) throw new Error("Ownership ledger corrupt: cannot assess live fills");
+  // The journal context (margin_round_trips + the trade card): best-effort, the match itself
+  // never depends on it — an unreadable journal means empty journal fields, not a failed run.
+  const txids = rows.map((r) => r.live_txid);
+  const journal = await loadRoundTripJournal(txids).catch(() => new Map());
+  const cards = new Map<string, { ddTier: string; grade: string }>();
+  try {
+    const cardRows = await prisma.$queryRawUnsafe<{ txid: string; card: { ddTier?: unknown; grade?: unknown } | null }[]>(`SELECT txid, card FROM margin_trade_cards WHERE txid = ANY($1::text[])`, txids);
+    for (const c of cardRows) if (c.txid && c.card && typeof c.card === "object") cards.set(c.txid, { ddTier: String(c.card.ddTier ?? ""), grade: String(c.card.grade ?? "") });
+  } catch { /* cards are a journal nicety */ }
   return matchLiveFills(
     rows.map((r) => ({ id: r.id, time: r.time.toISOString(), symbol: r.symbol, side: r.side, source: r.source, leverage: r.leverage, markPrice: r.mark_price, shadowStatus: r.shadow_status, shadowExit: r.shadow_exit, shadowPnl: r.shadow_pnl, shadowFees: r.shadow_fees, shadowReason: r.shadow_reason, shadowResolvedAt: r.shadow_resolved_at?.toISOString() ?? null, liveTxid: r.live_txid,
-      paperNotional: r.shadow_notional != null && Number.isFinite(r.shadow_notional) && r.shadow_notional > 0 ? r.shadow_notional : null })),
+      paperNotional: r.shadow_notional != null && Number.isFinite(r.shadow_notional) && r.shadow_notional > 0 ? r.shadow_notional : null, btcRegime: r.btc_regime ?? null })),
     trades.map((t) => ({ ...t, time: t.time.toISOString(), price: t.price ?? 0, cost: t.cost ?? 0, fee: t.fee ?? 0, vol: t.vol ?? 0, margin: t.margin ?? 0, posstatus: t.posstatus ?? "" })),
     (ordertxid) => own?.addOnOf(ordertxid) ?? null,
+    {
+      lastStopLevelOf: (txid) => journal.get(txid)?.lastStopLevel ?? null,
+      journalOf: (txid) => {
+        const j = journal.get(txid); const c = cards.get(txid);
+        if (!j && !c) return null;
+        return { mfeR: j?.mfeR ?? null, maeR: j?.maeR ?? null, exitReason: j?.exitReason ?? null, riskTier: c?.ddTier || null, grade: c?.grade || null };
+      },
+    },
   );
+}
+
+/** Phase B of the journal: every CLOSED live fill's exit, fees, net, hold and paper-at-live-size. Best-effort. */
+export async function journalClosedFills(fills: LiveFill[]): Promise<number> {
+  let n = 0;
+  const candidates = fills.filter((f) => f.closed && f.source !== "roundtrip");
+  if (!candidates.length) return 0;
+  // One SELECT of what is already closed in the journal, so the daily run touches only new trips.
+  const done = await loadClosedRoundTripTxids(candidates.map((f) => f.liveTxid)).catch(() => new Set<string>());
+  for (const f of candidates) {
+    if (done.has(f.liveTxid)) continue;
+    try {
+      await upsertRoundTripClose(
+        {
+          txid: f.liveTxid, exitPrice: f.realExit, exitAt: f.realExitAt, fees: f.realEntryFee + f.realExitFee, rollover: null,
+          netPnl: f.realNet, holdMinutes: f.realExitAt ? (new Date(f.realExitAt).getTime() - new Date(f.realEntryAt).getTime()) / 60_000 : null,
+          stopFillSlipBp: f.stopFillSlipBp, paperPnlAtLiveSize: f.paperPnlAtLiveSize, exitReason: f.exitKind === "stop" ? "stop filled" : null,
+        },
+        { pair: f.symbol, side: f.side, source: f.source, entryPrice: f.realEntry, openedAt: f.realEntryAt },
+      );
+      n++;
+    } catch (e) { console.error("[margin-synthesis] journal phase B failed", f.liveTxid, e); }
+  }
+  return n;
 }
 
 async function extractLessons(stats: string, prevLessons: string | null): Promise<string | null> {
@@ -438,6 +515,8 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
     journaledSet.add(f.liveTxid); journaled++;
   }
   if (journaled) await cfgSet(SYNTH_JOURNALED, JSON.stringify([...journaledSet].slice(-500)));
+  // Phase B of the live journal table (margin_round_trips): exit, fees, net, hold, slip. Idempotent.
+  await journalClosedFills(fills).catch(() => 0);
 
   // Observations: what moved since the last run (verdict changes, divergence, milestones).
   const observations: string[] = [];

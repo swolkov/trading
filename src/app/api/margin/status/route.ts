@@ -1,6 +1,10 @@
 import { krakenConfigured, krakenPublic } from "@/lib/kraken";
 import { marginDisplaySnapshot, liquidationEstimate } from "@/lib/kraken-margin";
 import { pairBase, publicPairFor } from "@/lib/kraken-pairs";
+import { prisma } from "@/lib/db";
+import { botOwnership } from "@/lib/margin-executor";
+import { exposureSummary, type ExposurePosition, type ExposureSummary } from "@/lib/margin-exposure";
+import type { RiskState } from "@/lib/margin-risk-tiers";
 
 // Live margin state for the cockpit: account health (margin level vs the 80%/40%
 // call/liquidation lines), open positions with exact liquidation prices, and the
@@ -42,11 +46,34 @@ export async function GET() {
       return null;
     };
 
+    // CORRELATED EXPOSURE (A2): the same pure summary the executor's cluster gate uses, on the
+    // cached positions with the ledger's stops; drawdown from the guardian's risk state. Any
+    // failure reads as null — display only, two DB reads, no private Kraken call.
+    let exposure: (ExposureSummary & { capPct: number | null }) | null = null;
+    try {
+      const [own, rsRow, haltRow, capRow] = await Promise.all([
+        botOwnership().catch(() => null),
+        prisma.agentConfig.findUnique({ where: { key: "kraken_margin_risk_state" } }),
+        prisma.agentConfig.findUnique({ where: { key: "kraken_margin_max_drawdown_pct" } }),
+        prisma.agentConfig.findUnique({ where: { key: "kraken_margin_cluster_risk_cap_pct" } }),
+      ]);
+      const rs = rsRow?.value ? (JSON.parse(rsRow.value) as RiskState) : null;
+      const haltPct = Math.max(1, Number(haltRow?.value) || 15);
+      const dd = rs?.dd ?? NaN;
+      const s = exposureSummary(positions.map((p): ExposurePosition => {
+        const ours = own != null && !own.ledgerCorrupt && own.isOurs(p);
+        return { pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, leverage: p.leverage, ours, stopFrac: ours ? own!.stopFracOf(p.ordertxid) : null };
+      }), health.equity, haltPct, dd);
+      const capOverride = capRow?.value != null && capRow.value.trim() !== "" ? Number(capRow.value) : null;
+      exposure = { ...s, capPct: capOverride != null && Number.isFinite(capOverride) ? capOverride : Number.isFinite(dd) ? Math.max(0, haltPct - Math.max(0, dd)) : null };
+    } catch { exposure = null; }
+
     const body = {
       connected: true,
       asOf: snap.value.readAt,
       stale: snap.stale,
       health,
+      exposure,
       positions: positions.map((p) => {
         const px = priceFor(p.pair);
         const liq = px != null ? liquidationEstimate(p, px) : null;
