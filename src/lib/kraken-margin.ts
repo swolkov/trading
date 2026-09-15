@@ -251,7 +251,47 @@ const ROUND_TRIPS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_round_trips (
   closed boolean DEFAULT false
 )`;
 
+// PENDING (DEFERRED) PAPER ENTRIES (Sep 15 2026, margin-pending.ts): the swing-retest twin queues a
+// 4h breakout here at the pierce and opens its paper row only when the retest fills. One row per
+// queued signal; `stamps` carries the intel columns the row would have been stamped with.
+const PENDING_ENTRIES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_pending_entries (
+  id serial PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  symbol text NOT NULL,
+  side text NOT NULL,
+  source text NOT NULL,
+  level double precision NOT NULL,
+  leverage double precision,
+  conviction text,
+  conviction_score double precision,
+  note text,
+  stamps jsonb,
+  btc_regime text,
+  expires_at timestamptz NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  last_checked_t double precision,
+  resolved_at timestamptz,
+  fill_px double precision,
+  fill_t double precision,
+  alert_id int,
+  reason text,
+  armed boolean NOT NULL DEFAULT false,
+  fail_t double precision
+)`;
+
+// NATIVE 4h BARS (Sep 15 2026, margin-bars-cache.ts): the scan universe's complete 4h bars,
+// appended daily so the desk's own history outgrows Kraken's 720-bar OHLC window.
+const BARS_4H_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_bars_4h (
+  symbol text NOT NULL,
+  t bigint NOT NULL,
+  o double precision, h double precision, l double precision, c double precision, v double precision,
+  PRIMARY KEY (symbol, t)
+)`;
+
 const MARGIN_INDEX_SQL = [
+  `CREATE INDEX IF NOT EXISTS margin_pending_entries_status_idx ON margin_pending_entries(status, expires_at)`,
+  `ALTER TABLE margin_pending_entries ADD COLUMN IF NOT EXISTS armed boolean NOT NULL DEFAULT false`,
+  `ALTER TABLE margin_pending_entries ADD COLUMN IF NOT EXISTS fail_t double precision`,
   `CREATE INDEX IF NOT EXISTS margin_trade_cards_txid_idx ON margin_trade_cards(txid)`,
   `CREATE INDEX IF NOT EXISTS margin_trade_cards_at_idx ON margin_trade_cards(at)`,
   // margin_round_trips is read by its PK (txid) only; no secondary index needed.
@@ -268,6 +308,8 @@ export function ensureMarginTables(): Promise<void> {
       await prisma.$executeRawUnsafe(LEDGER_TABLE_SQL);
       await prisma.$executeRawUnsafe(TRADE_CARDS_TABLE_SQL);
       await prisma.$executeRawUnsafe(ROUND_TRIPS_TABLE_SQL);
+      await prisma.$executeRawUnsafe(PENDING_ENTRIES_TABLE_SQL);
+      await prisma.$executeRawUnsafe(BARS_4H_TABLE_SQL);
       for (const sql of MARGIN_INDEX_SQL) await prisma.$executeRawUnsafe(sql);
     })().catch((e) => { marginTablesReady = null; throw e; });
   }

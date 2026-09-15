@@ -54,7 +54,27 @@ export const RETIRED_AUTO_SOURCES = new Set([
 //                      risk stays one R because the add is sized to the resting stop). Same-
 //                      notional adds were rejected (worst −$694). Live-capable: the guardian
 //                      triggers the add, the executor sizes it with the same function.
-export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-lock", "swing-pyr"] as const;
+//   ── Sep 15 2026 (docs/KRAKEN-DESK-OPERATING-MODEL.md §4 — hypotheses and kill rules committed
+//   before the first row; all PAPER ONLY, no live container, comparator = swing-wide) ──
+//   swing-partial    — swing-wide's container, 30% banked at +2R, the rest trails 2R.
+//                      Kill: paired t ≤ −2, or expectancy ≥ $40 worse with no maxDD gain.
+//   swing-retest     — swing-wide's container on a DEFERRED entry: queued at the pierce, filled on
+//                      the first 1-min bar that touches the level (+0.5%) and closes above it, failed
+//                      on a close 0.5% below, expired after 24h (margin-pending.ts). Kill: fill rate
+//                      < 25% after 40 queued, or paired-on-filled t ≤ −2.
+//   swing-mtf        — swing-wide's signals only when the coin's 1d AND 4h closes are above their
+//                      20-bar averages (coinMtfTrend). Registered as EXPECTED TO FAIL: the only
+//                      regime filter tested (selective-btc) is at t=−6.
+//   swing-atr        — swing-wide's hold and trail, stop = clamp(2×ATR14/close, 2%, 8%), risk-sized
+//                      to that stop (ScanSignal.atrFrac → shadow_stop_frac). Kill: paired t ≤ −2, or
+//                      maxDD 25% worse.
+export const TWIN_SOURCES = ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-lock", "swing-pyr", "swing-partial", "swing-retest", "swing-mtf", "swing-atr"] as const;
+// OWN-SIGNAL paper sleeves that are nevertheless kept OUT of the pooled totals (the selective-x5
+// precedent: an own scoreboard row, never in the headline). swing-short (Sep 15 2026): high-
+// conviction 4h BREAKDOWNS in a BTC down-regime, swing-lev's container mirrored, paper only.
+// Kill: net ≤ $0 at 30 resolved; early stop at 20 if hit ≤ 15% and net ≤ −$1,000.
+export const OWN_SIGNAL_PAPER_SOURCES = ["swing-short"] as const;
+export const SWING_SHORT_SOURCE = "swing-short";
 // SELECTIVE-SHORT (registered Sep 8 2026) — NOT a twin: its own signals (high-conviction
 // BREAKDOWNS, 5m/15m, not stretched), opened ONLY while BTC's last complete daily close is
 // BELOW its 20-day average. Every short on the record (37, 11% won, −$5,140) was taken inside
@@ -94,8 +114,22 @@ export const SWING_TFS = new Set(["4h", "1d"]);
 export const SWING_LEV_TFS = new Set(["4h"]);
 export const MAJORS = new Set(["BTC", "ETH", "SOL"]);
 
-export type AutoPlan = { source: string; lev: number };
+export type AutoPlan = {
+  source: string; lev: number;
+  deferred?: true; level?: number;   // swing-retest: queue, do not open — fill on the retest of `level`
+  stopFrac?: number;                 // swing-atr: the row's own initial stop fraction (→ shadow_stop_frac)
+};
 export type Regime = { btcUp: boolean | null };   // null = daily bars unavailable → no regime twin this run
+/** What the Sep 15 twins read beyond the signal: the coin's MTF trend, the pierced level, the ATR fraction. */
+export type PlanExtras = { mtfUp?: boolean | null; level?: number | null; atrFrac?: number | null };
+
+// ATR STOP (swing-atr): clamp(mult × ATR14 ÷ close, min, max). Registered constants, not knobs.
+export const ATR_STOP = { mult: 2, min: 0.02, max: 0.08 } as const;
+/** The ATR twin's stop fraction from the signal's ATR14 ÷ close; null when the ATR is unusable (the twin then opens nothing). */
+export function atrStopFrac(atrFrac: number | null | undefined): number | null {
+  if (atrFrac == null || !Number.isFinite(atrFrac) || !(atrFrac > 0)) return null;
+  return Math.min(ATR_STOP.max, Math.max(ATR_STOP.min, ATR_STOP.mult * atrFrac));
+}
 
 export type ConvictionInput = { tier: string; factors: string[] };
 
@@ -116,6 +150,7 @@ export function autoShadowPlans(
   lev: number,
   regime?: Regime,
   symbol?: string,   // "BTC/USD" — the majors twin opens only on BTC/ETH/SOL
+  extra?: PlanExtras,   // Sep 15 twins: MTF trend, pierced level, ATR fraction (absent → those twins open nothing)
 ): AutoPlan[] {
   if (conv.tier !== "high") return [];
   const capped = Math.max(2, Math.min(20, lev));
@@ -130,9 +165,19 @@ export function autoShadowPlans(
       plans.push({ source: "swing-wide", lev: capped });
       plans.push({ source: "swing-lock", lev: capped });
       plans.push({ source: "swing-pyr", lev: capped });
+      // The Sep 15 twins ride the same 4h signal. swing-partial always; the other three only when
+      // their input is present (a missing level / ATR / MTF read opens nothing — never a guess).
+      plans.push({ source: "swing-partial", lev: capped });
+      if (extra?.level != null && extra.level > 0) plans.push({ source: "swing-retest", lev: capped, deferred: true, level: extra.level });
+      if (extra?.mtfUp === true) plans.push({ source: "swing-mtf", lev: capped });
+      const atrStop = atrStopFrac(extra?.atrFrac);
+      if (atrStop != null) plans.push({ source: "swing-atr", lev: capped, stopFrac: atrStop });
     }
     return plans;
   }
+  // swing-short (Sep 15 2026): the slow family's SHORT leg — high-conviction 4h breakdowns, only
+  // in a confirmed BTC down-regime, swing-lev's container. Paper only, own row, not pooled.
+  if (kind === "breakdown" && SWING_LEV_TFS.has(timeframe)) return regime?.btcUp === false ? [{ source: SWING_SHORT_SOURCE, lev: capped }] : [];
   if (!PAYING_TFS.has(timeframe)) return [];
   if (isStretched(conv.factors)) return [];
 

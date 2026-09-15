@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { getKrakenOHLC } from "@/lib/kraken-margin";
 import { SIM_VERSION, SIM_COHORT_SQL } from "@/lib/margin-shadow";
+import type { TfFeatures } from "@/lib/margin-scanner";
 
 // ── PRE-REGISTERED PAPER SLEEVES THAT NEED DAILY BARS (Sep 7 2026) ─────────────────────────
 // Two of the four twins registered on Sep 7 read the daily chart:
@@ -51,6 +52,20 @@ export async function completedDailyCloses(symbol: string): Promise<number[]> {
 
 export async function readBtcRegime(): Promise<boolean | null> {
   return btcRegimeUp(await completedDailyCloses("BTC/USD"));
+}
+
+/**
+ * THE COIN'S OWN MULTI-TIMEFRAME TREND (C5c, Sep 15 2026) — the swing-mtf twin's gate: 1d close
+ * above SMA20(1d) AND 4h close above SMA20(4h), read from the scan's barFeatures (the SMA includes
+ * the forming bar, exactly as the mtfState stamp reads it). null when either series is missing or
+ * under-sampled — the twin then opens nothing rather than guessing. A stamp-and-gate on paper only;
+ * the only regime filter this desk has tested (selective-btc) is losing at t=−6.
+ */
+export function coinMtfTrend(features: Record<string, TfFeatures> | null | undefined, coin: string): boolean | null {
+  const d1 = features?.[`${coin}:1d`], h4 = features?.[`${coin}:4h`];
+  const ok = (f: TfFeatures | undefined) => f != null && Number.isFinite(f.close) && Number.isFinite(f.sma20) && f.sma20 > 0;
+  if (!ok(d1) || !ok(h4)) return null;
+  return (d1 as TfFeatures).close > (d1 as TfFeatures).sma20 && (h4 as TfFeatures).close > (h4 as TfFeatures).sma20;
 }
 
 const TSMOM_DAY_KEY = "margin_tsmom_last_day";

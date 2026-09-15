@@ -49,6 +49,10 @@ export interface ScanSignal {
   detail: string;
   price: number;
   realertMs: number;   // how long before this exact signal may fire again
+  // On breakout / breakdown signals only (Sep 15 2026, the C5 twins): the pierced 20-bar level
+  // (swing-retest waits for its retest) and ATR14 ÷ close at signal time (swing-atr's stop).
+  level?: number;
+  atrFrac?: number;
 }
 
 // Wilder ATR(14) series — used to detect a volatility regime shift (big moves starting).
@@ -181,8 +185,14 @@ export function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bar
   const window = prev.slice(-20);
   const hh = Math.max(...window.map((b) => b.h));
   const ll = Math.min(...window.map((b) => b.l));
-  if (last.h > hh) out.push(mk("breakout", `pierced 20-bar high $${hh.toLocaleString()}`));
-  else if (last.l < ll) out.push(mk("breakdown", `pierced 20-bar low $${ll.toLocaleString()}`));
+  if (last.h > hh || last.l < ll) {
+    // The level and the ATR fraction ride on the directional signal for the twins that need them;
+    // nothing else reads them, and scoreConviction never does (pinned by the golden test).
+    const a = atr14(bars); const atrNow = a[a.length - 1];
+    const atrFrac = atrNow > 0 && last.c > 0 ? atrNow / last.c : undefined;
+    if (last.h > hh) out.push({ ...mk("breakout", `pierced 20-bar high $${hh.toLocaleString()}`), level: hh, ...(atrFrac != null ? { atrFrac } : {}) });
+    else out.push({ ...mk("breakdown", `pierced 20-bar low $${ll.toLocaleString()}`), level: ll, ...(atrFrac != null ? { atrFrac } : {}) });
+  }
 
   // LIQUIDITY SWEEP (the ICT/SMC "stop hunt"): price wicked BEYOND the 20-bar extreme but
   // the live price is back INSIDE it — a FAILED break that grabbed the stops resting there.

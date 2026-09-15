@@ -2,7 +2,8 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { scanUniverse, signalKey, scoreConviction, type ScanSignal } from "@/lib/margin-scanner";
 import { evaluateShadowSignals, ensureShadowColumns, snapshotShadowSizing, strategyBreakdown, shadowScore, SIM_VERSION, SIM_COHORT_SQL, EXPERIMENT_SOURCES, SIZE_MULTIPLIER } from "@/lib/margin-shadow";
-import { openTsmomPaper, readBtcRegime } from "@/lib/margin-regime";
+import { coinMtfTrend, openTsmomPaper, readBtcRegime } from "@/lib/margin-regime";
+import { queuePendingEntry, resolvePendingEntries } from "@/lib/margin-pending";
 import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
@@ -74,6 +75,10 @@ export async function GET(request: Request) {
   }).catch(() => {});
 
   const state = await loadState();
+  // PENDING (DEFERRED) ENTRIES (margin-pending.ts, C5b): the swing-retest twin's queued breakouts
+  // are resolved FIRST — a fill is a paper row like any other and must exist before this tick's
+  // evaluator runs. ≤10 rows under its own 20 s wall clock, fail-soft: a Kraken hiccup costs nothing.
+  const pending = await resolvePendingEntries().catch((e) => ({ checked: 0, filled: [], failed: [], expired: [], errors: [`pending: ${String(e).slice(0, 80)}`], stoppedForBudget: false }));
   // DERIVATIVES RESEARCH FEED (margin-derivatives.ts): funding / OI / mark from public perp
   // tickers, ≥15 min apart, BEFORE the 130-call scan so the stamp on this tick's rows is this
   // tick's read. Fail-soft and deadline-guarded: a dead feed stamps NULLs and costs nothing else.
@@ -270,7 +275,10 @@ export async function GET(request: Request) {
         if (!(s.price > 0)) { note_(s.coin, s.timeframe, s.kind, "skipped", undefined, "no price"); continue; }
         if (s.kind !== "breakout" && s.kind !== "breakdown") { note_(s.coin, s.timeframe, s.kind, "watched", undefined, "not a directional signal — awareness only"); continue; }
         const conv = scoreConviction(s, signals);
-        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime, s.symbol);
+        // The Sep 15 twins read three more things from this signal and the features the scan already
+        // holds: the coin's MTF trend (swing-mtf), the pierced level (swing-retest), the ATR fraction
+        // (swing-atr). Absent inputs open nothing for those twins; every other plan is unchanged.
+        const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime, s.symbol, { mtfUp: coinMtfTrend(scan.features, s.coin), level: s.level ?? null, atrFrac: s.atrFrac ?? null });
         // EVERY fresh breakout/breakdown is scored — refused ones too — so the ranker is measured
         // on the whole population it would gate, not only on what the desk already liked.
         const opp = opportunityScore({
@@ -306,6 +314,16 @@ export async function GET(request: Request) {
             continue;
           }
           const note = `auto: ${plan.source} ${s.kind} ${s.timeframe} [${conv.tier}${conv.factors.length ? ` — ${conv.factors.join(", ")}` : ""}]`;
+          // DEFERRED plan (swing-retest): queue it with the pierced level and this tick's stamps; the
+          // resolver at the top of a later tick opens the row if the retest holds. Never live.
+          if (plan.deferred) {
+            const q = await queuePendingEntry({
+              symbol: s.symbol, side, source: plan.source, level: plan.level as number, leverage: plan.lev,
+              conviction: conv.tier, convictionScore: conv.score, note, stamps: stampSql(intel, s.coin, { opportunity: opp }), btcRegime: btcRegimeStr,
+            }).catch((e) => ({ queued: false, id: null, why: String(e).slice(0, 80) }));
+            note_(s.coin, s.timeframe, s.kind, q.queued ? "queued" : "blocked", conv.tier, q.queued ? `${plan.source} waits for a retest of $${plan.level}` : q.why);
+            continue;
+          }
           // ENTRY CHASE (realism): a 5-min scan spots a break late, and a live order
           // chases it — so every paper entry pays 0.1% of adverse price, instead of
           // pretending to fill instantly at the signal price (the classic paper-trading
@@ -319,12 +337,16 @@ export async function GET(request: Request) {
           const stamp = stampSql(intel, s.coin, { opportunity: opp });
           // The BTC daily regime rides on the row too (A4's journal stamp; risk_pct is written by
           // snapshotShadowSizing beside the frozen size it belongs to).
-          const stampCols = `, ${[...stamp.columns, "btc_regime"].join(", ")}`;
-          const stampVals = `, ${[...stamp.columns, "btc_regime"].map((_, i) => `$${10 + i}`).join(",")}`;
+          // The ATR twin's own stop fraction rides on its row (shadow_stop_frac); every other plan's
+          // stays NULL, so exitParams keeps the container's fixed stop for them.
+          const extraCols = [...stamp.columns, "btc_regime", ...(plan.stopFrac != null ? ["shadow_stop_frac"] : [])];
+          const extraVals = [...stamp.values, btcRegimeStr, ...(plan.stopFrac != null ? [plan.stopFrac] : [])];
+          const stampCols = `, ${extraCols.join(", ")}`;
+          const stampVals = `, ${extraCols.map((_, i) => `$${10 + i}`).join(",")}`;
           const inserted = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version${stampCols})
              VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9${stampVals}) RETURNING id`,
-            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values, btcRegimeStr,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...extraVals,
           );
           const rowId = inserted[0]?.id ?? null;
           const frozenNotional = rowId != null ? await snapshotShadowSizing(rowId) : null;
@@ -521,6 +543,7 @@ export async function GET(request: Request) {
     update: { value: intelLatest },
     create: { key: "kraken_margin_intel_latest", value: intelLatest },
   }).catch(() => {});
+  for (const e of pending.errors) errors.push(e);
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
   // PERSIST THE TICK. Same reasoning as the options book: what the desk REFUSED is at least
   // as informative as what it took, and it is the only way to answer "why hasn't it traded?"
@@ -530,5 +553,5 @@ export async function GET(request: Request) {
     update: { value: JSON.stringify({ at: new Date().toISOString(), scanned: signals.length, fresh: fresh.length, suppressed: signals.length - fresh.length, look, errors: errors.slice(0, 5) }) },
     create: { key: "margin_scan_last_result", value: JSON.stringify({ at: new Date().toISOString(), scanned: signals.length, fresh: fresh.length, suppressed: signals.length - fresh.length, look, errors: errors.slice(0, 5) }) },
   }).catch(() => {});
-  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, autoOpened, shadowResolved, look, errors: errors.slice(0, 5) });
+  return Response.json({ ok: errors.length === 0, scanned: signals.length, fresh: fresh.length, autoOpened, shadowResolved, pending: { checked: pending.checked, filled: pending.filled, failed: pending.failed, expired: pending.expired }, look, errors: errors.slice(0, 5) });
 }

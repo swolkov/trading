@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LIVE_CONTAINERS, armableSources, bookMaxHoldH, bookTrailR, liveContainerFor } from "../src/lib/margin-live-risk";
+import { readFileSync } from "node:fs";
+import { LIVE_CONTAINERS, armableSources, bookMaxHoldH, bookTrailR, isSourceArmed, liveContainerFor } from "../src/lib/margin-live-risk";
 import { exitParams } from "../src/lib/margin-shadow";
 import { RETIRED_AUTO_SOURCES } from "../src/lib/margin-auto-plans";
 
@@ -22,6 +23,10 @@ test("every live container equals its paper container (stop %, hold hours, trail
 
 test("sleeves whose paper EXIT the guardian does not mirror have no live container and cannot be armed", () => {
   for (const s of ["selective-tight", "selective-launch", "selective-x5", "swing-spot", "swing-lock", "scanner", "fast-tight", "sweep-fade", "selective-swing", "nonsense", "constructor", "__proto__", "toString"]) assert.equal(liveContainerFor(s), null, s);
+  // The five Sep 15 2026 twins (docs/KRAKEN-DESK-OPERATING-MODEL.md §4) are PAPER ONLY: a partial the
+  // guardian does not take, a conditional entry it does not place, a gate it does not read, a stop
+  // it does not size, a short leg it has no container for. None can be armed.
+  for (const s of ["swing-partial", "swing-retest", "swing-mtf", "swing-atr", "swing-short"]) { assert.equal(liveContainerFor(s), null, `${s} cannot be armed`); assert.ok(!armableSources().includes(s), `${s} is not offered by the arm switch`); }
   for (const s of RETIRED_AUTO_SOURCES) assert.equal(liveContainerFor(s), null, `retired ${s}`);
   assert.equal(liveContainerFor(null), null);
   assert.equal(liveContainerFor(""), null);
@@ -67,4 +72,21 @@ test("a book's time stop is the shortest hold of its tranches; a tranche with no
   assert.equal(bookMaxHoldH([], 72), 72);
   assert.equal(bookMaxHoldH([0, -5, NaN, 336], 48), 48, "junk counts as the global, never as a longer hold");
   assert.equal(bookMaxHoldH([336], 48), 336);
+});
+
+test("a hand-set kraken_margin_live_sources naming a no-container source passes the arm check but the executor's container gate refuses it before any order", () => {
+  // Layer 1a would let it through — the key is the operator's word…
+  for (const s of ["swing-retest", "swing-partial", "swing-mtf", "swing-atr", "swing-short"]) {
+    assert.equal(isSourceArmed(s, s), true, `${s}: the source predicate alone accepts a hand-set key`);
+    assert.equal(liveContainerFor(s), null, `${s}: …but it has no container`);
+  }
+  // …and the executor's entry path holds the line: the container gate sits before AddOrder and
+  // refuses with the pinned string. Read from the source, as the trade-card test does — the gate
+  // is inside executeAlert, behind a dozen live reads that cannot be driven from a unit test.
+  const exec = readFileSync(new URL("../src/lib/margin-executor.ts", import.meta.url), "utf8");
+  const entryPath = exec.split("// ---- ENTRY PATH ----")[1] ?? "";
+  const beforeOrder = entryPath.split('res = await krakenPrivate("AddOrder", params)')[0];
+  assert.ok(beforeOrder.length > 0, "the entry path and AddOrder were found");
+  assert.match(beforeOrder, /const container = liveContainerFor\(alert\.source\);/);
+  assert.match(beforeOrder, /if \(!container\) return \{ executed: false, validated: false, note: `entry refused: source "\$\{alert\.source \?\? "manual"\}" has no live container/);
 });
