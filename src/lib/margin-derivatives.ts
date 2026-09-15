@@ -195,18 +195,26 @@ export interface DerivLatest {
   errors: string[];
 }
 
-/** The newest snapshot per coin that is at least 20h (and at most 30h) old — the 24h baseline. */
+/** Pure: the baseline map's key — OI is only comparable within ONE venue. */
+export const oiKey = (coin: string, source: string) => `${coin}:${source}`;
+/**
+ * The newest snapshot per (coin, SOURCE) that is at least 20h (and at most 30h) old — the 24h
+ * baseline. Keyed per venue: a coin that moved from Bybit to Kraken Futures between snapshots
+ * must read null, not a phantom cross-venue change.
+ */
 async function priorOiByCoin(nowMs: number): Promise<Record<string, number>> {
-  const rows = await prisma.$queryRawUnsafe<{ coin: string; oi: number | null }[]>(
-    `SELECT DISTINCT ON (coin) coin, oi FROM margin_derivatives_snapshots
+  const rows = await prisma.$queryRawUnsafe<{ coin: string; source: string; oi: number | null }[]>(
+    `SELECT DISTINCT ON (coin, source) coin, source, oi FROM margin_derivatives_snapshots
      WHERE at <= $1::timestamptz - interval '20 hours' AND at >= $1::timestamptz - interval '30 hours'
-     ORDER BY coin, at DESC`,
+     ORDER BY coin, source, at DESC`,
     new Date(nowMs).toISOString(),
   );
   const out: Record<string, number> = {};
-  for (const r of rows) if (r.oi != null && Number.isFinite(r.oi)) out[r.coin] = r.oi;
+  for (const r of rows) if (r.oi != null && Number.isFinite(r.oi)) out[oiKey(r.coin, r.source)] = r.oi;
   return out;
 }
+/** Retention: rows older than this are dropped once a day. */
+export const SNAPSHOT_RETENTION_DAYS = 90;
 
 export async function readLatestDerivatives(): Promise<DerivLatest | null> {
   try {
@@ -245,11 +253,15 @@ export async function snapshotDerivatives(opts: { nowMs?: number; deadlineMs?: n
     const at = new Date(nowMs).toISOString();
     const byCoin: Record<string, DerivCoin> = {};
     for (const t of Object.values(byTicker)) {
-      byCoin[t.coin] = { source: t.source, funding: t.funding, funding8hRel: t.funding8hRel, fundingPred: t.fundingPred, oi: t.oi, oiUsd: t.oiUsd, mark: t.mark, oiChg24h: oiChange24h(t.oi, prior[t.coin]) };
+      byCoin[t.coin] = { source: t.source, funding: t.funding, funding8hRel: t.funding8hRel, fundingPred: t.fundingPred, oi: t.oi, oiUsd: t.oiUsd, mark: t.mark, oiChg24h: oiChange24h(t.oi, prior[oiKey(t.coin, t.source)]) };
       await prisma.$executeRawUnsafe(
         `INSERT INTO margin_derivatives_snapshots (at, coin, source, funding, funding_pred, oi, mark, raw) VALUES ($1::timestamptz,$2,$3,$4,$5,$6,$7,$8::jsonb)`,
         at, t.coin, t.source, t.funding, t.fundingPred, t.oi, t.mark, JSON.stringify(t.raw),
       ).catch((e) => errors.push(`insert ${t.coin}: ${String(e).slice(0, 60)}`));
+    }
+    // Once per UTC day (the first snapshot whose date differs from the latest key's): prune.
+    if (!prev || prev.at.slice(0, 10) !== at.slice(0, 10)) {
+      await prisma.$executeRawUnsafe(`DELETE FROM margin_derivatives_snapshots WHERE at < now() - interval '${SNAPSHOT_RETENTION_DAYS} days'`).catch((e) => errors.push(`retention: ${String(e).slice(0, 60)}`));
     }
     const covered = Object.keys(byCoin).length;
     const latest: DerivLatest = { at, coverage: `${covered}/${SCAN_UNIVERSE.length}`, covered, universe: SCAN_UNIVERSE.length, byCoin, fearGreed: fearGreed ?? prev?.fearGreed ?? null, errors };

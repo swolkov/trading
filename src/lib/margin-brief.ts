@@ -64,8 +64,11 @@ export interface BriefInput {
   risk: BriefRisk | null;
 }
 
-/** Outcomes that mean "the desk did NOT take it" — a fresh HIGH with any of these is not an ENTER. */
-export const REFUSED_OUTCOMES = new Set(["live refused", "live skipped", "btc vetoed", "blocked", "no trade", "skipped", "live ERROR", "prop refused", "prop ERROR", "watched"]);
+/**
+ * Outcomes that mean the ARMED sleeve did NOT take it — a fresh HIGH with any of these is not an
+ * ENTER. "paper only" is a sleeve that is not armed; "TRADED PROP" is the retired prop desk.
+ */
+export const REFUSED_OUTCOMES = new Set(["live refused", "live skipped", "btc vetoed", "blocked", "no trade", "skipped", "live ERROR", "prop refused", "prop ERROR", "watched", "paper only", "TRADED PROP"]);
 
 export function deriveAction(i: Pick<BriefInput, "regime" | "opportunities" | "live" | "review" | "risk">): { action: BriefAction; reason: string } {
   if (i.regime?.event?.mode === "paused") return { action: "NO TRADE", reason: `event window paused — ${i.regime.event.reason}` };
@@ -130,7 +133,7 @@ export function renderDeskBrief(i: BriefInput): string {
   if (!i.livePositionsAt) L.push(`- ${dash} (Kraken not read this run — positions unknown, not zero)`);
   else if (!i.livePositions.length) L.push(`- ${dash} (flat)`);
   else {
-    L.push("| Pair | Side | Lev | Entry | P&L | Cushion used |", "|---|---|---|---|---|---|");
+    L.push("| Pair | Side | Lev | Entry | P&L | Cushion used (approx.) |", "|---|---|---|---|---|---|");
     for (const p of i.livePositions) L.push(`| ${p.pair} | ${p.side} | ${p.leverage.toFixed(0)}× | ${px(p.entryPrice)} | ${money(p.net)} | ${pctAbs(p.cushionUsed)} |`);
   }
   L.push("", "**Open paper rows**");
@@ -188,7 +191,12 @@ export function renderDeskBrief(i: BriefInput): string {
   return L.join("\n");
 }
 
-/** Fraction of the liquidation cushion a position has consumed at price `px` (0.6/lev at entry). */
+/**
+ * Fraction of the liquidation cushion a position has consumed at price `px` — the guardian's own
+ * arithmetic (kraken-margin.ts liquidationEstimate: liq = entry ∓ 0.6/lev, pctAway measured from
+ * the CURRENT price; margin-watch: used = 1 − pctAway ÷ cushion), pinned equal by test. Approximate
+ * in the brief only because `px` there is the snapshot's value ÷ vol, not a fresh Ticker read.
+ */
 export function cushionUsed(side: string, entryPrice: number, leverage: number, px: number | null): number | null {
   if (px == null || !(px > 0) || !(entryPrice > 0)) return null;
   const adverse = 0.6 / Math.max(1, leverage);

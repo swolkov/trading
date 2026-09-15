@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import {
-  FETCH_TIMEOUT_MS, FUNDING_PERIOD_HOURS, KF_FUNDING_HOURS, OI_DROP_PROXY, SNAPSHOT_MIN_INTERVAL_MS, SYMBOL_MAP,
+  FETCH_TIMEOUT_MS, FUNDING_PERIOD_HOURS, KF_FUNDING_HOURS, OI_DROP_PROXY, SNAPSHOT_MIN_INTERVAL_MS, SNAPSHOT_RETENTION_DAYS, SYMBOL_MAP, oiKey,
   fetchBybitLinearTickers, fetchFearGreed, fetchKrakenFuturesTickers, normalizeDerivatives, oiChange24h,
   parseBybitLinearTickers, parseFearGreed, parseKrakenFuturesTickers,
 } from "../src/lib/margin-derivatives";
@@ -103,6 +103,22 @@ test("normalise: Kraken wins, Bybit fills only the gaps; oiChange24h is a fracti
   assert.equal(oiChange24h(1000, 0), null);
   assert.equal(oiChange24h(NaN, 1000), null);
   assert.equal(OI_DROP_PROXY, -0.05);
+});
+
+test("the 24h OI baseline is keyed per (coin, source): a venue switch reads null, never a cross-venue phantom change", () => {
+  assert.equal(oiKey("BTC", "kraken-futures"), "BTC:kraken-futures");
+  // The baseline map as priorOiByCoin builds it, and the lookup snapshotDerivatives makes.
+  const prior: Record<string, number> = { [oiKey("ZEC", "bybit")]: 12000 };
+  const kfZec = { coin: "ZEC", source: "kraken-futures" as const, oi: 13549.86 };
+  assert.equal(oiChange24h(kfZec.oi, prior[oiKey(kfZec.coin, kfZec.source)]), null, "Kraken today vs Bybit yesterday is not a change");
+  const byZec = { coin: "ZEC", source: "bybit" as const, oi: 12600 };
+  assert.ok(Math.abs(oiChange24h(byZec.oi, prior[oiKey(byZec.coin, byZec.source)])! - 0.05) < 1e-12);
+  const src = readFileSync(new URL("../src/lib/margin-derivatives.ts", import.meta.url), "utf8");
+  assert.ok(/DISTINCT ON \(coin, source\)/.test(src) && /ORDER BY coin, source, at DESC/.test(src));
+  assert.ok(/prior\[oiKey\(t\.coin, t\.source\)\]/.test(src));
+  assert.equal(SNAPSHOT_RETENTION_DAYS, 90);
+  assert.ok(/DELETE FROM margin_derivatives_snapshots WHERE at < now\(\) - interval '\$\{SNAPSHOT_RETENTION_DAYS\} days'/.test(src), "daily retention");
+  assert.ok(/prev\.at\.slice\(0, 10\) !== at\.slice\(0, 10\)/.test(src), "once per UTC day, keyed on the latest key's date");
 });
 
 test("Fear & Greed parser on the real shape; garbage → null", () => {

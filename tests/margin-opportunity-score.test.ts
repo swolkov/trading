@@ -149,6 +149,8 @@ test("promotionVerdict: thin → gathering; full but t<2 or ≥80 not out-earnin
   // Better per trade but not significant.
   assert.equal(promotionVerdict([sl("≥80", 40, 800, 1.9), sl("<80", 40, 400, 3)]).status, "not ranking");
   assert.equal(promotionVerdict([sl("≥80", 40, 800, null), sl("<80", 40, 400, 3)]).status, "not ranking");
+  assert.equal(promotionVerdict([sl("≥80", 40, 800, NaN), sl("<80", 40, 400, 3)]).status, "not ranking", "a NaN t never promotes");
+  assert.equal(promotionVerdict([sl("≥80", 40, 800, Infinity), sl("<80", 40, 400, 3)]).status, "not ranking", "an infinite t never promotes");
   // All three.
   const ok = promotionVerdict([sl("≥80", 40, 1200, 2.4), sl("<80", 60, 600, 1)]);
   assert.equal(ok.status, "PROMOTABLE");
@@ -167,4 +169,7 @@ test("the score never reaches the money path: executor, auto-plans, live-risk an
   assert.ok(/stampSql\(intel, s\.coin, \{ opportunity: opp \}\)/.test(scan));
   assert.ok(/score:\s*conv\.score/.test(scan), "the trade card's score is still the conviction score");
   assert.ok(!/kraken_margin_min_score/.test(scan), "no live gate key in this PR");
+  // The slices go through margin-shadow's candidateSlice — one aggregate for every cut on the page.
+  const slices = readFileSync(new URL("../src/lib/margin-opportunity-slices.ts", import.meta.url), "utf8");
+  assert.ok(/candidateSlice\(source, /.test(slices) && !/\$queryRawUnsafe/.test(slices));
 });

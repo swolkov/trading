@@ -109,10 +109,38 @@ test("carryShock: a prior veto stands until its clock runs out; a fresh shock re
   assert.equal(expired.until, null);
   const fresh = btcShock(m5Series(76_000, 0.032), h1Series(76_000), NOW + 30 * 60_000);
   const restarted = carryShock(fresh, prior, NOW + 30 * 60_000);
-  assert.equal(restarted.shock, "up");
-  assert.equal(restarted.until, new Date(NOW + 90 * 60_000).toISOString());
+  assert.equal(restarted.shock, "up", "a shock the OTHER way replaces the veto");
+  assert.equal(restarted.until, new Date(NOW + 90 * 60_000).toISOString(), "…and restarts the clock");
   assert.equal(carryShock(calm, null, NOW).shock, null);
   assert.equal(carryShock(calm, { shock: "down", until: "garbage" }, NOW).shock, null, "an unparseable clock is no veto");
+});
+
+test("the clock is anchored to FIRST detection: three consecutive ticks seeing the same move keep one `until`; after it expires a still-visible move starts a new hour", () => {
+  const t0 = NOW, t1 = NOW + 5 * 60_000, t2 = NOW + 10 * 60_000;
+  const s0 = carryShock(btcShock(m5Series(76_000, -0.034), h1Series(76_000), t0), null, t0);
+  const c0 = { shock: s0.shock, until: s0.until };
+  const s1 = carryShock(btcShock(m5Series(76_000, -0.034), h1Series(76_000), t1), c0, t1);
+  const s2 = carryShock(btcShock(m5Series(76_000, -0.034), h1Series(76_000), t2), { shock: s1.shock, until: s1.until }, t2);
+  assert.equal(s0.until, new Date(t0 + 60 * 60_000).toISOString());
+  assert.equal(s1.until, s0.until);
+  assert.equal(s2.until, s0.until);
+  assert.equal(s2.shock, "down");
+  assert.equal(altEntryVetoed(s2, "buy", "ETH", t0 + 61 * 60_000).vetoed, false, "one hour after FIRST detection the veto is over");
+  // Past expiry, a move still visible in the window starts a fresh hour.
+  const t3 = t0 + 61 * 60_000;
+  const s3 = carryShock(btcShock(m5Series(76_000, -0.034), h1Series(76_000), t3), { shock: s2.shock, until: s2.until }, t3);
+  assert.equal(s3.until, new Date(t3 + 60 * 60_000).toISOString());
+});
+
+test("btc_state carries the veto even when THIS tick's bars are missing: shock-down, never 'unknown', while a veto applies", () => {
+  const prior = { shock: "down" as const, until: new Date(NOW + 60 * 60_000).toISOString() };
+  const noBars = carryShock(btcShock([], [], NOW + 10 * 60_000), prior, NOW + 10 * 60_000);
+  assert.equal(noBars.barsOk, false);
+  assert.equal(noBars.shock, "down");
+  assert.equal(btcStateStamp(noBars), "shock-down");
+  assert.equal(altEntryVetoed(noBars, "buy", "ETH", NOW + 10 * 60_000).vetoed, true);
+  const expired = carryShock(btcShock([], [], NOW + 61 * 60_000), prior, NOW + 61 * 60_000);
+  assert.equal(btcStateStamp(expired), "unknown");
 });
 
 test("the off switch: only the literal 'false' disables; missing/garbage/unreadable read as ON (fail closed for entries)", () => {

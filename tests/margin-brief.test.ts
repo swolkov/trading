@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { BRIEF_SECTIONS, REFUSED_OUTCOMES, cushionUsed, deriveAction, renderDeskBrief, type BriefInput } from "../src/lib/margin-brief";
-import { briefDue } from "../src/lib/margin-brief-build";
+import { briefDue, opportunityFromRow } from "../src/lib/margin-brief-build";
+import { liquidationEstimate, type KrakenMarginPosition } from "../src/lib/kraken-margin";
 import { realizedVol, renderCryptoRegime, breadthOf } from "../src/lib/margin-crypto-regime";
 import { REGIME_LABELS, regimeLabel, regimeLabelFor } from "../src/lib/margin-regime-label";
 import { gatherIntel, stampSql } from "../src/lib/margin-intel";
@@ -56,7 +57,7 @@ test("the eight headers render in the prompt's order, once each; empty inputs re
 });
 
 test("a populated brief: top-5 opportunities by score, live table with cushion, strategies with weekly action, risk line", () => {
-  const opps = [60, 91, 75, 88, 40, 99, 12].map((score, n) => ({ coin: `C${n}`, tf: "4h", kind: "breakout", score, tier: "high", outcome: "paper only" }));
+  const opps = [60, 91, 75, 88, 40, 99, 12].map((score, n) => ({ coin: `C${n}`, tf: "4h", kind: "breakout", score, tier: "high", outcome: "TRADED LIVE" }));
   const text = renderDeskBrief(base({
     opportunities: [...opps, { coin: "X", tf: "5m", kind: "volume-spike", outcome: "watched" }],
     livePositions: [{ pair: "XBTUSD", side: "long", leverage: 9, entryPrice: 76000, net: -12.5, cushionUsed: 0.31 }],
@@ -71,6 +72,7 @@ test("a populated brief: top-5 opportunities by score, live table with cushion, 
   assert.equal(rows.length, 5);
   assert.deepEqual(rows.map((r) => r.split("|")[2].trim()), ["C5", "C1", "C3", "C2", "C0"]);
   assert.ok(!best.includes("| X |"), "non-directional signals are not opportunities");
+  assert.ok(/Cushion used \(approx\.\)/.test(text));
   assert.ok(/\| XBTUSD \| long \| 9× \| \$76,000 \| −\$13 \| 31% \|/.test(text));
   assert.ok(/cached read at 13:04Z/.test(text));
   assert.ok(/\| ETH\/USD \| buy \| swing-pyr \| \$2,430 \| \$18 \| 7h \/ 168h \|/.test(text));
@@ -79,6 +81,36 @@ test("a populated brief: top-5 opportunities by score, live table with cushion, 
   assert.ok(/Equity \$4,600 · margin level 412% · drawdown 1\.2% \(tier 0, ×1\) · losers today 0/.test(text));
   assert.ok(/all-stops risk \$368 \(8\.0% of equity\) · breaker headroom 13\.8% · cluster ok/.test(text));
   assert.ok(/\*\*ENTER\*\* — C5 4h breakout/.test(text));
+});
+
+test("ENTER means the ARMED sleeve took it: 'paper only' (an unarmed sleeve) and 'TRADED PROP' are refusals for the ladder", () => {
+  assert.ok(REFUSED_OUTCOMES.has("paper only") && REFUSED_OUTCOMES.has("TRADED PROP"));
+  assert.equal(deriveAction(base({ opportunities: [{ ...FRESH_HIGH, outcome: "paper only" }] })).action, "WAIT");
+  assert.equal(deriveAction(base({ opportunities: [{ ...FRESH_HIGH, outcome: "TRADED PROP" }] })).action, "WAIT");
+  // The ENTER line names the best-scored fresh HIGH, not the first in the list.
+  const r = deriveAction(base({ opportunities: [{ ...FRESH_HIGH, coin: "A", score: 61 }, { ...FRESH_HIGH, coin: "B", score: 93 }, { ...FRESH_HIGH, coin: "C", score: 99, outcome: "paper only" }] }));
+  assert.equal(r.action, "ENTER");
+  assert.match(r.reason, /^B 4h breakout/);
+});
+
+test("opportunityFromRow: a stamped paper row → coin/tf/kind from the note, the scan's outcome words from executed/validated/live_exec_note", () => {
+  const row = { symbol: "ETH/USD", note: "auto: swing-pyr breakout 4h [high — 2 timeframes breaking]", conviction: "high", opportunity_score: 84, executed: false, validated: false, live_exec_note: null };
+  assert.deepEqual(opportunityFromRow(row), { coin: "ETH", tf: "4h", kind: "breakout", score: 84, tier: "high", outcome: "paper only", detail: undefined });
+  assert.equal(opportunityFromRow({ ...row, executed: true }).outcome, "TRADED LIVE");
+  assert.equal(opportunityFromRow({ ...row, validated: true }).outcome, "live validated");
+  assert.equal(opportunityFromRow({ ...row, live_exec_note: "live skipped: BTC shock down −3.4%/1h — alt longs vetoed until 14:32Z" }).outcome, "btc vetoed");
+  assert.equal(opportunityFromRow({ ...row, live_exec_note: "live skipped: data quality: 1 gap(s) in the last 20 bars" }).outcome, "live skipped");
+  assert.equal(opportunityFromRow({ ...row, live_exec_note: "entry refused: drawdown tier unknown" }).outcome, "live refused");
+  assert.deepEqual([opportunityFromRow({ ...row, note: "manual alert" }).tf, opportunityFromRow({ ...row, note: null }).kind], ["?", "?"]);
+});
+
+test("cushionUsed mirrors the guardian's arithmetic (liquidationEstimate + used = 1 − pctAway ÷ cushion) exactly", () => {
+  for (const [side, entry, lev, px] of [["long", 100, 9, 96], ["long", 76000, 9, 73500], ["short", 100, 5, 104], ["short", 2400, 10, 2450]] as const) {
+    const pos = { side, entryPrice: entry, leverage: lev } as KrakenMarginPosition;
+    const { pctAway } = liquidationEstimate(pos, px);
+    const guardian = 1 - pctAway / (0.6 / Math.max(1, lev));
+    assert.ok(Math.abs(cushionUsed(side, entry, lev, px)! - guardian) < 1e-12, `${side} ${entry} ${lev} ${px}`);
+  }
 });
 
 test("cushionUsed: a 9× long at entry has used 0; at −4% it has used 60% (the stop sits at 0.6 of the cushion); shorts mirror", () => {
@@ -162,10 +194,15 @@ test("source: the brief is scheduled inside margin-scan (no new cron), positions
   assert.ok(/briefDue\(state\.briefDay, Date\.now\(\)\)/.test(scan));
   assert.ok(/routeDeadlineMs - Date\.now\(\) > 60_000/.test(scan), "guarded by the route deadline");
   assert.ok(/state\.briefDay = due\.day;\s*\n\s*await saveState\(state\);\s*\n\s*const b = await publishDeskBrief/.test(scan), "the day key is saved BEFORE the brief runs");
+  assert.ok(/if \(!b\) \{ state\.briefDay = null;/.test(scan), "a brief that was not written releases the day key so the next tick retries");
   const vercel = readFileSync(new URL("../vercel.json", import.meta.url), "utf8");
   assert.ok(!/margin[-/]brief/.test(vercel), "no new cron for the margin brief");
   const build = readFileSync(new URL("../src/lib/margin-brief-build.ts", import.meta.url), "utf8");
-  assert.ok(/marginDisplaySnapshot\(\)/.test(build) && !/getKrakenMarginPositions|getKrakenMarginHealth|krakenPrivate/.test(build), "live positions via the cached snapshot only");
+  // NO Kraken call from the brief builder: not the TTL'd display snapshot (fresh private reads when
+  // the DB copy is >20s old — always, from a cron tick), not the raw readers, not the public API.
+  assert.ok(/readDisplaySnapshotAny\(\)/.test(build), "positions from the DB copy of the snapshot, any age");
+  assert.ok(!/marginDisplaySnapshot|getKrakenMarginPositions|getKrakenMarginHealth|krakenPrivate|krakenPublic/.test(build), "the brief builder never touches Kraken");
+  assert.ok(/todaysOpportunities/.test(build) && /opportunity_score IS NOT NULL/.test(build), "BEST OPPORTUNITIES ranks today's stamped rows");
   const synth = readFileSync(new URL("../src/lib/margin-synthesis.ts", import.meta.url), "utf8");
   assert.ok(/await refreshCryptoRegime\(\)\.catch/.test(synth));
   const regime = readFileSync(new URL("../src/lib/margin-crypto-regime.ts", import.meta.url), "utf8");

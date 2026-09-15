@@ -630,6 +630,21 @@ async function readDisplaySnapshotDb(): Promise<MarginDisplaySnapshot | null> {
     return s;
   } catch { return null; }
 }
+/**
+ * The DB copy of the display snapshot WHATEVER ITS AGE (dated by `readAt`), or null. For readers
+ * that must never trigger a private Kraken call of their own — the daily desk brief runs inside
+ * the scan cron beside the guardian's protect calls and must not queue against them. Callers
+ * must show `readAt` and treat null as "unknown", never as flat.
+ */
+export async function readDisplaySnapshotAny(): Promise<MarginDisplaySnapshot | null> {
+  try {
+    const raw = (await prisma.agentConfig.findUnique({ where: { key: DISPLAY_KEY } }))?.value;
+    if (!raw) return null;
+    const s = JSON.parse(raw) as MarginDisplaySnapshot;
+    if (!s.readAt || !s.health || !Array.isArray(s.positions)) return null;
+    return s;
+  } catch { return null; }
+}
 export const marginDisplaySnapshot = displayCache(async (): Promise<MarginDisplaySnapshot> => {
   const shared = await readDisplaySnapshotDb();
   if (shared) return shared;

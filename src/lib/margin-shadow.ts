@@ -1027,36 +1027,42 @@ export interface CandidateDetail {
   recent: CandidateTrade[];
 }
 const TF_SQL = `COALESCE(substring(note from '(5m|15m|1h|4h|1d)'), '?')`;
+type SliceRow = { k: string; resolved: bigint; wins: bigint; net: number | null; meanpnl: number | null; stdpnl: number | null; days: bigint; open: bigint };
+/**
+ * ONE sleeve's RECORD rows grouped by `groupExpr` → a CandidateSlice per group. groupExpr /
+ * extraWhere are fixed strings chosen by the caller — never user input. Shared by candidateDetail
+ * and the opportunity-score cuts (margin-opportunity-slices.ts) so every slice on the page is
+ * the same aggregate.
+ */
+export async function candidateSlice(source: string, groupExpr: string, extraWhere = ""): Promise<CandidateSlice[]> {
+  const rows = await prisma.$queryRawUnsafe<SliceRow[]>(
+    `SELECT ${groupExpr} AS k,
+       count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
+       count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
+       COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS net,
+       avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
+       stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl,
+       count(DISTINCT date_trunc('day', shadow_resolved_at AT TIME ZONE 'UTC')) FILTER (WHERE shadow_status='resolved')::bigint AS days,
+       count(*) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open')::bigint AS open
+     FROM tradingview_alerts
+     WHERE source=$1 AND side IN ('buy','sell') AND ${RECORD_SQL} ${extraWhere}
+     GROUP BY 1`,
+    source,
+  );
+  return rows.map((r) => {
+    const resolved = Number(r.resolved);
+    return {
+      key: String(r.k), resolved, wins: Number(r.wins),
+      hitRate: resolved > 0 ? Number(r.wins) / resolved : null,
+      net: r.net || 0,
+      tStat: resolved > 1 && r.meanpnl != null && r.stdpnl != null && r.stdpnl > 0 ? (r.meanpnl * Math.sqrt(resolved)) / r.stdpnl : null,
+      days: Number(r.days), open: Number(r.open),
+    };
+  });
+}
 export async function candidateDetail(source: string, limit = 30): Promise<CandidateDetail> {
   await ensureShadowColumns();
-  type SliceRow = { k: string; resolved: bigint; wins: bigint; net: number | null; meanpnl: number | null; stdpnl: number | null; days: bigint; open: bigint };
-  // groupExpr / extraWhere are fixed strings chosen below — never user input.
-  const slice = async (groupExpr: string, extraWhere: string): Promise<CandidateSlice[]> => {
-    const rows = await prisma.$queryRawUnsafe<SliceRow[]>(
-      `SELECT ${groupExpr} AS k,
-         count(*) FILTER (WHERE shadow_status='resolved')::bigint AS resolved,
-         count(*) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0)::bigint AS wins,
-         COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS net,
-         avg(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS meanpnl,
-         stddev_samp(shadow_pnl) FILTER (WHERE shadow_status='resolved') AS stdpnl,
-         count(DISTINCT date_trunc('day', shadow_resolved_at AT TIME ZONE 'UTC')) FILTER (WHERE shadow_status='resolved')::bigint AS days,
-         count(*) FILTER (WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open')='open')::bigint AS open
-       FROM tradingview_alerts
-       WHERE source=$1 AND side IN ('buy','sell') AND ${RECORD_SQL} ${extraWhere}
-       GROUP BY 1`,
-      source,
-    );
-    return rows.map((r) => {
-      const resolved = Number(r.resolved);
-      return {
-        key: String(r.k), resolved, wins: Number(r.wins),
-        hitRate: resolved > 0 ? Number(r.wins) / resolved : null,
-        net: r.net || 0,
-        tStat: resolved > 1 && r.meanpnl != null && r.stdpnl != null && r.stdpnl > 0 ? (r.meanpnl * Math.sqrt(resolved)) / r.stdpnl : null,
-        days: Number(r.days), open: Number(r.open),
-      };
-    });
-  };
+  const slice = (groupExpr: string, extraWhere: string) => candidateSlice(source, groupExpr, extraWhere);
   const [fwd, byTimeframe, byWindow, dayRows, recentRows] = await Promise.all([
     // Per-sleeve: the slow family's rule changed on a different day from the fast family's.
     slice(`'forward'`, `AND time > '${policyCutFor(source)}'::timestamptz`),

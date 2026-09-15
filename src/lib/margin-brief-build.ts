@@ -2,17 +2,19 @@
 // already holds, every block behind a soft catch so one dead source blanks one section ("—"),
 // never the brief. Publishes to the vault (Brain/crypto-desk-brief.md), the AgentConfig key
 // margin_brief_latest (what /api/margin/brief and the /margin panel read — no Kraken call of
-// their own) and Slack margin_results. Live positions come from the CACHED display snapshot
-// (marginDisplaySnapshot) — never a direct private read from here.
+// their own) and Slack margin_results. Live positions come from the DB copy of the display
+// snapshot WHATEVER ITS AGE (readDisplaySnapshotAny, dated by readAt) — this module makes NO
+// Kraken call, private or public: it runs inside the scan cron beside the guardian's protect
+// calls and must never queue against them. Pinned by test.
 //
 // Scheduled by the margin scan: the first tick after 13:00 UTC each day (briefDue), guarded by
 // the route's deadline. No cron of its own.
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { vaultWrite } from "@/lib/vault";
-import { marginDisplaySnapshot } from "@/lib/kraken-margin";
+import { readDisplaySnapshotAny } from "@/lib/kraken-margin";
 import type { TfFeatures } from "@/lib/margin-scanner";
-import { recentPaperTrades, strategyBreakdown, type StrategyStat } from "@/lib/margin-shadow";
+import { RECORD_SQL, recentPaperTrades, strategyBreakdown, type StrategyStat } from "@/lib/margin-shadow";
 import { leaderboard, type LeaderboardRow } from "@/lib/margin-leaderboard";
 import { weeklyAction } from "@/lib/margin-weekly";
 import { loadLiveFills, divergenceSummary, readStage3, readDemotion } from "@/lib/margin-synthesis";
@@ -38,6 +40,28 @@ export function briefDue(lastDay: string | null | undefined, nowMs: number): { d
 const cfg = async (k: string): Promise<string | null> => prisma.agentConfig.findUnique({ where: { key: k } }).then((r) => r?.value ?? null).catch(() => null);
 const soft = <T,>(p: Promise<T>, fallback: T): Promise<T> => p.catch(() => fallback);
 
+type TodayRow = { symbol: string; note: string | null; conviction: string | null; opportunity_score: number | null; executed: boolean | null; validated: boolean | null; live_exec_note: string | null };
+/** Pure: a stamped paper row → the brief's opportunity line, with the outcome the scan would have logged. */
+export function opportunityFromRow(r: TodayRow): BriefOpportunity {
+  const m = /^auto: [a-z0-9-]+ (breakout|breakdown) (5m|15m|1h|4h|1d)/.exec(r.note ?? "");
+  const outcome = r.executed ? "TRADED LIVE" : r.validated ? "live validated"
+    : r.live_exec_note?.startsWith("live skipped: BTC shock") ? "btc vetoed"
+    : r.live_exec_note?.startsWith("live skipped") ? "live skipped"
+    : r.live_exec_note ? "live refused" : "paper only";
+  return { coin: r.symbol.split("/")[0], tf: m?.[2] ?? "?", kind: m?.[1] ?? "?", score: r.opportunity_score ?? undefined, tier: r.conviction ?? undefined, outcome, detail: r.live_exec_note?.slice(0, 120) ?? undefined };
+}
+/** Today's (UTC) stamped rows, best score first — the whole day's candidates, not one tick's. */
+async function todaysOpportunities(nowMs: number): Promise<BriefOpportunity[]> {
+  const dayStart = `${new Date(nowMs).toISOString().slice(0, 10)}T00:00:00Z`;
+  const rows = await prisma.$queryRawUnsafe<TodayRow[]>(
+    `SELECT symbol, note, conviction, opportunity_score, executed, validated, live_exec_note FROM tradingview_alerts
+     WHERE time >= $1::timestamptz AND opportunity_score IS NOT NULL AND side IN ('buy','sell') AND ${RECORD_SQL}
+     ORDER BY opportunity_score DESC, time DESC LIMIT 20`,
+    dayStart,
+  );
+  return rows.map(opportunityFromRow);
+}
+
 export interface BuildOpts { features?: Record<string, TfFeatures> | null; opportunities?: BriefOpportunity[] | null; nowMs?: number }
 
 /** Gather everything; never throws. */
@@ -45,7 +69,10 @@ export async function buildDeskBrief(opts: BuildOpts = {}): Promise<BriefInput> 
   const at = new Date(opts.nowMs ?? Date.now()).toISOString();
   const [regimeRes, opps, paper, strategies, board, fills, stage3, demoted, decayState, decayMult, snap, riskRaw, anomaly, auto, validate, sourcesRaw, breaker] = await Promise.all([
     soft(refreshCryptoRegime(opts.features ?? null), null),
-    opts.opportunities ? Promise.resolve(opts.opportunities) : cfg("margin_scan_last_result").then((raw) => { try { return raw ? ((JSON.parse(raw) as { look?: BriefOpportunity[] }).look ?? []) : []; } catch { return []; } }),
+    // Today's stamped rows rank first; the tick's look[] (which also holds signals that opened
+    // no row) is the fallback when nothing has been stamped today or the query fails.
+    soft(todaysOpportunities(opts.nowMs ?? Date.now()), []).then(async (rows) => rows.length ? rows
+      : opts.opportunities ?? (await cfg("margin_scan_last_result").then((raw) => { try { return raw ? ((JSON.parse(raw) as { look?: BriefOpportunity[] }).look ?? []) : []; } catch { return []; } }))),
     soft(recentPaperTrades(100), []),
     soft(strategyBreakdown(), [] as StrategyStat[]),
     soft(leaderboard(), [] as LeaderboardRow[]),
@@ -54,7 +81,7 @@ export async function buildDeskBrief(opts: BuildOpts = {}): Promise<BriefInput> 
     soft(readDemotion(), null),
     soft(readDecayState(), null),
     cfg(DECAY_MULT_KEY),
-    soft(marginDisplaySnapshot().then((c) => c.value), null),
+    soft(readDisplaySnapshotAny(), null),
     cfg("kraken_margin_risk_state"),
     cfg("kraken_margin_anomaly"),
     cfg("kraken_margin_auto"), cfg("kraken_margin_validate_only"), cfg("kraken_margin_live_sources"), cfg("kraken_margin_disarmed_dd"),

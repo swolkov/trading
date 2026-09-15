@@ -446,7 +446,8 @@ export async function GET(request: Request) {
       state.briefDay = due.day;
       await saveState(state);
       const b = await publishDeskBrief({ features: scan.features, opportunities: look });
-      if (!b) errors.push("desk brief: not written");
+      // Not written → release the day key so the next tick retries (saveState below persists it).
+      if (!b) { state.briefDay = null; errors.push("desk brief: not written"); }
     }
   } catch (e) { errors.push(`desk brief: ${String(e).slice(0, 80)}`); }
 

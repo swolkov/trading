@@ -86,20 +86,27 @@ export function btcShock(m5: KrakenBar[], h1: KrakenBar[], nowMs: number = Date.
 }
 
 /**
- * Merge this tick's read with the veto carried from earlier ticks: a fresh shock always wins
- * (and restarts the clock); otherwise a prior veto stands until its `until`; expired → clear.
+ * Merge this tick's read with the veto carried from earlier ticks. The clock is ANCHORED TO FIRST
+ * DETECTION: a 3% hour stays visible in the 5m window for up to an hour, so a tick that sees the
+ * same shock while the prior veto still stands keeps the prior `until` (else the hold would creep
+ * to ~2h while the copy says one). A shock in the OTHER direction restarts the clock; no fresh
+ * shock → the prior veto stands until its `until`; expired → clear.
  */
 export function carryShock(fresh: BtcShockState, prior: BtcShockCarry | null | undefined, nowMs: number = Date.now()): BtcShockState {
-  if (fresh.shock) return fresh;
   const priorUntil = prior?.until ? Date.parse(prior.until) : NaN;
-  if (prior?.shock && Number.isFinite(priorUntil) && priorUntil > nowMs) return { ...fresh, shock: prior.shock, until: prior.until };
+  const priorStands = !!prior?.shock && Number.isFinite(priorUntil) && priorUntil > nowMs;
+  if (fresh.shock) return priorStands && prior!.shock === fresh.shock ? { ...fresh, until: prior!.until } : fresh;
+  if (priorStands) return { ...fresh, shock: prior!.shock, until: prior!.until };
   return { ...fresh, shock: null, until: null };
 }
 
-/** The btc_state stamp on a paper row: unknown | calm | shock-up | shock-down. */
+/**
+ * The btc_state stamp on a paper row: shock-up | shock-down | calm | unknown. A carried veto is
+ * stamped even when THIS tick's bars are missing — a row is never "unknown" while a veto applies.
+ */
 export function btcStateStamp(state: Pick<BtcShockState, "barsOk" | "shock">): string {
-  if (!state.barsOk) return "unknown";
-  return state.shock ? `shock-${state.shock}` : "calm";
+  if (state.shock) return `shock-${state.shock}`;
+  return state.barsOk ? "calm" : "unknown";
 }
 
 const hhmmZ = (iso: string) => `${iso.slice(11, 16)}Z`;
