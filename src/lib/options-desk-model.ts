@@ -1,5 +1,6 @@
 // Research uses broker prices. It never simulates fills or authorizes an order.
 import { exDivRisk, spansEarnings, type EarningsClass, type ResearchEvents } from "./options-events";
+import { directionOfKind, marketState, marketVeto, type MarketStamp } from "./options-market-state";
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
 // The base research list. The index and mega-cap names give the desk its regime read, but at a
 // $100 max loss a single contract on a $300+ stock never fits, so the AFFORDABLE CORE (Sep 14 2026)
@@ -49,6 +50,8 @@ export interface ResearchCandidate {
   ivToRealized: number | null;
   /** Earnings verdict for this expiry: "none" (permitted), never "EARNINGS TRADE"/"unknown" here — those are dropped, not ranked. */
   earningsClass: EarningsClass; earningsAt: string | null; exDivAt: string | null;
+  /** Where SPY/QQQ sat on the signal day and whether this direction is aligned — a stamp; the live veto is applied by the desk. */
+  market: MarketStamp & { aligned: boolean | null };
 }
 const mean = (xs: number[]) => xs.reduce((a,b)=>a+b,0)/xs.length;
 export function researchSignals(bars: OptionsResearch["bars"], now=Date.now()): StrategySignal[] {
@@ -110,9 +113,10 @@ export function payoffAtUsd(kind: string, long: ResearchContract, short: Researc
   const value = short ? intrinsic(long) - intrinsic(short) : intrinsic(long);
   return (kind.endsWith("credit") ? price + value : value - price) * 100 - fee;
 }
-export function screenResearchContracts(data: OptionsResearch, cap: number, buyingPower: number, now=Date.now()): ResearchCandidate[] {
+export function screenResearchContracts(data: OptionsResearch, cap: number, buyingPower: number, now=Date.now(), opts: { vix?: number | null } = {}): ResearchCandidate[] {
   if (!Number.isFinite(cap)||cap<=0||!Number.isFinite(buyingPower)||buyingPower<=0) return [];
   const rules=OPTIONS_DESK_RULES, signals=researchSignals(data.bars,now), result: ResearchCandidate[]=[];
+  const market=marketState({SPY:data.bars.SPY,QQQ:data.bars.QQQ},opts.vix??null,now), stamp:MarketStamp={spy:market.spy,qqq:market.qqq,vix:market.vix};
   const good=data.contracts.filter(c=>contractQualityFailures(c,now).length===0);
   for (const signal of signals.filter(s=>["20-session breakout","20-session breakdown"].includes(s.setup))) {
     const bull=signal.direction==="bullish", cs=good.filter(c=>c.symbol===signal.symbol);
@@ -150,6 +154,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
         limit:Math.round(price*100)/100,plannedLoss:Math.round(loss*100)/100,feeReserve:fee,maxProfit:maxProfit==null?null:Math.round(maxProfit*100)/100,
         quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:emPct,payoffAtMoveUsd:payoff,ivToRealized,
         earningsClass:earnings.earningsClass,earningsAt:earnings.earningsAt,exDivAt:data.events?.[signal.symbol]?.exDivAt??null,
+        market:{...stamp,aligned:marketVeto(stamp,directionOfKind(kind),signal.symbol).aligned},
         reason:`${signal.setup}. ${volNote}. ${moveNote}. Research only; fresh broker review and operational checks required.`});
     };
     for(const long of cs){

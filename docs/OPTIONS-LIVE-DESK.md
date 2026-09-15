@@ -132,3 +132,21 @@ clock. The rules live in `src/lib/options-events.ts` and are pure:
 
 Until the first research run after this ships stores `events`, every single-name candidate reads
 as unknown and is refused; index ETFs still trade. That is the rule working, not the desk broken.
+
+## Broad market first: alignment stamp and one pre-registered veto (Sep 15 2026)
+
+`src/lib/options-market-state.ts` (pure) reads SPY and QQQ from the research bars — close vs the
+20- and 50-day averages, the signal day's move, `above`/`below`/`unknown` — and VIX from Yahoo
+(`vixLevel`, **null on failure; never `cross-asset.ts`, which fabricates 20**). The screen stamps
+`market` on every candidate with `aligned` for its direction; the desk writes the same view into
+`options_live_state.market` on every entry tick (shown on the Live desk panel).
+
+Exactly one rule vetoes, registered before any trade was measured against it: a **bullish
+single-name** entry is refused when SPY closed **below its 20-day average AND −1.5% or worse** on
+the signal day (mirror for bearish: above and +1.5% or better). At the moment of entry a live SPY
+quote (`broker.underlyingQuote`) adds an **intraday shock** check: ≥1.5% against the trade refuses.
+Index ETFs are exempt from the day rule (an ETF breakout is the market). Missing or stale bars and
+a failed quote stamp `unknown` and never veto — this layer is fail-soft; the earnings rule is the
+fail-closed one. Off switch: `options_live_market_veto="false"` (default on). Entry log lines:
+`refused: SOFI long_call: market veto — SPY below its 20-day (651.2 vs 660.4) and -2.1% on 2026-09-14 — bullish single-name entries refused`
+and `… market shock veto — SPY -1.7% intraday against a bullish entry`.
