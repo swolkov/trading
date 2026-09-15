@@ -27,10 +27,11 @@ Only registered edges trade. Adding one is a code change (registry + Pine script
    real-time data** add-on for non-professionals so the chart sees the prices the broker fills at.
    Alerts on Essential expire after two months unless set open-ended — the inbox on `/futures` shows
    when alerts stop arriving.
-2. **Nine charts.** `ES1!`, `NQ1!`, `YM1!` on **1D** with `pine/futures-desk-index-daily-mr.pine`;
+2. **Ten charts.** `ES1!`, `NQ1!`, `YM1!` on **1D** with `pine/futures-desk-index-daily-mr.pine`;
    `ES1!`, `NQ1!`, `YM1!`, `GC1!`, `SI1!`, `HG1!` on **60** with
-   `pine/futures-desk-donchian-60m-long.pine`. Chart settings → Symbol → **Adjust for contract
-   changes: ON** (the validations used back-adjusted series).
+   `pine/futures-desk-donchian-60m-long.pine`; `ES1!` on **60** with
+   `pine/futures-desk-feed-heartbeat.pine` (the feed heartbeat). Chart settings → Symbol → **Adjust
+   for contract changes: ON** (the validations used back-adjusted series).
 3. **The secret.** Paste `TRADINGVIEW_WEBHOOK_SECRET` (Vercel) into each script's "Desk webhook secret"
    input. It travels in the alert body; TradingView cannot set headers.
 4. **One alert per chart.** Condition: the indicator → *Any alert() function call*. Notifications →
@@ -122,6 +123,196 @@ guardian` — closes, rolls and re-protection are never gated by any of this.
 `DEFAULT_LIMITS` (0.5% / $750 daily pause / 10% halt / stage A) apply on deploy. Positions opened at
 the old $1,500 budget keep their stops and `risk_usd` — nothing is resized. Deploy after 4 PM ET.
 
+## Journal completeness and demo realism (E4, `src/lib/futures-desk-journal.ts`)
+
+**The judged series WILL be `pnl_after_slip_usd`, not `pnl_usd`** (E6 wires the leaderboard and the
+verdict to it; until then the scoreboard still reads `pnl_usd`). The demo fills at the touch and reports
+no slippage, so every row also carries a per-market slippage model: `slip_model_pts` per side
+(`SLIP_PTS_PER_SIDE` — ES 0.89 · NQ 11.74 · GC 0.50 **measured** in the edge factory; YM 4 · SI 0.01
+· HG 0.0025 · RTY 0.5 **assumed** and labelled so) and `slip_model_usd` = 2 × slip × point value ×
+contracts (an MNQ 1-lot round trip = $46.96). `settle` writes `pnl_after_slip_usd = pnl_usd −
+slip_model_usd`; `pnl_usd` stays the demo's own number. A rolled chain is charged per leg — each leg
+models its own round trip, so one roll costs four sides of slippage. Entry slip is also **measured** per trade:
+`signal_price` is the alert's close, `entry_slip_pts` = fill − signal (long; sign flipped for a
+short), positive = paid. TradingView's alert arrives on a delayed bar close, so a non-zero figure is
+the expected cost, recorded rather than hidden.
+
+**Every ledger row** (entry and roll leg alike) carries: `stop_points`, `atr_at_entry` (Pine v2),
+`session` (ET slice at entry — overnight 18–02 · european 02–07 · premarket 07–09:30 · open 09:30–10
+· morning 10–11:30 · midday 11:30–14 · power 14–15:30 · close 15:30–17 · break 17–18; a stamp, never a
+gate), `grade`, `regime` / `event_mode` (null until E7 / E3 stamp them), `error_class` and the
+excursion columns. **`error_class`** (mistake tracking): `partial_fill` (an entry or a roll re-open filled short — the remainder is cancelled before the row is written),
+`unprotected` (no stop could be placed — the position was closed), `roll_failed` (old month closed,
+new month did not open), `close_refused` (the broker refused a liquidation), `queue_expired` (a
+queued alert aged out — on the SIGNAL row), `auth_backoff`, `foreign_position`. Precedence on one
+row: `unprotected` overwrites anything (the position is gone); `close_refused` is written only when
+the row has no class yet (`COALESCE`), so a partial fill or an unprotected close keeps its class.
+`classifyError` reads the class off a stamped row, or from the text of a row written before the
+column existed.
+
+**MFE / MAE** (`mfe_pts`, `mae_pts`, `mfe_r`, `mae_r`, `bars_held`, `mfe_source`, `mfe_to`): the desk
+has no price feed, so the guardian folds **delayed Yahoo 1-hour bars** (`ES=F`, `NQ=F`, `YM=F`,
+`GC=F`, `SI=F`, `HG=F`) into every open row and every row closed in the last 7 days whose fold has
+not yet reached its close, **once per ET day after 17:05 ET** (`futures_desk_state.excursionDayKey`,
+stamped together with `guardianAt` BEFORE the fold runs). Every distinct (symbol, kind) is fetched
+once, in parallel, under one 30-second deadline. `mfe_source = yahoo_1h_delayed`; a row first seen
+more than 5 days old is backfilled from daily bars and stays `yahoo_1d`. `mfe_to` is the last bar
+folded, so bars are never counted twice. Fail-soft: a Yahoo problem is a guardian note and the day's
+`lastError`, never an exception. Roll week caveat: Yahoo's symbol is the continuous front month, so a
+position still in the old month carries the calendar spread in its excursion — labelled, not corrected.
+
+**Signals** carry `score`, `score_json` (the Pine v2 context: `atr, rsi, volRatio, dist20h, d1Up,
+h4Up`), `grade` (stamped by the entry path), `session`, `regime` / `event_mode` (E7 / E3),
+`checklist_json` (E5) and `error_class`.
+
+### Pine v2 (one re-paste)
+
+Both scripts now write six optional context fields into every message and a third action, **`watch`**:
+Donchian fires it when the close is within 0.5% of the prior 100-bar high with no position on; daily
+MR when RSI(14) < 33 with no position on. A watch row is logged with a **dry-run sizing card** as its
+reason (`dry run: 1× MES · stop 40 pts · risk $201.70 of $250 (normal · stage A)`), never queued and
+never executed, capped at **three per market per ET day** (the fourth reads `watch cap reached`), and
+expired by the guardian after 24 h. A v1 message (no new fields) parses exactly as before, so the
+re-paste can happen chart by chart.
+
+**Manual re-paste (E4 and, later, E5's heartbeat chart — the only two re-paste events):**
+1. On each of the 9 charts: Pine editor → replace the script body with the file from `pine/` → Save →
+   the "Desk webhook secret" input keeps its value; re-check it.
+2. Recreate the alert on each chart (an edited script does NOT update a live alert): delete the old
+   one, add → condition = the indicator → *Any alert() function call* → webhook URL → message empty →
+   expiration open-ended.
+3. Verify: the next row on `/futures` → alert inbox shows a `watch` or an entry whose `score_json`
+   carries `atr` (the desk page's inbox; or `SELECT score_json FROM futures_desk_signals ORDER BY id
+   DESC LIMIT 1`).
+
+## Kill switches, platform safety, feed heartbeat, pre-trade checklist (E5, `src/lib/futures-desk-safety.ts`)
+
+Kept from before: guardian stale 20 min refuses entries, auth backoff, entry/guardian locks, the
+foreign-position report, unknown-status rows, the balance-read abort. Added:
+
+- **Three execution errors in one ET day disable the desk** (`disabledReason = "3 execution errors
+  today"`, one Slack; a person re-enables from `/futures`). Counted: inbox rows that ended in `error`
+  (watch rows never count) plus ledger rows classed `roll_failed` / `close_refused` / `unprotected`
+  (an unprotected entry is its signal's error, counted once). Enabling records today's count as
+  `state.execErrorBaseline`; the trip is `count ≥ baseline + 3`, so a re-enable is a fresh allowance
+  of three, not an instant re-trip.
+- **Anomalies pause ENTRIES until a person clears them** (`futures_desk_anomaly` = `{kind, detail,
+  at}`; refusal `anomaly open: foreign position #123 — entries paused until cleared`). The guardian
+  writes one on: a contract the desk did not open (`foreign_position`), a broker position that
+  disagrees with its ledger row in qty or side (`ledger_mismatch on MESZ6: broker long 2, ledger
+  long 1`), or **equity moving more than 30% between two runs with no fills** (`equity_jump`). A
+  manual trade in the Tradovate app therefore pauses the desk — intended. Closes, rolls and
+  re-protection are never gated. While an entry is in flight (its fill exists before its ledger row)
+  the foreign/mismatch read is skipped for that run. A stop-out between two runs is settled AFTER the
+  check, so it counts as no fill — at $250 of risk on $50k it cannot move equity 30%, by design.
+  `/futures` shows the open anomaly (kind, detail, when) in a red panel with a **type CLEAR** control;
+  the API is `POST /api/futures/desk/enable` `{ "action": "clear-anomaly", "confirm": "CLEAR" }`.
+  `deskStatus()` returns `anomaly`, `feedSeenAt`, `feedStale`, and the last ten `watch` rows separately
+  from the 40-row inbox.
+- **Feed heartbeat.** The tenth chart, `pine/futures-desk-feed-heartbeat.pine` on **ES1! 60m**, posts
+  `{"action":"heartbeat"}` every confirmed bar. The webhook (secret required, rate-limited like any
+  alert) stores `futures_desk_feed_seen_at` and writes **no signal row**. `feedStale` = more than
+  **180 CME-open minutes** since the last heartbeat (the 17–18 break and the weekend count for
+  nothing; never seen = stale). Health carries `feedSeenAt` / `feedStale`; the guardian Slacks once
+  per 6 h while stale; the brief reads NO TRADE. **Entries are NOT refused for a stale feed** — an
+  alert that arrives is itself proof of the feed — it is a `checklist_json.warnings` entry. This also
+  catches TradingView's alert expiry (Essential: ~2 months unless open-ended).
+- **The enforced pre-trade checklist** runs after every existing refusal and right before the order,
+  and is stored whole as `checklist_json` on the signal row; the **first failure is the refusal**.
+  Exact strings: `account is not the demo (host must be demo.tradovateapi.com)` (asserted from the
+  desk client's pinned mode, `DESK_MODE`, through the same mode→host rule `tradovate.ts` uses) ·
+  `ES is not a root of index_daily_mr` · `contract month code V not in ACTIVE_MONTH_CODES for ES`
+  (metals: `ACTIVE_MONTH_CODES`; index roots: the quarterlies H/M/U/Z) ·
+  `MESU6 expires in 1 day — inside the roll window; entry refused` (E3's `rollWindowRefusal`, the one
+  string) · `micro symbol MES does not match MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` ·
+  `stop missing or on the wrong side of price` · `risk $301.70 exceeds the $250 budget` · `already
+  holding ES` · `event calendar not checked in the last 20 minutes` (missing, unreadable or stale —
+  a failure since E3) · feed stale = warning only.
+
+**Manual (E5):** add the tenth chart — ES1! 60m, paste `pine/futures-desk-feed-heartbeat.pine`, set
+the secret input, one alert → *Any alert() function call* → the desk webhook, message empty,
+open-ended. Verify: `/api/health` → `desk.feedSeenAt` moves within the hour and `feedStale` is false.
+
+## Event calendar, no-trade windows, CME holidays, roll window (E3, `src/lib/futures-desk-calendar.ts`)
+
+**The guardian writes `futures_desk_event_policy` every run** — `{mode, reason, until, at, source:
+"static", event}` from the shared `event-calendar.ts` policy (`eventPolicyNow`) on the **static
+`MACRO_EVENTS` table only**: Finnhub's economic calendar is a premium endpoint on this account, so
+nothing is fetched and `source` is always `static`. A feed being down can therefore never refuse an
+entry; what does refuse is the guardian not having written the row lately. Modes: **paused** — a
+tier-1 print (FOMC decision, CPI, NFP) within ±30 min; **reduced** — tier 1 within −12h..+2h, or a
+tier-2 print (PPI, PCE, FOMC minutes) within ±30 min; **normal** otherwise. FOMC Sep 16 2026 14:00 ET:
+reduced from 02:00 ET, paused 13:30–14:30, reduced until 16:00.
+
+**The entry path** (`contextNow` → `entryRefusal`, then the checklist) reads the row back and takes
+the STRICTER of the row's mode and the policy recomputed at the entry instant (paused > reduced >
+normal) — the row is the freshness proof, the live recomputation closes the gap between guardian runs
+(a row written at 13:29 ET reading `reduced` cannot let a 13:33 entry through the pause):
+- missing, unreadable or older than **20 minutes** → `event calendar not checked in the last 20
+  minutes` (the E5 checklist item is now a **failure** for a missing key too — the warning is gone);
+- paused → `event window: FOMC rate decision 14:00 ET — paused until 14:30`;
+- reduced → the budget is halved **on top of** the drawdown tier (`budgetMult = tier × 0.5`; tier 2
+  in a reduced window sizes at ×0.25). A stale `reduced` row does not halve anything — it refuses.
+- `event_mode` is stamped on the signal row (before the verdict, so a refused row says what it met)
+  and on the trade row.
+
+**CME holidays close ENTRIES only** (`CME_HOLIDAYS_2026`: Thanksgiving Nov 26 early 13:00 ET, Nov 27
+early 13:15, Dec 24 early 13:15, Dec 25 closed, Jan 1 2027 closed, MLK Jan 18 2027 early 13:00,
+Presidents' Day Feb 15 2027 early 13:00 — refresh when the 2027 schedule publishes). `cmeOpenForEntry`
+= `cmeOpen` and no holiday closure; refusals `CME holiday: Christmas Day — closed; entry refused` and
+`CME early close 13:00 ET (Thanksgiving) — entry refused for the rest of the day` (the evening reopen
+on an early-close day is holiday-thin, so it stays closed to entries through the ET day). A
+**closed-all-day** holiday closes everything: the alert queue, the queue drain, time stops and rolls
+use `cmeOpenForDesk` (= `cmeOpen` and not a closed day); an early-close evening stays open for exits
+and rolls on the plain `cmeOpen`. A queued entry that drains onto an early-close afternoon is refused,
+not placed; queued alerts keep the 12h expiry. The watch card's dry run is sized at tier × event too.
+
+**Sessions** (`sessionOf`, E4) are a journal slice, never a gate. Health exposes `eventMode`,
+`eventPolicyAt`, `eventPolicyFresh` and `cmeOpenForEntry`.
+
+## Leaderboard, daily and weekly review, promotion gate (E6, `src/lib/futures-desk-review.ts`)
+
+No money path. `futures-desk-metrics.ts` computes the series metrics (PF, max drawdown as % of
+basis, per-trade Sharpe/Sortino, avg R, expectancy $ and R, hit rate, MFE/MAE, streaks) — it
+**mirrors the shared `margin-metrics.ts` `sleeveMetrics`** that lands with the crypto PR in what it
+measures, on this desk's own row shape (judged P&L, `risk_usd`, close instant, MFE/MAE in R); an
+adapter onto the shared module may follow once both are on main. `journalToMetricRows` folds roll chains into one row each
+(`mergeRollChains`, which moved here from the status module): the **judged P&L is
+`pnl_after_slip_usd` summed across the legs** where every leg has it, else the demo's own
+(`pnlSource` says which; a chain with any leg lacking the after-slip figure is judged on the demo's
+`pnl_usd` for the WHOLE chain — never a mixed sum), fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's
+session / regime / side; risk = `risk_usd`. `futuresLeaderboard` = per edge, per edge × root, and
+per edge by session / regime / day-of-week / direction. `profitDistribution` = best trade / day /
+week / market as a share of GROSS profit.
+
+**Promotion gate** (`futuresPromotionVerdict`, one verdict per edge, on `/futures` and
+`/api/futures/desk` as `promotion`): `donchian_60m_long` ≥ 100 resolved over ≥ 56 days;
+`index_daily_mr` ≥ 30 resolved over ≥ 84 days (the daily-bar exception, stated on the gate: at ~3–5
+signals a year per root even 30 is unlikely inside the window, so its live case rests on backtest
+concordance too); net after slip > 0; PF ≥ 1.4 (strong ≥ 1.6); max drawdown ≤ 8% of basis (strong
+≤ 6%); t ≥ 2; best trade ≤ 25% and best day ≤ 30% of gross profit; ≥ 3 regime labels seen (**until
+E7 stamps regimes this reads "not yet measurable" and counts as failed — no edge can read
+LIVE-CANDIDATE before E7**); execution-error rate ≤ 2% (inbox `error` rows + ledger classes over
+executed + errored entries); no open anomaly. Verdict: all gates pass → **LIVE-CANDIDATE** (`strong`
+when PF ≥ 1.6 and DD ≤ 6%); the sample gates (resolved, span) fail → **GATHERING**; otherwise
+**FAILING**, with `failedGates[]`. A verdict is a document, never a switch — a live account is a
+separate typed decision.
+
+**Daily review** — the first guardian run after 17:05 ET per ET weekday (`state.reviewDayKey`, stamped
+with `guardianAt` before the work, run after the MFE/MAE fold): gross (demo), net after slip, trades,
+wins/losses, win rate, avg winner/loser, PF, expectancy, largest win/loss, fees, modeled slip, max
+intraday drawdown (**n/a** — the guardian keeps one equity per run, not a series), rule violations
+(error classes on the day's rows and inbox), refusals by reason, best/worst setup, watch rows →
+appended to `Performance/futures-desk-daily.md` (**capped at 120 entries**, the oldest rolled into
+`Performance/futures-desk-daily-archive.md`) + one condensed Slack line on `futures_demo`.
+**Weekly review** — the first guardian run on a Monday per ISO week (`state.weeklyReviewKey`): the
+leaderboard tables by strategy / instrument / session / day / regime / direction, the profit
+distribution, the promotion verdicts and stage readiness → `Performance/futures-desk-weekly.md`
+(overwritten) + Slack. **No new Vercel cron**; both are fail-soft guardian notes. `/futures` shows
+"Edges — promotion gate" (gate rows with ok / value / target, the edge × market leaderboard) and the
+stage-readiness line; the API returns `leaderboard`, `promotion`, `stageReadiness` (`reviewError`
+when the read failed).
+
 ## Proof
 
 `scripts/futures-desk-round-trip.ts` — 1× MES on the demo: OSO placed, fill confirmed, bracket stop
@@ -130,8 +321,10 @@ with the Railway env: `PROBE_PRICE=<MES last> node --env-file=<railway kv> --imp
 
 ## Tables and keys
 
-`futures_desk_signals` (inbox), `futures_desk_trades` (ledger) — raw SQL, never prisma-managed.
+`futures_desk_signals` (inbox), `futures_desk_trades` (ledger) — raw SQL, never prisma-managed; the
+E4 columns are added with `ADD COLUMN IF NOT EXISTS` on first use (`ensureDeskTables`, `futures-desk-store.ts`).
 `futures_desk_state` (JSON), `futures_desk_enabled`, `futures_desk_risk_pct` (Normal %),
 `futures_desk_risk_pct_strong`, `futures_desk_risk_pct_aplus`, `futures_desk_sizing_basis`,
 `futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_risk_state` (JSON),
-`futures_desk_entry_lock`. Slack lane `futures_demo` (`webhook_futures_demo`).
+`futures_desk_entry_lock`, `futures_desk_guard_lock`, `futures_desk_anomaly` (JSON; empty = clear),
+`futures_desk_feed_seen_at` (ISO). Slack lane `futures_demo` (`webhook_futures_demo`).

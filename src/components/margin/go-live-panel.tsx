@@ -24,6 +24,21 @@ export interface StrategyStat {
   grossPnl: number; fees: number; peakedGreen: number; liveNet: number; tStat: number | null; paperTStat?: number | null; verdict: string;
   forwardResolved?: number; days?: number;
 }
+// The leaderboard row (from /api/margin/scoreboard → leaderboard): the per-sleeve metrics,
+// the rolling decay read and the explicit live gate. Shapes mirror margin-leaderboard.ts.
+// Infinity does not survive JSON — a profit factor with no losses arrives as null; the page
+// reads `hitRate === 1` beside it as "∞".
+export interface MetricsView {
+  n: number; net: number; expectancy: number | null; profitFactor: number | null; hitRate: number | null;
+  sharpe: number | null; sortino: number | null; tStat: number | null; spanDays: number;
+  maxDD: number; maxDDPct: number | null; maxDDTrades: number; longestLossStreak: number;
+  avgR: number | null; medianR: number | null; rN: number; mfeR: number | null; mfeN: number; maeR: number | null; maeN: number;
+  feeShare: number | null;
+}
+export interface RollingView { state: "insufficient" | "stable" | "cooling" | "DECAYING"; window: number; welchT: number | null; note: string; lastN: number; lastExpectancy: number | null; priorExpectancy: number | null; lastNet: number }
+export interface PromotionGateView { name: string; ok: boolean; value: string; target: string }
+export interface PromotionView { ready: boolean; stage: string; gates: PromotionGateView[]; failed: string[]; note: string }
+export interface LeaderboardRowView { key: string; metrics: MetricsView; paperMetrics: MetricsView; rolling: RollingView; promotion: PromotionView }
 // Cost of capacity (from /api/margin/scoreboard → capacity): what the setups the executor
 // refused since arming went on to do, and a replay of the same stream with more slots.
 export interface CapacityView {
@@ -73,6 +88,33 @@ function Step({ title, status, tone, children }: { title: string; status: string
       <PanelBody className="space-y-3">{children}</PanelBody>
     </Panel>
   );
+}
+
+// One line of plain English per gate — the promotion gate's names are the keys (margin-leaderboard.ts).
+const GATE_HINTS: Record<string, string> = {
+  "Forward resolved trades": "enough of a sample under the rule as it stands",
+  "Net at live sizing": "it makes money after fees",
+  "Confidence (t)": "not luck",
+  "Distinct days": "not one good day",
+  "Max drawdown (live series)": "its worst run stays inside the breaker",
+  "Profit factor": "gross wins ÷ gross losses",
+  "Rolling record": "the last 30 are not a different, worse process (Welch t)",
+  "Live container": "the guardian can mirror its stop, hold and trail",
+  // the four original gates, used only when the leaderboard block failed to load
+  "Resolved trades": "enough of a sample",
+  "Net result at live sizing": "it makes money after fees",
+};
+/** The four gates this card showed before the leaderboard existed — the fallback when that block fails to load. */
+function legacyGates(c: StrategyStat): PromotionView {
+  const net = c.liveNet ?? 0; const t = c.tStat ?? null; const days = c.days ?? 0;
+  const gates: PromotionGateView[] = [
+    { name: "Resolved trades", ok: c.resolved >= 30, value: String(c.resolved), target: "30" },
+    { name: "Net result at live sizing", ok: c.resolved > 0 && net > 0, value: `${net < 0 ? "−" : ""}$${Math.abs(Math.round(net)).toLocaleString()}`, target: "> $0" },
+    { name: "Confidence (t)", ok: t != null && t >= 2, value: t == null ? "—" : t.toFixed(2), target: "2.00" },
+    { name: "Distinct days", ok: days >= 7, value: String(days), target: "7" },
+  ];
+  // Never READY from the fallback: the full gate (drawdown, PF, decay, container) was not read.
+  return { ready: false, stage: gates.every((g) => g.ok) ? "promising" : c.resolved < 30 ? "gathering" : "promising", gates, failed: gates.filter((g) => !g.ok).map((g) => g.name), note: "leaderboard unavailable" };
 }
 
 function GateRow({ label, value, target, ok, hint }: { label: string; value: string; target: string; ok: boolean; hint: string }) {
@@ -203,7 +245,7 @@ function ArmControls({ rtPassed, gateOk }: { rtPassed: boolean; gateOk: boolean 
   );
 }
 
-export function GoLivePanel({ strategies, capacity = null, candidateSource = null }: { strategies: StrategyStat[]; capacity?: CapacityView | null; candidateSource?: string | null }) {
+export function GoLivePanel({ strategies, capacity = null, candidateSource = null, leaderboard = [] }: { strategies: StrategyStat[]; capacity?: CapacityView | null; candidateSource?: string | null; leaderboard?: LeaderboardRowView[] }) {
   const { data: rt } = useSWR<RtView>("/api/margin/round-trip", fetcher, { refreshInterval: 30_000 });
   const { data: cfg } = useSWR<ExecCfg>("/api/margin/executor-config", fetcher, { refreshInterval: 60_000 });
   // The scorecard scores the sleeve that is ACTUALLY armed (kraken_margin_live_sources, via
@@ -218,14 +260,17 @@ export function GoLivePanel({ strategies, capacity = null, candidateSource = nul
   const plumbingStatus = rtRunning ? `Running · ${rtState?.stage}` : rtPassed ? `Passed · ${new Date(rtState!.finishedAt ?? rtState!.updatedAt).toLocaleDateString()}` : rtState?.stage === "done" ? "Failed checks" : rtState?.stage === "failed" ? "Last run failed" : "Not run yet";
   const plumbingTone: ChipTone = rtRunning ? "amber" : rtPassed ? "green" : rtState ? "red" : "grey";
 
-  const resolved = cand?.resolved ?? 0;
-  const net = cand?.liveNet ?? 0;
-  const t = cand?.tStat ?? null;
-  const days = cand?.days ?? 0;
-  const gate = { n: resolved >= 30, net: resolved > 0 && net > 0, t: t != null && t >= 2, days: days >= 7 };
-  const gateOk = gate.n && gate.net && gate.t && gate.days;
-  const gateStatus = !cand ? "No data yet" : gateOk ? "Real edge — gate open" : `${[gate.n, gate.net, gate.t, gate.days].filter(Boolean).length} of 4 green`;
-  const gateTone: ChipTone = !cand ? "grey" : gateOk ? "green" : "amber";
+  // THE GATE = promotionVerdict (margin-leaderboard.ts): eight named gates in order — forward
+  // sample, net at live sizing, t, days, max drawdown vs the breaker, profit factor, rolling
+  // record not DECAYING, a guardian-mirrored container. If the leaderboard block failed to
+  // load, the four original gates are rebuilt here from the scoreboard row so the card never
+  // goes blank — and says so.
+  const board = liveSource ? leaderboard.find((r) => r.key === liveSource) ?? null : null;
+  const promotion: PromotionView | null = board?.promotion ?? (cand ? legacyGates(cand) : null);
+  const gateOk = !!promotion?.ready;
+  const greens = promotion ? promotion.gates.filter((g) => g.ok).length : 0;
+  const gateStatus = !promotion ? "No data yet" : promotion.ready ? "Real edge — gate open" : `${greens} of ${promotion.gates.length} green`;
+  const gateTone: ChipTone = !promotion ? "grey" : promotion.ready ? "green" : promotion.stage === "REDUCE" ? "red" : "amber";
 
   const armed = !!cfg?.live.armed;
   const eq = cfg?.equity ?? 0;
@@ -236,17 +281,18 @@ export function GoLivePanel({ strategies, capacity = null, candidateSource = nul
         <Note>
           Strategy under test: <strong className="font-medium text-foreground/85">{cand?.label ?? (cfg?.live.liveSources ?? []).join(", ") ?? "—"}</strong>.
           {armed
-            ? <> ⚠️ This is a SCORECARD, not a gate — the desk is <strong className="font-medium text-foreground/85">already armed and trading real money</strong> on this sleeve, ahead of these four turning green. That was a deliberate call and it is logged. Until they are all green the edge is <strong className="font-medium text-foreground/85">undemonstrated</strong>, which is not the same as disproven: it means the sample is still too small to tell luck from skill.</>
-            : <> All four must be green. Until then nothing trades real money.</>}
+            ? <> ⚠️ This is a SCORECARD, not a gate — the desk is <strong className="font-medium text-foreground/85">already armed and trading real money</strong> on this sleeve, ahead of these gates turning green. That was a deliberate call and it is logged. Until they are all green the edge is <strong className="font-medium text-foreground/85">undemonstrated</strong>, which is not the same as disproven: it means the sample is still too small to tell luck from skill.</>
+            : <> Every gate must be green. Until then nothing trades real money.</>}
         </Note>
-        {cand ? (
+        {cand && promotion ? (
           <div className="space-y-1.5">
-            <GateRow label="Resolved trades" hint="enough of a sample" value={String(resolved)} target="30" ok={gate.n} />
-            <GateRow label="Net result at live sizing" hint="it makes money after fees" value={`${net < 0 ? "−" : ""}$${Math.abs(Math.round(net)).toLocaleString()}`} target="> $0" ok={gate.net} />
-            <GateRow label="Confidence (t)" hint="not luck" value={t == null ? "—" : t.toFixed(2)} target="2.00" ok={gate.t} />
-            <GateRow label="Distinct days" hint="not one good day" value={String(days)} target="7" ok={gate.days} />
+            {promotion.gates.map((g) => <GateRow key={g.name} label={g.name} hint={GATE_HINTS[g.name] ?? ""} value={g.value} target={g.target} ok={g.ok} />)}
             <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-muted-foreground">
-              Verdict <Chip tone={verdictTone(cand.verdict)}>{cand.verdict}</Chip>{cand.open > 0 && <span>· {cand.open} open now</span>}
+              Verdict <Chip tone={verdictTone(cand.verdict)}>{cand.verdict}</Chip>
+              <span>· gate</span> <Chip tone={promotion.ready ? "green" : promotion.stage === "REDUCE" ? "red" : promotion.stage === "PAPER-ONLY" ? "blue" : "amber"} title={promotion.note}>{promotion.stage}</Chip>
+              {board && <span title={board.rolling.note}>· rolling {board.rolling.window}: <span className={board.rolling.state === "DECAYING" ? "font-semibold text-down" : board.rolling.state === "cooling" ? "text-warn" : ""}>{board.rolling.state}</span></span>}
+              {!board && <span className="text-warn">· leaderboard block did not load — showing the four original gates</span>}
+              {cand.open > 0 && <span>· {cand.open} open now</span>}
             </div>
           </div>
         ) : <Note>No resolved trades for the live candidate yet.</Note>}

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Chip, verdictTone } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Explainer, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
-import { GoLivePanel, type CapacityView, type StrategyStat } from "@/components/margin/go-live-panel";
+import { GoLivePanel, type CapacityView, type LeaderboardRowView, type MetricsView, type StrategyStat } from "@/components/margin/go-live-panel";
 import { money, pct, pnl2, tone } from "@/lib/format";
 
 // ============ LIVE DESK ============
@@ -30,6 +30,8 @@ interface EdgeStat {
 interface EdgeBreakdowns { byDirection: EdgeStat[]; byCoin: EdgeStat[] }
 interface CandidateSlice { key: string; resolved: number; wins: number; hitRate: number | null; net: number; tStat: number | null; days: number; open: number }
 interface CandidateDetail { source: string; forward: CandidateSlice | null; byTimeframe: CandidateSlice[]; byEntryWindow: CandidateSlice[] }
+// Strategy decay (C3): kraken_margin_decay_multiplier as the executor reads it, and the rolling read behind it.
+interface DecayView { multiplier: string | null; state: { source: string; state: string; at: string; welchT: number | null; last30Net: number; lastExpectancy: number | null; priorExpectancy: number | null; reducedAt?: string; note: string } | null }
 
 // PRE-REGISTERED CUTS (Sep 7 2026): the live candidate sliced three fixed ways — forward-only,
 // by timeframe, by entry window. Registered before the samples exist so no cut is picked after
@@ -53,10 +55,24 @@ function edgeVerdict(e: EdgeStat): { label: string; tone: "grey" | "green" | "re
 }
 const hitTone = (h: number | null) => (h != null && h >= 0.5 ? "text-up" : "text-warn");
 
+// LEADERBOARD COLUMNS (margin-metrics.ts). Infinity does not survive JSON: a profit factor
+// with no losses arrives as null, so "every trade won" is read off the hit rate beside it.
+const pfText = (m: MetricsView) => (m.profitFactor != null ? m.profitFactor.toFixed(2) : m.n > 0 && m.hitRate === 1 ? "∞" : "—");
+const num2 = (x: number | null) => (x == null ? "—" : x.toFixed(2));
+const rollingTone = (state: LeaderboardRowView["rolling"]["state"]): "grey" | "green" | "amber" | "red" =>
+  state === "DECAYING" ? "red" : state === "cooling" ? "amber" : state === "stable" ? "green" : "grey";
+
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; degraded?: string[] }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; leaderboard?: LeaderboardRowView[]; decay?: DecayView; degraded?: string[] }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
+  const board = new Map((score?.leaderboard ?? []).map((r) => [r.key, r]));
+  // The decay multiplier is read as the executor reads it: missing/blank = 1×; anything the
+  // executor would refuse is shown as unreadable rather than silently as 1×.
+  const decayRaw = score?.decay?.multiplier ?? null;
+  const decayMult = decayRaw == null || decayRaw.trim() === "" ? 1 : Number(decayRaw);
+  const decayUnreadable = !Number.isFinite(decayMult) || decayMult < 0.25 || decayMult > 1;
+  const decayReduced = !decayUnreadable && decayMult < 1;
 
   // What we trade is the default view. Retired sleeves stay in the record (their numbers
   // are evidence, and a re-litigated kill needs them) but hide behind a toggle.
@@ -79,7 +95,7 @@ export default function PaperTradesPage() {
         sub="The armed desk: whether its edge is real yet, the controls to stop it, and the plumbing receipt. Every strategy is scored on paper first with real Kraken prices and your real fees — but the desk is ALREADY trading real money ahead of a green scorecard, which was a deliberate call."
       />
 
-      <GoLivePanel strategies={score?.strategies ?? []} capacity={score?.capacity ?? null} candidateSource={score?.candidate?.source ?? null} />
+      <GoLivePanel strategies={score?.strategies ?? []} capacity={score?.capacity ?? null} candidateSource={score?.candidate?.source ?? null} leaderboard={score?.leaderboard ?? []} />
 
       <Explainer title="How to read this page">
         <ul className="space-y-1">
@@ -91,6 +107,25 @@ export default function PaperTradesPage() {
           <li>Retired strategies (fast-tight, sweep-fade, scanner spray, selective-swing, shorts) lost on this record and no longer open trades. Their numbers stay behind the toggle in the scoreboard.</li>
         </ul>
       </Explainer>
+
+      {(decayReduced || decayUnreadable) && (
+        <Panel tone="red"><PanelBody>
+          {decayUnreadable ? (
+            <>
+              <p className="text-[13px] font-medium text-down">Live risk multiplier is unreadable — the executor refuses every entry.</p>
+              <Note className="mt-1">kraken_margin_decay_multiplier=&quot;{decayRaw}&quot; is outside 0.25–1. Set it to 1 (or clear it) on Live Desk to trade at full size again.</Note>
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] font-medium text-down">Live risk is REDUCED to {decayMult}× — {score?.decay?.state?.source ?? "the armed sleeve"} is decaying.</p>
+              <Note className="mt-1">
+                {score?.decay?.state?.reducedAt && <>Since {new Date(score.decay.state.reducedAt).toLocaleString()}. </>}
+                {score?.decay?.state?.note ?? "The last 30 paper trades are significantly worse than the record (Welch t ≤ −2)."} Every live entry now risks {decayMult}× its normal share (kraken_margin_decay_multiplier). It restores to 1× by itself only when the rolling read is stable again — a cooling read keeps the reduction. If the last 30 are also net ≤ $0 the sleeve demotes itself.
+              </Note>
+            </>
+          )}
+        </PanelBody></Panel>
+      )}
 
       {degraded.length > 0 && (
         <Panel tone="red"><PanelBody>
@@ -176,6 +211,13 @@ export default function PaperTradesPage() {
                 <Th num title="Fee + rollover drag">Fees</Th>
                 <Th num title="Gross − fees — what you actually keep, at the paper experiment's 3–6% research risk">Net (paper risk)</Th>
                 <Th num className="text-foreground" title="The same trades priced as the LIVE executor would size them — 3% risk, conviction-scaled exactly like paper. These columns agreeing is the check that live reproduces the record.">At live sizing</Th>
+                <Th num title="Mean ÷ standard deviation of per-trade P&L (live-sized), annualised by trades per year. RANKING ONLY, never a gate: crypto trades overlap and move together, so this is inflated — a sleeve holding three alts at once has fewer independent bets than trades. Blank under a 7-day span.">Sharpe</Th>
+                <Th num title="Like Sharpe but divides by the DOWNSIDE deviation only — big winners are not penalised as 'volatility'. Ranking only, same caveat.">Sortino</Th>
+                <Th num title="Profit factor = gross wins ÷ gross losses (live-sized). The gate needs ≥ 1.2. ∞ = no losing trade yet.">PF</Th>
+                <Th num title="Deepest peak-to-trough fall of the cumulative live-sized P&L, as a share of the reference account, with how many trades it took. The gate needs it inside the 15% breaker.">Max DD</Th>
+                <Th num title="Average R-multiple = P&L ÷ the dollars risked to the initial stop, FEE-INCLUSIVE — a clean stop-out reads about −1.05R, not −1R.">Avg R</Th>
+                <Th num title="Mean worst adverse excursion in R (how far trades went against you before resolving). Blank until the evaluator records troughs.">MAE (R)</Th>
+                <Th num title="Strategy decay: the last 30 trades against the ones before them (Welch t on live-sized P&L). DECAYING = t ≤ −2, which halves live risk and blocks promotion; cooling = negative window on a positive record, not significant.">Rolling 30</Th>
                 <Th num title="Went green at peak → finished green. The gap is the give-back — green that appeared but wasn't banked">Green banked</Th>
                 <Th num title="Judged on LIVE sizing: 30+ trades, positive net at live risk, t≥2 on the live-priced series, and resolutions spanning 7+ days.">Verdict</Th>
               </tr>
@@ -196,6 +238,20 @@ export default function PaperTradesPage() {
                   <Td num className="text-down/80">{s.fees ? `−$${Math.round(s.fees).toLocaleString()}` : "—"}</Td>
                   <Td num className={`${tone(s.totalPnl)} opacity-70`}>{money(s.totalPnl)}</Td>
                   <Td num className={`font-semibold ${tone(s.liveNet ?? 0)}`}>{money(s.liveNet ?? 0)}</Td>
+                  {(() => {
+                    const b = board.get(s.key); const m = b?.metrics;
+                    return (
+                      <>
+                        <Td num muted>{m ? num2(m.sharpe) : "—"}</Td>
+                        <Td num muted>{m ? num2(m.sortino) : "—"}</Td>
+                        <Td num className={m && m.profitFactor != null ? (m.profitFactor >= 1.2 ? "text-up" : m.profitFactor < 1 ? "text-down" : "") : ""}>{m ? pfText(m) : "—"}</Td>
+                        <Td num className={m && m.maxDDPct != null && m.maxDDPct * 100 > 15 ? "text-down" : ""} title={m ? `−$${Math.round(m.maxDD).toLocaleString()} over ${m.maxDDTrades} trade${m.maxDDTrades === 1 ? "" : "s"} · longest loss streak ${m.longestLossStreak}` : undefined}>{m && m.maxDDPct != null ? `${(m.maxDDPct * 100).toFixed(1)}%` : "—"}</Td>
+                        <Td num className={m && m.avgR != null ? tone(m.avgR) : ""} title={m ? `median ${num2(m.medianR)}R · ${m.rN} with a measured R` : undefined}>{m && m.avgR != null ? `${m.avgR.toFixed(2)}R` : "—"}</Td>
+                        <Td num muted title={m && m.maeN > 0 ? `${m.maeN} trades with a recorded trough · MFE ${num2(m.mfeR)}R` : "no troughs recorded yet"}>{m && m.maeR != null ? `${m.maeR.toFixed(2)}R` : "—"}</Td>
+                        <Td num>{b ? <Chip tone={rollingTone(b.rolling.state)} title={b.rolling.note}>{b.rolling.state}</Chip> : "—"}</Td>
+                      </>
+                    );
+                  })()}
                   <Td num muted title="peaked green → finished green">{s.resolved > 0 ? `${Math.round((s.peakedGreen / s.resolved) * 100)}% → ${Math.round((s.wins / s.resolved) * 100)}%` : "—"}</Td>
                   <Td num>
                     <span className="inline-flex items-center gap-1.5">
@@ -209,7 +265,7 @@ export default function PaperTradesPage() {
           </DataTable>
           <div className="border-t border-border px-4 py-3">
             <Note>
-              <strong>Gross</strong> is the raw edge (before fees); <strong>Fees</strong> is the drag; <strong>Net</strong> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if gross beats fees. Maker entries + fewer/bigger trades shrink the fees column. <strong>At live sizing</strong> prices each trade the way the live executor would size it; it matches the paper column because live scales by conviction (2× high, 0.5× low) exactly as paper does. While live bet a flat 3%, these same 48 trades were worth <span className="text-up">+$1,779</span> on paper and <span className="text-down">−$137</span> live — flat sizing halves the winners and doubles the losers. <strong>Green banked</strong> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept).
+              <strong>Gross</strong> is the raw edge (before fees); <strong>Fees</strong> is the drag; <strong>Net</strong> is what you keep. This is the exact battle that sank your real trading — your gross was ~break-even, but fees were the whole loss. A strategy only earns if gross beats fees. Maker entries + fewer/bigger trades shrink the fees column. <strong>At live sizing</strong> prices each trade the way the live executor would size it; it matches the paper column because live scales by conviction (2× high, 0.5× low) exactly as paper does. While live bet a flat 3%, these same 48 trades were worth <span className="text-up">+$1,779</span> on paper and <span className="text-down">−$137</span> live — flat sizing halves the winners and doubles the losers. <strong>Green banked</strong> is the give-back meter: what % of trades went green at their peak → what % finished green. A big gap means the strategy finds winners but hands them back — your August pattern (96% peaked green, 19% kept). <strong>Sharpe / Sortino</strong> rank sleeves and gate nothing — overlapping crypto trades inflate them. <strong>PF</strong>, <strong>Max DD</strong> and <strong>Rolling 30</strong> are three of the eight gates in the scorecard above; hover a header for the rule.
             </Note>
           </div>
         </Panel>

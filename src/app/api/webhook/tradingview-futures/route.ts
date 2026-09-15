@@ -2,10 +2,13 @@ import crypto from "crypto";
 import { prisma } from "@/lib/db";
 import { parseAlert } from "@/lib/futures-desk-rules";
 import { ensureDeskTables, handleAlert } from "@/lib/futures-desk";
+import { noteFeedSeen } from "@/lib/futures-desk-store";
 
 // TRADINGVIEW → FUTURES DESK. A TradingView alert POSTs the JSON its message template carries:
 //   { "secret": "…", "desk": "futures", "edge": "index_daily_mr", "symbol": "ES", "action": "entry",
 //     "side": "long", "price": 6531.25, "stop": 6470.50, "bar": "2026-09-14T21:00:00Z", "tf": "1D" }
+// A heartbeat study (pine/futures-desk-feed-heartbeat.pine, ES1! 60m) posts { "action": "heartbeat" }
+// every confirmed bar: it proves TradingView → webhook is alive and writes a timestamp, never a signal row.
 // Auth is the shared secret in the BODY (TradingView cannot set headers), compared in constant time.
 // Containment, in order: body-size cap → JSON guard → secret → DB-backed rate limit → the desk's own
 // dedupe (edge+market+action+bar is one event; TradingView retries on timeout, and a retry must never
@@ -18,6 +21,13 @@ function secretMatches(provided: unknown): boolean {
   if (!secret || typeof provided !== "string") return false;
   const a = Buffer.from(provided), b = Buffer.from(secret);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** `{ desk: "futures", action: "heartbeat" }` — `desk` is optional so an older heartbeat template still counts. */
+export function isHeartbeat(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  const b = body as Record<string, unknown>;
+  return b.action === "heartbeat" && (b.desk == null || b.desk === "futures");
 }
 
 export async function POST(request: Request) {
@@ -38,6 +48,11 @@ export async function POST(request: Request) {
     if (Number(recent) > 40) return Response.json({ error: "rate limited" }, { status: 429 });
   } catch { return Response.json({ error: "inbox unavailable — alert not accepted" }, { status: 503 }); }
 
+  // The feed heartbeat: authenticated and rate-limited like any alert, but it is a timestamp, not an event.
+  if (isHeartbeat(body)) {
+    try { await noteFeedSeen(); return Response.json({ status: "heartbeat" }); }
+    catch (e) { return Response.json({ error: String(e).slice(0, 200) }, { status: 500 }); }
+  }
   const parsed = parseAlert(body);
   if (!parsed.ok) return Response.json({ error: parsed.reason }, { status: 400 });
   try {

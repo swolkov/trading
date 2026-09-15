@@ -6,6 +6,7 @@ import { Chip, verdictTone } from "@/components/ui/chip";
 import { Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { ago, money, pnl0, tone } from "@/lib/format";
 import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
+import { FuturesPromotionPanel, type LeaderRowView, type PromotionVerdictView, type StageReadinessView } from "@/components/futures/promotion-panel";
 
 // ============ FUTURES DESK — Tradovate DEMO ============
 // The futures edge lab. TradingView evaluates each registered rule on real-time CME data and
@@ -27,8 +28,11 @@ interface Status {
   entriesToday: number;
   guardian: { at: string | null; fresh: boolean; lastError: string | null };
   broker: { balance: number; netLiq: number; positions: { contractId: number; netPos: number; netPrice: number }[]; workingOrders: number } | null;
-  brokerError: string | null; open: Trade[]; ledger: Trade[]; signals: Signal[]; cards: Card[];
+  brokerError: string | null; open: Trade[]; ledger: Trade[]; signals: Signal[]; watch: Signal[]; cards: Card[];
+  anomaly: { kind: string; detail: string; at: string } | null; feedSeenAt: string | null; feedStale: boolean;
   record: { trades: number; wins: number; pnl: number }; webhookPath: string; error?: string;
+  // E6: the promotion gate, the leaderboard and stage readiness (null while the review read fails; `reviewError` says why).
+  promotion: PromotionVerdictView[] | null; leaderboard: { byEdgeRoot: LeaderRowView[] } | null; stageReadiness: StageReadinessView | null; reviewError: string | null;
 }
 
 const btn = "inline-flex h-8 items-center justify-center rounded-md border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40";
@@ -38,6 +42,7 @@ const btnGo = `${btn} border-up/50 bg-up/10 text-up hover:bg-up/20`;
 export default function FuturesDeskPage() {
   const { data, mutate } = useSWR<Status>("/api/futures/desk", fetcher, { refreshInterval: 30_000 });
   const [confirm, setConfirm] = useState("");
+  const [clear, setClear] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -46,8 +51,8 @@ export default function FuturesDeskPage() {
     try {
       const r = await fetch("/api/futures/desk/enable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
-      setMsg(j.error ?? (j.enabled ? "ENABLED — the next registered alert trades on the demo" : "disabled"));
-      setConfirm(""); await mutate();
+      setMsg(j.error ?? (body.action === "clear-anomaly" ? "anomaly cleared — entries resume on the next alert" : j.enabled ? "ENABLED — the next registered alert trades on the demo" : "disabled"));
+      setConfirm(""); setClear(""); await mutate();
     } catch (e) { setMsg(String(e)); }
     setBusy(false);
   }
@@ -70,6 +75,7 @@ export default function FuturesDeskPage() {
           <>
             <Chip tone={data.enabled ? "green" : "grey"} dot={data.enabled} size="md">{data.enabled ? "ENABLED" : "disabled"}</Chip>
             <Chip tone={data.guardian.fresh ? "green" : "red"} size="md" title="The desk guardian runs every 5 minutes. Stale = no entries.">guardian {data.guardian.at ? ago(data.guardian.at) : "never"}</Chip>
+            <Chip tone={data.feedStale ? "red" : "green"} size="md" title="The TradingView heartbeat chart (ES1! 60m). Red after 180 CME-open minutes of silence = NO TRADE; entries are not refused — an arriving alert is proof of the feed.">feed {data.feedSeenAt ? ago(data.feedSeenAt) : "never"}</Chip>
           </>
         }
       />
@@ -78,6 +84,18 @@ export default function FuturesDeskPage() {
       {data.brokerError && <Panel tone="red"><PanelBody><Note><strong className="text-down">Tradovate did not answer</strong> — {data.brokerError}. Positions unknown, not zero.</Note></PanelBody></Panel>}
       {data.guardian.lastError && <Panel tone="amber"><PanelBody><Note>Last guardian error: {data.guardian.lastError}</Note></PanelBody></Panel>}
       {data.disabledReason && <Panel tone="red"><PanelBody><Note><strong className="text-down">Disabled by the guardian:</strong> {data.disabledReason}. Enabling again clears it — a person&apos;s decision, not a retry.</Note></PanelBody></Panel>}
+      {data.anomaly && (
+        <Panel tone="red">
+          <PanelHeader title="Anomaly — entries paused" aside={<span>{data.anomaly.kind} · {ago(data.anomaly.at)}</span>} />
+          <PanelBody className="space-y-2">
+            <Note><strong className="text-down">{data.anomaly.detail}.</strong> The guardian found the broker and the ledger disagreeing (a position the desk did not open, a qty/side mismatch, or an equity jump with no fills). Closes, rolls and re-protection continue; no new entry until a person looks at the Tradovate account and clears this.</Note>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input value={clear} onChange={(e) => setClear(e.target.value)} placeholder="type CLEAR" aria-label="Type CLEAR" className="h-8 w-full rounded-md border border-input bg-background px-2.5 text-[13px] sm:w-32" />
+              <button disabled={busy || clear !== "CLEAR"} onClick={() => post({ action: "clear-anomaly", confirm: clear })} className={`${btnDanger} w-full sm:w-auto`}>{busy ? "…" : "Clear the anomaly — entries resume"}</button>
+            </div>
+          </PanelBody>
+        </Panel>
+      )}
 
       <Panel>
         <PanelHeader title="Demo account" aside={<span>{data.broker ? `${data.broker.positions.length} broker position(s) · ${data.broker.workingOrders} working order(s)` : "broker not read"}</span>} />
@@ -111,6 +129,8 @@ export default function FuturesDeskPage() {
         </PanelBody>
       </Panel>
 
+      <FuturesPromotionPanel promotion={data.promotion} stageReadiness={data.stageReadiness} leaderboard={data.leaderboard} error={data.reviewError} />
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel>
           <PanelHeader title="Enable switch" />
@@ -139,11 +159,12 @@ export default function FuturesDeskPage() {
       <FuturesLedgerTable ledger={data.ledger} record={data.record} />
 
       <FuturesAlertInbox signals={data.signals} emptyHint="No alerts received yet. Set up the TradingView alerts below." />
+      <FuturesAlertInbox signals={data.watch} title="Watch — rules close to firing" aside="Pine v2 watch alerts, sized on paper (the dry-run card), never traded; three per market a day, gone after 24 h" emptyHint="No watch alerts yet — they arrive once the v2 scripts are pasted." />
 
       <Explainer title="TradingView setup — the exact alerts, and what the desk does with them">
         <ul>
           <li><strong>Webhook URL:</strong> <code>{origin}{data.webhookPath}</code>. TradingView Essential or higher (webhooks need a paid plan) plus the CME real-time data add-on, so the rule sees the same prices the broker fills at.</li>
-          <li><strong>One chart per market, the Pine script from <code>pine/</code> in the repo</strong>, one alert per chart set to &quot;Any alert() function call&quot;, message left as the script writes it. Index daily MR: ES1!, NQ1!, YM1! on 1D. Donchian: ES1!, NQ1!, YM1!, GC1!, SI1!, HG1! on 60. The secret goes into each script&apos;s input once.</li>
+          <li><strong>One chart per market, the Pine script from <code>pine/</code> in the repo</strong>, one alert per chart set to &quot;Any alert() function call&quot;, message left as the script writes it. Index daily MR: ES1!, NQ1!, YM1! on 1D. Donchian: ES1!, NQ1!, YM1!, GC1!, SI1!, HG1! on 60. Feed heartbeat: ES1! on 60 (the tenth chart). The secret goes into each script&apos;s input once.</li>
           <li><strong>What arrives:</strong> edge, market root, entry/exit, side, price, stop, the bar time. Only registered edges trade; an unknown edge or a missing stop is refused and shown in the inbox above.</li>
           <li><strong>What the desk does:</strong> sizes contracts = floor({L.riskPct}% × {money(L.sizingBasisUsd)} ÷ risk per micro), refuses below one contract, places a market entry with the stop in the same request (never naked), then the guardian: keeps a stop working, enforces the rule&apos;s time stop, rolls the month before expiry, settles closes from the broker&apos;s fills, and sends alerts that landed in the 17:00–18:00 ET break at the reopen.</li>
           <li><strong>The $50k:</strong> sizing is a % of a fixed basis, not of the demo&apos;s balance, so the record is comparable day to day. Reset the demo to $50,000 in the Tradovate app whenever you want the equity curve to match.</li>

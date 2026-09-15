@@ -3,6 +3,7 @@
 // broker's numbers and writes the result to `futures_desk_risk_state` for the page and health.
 // Imports run one way (this file → rules) so there is no module cycle.
 import { clusterOf, type Cluster, type DeskContext, type DeskLimits, type Side } from "@/lib/futures-desk-rules";
+import type { EventContext } from "@/lib/futures-desk-calendar";
 
 export { CLUSTER_OF, clusterOf, type Cluster } from "@/lib/futures-desk-rules";
 
@@ -85,9 +86,16 @@ export interface ContextInput {
   entriesToday: number;
   limits: DeskLimits;
   alert: { root: string; side: Side };
+  /** The budget × the composed multiplier (tier × event) — the worst case this entry would risk. */
   newRiskUsd: number;
   now: Date;
   dayKey: string;
+  /** The calendar as read back from `futures_desk_event_policy` (E3) — `eventContextOf`. */
+  event: Pick<EventContext, "mode" | "ageMs" | "window">;
+  /** The composed budget multiplier (tier × event) the entry is sized at. */
+  budgetMult: number;
+  /** `cmeHolidayRefusal(now)` — null on a normal day. */
+  cmeHoliday: string | null;
 }
 
 /** Fail closed on ENTRIES only: until the guardian has stamped a balance and a day-start balance
@@ -111,5 +119,8 @@ export function deskContextOf(i: ContextInput): DeskContext | { refusal: string 
     dailyLossRemainingUsd: dailyLossRemaining(s.dayKey === i.dayKey ? s.balance : s.dayStartBalance, s.dayStartBalance, or, i.limits),
     ddMult: ddTier(s.equity ?? 0, s.equityHigh ?? 0).mult,
     newRiskUsd: i.newRiskUsd,
+    eventMode: i.event.mode, eventPolicyAgeMs: i.event.ageMs, eventWindow: i.event.window,
+    budgetMult: i.budgetMult,
+    cmeHoliday: i.cmeHoliday,
   };
 }

@@ -1,10 +1,14 @@
 //@version=6
-// FUTURES DESK — Index daily mean-reversion, LONG only.
+// FUTURES DESK — Index daily mean-reversion, LONG only. Message v2 (Sep 2026).
 // Rule (scripts/daily-swing-validation.ts, 15 yr, two vendors): daily RSI(14) < 30 AND close > SMA200 × 0.92 → long
 // at the next open; exit when RSI(14) ≥ 50, or price hits entry − 1.5×ATR(14) (the broker holds that stop), or 30 days.
 // Apply to ES1!, NQ1!, YM1! on the 1D chart. Chart setting "Adjust for contract changes" ON. Create ONE alert per
 // chart: condition = this indicator → "Any alert() function call", webhook = the desk URL, message left empty
 // (the script writes the message). The desk sizes off a fixed $50k and refuses anything it does not recognise.
+//
+// v2 adds OPTIONAL context fields to every message (atr, rsi, volRatio, dist20h, d1Up, h4Up — journal stamps, never
+// gates; the desk parses a v1 message without them identically) and a "watch" action when RSI is under 33 with no
+// position on: the desk logs it and sizes it on paper, never trades it.
 indicator("Futures Desk — Index daily MR (long)", overlay = true, max_labels_count = 200)
 
 secret = input.string("", "Desk webhook secret")
@@ -12,6 +16,7 @@ rsiLen = 14
 atrLen = 14
 smaLen = 200
 rsiEntry = 30.0
+rsiWatch = 33.0
 rsiExit = 50.0
 smaFilter = 0.92
 stopAtr = 1.5
@@ -21,18 +26,27 @@ maxHoldDays = 30
 rsi = ta.rsi(close, rsiLen)
 atr = ta.atr(atrLen)
 sma = ta.sma(close, smaLen)
+volRatio = volume / ta.sma(volume, 20)
+dist20h = close / ta.highest(high, 20)[1] - 1
+d1Up = request.security(syminfo.tickerid, "D", close > ta.sma(close, 50))
+h4Up = request.security(syminfo.tickerid, "240", close > ta.sma(close, 50))
 
 var bool inPos = false
 var float stopPx = na
 var int entryTime = na
 
 root = syminfo.root
+num(float x) => na(x) ? "null" : str.tostring(x)
+flag(bool b) => b ? "true" : "false"
 msg(string action, float stop) =>
     '{"secret":"' + secret + '","desk":"futures","edge":"index_daily_mr","symbol":"' + root + '","action":"' + action +
-     '","side":"long","price":' + str.tostring(close) + ',"stop":' + (na(stop) ? "null" : str.tostring(stop)) +
-     ',"bar":' + str.tostring(time) + ',"tf":"1D"}'
+     '","side":"long","price":' + str.tostring(close) + ',"stop":' + num(stop) +
+     ',"bar":' + str.tostring(time) + ',"tf":"1D"' +
+     ',"atr":' + num(atr) + ',"rsi":' + num(rsi) + ',"volRatio":' + num(volRatio) + ',"dist20h":' + num(dist20h) +
+     ',"d1Up":' + flag(d1Up) + ',"h4Up":' + flag(h4Up) + '}'
 
 entrySig = not inPos and rsi < rsiEntry and close > sma * smaFilter and not na(sma)
+watchSig = not inPos and not entrySig and rsi < rsiWatch and not na(atr)
 // The broker's stop fills intraday; the chart only knows at the close. `low <= stop` is the honest proxy.
 stopHit = inPos and low <= stopPx
 timeUp = inPos and (time - entryTime) >= maxHoldDays * 86400000
@@ -45,6 +59,8 @@ if barstate.isconfirmed
         inPos := true
         alert(msg("entry", stopPx), alert.freq_once_per_bar_close)
         label.new(bar_index, low, "LONG\nstop " + str.tostring(stopPx, format.mintick), style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white)
+    else if watchSig
+        alert(msg("watch", close - stopAtr * atr), alert.freq_once_per_bar_close)   // the projected stop, so the desk can size it on paper
     else if stopHit
         inPos := false
         alert(msg("exit", float(na)), alert.freq_once_per_bar_close)   // harmless if the broker's stop already filled
