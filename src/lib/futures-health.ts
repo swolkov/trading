@@ -1,5 +1,6 @@
 import { cmeOpen } from "@/lib/futures-desk-rules";
 import { parseRiskState } from "@/lib/futures-desk-risk";
+import { feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
 
 // Read-only operational status. A saved "ready" flag is not evidence of a running engine.
 export function futuresHeartbeat(raw: string | undefined, now = Date.now()) {
@@ -36,6 +37,8 @@ export function futuresDeskHealth(config: Record<string, string>, now = Date.now
   const guardianTs = typeof state.guardianAt === "string" ? Date.parse(state.guardianAt) : NaN;
   const guardianValid = Number.isFinite(guardianTs) && guardianTs <= now;
   const risk = parseRiskState(config.futures_desk_risk_state);   // the guardian's portfolio snapshot; null until it has run
+  const feedTs = typeof config.futures_desk_feed_seen_at === "string" ? Date.parse(config.futures_desk_feed_seen_at) : NaN;
+  const anomaly = parseAnomaly(config.futures_desk_anomaly);
   return {
     configured,                                                  // broker + webhook credentials present on the server
     enabled: config.futures_desk_enabled === "true",             // the typed-ENABLE switch
@@ -49,6 +52,10 @@ export function futuresDeskHealth(config: Record<string, string>, now = Date.now
     openRisk: risk?.openRisk ?? null,
     dailyLossRemaining: risk?.dailyLossRemaining ?? null,
     cmeOpen: cmeOpen(new Date(now)),
+    // The TradingView heartbeat (E5): red after 180 CME-open minutes of silence — a NO TRADE chip, not a refusal.
+    feedSeenAt: Number.isFinite(feedTs) ? new Date(feedTs).toISOString() : null,
+    feedStale: feedStale(config.futures_desk_feed_seen_at, now),
+    anomaly: anomaly ? `${anomaly.detail} (${anomaly.at})` : null,   // entries paused until cleared from /futures
   };
 }
 

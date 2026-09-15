@@ -10,6 +10,8 @@ import { ACTIVE_MONTH_CODES, monthCodeOf } from "@/lib/contract-months";
 import type { TradingMode } from "@/lib/trading-mode";
 
 const MODE: TradingMode = "paper";
+/** The pinned mode, exported so the pre-trade checklist can ASSERT the demo host rather than assume it. */
+export const DESK_MODE: TradingMode = MODE;
 
 export interface DxOrder { id: number; contractId: number; action: "Buy" | "Sell"; ordStatus: string; clOrdId?: string; orderType?: string; timestamp?: string }
 export interface DxFill { id: number; orderId: number; contractId: number; timestamp: string; action: "Buy" | "Sell"; qty: number; price: number }

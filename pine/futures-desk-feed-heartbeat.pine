@@ -1,0 +1,14 @@
+//@version=6
+// FUTURES DESK — feed heartbeat. Apply to ES1! on the 60-minute chart (the tenth chart). ONE alert → "Any alert()
+// function call" → the desk webhook, message left empty. Every confirmed bar posts {"action":"heartbeat"} with the
+// secret; the desk stores the time it was last seen (futures_desk_feed_seen_at) and turns the feed chip red after
+// 180 CME-open minutes of silence — TradingView down, the alert expired, or the webhook unreachable. It writes no
+// signal row and never trades; entries are not refused for a stale feed (an arriving alert is itself proof of it).
+indicator("Futures Desk — feed heartbeat", overlay = true)
+
+secret = input.string("", "Desk webhook secret")
+
+if barstate.isconfirmed
+    alert('{"secret":"' + secret + '","desk":"futures","action":"heartbeat","bar":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+
+plot(na)

@@ -27,10 +27,11 @@ Only registered edges trade. Adding one is a code change (registry + Pine script
    real-time data** add-on for non-professionals so the chart sees the prices the broker fills at.
    Alerts on Essential expire after two months unless set open-ended — the inbox on `/futures` shows
    when alerts stop arriving.
-2. **Nine charts.** `ES1!`, `NQ1!`, `YM1!` on **1D** with `pine/futures-desk-index-daily-mr.pine`;
+2. **Ten charts.** `ES1!`, `NQ1!`, `YM1!` on **1D** with `pine/futures-desk-index-daily-mr.pine`;
    `ES1!`, `NQ1!`, `YM1!`, `GC1!`, `SI1!`, `HG1!` on **60** with
-   `pine/futures-desk-donchian-60m-long.pine`. Chart settings → Symbol → **Adjust for contract
-   changes: ON** (the validations used back-adjusted series).
+   `pine/futures-desk-donchian-60m-long.pine`; `ES1!` on **60** with
+   `pine/futures-desk-feed-heartbeat.pine` (the feed heartbeat). Chart settings → Symbol → **Adjust
+   for contract changes: ON** (the validations used back-adjusted series).
 3. **The secret.** Paste `TRADINGVIEW_WEBHOOK_SECRET` (Vercel) into each script's "Desk webhook secret"
    input. It travels in the alert body; TradingView cannot set headers.
 4. **One alert per chart.** Condition: the indicator → *Any alert() function call*. Notifications →
@@ -177,6 +178,48 @@ re-paste can happen chart by chart.
    carries `atr` (the desk page's inbox; or `SELECT score_json FROM futures_desk_signals ORDER BY id
    DESC LIMIT 1`).
 
+## Kill switches, platform safety, feed heartbeat, pre-trade checklist (E5, `src/lib/futures-desk-safety.ts`)
+
+Kept from before: guardian stale 20 min refuses entries, auth backoff, entry/guardian locks, the
+foreign-position report, unknown-status rows, the balance-read abort. Added:
+
+- **Three execution errors in one ET day disable the desk** (`disabledReason = "3 execution errors
+  today"`, one Slack; a person re-enables from `/futures`). Counted: inbox rows that ended in `error`
+  plus ledger rows classed `roll_failed` / `close_refused` / `unprotected` (an unprotected entry is
+  its signal's error, counted once). Tripped once per day, so a re-enable is not undone by the next
+  guardian run.
+- **Anomalies pause ENTRIES until a person clears them** (`futures_desk_anomaly` = `{kind, detail,
+  at}`; refusal `anomaly open: foreign position #123 — entries paused until cleared`). The guardian
+  writes one on: a contract the desk did not open (`foreign_position`), a broker position that
+  disagrees with its ledger row in qty or side (`ledger_mismatch on MESZ6: broker long 2, ledger
+  long 1`), or **equity moving more than 30% between two runs with no fills** (`equity_jump`). A
+  manual trade in the Tradovate app therefore pauses the desk — intended. Closes, rolls and
+  re-protection are never gated. While an entry is in flight (its fill exists before its ledger row)
+  the foreign/mismatch read is skipped for that run. Clear: `/futures` → `POST /api/futures/desk/enable`
+  `{ "action": "clear-anomaly", "confirm": "CLEAR" }`.
+- **Feed heartbeat.** The tenth chart, `pine/futures-desk-feed-heartbeat.pine` on **ES1! 60m**, posts
+  `{"action":"heartbeat"}` every confirmed bar. The webhook (secret required, rate-limited like any
+  alert) stores `futures_desk_feed_seen_at` and writes **no signal row**. `feedStale` = more than
+  **180 CME-open minutes** since the last heartbeat (the 17–18 break and the weekend count for
+  nothing; never seen = stale). Health carries `feedSeenAt` / `feedStale`; the guardian Slacks once
+  per 6 h while stale; the brief reads NO TRADE. **Entries are NOT refused for a stale feed** — an
+  alert that arrives is itself proof of the feed — it is a `checklist_json.warnings` entry. This also
+  catches TradingView's alert expiry (Essential: ~2 months unless open-ended).
+- **The enforced pre-trade checklist** runs after every existing refusal and right before the order,
+  and is stored whole as `checklist_json` on the signal row; the **first failure is the refusal**.
+  Exact strings: `account is not the demo (host must be demo.tradovateapi.com)` (asserted from the
+  desk client's pinned mode, `DESK_MODE`, through the same mode→host rule `tradovate.ts` uses) ·
+  `ES is not a root of index_daily_mr` · `contract MESU6 is not the desk's front month (MESZ6)` ·
+  `MESU6 is inside its roll window (expires in 1 day)` · `micro symbol MES does not match
+  MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` · `stop missing or on the wrong side of
+  price` · `risk $301.70 exceeds the $250 budget` · `already holding ES` · `event calendar not
+  checked in the last 20 minutes` (until E3 writes `futures_desk_event_policy` the key is missing and
+  this is a **warning**; a present-but-stale key is a failure) · feed stale = warning only.
+
+**Manual (E5):** add the tenth chart — ES1! 60m, paste `pine/futures-desk-feed-heartbeat.pine`, set
+the secret input, one alert → *Any alert() function call* → the desk webhook, message empty,
+open-ended. Verify: `/api/health` → `desk.feedSeenAt` moves within the hour and `feedStale` is false.
+
 ## Proof
 
 `scripts/futures-desk-round-trip.ts` — 1× MES on the demo: OSO placed, fill confirmed, bracket stop
@@ -190,4 +233,5 @@ E4 columns are added with `ADD COLUMN IF NOT EXISTS` on first use (`ensureDeskTa
 `futures_desk_state` (JSON), `futures_desk_enabled`, `futures_desk_risk_pct` (Normal %),
 `futures_desk_risk_pct_strong`, `futures_desk_risk_pct_aplus`, `futures_desk_sizing_basis`,
 `futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_risk_state` (JSON),
-`futures_desk_entry_lock`. Slack lane `futures_demo` (`webhook_futures_demo`).
+`futures_desk_entry_lock`, `futures_desk_guard_lock`, `futures_desk_anomaly` (JSON; empty = clear),
+`futures_desk_feed_seen_at` (ISO). Slack lane `futures_demo` (`webhook_futures_demo`).

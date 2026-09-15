@@ -178,7 +178,35 @@ export async function expireOldWatches(): Promise<number> {
   return prisma.$executeRawUnsafe(`UPDATE futures_desk_signals SET status = 'expired', reason = 'watch older than 24h', executed_at = now() WHERE status = 'watch' AND received_at < now() - interval '24 hours'`);
 }
 
+// ---- safety reads/writes (E5) ------------------------------------------------------------------------
+export const ANOMALY_KEY = "futures_desk_anomaly";
+export const FEED_SEEN_KEY = "futures_desk_feed_seen_at";
+/** The heartbeat chart's proof of life — a timestamp only, never a signal row. */
+export async function noteFeedSeen(): Promise<void> { await setKey(FEED_SEEN_KEY, new Date().toISOString()); }
+/** Execution errors of the last two days, for the daily count: signal rows that ended in `error`, plus
+ *  ledger rows classed roll_failed / close_refused / unprotected — an unprotected ENTRY is already its
+ *  signal's error, so it is not counted twice. An open row with a class is dated now (the problem is live). */
+export async function executionErrorEvents(): Promise<{ at: string; errorClass: string | null }[]> {
+  const rows = await prisma.$queryRawUnsafe<{ at: Date | string; error_class: string | null }[]>(
+    `SELECT received_at AS at, COALESCE(error_class, 'entry_error') AS error_class FROM futures_desk_signals WHERE status = 'error' AND received_at > now() - interval '2 days'
+     UNION ALL
+     SELECT CASE WHEN t.status = 'open' THEN now() ELSE COALESCE(t.closed_at, t.opened_at) END AS at, t.error_class FROM futures_desk_trades t
+     WHERE t.error_class IN ('roll_failed', 'close_refused', 'unprotected') AND COALESCE(t.closed_at, now()) > now() - interval '2 days'
+       AND NOT EXISTS (SELECT 1 FROM futures_desk_signals s WHERE s.trade_id = t.id AND s.status = 'error')`);
+  return rows.map((r) => ({ at: r.at instanceof Date ? r.at.toISOString() : String(r.at), errorClass: r.error_class }));
+}
+/** Ledger rows opened or closed since an instant — "fills since the last guardian run" for the equity-jump check. */
+export async function ledgerChangesSince(iso: string): Promise<number> {
+  const rows = await prisma.$queryRawUnsafe<{ n: bigint | number }[]>(`SELECT count(*) AS n FROM futures_desk_trades WHERE opened_at > $1::timestamptz OR closed_at > $1::timestamptz`, iso);
+  return Number(rows[0]?.n ?? 0);
+}
+
 // ---- locks (compare-and-set on an AgentConfig row) --------------------------------------------------
+/** Is the lock currently held (a fresh token)? The guardian skips the foreign/mismatch anomaly while an
+ *  entry is in flight — its fill exists before its ledger row does. */
+export async function lockHeld(key: string, ttlMs: number): Promise<boolean> {
+  try { const row = await prisma.agentConfig.findUnique({ where: { key } }); const at = Number(row?.value?.split("@")[1] || 0); return !!row?.value && Date.now() - at < ttlMs; } catch { return false; }
+}
 export async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
   const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const now = Date.now();

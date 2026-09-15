@@ -22,12 +22,14 @@ import {
 } from "@/lib/futures-desk-rules";
 import { ddTier, deskContextOf, riskStateOf } from "@/lib/futures-desk-risk";
 import { entrySlipPts, excursionJobDue, insertTrade, pnlAfterSlip, sessionOf, slipModelUsd, slipPtsPerSide, toR, updateExcursions, watchCapReached, watchCard } from "@/lib/futures-desk-journal";
+import { EXECUTION_ERRORS_DISABLE_AT, EXECUTION_ERRORS_REASON, anomalyRefusal, detectAnomaly, executionErrorsToday, feedStale, hostForMode, parseAnomaly, preTradeChecklist } from "@/lib/futures-desk-safety";
 import {
-  ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS, GUARD_LOCK_KEY, GUARD_LOCK_TTL_MS, LANE, acquireLock, alertOnce, cfg, deskEnabled, deskLimits, entriesToday, expireOldWatches,
-  loadState, markSignal, openTrades, patchState, rawRows, recordSignal, releaseLock, saveState, setKey, stampSignal, watchesToday, type DeskState, type TradeRow,
+  ANOMALY_KEY, ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS, FEED_SEEN_KEY, GUARD_LOCK_KEY, GUARD_LOCK_TTL_MS, LANE, acquireLock, alertOnce, cfg, deskEnabled, deskLimits, entriesToday,
+  executionErrorEvents, expireOldWatches, ledgerChangesSince, loadState, lockHeld, markSignal, openTrades, patchState, rawRows, recordSignal, releaseLock, saveState, setKey, stampSignal,
+  watchesToday, type DeskState, type TradeRow,
 } from "@/lib/futures-desk-store";
 import {
-  avgFill, cancelDeskOrder, contractExpiry, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
+  DESK_MODE, avgFill, cancelDeskOrder, contractExpiry, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
   findOrderByClOrdId, forgetContract, isWorking, liquidate, modifyStop, orderItem, placeEntryWithStop, placeStop, rollGuardDays,
   workingCloseOrders, type DxOrder,
 } from "@/lib/tradovate-desk";
@@ -133,7 +135,7 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const grade = gradeFor(a, promoted === "true");
     const tier = ddTier(state.equity ?? 0, state.equityHigh ?? 0);
     const ctx = await contextNow(state, limits, a, budgetFor(grade, limits) * tier.mult);   // worst case: the whole budget
-    const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits);
+    const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits) ?? anomalyRefusal(await cfg(ANOMALY_KEY));
     if (refusal) { await markSignal(signalId, "refused", refusal); return { status: "refused", reason: refusal, signalId }; }
     const stageDArmed = limits.stage === "D" && (await cfg("futures_desk_stage_d_armed")) === "true";
     const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult: tier.mult, stageDArmed });
@@ -141,6 +143,11 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     if (!size.ok) { await markSignal(signalId, "refused", size.reason); return { status: "refused", reason: size.reason, signalId }; }
     const contract = await deskContract(size.micro);
     if (!contract) { await markSignal(signalId, "error", `no ${size.micro} contract on Tradovate`); return { status: "error", reason: "contract", signalId }; }
+    // The enforced pre-trade checklist, stored whole on the signal row; the first failure is the refusal.
+    const [expiry, eventPolicyRaw, feedSeenAt] = await Promise.all([contractExpiry(contract.id), cfg("futures_desk_event_policy"), cfg(FEED_SEEN_KEY)]);
+    const check = preTradeChecklist(a, { brokerHost: hostForMode(DESK_MODE), frontMonth: contract.name, expiryIso: expiry, guardDays: rollGuardDays(size.micro), openRoots: "refusal" in ctx ? [] : ctx.openRoots, eventPolicyRaw, feedSeenAt, now: new Date() }, contract, size, limits);
+    await stampSignal(signalId, { checklistJson: JSON.stringify(check) });
+    if (!check.ok) { await markSignal(signalId, "refused", check.failures[0]); return { status: "refused", reason: check.failures[0], signalId }; }
     const stopDist = size.stopPoints;
     const action = a.side === "long" ? "Buy" : "Sell";
     const clOrdId = `fd-${signalId}`;
@@ -216,7 +223,7 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     await recordProtection(tradeId, stopId, stopId != null && stopId === stopOrderId && !anchored ? "stop at the provisional (chart) level — modify failed" : null);
     if (stopId == null) {
       // ensureProtected closed it; the guardian settles the round trip from the fills.
-      await markSignal(signalId, "error", `filled ${fill.qty}× ${contract.name} but could not be protected — closed`, tradeId);
+      await markSignal(signalId, "error", `filled ${fill.qty}× ${contract.name} but could not be protected — closed`, tradeId, "unprotected");
       return { status: "error", reason: "unprotected — closed", signalId, tradeId };
     }
     await markSignal(signalId, "executed", `${fill.qty}× ${contract.name} @ ${fill.price}`, tradeId);
@@ -284,6 +291,7 @@ async function guardBody(): Promise<GuardReport> {
   const state = await loadState();
   const limits = await deskLimits();
   const day = etDayKey(new Date());
+  const prev = { equity: state.equity, at: state.guardianAt };   // last run's numbers, for the equity-jump check
   let bal: Awaited<ReturnType<typeof deskBalance>>;
   try { bal = await deskBalance(); }
   catch (e) { await patchState((s) => { s.lastError = `broker: ${String(e).slice(0, 160)}`; }); return { ok: false, equity: state.equity ?? 0, open: 0, settled: 0, notes: [String(e).slice(0, 160)] }; }
@@ -301,6 +309,7 @@ async function guardBody(): Promise<GuardReport> {
   await saveState(state);
 
   const [positions, orders, open] = await Promise.all([deskPositions(), deskOrders(), openTrades()]);
+  await guardSafety(state, { positions, open, equity, prev, day, notes });
   // The risk snapshot for the page and health (display-only; the entry path recomputes from `state`).
   const rs = riskStateOf({ equity, equityHigh: state.equityHigh, balance: bal.balance, dayStartBalance: state.dayStartBalance, open, limits, now: new Date() });
   await setKey("futures_desk_risk_state", JSON.stringify(rs)).catch(() => {});
@@ -325,6 +334,7 @@ async function guardBody(): Promise<GuardReport> {
     expiries[t.id] = exp;
   }
   const fresh = await loadState();
+  if (feedStale(await cfg(FEED_SEEN_KEY), Date.now())) await alertOnce(fresh, "feed-stale", "📡 FUTURES DESK: no TradingView heartbeat in the last 180 CME-open minutes — the feed, the alert or the webhook is down. NO TRADE until it returns (entries are not refused; an arriving alert is proof of the feed).", 6 * 60 * 60_000);
   if (rs.tier === 3) await alertOnce(fresh, `dd-tier3-${day}`, `⚠️ FUTURES DESK drawdown ${rs.dd.toFixed(1)}% from the high — tier 3: budget ×0.25, micros only; investigate before the −10% halt.`, 24 * 60 * 60_000);
   // Roll planning: inside the last 5 days of a month, say when it rolls and into what; one Slack the day before.
   for (const plan of rollPreview(open.filter((t) => expiries[t.id] !== undefined), expiries, new Date(), rollGuardDays)) {
@@ -341,11 +351,13 @@ async function guardBody(): Promise<GuardReport> {
   await expireOldWatches().catch(() => {});
   // Queued alerts (CME break, lock contention, refused closes) — send at the reopen, expire when stale.
   if (cmeOpen(new Date())) {
-    const queued = await rawRows<{ id: number; edge: string; root: string; action: string; side: Side; price: number; stop: number | null; bar: string; timeframe: string; note: string | null; received_at: string }>(
+    const queued = await rawRows<{ id: number; edge: string; root: string; action: string; side: Side; price: number; stop: number | null; bar: string; timeframe: string; note: string | null; received_at: string; score: number | null; score_json: string | null }>(
       `SELECT * FROM futures_desk_signals WHERE status = 'queued' ORDER BY id`);
     for (const q of queued) {
       if (Date.now() - Date.parse(q.received_at) > QUEUE_MAX_AGE_MS) { await markSignal(q.id, "expired", "queued for more than 12h", null, "queue_expired"); continue; }
-      const a: AlertPayload = { edge: q.edge as AlertPayload["edge"], root: q.root, action: q.action as "entry" | "exit", side: q.side, price: q.price, stop: q.stop, bar: q.bar, timeframe: q.timeframe, note: q.note ?? "" };
+      let v2: Partial<AlertPayload> = {};   // the Pine v2 stamps ride along from the row so a replayed entry journals its ATR too
+      try { v2 = q.score_json ? JSON.parse(q.score_json) : {}; } catch { v2 = {}; }
+      const a: AlertPayload = { ...v2, edge: q.edge as AlertPayload["edge"], root: q.root, action: q.action as "entry" | "exit", side: q.side, price: q.price, stop: q.stop, bar: q.bar, timeframe: q.timeframe, note: q.note ?? "", ...(q.score != null ? { score: q.score } : {}) };
       try {
         const out = a.action === "exit" ? await exitByRule(q.id, a) : await enterFromSignal(q.id, a);
         notes.push(`queued #${q.id} → ${out.status}${out.reason ? ` (${out.reason})` : ""}`);
@@ -365,6 +377,37 @@ async function guardBody(): Promise<GuardReport> {
   }
   await patchState((s) => { s.guardianAt = new Date().toISOString(); s.lastError = excursionError; s.alerts = { ...s.alerts, ...fresh.alerts }; s.excursionDayKey = fresh.excursionDayKey; });
   return { ok: true, equity, open: open.length - settled, settled, notes };
+}
+
+/** Kill switches (E5), run right after the broker snapshot and before any position work. The guardian
+ *  has already saved its scalars, so what changes here is PATCHED onto the row (disabledReason, the
+ *  once-only stamps) and the anomaly key is written; never throws — a failed read is a note. */
+async function guardSafety(state: DeskState, i: { positions: { contractId: number; netPos: number }[]; open: TradeRow[]; equity: number; prev: { equity?: number; at?: string }; day: string; notes: string[] }): Promise<void> {
+  const before = JSON.stringify(state.alerts);
+  try {
+    // (a) three execution errors in one ET day disable the desk — once per day, so a re-enable is not undone by the next run.
+    const errKey = `exec-errors-${i.day}`;
+    if (!state.alerts[errKey] && executionErrorsToday(await executionErrorEvents(), i.day) >= EXECUTION_ERRORS_DISABLE_AT) {
+      state.disabledReason = EXECUTION_ERRORS_REASON;
+      await alertOnce(state, errKey, `🛑 FUTURES DESK disabled: ${EXECUTION_ERRORS_REASON}. Read the inbox and ledger error classes, then re-enable from /futures.`, 24 * 60 * 60_000);
+      i.notes.push(`disabled: ${EXECUTION_ERRORS_REASON}`);
+    }
+    // (b)(c) anomalies pause ENTRIES until a person clears them. A foreign/mismatch read while an entry is in
+    // flight is the entry's own fill (its ledger row comes after) — skipped; the next run sees the ledger.
+    if (!parseAnomaly(await cfg(ANOMALY_KEY))) {
+      const entryInFlight = await lockHeld(ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS);
+      const fillsSince = i.prev.at ? await ledgerChangesSince(i.prev.at) : 1;   // no previous run → no jump can be judged
+      const found = detectAnomaly({ positions: entryInFlight ? [] : i.positions, open: entryInFlight ? [] : i.open, prevEquity: i.prev.equity, equity: i.equity, fillsSince, now: new Date() });
+      if (found) {
+        await setKey(ANOMALY_KEY, JSON.stringify(found));
+        await alertOnce(state, `anomaly-${found.kind}`, `🚨 FUTURES DESK anomaly: ${found.detail}. Entries are PAUSED until cleared from /futures (type CLEAR); closes, rolls and re-protection continue.`, 6 * 60 * 60_000);
+        i.notes.push(`anomaly: ${found.detail}`);
+      }
+    }
+  } catch (e) { i.notes.push(`safety checks: ${String(e).slice(0, 120)}`); }
+  if (state.disabledReason === EXECUTION_ERRORS_REASON || JSON.stringify(state.alerts) !== before) {
+    await patchState((s) => { if (state.disabledReason === EXECUTION_ERRORS_REASON) s.disabledReason = s.disabledReason ?? EXECUTION_ERRORS_REASON; s.alerts = { ...s.alerts, ...state.alerts }; });
+  }
 }
 
 /** The broker is flat in this contract: cancel any stop that survived, find the exit fill, book the round trip. */
@@ -460,6 +503,14 @@ export async function setDeskEnabled(enabled: boolean, who: string): Promise<voi
   // the guardian would disable it again on its next run.
   await patchState((s) => { if (enabled) { s.disabledReason = undefined; s.equityHigh = s.equity ?? 0; } });
   await sendNotification(`${enabled ? "▶️" : "⏸"} FUTURES DESK ${enabled ? "ENABLED" : "DISABLED"} by ${who}.`, LANE).catch(() => {});
+}
+
+/** A person has looked: the anomaly key is emptied and entries resume on the next alert. */
+export async function clearAnomaly(who: string): Promise<void> {
+  const open = parseAnomaly(await cfg(ANOMALY_KEY));
+  await setKey(ANOMALY_KEY, "");
+  await patchState((s) => { for (const k of Object.keys(s.alerts)) if (k.startsWith("anomaly-")) delete s.alerts[k]; });
+  await sendNotification(`✅ FUTURES DESK anomaly cleared by ${who}${open ? ` (${open.detail})` : ""} — entries resume.`, LANE).catch(() => {});
 }
 
 /** Advance the sizing stage (A→B→C) — the route checks readiness first; this only records and announces. */
