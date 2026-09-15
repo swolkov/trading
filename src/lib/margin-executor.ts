@@ -93,6 +93,7 @@ import { eventRiskMultiplier, readEventPolicy } from "@/lib/margin-events";
 import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, refusalNote, revengePauseHit, setupGradeFor } from "@/lib/margin-risk-tiers";
 import { announceTradeCard, buildTradeCard, persistTradeCard, type CardRegime, type TradeCard } from "@/lib/margin-trade-card";
 import { clusterEntryAllowed, exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
+import { ANOMALY_KEY, anomalyActive } from "@/lib/margin-anomaly";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -807,6 +808,18 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
   } catch {
     return { executed: false, validated: false, note: "could not read the drawdown breaker — failing closed" };
+  }
+  // Layer 8d: THE ANOMALY KILL SWITCH (margin-anomaly.ts). The guardian writes
+  // kraken_margin_anomaly when a live tranche does not match its trade card (leverage, size, a
+  // widened stop) or when a stop of ours rests beside a position the ledger does not know.
+  // Any non-blank value refuses NEW entries — pyramid adds included — until an operator has
+  // looked and cleared it (executor-config route, clear-anomaly). Closes are above this line
+  // and never affected. STRICT read: an unreadable flag is a set flag.
+  try {
+    const anomaly = await cfgStrict(ANOMALY_KEY);
+    if (anomalyActive(anomaly)) return { executed: false, validated: false, note: refusalNote.anomaly(anomaly!) };
+  } catch (e) {
+    return { executed: false, validated: false, note: refusalNote.anomalyUnreadable(String(e)) };
   }
 
   // Serialize entries: without this, two alerts landing together both read the same

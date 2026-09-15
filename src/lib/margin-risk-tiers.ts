@@ -196,6 +196,8 @@ export const REFUSAL_RE = {
   eventUnreadable: /^entry refused: could not read the event policy/,
   cluster: /^entry refused: all-stops risk \$[\d.]+ \+ \$[\d.]+ would exceed the cluster cap/,
   clusterCapInvalid: /^entry refused: kraken_margin_cluster_risk_cap_pct .* is not a number/,
+  anomaly: /^entry refused: kraken_margin_anomaly is set — /,
+  anomalyUnreadable: /^entry refused: could not read kraken_margin_anomaly/,
 } as const;
 export const refusalNote = {
   ddUnknown: (peakRaw: string | null, equity: number) => `entry refused: drawdown tier unknown — failing closed (kraken_margin_equity_peak=${peakRaw ?? "missing"}, equity $${equity.toFixed(0)})`,
@@ -208,4 +210,6 @@ export const refusalNote = {
   eventUnreadable: (err: string) => `entry refused: could not read the event policy (${err.slice(0, 60)}) — failing closed`,
   cluster: (existingUsd: number, newUsd: number, capPct: number, equity: number) => `entry refused: all-stops risk $${existingUsd.toFixed(0)} + $${newUsd.toFixed(0)} would exceed the cluster cap ${capPct.toFixed(1)}% of equity ($${equity.toFixed(0)}) — every open stop hit at once must stay inside the breaker's headroom`,
   clusterCapInvalid: (raw: string | null) => `entry refused: kraken_margin_cluster_risk_cap_pct "${raw}" is not a number — failing closed`,
+  anomaly: (value: string) => `entry refused: kraken_margin_anomaly is set — ${value.split("\n")[0].slice(0, 160)}${value.includes("\n") ? " (+more)" : ""} — the live book does not match what was authorised; investigate on Kraken, then clear the key`,
+  anomalyUnreadable: (err: string) => `entry refused: could not read kraken_margin_anomaly (${err.slice(0, 60)}) — failing closed`,
 } as const;

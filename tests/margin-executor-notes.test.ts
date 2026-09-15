@@ -20,6 +20,8 @@ test("every refusal builder produces a string its own regex matches", () => {
     ["eventUnreadable", refusalNote.eventUnreadable("connect ECONNREFUSED")],
     ["cluster", refusalNote.cluster(800, 800, 15, 10_000)],
     ["clusterCapInvalid", refusalNote.clusterCapInvalid("abc")],
+    ["anomaly", refusalNote.anomaly("OABC: leverage 20 vs authorised 9")],
+    ["anomalyUnreadable", refusalNote.anomalyUnreadable("boom")],
   ];
   for (const [k, note] of cases) assert.match(note, REFUSAL_RE[k], k);
   // The exact words, pinned.

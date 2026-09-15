@@ -23,6 +23,7 @@ import { bookExposureMatches, recoveryBlocksPair, type PyramidRecovery } from "@
 import { maeR, mfeR, troughUpdate } from "@/lib/margin-shadow-excursion";
 import { upsertRoundTripOpen, type RoundTripOpen } from "@/lib/margin-round-trips";
 import { exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
+import { ANOMALY_KEY, bookMatchesCard, mergeAnomaly, unledgeredBesideOurStop, type CardForCheck } from "@/lib/margin-anomaly";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -175,6 +176,22 @@ export async function GET(request: Request) {
   const sent: string[] = [];
   const errors: string[] = [];
   const { state, unreliable: stateUnreliable, corrupt: stateCorrupt } = await loadState();
+  // THE ANOMALY KILL SWITCH (margin-anomaly.ts): merge findings into kraken_margin_anomaly —
+  // the executor refuses NEW entries while it is non-blank — and page once an hour per key.
+  // Best-effort by construction: nothing here can throw into the protect loop.
+  const flagAnomaly = async (findings: string[], pageKey: string, message: string): Promise<void> => {
+    if (!findings.length) return;
+    try {
+      const row = await prisma.agentConfig.findUnique({ where: { key: ANOMALY_KEY } });
+      const value = mergeAnomaly(row?.value ?? null, findings);
+      await prisma.agentConfig.upsert({ where: { key: ANOMALY_KEY }, update: { value }, create: { key: ANOMALY_KEY, value } });
+    } catch (e) { errors.push(`anomaly write: ${String(e).slice(0, 80)}`); }
+    if (shouldFire(state, pageKey)) {
+      await sendNotification(message, "margin_urgent").catch(() => {});
+      state.alerts[pageKey] = new Date().toISOString();
+      sent.push(pageKey);
+    }
+  };
   if (stateUnreliable) errors.push("guardian state unreadable — alerts only this run (no reconciliation, no managed exit, no save)");
   if (stateCorrupt) {
     await sendNotification("🚨 margin_watch_state was CORRUPT and has been reset (raw value saved to margin_watch_state_corrupt_backup). Orphan counters and managed-exit 1R/peak restart from the resting stops.", "margin_urgent").catch(() => {});
@@ -482,11 +499,29 @@ export async function GET(request: Request) {
       // no position now is a book that just flattened — its attached close[] stop is not
       // reduce-only and must not wait two sightings. (Positions read is reliable here.)
       const hadBookLastRun = new Set(Object.keys(state.managed ?? {}).map((k) => k.split("|").slice(0, 2).join("|")));
+      const samePair3b = (a: string, b: string) => pairBase(a) === pairBase(b);
       for (const o of mine) {
         const isStop = o.ordertype.includes("stop");
         const isEntry = o.ordertype === "limit" || o.ordertype === "market";
         if (isStop) {
           if (positionsUnreliable || recoveryBlocksPair(recovery3b, o.pair)) continue; // preserve pending-add protection
+          // A BOT-SHAPED POSITION THE LEDGER DOES NOT KNOW: our stop beside a position that is not
+          // ours, with nothing of ours on that pair+side. Most likely a bot entry whose ledger write
+          // was lost — its only stop must NOT be swept. Page with the adopt instruction and set the
+          // anomaly (no new entries until an operator has looked). If it is Spencer's own position
+          // beside a stale stop, the page says so too: cancel the stop by hand and clear the key.
+          // Only a stop older than two minutes: a fresh entry's attached close[] can show before
+          // its ledger write lands, and that is not an unledgered position, it is one in flight.
+          const unledgered = (positionsReadAtSec - o.opentm) > 120 ? unledgeredBesideOurStop(o, positions, own3b && !own3b.ledgerCorrupt ? own3b.isOurs : null, samePair3b) : [];
+          if (unledgered.length) {
+            const ids = unledgered.map((p) => p.ordertxid || p.id).join(", ");
+            await flagAnomaly(
+              unledgered.map((p) => `${p.ordertxid || p.id}: bot-shaped position on ${o.pair} — our stop ${o.txid} rests beside it but the ledger does not know it`),
+              `anomaly-unledgered-${pairBase(o.pair)}-${o.side}`,
+              `🚨 ${o.pair}: our stop ${o.txid} rests beside position(s) ${ids} that the ledger does NOT know. If the bot opened it, ADOPT it now (kraken_margin_adopt_txids=${ids}) so the guardian manages it; if it is YOURS, cancel the stop on Kraken. Either way clear kraken_margin_anomaly afterwards — no new bot entries until then. The stop was NOT swept.`,
+            );
+            continue;
+          }
           if (!stopProtectsLive(o)) {
             const seen = (priorOrphans[o.txid] ?? 0) + 1;  // this run's sighting
             // Only a stop OLDER than a fresh entry could belong to the flattened book: an
@@ -694,6 +729,31 @@ export async function GET(request: Request) {
           openedAt: Number.isFinite(oldestMs) ? new Date(oldestMs).toISOString() : null,
           peak, trough, mfeR: mfeR(dirN, entryPrice, peak, oneR), maeR: maeR(dirN, entryPrice, trough, oneR), lastStopLevel,
         };
+        // DOES THE LIVE BOOK MATCH ITS CARD? (margin-anomaly.ts) Per tranche: leverage, size and
+        // side against the trade card it was ledgered with; per book: the resting stop against the
+        // level the guardian ledgered LAST run (never wider). A mismatch pages and sets the anomaly;
+        // protection below continues regardless. Read-only here; any failure is an error line.
+        try {
+          const cardIds = grp.map((g) => ownership.cardIdOf(g.ordertxid)).filter((id): id is number => id != null);
+          const cards = new Map<number, CardForCheck>();
+          if (cardIds.length) {
+            const rows = await prisma.$queryRawUnsafe<{ id: number; card: { leverageUsed?: unknown; notional?: unknown; side?: unknown } | null }[]>(`SELECT id, card FROM margin_trade_cards WHERE id = ANY($1::int[])`, cardIds);
+            for (const r of rows) if (r.card && typeof r.card === "object") cards.set(r.id, { leverageUsed: Number(r.card.leverageUsed), notional: Number(r.card.notional), side: r.card.side === "sell" ? "sell" : "buy" });
+          }
+          const findings: string[] = [];
+          grp.forEach((g, i) => {
+            const cid = ownership.cardIdOf(g.ordertxid);
+            const check = bookMatchesCard(
+              { txid: g.ordertxid, leverage: g.leverage, notional: g.vol * g.entryPrice, side, restingStop: i === 0 ? bestResting : null, ledgeredStop: i === 0 ? (prev?.lastStopLevel ?? null) : null, px },
+              cid != null ? cards.get(cid) ?? null : null,
+            );
+            findings.push(...check.findings);
+          });
+          if (findings.length) {
+            await flagAnomaly(findings, `anomaly-book-${bookKey}`, `🚨 ${pairRaw} ${side}: the live book does NOT match what was authorised — ${findings.join("; ").slice(0, 500)}. Protection continues; NEW bot entries are refused until kraken_margin_anomaly is cleared. Check the position on Kraken first.`);
+            errors.push(`anomaly ${bookKey}: ${findings.length} finding(s)`);
+          }
+        } catch (e) { errors.push(`book check ${bookKey}: ${String(e).slice(0, 80)}`); }
         // The managed level is computed from the AUTHORISED stop and the peak — never from
         // whatever stop happens to be resting (a temporary breach guard must not become the
         // permanent target). The planner keeps a resting stop that is already better.
