@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { MarginChart, INTERVAL_LABELS, useTimeframeStats, type PriceLevel } from "@/components/margin/margin-chart";
+import { DeskBriefPanel } from "@/components/margin/desk-brief-panel";
 import { pairMatchesSymbol, SCAN_UNIVERSE } from "@/lib/kraken-pairs";
 import { Chip } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
@@ -149,6 +150,9 @@ export default function MarginCockpitPage() {
           <Note className="mt-0.5">Volatility around these prints routinely exceeds a 20x position&apos;s entire 3% cushion. Being levered into one is a choice — make it knowingly.</Note>
         </PanelBody></Panel>
       )}
+
+      {/* ── Desk brief (daily, eight sections, rule-derived ACTION) ── */}
+      <DeskBriefPanel />
 
       {/* ── Open positions ── */}
       <Panel>

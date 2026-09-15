@@ -4,7 +4,7 @@ import { mtfState, tfDirection } from "../src/lib/margin-mtf";
 import type { TfFeatures } from "../src/lib/margin-scanner";
 
 const feat = (close: number, sma20: number, prevClose20: number): TfFeatures => ({
-  close, sma20, prevClose20, hh20: NaN, ll20: NaN, hh90: NaN, ll90: NaN, atr14: NaN, atrRatio30: NaN, volRatio20: NaN, rsi14: NaN,
+  close, ret1: NaN, sma20, prevClose20, hh20: NaN, ll20: NaN, hh90: NaN, ll90: NaN, atr14: NaN, atrRatio30: NaN, volRatio20: NaN, rsi14: NaN,
   lastRange: NaN, dollarVol20: NaN, gapBars: 0, dupBars: 0, staleMs: 0, dataOk: true, dataReason: null,
 });
 const UP = feat(110, 100, 105);

@@ -135,7 +135,7 @@ test("source: the scan route computes the shock once from btcBars, carries it in
   const vetoAt = scan.indexOf("altEntryVetoed(btcState, side, s.coin)");
   const execAt = scan.indexOf("await executeAlert({");
   assert.ok(insertAt > 0 && insertAt < vetoAt && vetoAt < execAt);
-  assert.ok(/gatherIntel\(scan, eventStamp, \{ state: btcStateStamp\(btcState\) \}\)/.test(scan), "btc_state is stamped on every paper row");
+  assert.ok(/gatherIntel\(scan, eventStamp, \{ state: btcStateStamp\(btcState\) \}/.test(scan), "btc_state is stamped on every paper row");
   // The guardian's fast-move line carries the veto clock for BTC.
   const watch = readFileSync(new URL("../src/app/api/cron/margin-watch/route.ts", import.meta.url), "utf8");
   assert.ok(/fastMoveVetoSuffix\(dir\)/.test(watch));

@@ -15,6 +15,7 @@ import { snapshotDerivatives } from "@/lib/margin-derivatives";
 import { readEventPolicy } from "@/lib/margin-events";
 import { recordRefusal } from "@/lib/margin-trade-card";
 import { altEntryVetoed, btcShock, btcStateStamp, btcVetoEnabled, BTC_VETO_KEY, carryShock, type BtcShockCarry } from "@/lib/margin-btc-shock";
+import { briefDue, publishDeskBrief } from "@/lib/margin-brief-build";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -34,7 +35,8 @@ const TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_scan_signals (
 )`;
 
 // btcShock: the BTC-shock veto carried across ticks (margin-btc-shock.ts carryShock).
-interface State { fired: Record<string, string>; btcShock?: BtcShockCarry | null }
+// briefDay: the UTC day the desk brief was last written (margin-brief-build.ts briefDue).
+interface State { fired: Record<string, string>; btcShock?: BtcShockCarry | null; briefDay?: string | null }
 
 async function loadState(): Promise<State> {
   try {
@@ -433,6 +435,20 @@ export async function GET(request: Request) {
   // Automatic risk increases remain disabled pending complete financing evidence.
   // Kill criteria that fire by themselves: forward record not paying, or live diverging from paper.
 
+
+  // THE DAILY DESK BRIEF (margin-brief-build.ts): the first tick after 13:00 UTC, once per day,
+  // only with a minute of route budget left — the eight sections from this tick's features and
+  // look[], the cached display snapshot, and the desk's own keys. Fail-soft; the day key is set
+  // first so a slow brief can never run twice.
+  try {
+    const due = briefDue(state.briefDay, Date.now());
+    if (due.due && routeDeadlineMs - Date.now() > 60_000) {
+      state.briefDay = due.day;
+      await saveState(state);
+      const b = await publishDeskBrief({ features: scan.features, opportunities: look });
+      if (!b) errors.push("desk brief: not written");
+    }
+  } catch (e) { errors.push(`desk brief: ${String(e).slice(0, 80)}`); }
 
   await saveState(state);
 

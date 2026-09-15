@@ -7,11 +7,13 @@
 //   btc   — the BTC-shock state (B3)
 //   deriv — funding / open interest (B4)
 //   opportunity — the 0–100 paper ranker, per signal (B5, stampSql's third argument)
+//   regime — the nine-word regime label per coin (B6)
 // stampSql() keeps the scan route's INSERT thin: it hands back the column names and values
 // for whatever sections are present, so a section that is not built yet stamps nothing.
-import type { UniverseScan } from "@/lib/margin-scanner";
+import type { TfFeatures, UniverseScan } from "@/lib/margin-scanner";
 import { mtfState, type MtfState } from "@/lib/margin-mtf";
 import type { OpportunityScore } from "@/lib/margin-opportunity-score";
+import { regimeLabelFor, type RegimeLabel } from "@/lib/margin-regime-label";
 import { SCAN_COINS } from "@/lib/margin-scanner";
 
 /** Bumped whenever a stamp's MEANING changes, so slices never pool two definitions. */
@@ -25,6 +27,7 @@ export interface DerivStamp { funding: number | null; oi: number | null; oiChg24
 export interface Intel {
   version: string;
   mtf: Record<string, MtfState>;
+  regime: Record<string, RegimeLabel>;
   event: EventStamp | null;
   btc: BtcStamp | null;
   deriv: Record<string, DerivStamp> | null;
@@ -41,12 +44,18 @@ export function derivStamps(byCoin: Record<string, { source: string; funding8hRe
 export function gatherIntel(scan: Pick<UniverseScan, "features">, event: EventStamp | null = null, btc: BtcStamp | null = null, deriv: Record<string, DerivStamp> | null = null): Intel {
   const mtf: Record<string, MtfState> = {};
   for (const c of SCAN_COINS) mtf[c.name] = mtfState(scan.features, c.name);
-  return { version: INTEL_VERSION, mtf, event, btc, deriv };
+  return { version: INTEL_VERSION, mtf, regime: regimeStamps(scan.features), event, btc, deriv };
 }
 
 export type StampValue = string | number | null;
 /** Per-SIGNAL stamps (they depend on side/timeframe, not just the coin): the 0–100 paper ranker (B5). */
 export interface SignalStamps { opportunity?: OpportunityScore | null }
+/** regime_label per coin (margin-regime-label.ts) — computed once per tick from the features. */
+export function regimeStamps(features: Record<string, TfFeatures>): Record<string, RegimeLabel> {
+  const out: Record<string, RegimeLabel> = {};
+  for (const c of SCAN_COINS) out[c.name] = regimeLabelFor(features, c.name);
+  return out;
+}
 /** Columns + values to append to the paper row INSERT for `coin`. Always mtf_state and intel_version. */
 export function stampSql(intel: Intel, coin: string, signal: SignalStamps = {}): { columns: string[]; values: StampValue[] } {
   const columns = ["mtf_state", "intel_version"];
@@ -56,5 +65,6 @@ export function stampSql(intel: Intel, coin: string, signal: SignalStamps = {}):
   const d = intel.deriv?.[coin];
   if (d) { columns.push("deriv_funding", "deriv_oi", "deriv_oi_chg_24h", "deriv_source"); values.push(d.funding, d.oi, d.oiChg24h, d.source); }
   if (signal.opportunity) { columns.push("opportunity_score", "opportunity_json"); values.push(signal.opportunity.score, JSON.stringify({ components: signal.opportunity.components, missing: signal.opportunity.missing })); }
+  if (intel.regime?.[coin]) { columns.push("regime_label"); values.push(intel.regime[coin]); }
   return { columns, values };
 }

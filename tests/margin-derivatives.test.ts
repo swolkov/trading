@@ -142,7 +142,7 @@ test("stamp: deriv_funding = funding8hRel, deriv_oi = base units, deriv_oi_chg_2
   const btc = stampSql(intel, "BTC");
   const i = btc.columns.indexOf("deriv_funding");
   assert.ok(i > 0);
-  assert.deepEqual(btc.columns.slice(i), ["deriv_funding", "deriv_oi", "deriv_oi_chg_24h", "deriv_source"]);
+  assert.deepEqual(btc.columns.slice(i, i + 4), ["deriv_funding", "deriv_oi", "deriv_oi_chg_24h", "deriv_source"]);
   assert.equal(btc.values[i], kf.find((t) => t.coin === "BTC")!.funding8hRel);
   assert.equal(btc.values[i + 1], 1894.5955);
   assert.equal(btc.values[i + 2], 0.02);

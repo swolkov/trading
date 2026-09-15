@@ -10,7 +10,7 @@ import type { TfFeatures } from "../src/lib/margin-scanner";
 import type { MtfState } from "../src/lib/margin-mtf";
 
 const feat = (over: Partial<TfFeatures> = {}): TfFeatures => ({
-  close: 100, sma20: 97, prevClose20: 95, hh20: 99, ll20: 90, hh90: 112, ll90: 80, atr14: 2, atrRatio30: 1, volRatio20: 3, rsi14: 60,
+  close: 100, ret1: 0.01, sma20: 97, prevClose20: 95, hh20: 99, ll20: 90, hh90: 112, ll90: 80, atr14: 2, atrRatio30: 1, volRatio20: 3, rsi14: 60,
   lastRange: 0.02, dollarVol20: 1e6, gapBars: 0, dupBars: 0, staleMs: 0, dataOk: true, dataReason: null, ...over,
 });
 const MTF_UP: MtfState = { d1: "up", h4: "up", h1: "up", aligned: "long", text: "U/U/U" };
