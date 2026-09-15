@@ -11,6 +11,7 @@ import { isSourceArmed } from "@/lib/margin-live-risk";
 import { maybeDemote } from "@/lib/margin-synthesis";
 import { gatherIntel, stampSql } from "@/lib/margin-intel";
 import { readEventPolicy } from "@/lib/margin-events";
+import { recordRefusal } from "@/lib/margin-trade-card";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -284,12 +285,15 @@ export async function GET(request: Request) {
           const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
           // The intelligence stamps ride on the same INSERT (columns created by ensureShadowColumns).
           const stamp = stampSql(intel, s.coin);
-          const stampCols = stamp.columns.length ? `, ${stamp.columns.join(", ")}` : "";
-          const stampVals = stamp.columns.length ? `, ${stamp.columns.map((_, i) => `$${10 + i}`).join(",")}` : "";
+          // The BTC daily regime rides on the row too (A4's journal stamp; risk_pct is written by
+          // snapshotShadowSizing beside the frozen size it belongs to).
+          const btcRegime = regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown";
+          const stampCols = `, ${[...stamp.columns, "btc_regime"].join(", ")}`;
+          const stampVals = `, ${[...stamp.columns, "btc_regime"].map((_, i) => `$${10 + i}`).join(",")}`;
           const inserted = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version${stampCols})
              VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9${stampVals}) RETURNING id`,
-            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values, btcRegime,
           );
           const rowId = inserted[0]?.id ?? null;
           const frozenNotional = rowId != null ? await snapshotShadowSizing(rowId) : null;
@@ -309,6 +313,8 @@ export async function GET(request: Request) {
             if (rowId != null) {
               await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET live_exec_note=$1 WHERE id=$2`, `live skipped: data quality: ${dataProblem}`.slice(0, 300), rowId).catch(() => {});
             }
+            // Only an ARMED sleeve's skip is a live refusal worth a card-less row.
+            if (armedSources && isSourceArmed(armedSources, plan.source)) await recordRefusal(s.symbol, side, plan.source, `live skipped: data quality: ${dataProblem}`).catch(() => {});
           } else if (entryChecksPassed && frozenNotional != null && frozenNotional > 0 && armedSources && isSourceArmed(armedSources, plan.source)) {
             try {
               // LEVERAGE MUST TRAVEL WITH THE PLAN. The executor takes
@@ -324,9 +330,17 @@ export async function GET(request: Request) {
               // scored it and refused anything but "high" — throwing the tier away made the
               // executor re-scan the coin 20-90s later over five timeframes, where a 5m
               // volume-spike flipping between the two reads silently halves the position.
-              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, scoredConviction: conv.tier, deadlineMs: routeDeadlineMs });
+              // The regime and the score ride along for the TRADE CARD only (margin-trade-card.ts):
+              // stamps, never sizing inputs. `score` is the scan's conviction score today; B5's
+              // 0–100 opportunity score replaces it once it exists.
+              const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, scoredConviction: conv.tier, deadlineMs: routeDeadlineMs,
+                regime: regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown", score: conv.score });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
               note_(s.coin, s.timeframe, s.kind, r.executed ? "TRADED LIVE" : "live refused", conv.tier, r.note.slice(0, 160));
+              // A refusal the executor reached before it could build a card (breaker? cooldown?
+              // slots?) gets a card-less row here, so every live decision has a row. "tracked
+              // only" (the desk is disarmed) is not a decision — it would be a row every 15 min.
+              if (!r.executed && !r.validated && r.cardId == null && !r.note.startsWith("tracked only")) await recordRefusal(s.symbol, side, plan.source, r.note).catch(() => {});
               // Link the paper row to its live attempt: this is what the daily synthesis uses
               // to compare REAL fills against the paper model, trade by trade.
               if (rowId != null) {

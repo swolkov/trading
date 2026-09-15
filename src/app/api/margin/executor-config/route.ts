@@ -6,6 +6,8 @@ import {
 import { exitParams } from "@/lib/margin-shadow";
 import { DEFAULT_MAX_LOSSES_PER_DAY, parseDecayMultiplier, type RiskState } from "@/lib/margin-risk-tiers";
 import { resolveEventPolicy } from "@/lib/margin-events";
+import { ANOMALY_KEY, anomalyActive } from "@/lib/margin-anomaly";
+import { sendNotification } from "@/lib/notifications";
 
 // WHAT LIVE WOULD ACTUALLY DO, computed from the same config keys and the same helpers the
 // executor and guardian read — beside what PAPER does — so the admin page can show, per
@@ -32,6 +34,10 @@ export async function GET() {
       "kraken_margin_equity_peak", "kraken_margin_risk_state",
       // Event veto (B2): the guardian-written policy and the operator's off switch.
       "kraken_margin_event_policy", "kraken_margin_event_veto", "kraken_margin_calendar_feed",
+      // Cluster cap (A2): optional override of the breaker-headroom default.
+      "kraken_margin_cluster_risk_cap_pct",
+      // Anomaly kill switch (A5): guardian-written; non-blank refuses entries until cleared below.
+      ANOMALY_KEY,
     ];
     const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const c: Record<string, string> = {};
@@ -82,6 +88,12 @@ export async function GET() {
       eventVeto: c.kraken_margin_event_veto !== "false",
       calendarFeed: c.kraken_margin_calendar_feed === "finnhub" ? "finnhub" : "static",   // Finnhub's economic calendar is premium; opt-in
       eventPolicy: resolveEventPolicy(c.kraken_margin_event_policy ?? null, c.kraken_margin_event_veto ?? null, Date.now()),
+      // null = the default (breaker headroom: halt − drawdown taken); a number = the operator's cap.
+      clusterRiskCapPct: c.kraken_margin_cluster_risk_cap_pct != null && c.kraken_margin_cluster_risk_cap_pct.trim() !== "" ? num("kraken_margin_cluster_risk_cap_pct", NaN) : null,
+      // The guardian's findings, one per line; null = clear. While set, the executor refuses entries.
+      // STICKY BY DESIGN: the guardian never clears it — POST {action:"clear-anomaly", confirm:"CLEAR"} does.
+      anomaly: anomalyActive(c[ANOMALY_KEY]) ? c[ANOMALY_KEY] : null,
+      anomalyNote: "sticky by design — cleared only by an operator: POST /api/margin/executor-config {action:\"clear-anomaly\", confirm:\"CLEAR\"}",
     };
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),
@@ -128,6 +140,34 @@ export async function GET() {
     return Response.json(body);
   } catch (error) {
     console.error("[/api/margin/executor-config]", error);
+    return Response.json({ error: String(error) }, { status: 500 });
+  }
+}
+
+// CLEARING THE ANOMALY is a deliberate human act — the same shape as acknowledging a demotion
+// on the arm route: type the word, the key is blanked, the arm log and Slack record who did it.
+// It clears the block; it does not arm anything and it does not touch positions or stops.
+export async function POST(request: Request) {
+  let body: { action?: string; confirm?: string } = {};
+  try { body = await request.json(); } catch { /* empty */ }
+  if (String(body.action ?? "") !== "clear-anomaly") return Response.json({ error: "unknown action" }, { status: 400 });
+  if (String(body.confirm ?? "") !== "CLEAR") return Response.json({ error: "type CLEAR to confirm" }, { status: 400 });
+  try {
+    const row = await prisma.agentConfig.findUnique({ where: { key: ANOMALY_KEY } });
+    if (!anomalyActive(row?.value)) return Response.json({ ok: true, cleared: false, note: "no anomaly set" });
+    const was = row!.value;
+    await prisma.agentConfig.upsert({ where: { key: ANOMALY_KEY }, update: { value: "" }, create: { key: ANOMALY_KEY, value: "" } });
+    try {
+      const logRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_arm_log" } });
+      const log: string[] = logRow?.value ? (JSON.parse(logRow.value) as string[]) : [];
+      log.push(`${new Date().toISOString()} ANOMALY CLEARED from the admin page: ${was.replace(/\n/g, " | ").slice(0, 300)}`);
+      await prisma.agentConfig.upsert({ where: { key: "kraken_margin_arm_log" }, update: { value: JSON.stringify(log.slice(-50)) }, create: { key: "kraken_margin_arm_log", value: JSON.stringify(log.slice(-50)) } });
+    } catch { /* log only */ }
+    await sendNotification(`⚪ kraken_margin_anomaly cleared from the admin page (was: ${was.replace(/\n/g, " | ").slice(0, 200)}). Entries may resume on the next signal; nothing was armed or closed.`, "margin_live").catch(() => {});
+    cache = null;
+    return Response.json({ ok: true, cleared: true, was });
+  } catch (error) {
+    console.error("[/api/margin/executor-config POST]", error);
     return Response.json({ error: String(error) }, { status: 500 });
   }
 }

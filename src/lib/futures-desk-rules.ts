@@ -184,7 +184,8 @@ export interface AlertPayload {
   bar: string;
   timeframe: string;
   note: string;
-  /** Optional 0–100 opportunity score from the chart (Pine v2). Absent on today's alerts. */
+  /** The desk's OWN 0–100 opportunity score, set by `scoreSignal` at receipt (E7) — never from the chart. `parseAlert`
+   *  ignores any `score` a sender puts in the body, so a holder of the secret cannot grade or bucket its own alerts. */
   score?: number;
   // ---- Pine v2 context, all optional — stamps for the journal, never gates. A v1 alert has none.
   atr?: number;
@@ -236,9 +237,8 @@ export function parseAlert(body: unknown): ParsedAlert {
   else return { ok: false, reason: "bar time missing — TradingView must send {{time}}" };
   const timeframe = String(b.timeframe ?? b.tf ?? edge.timeframe);
   const note = typeof b.note === "string" ? b.note.slice(0, 200) : "";
-  const score = numberField(b.score);
+  // `score` is never read from the chart: the desk computes its own at receipt (scoreSignal, E7).
   const opt: Partial<AlertPayload> = {};
-  if (score != null) opt.score = score;
   for (const k of ["atr", "rsi", "volRatio", "dist20h"] as const) { const v = numberField(b[k]); if (v != null) opt[k] = v; }
   for (const k of ["d1Up", "h4Up"] as const) { const v = boolField(b[k]); if (v != null) opt[k] = v; }
   return { ok: true, alert: { edge: edge.key, root, action, side, price, stop: stop && stop > 0 ? stop : null, bar, timeframe, note, ...opt } };

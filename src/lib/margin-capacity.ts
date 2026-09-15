@@ -12,7 +12,7 @@ import { DEFAULT_MAX_LEVERAGE, effectiveMaxLeverage, leverageThatFitsStop, liveC
 // decision at the next leverage rung. Read-only. Paper dollars are at paper's base risk;
 // `liveFactor` scales them to the live base (stage 3 = half).
 
-export type RefusalKind = "taken" | "slots" | "cooldown" | "daily cap" | "margin" | "leverage" | "event" | "revenge" | "drawdown" | "other";
+export type RefusalKind = "taken" | "slots" | "cooldown" | "daily cap" | "margin" | "leverage" | "event" | "revenge" | "drawdown" | "cluster" | "other";
 
 export interface CapacitySetup {
   id: number; time: string; symbol: string; timeframe: string | null;
@@ -85,6 +85,8 @@ export function classifyRefusal(liveTxid: string | null, note: string | null): R
   if (/event window/.test(note)) return "event";
   if (/losing trades today/.test(note)) return "revenge";
   if (/drawdown tier|drawdown \d/.test(note)) return "drawdown";
+  // Added 2026-09-15 with the correlated-exposure gate (margin-exposure.ts).
+  if (/cluster cap/.test(note)) return "cluster";
   return "other";
 }
 
@@ -150,7 +152,7 @@ export interface CapacityReport {
   source: string; since: string; liveFactor: number;
   rules: { slots: number; perDay: number; cooldownMin: number };
   setups: number; taken: number;
-  refused: { total: number; slots: number; cooldown: number; dailyCap: number; margin: number; leverage: number; event: number; revenge: number; drawdown: number; other: number };
+  refused: { total: number; slots: number; cooldown: number; dailyCap: number; margin: number; leverage: number; event: number; revenge: number; drawdown: number; cluster: number; other: number };
   // What the refused setups went on to do, paper-sized.
   refusedOutcome: { resolved: number; wins: number; net: number; open: number; floating: number };
   replay: ReplayResult[];                       // slots 1..4 under the current per-day + cooldown, then every setup (slots 0)
@@ -223,7 +225,7 @@ export async function capacityReport(source: string): Promise<CapacityReport | n
   return {
     source, since, liveFactor, rules,
     setups: setups.length, taken: setups.filter((s) => s.kind === "taken").length,
-    refused: { total: refusedRows.length, slots: count("slots"), cooldown: count("cooldown"), dailyCap: count("daily cap"), margin: count("margin"), leverage: count("leverage"), event: count("event"), revenge: count("revenge"), drawdown: count("drawdown"), other: count("other") },
+    refused: { total: refusedRows.length, slots: count("slots"), cooldown: count("cooldown"), dailyCap: count("daily cap"), margin: count("margin"), leverage: count("leverage"), event: count("event"), revenge: count("revenge"), drawdown: count("drawdown"), cluster: count("cluster"), other: count("other") },
     refusedOutcome: {
       resolved: rr.length, wins: rr.filter((s) => (s.pnl ?? 0) > 0).length, net: rr.reduce((a, s) => a + (s.pnl ?? 0), 0),
       open: ro.length, floating: ro.reduce((a, s) => a + (s.unrealized ?? 0), 0),

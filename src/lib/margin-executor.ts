@@ -91,6 +91,9 @@ import {
 } from "@/lib/margin-live-risk";
 import { eventRiskMultiplier, readEventPolicy } from "@/lib/margin-events";
 import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, refusalNote, revengePauseHit, setupGradeFor } from "@/lib/margin-risk-tiers";
+import { announceTradeCard, buildTradeCard, persistTradeCard, type CardRegime, type TradeCard } from "@/lib/margin-trade-card";
+import { clusterEntryAllowed, exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
+import { ANOMALY_KEY, anomalyActive } from "@/lib/margin-anomaly";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -125,6 +128,12 @@ export interface AlertOrder {
   // add-on of `parentTxid`. Its attached stop is placed AT stopLevel, not entry − stop%.
   // The webhook's explicit field list never populates this.
   pyramid?: { parentTxid: string; stopLevel: number; unitNotional: number; riskUsd: number };
+  // INTERNAL CALLERS ONLY — stamps for the trade card (margin-trade-card.ts), never inputs to
+  // sizing or any gate: the BTC daily regime the scan read for this tick, and the scan's
+  // conviction score (B5's 0–100 opportunity score once it exists). The TradingView webhook's
+  // explicit field list never populates either (pinned by test).
+  regime?: CardRegime;
+  score?: number;
 }
 // WRITE-AHEAD MARKER for a pyramid add: set under the exec lock immediately before the add is
 // sent, read by the next add's gate. Two guardian runs can overlap (5-min cron, 300s budget),
@@ -140,6 +149,9 @@ export interface ExecResult {
   validated: boolean;          // true = validate-only round (no money moved)
   note: string;
   txid?: string;
+  // The margin_trade_cards row this decision wrote (sent, validated, or refused after sizing).
+  // Absent = the refusal happened before a card could be built; the scan route records it.
+  cardId?: number;
 }
 
 async function cfg(key: string): Promise<string | null> {
@@ -171,14 +183,19 @@ const BOT_TXID_MAX = 2000;
 
 // `addOnOf` marks a PYRAMID tranche: the txid of the first unit it was added to. The guardian
 // manages parent + add-ons as ONE book on the parent's entry and R (not as a stacked book).
-export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string }
+// `cardId` links the entry to its trade card (margin_trade_cards) so the guardian can verify
+// the live book against what was authorised and the journal can cite it.
+export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string; cardId?: number }
 // Returns true only when the entry is durably written. STRICT read: a failed read must
 // never be treated as an empty ledger — writing [B] over a ledger that held A would strip
 // A's ownership (unclosable by alert, unprotected by the guardian). A corrupt existing
 // ledger is backed up, then replaced. `stopFrac` is the entry's authorised 1R, stored so
 // the guardian's managed exit never has to re-derive it from a stop that may already
 // have been ratcheted.
-async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string }): Promise<boolean> {
+// `quiet`: opt-in for a SECOND write onto an entry that is already ledgered (attaching the trade
+// card's id) — a transient failure there must not page an adopt instruction for a position the
+// ledger already holds. Never used for the first write.
+export async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string; cardId?: number | null }, opts: { quiet?: boolean } = {}): Promise<boolean> {
   try {
     const raw = await cfgStrict(BOT_TXIDS_KEY);
     const cutoff = Date.now() - BOT_TXID_TTL_MS;
@@ -192,7 +209,7 @@ async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: nu
       }
     }
     const next = prev.filter((e) => e && e.ts > cutoff && e.txid !== txid);
-    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}), ...(meta?.maxHoldH ? { maxHoldH: meta.maxHoldH } : {}), ...(meta?.source ? { source: meta.source } : {}), ...(meta?.trailR && meta.trailR > 0 ? { trailR: meta.trailR } : {}), ...(meta?.addOnOf ? { addOnOf: meta.addOnOf } : {}) });
+    next.push({ txid, pair, ts: Date.now(), ...(meta?.stopFrac ? { stopFrac: meta.stopFrac } : {}), ...(meta?.maxHoldH ? { maxHoldH: meta.maxHoldH } : {}), ...(meta?.source ? { source: meta.source } : {}), ...(meta?.trailR && meta.trailR > 0 ? { trailR: meta.trailR } : {}), ...(meta?.addOnOf ? { addOnOf: meta.addOnOf } : {}), ...(meta?.cardId != null && meta.cardId > 0 ? { cardId: meta.cardId } : {}) });
     await prisma.agentConfig.upsert({
       where: { key: BOT_TXIDS_KEY },
       update: { value: JSON.stringify(next.slice(-BOT_TXID_MAX)) },
@@ -203,6 +220,7 @@ async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: nu
     // NOT best-effort in consequence: an unrecorded position is invisible to BOTH the close
     // path and the guardian's naked-position guard, so it is unclosable by alert AND
     // unprotected. Page immediately with the id needed to adopt it.
+    if (opts.quiet) return false;   // the caller already holds a ledgered entry and reports its own way
     await sendNotification(
       `🚨 Could not record bot position ${txid} on ${pair}. It will NOT be recognised by close alerts or the naked-position guard. Add it to kraken_margin_adopt_txids now. ${String(e).slice(0, 120)}`,
       "margin_urgent",
@@ -224,7 +242,7 @@ export async function botTxids(): Promise<Set<string>> {
 // and managed exit cannot disagree about which positions are the bot's. STRICT reads: a
 // DB failure THROWS rather than reading as "nothing is ours" (which made a close a silent
 // no-op with the wrong reason, and would leave adopted positions unprotected).
-export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null; maxHoldHOf: (ordertxid: string) => number | null; sourceOf: (ordertxid: string) => string | null; trailROf: (ordertxid: string) => number | null; addOnOf: (ordertxid: string) => string | null }> {
+export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string; id: string }) => boolean; ledger: Set<string>; adopted: Set<string>; ledgerCorrupt: boolean; stopFracOf: (ordertxid: string) => number | null; maxHoldHOf: (ordertxid: string) => number | null; sourceOf: (ordertxid: string) => string | null; trailROf: (ordertxid: string) => number | null; addOnOf: (ordertxid: string) => string | null; cardIdOf: (ordertxid: string) => number | null }> {
   const raw = await cfgStrict(BOT_TXIDS_KEY);
   const adoptRaw = (await cfgStrict("kraken_margin_adopt_txids")) ?? "";
   const adopted = new Set(adoptRaw.split(",").map((s) => s.trim()).filter(Boolean));
@@ -234,6 +252,7 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
   const source = new Map<string, string>();
   const trailR = new Map<string, number>();
   const addOnOf = new Map<string, string>();
+  const cardId = new Map<string, number>();
   let ledgerCorrupt = false;
   if (raw) {
     // A corrupt ledger must not take the ADOPTION list and the emergency override down
@@ -249,6 +268,7 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
         if (e.txid && e.source) source.set(e.txid, e.source);
         if (e.txid && e.trailR && e.trailR > 0) trailR.set(e.txid, e.trailR);
         if (e.txid && e.addOnOf) addOnOf.set(e.txid, e.addOnOf);
+        if (e.txid && e.cardId != null && e.cardId > 0) cardId.set(e.txid, e.cardId);
       }
     } catch { ledgerCorrupt = true; }
   }
@@ -260,6 +280,7 @@ export async function botOwnership(): Promise<{ isOurs: (p: { ordertxid: string;
     sourceOf: (ordertxid) => source.get(ordertxid) ?? null,
     trailROf: (ordertxid) => trailR.get(ordertxid) ?? null,
     addOnOf: (ordertxid) => addOnOf.get(ordertxid) ?? null,
+    cardIdOf: (ordertxid) => cardId.get(ordertxid) ?? null,
   };
 }
 
@@ -486,7 +507,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
           return { executed: false, validated: false, note: `close not attempted: ownership ledger unreadable — retry` };
         }
         // Authorised to flatten the pair regardless of ownership: proceed as if nothing is ours.
-        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null, sourceOf: () => null, trailROf: () => null, addOnOf: () => null };
+        ownership = { isOurs: () => false, ledger: new Set(), adopted: new Set(), ledgerCorrupt: false, stopFracOf: () => null, maxHoldHOf: () => null, sourceOf: () => null, trailROf: () => null, addOnOf: () => null, cardIdOf: () => null };
       }
       if (!closeAllAuthorised) {
         const recovery = await recoverPendingPyramid(allAccount, ownership);
@@ -792,6 +813,18 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   } catch {
     return { executed: false, validated: false, note: "could not read the drawdown breaker — failing closed" };
   }
+  // Layer 8d: THE ANOMALY KILL SWITCH (margin-anomaly.ts). The guardian writes
+  // kraken_margin_anomaly when a live tranche does not match its trade card (leverage, size, a
+  // widened stop) or when a stop of ours rests beside a position the ledger does not know.
+  // Any non-blank value refuses NEW entries — pyramid adds included — until an operator has
+  // looked and cleared it (executor-config route, clear-anomaly). Closes are above this line
+  // and never affected. STRICT read: an unreadable flag is a set flag.
+  try {
+    const anomaly = await cfgStrict(ANOMALY_KEY);
+    if (anomalyActive(anomaly)) return { executed: false, validated: false, note: refusalNote.anomaly(anomaly!) };
+  } catch (e) {
+    return { executed: false, validated: false, note: refusalNote.anomalyUnreadable(String(e)) };
+  }
 
   // Serialize entries: without this, two alerts landing together both read the same
   // day-state and both place an order. Fails closed — a lock we can't get = no entry.
@@ -806,7 +839,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
   let sentAtSec = 0;
   let pyramidCloseToken: string | null = null;
   let stopPctSent = 0;                       // the stop distance this entry was sized with
-  let ledgerMeta: { maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string } = {};
+  let ledgerMeta: { maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string; cardId?: number } = {};
   try {
     // Layer 8b: trade-frequency governor — the structural cure for the fee bleed.
     const dayState = await loadDayState();
@@ -1172,9 +1205,39 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     }
     const riskPctChain = liveRiskPctChain({ basePct: baseRiskPct, conviction: convTier, ddMult, eventMult, decayMult });
     const maxRiskPct = riskPctChain / 100;
+    // Margin already posted, for the margin-level floor (6b) and the trade card. ⚠️ NOT
+    // health.marginUsed on its own. TradeBalance's "m" is coerced to 0 when Kraken omits it
+    // from a degraded 200 — the exact ambiguity marginUsedRaw exists to preserve — and a 0
+    // here reads as "the account is flat", which would wave through a full-size entry
+    // precisely when the book is unreadable. Take the LARGER of the reported figure and the
+    // margin of the positions we already read, so a bad read can only make the floor
+    // stricter, never laxer.
+    const marginFromPositions = openPositions.reduce((s, p) => s + (p.margin > 0 ? p.margin : 0), 0);
+    const marginUsedNow = Math.max(health.marginUsed || 0, marginFromPositions);
+    const grossNotionalNow = openPositions.reduce((s, p) => s + (p.entryPrice > 0 && p.vol > 0 ? p.entryPrice * p.vol : 0), 0);
+    // THE TRADE CARD (margin-trade-card.ts). Built from the numbers above — it describes the
+    // order, it never shapes it. `sizedNotional` is filled once sizing has run, so a refusal
+    // before that point (the chain at 0) still leaves a card with the stop, leverage and
+    // multipliers it would have carried. refuse() persists a REFUSED card and returns the
+    // refusal; a failed write is paged, never fatal — there is no order to block here.
+    const entrySide: "buy" | "sell" = alert.side === "sell" ? "sell" : "buy";
+    let sizedNotional = 0;
+    const cardBase = () => ({
+      symbol: alert.symbol, side: entrySide, source: alert.source ?? "manual", horizonH: container.maxHoldH,
+      regime: alert.regime ?? "unknown" as CardRegime, entryPx, stopFrac: stopPct, trailR: container.trailR, addAtR: container.addAtR ?? null,
+      pairMaxLeverage: usRetailMaxLeverage(alert.symbol, maxLev), operatorMaxLeverage: maxLev, leverage,
+      equity, marginUsedNow, grossNotionalNow, conviction: convTier, score: alert.score ?? null,
+      ddTier: ddTier.tier, ddMult, eventMode: eventPolicy.mode, decayMult,
+    });
+    const refuse = async (reason: string): Promise<ExecResult> => {
+      let cardId: number | null = null;
+      try { cardId = await persistTradeCard(buildTradeCard({ ...cardBase(), notional: sizedNotional, action: "REFUSED", reason })); }
+      catch (e) { await sendNotification(`⚠️ ${pair}: refusal card not persisted (${String(e).slice(0, 80)}) — the refusal itself stands: ${reason.slice(0, 120)}`, "margin_live").catch(() => {}); }
+      return { executed: false, validated: false, note: reason, ...(cardId != null ? { cardId } : {}) };
+    };
     // A chain that multiplies to nothing is a refusal with its reasons, not a "no notional".
     if (!(maxRiskPct > 0)) {
-      return { executed: false, validated: false, note: refusalNote.chainZero(ddMult, eventMult, decayMult) };
+      return refuse(refusalNote.chainZero(ddMult, eventMult, decayMult));
     }
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     // SIZE = risk × equity ÷ stop, capped at leverage × equity — paper's positionNotional
@@ -1187,7 +1250,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       ? Math.min(pyramidAddNotional(pyramid.riskUsd, alert.side === "buy" ? "long" : "short", entryPx, pyramid.stopLevel, pyramid.unitNotional), liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade))
       : liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade);
     const notional = Math.min(unclamped, liveNotional(equity, maxRiskPct, riskDist, leverage, perTrade, health.freeMargin));
-    if (!(notional > 0)) return { executed: false, validated: false, note: `sizing produced no notional (free margin $${health.freeMargin.toFixed(0)}) — skipped` };
+    sizedNotional = notional;
+    if (!(notional > 0)) return refuse(`sizing produced no notional (free margin $${health.freeMargin.toFixed(0)}) — skipped`);
     // Layer 6b: the entry must LEAVE the account above the margin-level floor. Sizing is
     // capped at 90% of free margin, which only guarantees Kraken accepts the order — it
     // says nothing about the state of the book afterwards. With 3 slots available, risk %
@@ -1195,21 +1259,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // a margin call is reachable purely by config. This is the gate that makes the ACCOUNT
     // decide how many positions it can carry, rather than a constant that must be kept in
     // step with the risk setting by hand.
-    // ⚠️ NOT health.marginUsed on its own. TradeBalance's "m" is coerced to 0 when Kraken
-    // omits it from a degraded 200 — the exact ambiguity marginUsedRaw exists to preserve —
-    // and a 0 here reads as "the account is flat", which would wave through a full-size
-    // entry precisely when the book is unreadable. Take the LARGER of the reported figure
-    // and the margin of the positions we already read, so a bad read can only make this
-    // gate stricter, never laxer.
-    const marginFromPositions = openPositions.reduce((s, p) => s + (p.margin > 0 ? p.margin : 0), 0);
-    const marginUsedNow = Math.max(health.marginUsed || 0, marginFromPositions);
+    // (marginUsedNow is computed above, beside the trade card, from the same reads.)
     const mlFloor = await cfgNum("kraken_margin_min_margin_level", MIN_ENTRY_MARGIN_LEVEL);
     if (!entryKeepsMarginLevel(equity, marginUsedNow, notional, leverage, mlFloor)) {
       const after = projectedMarginLevel(equity, marginUsedNow, notional, leverage);
-      return {
-        executed: false, validated: false,
-        note: `entry refused: would leave margin level at ${after.toFixed(0)}% (floor ${mlFloor}%, Kraken calls at 80%). $${notional.toFixed(0)} notional at ${leverage}× on equity $${equity.toFixed(0)} with $${health.marginUsed.toFixed(0)} already posted. Lower kraken_margin_live_max_risk_pct or wait for a slot to close.`,
-      };
+      return refuse(`entry refused: would leave margin level at ${after.toFixed(0)}% (floor ${mlFloor}%, Kraken calls at 80%). $${notional.toFixed(0)} notional at ${leverage}× on equity $${equity.toFixed(0)} with $${health.marginUsed.toFixed(0)} already posted. Lower kraken_margin_live_max_risk_pct or wait for a slot to close.`);
     }
     // Layer 6c: the liquidation buffer, stated. leverageThatFitsStop already puts the isolated
     // liquidation distance ≥ 1.67× the stop at every rung it returns, and the margin-level
@@ -1217,12 +1271,35 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // today. It is the line that holds if the floor is disabled (kraken_margin_min_margin_level
     // =0) or leverage ever arrives from a path that did not fit it to the stop.
     if (!liqBufferOk(stopPct, leverage)) {
-      return { executed: false, validated: false, note: refusalNote.liqBuffer(stopPct, leverage) };
+      return refuse(refusalNote.liqBuffer(stopPct, leverage));
+    }
+    // Layer 6d: THE CLUSTER (margin-exposure.ts). What every open position loses if every stop
+    // is hit at once — bot positions at their ledgered stop, anything else at the liquidation
+    // cushion (fail closed) — plus this trade's risk, must stay inside the cap: the operator's
+    // kraken_margin_cluster_risk_cap_pct if set (STRICT read), else the breaker's headroom
+    // (halt − drawdown taken). Inert at one slot (8% < 15%); at three it refuses a second A+
+    // beside a first (8 + 8 > 15) and allows A+ beside Strong. A pyramid add measures its own
+    // book against the RESTING stop it is sized to, not the ledgered entry-relative one — by the
+    // time an add fires that stop is at or past breakeven, and the add's whole point is that the
+    // book's worst case stays one R.
+    {
+      const capRaw = await cfgStrict("kraken_margin_cluster_risk_cap_pct");
+      const capParsed = capRaw != null && capRaw.trim() !== "" ? Number(capRaw) : null;
+      if (capParsed != null && !Number.isFinite(capParsed)) return refuse(refusalNote.clusterCapInvalid(capRaw));
+      const capPct = capParsed ?? Math.max(0, ddHaltPct - Math.max(0, ddTier.dd));
+      const own = await botOwnership();
+      const exposure = exposureSummary(openPositions.map((p): ExposurePosition => {
+        const ours = own.isOurs(p);
+        const onThisBook = pyramid != null && pairMatchesSymbol(p.pair, alert.symbol) && p.side === (alert.side === "buy" ? "long" : "short");
+        return { pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, leverage: p.leverage, ours, stopFrac: ours ? own.stopFracOf(p.ordertxid) : null, ...(onThisBook ? { stopPrice: pyramid.stopLevel } : {}) };
+      }), equity, ddHaltPct, ddTier.dd);
+      const verdict = clusterEntryAllowed(exposure, notional * riskDist, equity, capPct);
+      if (!verdict.ok) return refuse(refusalNote.cluster(verdict.existingUsd, verdict.newUsd, verdict.capPct, equity, capParsed == null ? { haltPct: ddHaltPct, dd: ddTier.dd } : null));
     }
     const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;
     if (meta.orderMin > 0 && rawVol < meta.orderMin) {
-      return { executed: false, validated: false, note: `size ${rawVol} below Kraken minimum ${meta.orderMin} after risk cap — skipped` };
+      return refuse(`size ${rawVol} below Kraken minimum ${meta.orderMin} after risk cap — skipped`);
     }
     const volume = rawVol.toFixed(meta.lotDecimals);
     // The add's attached stop rests AT the book's level, so both units share one line; the
@@ -1255,17 +1332,17 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (validate) params.validate = "true";
 
     if (!(await guardianFresh())) {
-      return { executed: false, validated: false, note: "guardian protection went stale during entry checks — not sent (failing closed)" };
+      return refuse("guardian protection went stale during entry checks — not sent (failing closed)");
     }
     // The AddOrder round trip (≤15s) plus the ledger write plus recovery must fit before the
     // calling route is killed; an order accepted after that point would be unowned.
     if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 75_000) {
-      return { executed: false, validated: false, note: "entry refused: not enough route time left to send AND record ownership — next scan" };
+      return refuse("entry refused: not enough route time left to send AND record ownership — next scan");
     }
     let res;
     if (pyramid && !validate) {
       pyramidCloseToken = await acquireCloseLock(15_000);
-      if (!pyramidCloseToken) return { executed: false, validated: false, note: "pyramid add refused: protection reconciliation is busy" };
+      if (!pyramidCloseToken) return refuse("pyramid add refused: protection reconciliation is busy");
       // The guardian may have closed or changed the book while the entry checks ran.
       // Hold its mutation lock through submission and ownership persistence.
       const freshPositions = (await getKrakenMarginPositions()).filter((p) => pairMatchesSymbol(p.pair, alert.symbol));
@@ -1274,9 +1351,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       const sameVolume = bookExposureMatches(freshPositions.reduce((sum, p) => sum + p.vol, 0), conflicting.reduce((sum, p) => sum + p.vol, 0));
       if (freshOwnership.ledgerCorrupt || !sameOrders || !sameVolume || !freshPositions.some((p) => p.ordertxid === pyramid.parentTxid)
         || entryExposureRefusal(freshPositions.map((p) => ({ side: p.side, owned: freshOwnership.isOurs(p) })), alert.side === "buy" ? "long" : "short")) {
-        return { executed: false, validated: false, note: "pyramid add refused: parent book changed during entry checks" };
+        return refuse("pyramid add refused: parent book changed during entry checks");
       }
-      if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 75_000) return { executed: false, validated: false, note: "pyramid add refused: insufficient time after waiting for protection lock" };
+      if (alert.deadlineMs != null && alert.deadlineMs - Date.now() < 75_000) return refuse("pyramid add refused: insufficient time after waiting for protection lock");
     }
     if (!validate) await reserveDayEntry(dayState);
     // Pyramid: the write-ahead marker goes down BEFORE the order (see PYRAMID_PENDING_KEY). If it
@@ -1285,7 +1362,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       try {
         await writePyramidMarker({ parent: pyramid.parentTxid, ts: Date.now() });
       } catch (e) {
-        return { executed: false, validated: false, note: `pyramid add refused: could not write the pending-add marker (${String(e).slice(0, 60)}) — not sent` };
+        return refuse(`pyramid add refused: could not write the pending-add marker (${String(e).slice(0, 60)}) — not sent`);
       }
     }
     sentAtSec = Math.floor(Date.now() / 1000);
@@ -1310,7 +1387,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Record ownership BEFORE anything else can fail: this txid is how the close path and
     // the guardian's naked-position check know the resulting position is ours rather than
     // Spencer's. A missing entry here makes a close skip that position (safe); it can
-    // never cause us to close one that is not ours.
+    // never cause us to close one that is not ours. Nothing — not the trade card, not the
+    // announcement — sits between AddOrder and this write.
     let ledgered = !validate && txid ? await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }) : true;
     // AN UNLEDGERED PYRAMID ADD IS RECOVERED, NEVER "UNWOUND". A tranche cannot be targeted on
     // Kraken (it nets FIFO on the pair+side — a reduce-only sell of the add's volume would close
@@ -1334,11 +1412,31 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
     // This acceptance already owns a durable daily reservation made before AddOrder.
 
+    // THE TRADE CARD, persisted only now — after the order is accepted AND ownership is
+    // ledgered. Its id is then attached to the ledger entry with a second, best-effort
+    // recordBotEntry (idempotent: it drops the same txid and re-pushes it with the meta), so
+    // the guardian can verify the live book against what was authorised. A failed card write
+    // pages and changes nothing about ownership; a failed attach leaves a card without a link.
+    const card: TradeCard = buildTradeCard({ ...cardBase(), notional, action: validate ? "VALIDATE" : "ENTER" });
+    let cardId: number | null = null;
+    try { cardId = await persistTradeCard(card, txid ?? null); }
+    catch (e) { await sendNotification(`⚠️ ${pair}: trade card not persisted after AddOrder (${String(e).slice(0, 80)}) — the entry is ledgered and stands.`, "margin_live").catch(() => {}); }
+    if (cardId != null && ledgered && !validate && txid) {
+      ledgerMeta = { ...ledgerMeta, cardId };
+      // quiet: the position IS ledgered; a blip here must not page "adopt it".
+      const attached = await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }, { quiet: true }).catch(() => false);
+      if (!attached) await sendNotification(`⚠️ ${pair}: trade card ${cardId} link not attached to ${txid}; ownership intact (ledgered before the card).`, "margin_live").catch(() => {});
+    }
+    // Announce AFTER the ledger write: Slack margin_live + vault Decisions/ (both best-effort,
+    // 5s Slack timeout inside sendNotification).
+    await announceTradeCard(card, txid ?? null).catch(() => {});
+
     const stopDesc = (trailPct > 0 ? `trailing stop ${trailPct.toFixed(1)}%` : `stop ${(stopPct * 100).toFixed(1)}%`) + (marginClamped ? ` — size fitted to free margin ($${unclamped.toFixed(0)} wanted, $${notional.toFixed(0)} sent; risk ≈${((notional * riskDist) / equity * 100).toFixed(1)}%)` : "");
     return {
       executed: !validate,
       validated: validate,
       txid,
+      ...(cardId != null ? { cardId } : {}),
       note: `${pyramid ? "PYRAMID ADD " : ""}${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction (${setupGradeFor(convTier)}) · dd tier ${ddTier.tier} ×${ddMult} · event ${eventPolicy.mode} ×${eventMult} · decay ×${decayMult} → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
     };
   } catch (e) {

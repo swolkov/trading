@@ -3,11 +3,16 @@
 import { prisma } from "@/lib/db";
 import { EDGES, deskVerdict, tStatOf } from "@/lib/futures-desk-rules";
 import { deskEnabled, deskLimits, ensureDeskTables, ledgerRows, loadState, openTrades, rawRows, type TradeRow } from "@/lib/futures-desk";
-import { ANOMALY_KEY, FEED_SEEN_KEY, cfg } from "@/lib/futures-desk-store";
-import { feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
-import { mergeRollChains } from "@/lib/futures-desk-review";
-import { reviewSnapshot } from "@/lib/futures-desk-review-jobs";
-import { deskBalance, deskOrders, deskPositions, isWorking } from "@/lib/tradovate-desk";
+import { ANOMALY_KEY, FEED_SEEN_KEY, cfg, executionErrorEvents } from "@/lib/futures-desk-store";
+import { executionErrorsToday, feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
+import { isoWeekKey, mergeRollChains } from "@/lib/futures-desk-review";
+import { reviewSnapshot, scoreBucketReport } from "@/lib/futures-desk-review-jobs";
+import { EVENT_POLICY_KEY, eventWindowText, nextRollByRoot, parseEventPolicy } from "@/lib/futures-desk-calendar";
+import { parseRiskState } from "@/lib/futures-desk-risk";
+import { MIN_SCORE_KEY, REGIME_KEY, SCORE_PROMOTED_KEY, parseMinScore, parseRegime } from "@/lib/futures-desk-score";
+import { BRIEF_KEY, parseBriefLatest } from "@/lib/futures-desk-brief-jobs";
+import { etDayKey } from "@/lib/futures-desk-rules";
+import { deskBalance, deskOrders, deskPositions, isWorking, rollGuardDays } from "@/lib/tradovate-desk";
 
 // The roll-chain fold moved to futures-desk-review.ts (E6); the stage route and the tests keep this import.
 export { mergeRollChains };
@@ -46,11 +51,12 @@ export async function deskStatus() {
   const ledger: TradeRow[] = await ledgerRows(60);
   // Watch rows are context, not inbox: the inbox stays the desk's decisions; the last ten watches ride separately.
   const signalCols = `id, received_at, edge, root, action, side, price, stop, status, reason, trade_id`;
-  type SignalRow = { id: number; received_at: string; edge: string; root: string; action: string; side: string; price: number; stop: number | null; status: string; reason: string | null; trade_id: number | null };
-  const [signals, watch, anomalyRaw, feedSeenAt] = await Promise.all([
-    rawRows<SignalRow>(`SELECT ${signalCols} FROM futures_desk_signals WHERE action <> 'watch' ORDER BY id DESC LIMIT 40`),
-    rawRows<SignalRow>(`SELECT ${signalCols} FROM futures_desk_signals WHERE action = 'watch' ORDER BY id DESC LIMIT 10`),
-    cfg(ANOMALY_KEY), cfg(FEED_SEEN_KEY),
+  type SignalRow = { id: number; received_at: string; edge: string; root: string; action: string; side: string; price: number; stop: number | null; status: string; reason: string | null; trade_id: number | null; score: number | null };
+  const [signals, watch, anomalyRaw, feedSeenAt, riskRaw, policyRaw, regimeRaw, briefRaw, promotedRaw, minScoreRaw, errorEvents] = await Promise.all([
+    rawRows<SignalRow>(`SELECT ${signalCols}, score FROM futures_desk_signals WHERE action <> 'watch' ORDER BY id DESC LIMIT 40`),
+    rawRows<SignalRow>(`SELECT ${signalCols}, score FROM futures_desk_signals WHERE action = 'watch' ORDER BY id DESC LIMIT 10`),
+    cfg(ANOMALY_KEY), cfg(FEED_SEEN_KEY), cfg("futures_desk_risk_state"), cfg(EVENT_POLICY_KEY), cfg(REGIME_KEY), cfg(BRIEF_KEY), cfg(SCORE_PROMOTED_KEY), cfg(MIN_SCORE_KEY),
+    executionErrorEvents().catch(() => []),
   ]);
   const entriesRow = await prisma.$queryRawUnsafe<{ n: bigint | number }[]>(`SELECT count(*) AS n FROM futures_desk_trades WHERE rolled_from IS NULL AND (opened_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date`);
   const entriesToday = Number(entriesRow[0]?.n ?? 0);
@@ -62,7 +68,27 @@ export async function deskStatus() {
   } catch (e) { brokerError = String(e).slice(0, 200); }
   const guardianAgeMs = state.guardianAt ? Date.now() - Date.parse(state.guardianAt) : null;
   const closed = mergeRollChains(ledger).filter((t) => t.status === "closed" && t.pnl_usd != null);
+  // The dashboard fields (E8): read from the guardian's own keys and the review rows — no broker call beyond the snapshot above.
+  const now = new Date(), day = etDayKey(now), week = isoWeekKey(now), month = day.slice(0, 7);
+  const judged = "error" in review ? [] : review.rows;
+  const sum = (pred: (closedAt: string) => boolean) => judged.filter((r) => pred(r.closedAt)).reduce((s, r) => s + r.pnl, 0);
+  const policy = parseEventPolicy(policyRaw);
+  // The score's promotion verdict (E7) — drives the PROMOTE control; a failed read is null, never a 500.
+  const scoreVerdict = "error" in review ? null : await scoreBucketReport(review.rows).catch(() => null);
+  const dashboard = {
+    dailyRealized: state.balance != null && state.dayStartBalance != null && state.dayKey === day ? state.balance - state.dayStartBalance : null,
+    openPnl: state.equity != null && state.balance != null ? state.equity - state.balance : null,   // netLiq − cash
+    weekPnl: sum((c) => isoWeekKey(c) === week), monthPnl: sum((c) => etDayKey(new Date(c)).slice(0, 7) === month),   // judged series (after modeled slip)
+    tradesToday: judged.filter((r) => etDayKey(new Date(r.closedAt)) === day).length,
+    violationsToday: executionErrorsToday(errorEvents, day),
+    risk: parseRiskState(riskRaw),
+    eventMode: policy?.mode ?? null, eventWindow: policy ? eventWindowText(policy) : null,
+    regime: parseRegime(regimeRaw),
+    rolls: nextRollByRoot(now, rollGuardDays),
+    scorePromoted: promotedRaw === "true", minScore: parseMinScore(minScoreRaw), scoreVerdict,
+  };
   return {
+    dashboard, brief: parseBriefLatest(briefRaw),
     enabled, disabledReason: state.disabledReason ?? null, limits, state, entriesToday, guardian: { at: state.guardianAt ?? null, fresh: guardianAgeMs != null && guardianAgeMs < 20 * 60_000, lastError: state.lastError ?? null },
     broker, brokerError, open, ledger, signals, watch, cards,
     anomaly: parseAnomaly(anomalyRaw),                                   // entries paused until cleared (type CLEAR)
