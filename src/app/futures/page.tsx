@@ -7,6 +7,7 @@ import { Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from
 import { ago, money, pnl0, tone } from "@/lib/format";
 import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
 import { FuturesPromotionPanel, type LeaderRowView, type PromotionVerdictView, type StageReadinessView } from "@/components/futures/promotion-panel";
+import { FuturesBriefPanel, FuturesDashboard, type FuturesBriefView, type FuturesDashboardView } from "@/components/futures/desk-brief";
 
 // ============ FUTURES DESK — Tradovate DEMO ============
 // The futures edge lab. TradingView evaluates each registered rule on real-time CME data and
@@ -23,8 +24,10 @@ type Trade = FuturesTrade;
 type Signal = FuturesSignal;
 interface Status {
   enabled: boolean; disabledReason: string | null; configured: boolean;
-  limits: { sizingBasisUsd: number; riskPct: number; maxContracts: number; maxPositions: number; maxEntriesPerDay: number; dailyLossPausePct: number; drawdownDisablePct: number };
+  limits: { sizingBasisUsd: number; riskPct: number; maxContracts: number; maxPositions: number; maxEntriesPerDay: number; dailyLossPausePct: number; drawdownDisablePct: number; stage: string };
   state: { equity?: number; equityHigh?: number; dayStartEquity?: number; dayKey?: string };
+  // E8: the dashboard numbers (guardian keys + review rows) and the latest desk brief.
+  dashboard: FuturesDashboardView; brief: FuturesBriefView | null;
   entriesToday: number;
   guardian: { at: string | null; fresh: boolean; lastError: string | null };
   broker: { balance: number; netLiq: number; positions: { contractId: number; netPos: number; netPrice: number }[]; workingOrders: number } | null;
@@ -128,6 +131,9 @@ export default function FuturesDeskPage() {
           ))}
         </PanelBody>
       </Panel>
+
+      <FuturesDashboard d={data.dashboard} equity={s.equity ?? null} equityHigh={s.equityHigh ?? null} positions={data.open.length} trades={data.record.trades} feedSeenAt={data.feedSeenAt} feedStale={data.feedStale} stage={L.stage} />
+      <FuturesBriefPanel brief={data.brief} />
 
       <FuturesPromotionPanel promotion={data.promotion} stageReadiness={data.stageReadiness} leaderboard={data.leaderboard} error={data.reviewError} />
 

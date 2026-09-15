@@ -161,9 +161,9 @@ folded, so bars are never counted twice. Fail-soft: a Yahoo problem is a guardia
 `lastError`, never an exception. Roll week caveat: Yahoo's symbol is the continuous front month, so a
 position still in the old month carries the calendar spread in its excursion — labelled, not corrected.
 
-**Signals** carry `score`, `score_json` (the Pine v2 context: `atr, rsi, volRatio, dist20h, d1Up,
-h4Up`), `grade` (stamped by the entry path), `session`, `regime` / `event_mode` (E7 / E3),
-`checklist_json` (E5) and `error_class`.
+**Signals** carry `score` and `score_json` (the desk's own 0–100 score, E7, over the Pine v2 context:
+`atr, rsi, volRatio, dist20h, d1Up, h4Up`), `grade` (stamped by the entry path), `session`, `regime`
+(E7) / `event_mode` (E3), `checklist_json` (E5) and `error_class`.
 
 ### Pine v2 (one re-paste)
 
@@ -313,6 +313,79 @@ distribution, the promotion verdicts and stage readiness → `Performance/future
 stage-readiness line; the API returns `leaderboard`, `promotion`, `stageReadiness` (`reviewError`
 when the read failed).
 
+## Regime engine and the 0–100 opportunity score (E7, `src/lib/futures-desk-score.ts`)
+
+**Stamp and measure, not a gate.** The guardian labels every root once per ET day (its first run of
+the day, `state.regimeDayKey`) from **Yahoo daily bars** (`ES=F` … `RTY=F`, 420 calendar days):
+trend = close vs SMA50 vs SMA200 (`uptrend` when close > SMA50 > SMA200, `downtrend` when the
+reverse, else `range`) × vol = the ATR14 percentile over the last 250 daily ATRs (`lowvol` < 1/3,
+`highvol` ≥ 2/3, else `midvol`) → nine labels, `unknown` under 200 bars — never a throw. Written to
+`futures_desk_regime` `{at, byRoot: {ES: {label, close, sma50, sma200, atr, atrPct, at}, …}}`; a root
+whose bars failed keeps its previous entry (one bad fetch never blanks the stamp); one 30-second
+deadline, fail-soft, guardian notes. Stamped as `regime` on every signal row at receipt and on every
+trade row (null when unknown, so the promotion gate's "≥ 3 regimes seen" counts only real labels).
+Two clocks (TradingView's delayed bar for the alert fields, Yahoo for the regime) — drift is stamped,
+not acted on.
+
+**The score** (`futuresOpportunityScore`, every entry and watch, refused ones included, at receipt):
+structure 20 (`dist20h` proximity to the 20-bar high 10 + `d1Up`/`h4Up` 5 + 5) · trend 10 (the
+regime's trend half, mirrored for a short) · volume 10 (`volRatio` 0.5× → 0, 1.5× → 10) · liquidity
+10 static (ES/NQ 10 · YM/GC 8 · SI/HG/RTY 6) · catalyst 10 (event mode normal/reduced/paused →
+10/5/0) · R:R 15 (**k = 2** × ATR ÷ stop distance, 0.5 → 0, 3 → 15 — the k is a stated assumption,
+measured against MFE by the weekly review) · regime fit 10 and historical expectancy 15 from the
+desk's own leaderboard cells (edge × regime, edge × root; avg R −0.2 → 0, +0.4 → cap; a cell under
+10 resolved trades scores neutral). Missing Pine fields score their neutral part and are listed in
+`missing` — never NaN; every part is capped; the total is an integer ≤ 100. Written as `score` and in
+`score_json` (`{…Pine context, opportunity: {score, components, missing}}`) — the queue replay reads
+back only the Pine fields. The desk's own score REPLACES any chart-sent one.
+
+**Promotion.** The weekly review adds **score buckets** (≥ 80 / 70–79 / < 70 by n, mean R, PF, Welch
+t between the top and bottom buckets) and `scorePromotionVerdict`: green only when every bucket has
+≥ 30 resolved, the ≥ 80 bucket beats the < 70 bucket by mean R, and t ≥ 2. `POST
+/api/futures/desk/enable` `{ "action": "promote-score", "confirm": "PROMOTE" }` sets
+`futures_desk_score_promoted` = `true` **only on a green verdict** (else 400 with the reasons). Once
+promoted: `gradeFor` unlocks Strong (≥ 80, 0.75%) and A+ (≥ 90, 1.0%), and
+**`futures_desk_min_score`** (default 0, clamped 0–100, unreadable → 0) becomes the refusal
+`score 64 is below the desk minimum 70` (a missing score refuses too: `score missing — the desk
+minimum is 70`). Until promoted the key is inert and every alert is Normal — the conservative side.
+Demotion = the key set to anything but `true` (a config write; only reduces risk).
+
+## Desk brief, dashboard fields, watch alerts (E8, `src/lib/futures-desk-brief.ts`)
+
+**Watch alerts** (Pine v2 `watch`, E4/E5): stored as status `watch` with the dry-run size card as
+the reason, scored and regime-stamped like an entry, never executed and never queued, capped at three
+per root per ET day, expired after 24 h, and never counted as an execution error.
+
+**The brief** (`renderFuturesBrief`, pure — the LIVE TRADE OUTPUT) has four sections in this order:
+`## MARKET REGIME` (per-root label · SMA50/200 · ATR percentile, the event window/mode, the next roll
+per root) · `## TOP OPPORTUNITIES` (the last 24 h of watch rows by score, top 5, with the size card)
+· `## RECOMMENDED TRADE` (the open position or today's latest entry — account DEMO, symbol, month,
+micro, qty, order type, stop, $ risk, R:R expected = 2×ATR ÷ stop and MFE so far, session, regime,
+event mode, grade, score, stage — or the top watch, marked NOT placed) · `## ACTION` from `actionFor`:
+halted (disabled, guardian halt, tier 4) / paused (event window, daily loss spent) / anomaly / feed
+stale → **NO TRADE**; an open position at drawdown tier ≥ 2 → **REDUCE**; a watch live → **WAIT**;
+else **NO TRADE**. Empty inputs render `—`, never throw. The ACTION is what a person reading the desk
+would do — the executor keeps its own gates. Written by the guardian right after the daily review
+(same day key, fail-soft) to the vault `Brain/futures-desk-brief.md` (the same DB-backed vault the
+reviews use), one Slack line on `futures_demo`, and `futures_desk_brief_latest` `{at, action,
+markdown}`; `GET /api/futures/brief` returns the stored one, `?live=1` renders it now from the keys
+and tables (no broker call). `/futures` shows it in the "Desk brief" panel.
+
+**Next roll per root** is calendar-derived (`nextRollByRoot`, `futures-desk-calendar.ts`): index
+roots the quarterlies' third Friday 09:30 ET; metals the last business day before the contract month
+(first notice); the front month is the nearest with more than `guardDays` to go (`deskContract`'s
+rule) and the roll is `expiry − (guardDays − 1)` days (`rollDue`). Labelled `source: "calendar"` —
+the broker's own maturity dates decide the real roll.
+
+**Dashboard** (`/futures` → "Desk numbers", from `deskStatus().dashboard`, no broker call beyond the
+existing snapshot): equity, HWM, drawdown % and tier with the budget multiplier, daily realized
+(cash − day-start cash), open P&L (netLiq − cash), week / month P&L on the judged series, positions,
+open risk, daily loss remaining, trades (total, today), violations today, feed last seen, next roll
+per root, stage, event mode/window, score promoted / minimum, and the regime chips. Buying power is
+**not shown** — Tradovate's cash-balance snapshot does not expose it. `/command`'s futures block gains
+the drawdown tier · open risk · daily loss left row, the event mode · feed row and the open anomaly
+(from `/api/health`, additive).
+
 ## Proof
 
 `scripts/futures-desk-round-trip.ts` — 1× MES on the demo: OSO placed, fill confirmed, bracket stop
@@ -325,6 +398,9 @@ with the Railway env: `PROBE_PRICE=<MES last> node --env-file=<railway kv> --imp
 E4 columns are added with `ADD COLUMN IF NOT EXISTS` on first use (`ensureDeskTables`, `futures-desk-store.ts`).
 `futures_desk_state` (JSON), `futures_desk_enabled`, `futures_desk_risk_pct` (Normal %),
 `futures_desk_risk_pct_strong`, `futures_desk_risk_pct_aplus`, `futures_desk_sizing_basis`,
-`futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_risk_state` (JSON),
-`futures_desk_entry_lock`, `futures_desk_guard_lock`, `futures_desk_anomaly` (JSON; empty = clear),
-`futures_desk_feed_seen_at` (ISO). Slack lane `futures_demo` (`webhook_futures_demo`).
+`futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_min_score` (E7),
+`futures_desk_risk_state` (JSON), `futures_desk_event_policy` (JSON), `futures_desk_regime` (JSON, E7),
+`futures_desk_brief_latest` (JSON, E8), `futures_desk_entry_lock`, `futures_desk_guard_lock`,
+`futures_desk_anomaly` (JSON; empty = clear), `futures_desk_feed_seen_at` (ISO). Slack lane `futures_demo`
+(`webhook_futures_demo`). Vault documents: `Performance/futures-desk-daily.md` (+ `-archive`),
+`Performance/futures-desk-weekly.md`, `Brain/futures-desk-brief.md`.

@@ -33,9 +33,8 @@ export interface DeskState {
   /** ET day key of the last daily review (first guardian run after 17:05 ET) and ISO week key of the last weekly review (first Monday run) — E6. */
   reviewDayKey?: string;
   weeklyReviewKey?: string;
-  /** ET day key of the last regime refresh (E7: Yahoo daily bars per root, once a day) and of the last desk brief (E8, after the daily review). */
+  /** ET day key of the last regime refresh (E7: Yahoo daily bars per root, once a day). The desk brief (E8) follows `reviewDayKey`. */
   regimeDayKey?: string;
-  briefDayKey?: string;
 }
 
 export interface TradeRow {

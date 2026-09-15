@@ -17,6 +17,8 @@ export interface FuturesTrade {
 export interface FuturesSignal {
   id: number; received_at: string; edge: string; root: string; action: string; side: string; price: number;
   stop: number | null; status: string; reason: string | null; trade_id: number | null;
+  /** The desk's 0–100 opportunity score, stamped at receipt (E7) — absent on rows from before it existed. */
+  score?: number | null;
 }
 export const signalTone = (s: string) => (s === "executed" ? "green" : s === "queued" ? "amber" : s === "refused" || s === "error" || s === "expired" ? "red" : "grey");
 
@@ -62,9 +64,9 @@ export function FuturesAlertInbox({ signals, emptyHint, title = "Alert inbox", a
       <PanelHeader title={title} aside={<span>{aside}</span>} />
       {signals.length === 0 ? <PanelBody><Empty>{emptyHint}</Empty></PanelBody> : (
         <DataTable dense maxH="20rem">
-          <thead><tr><Th>Received</Th><Th>Edge</Th><Th>Market</Th><Th>Action</Th><Th num>Price</Th><Th num>Stop</Th><Th>Status</Th><Th>Why</Th></tr></thead>
+          <thead><tr><Th>Received</Th><Th>Edge</Th><Th>Market</Th><Th>Action</Th><Th num>Price</Th><Th num>Stop</Th><Th num>Score</Th><Th>Status</Th><Th>Why</Th></tr></thead>
           <tbody>{signals.map((g) => (
-            <Row key={g.id}><Td muted>{when(g.received_at)}</Td><Td>{g.edge}</Td><Td strong>{g.root}</Td><Td>{g.action} {g.side}</Td><Td num>{g.price}</Td><Td num>{g.stop ?? "—"}</Td><Td><Chip tone={signalTone(g.status)}>{g.status}</Chip></Td><Td muted>{g.reason ?? ""}</Td></Row>
+            <Row key={g.id}><Td muted>{when(g.received_at)}</Td><Td>{g.edge}</Td><Td strong>{g.root}</Td><Td>{g.action} {g.side}</Td><Td num>{g.price}</Td><Td num>{g.stop ?? "—"}</Td><Td num>{g.score ?? "—"}</Td><Td><Chip tone={signalTone(g.status)}>{g.status}</Chip></Td><Td muted>{g.reason ?? ""}</Td></Row>
           ))}</tbody>
         </DataTable>
       )}

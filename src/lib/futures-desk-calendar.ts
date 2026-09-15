@@ -167,3 +167,58 @@ export function rollWindowRefusal(contractName: string, expiryIso: string | null
   const days = Math.max(0, Math.round((Date.parse(expiryIso as string) - now.getTime()) / 86_400_000));
   return `${contractName} expires in ${days} day${days === 1 ? "" : "s"} — inside the roll window; entry refused`;
 }
+
+// ---- next roll per root (calendar-derived, for the brief and the dashboard) ---------------------------------
+/** The months each root trades: index roots the quarterlies; metals their liquid months (contract-months.ts). */
+const MONTH_CODES = "FGHJKMNQUVXZ";
+const ROLL_MONTHS: Record<string, string> = { ES: "HMUZ", NQ: "HMUZ", YM: "HMUZ", RTY: "HMUZ", GC: "GJMQVZ", SI: "HKNUZ", HG: "HKNUZ" };
+const MICRO_OF: Record<string, string> = { ES: "MES", NQ: "MNQ", YM: "MYM", RTY: "M2K", GC: "MGC", SI: "SIL", HG: "MHG" };
+
+/** A New York wall-clock instant as UTC ms (DST-aware through the platform's tz data). */
+export function etToUtcMs(y: number, m: number, d: number, hh: number, mm: number): number {
+  const guess = Date.UTC(y, m - 1, d, hh, mm);
+  const et = new Date(new Date(guess).toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const offset = Date.UTC(et.getFullYear(), et.getMonth(), et.getDate(), et.getHours(), et.getMinutes()) - guess;
+  return guess - offset;
+}
+/** Index contracts cash-settle on the THIRD FRIDAY of the contract month at 09:30 ET. */
+export function thirdFriday(y: number, m: number): { y: number; m: number; d: number } {
+  const dow = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  return { y, m, d: 1 + ((5 - dow + 7) % 7) + 14 };
+}
+/** Deliverable metals: first notice is the LAST BUSINESS DAY of the month BEFORE the contract month (CME
+ *  holidays are not applied — a day early at worst, which is the safe side for a roll estimate). */
+export function lastBusinessDayBefore(y: number, m: number): { y: number; m: number; d: number } {
+  const prev = new Date(Date.UTC(y, m - 1, 0));   // day 0 of month m = last day of month m−1
+  while (prev.getUTCDay() === 0 || prev.getUTCDay() === 6) prev.setUTCDate(prev.getUTCDate() - 1);
+  return { y: prev.getUTCFullYear(), m: prev.getUTCMonth() + 1, d: prev.getUTCDate() };
+}
+
+export interface RootRoll { root: string; micro: string; contract: string; kind: "expiry" | "first notice"; expiry: string; rollOn: string; daysUntilRoll: number; source: "calendar" }
+
+/** For each root, the month the desk would trade now (the nearest listed month whose expiry / first notice
+ *  is more than `guardDays` away — `deskContract`'s own rule) and when the guardian would roll out of it
+ *  (expiry − (guardDays − 1) days, `rollDue`). CALENDAR-DERIVED: the broker's own maturity dates decide
+ *  the real roll; this is the brief's and the dashboard's estimate, labelled `source: "calendar"`. */
+export function nextRollByRoot(now: Date, guardDaysOf: (micro: string) => number, roots: readonly string[] = Object.keys(ROLL_MONTHS)): RootRoll[] {
+  const out: RootRoll[] = [];
+  const nowMs = now.getTime();
+  for (const root of roots) {
+    const codes = ROLL_MONTHS[root], micro = MICRO_OF[root];
+    if (!codes || !micro) continue;
+    const guard = guardDaysOf(micro);
+    const metal = root === "GC" || root === "SI" || root === "HG";
+    const start = new Date(nowMs);
+    for (let k = 0; k < 24 && !out.some((r) => r.root === root); k++) {
+      const y = start.getUTCFullYear() + Math.floor((start.getUTCMonth() + k) / 12), m = ((start.getUTCMonth() + k) % 12) + 1;
+      const code = MONTH_CODES[m - 1];
+      if (!codes.includes(code)) continue;
+      const d = metal ? lastBusinessDayBefore(y, m) : thirdFriday(y, m);
+      const expMs = etToUtcMs(d.y, d.m, d.d, metal ? 17 : 9, metal ? 0 : 30);
+      if (expMs - nowMs <= guard * 86_400_000) continue;
+      const rollMs = expMs - (guard - 1) * 86_400_000;
+      out.push({ root, micro, contract: `${micro}${code}${String(y).slice(-1)}`, kind: metal ? "first notice" : "expiry", expiry: new Date(expMs).toISOString(), rollOn: new Date(rollMs).toISOString(), daysUntilRoll: (rollMs - nowMs) / 86_400_000, source: "calendar" });
+    }
+  }
+  return out;
+}

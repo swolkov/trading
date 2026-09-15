@@ -28,6 +28,7 @@ import { entrySlipPts, excursionJobDue, insertTrade, pnlAfterSlip, sessionOf, sl
 import { EXECUTION_ERRORS_DISABLE_AT, EXECUTION_ERRORS_REASON, anomalyRefusal, detectAnomaly, executionErrorsToday, feedStale, hostForMode, parseAnomaly, preTradeChecklist } from "@/lib/futures-desk-safety";
 import { MIN_SCORE_KEY, REGIME_KEY, SCORE_PROMOTED_KEY, minScoreRefusal, parseMinScore, parseRegime, pineContextOf, regimeStamp } from "@/lib/futures-desk-score";
 import { refreshRegime, scoreSignal } from "@/lib/futures-desk-score-jobs";
+import { runDeskBrief } from "@/lib/futures-desk-brief-jobs";
 import {
   ANOMALY_KEY, ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS, FEED_SEEN_KEY, GUARD_LOCK_KEY, GUARD_LOCK_TTL_MS, LANE, acquireLock, alertOnce, cfg, deskEnabled, deskLimits, entriesToday,
   executionErrorEvents, expireOldWatches, ledgerChangesSince, loadState, lockHeld, markSignal, openTrades, patchState, rawRows, recordSignal, releaseLock, saveState, setKey, stampSignal,
@@ -419,6 +420,8 @@ async function guardBody(): Promise<GuardReport> {
   if (regimeDue) { try { notes.push(...(await refreshRegime())); } catch (e) { notes.push(`regime: ${String(e).slice(0, 160)}`); } }
   // Daily after the fold (so today's MFE/MAE are on the rows); weekly on Monday's first run. Both fail-soft.
   if (dailyDue) { try { notes.push(...(await runDailyReview(day, limits))); } catch (e) { notes.push(`daily review: ${String(e).slice(0, 160)}`); } }
+  // The desk brief (E8) follows the daily review on the same day key: vault + Slack + `futures_desk_brief_latest`. Fail-soft.
+  if (dailyDue) { try { notes.push(...(await runDeskBrief(limits))); } catch (e) { notes.push(`brief: ${String(e).slice(0, 160)}`); } }
   if (weeklyDue) { try { notes.push(...(await runWeeklyReview(limits))); } catch (e) { notes.push(`weekly review: ${String(e).slice(0, 160)}`); } }
   return { ok: true, equity, open: open.length - settled, settled, notes };
 }
