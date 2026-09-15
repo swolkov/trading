@@ -9,7 +9,8 @@ import { executeAlert } from "@/lib/margin-executor";
 import { propEntry } from "@/lib/prop-desk";
 import { isSourceArmed } from "@/lib/margin-live-risk";
 import { maybeDemote } from "@/lib/margin-synthesis";
-import { gatherIntel, stampSql } from "@/lib/margin-intel";
+import { derivStamps, gatherIntel, stampSql } from "@/lib/margin-intel";
+import { snapshotDerivatives } from "@/lib/margin-derivatives";
 import { readEventPolicy } from "@/lib/margin-events";
 import { recordRefusal } from "@/lib/margin-trade-card";
 import { altEntryVetoed, btcShock, btcStateStamp, btcVetoEnabled, BTC_VETO_KEY, carryShock, type BtcShockCarry } from "@/lib/margin-btc-shock";
@@ -70,6 +71,10 @@ export async function GET(request: Request) {
   }).catch(() => {});
 
   const state = await loadState();
+  // DERIVATIVES RESEARCH FEED (margin-derivatives.ts): funding / OI / mark from public perp
+  // tickers, ≥15 min apart, BEFORE the 130-call scan so the stamp on this tick's rows is this
+  // tick's read. Fail-soft and deadline-guarded: a dead feed stamps NULLs and costs nothing else.
+  const deriv = await snapshotDerivatives({ deadlineMs: routeDeadlineMs });
   const scan = await scanUniverse();
   const { signals, errors } = scan;
   // What the scan knew, stamped on every paper row it opens (margin-intel.ts). Additive: it
@@ -85,7 +90,7 @@ export async function GET(request: Request) {
   const btcState = carryShock(btcShock(scan.btcBars.m5, scan.btcBars.h1), state.btcShock ?? null);
   state.btcShock = { shock: btcState.shock, until: btcState.until };
   const btcVetoOn = await prisma.agentConfig.findUnique({ where: { key: BTC_VETO_KEY } }).then((r) => btcVetoEnabled(r?.value)).catch(() => true);
-  const intel = gatherIntel(scan, eventStamp, { state: btcStateStamp(btcState) });
+  const intel = gatherIntel(scan, eventStamp, { state: btcStateStamp(btcState) }, derivStamps(deriv.latest?.byCoin));
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "");
   let entryChecksPassed = errors.length === 0;
   // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
@@ -474,10 +479,15 @@ export async function GET(request: Request) {
   // The latest intelligence snapshot for the admin page and /api/margin/intel (display only;
   // those routes must never make a Kraken call of their own).
   const dataIssues = Object.values(scan.features).filter((f) => !f.dataOk).length;
+  const intelLatest = JSON.stringify({
+    at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null,
+    btcShock: btcState, btcVetoOn,
+    derivatives: deriv.latest ? { at: deriv.latest.at, coverage: deriv.latest.coverage, fearGreed: deriv.latest.fearGreed, note: deriv.reason } : { note: deriv.reason },
+  });
   await prisma.agentConfig.upsert({
     where: { key: "kraken_margin_intel_latest" },
-    update: { value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null, btcShock: btcState, btcVetoOn }) },
-    create: { key: "kraken_margin_intel_latest", value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null, btcShock: btcState, btcVetoOn }) },
+    update: { value: intelLatest },
+    create: { key: "kraken_margin_intel_latest", value: intelLatest },
   }).catch(() => {});
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
   // PERSIST THE TICK. Same reasoning as the options book: what the desk REFUSED is at least

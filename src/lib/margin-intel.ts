@@ -18,18 +18,28 @@ export const INTEL_VERSION = "i1";
 export interface EventStamp { mode: "normal" | "reduced" | "paused" }
 /** btc_state: unknown | calm | shock-up | shock-down (margin-btc-shock.ts btcStateStamp). */
 export interface BtcStamp { state: string }
+/** Per coin: deriv_funding = relative funding per 8h, deriv_oi = base units, deriv_oi_chg_24h = fraction. */
+export interface DerivStamp { funding: number | null; oi: number | null; oiChg24h: number | null; source: string }
 export interface Intel {
   version: string;
   mtf: Record<string, MtfState>;
   event: EventStamp | null;
   btc: BtcStamp | null;
-  deriv: null;
+  deriv: Record<string, DerivStamp> | null;
 }
 
-export function gatherIntel(scan: Pick<UniverseScan, "features">, event: EventStamp | null = null, btc: BtcStamp | null = null): Intel {
+/** The latest derivatives snapshot (margin-derivatives.ts DerivLatest.byCoin) → per-coin stamps. */
+export function derivStamps(byCoin: Record<string, { source: string; funding8hRel: number | null; oi: number; oiChg24h: number | null }> | null | undefined): Record<string, DerivStamp> | null {
+  if (!byCoin) return null;
+  const out: Record<string, DerivStamp> = {};
+  for (const [coin, d] of Object.entries(byCoin)) out[coin] = { funding: d.funding8hRel, oi: d.oi, oiChg24h: d.oiChg24h, source: d.source };
+  return out;
+}
+
+export function gatherIntel(scan: Pick<UniverseScan, "features">, event: EventStamp | null = null, btc: BtcStamp | null = null, deriv: Record<string, DerivStamp> | null = null): Intel {
   const mtf: Record<string, MtfState> = {};
   for (const c of SCAN_COINS) mtf[c.name] = mtfState(scan.features, c.name);
-  return { version: INTEL_VERSION, mtf, event, btc, deriv: null };
+  return { version: INTEL_VERSION, mtf, event, btc, deriv };
 }
 
 export type StampValue = string | number | null;
@@ -39,5 +49,7 @@ export function stampSql(intel: Intel, coin: string): { columns: string[]; value
   const values: StampValue[] = [intel.mtf[coin]?.text ?? null, intel.version];
   if (intel.event) { columns.push("event_mode"); values.push(intel.event.mode); }
   if (intel.btc) { columns.push("btc_state"); values.push(intel.btc.state); }
+  const d = intel.deriv?.[coin];
+  if (d) { columns.push("deriv_funding", "deriv_oi", "deriv_oi_chg_24h", "deriv_source"); values.push(d.funding, d.oi, d.oiChg24h, d.source); }
   return { columns, values };
 }
