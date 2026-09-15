@@ -63,6 +63,13 @@ expiry, deliverable metals 20 days before first notice, into the month `deskCont
 closes from the broker's own fills (stop → rule exit → external), books P&L with modeled fees
 ($0.85/side/contract); reports positions it did not open and leaves them alone; drains the queue.
 
+**Rolls are calendar-driven.** The desk has no market data, so the volume/open-interest migration
+between months is unreadable here; the rule is `rollDue` (index micros: expiry − 2 days; metals:
+first notice − 20 days) plus `ACTIVE_MONTH_CODES` (`contract-months.ts`) for the liquid target month.
+The guardian logs `roll plan: MESU6 #12 → MESZ6 on ~Sep 16` inside the last 5 days and sends one
+Slack the day before. Each ledger row carries `contract_month` (`U6`, `Z6`) so a roll chain reads as
+one trade across two months.
+
 ## Proof
 
 `scripts/futures-desk-round-trip.ts` — 1× MES on the demo: OSO placed, fill confirmed, bracket stop

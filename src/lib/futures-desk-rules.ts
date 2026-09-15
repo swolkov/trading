@@ -236,6 +236,42 @@ export function etDayKey(now: Date): string {
   return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, "0")}-${String(et.getDate()).padStart(2, "0")}`;
 }
 
+// ---- rolls -------------------------------------------------------------------------------------
+/** The guardian's roll trigger, extracted so it can be pinned: roll once the expiry (first notice
+ *  for metals) is closer than (guardDays − 1) days. Unknown expiry never rolls. */
+export function rollDue(expiryIso: string | null, nowMs: number, guardDays: number): boolean {
+  if (!expiryIso) return false;
+  const exp = Date.parse(expiryIso);
+  if (!Number.isFinite(exp)) return false;
+  return exp - nowMs < (guardDays - 1) * 86_400_000;
+}
+
+export interface RollPlan { id: number; contract: string; micro: string; expiry: string; rollOn: string; daysUntilRoll: number; daysToExpiry: number }
+
+/** Positions whose month expires within 5 days: when each rolls (≈ expiry − (guardDays − 1) days).
+ *  `expiries` is keyed by trade id; a missing/unparseable expiry is skipped (nothing to plan).
+ *  `daysUntilRoll` may be negative — the roll is overdue (CME was closed when it came due). */
+export function rollPreview<T extends { id: number; contract: string; micro: string }>(
+  open: T[], expiries: Record<number, string | null | undefined>, now: Date, guardDaysOf: (micro: string) => number,
+): RollPlan[] {
+  const out: RollPlan[] = [];
+  for (const t of open) {
+    const iso = expiries[t.id];
+    const exp = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(exp)) continue;
+    const daysToExpiry = (exp - now.getTime()) / 86_400_000;
+    if (daysToExpiry > 5) continue;
+    const rollOnMs = exp - (guardDaysOf(t.micro) - 1) * 86_400_000;
+    out.push({ id: t.id, contract: t.contract, micro: t.micro, expiry: new Date(exp).toISOString(), rollOn: new Date(rollOnMs).toISOString(), daysUntilRoll: (rollOnMs - now.getTime()) / 86_400_000, daysToExpiry });
+  }
+  return out;
+}
+
+/** "Sep 16" in ET — for roll-plan notes and the day-before Slack. */
+export function etShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" });
+}
+
 // ---- P&L and the verdict -----------------------------------------------------------------------
 export function tradePnlUsd(side: Side, entry: number, exit: number, qty: number, pointValue: number): number {
   const pts = side === "long" ? exit - entry : entry - exit;

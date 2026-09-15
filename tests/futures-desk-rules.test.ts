@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DEFAULT_LIMITS, cmeOpen, dedupeKey, deskVerdict, entryRefusal, etDayKey, parseAlert, roundToTick, sizeEntry, tStatOf, tradePnlUsd,
+  DEFAULT_LIMITS, cmeOpen, dedupeKey, deskVerdict, entryRefusal, etDayKey, etShortDate, parseAlert, rollDue, rollPreview, roundToTick, sizeEntry, tStatOf, tradePnlUsd,
   type AlertPayload, type DeskContext,
 } from "../src/lib/futures-desk-rules";
 
@@ -106,4 +106,38 @@ test("verdict wording matches the other desks", () => {
   assert.match(deskVerdict(31, 500, 1.2, 20), /PROMISING/);
   assert.equal(tStatOf([1, 1, 1]), null);
   assert.ok((tStatOf([1, 2, 3, 4]) ?? 0) > 3);
+});
+
+// ---- rolls (E9) ----------------------------------------------------------------------------------
+test("rollDue: Sep 18 09:30 ET expiry, 3-day guard → not due Sep 15 noon ET, due Sep 16 noon ET; metals use 21", () => {
+  const exp = "2026-09-18T13:30:00Z";
+  assert.equal(rollDue(exp, Date.parse("2026-09-15T16:00:00Z"), 3), false);   // 2d 21.5h away
+  assert.equal(rollDue(exp, Date.parse("2026-09-16T16:00:00Z"), 3), true);    // 1d 21.5h < 2d
+  assert.equal(rollDue("2026-10-30T13:30:00Z", Date.parse("2026-10-09T16:00:00Z"), 21), false);
+  assert.equal(rollDue("2026-10-30T13:30:00Z", Date.parse("2026-10-11T16:00:00Z"), 21), true);
+  assert.equal(rollDue(null, Date.now(), 3), false);
+  assert.equal(rollDue("not a date", Date.now(), 3), false);
+});
+
+test("rollPreview lists only months within 5 days, with the roll date; metals 30 days out are absent", () => {
+  const guard = (micro: string) => (micro === "MGC" ? 21 : 3);
+  const open = [
+    { id: 12, contract: "MESU6", micro: "MES" },
+    { id: 13, contract: "MGCZ6", micro: "MGC" },
+    { id: 14, contract: "MNQU6", micro: "MNQ" },
+  ];
+  const now = new Date("2026-09-14T16:00:00Z");
+  const plans = rollPreview(open, { 12: "2026-09-18T13:30:00Z", 13: "2026-10-30T13:30:00Z", 14: null }, now, guard);
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].id, 12);
+  assert.equal(plans[0].rollOn, "2026-09-16T13:30:00.000Z");        // expiry − 2 days
+  assert.ok(Math.abs(plans[0].daysToExpiry - 3.896) < 0.01);
+  assert.ok(Math.abs(plans[0].daysUntilRoll - 1.896) < 0.01);
+  assert.equal(etShortDate(plans[0].rollOn), "Sep 16");
+  // The day before: inside one day of the roll.
+  const dayBefore = rollPreview(open, { 12: "2026-09-18T13:30:00Z" }, new Date("2026-09-15T16:00:00Z"), guard);
+  assert.ok(dayBefore[0].daysUntilRoll <= 1);
+  // Overdue (CME was closed when it came due) reads negative, still listed.
+  const overdue = rollPreview(open, { 12: "2026-09-18T13:30:00Z" }, new Date("2026-09-17T16:00:00Z"), guard);
+  assert.ok(overdue[0].daysUntilRoll < 0);
 });

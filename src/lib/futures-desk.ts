@@ -17,8 +17,8 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import {
-  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey,
-  roundToTick, sizeEntry, tradePnlUsd, type AlertPayload, type DeskContext, type DeskLimits, type Side,
+  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate,
+  rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd, type AlertPayload, type DeskContext, type DeskLimits, type Side,
 } from "@/lib/futures-desk-rules";
 import {
   avgFill, cancelDeskOrder, contractExpiry, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
@@ -51,6 +51,8 @@ export interface TradeRow {
   cl_ord_id: string; signal_id: number | null; status: "open" | "closed" | "unknown"; exit_price: number | null;
   exit_order_id: number | null; closed_at: string | null; exit_reason: string | null; pnl_usd: number | null;
   fees_usd: number | null; risk_usd: number; point_value: number; rolled_from: number | null; note: string | null;
+  /** Month code of the contract this leg trades (`U6`, `Z6`) — a roll chain reads as one trade across two months. */
+  contract_month: string | null;
 }
 
 // ---- type normalisation at the raw-SQL boundary --------------------------------------------------
@@ -122,6 +124,7 @@ export async function ensureDeskTables(): Promise<void> {
     cl_ord_id text, signal_id integer, status text DEFAULT 'open', exit_price double precision, exit_order_id bigint,
     closed_at timestamptz, exit_reason text, pnl_usd double precision, fees_usd double precision, risk_usd double precision,
     point_value double precision, rolled_from integer, note text)`);
+  await prisma.$executeRawUnsafe(`ALTER TABLE futures_desk_trades ADD COLUMN IF NOT EXISTS contract_month text`);
   tablesReady = true;
 }
 
@@ -318,10 +321,10 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const spec = MICRO_FOR_ROOT[a.root];
     const riskUsd = fill.qty * size.riskPerContractUsd;
     const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-      `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note)
-       VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16) RETURNING id`,
+      `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note, contract_month)
+       VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16,$17) RETURNING id`,
       a.edge, a.root, size.micro, contract.name, contract.id, a.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, signalId,
-      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note);
+      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note, contract.name.slice(-2));
     const tradeId = rows[0].id;
 
     // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
@@ -418,6 +421,7 @@ async function guardBody(): Promise<GuardReport> {
 
   const [positions, orders, open] = await Promise.all([deskPositions(), deskOrders(), openTrades()]);
   let settled = 0;
+  const expiries: Record<number, string | null> = {};   // open positions NOT rolled this run → roll planning below
   for (const t of open) {
     const pos = positions.find((p) => p.contractId === t.contract_id);
     if (!pos) { if (await settle(t, orders)) settled++; continue; }
@@ -433,12 +437,21 @@ async function guardBody(): Promise<GuardReport> {
     }
     // Roll before expiry / first notice: close the old month and re-open the new one at the same stop distance.
     const exp = await contractExpiry(t.contract_id);
-    if (exp && Date.parse(exp) - Date.now() < (rollGuardDays(t.micro) - 1) * 86_400_000 && cmeOpen(new Date())) {
-      await rollTrade(live, notes);
-    }
+    if (rollDue(exp, Date.now(), rollGuardDays(t.micro)) && cmeOpen(new Date())) { await rollTrade(live, notes); continue; }
+    expiries[t.id] = exp;
+  }
+  const fresh = await loadState();
+  // Roll planning: inside the last 5 days of a month, say when it rolls and into what; one Slack the day before.
+  for (const plan of rollPreview(open.filter((t) => expiries[t.id] !== undefined), expiries, new Date(), rollGuardDays)) {
+    forgetContract(plan.micro);
+    const next = await deskContract(plan.micro).catch(() => null);
+    const t = open.find((x) => x.id === plan.id)!;
+    const target = next && next.id !== t.contract_id ? next.name : "next month";   // outside the guard, deskContract still resolves the current month
+    const line = `roll plan: ${plan.contract} #${plan.id} → ${target} on ~${etShortDate(plan.rollOn)}`;
+    notes.push(line);
+    if (plan.daysUntilRoll <= 1) await alertOnce(fresh, `roll-plan-${plan.id}`, `🗓 FUTURES DESK ${line} (expires ${etShortDate(plan.expiry)}; the guardian rolls at the same stop distance during CME hours).`, 24 * 60 * 60_000);
   }
   // Positions the desk does not own — reported, never touched.
-  const fresh = await loadState();
   for (const p of positions) if (!open.some((t) => t.contract_id === p.contractId)) await alertOnce(fresh, `foreign-${p.contractId}`, `⚠️ FUTURES DESK: the demo holds contract #${p.contractId} (${p.netPos > 0 ? "long" : "short"} ${Math.abs(p.netPos)}) that the desk did not open. Left alone.`);
 
   // Queued alerts (CME break, lock contention, refused closes) — send at the reopen, expire when stale.
@@ -522,9 +535,9 @@ async function rollTrade(t: TradeRow, notes: string[]): Promise<void> {
   const stopPx = roundToTick(t.side === "long" ? fill.price - stopDist : fill.price + stopDist, next.tickSize);
   // Ledger row first (the new leg keeps the ORIGINAL opened_at so the time stop does not restart), then protection.
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-    `INSERT INTO futures_desk_trades (opened_at, edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, rolled_from, note)
-     VALUES ($1::timestamptz,$2,$3,$4,$5,$6::int,$7,$8::int,$9::float8,$10::float8,$11::bigint,$12::bigint,$13,$14::int,'open',$15::float8,$16::float8,$17::int,$18) RETURNING id`,
-    t.opened_at, t.edge, t.root, t.micro, next.name, next.id, t.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, t.signal_id, t.risk_usd, t.point_value, t.id, `rolled from ${t.contract}`);
+    `INSERT INTO futures_desk_trades (opened_at, edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, rolled_from, note, contract_month)
+     VALUES ($1::timestamptz,$2,$3,$4,$5,$6::int,$7,$8::int,$9::float8,$10::float8,$11::bigint,$12::bigint,$13,$14::int,'open',$15::float8,$16::float8,$17::int,$18,$19) RETURNING id`,
+    t.opened_at, t.edge, t.root, t.micro, next.name, next.id, t.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, t.signal_id, t.risk_usd, t.point_value, t.id, `rolled from ${t.contract}`, next.name.slice(-2));
   if (stopOrderId) { try { await modifyStop(stopOrderId, fill.qty, stopPx); } catch { /* verified below */ } }
   const stopId = await ensureProtected({ contractId: next.id, contract: next.name, side: t.side, qty: fill.qty, stopPx, stopOrderId, clOrdId, why: "roll" });
   await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET stop_order_id = $2::bigint, exit_reason = $3::text WHERE id = $1`, rows[0].id, stopId, stopId == null ? "unprotected" : null);
