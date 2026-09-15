@@ -216,7 +216,13 @@ export function projectedMarginLevel(equity: number, marginUsedNow: number, noti
  */
 export function leverageThatFitsStop(stopPct: number, leverage: number): number {
   const stopFrac = Number.isFinite(stopPct) && stopPct > 0 ? stopPct / 100 : LIVE_STOP_DEFAULT_PCT / 100;
-  const fits = Math.floor(0.36 / stopFrac);
+  // The same 0.36/stop as ever, written as what it IS: the liquidation cushion (0.6/L) must
+  // sit at least LIQ_BUFFER_MULT (1/0.6 = 1.67×) beyond the stop, so L ≤ 0.6 ÷ 1.67 ÷ stop.
+  // ⚠️ LIQ_STOP_ALLOWANCE is computed ONCE as a constant, not inline as 0.6/(mult×stop):
+  // that inline form rounds 0.6/((1/0.6)×0.03) to 11.999999999999998 and would silently
+  // drop every 3% sleeve from 12× to 11× (6% → 5×, 12% → 2×). Pinned by test against the
+  // literal 0.36/stop for every stop 1–20% × leverage 2–20.
+  const fits = Math.floor(LIQ_STOP_ALLOWANCE / stopFrac);
   return Math.max(2, Math.min(leverage, fits));
 }
 
@@ -525,6 +531,17 @@ export function bookTrailR(tranches: { trailR?: number | null; source?: string |
  * STOP_CUSHION_FRACTION, so any alarm threshold BELOW it fires on healthy positions.
  */
 export const STOP_CUSHION_FRACTION = 0.6;
+/** Kraken liquidates near a 0.6/leverage adverse move (liquidationEstimate's model). */
+export const LIQ_CUSHION = 0.6;
+/**
+ * THE LIQUIDATION BUFFER, made explicit: the isolated liquidation distance must be at least
+ * this multiple of the stop. It is not a new rule — it is exactly what STOP_CUSHION_FRACTION
+ * has enforced since Sep 9 (a stop at 60% of the cushion ⇔ the cushion at 1/0.6 = 1.67× the
+ * stop). Named so the trade card, the tests and the entry gate (liqBufferOk) can say it.
+ */
+export const LIQ_BUFFER_MULT = 1 / STOP_CUSHION_FRACTION;
+/** The stop allowance per unit of leverage: 0.6 ÷ 1.67 = 0.36 (exactly, in IEEE-754). */
+export const LIQ_STOP_ALLOWANCE = LIQ_CUSHION / LIQ_BUFFER_MULT;
 
 export function clampLiveStopFrac(cfgPct: number, leverage: number): number {
   const liqDistance = 0.6 / Math.max(1, leverage);
