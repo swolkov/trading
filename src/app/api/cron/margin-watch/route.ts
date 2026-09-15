@@ -6,10 +6,15 @@ import {
   getKrakenMarginPositions,
   getKrakenOHLC,
   liquidationEstimate,
+  listRoundTrips,
   syncKrakenTrades,
 } from "@/lib/kraken-margin";
+import { drawdownTier, losersToday, type RiskState } from "@/lib/margin-risk-tiers";
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
+import { getEconomicCalendar } from "@/lib/finnhub";
+import { eventPolicyNow, mergeCalendar, normalizeFinnhub, staticCalendar, type CalendarEvent } from "@/lib/event-calendar";
+import { EVENT_POLICY_KEY } from "@/lib/margin-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, executeAlert, recoverPendingPyramid, releaseCloseLock } from "@/lib/margin-executor";
 import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, FOUR_H_SEC, bookMaxHoldH, bookTrailR, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, fourHourBarComplete, groupPositionsByOrder, liveContainerFor, managedStopTarget, pyramidAddDue, pyramidBookOf } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
@@ -52,7 +57,14 @@ type WatchState = {
   // the real attached stop resting at the same level would otherwise pair a reduce-only
   // stop with a non-reduce-only one that fire on the same tick.
   emptyOrdersStreak?: number;
+  // The drawdown tier seen last run (margin-risk-tiers), so a tier change pages once.
+  ddTier?: string;
+  // Finnhub's high-impact calendar, normalised, refreshed every 6h (step 5b). Kept across a
+  // failed refresh so an outage falls back to the last good feed, then to the static table.
+  calendar?: CalendarEvent[];
+  calendarAt?: string;
 };
+const CALENDAR_TTL_MS = 6 * 3600_000;
 
 async function cfg(key: string): Promise<string | null> {
   const row = await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null);
@@ -95,7 +107,11 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
       if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}) };
     }
     return {
-      state: { ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined },
+      state: {
+        ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined, ddTier: typeof parsed.ddTier === "string" ? parsed.ddTier : undefined,
+        calendar: Array.isArray(parsed.calendar) ? parsed.calendar.filter((e) => e && typeof e.name === "string" && Number.isFinite(e.atMs) && (e.tier === 1 || e.tier === 2)) : undefined,
+        calendarAt: typeof parsed.calendarAt === "string" ? parsed.calendarAt : undefined,
+      },
       unreliable: false, corrupt: false,
     };
   } catch {
@@ -124,10 +140,10 @@ async function saveState(state: WatchState): Promise<void> {
   }).catch(() => {});
 }
 
-function shouldFire(state: WatchState, key: string, always = false): boolean {
+function shouldFire(state: WatchState, key: string, always = false, realertMs = REALERT_MS): boolean {
   if (always) return true;
   const last = state.alerts[key];
-  return !last || Date.now() - new Date(last).getTime() > REALERT_MS;
+  return !last || Date.now() - new Date(last).getTime() > realertMs;
 }
 
 export async function GET(request: Request) {
@@ -227,6 +243,38 @@ export async function GET(request: Request) {
         }).catch(() => {});
       }
       const dd = peak > 0 ? (peak - health.equity) / peak : 0;
+      // RISK TIERS (display + one page per tier change). The executor computes the same tier
+      // itself from fresh equity at entry time; this row is for the admin page and the intel
+      // route, which must never make a private Kraken call of their own.
+      try {
+        const tier = drawdownTier(peak, health.equity, ddPct * 100);
+        // Read once; when the ladder is switched off the executor sizes at ×1 and this row
+        // and its page must say the same thing.
+        const tiersOn = (await cfg("kraken_margin_dd_tiers")) !== "off";
+        const mult = tiersOn ? tier.mult : (tier.tier === "halt" || tier.tier === "unknown" ? 0 : 1);
+        let losers: number | null = null;
+        try {
+          const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+          // The scratch threshold uses the armed sleeve's stop (the first armed source's container).
+          const armed = ((await cfg("kraken_margin_live_sources")) ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0];
+          const stop = armed ? liveContainerFor(armed)?.stopPct : undefined;
+          losers = losersToday(await listRoundTrips(), dayStart.getTime(), health.equity, stop != null ? stop / 100 : null);
+        } catch { losers = null; }
+        const riskState: RiskState = { at: new Date().toISOString(), peak, equity: health.equity, dd: tier.dd, tier: tier.tier, mult, losersToday: losers, tiersOn, ...(tiersOn ? {} : { note: "tiers off (kraken_margin_dd_tiers=off) — live risk ×1 below the halt" }) };
+        await prisma.agentConfig.upsert({
+          where: { key: "kraken_margin_risk_state" }, update: { value: JSON.stringify(riskState) }, create: { key: "kraken_margin_risk_state", value: JSON.stringify(riskState) },
+        }).catch(() => {});
+        const tierKey = String(tier.tier);
+        if (state.ddTier != null && state.ddTier !== tierKey && shouldFire(state, `dd-tier-${tierKey}`)) {
+          const msg = tier.tier === 0
+            ? `✅ Drawdown tier 0 — equity $${health.equity.toFixed(0)} is ${tier.dd.toFixed(1)}% off peak $${peak.toFixed(0)}; live risk back to full size.`
+            : `🟠 Drawdown tier ${tierKey} — equity $${health.equity.toFixed(0)} is ${tier.dd.toFixed(1)}% off peak $${peak.toFixed(0)}; live per-trade risk ×${mult}${tiersOn ? "" : " (tiers off)"} until it recovers (5% halves, 10% quarters, ${(ddPct * 100).toFixed(0)}% halts).`;
+          await sendNotification(msg, "margin_urgent").catch(() => {});
+          state.alerts[`dd-tier-${tierKey}`] = new Date().toISOString();
+          sent.push(`dd-tier-${tierKey}`);
+        }
+        state.ddTier = tierKey;
+      } catch (e) { errors.push(`risk tiers: ${String(e).slice(0, 80)}`); }
       const disarmed = (await cfg("kraken_margin_disarmed_dd")) === "true";
       if (!disarmed && dd >= ddPct) {
         await prisma.agentConfig.upsert({
@@ -981,6 +1029,56 @@ export async function GET(request: Request) {
     }
   } catch (e) {
     errors.push(`fast-move: ${e}`);
+  }
+
+  // 5b) EVENT POLICY (Sep 15 2026) — every run, flat or not, because the executor reads it
+  //     before every entry and a policy older than 20 minutes reads as REDUCED. The static
+  //     table is the calendar by default. Finnhub's economic calendar is a PREMIUM endpoint
+  //     (the prod key answers "You don't have access to this resource") so it is OPT-IN:
+  //     kraken_margin_calendar_feed=finnhub AND a key present; fetched at most every 6h (10s
+  //     timeout inside getEconomicCalendar, [] on any failure), merged over the static table.
+  //     An empty/denied feed is recorded once a week in `sent` — never an error, never a page.
+  //     Slack once per (event, mode): reduced → margin_signals, paused → margin_urgent.
+  try {
+    const nowMs = Date.now();
+    const feedOn = !!process.env.FINNHUB_API_KEY && (await cfg("kraken_margin_calendar_feed")) === "finnhub";
+    if (feedOn) {
+      const cacheAge = state.calendarAt ? nowMs - Date.parse(state.calendarAt) : Infinity;
+      if (!(cacheAge < CALENDAR_TTL_MS)) {
+        const rows = await getEconomicCalendar();
+        // One attempt per 6h whatever it returned; the last good feed is kept through an empty
+        // answer, and the static table sits under both.
+        state.calendarAt = new Date(nowMs).toISOString();
+        if (rows.length) state.calendar = normalizeFinnhub(rows);
+        else if (shouldFire(state, "finnhub-calendar-empty", false, 7 * 24 * 3600_000)) {
+          state.alerts["finnhub-calendar-empty"] = new Date(nowMs).toISOString();
+          sent.push("finnhub-calendar-empty (static table only)");
+        }
+      }
+    } else if (state.calendar) {
+      // Feed switched off: forget the cached rows so the policy is honestly "static".
+      delete state.calendar; delete state.calendarAt;
+    }
+    const events = mergeCalendar(feedOn ? (state.calendar ?? []) : [], staticCalendar(), nowMs);
+    const policy = eventPolicyNow(nowMs, events);
+    const source = policy.nextEvent?.source ?? (feedOn && state.calendar?.length ? "finnhub+static" : "static");
+    const value = JSON.stringify({ ...policy, source, calendarAt: state.calendarAt ?? null, events: events.slice(0, 12) });
+    await prisma.agentConfig.upsert({ where: { key: EVENT_POLICY_KEY }, update: { value }, create: { key: EVENT_POLICY_KEY, value } });
+    if (policy.mode !== "normal" && policy.nextEvent) {
+      const key = `event-policy-${policy.nextEvent.name}-${new Date(policy.nextEvent.atMs).toISOString().slice(0, 10)}-${policy.mode}`;
+      if (shouldFire(state, key)) {
+        await sendNotification(
+          policy.mode === "paused"
+            ? `⛔ Event window: ${policy.reason}. New crypto entries are PAUSED (closes and stops unaffected).`
+            : `🟡 Event window: ${policy.reason}. New crypto entries run at HALF risk until it clears.`,
+          policy.mode === "paused" ? "margin_urgent" : "margin_signals",
+        ).catch(() => {});
+        state.alerts[key] = new Date().toISOString();
+        sent.push(key);
+      }
+    }
+  } catch (e) {
+    errors.push(`event policy: ${String(e).slice(0, 100)}`);
   }
 
   // 5) Event guardrail: levered into a high-impact macro print within 24h → one warning.
