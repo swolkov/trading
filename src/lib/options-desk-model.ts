@@ -2,14 +2,25 @@
 import { exDivRisk, spansEarnings, type EarningsClass, type ResearchEvents } from "./options-events";
 import { chaseRatio, directionOfKind, marketState, marketVeto, type MarketStamp } from "./options-market-state";
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
-// The base research list. The index and mega-cap names give the desk its regime read, but at a
-// $100 max loss a single contract on a $300+ stock never fits, so the AFFORDABLE CORE (Sep 14 2026)
-// is where the live desk can actually buy delta: $11-$30 names with deep, tight option markets.
+// The base research list, in two SLICES (Sep 15 2026) because one run cannot read it all: 28 base +
+// ≤6 discovery names × 2 expiries × 5 strikes × 2 types = 680 contracts, and the broker's instrument
+// reads already flaked past ~100 per run. Each slice is ≤360 contracts. The research job picks the
+// slice by ET hour (10:15 and 15:15 → A; 12:15 and 17:45 → B) unless RESEARCH_SLICE says otherwise;
+// the merge keeps the other slice's bars, contracts and events, so the screen always sees all 28.
+//   A — the six index/mega names (the desk's regime read) + the AFFORDABLE CORE (Sep 14 2026): at a
+//       $100 max loss a single contract on a $300+ stock never fits, so $11–$30 names with deep,
+//       tight option markets are where the live desk can actually buy delta. 18 names × 20 = 360.
+//   B — ten large caps (Sep 15 2026): at their prices only a $2.5–5-wide debit spread fits the cap;
+//       the screen enforces that by price, nothing special-cases them. Discovery names (≤6 from the
+//       broker scanners) ride in this slice only. (10 + 6) × 20 = 320.
 // The screen still applies every quality gate; a name on this list earns nothing by being here.
-export const OPTIONS_WATCHLIST = [
-  "SPY", "QQQ", "IWM", "AAPL", "AMD", "NVDA",
-  "F", "AAL", "T", "PFE", "CCL", "NCLH", "WBD", "DKNG", "RIOT", "SOFI", "MARA", "RIVN",
-];
+// For D4's cluster map: RIOT, MARA, COIN and MSTR are one `crypto-proxy` bet, not four.
+export const OPTIONS_WATCHLIST_SLICES = {
+  A: ["SPY", "QQQ", "IWM", "AAPL", "AMD", "NVDA", "F", "AAL", "T", "PFE", "CCL", "NCLH", "WBD", "DKNG", "RIOT", "SOFI", "MARA", "RIVN"],
+  B: ["TSLA", "MSFT", "AMZN", "META", "GOOGL", "AVGO", "NFLX", "PLTR", "COIN", "MSTR"],
+} as const satisfies Record<string, readonly string[]>;
+export type ResearchSlice = keyof typeof OPTIONS_WATCHLIST_SLICES;
+export const OPTIONS_WATCHLIST: string[] = [...OPTIONS_WATCHLIST_SLICES.A, ...OPTIONS_WATCHLIST_SLICES.B];
 export const OPTIONS_DESK_RULES = {
   maxContracts: 1, maxPositions: 1, maxEntriesPerDay: 1,
   // DTE ENGINE (Sep 15 2026): research pulls TWO expiries per name — the nearest ≥21 and the nearest

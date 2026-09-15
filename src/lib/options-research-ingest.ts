@@ -120,7 +120,7 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   }
   const matched=new Set(result.contracts.map(c=>c.id));
   const unmatched=[...requestedQuotes].filter(id=>!matched.has(id)).length;
-  if(unmatched>0)result.errors.push(`${unmatched} requested contracts lacked usable matched quotes`);
+  if(unmatched>0)result.errors.push(unmatchedQuoteLine(unmatched));
   for(const symbol of Object.keys(result.bars))if(!result.contracts.some(c=>c.symbol===symbol))result.errors.push(`${symbol}: no matched option quotes in this collection`);
   // One event row per researched symbol, only once the calendar itself was read: "no earnings" is a statement the
   // broker made, never one this parser infers from silence. The ex-dividend key is present only when fundamentals came back.
@@ -144,12 +144,21 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   result.scans=[...scans.values()];return result;
 }
 
-// Current display keeps the base universe plus at most six current discoveries.
+// The unmatched-quote count is one error line the panel counts back out; the two functions must agree on its shape.
+const unmatchedQuoteLine=(n:number)=>`${n} requested contracts lacked usable matched quotes`;
+export function unmatchedQuoteCount(errors:string[]):number{
+  return errors.reduce((n,e)=>{const m=/^(\d+) requested contracts lacked usable matched quotes$/.exec(e);return n+(m?Number(m[1]):0);},0);
+}
+
+// Current display keeps the base universe plus at most six current discoveries. A run that observed no
+// discovery names (slice A never asks for them) carries the last run's discoveries forward instead of
+// dropping them for half the day; a run that observed some replaces them.
 // The archive is built from `next` alone, never from this inherited display state.
 export function mergeResearchSnapshot(prior: OptionsResearch | null, next: OptionsResearch): OptionsResearch {
   const observed = [...new Set([...Object.keys(next.bars), ...next.contracts.map(c => c.symbol)])];
-  const pool = observed.length ? observed : [...Object.keys(prior?.bars ?? {}), ...(prior?.contracts ?? []).map(c => c.symbol)];
-  const extras = [...new Set(pool.filter(s => !OPTIONS_WATCHLIST.includes(s)))].sort().slice(0, 6);
+  const extrasOf = (pool: string[]) => [...new Set(pool.filter(s => !OPTIONS_WATCHLIST.includes(s)))].sort().slice(0, 6);
+  const fresh = extrasOf(observed);
+  const extras = fresh.length ? fresh : extrasOf([...Object.keys(prior?.bars ?? {}), ...(prior?.contracts ?? []).map(c => c.symbol)]);
   const selected = new Set([...OPTIONS_WATCHLIST, ...extras]);
   const bars = Object.fromEntries([...selected].flatMap(symbol => {
     const rows = next.bars[symbol] ?? prior?.bars[symbol];

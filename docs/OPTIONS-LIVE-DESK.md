@@ -208,3 +208,45 @@ at −$0.01/day). Stamps: `dteBucket` (`21-30` | `30-45` | `45-60`), `expectedHo
 restart an empty record). Every candidate is stamped `deltaBand`: **prompt** = the long leg's
 |delta| in [0.40, 0.70], **outer** = the rest of the window (or no delta). D7 measures the slice
 before anything moves.
+
+## Universe expansion and research slices (Sep 15 2026)
+
+`OPTIONS_WATCHLIST` is now **28 base names** = `OPTIONS_WATCHLIST_SLICES.A ∪ B` (order preserved; a
+test pins the partition):
+
+- **A (18)** — the six index/mega names (SPY QQQ IWM AAPL AMD NVDA) that give the desk its regime
+  read, plus the affordable core (F AAL T PFE CCL NCLH WBD DKNG RIOT SOFI MARA RIVN).
+- **B (10)** — TSLA MSFT AMZN META GOOGL AVGO NFLX PLTR COIN MSTR. At their prices only a $2.5–5-wide
+  debit spread fits the cap; the screen enforces that by price, nothing special-cases them. Scanner
+  **discovery** names (≤6) ride in this slice only.
+- For D4's cluster map: RIOT, MARA, COIN and MSTR are one `crypto-proxy` bet, not four.
+
+**The load math.** 28 base + ≤6 discovery = 34 names × 2 expiries × 5 strikes × 2 types =
+**680 contracts** per full pass (34 quote batches of 20) against 180 (9 batches) before, and the
+broker's instrument reads already flaked past ~100 in one run. So each run reads **≤360 contracts**:
+slice A = 18 × 20 = 360; slice B = (10 + 6) × 20 = 320. One run takes roughly **10–15 minutes**
+(bars, two chains per name, quote batches until every ID answers, the calendar twice, fundamentals
+in tens).
+
+**The schedule** stays one plist (`scripts/com.esbueno.options-market.plist`, four weekday
+entries). launchd cannot vary the environment per `StartCalendarInterval`, so
+`scripts/options-market-run.sh` picks the slice by ET hour — **10:15 and 15:15 → A; 12:15 and
+17:45 → B** (any other hour → A) — unless `RESEARCH_SLICE=A|B` is set for a hand run (anything
+else refuses and logs). The script derives `BASE_SYMBOLS` from that slice, runs the scanner
+session and adds the discovery clause only in B, exports `RESEARCH_SLICE` so the ingest log line
+carries `slice`, `runSymbols`, `runContracts` and `unmatchedQuotes`.
+
+**The merge** (`mergeResearchSnapshot`) keeps every watchlist symbol's bars, contracts and event
+rows from whichever run last observed them, so a slice-B run never drops slice A's data and the
+screen always sees all 28 (a test pins both directions). A run that observed no discovery names
+(slice A never asks) carries the last run's discoveries forward instead of dropping them for half
+the day; a run that observed some replaces them (six at most, sorted). `errors` are the run's own.
+
+**Unmatched quotes on the panel.** The ingest already writes `N requested contracts lacked usable
+matched quotes` into the snapshot's `errors`; `unmatchedQuoteCount(errors)` reads it back and
+`/api/options/live-desk` exposes `research {capturedAt, symbols, contracts, unmatchedQuotes,
+errors}`, shown on the Live desk panel's research line ("412 contracts on 28 names, last run 2h
+ago · 3 unmatched quotes · 2 error lines"). A rising count is the first sign a slice is too big.
+
+After this ships, the first two runs (one A, one B) fill both halves; until then the merged
+snapshot carries whatever the old 18-name runs left, and the ten new names simply have no bars yet.

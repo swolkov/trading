@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Four runs a weekday. launchd cannot vary the environment per StartCalendarInterval, so the slice is
+     chosen inside options-market-run.sh by ET hour: 10:15 and 15:15 read slice A (index/mega + affordable
+     core), 12:15 and 17:45 read slice B (large caps + scanner discovery). RESEARCH_SLICE=A|B overrides. -->
 <dict>
 	<key>Label</key>
 	<string>com.esbueno.options-market</string>

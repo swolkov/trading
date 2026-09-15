@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { prisma } from "../src/lib/db";
-import { parseRobinhoodResearchEvents, mergeResearchSnapshot, discoverySymbols } from "../src/lib/options-research-ingest";
+import { parseRobinhoodResearchEvents, mergeResearchSnapshot, discoverySymbols, unmatchedQuoteCount } from "../src/lib/options-research-ingest";
 import { OPTIONS_RESEARCH_KEY, isOptionsResearch, type OptionsResearch } from "../src/lib/options-desk-model";
 import { readAccountSnapshot } from "../src/lib/options-quote-store";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../src/lib/options-operation";
@@ -37,6 +37,6 @@ async function main(){
   const [account,risk]=await Promise.all([readAccountSnapshot(),prisma.agentConfig.findUnique({where:{key:OPTIONS_MAX_LOSS_KEY}})]);
   await saveOptionsObservation(buildOptionsObservation(next,parseOptionsMaxLoss(risk?.value),account),rawCapture);
   await prisma.agentConfig.upsert({where:{key:OPTIONS_RESEARCH_KEY},create:{key:OPTIONS_RESEARCH_KEY,value:JSON.stringify(merged)},update:{value:JSON.stringify(merged)}});
-  console.log(JSON.stringify({stored:true,symbols:Object.keys(merged.bars),contracts:merged.contracts.length,scans:merged.scans.length,events:Object.keys(merged.events??{}).length,errors:merged.errors}));
+  console.log(JSON.stringify({stored:true,slice:process.env.RESEARCH_SLICE??null,runSymbols:Object.keys(next.bars),runContracts:next.contracts.length,unmatchedQuotes:unmatchedQuoteCount(next.errors),symbols:Object.keys(merged.bars),contracts:merged.contracts.length,scans:merged.scans.length,events:Object.keys(merged.events??{}).length,errors:merged.errors}));
 }
 main().finally(()=>prisma.$disconnect()).catch(e=>{console.error(e.message);process.exitCode=1});

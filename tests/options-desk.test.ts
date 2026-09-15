@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
-import { OPTIONS_DESK_RULES, contractQualityFailures, deltaBandOf, dteBucketOf, isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
-import { mergeResearchSnapshot } from "../src/lib/options-research-ingest";
+import { OPTIONS_DESK_RULES, OPTIONS_WATCHLIST, OPTIONS_WATCHLIST_SLICES, contractQualityFailures, deltaBandOf, dteBucketOf, isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
+import { mergeResearchSnapshot, unmatchedQuoteCount } from "../src/lib/options-research-ingest";
 import { exDivRisk, nextExDiv, spansEarnings } from "../src/lib/options-events";
 import { loadOptionsNews } from "../src/lib/options-news";
 import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scripts/robinhood/client";
@@ -254,4 +254,44 @@ test("DTE engine: 21 days is the floor (a 20-DTE contract is outside the window,
  assert.equal(spread.thetaDragUsd,null); assert.equal(spread.deltaBand,"prompt");
  const soon=screenResearchContracts({...r,contracts:[{...near,expiry:"2026-10-06"},{...nearPut,expiry:"2026-10-06"}]},100,500,now)[0];   // 23.3 DTE → 21-30, hold 10
  assert.equal(soon.dteBucket,"21-30"); assert.equal(soon.expectedHoldDays,10);
+});
+
+test("universe: the two research slices partition the 28-name watchlist in order, each under the 360-contract cap; the ten large caps are slice B",()=>{
+ const {A,B}=OPTIONS_WATCHLIST_SLICES;
+ assert.deepEqual(OPTIONS_WATCHLIST,[...A,...B]); assert.equal(OPTIONS_WATCHLIST.length,28); assert.equal(new Set(OPTIONS_WATCHLIST).size,28);
+ assert.equal(A.filter(x=>(B as readonly string[]).includes(x)).length,0);
+ assert.deepEqual([...B],["TSLA","MSFT","AMZN","META","GOOGL","AVGO","NFLX","PLTR","COIN","MSTR"]);
+ assert.deepEqual(A.slice(0,6),["SPY","QQQ","IWM","AAPL","AMD","NVDA"]); assert.equal(A.length,18);
+ const perName=2*5*2;                                                    // two expiries × five strikes × calls and puts
+ assert.ok(A.length*perName<=360); assert.ok((B.length+6)*perName<=360); // discovery (≤6) rides in B
+ assert.equal(OPTIONS_WATCHLIST.length*perName+6*perName,680);
+});
+
+test("a slice-B run keeps slice A's bars, contracts and events; a slice-A run keeps slice B's and carries the last discoveries forward; the unmatched-quote count is read back out of the error lines",()=>{
+ const base=research(), at=new Date(now).toISOString();
+ const bars=(close:number)=>base.bars.TEST.map(b=>({...b,close}));
+ const contract=(symbol:string,id:string)=>({...base.contracts[0],id,symbol});
+ const event=(when:string)=>({earningsAt:null,earningsTiming:null,calendarThrough:"2026-11-11",exDivAt:null,dividendAmount:null,at:when});
+ const sliceA:OptionsResearch={...base,bars:{SPY:bars(500),SOFI:bars(20)},contracts:[contract("SPY","spy1"),contract("SOFI","sofi1")],events:{SPY:event("2026-09-12T14:00:00Z"),SOFI:event("2026-09-12T14:00:00Z")},errors:[]};
+ const sliceB:OptionsResearch={...base,bars:{TSLA:bars(300),COIN:bars(200),ZZZ:bars(15)},contracts:[contract("TSLA","tsla1"),contract("COIN","coin1"),contract("ZZZ","zzz1")],events:{TSLA:event(at),COIN:event(at),ZZZ:event(at)},errors:["3 requested contracts lacked usable matched quotes"]};
+ const afterB=mergeResearchSnapshot(sliceA,sliceB);
+ assert.deepEqual(Object.keys(afterB.bars).sort(),["COIN","SOFI","SPY","TSLA","ZZZ"]);
+ assert.deepEqual(afterB.contracts.map(c=>c.id).sort(),["coin1","sofi1","spy1","tsla1","zzz1"]);
+ assert.equal(afterB.events?.SPY.at,"2026-09-12T14:00:00Z"); assert.equal(afterB.events?.TSLA.at,at);   // A's rows keep their own clock
+ assert.equal(afterB.bars.SPY[0].close,500); assert.deepEqual(afterB.errors,sliceB.errors);           // errors are the run's own
+ assert.equal(unmatchedQuoteCount(afterB.errors),3);
+ // The next slice-A run refreshes A, keeps B, and does not drop the discovery name it never asked for.
+ const afterA=mergeResearchSnapshot(afterB,{...sliceA,bars:{SPY:bars(510),SOFI:bars(21)},errors:[]});
+ assert.deepEqual(Object.keys(afterA.bars).sort(),["COIN","SOFI","SPY","TSLA","ZZZ"]);
+ assert.equal(afterA.bars.SPY[0].close,510); assert.equal(afterA.bars.TSLA[0].close,300); assert.ok(afterA.contracts.some(c=>c.id==="zzz1"));
+ assert.equal(unmatchedQuoteCount(afterA.errors),0);
+ // A later slice-B run that observed a different discovery set replaces it (six at most, sorted).
+ const afterB2=mergeResearchSnapshot(afterA,{...sliceB,bars:{TSLA:bars(310),YYY:bars(12)},contracts:[contract("TSLA","tsla2"),contract("YYY","yyy1")],errors:[]});
+ assert.equal("ZZZ" in afterB2.bars,false); assert.ok("YYY" in afterB2.bars); assert.ok("COIN" in afterB2.bars);
+ assert.equal(unmatchedQuoteCount(["12 requested contracts lacked usable matched quotes","F: no matched option quotes in this collection","x requested contracts lacked usable matched quotes"]),12);
+ // The parser writes the line the counter reads.
+ const use=(id:string,name:string,input:unknown)=>({type:"tool_use",id,name:`mcp__robinhood-trading__${name}`,input});
+ const res=(id:string,data:unknown)=>({type:"tool_result",tool_use_id:id,content:JSON.stringify({data})});
+ const parsed=parseRobinhoodResearchEvents([{message:{content:[use("q","get_option_quotes",{instrument_ids:["i1","i2"]})]}},{message:{content:[res("q",{results:[]})]}}].map(l=>JSON.stringify(l)).join("\n"),at);
+ assert.equal(unmatchedQuoteCount(parsed.errors),2);
 });

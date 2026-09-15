@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/db";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "@/lib/options-operation";
 import { OPTIONS_LIVE_RULES } from "@/lib/options-live-guardian";
+import { OPTIONS_RESEARCH_KEY, isOptionsResearch } from "@/lib/options-desk-model";
+import { unmatchedQuoteCount } from "@/lib/options-research-ingest";
 import { sendNotification } from "@/lib/notifications";
 
 // THE OPTIONS LIVE DESK's admin surface. GET = what the desk on the Mac last reported (it writes
@@ -10,13 +12,18 @@ import { sendNotification } from "@/lib/notifications";
 // and never touches an open position — the guardian keeps managing it.
 export const dynamic = "force-dynamic";
 const KEYS = ["options_live_armed", "options_live_integration_verified", "options_live_guardian_ok_at", "options_live_verified_fee_reserve_usd", OPTIONS_MAX_LOSS_KEY,
-  "options_live_state", "options_live_probe", "options_live_log", "options_live_equity_high", "options_live_arm_log"];
+  "options_live_state", "options_live_probe", "options_live_log", "options_live_equity_high", "options_live_arm_log", OPTIONS_RESEARCH_KEY];
 const DEFAULT_FEE_RESERVE_USD = 2;   // regulatory fees on one contract round trip are cents; $2 is a generous ceiling inside the $100 cap
 
 async function view() {
   const rows = await prisma.agentConfig.findMany({ where: { key: { in: KEYS } } });
   const c = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   const parse = (k: string) => { try { return c[k] ? JSON.parse(c[k]) : null; } catch { return null; } };
+  // What the entry tick will screen: the merged research snapshot (all slices), with the last run's unmatched-quote count.
+  const research = parse(OPTIONS_RESEARCH_KEY);
+  const researchLine = isOptionsResearch(research)
+    ? { capturedAt: research.capturedAt, symbols: Object.keys(research.bars).length, contracts: research.contracts.length, unmatchedQuotes: unmatchedQuoteCount(research.errors), errors: research.errors.length }
+    : null;
   const guardianAt = c.options_live_guardian_ok_at ?? null;
   const guardianAge = guardianAt ? Date.now() - Date.parse(guardianAt) : null;
   let intents: { refId: string; action: string; state: string; orderId: string | null; updatedAt: string }[] = [];
@@ -38,7 +45,7 @@ async function view() {
     log: (parse("options_live_log") as string[] | null ?? []).slice(-40),
     armLog: (parse("options_live_arm_log") as string[] | null ?? []).slice(-10),
     equityHigh: c.options_live_equity_high ? Number(c.options_live_equity_high) : null,
-    intents, owned,
+    research: researchLine, intents, owned,
   };
 }
 export async function GET() { return Response.json(await view()); }
