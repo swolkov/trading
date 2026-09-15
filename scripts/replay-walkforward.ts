@@ -74,7 +74,7 @@ const within = (xs: Sample[], from: string, to: string) => xs.filter((x) => x.t 
 async function main() {
   const t0 = Date.now();
   const lines: string[] = [];
-  const log = (s = "") => { lines.push(s); console.log(s); };
+  const log = (...parts: string[]) => { for (const s of parts.length ? parts : [""]) { lines.push(s); console.log(s); } };
   const { bars, missing } = loadResearchBars(DATA_DIR);
   if (!bars.length) { console.error(`no bars under ${DATA_DIR} — run scripts/crypto-bars-refresh.ts`); process.exit(1); }
   const rule = ruleFor(SOURCE);
