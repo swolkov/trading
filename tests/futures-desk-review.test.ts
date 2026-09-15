@@ -48,6 +48,10 @@ test("journalToMetricRows merges a roll chain into ONE row: judged P&L summed ac
   const legacy = out.find((r) => r.id === 4)!;
   assert.equal(legacy.pnlSource, "demo"); assert.equal(legacy.pnl, -120); assert.equal(legacy.errorClass, "partial_fill"); assert.equal(legacy.dow, "Tue");
   assert.equal(out[0].id, 4);   // sorted by close
+  // A chain with ONE leg lacking the after-slip figure is judged on the demo's pnl_usd for the WHOLE chain — never a mixed sum.
+  const mixed = journalToMetricRows(rows.map((r) => (r.id === 1 ? { ...r, pnl_after_slip_usd: null } : r)));
+  const mixedChain = mixed.find((r) => r.id === 2)!;
+  assert.equal(mixedChain.pnlSource, "demo"); assert.ok(Math.abs(mixedChain.pnl - 150) < 1e-9); assert.ok(Math.abs(mixedChain.pnlDemo - 150) < 1e-9); assert.ok(Math.abs((mixedChain.r as number) - 0.75) < 1e-9);
   // mergeRollChains itself still folds the leg into its successor (the status module re-exports this one).
   assert.equal(mergeRollChains(rows).length, 3);
 });
@@ -165,6 +169,10 @@ test("renderDailyReview: the fixed headers, the stat list, refusals by reason, w
     { edge: "donchian_60m_long", root: "GC", action: "watch", status: "watch", reason: "dry run: 1× MGC · stop 12 pts · risk $121.70 of $250 (normal · stage A)" },
     { edge: "donchian_60m_long", root: "SI", action: "entry", status: "error", reason: "entry threw", error_class: "auth_backoff" },
   ];
+  // An unprotected ENTRY is both its signal's error and its row's class: counted once.
+  const unprotectedRows = [...rows, { ...rows[0], id: 9, errorClass: "unprotected", pnl: -20, pnlDemo: -11.1 }];
+  const unprotectedSignals = [...signals, { edge: "donchian_60m_long", root: "ES", action: "entry", status: "error", reason: "filled 1× MESZ6 but could not be protected — closed", error_class: "unprotected", trade_id: 9 }];
+  assert.ok(renderDailyReview({ dayKey: "2026-09-15", rows: unprotectedRows, signals: unprotectedSignals, basisUsd: BASIS }).markdown.includes("- Rule violations (error classes): 3"));   // 2 + the one unprotected, not 4
   const { markdown, slack } = renderDailyReview({ dayKey: "2026-09-15", rows, signals, equitySamples: null, stage: "A", basisUsd: BASIS });
   for (const h of ["## Futures desk — daily review 2026-09-15 (Tue) · stage A", "### P&L", "### Trades", "### Refusals", "### Watch"]) assert.ok(markdown.includes(h), h);
   assert.ok(markdown.includes("- Gross (demo, after modeled fees): +$157 · fees $5.10 · modeled slip $26.70"));   // 130 + 3 × 8.9
@@ -200,6 +208,9 @@ test("when the reviews run: daily after 17:05 ET once per day key; weekly on Mon
   assert.equal(dailyReviewDue(undefined, new Date("2026-09-15T21:05:00Z")), true);
   assert.equal(dailyReviewDue("2026-09-15", new Date("2026-09-15T21:05:00Z")), false);
   assert.equal(dailyReviewDue("2026-09-14", new Date("2026-09-15T21:05:00Z")), true);
+  assert.equal(dailyReviewDue(undefined, new Date("2026-09-19T21:10:00Z")), false);   // Saturday 17:10 ET — no session to review
+  assert.equal(dailyReviewDue(undefined, new Date("2026-09-20T21:10:00Z")), false);   // Sunday
+  assert.equal(dailyReviewDue(undefined, new Date("2026-09-18T21:10:00Z")), true);    // Friday
   assert.equal(weeklyReviewDue(undefined, new Date("2026-09-14T04:01:00Z")), true);    // Mon 00:01 ET
   assert.equal(weeklyReviewDue("2026-W38", new Date("2026-09-14T04:01:00Z")), false);
   assert.equal(weeklyReviewDue("2026-W37", new Date("2026-09-14T04:01:00Z")), true);

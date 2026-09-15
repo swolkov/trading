@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { staticCalendar } from "../src/lib/event-calendar";
 import {
-  CME_HOLIDAYS_2026, EVENT_POLICY_KEY, EVENT_REDUCED_MULT, cmeHolidayOn, cmeHolidayRefusal, cmeOpenForEntry, deskCalendar, deskEventPolicy, etHHMM, eventContextOf,
-  eventWindowText, parseEventPolicy, rollWindowRefusal,
+  CME_HOLIDAYS_2026, EVENT_POLICY_KEY, EVENT_REDUCED_MULT, cmeClosedHoliday, cmeHolidayOn, cmeHolidayRefusal, cmeOpenForDesk, cmeOpenForEntry, deskCalendar, deskEventPolicy, etHHMM,
+  eventContextOf, eventWindowText, parseEventPolicy, rollWindowRefusal, stricterMode,
 } from "../src/lib/futures-desk-calendar";
 import { DEFAULT_LIMITS, EVENT_POLICY_FRESH_MS, cmeOpen, entryRefusal, parseAlert, type AlertPayload, type DeskContext } from "../src/lib/futures-desk-rules";
 import { deskContextOf } from "../src/lib/futures-desk-risk";
@@ -41,6 +41,18 @@ test("CME holidays: a closed day refuses entries all day; an early close refuses
   assert.equal(cmeOpenForEntry(new Date("2026-09-12T15:00:00Z")), false);        // Saturday: cmeOpen is false, so is the entry clock
   // In the container the holiday text IS the refusal, after the calendar checks and before position checks.
   assert.equal(entryRefusal(es, { ...okCtx, cmeHoliday: cmeHolidayRefusal(xmas) }, DEFAULT_LIMITS), "CME holiday: Christmas Day — closed; entry refused");
+});
+
+test("a closed-all-day holiday closes the guardian's clock too (queue drain, time stops, rolls); an early-close evening stays open for exits", () => {
+  assert.equal(cmeClosedHoliday(new Date("2026-12-25T15:00:00Z")), true);            // Dec 25 10:00 ET → the drain is skipped
+  assert.equal(cmeOpenForDesk(new Date("2026-12-25T15:00:00Z")), false);
+  assert.equal(cmeOpenForDesk(new Date("2027-01-01T15:00:00Z")), false);
+  assert.equal(cmeClosedHoliday(new Date("2026-11-26T19:00:00Z")), false);           // Thanksgiving 14:00 ET: early close, not closed
+  assert.equal(cmeOpenForDesk(new Date("2026-11-26T19:00:00Z")), true);              // exits and rolls may still act
+  assert.equal(cmeOpenForEntry(new Date("2026-11-26T19:00:00Z")), false);            // entries may not
+  assert.equal(cmeOpenForDesk(new Date("2026-11-26T23:30:00Z")), true);              // the evening reopen on an early-close day
+  assert.equal(cmeOpenForDesk(new Date("2026-09-15T21:30:00Z")), false);             // the plain break still closes it
+  assert.equal(cmeOpenForDesk(new Date("2026-09-15T16:00:00Z")), true);
 });
 
 // ---- the event policy ------------------------------------------------------------------------------
@@ -104,6 +116,29 @@ test("the entry path: paused refuses with the window, reduced halves the budget 
   assert.equal(entryRefusal(es, { ...okCtx, eventMode: "reduced", eventPolicyAgeMs: staleReduced.ageMs }, DEFAULT_LIMITS), "event calendar not checked in the last 20 minutes");
   // Round trip through the key.
   assert.deepEqual(parseEventPolicy(pausedRaw), JSON.parse(pausedRaw));
+});
+
+test("the entry instant is judged on the STRICTER of the row and the live policy: a `reduced` row from 17:29Z cannot let a 17:33Z entry through the pause", () => {
+  assert.equal(stricterMode("normal", "reduced"), "reduced"); assert.equal(stricterMode("paused", "reduced"), "paused"); assert.equal(stricterMode("normal", "normal"), "normal");
+  const rowRaw = JSON.stringify(deskEventPolicy(new Date("2026-09-16T17:29:00Z"), fomc));
+  assert.equal(parseEventPolicy(rowRaw)?.mode, "reduced");
+  const nowMs = Date.parse("2026-09-16T17:33:00Z");
+  const live = deskEventPolicy(new Date(nowMs), fomc);
+  assert.equal(live.mode, "paused");
+  const ev = eventContextOf(rowRaw, nowMs, live);
+  assert.equal(ev.mode, "paused"); assert.equal(ev.ageMs, 4 * 60_000); assert.equal(ev.budgetMult, 1);
+  assert.equal(entryRefusal(es, { ...okCtx, eventMode: ev.mode, eventPolicyAgeMs: ev.ageMs, eventWindow: ev.window }, DEFAULT_LIMITS), "event window: FOMC rate decision 14:00 ET — paused until 14:30");
+  // The other way: a `paused` row and a live `normal` still refuses (the row's window text is used).
+  const pausedRow = JSON.stringify(deskEventPolicy(new Date("2026-09-16T18:29:00Z"), fomc));
+  const late = eventContextOf(pausedRow, Date.parse("2026-09-16T18:33:00Z"), deskEventPolicy(new Date("2026-09-16T18:33:00Z"), fomc));
+  assert.equal(late.mode, "paused"); assert.equal(late.window, "FOMC rate decision 14:00 ET — paused until 14:30");
+  // Live `reduced` over a fresh `normal` row halves the budget; the row still proves freshness — a missing row refuses whatever live says.
+  const normalRow = JSON.stringify({ mode: "normal", reason: "", until: null, at: "2026-09-16T05:58:00Z", source: "static", event: null });
+  const reduced = eventContextOf(normalRow, Date.parse("2026-09-16T06:01:00Z"), deskEventPolicy(new Date("2026-09-16T06:01:00Z"), fomc));
+  assert.equal(reduced.mode, "reduced"); assert.equal(reduced.budgetMult, EVENT_REDUCED_MULT);
+  const noRow = eventContextOf(null, nowMs, live);
+  assert.equal(noRow.mode, null); assert.equal(noRow.ageMs, null);
+  assert.equal(entryRefusal(es, { ...okCtx, eventMode: noRow.mode, eventPolicyAgeMs: noRow.ageMs }, DEFAULT_LIMITS), "event calendar not checked in the last 20 minutes");
 });
 
 test("health reads the policy: mode, when, fresh; and the entry clock on a holiday", () => {

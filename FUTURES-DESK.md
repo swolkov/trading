@@ -244,7 +244,10 @@ tier-1 print (FOMC decision, CPI, NFP) within ±30 min; **reduced** — tier 1 w
 tier-2 print (PPI, PCE, FOMC minutes) within ±30 min; **normal** otherwise. FOMC Sep 16 2026 14:00 ET:
 reduced from 02:00 ET, paused 13:30–14:30, reduced until 16:00.
 
-**The entry path** (`contextNow` → `entryRefusal`, then the checklist) reads the row back:
+**The entry path** (`contextNow` → `entryRefusal`, then the checklist) reads the row back and takes
+the STRICTER of the row's mode and the policy recomputed at the entry instant (paused > reduced >
+normal) — the row is the freshness proof, the live recomputation closes the gap between guardian runs
+(a row written at 13:29 ET reading `reduced` cannot let a 13:33 entry through the pause):
 - missing, unreadable or older than **20 minutes** → `event calendar not checked in the last 20
   minutes` (the E5 checklist item is now a **failure** for a missing key too — the warning is gone);
 - paused → `event window: FOMC rate decision 14:00 ET — paused until 14:30`;
@@ -258,9 +261,11 @@ early 13:15, Dec 24 early 13:15, Dec 25 closed, Jan 1 2027 closed, MLK Jan 18 20
 Presidents' Day Feb 15 2027 early 13:00 — refresh when the 2027 schedule publishes). `cmeOpenForEntry`
 = `cmeOpen` and no holiday closure; refusals `CME holiday: Christmas Day — closed; entry refused` and
 `CME early close 13:00 ET (Thanksgiving) — entry refused for the rest of the day` (the evening reopen
-on an early-close day is holiday-thin, so it stays closed to entries through the ET day). Exits, queue
-drains, rolls and re-protection keep the plain `cmeOpen`; a queued entry that drains onto a holiday
-is refused, not placed; queued alerts keep the 12h expiry.
+on an early-close day is holiday-thin, so it stays closed to entries through the ET day). A
+**closed-all-day** holiday closes everything: the alert queue, the queue drain, time stops and rolls
+use `cmeOpenForDesk` (= `cmeOpen` and not a closed day); an early-close evening stays open for exits
+and rolls on the plain `cmeOpen`. A queued entry that drains onto an early-close afternoon is refused,
+not placed; queued alerts keep the 12h expiry. The watch card's dry run is sized at tier × event too.
 
 **Sessions** (`sessionOf`, E4) are a journal slice, never a gate. Health exposes `eventMode`,
 `eventPolicyAt`, `eventPolicyFresh` and `cmeOpenForEntry`.
@@ -269,11 +274,13 @@ is refused, not placed; queued alerts keep the 12h expiry.
 
 No money path. `futures-desk-metrics.ts` computes the series metrics (PF, max drawdown as % of
 basis, per-trade Sharpe/Sortino, avg R, expectancy $ and R, hit rate, MFE/MAE, streaks) — it
-**mirrors the shared `margin-metrics.ts` `sleeveMetrics`** that lands with the crypto PR and becomes
-a re-export once both are on main. `journalToMetricRows` folds roll chains into one row each
+**mirrors the shared `margin-metrics.ts` `sleeveMetrics`** that lands with the crypto PR in what it
+measures, on this desk's own row shape (judged P&L, `risk_usd`, close instant, MFE/MAE in R); an
+adapter onto the shared module may follow once both are on main. `journalToMetricRows` folds roll chains into one row each
 (`mergeRollChains`, which moved here from the status module): the **judged P&L is
 `pnl_after_slip_usd` summed across the legs** where every leg has it, else the demo's own
-(`pnlSource` says which), fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's
+(`pnlSource` says which; a chain with any leg lacking the after-slip figure is judged on the demo's
+`pnl_usd` for the WHOLE chain — never a mixed sum), fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's
 session / regime / side; risk = `risk_usd`. `futuresLeaderboard` = per edge, per edge × root, and
 per edge by session / regime / day-of-week / direction. `profitDistribution` = best trade / day /
 week / market as a share of GROSS profit.
@@ -291,7 +298,7 @@ when PF ≥ 1.6 and DD ≤ 6%); the sample gates (resolved, span) fail → **GAT
 **FAILING**, with `failedGates[]`. A verdict is a document, never a switch — a live account is a
 separate typed decision.
 
-**Daily review** — the first guardian run after 17:05 ET per ET day (`state.reviewDayKey`, stamped
+**Daily review** — the first guardian run after 17:05 ET per ET weekday (`state.reviewDayKey`, stamped
 with `guardianAt` before the work, run after the MFE/MAE fold): gross (demo), net after slip, trades,
 wins/losses, win rate, avg winner/loser, PF, expectancy, largest win/loss, fees, modeled slip, max
 intraday drawdown (**n/a** — the guardian keeps one equity per run, not a series), rule violations

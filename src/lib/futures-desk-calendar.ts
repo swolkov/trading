@@ -90,15 +90,24 @@ export function eventWindowText(p: DeskEventPolicy): string | null {
   return p.event ? `${p.event.name} ${etHHMM(p.event.atMs)} ET — paused until ${until}` : `tier-1 print within ${PAUSE_WINDOW_MIN} minutes — paused until ${until}`;
 }
 
-/** What the entry container carries about the calendar. `ageMs` null = missing/unreadable (a refusal);
- *  `budgetMult` is 0.5 only while a FRESH policy reads `reduced`. */
+const MODE_RANK: Record<EventMode, number> = { normal: 0, reduced: 1, paused: 2 };
+/** paused > reduced > normal. */
+export function stricterMode(a: EventMode, b: EventMode): EventMode { return MODE_RANK[a] >= MODE_RANK[b] ? a : b; }
+
+/** What the entry container carries about the calendar. The ROW (`futures_desk_event_policy`) is the
+ *  freshness proof — `ageMs` null = missing/unreadable, a refusal — but the MODE is the stricter of
+ *  the row's and `live` (the policy recomputed at the entry instant, pure), so a row written at 13:29
+ *  ET reading `reduced` cannot let a 13:33 entry through the pause window. `budgetMult` is 0.5 only
+ *  while a fresh row and that stricter mode read `reduced`. */
 export interface EventContext { mode: EventMode | null; ageMs: number | null; window: string | null; budgetMult: number; policy: DeskEventPolicy | null }
-export function eventContextOf(raw: string | null | undefined, nowMs: number): EventContext {
+export function eventContextOf(raw: string | null | undefined, nowMs: number, live: DeskEventPolicy | null = null): EventContext {
   const policy = parseEventPolicy(raw);
   const at = policy ? Date.parse(policy.at) : NaN;
   const ageMs = Number.isFinite(at) ? nowMs - at : null;
   const fresh = ageMs != null && ageMs <= EVENT_POLICY_FRESH_MS;
-  return { mode: policy?.mode ?? null, ageMs, window: policy ? eventWindowText(policy) : null, budgetMult: fresh && policy?.mode === "reduced" ? EVENT_REDUCED_MULT : 1, policy };
+  const mode = policy ? (live ? stricterMode(policy.mode, live.mode) : policy.mode) : null;
+  const window = mode === "paused" ? (live?.mode === "paused" ? eventWindowText(live) : policy ? eventWindowText(policy) : null) : null;
+  return { mode, ageMs, window, budgetMult: fresh && mode === "reduced" ? EVENT_REDUCED_MULT : 1, policy };
 }
 
 // ---- CME holidays (entries only) ------------------------------------------------------------------
@@ -133,16 +142,28 @@ export function cmeHolidayRefusal(now: Date, table: readonly CmeHoliday[] = CME_
   return `CME early close ${h.closeEt} ET (${h.name}) — entry refused for the rest of the day`;
 }
 
-/** The entry path's clock: the plain CME hours AND no holiday closure. Nothing else uses this. */
+/** The entry clock: the plain CME hours AND no holiday closure (closed day, or after an early close).
+ *  The entry path itself refuses through `cmeHolidayRefusal` in the container; this boolean is what
+ *  the health chip shows. */
 export function cmeOpenForEntry(now: Date, table: readonly CmeHoliday[] = CME_HOLIDAYS_2026): boolean {
   return cmeOpen(now) && cmeHolidayRefusal(now, table) == null;
+}
+/** A closed-ALL-DAY holiday (Christmas, New Year's Day). */
+export function cmeClosedHoliday(now: Date, table: readonly CmeHoliday[] = CME_HOLIDAYS_2026): boolean {
+  const h = cmeHolidayOn(now, table);
+  return h != null && h.closeEt == null;
+}
+/** The guardian's clock for the queue drain, time stops and rolls: the plain CME hours, except a
+ *  closed-all-day holiday closes everything. An early-close evening stays open for exits and rolls. */
+export function cmeOpenForDesk(now: Date, table: readonly CmeHoliday[] = CME_HOLIDAYS_2026): boolean {
+  return cmeOpen(now) && !cmeClosedHoliday(now, table);
 }
 
 // ---- the roll window ----------------------------------------------------------------------------
 /** `MESU6 expires in 1 day — inside the roll window; entry refused` once `rollDue` says the month is
  *  about to roll (the guardian would close what was just opened). Null outside the window. */
-export function rollWindowRefusal(contract: string, expiryIso: string | null, now: Date, guardDays: number): string | null {
+export function rollWindowRefusal(contractName: string, expiryIso: string | null, now: Date, guardDays: number): string | null {
   if (!rollDue(expiryIso, now.getTime(), guardDays)) return null;
   const days = Math.max(0, Math.round((Date.parse(expiryIso as string) - now.getTime()) / 86_400_000));
-  return `${contract} expires in ${days} day${days === 1 ? "" : "s"} — inside the roll window; entry refused`;
+  return `${contractName} expires in ${days} day${days === 1 ? "" : "s"} — inside the roll window; entry refused`;
 }

@@ -42,13 +42,15 @@ export interface MetricRow {
 const dowOf = (iso: string): string => new Date(iso).toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" });
 
 /** Resolved trades only, roll chains merged into one row each: judged P&L summed across the legs,
- *  fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's session / regime / side. */
+ *  fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's session / regime / side.
+ *  A chain is judged after slip only when EVERY leg carries `pnl_after_slip_usd`; otherwise the whole
+ *  chain is the demo's own `pnl_usd` (`pnlSource: "demo"`) — never a mixed sum. */
 export function journalToMetricRows(rows: JournalRow[]): MetricRow[] {
   const byId = new Map(rows.map((r) => [r.id, r]));
-  const judged = mergeRollChains(rows.map((r) => ({ ...r, pnl_usd: r.pnl_after_slip_usd ?? r.pnl_usd })));
-  const demo = new Map(mergeRollChains(rows).map((r) => [r.id, r.pnl_usd]));
+  const judged = new Map(mergeRollChains(rows.map((r) => ({ ...r, pnl_usd: r.pnl_after_slip_usd ?? r.pnl_usd }))).map((r) => [r.id, r.pnl_usd]));
+  const demo = mergeRollChains(rows);
   const out: MetricRow[] = [];
-  for (const head of judged) {
+  for (const head of demo) {
     if (head.status !== "closed" || head.pnl_usd == null || !head.closed_at) continue;
     const legs: JournalRow[] = [];
     for (let cur: JournalRow | undefined = byId.get(head.id); cur; cur = cur.rolled_from != null ? byId.get(cur.rolled_from) : undefined) legs.push(cur);
@@ -56,11 +58,13 @@ export function journalToMetricRows(rows: JournalRow[]): MetricRow[] {
     const num = (v: number | null | undefined) => (typeof v === "number" && Number.isFinite(v) ? v : null);
     const maxOf = (vals: (number | null)[]) => { const xs = vals.filter((v): v is number => v != null); return xs.length ? Math.max(...xs) : null; };
     const risk = Number.isFinite(head.risk_usd) ? head.risk_usd : 0;
+    const allAfterSlip = legs.every((l) => l.pnl_after_slip_usd != null);
+    const pnl = allAfterSlip ? (judged.get(head.id) ?? head.pnl_usd) : head.pnl_usd;
     out.push({
       id: head.id, edge: head.edge, root: head.root, side: origin.side, openedAt: origin.opened_at, closedAt: head.closed_at,
-      pnl: head.pnl_usd, pnlDemo: demo.get(head.id) ?? head.pnl_usd, pnlSource: legs.every((l) => l.pnl_after_slip_usd != null) ? "after_slip" : "demo",
+      pnl, pnlDemo: head.pnl_usd, pnlSource: allAfterSlip ? "after_slip" : "demo",
       fees: legs.reduce((s, l) => s + (num(l.fees_usd) ?? 0), 0), slipUsd: legs.reduce((s, l) => s + (num(l.slip_model_usd) ?? 0), 0),
-      risk, r: risk > 0 ? head.pnl_usd / risk : null,
+      risk, r: risk > 0 ? pnl / risk : null,
       session: origin.session ?? null, regime: origin.regime ?? null, dow: dowOf(origin.opened_at),
       mfeR: maxOf(legs.map((l) => num(l.mfe_r))), maeR: maxOf(legs.map((l) => num(l.mae_r))),
       errorClass: legs.map((l) => l.error_class ?? null).find((c) => c != null) ?? null, stage: origin.stage ?? null, legs: legs.length,
@@ -183,9 +187,11 @@ export function futuresPromotionVerdict(edgeKey: EdgeKey, rows: MetricRow[], ano
 }
 
 // ---- when the reviews run ------------------------------------------------------------------------------
-/** The daily review runs once per ET day, on the first guardian run after 17:05 ET (the session closed at 17:00). */
+/** The daily review runs once per ET trading day, on the first guardian run after 17:05 ET (the session
+ *  closed at 17:00). Saturday and Sunday (ET) have no session to review — skipped. */
 export function dailyReviewDue(lastDayKey: string | undefined, now: Date): boolean {
   const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  if (et.getDay() === 0 || et.getDay() === 6) return false;
   return et.getHours() * 60 + et.getMinutes() >= 17 * 60 + 5 && lastDayKey !== etDayKey(now);
 }
 /** The weekly review runs on the first guardian run of a Monday (ET), once per ISO week. */
@@ -204,7 +210,7 @@ export function rotateEntries(existing: string | null, entry: string, cap = 120)
 }
 
 // ---- daily review -------------------------------------------------------------------------------------
-export interface DailySignal { edge: string; root: string; action: string; status: string; reason: string | null; error_class?: string | null }
+export interface DailySignal { edge: string; root: string; action: string; status: string; reason: string | null; error_class?: string | null; trade_id?: number | null }
 export interface DailyInput {
   dayKey: string; rows: MetricRow[]; signals: DailySignal[];
   /** Intraday equity samples (levels) if a series exists — the guardian keeps one equity per run, not a series, so usually null → "n/a". */
@@ -231,7 +237,10 @@ export function renderDailyReview(i: DailyInput): { markdown: string; slack: str
   const gross = i.rows.reduce((s, r) => s + r.pnlDemo, 0);
   const fees = i.rows.reduce((s, r) => s + r.fees, 0), slip = i.rows.reduce((s, r) => s + r.slipUsd, 0);
   const netAfterSlip = i.rows.reduce((s, r) => s + (r.pnlSource === "after_slip" ? r.pnl : r.pnlDemo - r.slipUsd), 0);
-  const violations = i.rows.filter((r) => r.errorClass).length + i.signals.filter((s) => s.error_class || s.status === "error").length;
+  // Rule violations: ledger error classes + inbox errors, an unprotected ENTRY counted once (it is both its
+  // signal's error and its row's class — the signal's trade_id names the row).
+  const classedRows = new Set(i.rows.filter((r) => r.errorClass).map((r) => r.id));
+  const violations = classedRows.size + i.signals.filter((s) => (s.error_class || s.status === "error") && !(s.error_class === "unprotected" && s.trade_id != null && classedRows.has(s.trade_id))).length;
   const refusals = countBy(i.signals.filter((s) => s.status === "refused"), (s) => (s.reason ?? "(no reason)").slice(0, 90));
   const setups = countBy(i.rows, (r) => `${r.edge} · ${r.root}`).map(([k]) => ({ key: k, pnl: i.rows.filter((r) => `${r.edge} · ${r.root}` === k).reduce((s, r) => s + r.pnl, 0) })).sort((a, b) => b.pnl - a.pnl);
   const watch = i.signals.filter((s) => s.action === "watch");

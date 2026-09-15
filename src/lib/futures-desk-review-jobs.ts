@@ -30,7 +30,7 @@ async function journal(): Promise<JournalRow[]> {
 /** Inbox rows of one ET day (received there), for the refusal and watch counts. */
 async function signalsOn(dayKey: string): Promise<DailySignal[]> {
   return rawRows<DailySignal>(
-    `SELECT edge, root, action, status, reason, error_class FROM futures_desk_signals WHERE (received_at AT TIME ZONE 'America/New_York')::date = $1::date ORDER BY id`, dayKey);
+    `SELECT edge, root, action, status, reason, error_class, trade_id FROM futures_desk_signals WHERE (received_at AT TIME ZONE 'America/New_York')::date = $1::date ORDER BY id`, dayKey);
 }
 
 /** Execution errors per edge from the inbox (signal rows that ended in `error`) over the record, and
