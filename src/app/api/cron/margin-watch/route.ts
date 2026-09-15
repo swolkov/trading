@@ -12,6 +12,9 @@ import {
 import { drawdownTier, losersToday, type RiskState } from "@/lib/margin-risk-tiers";
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
+import { getEconomicCalendar } from "@/lib/finnhub";
+import { eventPolicyNow, mergeCalendar, normalizeFinnhub, staticCalendar, type CalendarEvent } from "@/lib/event-calendar";
+import { EVENT_POLICY_KEY } from "@/lib/margin-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, executeAlert, recoverPendingPyramid, releaseCloseLock } from "@/lib/margin-executor";
 import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_PCT, FOUR_H_SEC, bookMaxHoldH, bookTrailR, clampLiveStopFrac, failClosedOnEmptyPositions, fifoWouldHitManual, fourHourBarComplete, groupPositionsByOrder, liveContainerFor, managedStopTarget, pyramidAddDue, pyramidBookOf } from "@/lib/margin-live-risk";
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
@@ -56,7 +59,12 @@ type WatchState = {
   emptyOrdersStreak?: number;
   // The drawdown tier seen last run (margin-risk-tiers), so a tier change pages once.
   ddTier?: string;
+  // Finnhub's high-impact calendar, normalised, refreshed every 6h (step 5b). Kept across a
+  // failed refresh so an outage falls back to the last good feed, then to the static table.
+  calendar?: CalendarEvent[];
+  calendarAt?: string;
 };
+const CALENDAR_TTL_MS = 6 * 3600_000;
 
 async function cfg(key: string): Promise<string | null> {
   const row = await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null);
@@ -99,7 +107,11 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
       if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}) };
     }
     return {
-      state: { ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined, ddTier: typeof parsed.ddTier === "string" ? parsed.ddTier : undefined },
+      state: {
+        ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined, ddTier: typeof parsed.ddTier === "string" ? parsed.ddTier : undefined,
+        calendar: Array.isArray(parsed.calendar) ? parsed.calendar.filter((e) => e && typeof e.name === "string" && Number.isFinite(e.atMs) && (e.tier === 1 || e.tier === 2)) : undefined,
+        calendarAt: typeof parsed.calendarAt === "string" ? parsed.calendarAt : undefined,
+      },
       unreliable: false, corrupt: false,
     };
   } catch {
@@ -1010,6 +1022,44 @@ export async function GET(request: Request) {
     }
   } catch (e) {
     errors.push(`fast-move: ${e}`);
+  }
+
+  // 5b) EVENT POLICY (Sep 15 2026) — every run, flat or not, because the executor reads it
+  //     before every entry and a policy older than 20 minutes reads as REDUCED. Finnhub's
+  //     calendar is fetched at most every 6h (10s timeout inside getEconomicCalendar, [] on any
+  //     failure); the static table is merged underneath so the FOMC is never missed. Slack once
+  //     per (event, mode): reduced → margin_signals, paused → margin_urgent.
+  try {
+    const nowMs = Date.now();
+    const cacheAge = state.calendarAt ? nowMs - Date.parse(state.calendarAt) : Infinity;
+    if (!(cacheAge < CALENDAR_TTL_MS)) {
+      const rows = await getEconomicCalendar();
+      // One attempt per 6h whatever it returned (no key → 401 → [] every 5 min otherwise); the
+      // last good feed is kept through an empty answer, and the static table sits under both.
+      state.calendarAt = new Date(nowMs).toISOString();
+      if (rows.length) state.calendar = normalizeFinnhub(rows);
+      else if (!state.calendar) errors.push("event calendar: Finnhub returned nothing — static table only");
+    }
+    const events = mergeCalendar(state.calendar ?? [], staticCalendar(), nowMs);
+    const policy = eventPolicyNow(nowMs, events);
+    const source = policy.nextEvent?.source ?? (state.calendar?.length ? "finnhub+static" : "static");
+    const value = JSON.stringify({ ...policy, source, calendarAt: state.calendarAt ?? null, events: events.slice(0, 12) });
+    await prisma.agentConfig.upsert({ where: { key: EVENT_POLICY_KEY }, update: { value }, create: { key: EVENT_POLICY_KEY, value } });
+    if (policy.mode !== "normal" && policy.nextEvent) {
+      const key = `event-policy-${policy.nextEvent.name}-${new Date(policy.nextEvent.atMs).toISOString().slice(0, 10)}-${policy.mode}`;
+      if (shouldFire(state, key)) {
+        await sendNotification(
+          policy.mode === "paused"
+            ? `⛔ Event window: ${policy.reason}. New crypto entries are PAUSED (closes and stops unaffected).`
+            : `🟡 Event window: ${policy.reason}. New crypto entries run at HALF risk until it clears.`,
+          policy.mode === "paused" ? "margin_urgent" : "margin_signals",
+        ).catch(() => {});
+        state.alerts[key] = new Date().toISOString();
+        sent.push(key);
+      }
+    }
+  } catch (e) {
+    errors.push(`event policy: ${String(e).slice(0, 100)}`);
   }
 
   // 5) Event guardrail: levered into a high-impact macro print within 24h → one warning.

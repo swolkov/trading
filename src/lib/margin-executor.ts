@@ -89,6 +89,7 @@ import {
   projectedMarginLevel,
   resolveConvictionTier,
 } from "@/lib/margin-live-risk";
+import { eventRiskMultiplier, readEventPolicy } from "@/lib/margin-events";
 import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferMultiple, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, revengePauseHit, setupGradeFor, LIQ_BUFFER_MULT } from "@/lib/margin-risk-tiers";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
@@ -858,8 +859,18 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (!(await guardianFresh())) {
       return { executed: false, validated: false, note: "guardian protection has not completed in 15m — no new entries while nothing would manage them (failing closed)" };
     }
-    // Event-window multiplier for the sizing chain below — the event-calendar step wires it.
-    const eventMult = 1;
+    // Layer 5c: THE EVENT WINDOW (margin-events.ts). The guardian writes the calendar policy
+    // every run; paused (a tier-1 print within ±30 min) refuses the entry, reduced halves the
+    // risk through the chain below. A missing or stale policy is REDUCED, never open. STRICT
+    // read — a DB failure lands in the outer catch ("entry failed before any order was sent").
+    // Applies to pyramid adds too: an add is new risk into the same print.
+    let eventPolicy: Awaited<ReturnType<typeof readEventPolicy>>;
+    try { eventPolicy = await readEventPolicy(); }
+    catch (e) { return { executed: false, validated: false, note: `entry refused: could not read the event policy (${String(e).slice(0, 60)}) — failing closed` }; }
+    if (eventPolicy.mode === "paused") {
+      return { executed: false, validated: false, note: `entry refused: event window — ${eventPolicy.reason}` };
+    }
+    const eventMult = eventRiskMultiplier(eventPolicy.mode);
 
     // Layer 5: daily loss kill switch — realized round trips closed today plus open P&L.
     // Fails closed on ANY read problem, including a stale trade sync.
@@ -1320,7 +1331,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${pyramid ? "PYRAMID ADD " : ""}${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction (${setupGradeFor(convTier)}) · dd tier ${ddTier.tier} ×${ddMult} · event ×${eventMult} · decay ×${decayMult} → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
+      note: `${pyramid ? "PYRAMID ADD " : ""}${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction (${setupGradeFor(convTier)}) · dd tier ${ddTier.tier} ×${ddMult} · event ${eventPolicy.mode} ×${eventMult} · decay ×${decayMult} → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
     };
   } catch (e) {
     if (!addOrderSent) {

@@ -85,6 +85,9 @@ export default function MarginCockpitPage() {
   }>("/api/margin/news", fetcher, { refreshInterval: 300_000 });
   const { data: sig } = useSWR<{ signals: { ts: string; coin: string; timeframe: string; kind: string; detail: string; price: number }[] }>(
     "/api/margin/signals", fetcher, { refreshInterval: 120_000 });
+  // The event policy the EXECUTOR acts on (guardian-written; stale reads as reduced).
+  const { data: intel } = useSWR<{ eventPolicy: { mode: "normal" | "reduced" | "paused"; reason: string; stale: boolean; source: string | null; nextEvent: { name: string; atMs: number } | null } }>(
+    "/api/margin/intel", fetcher, { refreshInterval: 60_000 });
 
   const symbol = wsnameToSymbol(pairWs);
   const positions = useMemo(() => status?.positions ?? [], [status?.positions]);
@@ -122,6 +125,11 @@ export default function MarginCockpitPage() {
 
   const ml = health?.marginLevel ?? null;
   const mlTone = ml == null ? "grey" : ml < 100 ? "red" : ml < 150 ? "amber" : "green";
+  const ev = intel?.eventPolicy ?? null;
+  const evTone = ev == null ? "grey" : ev.mode === "paused" ? "red" : ev.mode === "reduced" ? "amber" : "green";
+  const evTitle = ev
+    ? `${ev.reason}${ev.nextEvent ? ` · next: ${ev.nextEvent.name} ${new Date(ev.nextEvent.atMs).toISOString().slice(0, 16).replace("T", " ")}Z` : ""} · source: ${ev.source ?? "—"}${ev.stale ? " · STALE — the executor sizes at half risk" : ""}`
+    : "Event policy not loaded";
   const inputCls = "mt-1 h-8 w-full rounded-md border border-input bg-background px-2.5 text-[13px] font-semibold tabular-nums";
 
   return (
@@ -129,7 +137,10 @@ export default function MarginCockpitPage() {
       <PageHeader
         title="Live Account"
         sub="What Kraken says right now — real money. Positions, margin level, signals, and the track record from the ledger. Margin call at 80% margin level, forced liquidation at 40%."
-        right={krakenDown ? <Chip tone="red" size="md" dot>Kraken unreachable</Chip> : <Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : status ? "Margin not in use" : "Loading…"}</Chip>}
+        right={<>
+          {krakenDown ? <Chip tone="red" size="md" dot>Kraken unreachable</Chip> : <Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : status ? "Margin not in use" : "Loading…"}</Chip>}
+          <Chip tone={evTone} size="md" dot={ev?.mode === "paused"} title={evTitle}>{ev ? `Events ${ev.mode === "paused" ? "PAUSED" : ev.mode}` : "Events …"}</Chip>
+        </>}
       />
 
       {(news?.imminent?.length ?? 0) > 0 && (

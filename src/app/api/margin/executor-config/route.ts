@@ -5,6 +5,7 @@ import {
 } from "@/lib/margin-live-risk";
 import { exitParams } from "@/lib/margin-shadow";
 import { DEFAULT_MAX_LOSSES_PER_DAY, parseDecayMultiplier, type RiskState } from "@/lib/margin-risk-tiers";
+import { resolveEventPolicy } from "@/lib/margin-events";
 
 // WHAT LIVE WOULD ACTUALLY DO, computed from the same config keys and the same helpers the
 // executor and guardian read — beside what PAPER does — so the admin page can show, per
@@ -29,6 +30,8 @@ export async function GET() {
       // multiplier the chain reads, and the guardian's display row.
       "kraken_margin_dd_tiers", "kraken_margin_max_losses_per_day", "kraken_margin_decay_multiplier",
       "kraken_margin_equity_peak", "kraken_margin_risk_state",
+      // Event veto (B2): the guardian-written policy and the operator's off switch.
+      "kraken_margin_event_policy", "kraken_margin_event_veto",
     ];
     const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const c: Record<string, string> = {};
@@ -76,6 +79,8 @@ export async function GET() {
       decayMultiplier: parseDecayMultiplier(c.kraken_margin_decay_multiplier ?? null),   // null = the executor refuses
       equityPeak: num("kraken_margin_equity_peak", 0) || null,
       riskState: (() => { try { return c.kraken_margin_risk_state ? (JSON.parse(c.kraken_margin_risk_state) as RiskState) : null; } catch { return null; } })(),
+      eventVeto: c.kraken_margin_event_veto !== "false",
+      eventPolicy: resolveEventPolicy(c.kraken_margin_event_policy ?? null, c.kraken_margin_event_veto ?? null, Date.now()),
     };
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),

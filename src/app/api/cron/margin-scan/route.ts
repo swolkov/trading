@@ -10,6 +10,7 @@ import { propEntry } from "@/lib/prop-desk";
 import { isSourceArmed } from "@/lib/margin-live-risk";
 import { maybeDemote } from "@/lib/margin-synthesis";
 import { gatherIntel, stampSql } from "@/lib/margin-intel";
+import { readEventPolicy } from "@/lib/margin-events";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -70,7 +71,10 @@ export async function GET(request: Request) {
   const { signals, errors } = scan;
   // What the scan knew, stamped on every paper row it opens (margin-intel.ts). Additive: it
   // reads the features the scan already computed and never changes what trades.
-  const intel = gatherIntel(scan, null);
+  // The event policy is stamped on paper rows for the byEventMode slice; paper is NEVER gated
+  // by it (the executor applies the veto). Fail-soft here: unreadable stamps nothing.
+  const eventStamp = await readEventPolicy().then((p) => ({ mode: p.mode })).catch(() => null);
+  const intel = gatherIntel(scan, eventStamp);
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "");
   let entryChecksPassed = errors.length === 0;
   // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
