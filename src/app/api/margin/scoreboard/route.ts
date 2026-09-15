@@ -2,6 +2,7 @@ import { computeMarginScoreboard, listRoundTrips } from "@/lib/kraken-margin";
 import { shadowScore, strategyBreakdown, recentPaperTrades, edgeBreakdowns, candidateDetail } from "@/lib/margin-shadow";
 import { capacityReport } from "@/lib/margin-capacity";
 import { leaderboard } from "@/lib/margin-leaderboard";
+import { DECAY_MULT_KEY, readDecayState } from "@/lib/margin-decay";
 import { prisma } from "@/lib/db";
 
 // The "was I winning" scoreboard: Spencer's real margin round trips, hit rate,
@@ -33,6 +34,11 @@ export async function GET() {
       soft("leaderboard", leaderboard(), []),
     ]);
     const scanRaw = await prisma.agentConfig.findUnique({ where: { key: "margin_scan_last_result" } }).then((r) => r?.value ?? null).catch(() => null);
+    // Strategy decay (C3): the live risk multiplier the executor reads and the rolling read behind it.
+    const [decayMultiplier, decayState] = await Promise.all([
+      prisma.agentConfig.findUnique({ where: { key: DECAY_MULT_KEY } }).then((r) => r?.value ?? null).catch(() => null),
+      readDecayState().catch(() => null),
+    ]);
     let scanLook: unknown = null;
     try { scanLook = scanRaw ? JSON.parse(scanRaw) : null; } catch { scanLook = null; }
     return Response.json({ scanLook,
@@ -55,6 +61,8 @@ export async function GET() {
       capacity,
       // The leaderboard: every sleeve's row with Sharpe/Sortino/PF/maxDD/R/MAE, the rolling decay read and the explicit live gate.
       leaderboard: board,
+      // kraken_margin_decay_multiplier (raw; missing = 1×) and the decay state the rule last wrote.
+      decay: { multiplier: decayMultiplier, state: decayState },
     });
   } catch (error) {
     console.error("[/api/margin/scoreboard]", error);

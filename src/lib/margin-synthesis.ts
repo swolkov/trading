@@ -18,6 +18,8 @@ import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault"
 import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, candidateDetail, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { leaderboard, type LeaderboardRow } from "@/lib/margin-leaderboard";
+import { DECAY_FULL_MULT, DECAY_MULT_KEY, maybeDecayReduce, type DecayRun } from "@/lib/margin-decay";
+import type { RollingState } from "@/lib/margin-metrics";
 import { pairBase } from "@/lib/kraken-pairs";
 import { botOwnership } from "@/lib/margin-executor";
 
@@ -317,8 +319,13 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
 //   2. Live diverges from paper (divergenceSummary's DIVERGES verdict) after at least
 //      DEMOTION_MIN_CLOSED_LIVE closed live trades → the record does not describe what live
 //      earns; stop and recalibrate before more money tests the gap.
+//   3. (C3, Sep 15 2026) The rolling read is DECAYING (the last 30 resolved are significantly
+//      worse than the trades before them, Welch t ≤ −2) AND those last 30 are net ≤ 0 → the
+//      rule has stopped paying, whatever the pooled record still says. A DECAYING sleeve whose
+//      last 30 are still positive is only REDUCED to half risk (maybeDecayReduce), not demoted.
 // Demotion = kraken_margin_auto=false FIRST (risk off before anything else), then the reason
-// is stored under DEMOTION_KEY, logged to the arm log and paged to margin_live + margin_urgent.
+// is stored under DEMOTION_KEY, the decay multiplier is reset to 1 (the next sleeve armed
+// starts at full size), logged to the arm log and paged to margin_live + margin_urgent.
 // Re-arming needs a human to acknowledge the demotion (the arm switch refuses while the key
 // exists) — a demoted sleeve never re-arms by itself.
 export const DEMOTION_KEY = "kraken_margin_demoted";
@@ -326,10 +333,13 @@ export const DEMOTION_MIN_RESOLVED = 30;
 export const DEMOTION_MIN_CLOSED_LIVE = 5;
 export interface Demotion { at: string; source: string; reason: string }
 
-/** The pure rule. null = keep running. */
+export interface RollingForDemotion { state: RollingState; welchT: number | null; lastNet: number; window?: number }
+
+/** The pure rule. null = keep running. `rolling` is optional: callers without the decay read judge on rules 1 and 2 as before. */
 export function demotionVerdict(
   forward: { resolved: number; net: number } | null,
   div: { closed: number; verdict: string },
+  rolling: RollingForDemotion | null = null,
   minResolved = DEMOTION_MIN_RESOLVED,
   minClosed = DEMOTION_MIN_CLOSED_LIVE,
 ): string | null {
@@ -338,6 +348,9 @@ export function demotionVerdict(
   }
   if (div.closed >= minClosed && /DIVERGES/.test(div.verdict)) {
     return `live diverges from paper after ${div.closed} closed live trades: ${div.verdict}`;
+  }
+  if (rolling && rolling.state === "DECAYING" && rolling.lastNet <= 0) {
+    return `the rolling-${rolling.window ?? 30} record has decayed (Welch t=${rolling.welchT?.toFixed(2) ?? "—"}) and is not paying: last ${rolling.window ?? 30} net ${rolling.lastNet < 0 ? "−" : ""}$${Math.abs(rolling.lastNet).toFixed(0)} (rule: DECAYING and ≤ $0)`;
   }
   return null;
 }
@@ -354,13 +367,19 @@ export async function maybeDemote(): Promise<Demotion | null> {
   if (!(auto === "true" && validate === "false")) return null;   // only an ARMED executor can be demoted
   const source = (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0];
   if (!source) throw new Error("Armed source unavailable");
+  // REDUCE before demote: the decay rule reads the same armed sleeve and halves live risk on a
+  // DECAYING read; its rolling verdict is then the third input to the demotion rule below.
+  const decay: DecayRun | null = await maybeDecayReduce();
   const [detail, fills] = await Promise.all([candidateDetail(source), loadLiveFills()]);
   const forward = detail?.forward ? { resolved: detail.forward.resolved, net: detail.forward.net } : null;
-  const reason = demotionVerdict(forward, divergenceSummary(fills));
+  const rolling = decay ? { state: decay.rolling.state, welchT: decay.rolling.welchT, lastNet: decay.rolling.last.net, window: decay.rolling.window } : null;
+  const reason = demotionVerdict(forward, divergenceSummary(fills), rolling);
   if (!reason) return null;
   const d: Demotion = { at: new Date().toISOString(), source, reason };
   await cfgSet("kraken_margin_auto", "false");        // risk off FIRST
   await cfgSet(DEMOTION_KEY, JSON.stringify(d));
+  // The reduction belonged to this sleeve's record; the next sleeve armed starts at full size.
+  await cfgSet(DECAY_MULT_KEY, DECAY_FULL_MULT).catch(() => {});
   try {
     const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
     log.push(`${d.at} DEMOTED ${source} → paper (kraken_margin_auto=false): ${reason}. Re-arming needs the demotion acknowledged on Live Desk.`);

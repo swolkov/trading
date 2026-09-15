@@ -30,6 +30,8 @@ interface EdgeStat {
 interface EdgeBreakdowns { byDirection: EdgeStat[]; byCoin: EdgeStat[] }
 interface CandidateSlice { key: string; resolved: number; wins: number; hitRate: number | null; net: number; tStat: number | null; days: number; open: number }
 interface CandidateDetail { source: string; forward: CandidateSlice | null; byTimeframe: CandidateSlice[]; byEntryWindow: CandidateSlice[] }
+// Strategy decay (C3): kraken_margin_decay_multiplier as the executor reads it, and the rolling read behind it.
+interface DecayView { multiplier: string | null; state: { source: string; state: string; at: string; welchT: number | null; last30Net: number; lastExpectancy: number | null; priorExpectancy: number | null; reducedAt?: string; note: string } | null }
 
 // PRE-REGISTERED CUTS (Sep 7 2026): the live candidate sliced three fixed ways — forward-only,
 // by timeframe, by entry window. Registered before the samples exist so no cut is picked after
@@ -61,10 +63,16 @@ const rollingTone = (state: LeaderboardRowView["rolling"]["state"]): "grey" | "g
   state === "DECAYING" ? "red" : state === "cooling" ? "amber" : state === "stable" ? "green" : "grey";
 
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; leaderboard?: LeaderboardRowView[]; degraded?: string[] }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; leaderboard?: LeaderboardRowView[]; decay?: DecayView; degraded?: string[] }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
   const board = new Map((score?.leaderboard ?? []).map((r) => [r.key, r]));
+  // The decay multiplier is read as the executor reads it: missing/blank = 1×; anything the
+  // executor would refuse is shown as unreadable rather than silently as 1×.
+  const decayRaw = score?.decay?.multiplier ?? null;
+  const decayMult = decayRaw == null || decayRaw.trim() === "" ? 1 : Number(decayRaw);
+  const decayUnreadable = !Number.isFinite(decayMult) || decayMult < 0.25 || decayMult > 1;
+  const decayReduced = !decayUnreadable && decayMult < 1;
 
   // What we trade is the default view. Retired sleeves stay in the record (their numbers
   // are evidence, and a re-litigated kill needs them) but hide behind a toggle.
@@ -99,6 +107,25 @@ export default function PaperTradesPage() {
           <li>Retired strategies (fast-tight, sweep-fade, scanner spray, selective-swing, shorts) lost on this record and no longer open trades. Their numbers stay behind the toggle in the scoreboard.</li>
         </ul>
       </Explainer>
+
+      {(decayReduced || decayUnreadable) && (
+        <Panel tone="red"><PanelBody>
+          {decayUnreadable ? (
+            <>
+              <p className="text-[13px] font-medium text-down">Live risk multiplier is unreadable — the executor refuses every entry.</p>
+              <Note className="mt-1">kraken_margin_decay_multiplier=&quot;{decayRaw}&quot; is outside 0.25–1. Set it to 1 (or clear it) on Live Desk to trade at full size again.</Note>
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] font-medium text-down">Live risk is REDUCED to {decayMult}× — {score?.decay?.state?.source ?? "the armed sleeve"} is decaying.</p>
+              <Note className="mt-1">
+                {score?.decay?.state?.reducedAt && <>Since {new Date(score.decay.state.reducedAt).toLocaleString()}. </>}
+                {score?.decay?.state?.note ?? "The last 30 paper trades are significantly worse than the record (Welch t ≤ −2)."} Every live entry now risks {decayMult}× its normal share (kraken_margin_decay_multiplier). It restores to 1× by itself only when the rolling read is stable again — a cooling read keeps the reduction. If the last 30 are also net ≤ $0 the sleeve demotes itself.
+              </Note>
+            </>
+          )}
+        </PanelBody></Panel>
+      )}
 
       {degraded.length > 0 && (
         <Panel tone="red"><PanelBody>

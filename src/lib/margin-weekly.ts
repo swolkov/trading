@@ -6,6 +6,8 @@ import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { loadLiveFills, divergenceSummary, readStage3, readDemotion, type LiveFill, type Divergence, type Stage3, type Demotion } from "@/lib/margin-synthesis";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 import { leaderboard, type LeaderboardRow, type PromotionVerdict } from "@/lib/margin-leaderboard";
+import { DECAY_MULT_KEY, readDecayState, type DecayState } from "@/lib/margin-decay";
+import { parseDecayMultiplier } from "@/lib/margin-risk-tiers";
 
 // ── THE MONDAY REVIEW ──────────────────────────────────────────────────────────────────────
 // One page a week, written by rule, not by mood: where the live book stands, whether the
@@ -45,6 +47,7 @@ export interface WeeklyInput {
   candidate: CandidateDetail | null;
   capacity: CapacityReport | null;
   leaderboard?: LeaderboardRow[];   // per-sleeve metrics + the explicit gate (absent on older callers)
+  decay?: { multiplier: string | null; state: DecayState | null };   // kraken_margin_decay_multiplier + its state (C3)
 }
 
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(0)}`;
@@ -66,6 +69,13 @@ export function renderWeeklyMemo(i: WeeklyInput): string {
   L.push("## 1 · Live book", "");
   L.push(`- Executor: **${i.demoted ? "DEMOTED to paper" : i.live.armed ? "ARMED" : "disarmed"}** · sleeve: ${i.live.sources.join(", ") || "none"} · equity ${i.live.equity != null ? money(i.live.equity) : "?"}${i.live.equityPeak != null && i.live.equity != null ? ` (peak ${money(i.live.equityPeak)}, ${((i.live.equity / i.live.equityPeak - 1) * 100).toFixed(1)}% from peak)` : ""}`);
   if (i.demoted) L.push(`- ⛔ Demoted ${i.demoted.at.slice(0, 16).replace("T", " ")} UTC: ${i.demoted.reason}`);
+  if (i.decay) {
+    const mult = parseDecayMultiplier(i.decay.multiplier);
+    const st = i.decay.state;
+    if (mult == null) L.push(`- ⛔ Risk multiplier: **unreadable** (kraken_margin_decay_multiplier="${i.decay.multiplier ?? ""}") — the executor refuses every entry until it is 0.25–1.`);
+    else if (mult < 1) L.push(`- ⚠️ Risk multiplier: **${mult}× since ${st?.reducedAt ? st.reducedAt.slice(0, 16).replace("T", " ") + " UTC" : "?"}** (${st ? `${st.state === "DECAYING" ? "decaying" : st.state}: ${st.note}` : "no decay state recorded"}). Restores to 1× by itself only on a stable rolling read.`);
+    else if (st && st.state !== "insufficient") L.push(`- Risk multiplier: 1× · rolling ${st.state}${st.state !== "stable" ? ` (${st.note})` : ""} · read ${st.at.slice(0, 16).replace("T", " ")} UTC`);
+  }
   if (i.stage3) L.push(`- Stage 3: **${i.stage3.status}** · ${i.stage3.done ?? 0}/${i.stage3.target} closed live trades at base ${i.stage3.fromBase}% → ${i.stage3.toBase}%${i.stage3.note ? ` · ${i.stage3.note}` : ""}`);
   L.push(`- Closed live trades: ${closed.length} (${winsLive} won) · real net ${money(realNet)} · paper on the same trades at live size ${money(i.div.paperNet)} · verdict: ${i.div.verdict}`);
   L.push(`- Execution: avg entry slippage ${i.div.avgEntrySlipBp != null ? `${i.div.avgEntrySlipBp.toFixed(0)}bp` : "—"} (model ${i.div.modelChaseBp}bp) · avg fee/side ${i.div.avgFeePctSide != null ? `${i.div.avgFeePctSide.toFixed(3)}%` : "—"} (model ${i.div.modelFeePct}%)`, "");
@@ -135,7 +145,7 @@ export function renderWeeklyMemo(i: WeeklyInput): string {
 
 export async function runMarginWeekly(): Promise<{ ok: boolean; path: string; actions: string[] }> {
   const cfg = async (k: string) => prisma.agentConfig.findUnique({ where: { key: k } }).then((r) => r?.value ?? null).catch(() => null);
-  const [auto, validate, sourcesRaw, watchState, peakRaw] = await Promise.all([cfg("kraken_margin_auto"), cfg("kraken_margin_validate_only"), cfg("kraken_margin_live_sources"), cfg("margin_watch_state"), cfg("kraken_margin_equity_peak")]);
+  const [auto, validate, sourcesRaw, watchState, peakRaw, decayMult, decayState] = await Promise.all([cfg("kraken_margin_auto"), cfg("kraken_margin_validate_only"), cfg("kraken_margin_live_sources"), cfg("margin_watch_state"), cfg("kraken_margin_equity_peak"), cfg(DECAY_MULT_KEY), readDecayState().catch(() => null)]);
   const sources = (sourcesRaw ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   const candSource = sources[0] || "selective";
   let equity: number | null = null;
@@ -154,6 +164,7 @@ export async function runMarginWeekly(): Promise<{ ok: boolean; path: string; ac
   const memo = renderWeeklyMemo({
     at, live: { armed: auto === "true" && validate === "false", sources, equity, equityPeak: Number.isFinite(peak) && peak > 0 ? peak : null },
     stage3, demoted, fills, div: divergenceSummary(fills), strategies, candidate, capacity, leaderboard: board,
+    decay: { multiplier: decayMult, state: decayState },
   });
   const path = "Performance/margin-weekly.md";
   await vaultWrite(path, memo, "margin-weekly");
