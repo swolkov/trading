@@ -252,9 +252,56 @@ unchanged the next day (the C5 invariant — no legacy row's arithmetic moved); 
 gains a row on that breakout and resolves within 24h; (4) the first closed live round trip after
 the deploy has a `### Post-trade review` block in that day's `Decisions/` file.
 
-## 8. Research results (filled in by the C6 run — see `Performance/margin-research.md`)
+## 8. Research results (the C6 run, 2026-09-15 — full tables in `Performance/margin-research.md`)
 
-Recorded after the pre-registration above was committed. Numbers, n, t, CI only; verdict words
-only where |t| ≥ 2.
+Recorded after the pre-registration above was committed (commit order: C7 → C4 → C5 → C6 → this
+section). Numbers, n, t, CI only; verdict words only where |t| ≥ 2. Wall time 4 s.
 
-_(pending — written in the finalising commit of this PR)_
+**Engine reproduction first.** The Sep 12 bar cache (`bars.json` in a scratchpad) no longer
+exists, so the +$125 / t=2.63 line cannot be re-run on the same bytes. Two checks were run
+instead: (1) the original `scripts/backtest-variants.ts` (origin/main) and the extracted engine
+were both run on a FRESH Kraken cache (26 coins, 720 × 4h/1d, 2026-05-18 → 2026-09-15) — **their
+output is byte-identical** (`diff` empty), so the extraction changed nothing; (2) on that fresh
+window Q2f reads **+$113/trade vs swing-wide, t=2.45, 95% CI +$23 … +$204, n=89, adds 39/89,
+worst −$499 vs −$426** (Sep 12: +$125, t=2.63, n=88, adds 40/88, worst −$499 vs −$403). Same
+sign, same size, three days of window shift; the difference is the data, not the code.
+
+**The proxy check.** On the overlapping window, the Binance 1h→4h proxy for the same 10 coins
+yields 23 entries vs Kraken's 28, and control / wide / pyr of +$169 / +$200 / +$240 (Kraken:
++$149 / +$250 / +$352). The proxy tracks the sign and rough size; it is not the same tape.
+
+**WF1 — the live rule (swing-pyr) over 2024-01 → 2026-09, 10 coins, 196 non-overlapping entries.**
+Whole sample: **+$31/trade, t=0.56, CI −$78 … +$140** — not distinguishable from zero. By year:
+2024 +$5 (n=104, t=0.06) · 2025 +$31 (n=50, t=0.31) · 2026 +$98 (n=42, t=0.74). OOS folds:
+F1 −$11 (n=24, t=−0.10) · F2 +$70 (n=26, t=0.42) · F3 −$74 (n=19, t=−0.34) · **pooled OOS +$2
+(n=69, t=0.02, CI −$181 … +$186)**. Post-folds 2026-07 → Sep 15: +$240 (n=23, t=1.48). Jackknife
+by coin: t from 0.09 (without BTC) to 1.00 (without AVAX); AVAX alone is −$211 (n=22, t=−3.39).
+**Read:** the edge the 120-day Kraken window shows (+$335, t=2.72) is a 2026 phenomenon on this
+proxy; over 2.7 years the rule is flat out of sample. That is the honest state of the live rule
+and it is why nothing in this PR changes it — the forward paper record decides.
+
+**Paired on the same 196 entries:** rule − swing-lev −$17 (t=−0.41) · rule − swing-wide −$13
+(t=−0.64) · rule − swing-partial −$16 (t=−0.58). None distinguishable; the Sep 12 pyramid
+advantage does not appear on the long sample.
+
+**WF2 — walk-forward efficiency.** The IS-best cell was 5/2.5/120/0.75 in every fold (IS
++$88 … +$90, t ≈ 0.8–1.1). OOS: +$99 / +$89 / −$102; efficiency 1.13 / 0.99 / −1.14; paired vs
+the live rule OOS +$110 (t=1.12) / +$19 (t=0.17) / −$28 (t=−0.40) — **picking is not
+distinguishable from not picking in any fold**, and the third fold reverses.
+
+**S1 — flatness.** 108 cells, **0 cliffs on 297 neighbour edges**; the live cell's eight
+neighbours differ by −$7 … +$32 per trade, |t| ≤ 0.86; no cell reaches t ≥ 2 (best 5/2.5/120/0.75
+at +$85, t=1.26; worst 5/1.5/168/1 at −$2). The surface is flat — which is the same statement as
+WF1: there is little here to be sensitive to.
+
+**MC1 — 10,000 × 100-trade block-bootstrap paths of the rule's R-multiples** (mean 0.098R, sd
+2.43R, 107/196 ≤ −0.9R, 20/196 > 3R): P(hit the 15% breaker inside 100 trades) **100% at 3, 5
+and 8%**; median maxDD 16 / 17 / 19%; 95th 18 / 20 / 21%; longest losing streak (median) 5 / 3 /
+2 before the halt; median final −10 / −16 / −17% (paths stop at the breaker, so P(−50%) = 0 and
+P(+50%) = 9–11%). **Read:** on this distribution the breaker is not an edge case, it is the
+expected event; the 8% ceiling sweep (which used the paper record's 65%-hit distribution) and
+this bootstrap (a 26%-hit replay distribution) disagree because the distributions do, and the
+forward paper record is the one that will settle which is closer to the truth.
+
+**What this changes:** nothing in code. It sets the bar the five twins and the live rule must
+clear on the forward record, and it is the number the next arming discussion starts from.
