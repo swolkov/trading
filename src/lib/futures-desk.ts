@@ -21,6 +21,7 @@ import {
   type AlertPayload, type DeskContext, type DeskLimits, type Side, type Stage,
 } from "@/lib/futures-desk-rules";
 import { ddTier, deskContextOf, riskStateOf } from "@/lib/futures-desk-risk";
+import { EVENT_POLICY_KEY, cmeHolidayRefusal, deskEventPolicy, eventContextOf } from "@/lib/futures-desk-calendar";
 import { entrySlipPts, excursionJobDue, insertTrade, pnlAfterSlip, sessionOf, slipModelUsd, slipPtsPerSide, toR, updateExcursions, watchCapReached, watchCard } from "@/lib/futures-desk-journal";
 import { EXECUTION_ERRORS_DISABLE_AT, EXECUTION_ERRORS_REASON, anomalyRefusal, detectAnomaly, executionErrorsToday, feedStale, hostForMode, parseAnomaly, preTradeChecklist } from "@/lib/futures-desk-safety";
 import {
@@ -76,10 +77,15 @@ async function watchSignal(signalId: number, a: AlertPayload): Promise<AlertOutc
   return { status: "watch", reason: card, signalId };
 }
 
-/** The entry container from the guardian's own numbers (≤ 20 min old by the freshness gate). */
-async function contextNow(s: DeskState, limits: DeskLimits, a: AlertPayload, newRiskUsd: number): Promise<DeskContext | { refusal: string }> {
-  const [open, n, enabled] = await Promise.all([openTrades(), entriesToday(), deskEnabled()]);
-  return deskContextOf({ enabled, state: s, open, entriesToday: n, limits, alert: a, newRiskUsd, now: new Date(), dayKey: etDayKey(new Date()) });
+/** The entry container from the guardian's own numbers (≤ 20 min old by the freshness gate) and the
+ *  event policy it last wrote (E3): a reduced window halves the budget on top of the tier's multiplier;
+ *  paused, stale or missing refuses in `entryRefusal`; a CME holiday refuses entries only. */
+async function contextNow(s: DeskState, limits: DeskLimits, a: AlertPayload, budgetUsd: number, tierMult: number): Promise<DeskContext | { refusal: string }> {
+  const now = new Date();
+  const [open, n, enabled, policyRaw] = await Promise.all([openTrades(), entriesToday(), deskEnabled(), cfg(EVENT_POLICY_KEY)]);
+  const event = eventContextOf(policyRaw, now.getTime());
+  const budgetMult = tierMult * event.budgetMult;
+  return deskContextOf({ enabled, state: s, open, entriesToday: n, limits, alert: a, newRiskUsd: budgetUsd * budgetMult, now, dayKey: etDayKey(now), event, budgetMult, cmeHoliday: cmeHolidayRefusal(now) });
 }
 
 /** Exactly one working stop, or no position. Returns the working stop id, or null when the
@@ -134,12 +140,13 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const [state, limits, promoted] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted")]);
     const grade = gradeFor(a, promoted === "true");
     const tier = ddTier(state.equity ?? 0, state.equityHigh ?? 0);
-    const ctx = await contextNow(state, limits, a, budgetFor(grade, limits) * tier.mult);   // worst case: the whole budget
+    const ctx = await contextNow(state, limits, a, budgetFor(grade, limits), tier.mult);   // worst case: the whole budget × tier × event
+    const [eventMode, budgetMult] = "refusal" in ctx ? [null, tier.mult] : [ctx.eventMode, ctx.budgetMult];
+    await stampSignal(signalId, { grade, eventMode });   // stamped before the verdict, so a refused row still says what it met
     const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits) ?? anomalyRefusal(await cfg(ANOMALY_KEY));
     if (refusal) { await markSignal(signalId, "refused", refusal); return { status: "refused", reason: refusal, signalId }; }
     const stageDArmed = limits.stage === "D" && (await cfg("futures_desk_stage_d_armed")) === "true";
-    const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult: tier.mult, stageDArmed });
-    await stampSignal(signalId, { grade });
+    const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult, stageDArmed });
     if (!size.ok) { await markSignal(signalId, "refused", size.reason); return { status: "refused", reason: size.reason, signalId }; }
     const contract = await deskContract(size.micro);
     if (!contract) { await markSignal(signalId, "error", `no ${size.micro} contract on Tradovate`); return { status: "error", reason: "contract", signalId }; }
@@ -212,7 +219,7 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
       edge: a.edge, root: a.root, micro: size.micro, contract: contract.name, contractId: contract.id, side: a.side, qty: fill.qty, entryPrice: fill.price, stopPrice: stopPx,
       entryOrderId: orderId, stopOrderId, clOrdId, signalId, riskUsd, pointValue: size.pointValue, rolledFrom: null, note: partial ? `partial fill ${fill.qty}/${size.contracts}` : a.note,
       contractMonth: contract.name.slice(-2), stage: limits.stage, signalPrice: a.price, entrySlipPts: entrySlipPts(a.side, a.price, fill.price), stopPoints: stopDist, atrAtEntry: a.atr ?? null,
-      session: sessionOf(new Date()), regime: null, eventMode: null, grade: size.grade, errorClass: partial ? "partial_fill" : null, slipModelPts: slipPtsPerSide(a.root), slipModelUsd: slipModelUsd(a.root, fill.qty, size.pointValue),
+      session: sessionOf(new Date()), regime: null, eventMode, grade: size.grade, errorClass: partial ? "partial_fill" : null, slipModelPts: slipPtsPerSide(a.root), slipModelUsd: slipModelUsd(a.root, fill.qty, size.pointValue),
     });
 
     // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
@@ -313,6 +320,10 @@ async function guardBody(): Promise<GuardReport> {
   // The risk snapshot for the page and health (display-only; the entry path recomputes from `state`).
   const rs = riskStateOf({ equity, equityHigh: state.equityHigh, balance: bal.balance, dayStartBalance: state.dayStartBalance, open, limits, now: new Date() });
   await setKey("futures_desk_risk_state", JSON.stringify(rs)).catch(() => {});
+  // The event policy (E3) — static table only, written every run; an entry needs one under 20 minutes old.
+  const policy = deskEventPolicy(new Date());
+  await setKey(EVENT_POLICY_KEY, JSON.stringify(policy)).catch(() => notes.push("event policy not saved"));
+  if (policy.mode !== "normal") notes.push(`event policy: ${policy.mode} — ${policy.reason}`);
   let settled = 0;
   const expiries: Record<number, string | null> = {};   // open positions NOT rolled this run → roll planning below
   for (const t of open) {

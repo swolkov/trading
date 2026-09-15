@@ -14,7 +14,8 @@ function alertOf(over: Record<string, unknown> = {}): AlertPayload { const p = p
 const now = new Date("2026-09-15T16:00:00Z");   // Tue 12:00 ET
 const es = alertOf();
 const size: SizeResult = sizeEntry(es, DEFAULT_LIMITS, { grade: "normal", stage: "A", budgetMult: 1 });
-const okCtx: ChecklistContext = { brokerHost: DEMO_HOST, expiryIso: "2026-12-18T14:30:00Z", guardDays: 3, openRoots: [], eventPolicyRaw: null, feedSeenAt: "2026-09-15T15:00:00Z", now };
+const freshPolicy = JSON.stringify({ mode: "normal", at: "2026-09-15T15:55:00Z" });   // 5 min old
+const okCtx: ChecklistContext = { brokerHost: DEMO_HOST, expiryIso: "2026-12-18T14:30:00Z", guardDays: 3, openRoots: [], eventPolicyRaw: freshPolicy, feedSeenAt: "2026-09-15T15:00:00Z", now };
 const mesz6 = { name: "MESZ6" };
 
 // (a)
@@ -92,10 +93,11 @@ test("health exposes the feed and the anomaly; entries are never gated by the he
 });
 
 // (e)
-test("the checklist passes a clean ES entry and warns (not fails) while the event policy key does not exist", () => {
+test("the checklist passes a clean ES entry with a fresh event policy; a MISSING policy is a failure (E3)", () => {
   const c = preTradeChecklist(es, okCtx, mesz6, size, DEFAULT_LIMITS);
-  assert.equal(c.ok, true); assert.deepEqual(c.failures, []);
-  assert.deepEqual(c.warnings, ["event calendar not checked in the last 20 minutes (no policy key yet — E3)"]);
+  assert.equal(c.ok, true); assert.deepEqual(c.failures, []); assert.deepEqual(c.warnings, []);
+  const missing = preTradeChecklist(es, { ...okCtx, eventPolicyRaw: null }, mesz6, size, DEFAULT_LIMITS);
+  assert.equal(missing.ok, false); assert.deepEqual(missing.failures, ["event calendar not checked in the last 20 minutes"]); assert.deepEqual(missing.warnings, []);
   assert.equal(hostForMode(DESK_MODE), DEMO_HOST);   // the desk's pinned mode resolves to the demo host
   assert.equal(hostForMode("live"), "live.tradovateapi.com");
 });
@@ -111,7 +113,7 @@ test("the checklist's exact failure strings, one fixture each", () => {
   const gcSize = sizeEntry(gc, DEFAULT_LIMITS, { grade: "normal", stage: "A", budgetMult: 1 });
   assert.deepEqual(f(gc, {}, { name: "MGCU6" }, gcSize), ["contract month code U not in ACTIVE_MONTH_CODES for GC"]);
   assert.deepEqual(f(gc, {}, { name: "MGCZ6" }, gcSize), []);
-  assert.deepEqual(f(es, { expiryIso: "2026-09-16T16:00:00Z" }, { name: "MESU6" }), ["MESU6 is inside its roll window (expires in 1 day)"]);
+  assert.deepEqual(f(es, { expiryIso: "2026-09-16T16:00:00Z" }, { name: "MESU6" }), ["MESU6 expires in 1 day — inside the roll window; entry refused"]);   // E3's one string, via rollWindowRefusal
   assert.deepEqual(f(es, { expiryIso: "2026-09-17T17:00:00Z" }, { name: "MESU6" }), []);   // 2.04 days out: a 3-day guard rolls only under 2
   assert.deepEqual(f(alertOf({ symbol: "NQ" }), {}), ["micro symbol MES does not match MICRO_FOR_ROOT"]);
   assert.deepEqual(f(es, {}, mesz6, { ...size, contracts: 2 }), ["qty 2 exceeds the stage A cap of 1"]);
@@ -122,6 +124,7 @@ test("the checklist's exact failure strings, one fixture each", () => {
   assert.deepEqual(f(es, { eventPolicyRaw: JSON.stringify({ mode: "normal", at: "2026-09-15T15:35:00Z" }) }), ["event calendar not checked in the last 20 minutes"]);   // 25 min old
   assert.deepEqual(f(es, { eventPolicyRaw: "{" }), ["event calendar not checked in the last 20 minutes"]);
   assert.deepEqual(f(es, { eventPolicyRaw: JSON.stringify({ mode: "normal", at: "2026-09-15T15:50:00Z" }) }), []);
+  assert.deepEqual(f(es, { eventPolicyRaw: null }), ["event calendar not checked in the last 20 minutes"]);   // missing = failure since E3
   // The first failure is the refusal; the rest still ride in checklist_json.
   const many = preTradeChecklist({ ...es, stop: null }, { ...okCtx, brokerHost: "live.tradovateapi.com", openRoots: ["ES"] }, mesz6, size, DEFAULT_LIMITS);
   assert.equal(many.ok, false); assert.equal(many.failures[0], "account is not the demo (host must be demo.tradovateapi.com)"); assert.equal(many.failures.length, 3);

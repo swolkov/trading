@@ -3,10 +3,13 @@
 // strings and booleans. Fail closed on ENTRIES only — nothing here is consulted by a close, a roll
 // or a re-protect.
 import { ACTIVE_MONTH_CODES, monthCodeOf } from "@/lib/contract-months";
+import { rollWindowRefusal } from "@/lib/futures-desk-calendar";
 import {
-  MICRO_FOR_ROOT, MINI_FOR_ROOT, STAGE_MAX_CONTRACTS, cmeOpen, edgeByKey, etDayKey, rollDue, usd,
+  EVENT_POLICY_FRESH_MS, MICRO_FOR_ROOT, MINI_FOR_ROOT, STAGE_MAX_CONTRACTS, cmeOpen, edgeByKey, etDayKey, usd,
   type AlertPayload, type DeskLimits, type SizeResult,
 } from "@/lib/futures-desk-rules";
+
+export { EVENT_POLICY_FRESH_MS };
 
 // ---- (a) execution errors ------------------------------------------------------------------------
 export const EXECUTION_ERRORS_DISABLE_AT = 3;
@@ -94,7 +97,6 @@ export function feedStale(seenAtIso: string | null | undefined, nowMs: number): 
 export const DEMO_HOST = "demo.tradovateapi.com";
 /** The host `tradovate.ts` resolves for a mode (`getBaseUrl`: live → live.tradovateapi.com, anything else → demo). */
 export function hostForMode(mode: string): string { return mode === "live" ? "live.tradovateapi.com" : DEMO_HOST; }
-export const EVENT_POLICY_FRESH_MS = 20 * 60_000;
 /** Index contracts list quarterlies only; `ACTIVE_MONTH_CODES` has no entry for them (see contract-months.ts). */
 const QUARTERLIES = new Set(["H", "M", "U", "Z"]);
 
@@ -105,7 +107,7 @@ export interface ChecklistContext {
   expiryIso: string | null;
   guardDays: number;
   openRoots: string[];
-  /** `futures_desk_event_policy` raw. MISSING = warning until E3 writes it; present and stale = failure. */
+  /** `futures_desk_event_policy` raw — the guardian writes it every run (E3). Missing, unreadable or older than 20 minutes = failure. */
   eventPolicyRaw: string | null;
   feedSeenAt: string | null;
   now: Date;
@@ -128,10 +130,8 @@ export function preTradeChecklist(a: AlertPayload, ctx: ChecklistContext, contra
   // the quarterlies for the index roots (only H/M/U/Z are listed for them). A thin or mis-parsed month is refused.
   const month = monthCodeOf(size.micro, contract.name);
   if (!(ACTIVE_MONTH_CODES[a.root] ?? QUARTERLIES).has(month)) failures.push(`contract month code ${month || "(none)"} not in ACTIVE_MONTH_CODES for ${a.root}`);
-  if (rollDue(ctx.expiryIso, ctx.now.getTime(), ctx.guardDays)) {
-    const days = Math.max(0, Math.round((Date.parse(ctx.expiryIso as string) - ctx.now.getTime()) / 86_400_000));
-    failures.push(`${contract.name} is inside its roll window (expires in ${days} day${days === 1 ? "" : "s"})`);
-  }
+  const roll = rollWindowRefusal(contract.name, ctx.expiryIso, ctx.now, ctx.guardDays);   // one helper, one string (E3)
+  if (roll) failures.push(roll);
   const expected = size.unit === "mini" ? MINI_FOR_ROOT[a.root]?.mini : MICRO_FOR_ROOT[a.root]?.micro;
   if (!expected || size.micro !== expected || !contract.name.startsWith(expected)) failures.push(`${size.unit} symbol ${size.micro || "(none)"} does not match ${size.unit === "mini" ? "MINI_FOR_ROOT" : "MICRO_FOR_ROOT"}`);
   const cap = Math.min(STAGE_MAX_CONTRACTS[limits.stage], limits.maxContracts);
@@ -140,11 +140,9 @@ export function preTradeChecklist(a: AlertPayload, ctx: ChecklistContext, contra
   if (!stopOk) failures.push("stop missing or on the wrong side of price");
   if (size.riskUsd > size.riskBudgetUsd + 1e-9) failures.push(`risk ${usd(size.riskUsd, 2)} exceeds the ${usd(size.riskBudgetUsd, Number.isInteger(size.riskBudgetUsd) ? 0 : 2)} budget`);
   if (ctx.openRoots.includes(a.root)) failures.push(`already holding ${a.root}`);
-  // E3 writes `futures_desk_event_policy` every guardian run. Until it lands the key does not exist, so a
-  // MISSING key is a warning; once E3 is merged, change the `else` below to push the same string as a failure.
+  // The guardian writes `futures_desk_event_policy` every run (E3): missing, unreadable or stale all FAIL.
   const age = eventPolicyAge(ctx.eventPolicyRaw, ctx.now.getTime());
-  if (ctx.eventPolicyRaw && (age == null || age > EVENT_POLICY_FRESH_MS)) failures.push("event calendar not checked in the last 20 minutes");
-  else if (!ctx.eventPolicyRaw) warnings.push("event calendar not checked in the last 20 minutes (no policy key yet — E3)");
+  if (age == null || age > EVENT_POLICY_FRESH_MS) failures.push("event calendar not checked in the last 20 minutes");
   if (feedStale(ctx.feedSeenAt, ctx.now.getTime())) warnings.push(`feed heartbeat stale (last seen ${ctx.feedSeenAt ?? "never"}) — this alert is itself proof of the feed`);
   return { ok: failures.length === 0, failures, warnings };
 }

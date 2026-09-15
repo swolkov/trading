@@ -223,15 +223,47 @@ foreign-position report, unknown-status rows, the balance-read abort. Added:
   desk client's pinned mode, `DESK_MODE`, through the same mode→host rule `tradovate.ts` uses) ·
   `ES is not a root of index_daily_mr` · `contract month code V not in ACTIVE_MONTH_CODES for ES`
   (metals: `ACTIVE_MONTH_CODES`; index roots: the quarterlies H/M/U/Z) ·
-  `MESU6 is inside its roll window (expires in 1 day)` · `micro symbol MES does not match
-  MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` · `stop missing or on the wrong side of
-  price` · `risk $301.70 exceeds the $250 budget` · `already holding ES` · `event calendar not
-  checked in the last 20 minutes` (until E3 writes `futures_desk_event_policy` the key is missing and
-  this is a **warning**; a present-but-stale key is a failure) · feed stale = warning only.
+  `MESU6 expires in 1 day — inside the roll window; entry refused` (E3's `rollWindowRefusal`, the one
+  string) · `micro symbol MES does not match MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` ·
+  `stop missing or on the wrong side of price` · `risk $301.70 exceeds the $250 budget` · `already
+  holding ES` · `event calendar not checked in the last 20 minutes` (missing, unreadable or stale —
+  a failure since E3) · feed stale = warning only.
 
 **Manual (E5):** add the tenth chart — ES1! 60m, paste `pine/futures-desk-feed-heartbeat.pine`, set
 the secret input, one alert → *Any alert() function call* → the desk webhook, message empty,
 open-ended. Verify: `/api/health` → `desk.feedSeenAt` moves within the hour and `feedStale` is false.
+
+## Event calendar, no-trade windows, CME holidays, roll window (E3, `src/lib/futures-desk-calendar.ts`)
+
+**The guardian writes `futures_desk_event_policy` every run** — `{mode, reason, until, at, source:
+"static", event}` from the shared `event-calendar.ts` policy (`eventPolicyNow`) on the **static
+`MACRO_EVENTS` table only**: Finnhub's economic calendar is a premium endpoint on this account, so
+nothing is fetched and `source` is always `static`. A feed being down can therefore never refuse an
+entry; what does refuse is the guardian not having written the row lately. Modes: **paused** — a
+tier-1 print (FOMC decision, CPI, NFP) within ±30 min; **reduced** — tier 1 within −12h..+2h, or a
+tier-2 print (PPI, PCE, FOMC minutes) within ±30 min; **normal** otherwise. FOMC Sep 16 2026 14:00 ET:
+reduced from 02:00 ET, paused 13:30–14:30, reduced until 16:00.
+
+**The entry path** (`contextNow` → `entryRefusal`, then the checklist) reads the row back:
+- missing, unreadable or older than **20 minutes** → `event calendar not checked in the last 20
+  minutes` (the E5 checklist item is now a **failure** for a missing key too — the warning is gone);
+- paused → `event window: FOMC rate decision 14:00 ET — paused until 14:30`;
+- reduced → the budget is halved **on top of** the drawdown tier (`budgetMult = tier × 0.5`; tier 2
+  in a reduced window sizes at ×0.25). A stale `reduced` row does not halve anything — it refuses.
+- `event_mode` is stamped on the signal row (before the verdict, so a refused row says what it met)
+  and on the trade row.
+
+**CME holidays close ENTRIES only** (`CME_HOLIDAYS_2026`: Thanksgiving Nov 26 early 13:00 ET, Nov 27
+early 13:15, Dec 24 early 13:15, Dec 25 closed, Jan 1 2027 closed, MLK Jan 18 2027 early 13:00,
+Presidents' Day Feb 15 2027 early 13:00 — refresh when the 2027 schedule publishes). `cmeOpenForEntry`
+= `cmeOpen` and no holiday closure; refusals `CME holiday: Christmas Day — closed; entry refused` and
+`CME early close 13:00 ET (Thanksgiving) — entry refused for the rest of the day` (the evening reopen
+on an early-close day is holiday-thin, so it stays closed to entries through the ET day). Exits, queue
+drains, rolls and re-protection keep the plain `cmeOpen`; a queued entry that drains onto a holiday
+is refused, not placed; queued alerts keep the 12h expiry.
+
+**Sessions** (`sessionOf`, E4) are a journal slice, never a gate. Health exposes `eventMode`,
+`eventPolicyAt`, `eventPolicyFresh` and `cmeOpenForEntry`.
 
 ## Proof
 

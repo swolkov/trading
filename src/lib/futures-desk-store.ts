@@ -171,9 +171,9 @@ export async function markSignal(id: number, status: string, reason: string, tra
     `UPDATE futures_desk_signals SET status = $2::text, reason = $3::text, executed_at = CASE WHEN $2::text IN ('executed','refused','error','expired','watch') THEN now() ELSE executed_at END,
      trade_id = COALESCE($4::int, trade_id), error_class = COALESCE($5::text, error_class) WHERE id = $1`, id, status, reason.slice(0, 400), tradeId, errorClass);
 }
-/** The entry path's stamps on the signal row: the grade it was sized at and the pre-trade checklist. */
-export async function stampSignal(id: number, v: { grade?: string; checklistJson?: string }): Promise<void> {
-  await prisma.$executeRawUnsafe(`UPDATE futures_desk_signals SET grade = COALESCE($2::text, grade), checklist_json = COALESCE($3::text, checklist_json) WHERE id = $1`, id, v.grade ?? null, v.checklistJson ?? null);
+/** The entry path's stamps on the signal row: the grade it was sized at, the event mode it met (E3) and the pre-trade checklist. */
+export async function stampSignal(id: number, v: { grade?: string; eventMode?: string | null; checklistJson?: string }): Promise<void> {
+  await prisma.$executeRawUnsafe(`UPDATE futures_desk_signals SET grade = COALESCE($2::text, grade), event_mode = COALESCE($3::text, event_mode), checklist_json = COALESCE($4::text, checklist_json) WHERE id = $1`, id, v.grade ?? null, v.eventMode ?? null, v.checklistJson ?? null);
 }
 /** Watch rows are a day's context, not an inbox item: after 24 h they expire. */
 export async function expireOldWatches(): Promise<number> {
