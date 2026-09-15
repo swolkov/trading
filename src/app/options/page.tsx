@@ -3,6 +3,7 @@
 import useSWR from "swr";
 import { OptionsResearchDesk } from "@/components/options/research-desk";
 import { OptionsLiveDeskPanel } from "@/components/options/live-desk-panel";
+import { OptionsScorePanel } from "@/components/options/score-panel";
 import { OptionOrdersTable, OptionPositionsTable, type LiveOrder, type LivePosition } from "@/components/options/account-tables";
 import { Chip } from "@/components/ui/chip";
 import { Empty, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
@@ -86,6 +87,7 @@ export default function RobinhoodLiveAccountPage() {
 
       <OptionsResearchDesk />
       <OptionsLiveDeskPanel />
+      <OptionsScorePanel />
     </div>
   );
 }

@@ -5,6 +5,7 @@ import type { OptionsResearch, ResearchCandidate } from "../../src/lib/options-d
 import { buildOptionsTradeCard, structureComparison, type OptionsTradeCard } from "../../src/lib/options-trade-card";
 import { saveOptionsTradeCards } from "../../src/lib/options-trade-card-store";
 import type { OptionsGrade } from "../../src/lib/options-risk-ladder";
+import { optionsOpportunityScore, scoreInputsFor } from "../../src/lib/options-score";
 import { logDecision } from "../../src/lib/vault";
 
 export interface LivePricing { natural: number | null; mark: number | null; expectedFill: number | null }
@@ -17,7 +18,7 @@ export interface EntryDecisionInput {
   result: { status: string; reason?: string } | null;
   refused: RefusedCandidate[];
   equity: number | null; feeReserveUsd: number;
-  /** The 0–100 paper ranker for a candidate, when the caller has one. Stamp only. */
+  /** The 0–100 paper ranker for a candidate. Default: scored here from the snapshot's contracts (IV-rank listed as missing — the tick reads no archive). Stamp only, after the decision. */
   scoreOf?: (c: ResearchCandidate) => number | null;
   at?: string;
 }
@@ -25,18 +26,19 @@ export interface EntryDecisionInput {
 export function entryTickCards(input: EntryDecisionInput): OptionsTradeCard[] {
   const contracts = input.data?.contracts ?? [];
   const at = input.at ?? new Date().toISOString();
+  const scoreOf = input.scoreOf ?? ((c: ResearchCandidate) => optionsOpportunityScore(scoreInputsFor(c, contracts, null)).score);
   const siblings = (c: ResearchCandidate) => [c, ...input.refused.map((r) => r.candidate).filter((r) => r.symbol === c.symbol && r !== c)];
   const cards: OptionsTradeCard[] = [];
   if (input.chosen) {
     const { candidate, live, quantity, grade, cap } = input.chosen;
     const accepted = input.result?.status === "accepted";
     cards.push(buildOptionsTradeCard({ source: accepted ? "entry" : "refusal", candidate, contracts, live, quantity, grade, cap, equity: input.equity, feeReserveUsd: input.feeReserveUsd,
-      score: input.scoreOf?.(candidate) ?? null, action: accepted ? "ENTER" : "REFUSED", gate: accepted ? null : `core ${input.result?.status ?? "no answer"}: ${input.result?.reason ?? "no reason"}`,
+      score: scoreOf(candidate), action: accepted ? "ENTER" : "REFUSED", gate: accepted ? null : `core ${input.result?.status ?? "no answer"}: ${input.result?.reason ?? "no reason"}`,
       comparison: structureComparison(siblings(candidate), contracts), at }));
   }
   for (const r of input.refused) {
     cards.push(buildOptionsTradeCard({ source: "refusal", candidate: r.candidate, contracts, equity: input.equity, feeReserveUsd: input.feeReserveUsd,
-      score: input.scoreOf?.(r.candidate) ?? null, action: "REFUSED", gate: r.gate, comparison: structureComparison(siblings(r.candidate), contracts), at }));
+      score: scoreOf(r.candidate), action: "REFUSED", gate: r.gate, comparison: structureComparison(siblings(r.candidate), contracts), at }));
   }
   return cards;
 }

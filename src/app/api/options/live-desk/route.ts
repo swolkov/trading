@@ -5,6 +5,7 @@ import { OPTIONS_LADDER, OPTIONS_LADDER_RULES, clusterOf } from "@/lib/options-r
 import { OPTIONS_RESEARCH_KEY, isOptionsResearch } from "@/lib/options-desk-model";
 import { unmatchedQuoteCount } from "@/lib/options-research-ingest";
 import { sendNotification } from "@/lib/notifications";
+import { optionsScoreReport } from "@/lib/options-score-report";
 
 // THE OPTIONS LIVE DESK's admin surface. GET = what the desk on the Mac last reported (it writes
 // options_live_state every tick), the switches, the probe result and the log tail. POST = the
@@ -93,5 +94,16 @@ export async function POST(request: Request) {
     await sendNotification(`🔴 Options live desk ARMED from the admin page: real money, ceiling $${ceiling} per trade including fees — Normal $${L.Normal.usd} / Strong $${L.Strong.usd} / A+ ${promoted ? `$${L["A+"].usd}` : "locked"} by grade, scaled by the drawdown tier. The first tick reviews an order without placing it; only after that verifies does an entry go through.`, "options").catch(() => {});
     return Response.json({ ok: true, ...(await view()) });
   }
-  return Response.json({ error: "action must be arm | disarm" }, { status: 400 });
+  // D7: the 0–100 score becomes a live input (unlocks the A+ rung on the next ARM) ONLY on a green measurement verdict — typed, never automatic.
+  if (body.action === "promote-score") {
+    if (body.confirm !== "PROMOTE") return Response.json({ ok: false, error: "type PROMOTE to confirm" }, { status: 400 });
+    const report = await optionsScoreReport();
+    if (!report.verdict.green) return Response.json({ ok: false, error: `score not promotable: ${report.verdict.reasons.join("; ")}` }, { status: 409 });
+    await set(PROMOTED_KEY, "true");
+    const line = `SCORE PROMOTED from the admin page: ${report.buckets.map((b) => `${b.name} n=${b.n} mean $${b.mean}`).join(" · ")}, Welch t ${report.verdict.welchT} (registered ${report.registeredAt}). A+ unlocks on the next ARM; the runner still sizes without a score until a later PR feeds it one.`;
+    await log(line);
+    await sendNotification(`🟢 Options 0–100 score PROMOTED — ${line}`, "options").catch(() => {});
+    return Response.json({ ok: true, ...(await view()) });
+  }
+  return Response.json({ error: "action must be arm | disarm | promote-score" }, { status: 400 });
 }
