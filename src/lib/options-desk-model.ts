@@ -1,4 +1,5 @@
 // Research uses broker prices. It never simulates fills or authorizes an order.
+import { exDivRisk, spansEarnings, type EarningsClass, type ResearchEvents } from "./options-events";
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
 // The base research list. The index and mega-cap names give the desk its regime read, but at a
 // $100 max loss a single contract on a $300+ stock never fits, so the AFFORDABLE CORE (Sep 14 2026)
@@ -32,6 +33,8 @@ export interface NativeScan { id: string; name: string; filters: unknown; symbol
 export interface OptionsResearch {
   capturedAt: string; source: "Robinhood MCP"; bars: Record<string, ResearchBar[]>;
   contracts: ResearchContract[]; scans: NativeScan[]; errors: string[];
+  /** Earnings and ex-dividend rows per researched symbol (Sep 15 2026). Absent on snapshots written before the calendar was collected. */
+  events?: ResearchEvents;
 }
 export interface StrategySignal { symbol: string; direction: "bullish" | "bearish" | "neutral"; setup: string; close: number; day: string; relativeVolume: number | null; reason: string }
 export interface ResearchCandidate {
@@ -44,6 +47,8 @@ export interface ResearchCandidate {
   payoffAtMoveUsd: number | null;
   /** ATM implied vol ÷ 20-day realized vol — ≤ singleLegMaxIvToRealized prefers a single leg. */
   ivToRealized: number | null;
+  /** Earnings verdict for this expiry: "none" (permitted), never "EARNINGS TRADE"/"unknown" here — those are dropped, not ranked. */
+  earningsClass: EarningsClass; earningsAt: string | null; exDivAt: string | null;
 }
 const mean = (xs: number[]) => xs.reduce((a,b)=>a+b,0)/xs.length;
 export function researchSignals(bars: OptionsResearch["bars"], now=Date.now()): StrategySignal[] {
@@ -113,6 +118,9 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
     const bull=signal.direction==="bullish", cs=good.filter(c=>c.symbol===signal.symbol);
     const rv=realizedVol20(data.bars[signal.symbol]??[]);
     const push=(kind:string,long:ResearchContract,short?:ResearchContract)=>{
+      // Earnings on or before expiry (or no fresh calendar row) is an earnings trade the rule never asked for — dropped, not ranked.
+      const earnings=spansEarnings(signal.symbol,long.expiry,data.events,now);
+      if(!earnings.permitted)return;
       const credit=kind.endsWith("credit"), fee=rules.feeReservePerContract*(short?2:1);
       const width=short?Math.abs(long.strike-short.strike):0;
       const rawPrice=short?(credit?short.bid-long.ask:long.ask-short.bid):long.ask;
@@ -130,6 +138,9 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const em=impliedMoveFrac(cs,long.expiry,signal.close);
       const payoff=em==null?null:Math.round(payoffAtUsd(kind,long,short,signal.close*(1+(bull?em:-em)),price,fee)*100)/100;
       if(payoff!=null&&payoff<=0)return;
+      const emPct=em==null?null:Math.round(em*10000)/100;
+      const exDiv=exDivRisk(kind,short?.strike??null,short?.type??null,signal.close,emPct,data.events?.[signal.symbol]?.exDivAt,long.expiry,now);
+      if(!exDiv.permitted)return;
       const iv=atmImpliedVol(cs,long.expiry,signal.close);
       const ivToRealized=iv!=null&&rv!=null?Math.round(iv/rv*100)/100:null;
       const single=!short, singlePreferred=ivToRealized!=null&&ivToRealized<=rules.singleLegMaxIvToRealized;
@@ -137,7 +148,8 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const moveNote=em==null?"expected move unavailable":`worth $${payoff} at the market's expected ±${(em*100).toFixed(1)}% move`;
       result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,
         limit:Math.round(price*100)/100,plannedLoss:Math.round(loss*100)/100,feeReserve:fee,maxProfit:maxProfit==null?null:Math.round(maxProfit*100)/100,
-        quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:em==null?null:Math.round(em*10000)/100,payoffAtMoveUsd:payoff,ivToRealized,
+        quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:emPct,payoffAtMoveUsd:payoff,ivToRealized,
+        earningsClass:earnings.earningsClass,earningsAt:earnings.earningsAt,exDivAt:data.events?.[signal.symbol]?.exDivAt??null,
         reason:`${signal.setup}. ${volNote}. ${moveNote}. Research only; fresh broker review and operational checks required.`});
     };
     for(const long of cs){
@@ -167,7 +179,19 @@ export function isOptionsResearch(value:unknown):value is OptionsResearch{
     &&r.bars!==null&&typeof r.bars==="object"&&!Array.isArray(r.bars)&&Object.values(r.bars).every(bs=>Array.isArray(bs)&&bs.every(b=>b&&typeof b.day==="string"&&[b.open,b.high,b.low,b.close,b.volume].every(Number.isFinite)))
     &&Array.isArray(r.contracts)&&r.contracts.every(c=>c&&typeof c.id==="string"&&typeof c.symbol==="string"&&["call","put"].includes(c.type)&&Number.isFinite(Date.parse(c.at))&&Number.isFinite(Date.parse(c.expiry))&&[c.bid,c.ask,c.strike,c.multiplier,c.bidSize,c.askSize,c.openInterest,c.volume].every(Number.isFinite))
     &&Array.isArray(r.scans)&&r.scans.every(s=>s&&typeof s.id==="string"&&typeof s.name==="string"&&Array.isArray(s.symbols)&&s.symbols.every(x=>typeof x==="string"))
-    &&Array.isArray(r.errors)&&r.errors.every(e=>typeof e==="string");
+    &&Array.isArray(r.errors)&&r.errors.every(e=>typeof e==="string")
+    &&(r.events===undefined||isResearchEvents(r.events));
+}
+const dayOrNull=(x:unknown)=>x===null||typeof x==="string"&&/^\d{4}-\d{2}-\d{2}/.test(x)&&Number.isFinite(Date.parse(x.slice(0,10)));
+export function isResearchEvents(value:unknown):value is ResearchEvents{
+  if(!value||typeof value!=="object"||Array.isArray(value))return false;
+  return Object.values(value as Record<string,unknown>).every(e=>{
+    if(!e||typeof e!=="object")return false;
+    const r=e as Record<string,unknown>;
+    return dayOrNull(r.earningsAt)&&(r.earningsTiming===null||r.earningsTiming==="am"||r.earningsTiming==="pm")
+      &&(r.exDivAt===undefined||dayOrNull(r.exDivAt))&&(r.dividendAmount===undefined||r.dividendAmount===null||typeof r.dividendAmount==="number"&&Number.isFinite(r.dividendAmount))
+      &&typeof r.at==="string"&&Number.isFinite(Date.parse(r.at));
+  });
 }
 
 /** Says WHICH gate left the live desk empty-handed, so "no trade" reads as a fact and not a mystery:
@@ -176,5 +200,18 @@ export function noCandidateNote(data: OptionsResearch, cap: number, now = Date.n
   const names = Object.keys(data.bars).length;
   const breaks = researchSignals(data.bars, now).filter((s) => s.setup === "20-session breakout" || s.setup === "20-session breakdown");
   if (!breaks.length) return `no entry: no 20-session breakout or breakdown among the ${names} researched names (cap $${cap})`;
-  return `no entry: signal on ${breaks.map((s) => `${s.symbol} ${s.direction}`).join(", ")} but no long call/put or debit spread fits the $${cap} cap`;
+  // A signal whose every researched expiry spans earnings (or has no fresh calendar row) was refused before the cap was ever consulted.
+  const refused = breaks.flatMap((s) => {
+    const expiries = [...new Set(data.contracts.filter((c) => c.symbol === s.symbol).map((c) => c.expiry))].sort();
+    const verdicts = expiries.map((e) => spansEarnings(s.symbol, e, data.events, now));
+    if (!expiries.length || verdicts.some((v) => v.permitted)) return [];
+    const v = verdicts[0];
+    return [`${s.symbol} ${s.direction} but ${v.earningsClass === "EARNINGS TRADE" ? `earnings ${v.earningsAt} falls before expiry ${expiries[0]}` : v.note}`];
+  });
+  const rest = breaks.filter((s) => !refused.some((r) => r.startsWith(`${s.symbol} `)));
+  const parts = [
+    ...(refused.length ? [`signal on ${refused.join("; ")} (${refused.length} refused by the earnings rule)`] : []),
+    ...(rest.length ? [`signal on ${rest.map((s) => `${s.symbol} ${s.direction}`).join(", ")} but no long call/put or debit spread fits the $${cap} cap`] : []),
+  ];
+  return `no entry: ${parts.join("; ")}`;
 }

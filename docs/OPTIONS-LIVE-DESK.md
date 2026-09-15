@@ -102,3 +102,33 @@ structure worth nothing at that move is rejected outright — that is a lottery 
 
 **Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
 trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
+
+## Earnings and ex-dividend (Sep 15 2026)
+
+A 21–60 day single-name contract very often spans an earnings date, and the breakout rule says
+nothing about earnings — that is an **EARNINGS TRADE** the desk never asked for. So the research
+session now also reads the broker's earnings calendar (next 31 days, then the 29 after) and each
+name's fundamentals (dividend schedule, batches of 10); the ingest turns them into
+`events[symbol] = {earningsAt, earningsTiming, exDivAt, dividendAmount, at}` on the research
+snapshot (`src/lib/options-research-ingest.ts`), carried forward by the merge with its original
+clock. The rules live in `src/lib/options-events.ts` and are pure:
+
+- **`spansEarnings`** — refused when earnings fall on or before expiry; refused as **unknown** when
+  there is no row or the row is older than 36 hours. SPY/QQQ/IWM have no earnings and are exempt.
+  The screen drops refused structures and the empty-tick note names the date
+  (`signal on SOFI bullish but earnings 2026-10-28 falls before expiry 2026-11-20 (1 refused by the earnings rule)`).
+- **`exDivRisk`** — a call debit spread whose short call the market's expected move can put in the
+  money before an ex-dividend date inside the hold is refused (early assignment). Fundamentals never
+  read → every spread is refused (index ETFs included); single legs are unaffected.
+- **Live re-check** — `pickCandidate` re-runs `spansEarnings` on the desk's own clock and, for the
+  chosen name only, asks the broker once (`broker.nextEarnings`, built from the live tool catalog,
+  decoded by named fields). **Any failure refuses — fail closed by design** — and the entry log says
+  why: `refused: SOFI long_call: live earnings check failed — … (refused, fail closed)`. The first
+  failure also logs the response's key shape so the decoder can be pinned to the real schema.
+- **Guardian** — the owned record now carries `exDivAt` and `shortStrike` (stamped at fill);
+  `guardianExDivExit` closes a call debit spread whose short call is in the money with the ex-date
+  two days out or less, priced at the executable mark. The underlying quote
+  (`broker.underlyingQuote`, `get_equity_quotes`) is fail-soft: no quote → rule skipped and logged.
+
+Until the first research run after this ships stores `events`, every single-name candidate reads
+as unknown and is refused; index ETFs still trade. That is the rule working, not the desk broken.

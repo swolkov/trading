@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodeBrokerOrder, decodeOrderPayload, decodeReviewPayload, groupPositions, mapOrderState, optionIdOf, orderMatchesCanonical, regularSessionFor } from "../src/lib/options-live-broker";
+import { decodeBrokerOrder, decodeEarningsPayload, decodeOrderPayload, decodeReviewPayload, decodeUnderlyingQuote, earningsRequestFor, groupPositions, mapOrderState, optionIdOf, orderMatchesCanonical, regularSessionFor } from "../src/lib/options-live-broker";
 import { OPTIONS_LIVE_ACCOUNT, optionsRequestFingerprint, type OptionOrderParams } from "../src/lib/options-live-policy";
 
 const params: OptionOrderParams = { account_number: OPTIONS_LIVE_ACCOUNT, legs: [{ option_id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", side: "buy", position_effect: "open", ratio_quantity: 1 }], quantity: "1", direction: "debit", type: "limit", price: "0.55", time_in_force: "gfd", market_hours: "regular_hours" };
@@ -69,4 +69,30 @@ test("placement decoding binds the ref_id and fingerprint we sent; garbage is nu
   const o = decodeOrderPayload({ data: { order: { id: "o9", state: "queued", processed_quantity: 0, account_number: OPTIONS_LIVE_ACCOUNT } } }, bind)!;
   assert.equal(o.id, "o9"); assert.equal(o.state, "open"); assert.equal(o.refId, bind.refId); assert.equal(o.requestFingerprint, fp); assert.equal(o.accountNumber, OPTIONS_LIVE_ACCOUNT);
   assert.equal(decodeOrderPayload({ data: { order: { state: "queued" } } }, bind), null);
+});
+
+test("underlying quote decodes the broker's quote row by name and by symbol; anything short of that is null", () => {
+  const row = { quote: { symbol: "SPY", last_trade_price: "651.20", venue_last_trade_time: "2026-09-15T14:52:26Z", adjusted_previous_close: "660.00", previous_close: "659.00" }, close: { symbol: "SPY", price: "660.00" } };
+  assert.deepEqual(decodeUnderlyingQuote({ data: { results: [row] } }, "SPY"), { symbol: "SPY", last: 651.2, previousClose: 660, atMs: Date.parse("2026-09-15T14:52:26Z") });
+  assert.equal(decodeUnderlyingQuote({ data: { results: [row] } }, "QQQ"), null);                                                       // wrong symbol
+  assert.equal(decodeUnderlyingQuote({ data: { results: [{ quote: { ...row.quote, last_trade_price: null } }] } }, "SPY"), null);      // no last
+  assert.equal(decodeUnderlyingQuote({ data: { results: [{ quote: { ...row.quote, venue_last_trade_time: "soon" } }] } }, "SPY"), null);
+  assert.equal(decodeUnderlyingQuote({ data: {} }, "SPY"), null);
+});
+
+test("earnings: the request is built from the live catalog so 'no row' can be trusted; the response is read by named fields or throws", () => {
+  const catalog = (calendar: string[], results: string[] = []) => ({ tools: [
+    { name: "get_earnings_calendar", inputSchema: { properties: Object.fromEntries(calendar.map((k) => [k, {}])) } },
+    { name: "get_earnings_results", inputSchema: { properties: Object.fromEntries(results.map((k) => [k, {}])) } },
+  ] });
+  assert.deepEqual(earningsRequestFor(catalog(["symbols", "start_date", "end_date"]), "SOFI", "2026-09-15", "2026-10-16"), { name: "get_earnings_calendar", args: { symbols: ["SOFI"], start_date: "2026-09-15", end_date: "2026-10-16" } });
+  assert.deepEqual(earningsRequestFor(catalog(["days"]), "SOFI", "2026-09-15", "2026-10-16"), { name: "get_earnings_calendar", args: { days: 32 } });
+  assert.deepEqual(earningsRequestFor(catalog(["symbols"], ["symbol"]), "SOFI", "2026-09-15", "2026-10-16"), { name: "get_earnings_results", args: { symbol: "SOFI" } });   // a symbol-only calendar has no window → results by symbol
+  assert.throws(() => earningsRequestFor(catalog(["symbols"], ["page"]), "SOFI", "2026-09-15", "2026-10-16"), /no earnings tool in the catalog/);
+  assert.throws(() => earningsRequestFor({ tools: [] }, "SOFI", "2026-09-15", "2026-10-16"), /no earnings tool/);
+  const rows = [{ symbol: "SOFI", report: { date: "2026-10-28", timing: "pm" } }, { symbol: "SOFI", report: { date: "2026-07-29", timing: "pm" } }, { symbol: "AAL", date: "2026-10-01" }];
+  assert.deepEqual(decodeEarningsPayload({ data: { results: rows } }, "SOFI", "2026-09-15", "get_earnings_calendar"), { symbol: "SOFI", earningsAt: "2026-10-28", timing: "pm", via: "get_earnings_calendar" });
+  assert.deepEqual(decodeEarningsPayload({ data: { results: rows } }, "PFE", "2026-09-15", "get_earnings_calendar").earningsAt, null);        // asked across the window, not listed → none
+  assert.throws(() => decodeEarningsPayload({ data: { results: [{ symbol: "SOFI", when: "later" }] } }, "SOFI", "2026-09-15", "x"), /no readable date/);
+  assert.throws(() => decodeEarningsPayload({ data: { stuff: 1 } }, "SOFI", "2026-09-15", "x"), /unrecognized response shape/);
 });

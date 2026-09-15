@@ -25,6 +25,9 @@ export interface OwnedPositionRecord extends OwnedOptionsPosition {
   kind: StructureKind; direction: "debit" | "credit"; entryPrice: number; width: number; openedAtMs: number; expiry: string; underlying: string;
   /** Best executable close net seen since entry — the trail's anchor. Absent on records written before the trail existed. */
   peakNet?: number;
+  /** Next ex-dividend date (YYYY-MM-DD) and the short leg's strike, stamped at fill for the ex-dividend exit rule (Sep 15 2026). */
+  exDivAt?: string | null;
+  shortStrike?: number | null;
 }
 
 /** Executable net price to CLOSE a debit structure now: sell the long at its bid, buy the short back at its ask. */
