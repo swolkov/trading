@@ -7,6 +7,8 @@ import {
   scoreBucketsOf, scoreJsonOf, scorePromotionVerdict, trendLabelOf, trendOf, volLabelOf, welchT, type DailyBar,
 } from "../src/lib/futures-desk-score";
 import { renderWeeklyReview, futuresLeaderboard, profitDistribution } from "../src/lib/futures-desk-review";
+import { prisma } from "../src/lib/db";
+import { recordSignal, stampSignal } from "../src/lib/futures-desk-store";
 
 const body = { secret: "x", desk: "futures", edge: "donchian_60m_long", symbol: "ES", action: "entry", side: "long", price: 6500, stop: 6460, bar: "2026-09-14T21:00:00Z", tf: "60" };
 function alertOf(over: Record<string, unknown> = {}): AlertPayload { const p = parseAlert({ ...body, ...over }); if (!p.ok) throw new Error(p.reason); return p.alert; }
@@ -160,4 +162,37 @@ test("minScoreRefusal: exact string, only when promoted, never at a minimum of 0
   assert.equal(minScoreRefusal(null, 70, true), "score missing — the desk minimum is 70");
   assert.equal(minScoreRefusal(undefined, 70, false), null);
   assert.equal(parseMinScore("70"), 70); assert.equal(parseMinScore("150"), 100); assert.equal(parseMinScore("-5"), 0); assert.equal(parseMinScore("abc"), 0); assert.equal(parseMinScore(null), 0);
+});
+
+// ---- provenance: no score in the table can come from a sender ----------------------------------------------
+test("a signal row's score can only come from scoreSignal: parseAlert drops a chart score, recordSignal inserts NULL, only stampSignal writes the column", async () => {
+  assert.equal(alertOf({ score: 99 }).score, undefined);
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const db = prisma as unknown as { $queryRawUnsafe: (sql: string, ...p: unknown[]) => Promise<unknown>; $executeRawUnsafe: (sql: string, ...p: unknown[]) => Promise<unknown> };
+  const [q, x] = [db.$queryRawUnsafe, db.$executeRawUnsafe];
+  db.$queryRawUnsafe = async (sql: string, ...params: unknown[]) => { calls.push({ sql, params }); return sql.startsWith("INSERT") ? [{ id: 7 }] : [{ recent: 0 }]; };
+  db.$executeRawUnsafe = async (sql: string, ...params: unknown[]) => { calls.push({ sql, params }); return 1; };
+  try {
+    // Even an alert object carrying a score (as scoreSignal's own output would) is inserted with score = NULL.
+    const rec = await recordSignal({ ...alertOf({ atr: 50 }), score: 95 }, "received", "");
+    assert.equal(rec.duplicate, false);
+    const ins = calls.find((c) => c.sql.includes("INSERT INTO futures_desk_signals"))!;
+    const cols = ins.sql.slice(ins.sql.indexOf("(") + 1, ins.sql.indexOf(")")).split(",").map((c) => c.trim());
+    assert.equal(ins.params[cols.indexOf("score")], null, "score is inserted NULL");
+    assert.deepEqual(JSON.parse(ins.params[cols.indexOf("score_json")] as string), { atr: 50 });   // the Pine context only, no score
+    // The one writer of the column.
+    calls.length = 0;
+    await stampSignal(7, { score: 64, scoreJson: "{}", regime: "range-midvol" });
+    assert.equal(calls.length, 1); assert.match(calls[0].sql, /SET [\s\S]*\bscore = COALESCE\(\$5::int, score\)/); assert.equal(calls[0].params[4], 64);
+    // Across every desk module, exactly one INSERT names the column (the NULL above) and exactly one UPDATE sets it (stampSignal) — both in the store.
+    const fs = await import("node:fs");
+    const files = fs.readdirSync("src/lib").filter((f) => f.startsWith("futures-desk")).map((f) => `src/lib/${f}`);
+    const writers: string[] = [];
+    for (const f of files) {
+      const src = fs.readFileSync(f, "utf8");
+      for (const m of src.matchAll(/INSERT INTO futures_desk_signals \(([^)]*)\)/g)) if (/\bscore\b/.test(m[1])) writers.push(`${f}: INSERT`);
+      for (const m of src.matchAll(/UPDATE futures_desk_signals SET([\s\S]*?)WHERE/g)) if (/\bscore\s*=/.test(m[1])) writers.push(`${f}: UPDATE`);
+    }
+    assert.deepEqual(writers.sort(), ["src/lib/futures-desk-store.ts: INSERT", "src/lib/futures-desk-store.ts: UPDATE"]);
+  } finally { db.$queryRawUnsafe = q; db.$executeRawUnsafe = x; }
 });

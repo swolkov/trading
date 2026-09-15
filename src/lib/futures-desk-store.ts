@@ -156,8 +156,9 @@ export async function watchesToday(root: string, excludeId: number): Promise<num
 }
 
 // ---- the inbox -----------------------------------------------------------------------------------
-/** The alert's own stamps travel with the row: the score and the Pine v2 context fields (as JSON) and
- *  the ET session it arrived in. Grade and the checklist are stamped later, by the entry path. */
+/** The alert's own stamps travel with the row: the Pine v2 context fields (as JSON) and the ET session it
+ *  arrived in. `score` is inserted NULL — ONLY `stampSignal` (from `scoreSignal`, the desk's own computation)
+ *  ever writes it, so no score in the table came from a sender. Grade and the checklist are stamped later. */
 export async function recordSignal(a: AlertPayload, status: string, reason: string): Promise<{ id: number; duplicate: boolean }> {
   await ensureDeskTables();
   const key = dedupeKey(a);
@@ -166,7 +167,7 @@ export async function recordSignal(a: AlertPayload, status: string, reason: stri
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
     `INSERT INTO futures_desk_signals (dedupe_key, edge, root, action, side, price, stop, bar, timeframe, note, status, reason, score, score_json, session)
      VALUES ($1,$2,$3,$4,$5,$6::float8,$7::float8,$8::timestamptz,$9,$10,$11,$12,$13::int,$14,$15) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`,
-    key, a.edge, a.root, a.action, a.side, a.price, a.stop, a.bar, a.timeframe, a.note, status, reason, a.score ?? null, scoreJson, sessionOf(new Date()));
+    key, a.edge, a.root, a.action, a.side, a.price, a.stop, a.bar, a.timeframe, a.note, status, reason, null, scoreJson, sessionOf(new Date()));
   if (rows.length) return { id: rows[0].id, duplicate: false };
   const existing = await prisma.$queryRawUnsafe<{ id: number }[]>(`SELECT id FROM futures_desk_signals WHERE dedupe_key = $1`, key);
   return { id: existing[0]?.id ?? 0, duplicate: true };

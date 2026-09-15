@@ -6,7 +6,7 @@ import { deskEnabled, deskLimits, ensureDeskTables, ledgerRows, loadState, openT
 import { ANOMALY_KEY, FEED_SEEN_KEY, cfg, executionErrorEvents } from "@/lib/futures-desk-store";
 import { executionErrorsToday, feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
 import { isoWeekKey, mergeRollChains } from "@/lib/futures-desk-review";
-import { reviewSnapshot } from "@/lib/futures-desk-review-jobs";
+import { reviewSnapshot, scoreBucketReport } from "@/lib/futures-desk-review-jobs";
 import { EVENT_POLICY_KEY, eventWindowText, nextRollByRoot, parseEventPolicy } from "@/lib/futures-desk-calendar";
 import { parseRiskState } from "@/lib/futures-desk-risk";
 import { MIN_SCORE_KEY, REGIME_KEY, SCORE_PROMOTED_KEY, parseMinScore, parseRegime } from "@/lib/futures-desk-score";
@@ -73,6 +73,8 @@ export async function deskStatus() {
   const judged = "error" in review ? [] : review.rows;
   const sum = (pred: (closedAt: string) => boolean) => judged.filter((r) => pred(r.closedAt)).reduce((s, r) => s + r.pnl, 0);
   const policy = parseEventPolicy(policyRaw);
+  // The score's promotion verdict (E7) — drives the PROMOTE control; a failed read is null, never a 500.
+  const scoreVerdict = "error" in review ? null : await scoreBucketReport(review.rows).catch(() => null);
   const dashboard = {
     dailyRealized: state.balance != null && state.dayStartBalance != null && state.dayKey === day ? state.balance - state.dayStartBalance : null,
     openPnl: state.equity != null && state.balance != null ? state.equity - state.balance : null,   // netLiq − cash
@@ -83,7 +85,7 @@ export async function deskStatus() {
     eventMode: policy?.mode ?? null, eventWindow: policy ? eventWindowText(policy) : null,
     regime: parseRegime(regimeRaw),
     rolls: nextRollByRoot(now, rollGuardDays),
-    scorePromoted: promotedRaw === "true", minScore: parseMinScore(minScoreRaw),
+    scorePromoted: promotedRaw === "true", minScore: parseMinScore(minScoreRaw), scoreVerdict,
   };
   return {
     dashboard, brief: parseBriefLatest(briefRaw),

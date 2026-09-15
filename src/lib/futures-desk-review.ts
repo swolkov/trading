@@ -305,7 +305,7 @@ export function renderWeeklyReview(i: WeeklyInput): string {
   if (i.scoreBuckets) {
     const sb = i.scoreBuckets;
     lines.push(`| Bucket | n | mean R | PF |`, `|---|---:|---:|---:|`);
-    for (const b of sb.buckets) lines.push(`| ${b.label} | ${b.n} | ${f2(b.meanR)} | ${b.pf == null ? (b.n ? "∞" : "—") : b.pf === Infinity ? "∞" : f2(b.pf)} |`);
+    for (const b of sb.buckets) lines.push(`| ${b.label} | ${b.n} | ${f2(b.meanR)} | ${b.pf == null ? "—" : b.pf === Infinity ? "∞" : f2(b.pf)} |`);
     lines.push(`- Welch t (≥ 80 vs < 70): ${f2(sb.tStat)} · unscored resolved: ${sb.unscored} · score ${sb.promoted ? "PROMOTED — Strong/A+ unlocked, the minimum applies" : "not promoted — a stamp, never a size"}`);
     lines.push(`- Promotion verdict: ${sb.ok ? "GREEN — promote from /futures (type PROMOTE)" : sb.reasons.join(" · ")}`);
   } else lines.push(`- n/a`);

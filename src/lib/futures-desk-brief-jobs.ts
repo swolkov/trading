@@ -40,7 +40,7 @@ export async function briefInputNow(limits: DeskLimits, now = new Date()): Promi
   await ensureDeskTables();
   const [state, enabled, regimeRaw, policyRaw, riskRaw, anomalyRaw, feedSeenAt, watches, entries] = await Promise.all([
     loadState(), deskEnabled(), cfg(REGIME_KEY), cfg(EVENT_POLICY_KEY), cfg("futures_desk_risk_state"), cfg(ANOMALY_KEY), cfg(FEED_SEEN_KEY),
-    rawRows<WatchRow>(`SELECT edge, root, side, price, stop, score, reason, received_at FROM futures_desk_signals WHERE action = 'watch' AND status = 'watch' AND received_at > now() - interval '24 hours' ORDER BY score DESC NULLS LAST, id DESC LIMIT 20`),
+    rawRows<WatchRow>(`SELECT edge, root, side, price, stop, score, reason, received_at FROM futures_desk_signals WHERE action = 'watch' AND status = 'watch' AND reason NOT LIKE 'watch cap%' AND received_at > now() - interval '24 hours' ORDER BY score DESC NULLS LAST, id DESC LIMIT 20`),
     rawRows<EntryRow>(
       `SELECT t.id, t.contract, t.micro, t.side, t.qty, t.entry_price, t.stop_price, t.risk_usd, t.stop_points, t.atr_at_entry, t.session, t.regime, t.event_mode, t.grade, t.mfe_r, t.opened_at, t.status, s.score
        FROM futures_desk_trades t LEFT JOIN futures_desk_signals s ON s.id = t.signal_id
@@ -66,12 +66,14 @@ export async function briefInputNow(limits: DeskLimits, now = new Date()): Promi
     contract: e.contract, micro: e.micro, side: e.side, qty: e.qty, entryPrice: e.entry_price, stopPrice: e.stop_price, riskUsd: e.risk_usd, stopPoints: e.stop_points, atr: e.atr_at_entry,
     session: e.session, regime: e.regime, eventMode: e.event_mode, grade: e.grade, score: e.score, mfeR: e.mfe_r, openedAt: e.opened_at, status: e.status,
   } : null;
-  const openPositions = await rawRows<{ n: bigint | number }>(`SELECT count(*) AS n FROM futures_desk_trades WHERE status = 'open'`).then((r) => Number(r[0]?.n ?? 0));
+  const openRows = await rawRows<{ root: string; contract: string }>(`SELECT root, contract FROM futures_desk_trades WHERE status = 'open' ORDER BY id`);
+  const openPositions = openRows.length;
+  const held = Object.fromEntries(openRows.map((r) => [r.root, r.contract]));   // the guardian rolls the HELD month, so the brief shows its date
   return {
     generatedAt: now.toISOString(),
     regime: parseRegime(regimeRaw),
     event: policy ? { mode: policy.mode, reason: policy.reason, window: eventWindowText(policy) } : null,
-    rolls: nextRollByRoot(now, rollGuardDays),
+    rolls: nextRollByRoot(now, rollGuardDays, undefined, held),
     watches: watches.map((w): BriefWatch => ({ edge: w.edge, root: w.root, side: w.side, price: w.price, stop: w.stop, score: w.score, card: w.reason, receivedAt: w.received_at })),
     entry,
     state: { halted, paused, anomaly, feedStale: stale, openPositions, ddTier: tier, watchCount: watches.length, reasons },

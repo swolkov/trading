@@ -5,7 +5,7 @@
 // "—" and never throw.
 import { usd } from "@/lib/futures-desk-rules";
 import type { RootRoll } from "@/lib/futures-desk-calendar";
-import type { RegimeSnapshot } from "@/lib/futures-desk-score";
+import { regimeAgeDays, regimeStale, type RegimeSnapshot } from "@/lib/futures-desk-score";
 
 export type BriefAction = "NO TRADE" | "REDUCE" | "WAIT";
 export const BRIEF_HEADERS = ["## MARKET REGIME", "## TOP OPPORTUNITIES", "## RECOMMENDED TRADE", "## ACTION"] as const;
@@ -61,9 +61,14 @@ export function expectedRR(atr: number | null | undefined, stopPoints: number | 
 
 function regimeLines(i: BriefInput): string[] {
   const roots = i.regime ? Object.keys(i.regime.byRoot) : [];
-  const lines = roots.length ? roots.map((r) => { const v = i.regime!.byRoot[r]; return `- ${r}: **${v.label}** · close ${v.close ?? "—"} · SMA50 ${v.sma50 == null ? "—" : Math.round(v.sma50)} · SMA200 ${v.sma200 == null ? "—" : Math.round(v.sma200)} · ATR pct ${v.atrPct == null ? "—" : Math.round(v.atrPct * 100)}%`; }) : ["- regime: — (no snapshot yet)"];
+  const nowMs = Date.parse(i.generatedAt);
+  const lines = roots.length ? roots.map((r) => {
+    const v = i.regime!.byRoot[r];
+    const stale = regimeStale(v, nowMs) ? ` (stale — ${Math.round(regimeAgeDays(v, nowMs) ?? 0)} d old)` : "";
+    return `- ${r}: **${v.label}**${stale} · close ${v.close ?? "—"} · SMA50 ${v.sma50 == null ? "—" : Math.round(v.sma50)} · SMA200 ${v.sma200 == null ? "—" : Math.round(v.sma200)} · ATR pct ${v.atrPct == null ? "—" : Math.round(v.atrPct * 100)}%`;
+  }) : ["- regime: — (no snapshot yet)"];
   lines.push(`- Event window: ${i.event ? `**${i.event.mode}**${i.event.window ? ` — ${i.event.window}` : i.event.reason ? ` — ${i.event.reason}` : ""}` : "—"}`);
-  lines.push(`- Next roll: ${i.rolls.length ? i.rolls.map((r) => `${r.root} ${r.contract} ~${etDate(r.rollOn)}`).join(" · ") : "—"}`);
+  lines.push(`- Next roll: ${i.rolls.length ? i.rolls.map((r) => (r.held ? `${r.root} held ${contractMonthOf(r.contract, r.micro)} rolls ~${etDate(r.rollOn)}` : `${r.root} ${r.contract} ~${etDate(r.rollOn)}`)).join(" · ") : "—"}`);
   return lines;
 }
 

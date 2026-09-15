@@ -106,13 +106,14 @@ test("sizing: the drawdown multiplier shrinks the budget", () => {
   assert.equal(es.ok, false); assert.match(es.reason, /\$101\.70 against a \$62\.50 budget/);   // a fractional budget shows its cents
 });
 
-test("gradeFor: locked at Normal until the score is promoted; then ≥90 A+, ≥80 Strong", () => {
-  const a = alertOf({ score: "95" });
-  assert.equal(a.score, 95);
+test("gradeFor: locked at Normal until the score is promoted; then ≥90 A+, ≥80 Strong — and a chart-sent score is IGNORED by parseAlert", () => {
+  assert.equal(alertOf({ score: "95" }).score, undefined);   // a sender with the secret cannot grade its own alert
+  assert.equal(alertOf({ score: 95 }).score, undefined);
+  const a = { ...alertOf({}), score: 95 };                     // the desk's own score, as scoreSignal sets it
   assert.equal(gradeFor(a, false), "normal");
   assert.equal(gradeFor(a, true), "aplus");
-  assert.equal(gradeFor(alertOf({ score: 85 }), true), "strong");
-  assert.equal(gradeFor(alertOf({ score: 79 }), true), "normal");
+  assert.equal(gradeFor({ ...alertOf({}), score: 85 }, true), "strong");
+  assert.equal(gradeFor({ ...alertOf({}), score: 79 }, true), "normal");
   const none = alertOf({});
   assert.equal(none.score, undefined);
   assert.equal(gradeFor(none, true), "normal");

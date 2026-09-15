@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BRIEF_HEADERS, actionFor, contractMonthOf, emptyBriefInput, expectedRR, renderFuturesBrief, type BriefInput, type BriefState } from "../src/lib/futures-desk-brief";
 import { parseBriefLatest } from "../src/lib/futures-desk-brief-jobs";
-import { etToUtcMs, lastBusinessDayBefore, nextRollByRoot, thirdFriday } from "../src/lib/futures-desk-calendar";
+import { contractMonthYear, etToUtcMs, lastBusinessDayBefore, nextRollByRoot, thirdFriday } from "../src/lib/futures-desk-calendar";
 
 const now = new Date("2026-09-15T21:10:00Z");
 const calm: BriefState = { halted: false, paused: false, anomaly: false, feedStale: false, openPositions: 0, ddTier: 0, watchCount: 0 };
@@ -92,7 +92,7 @@ test("nextRollByRoot on Sep 15 2026: index roots already on Z6 (U6 expires Sep 1
   const rolls = nextRollByRoot(now, guard);
   const by = Object.fromEntries(rolls.map((r) => [r.root, r]));
   assert.deepEqual(rolls.map((r) => r.root), ["ES", "NQ", "YM", "RTY", "GC", "SI", "HG"]);
-  assert.equal(by.ES.contract, "MESZ6"); assert.equal(by.ES.kind, "expiry"); assert.equal(by.ES.expiry, "2026-12-18T14:30:00.000Z"); assert.equal(by.ES.rollOn, "2026-12-16T14:30:00.000Z"); assert.equal(by.ES.source, "calendar");
+  assert.equal(by.ES.contract, "MESZ6"); assert.equal(by.ES.kind, "expiry"); assert.equal(by.ES.expiry, "2026-12-18T14:30:00.000Z"); assert.equal(by.ES.rollOn, "2026-12-16T14:30:00.000Z"); assert.equal(by.ES.source, "calendar"); assert.equal(by.ES.held, false);
   assert.equal(by.GC.contract, "MGCZ6"); assert.equal(by.GC.kind, "first notice"); assert.equal(by.GC.expiry.slice(0, 10), "2026-11-30"); assert.equal(by.GC.rollOn.slice(0, 10), "2026-11-10");
   assert.equal(by.SI.contract, "SILZ6"); assert.equal(by.HG.contract, "MHGZ6");
   // Sep 14: U6 expires in 4 days — still the front month for the index roots, rolling Sep 16.
@@ -105,4 +105,26 @@ test("nextRollByRoot on Sep 15 2026: index roots already on Z6 (U6 expires Sep 1
   assert.equal(new Date(etToUtcMs(2026, 9, 18, 9, 30)).toISOString(), "2026-09-18T13:30:00.000Z");   // EDT
   assert.equal(new Date(etToUtcMs(2026, 12, 18, 9, 30)).toISOString(), "2026-12-18T14:30:00.000Z");  // EST
   assert.deepEqual(nextRollByRoot(now, guard, ["CL"]), []);
+});
+
+test("a HELD month inside the guard window shows its own roll: Dec 15 17:05 ET, MESZ6 open → 'ES held Z6 rolls ~Dec 16' while the calendar would already say H7", () => {
+  const dec15 = new Date("2026-12-15T22:05:00Z");
+  const calendar = Object.fromEntries(nextRollByRoot(dec15, guard).map((r) => [r.root, r]));
+  assert.equal(calendar.ES.contract, "MESH7"); assert.equal(calendar.ES.held, false);
+  const held = Object.fromEntries(nextRollByRoot(dec15, guard, undefined, { ES: "MESZ6" }).map((r) => [r.root, r]));
+  assert.equal(held.ES.contract, "MESZ6"); assert.equal(held.ES.held, true); assert.equal(held.ES.rollOn, "2026-12-16T14:30:00.000Z"); assert.equal(held.NQ.contract, "MNQH7");
+  const { markdown } = renderFuturesBrief({ ...emptyBriefInput(dec15), rolls: nextRollByRoot(dec15, guard, ["ES", "NQ"], { ES: "MESZ6" }) });
+  assert.ok(markdown.includes("- Next roll: ES held Z6 rolls ~Dec 16 · NQ MNQH7 ~Mar 17"), markdown);
+  // A held metal month: MGCZ6 on Nov 20 (first notice Nov 30, roll Nov 10 already past → negative days, still shown as held).
+  const gc = nextRollByRoot(new Date("2026-11-20T15:00:00Z"), guard, ["GC"], { GC: "MGCZ6" })[0];
+  assert.equal(gc.contract, "MGCZ6"); assert.ok(gc.daysUntilRoll < 0);
+  assert.equal(contractMonthYear("MESZ6", "MES", dec15)?.y, 2026); assert.equal(contractMonthYear("MESH7", "MES", dec15)?.m, 3); assert.equal(contractMonthYear("MESZ", "MES", dec15), null); assert.equal(contractMonthYear("MNQZ6", "MES", dec15), null);
+  assert.deepEqual(contractMonthYear("MESZ9", "MES", new Date("2031-01-01T00:00:00Z")), { m: 12, y: 2029 });   // the nearest year with that digit
+});
+
+test("a root whose label the refresh could not renew reads (stale) in the brief; a fresh one does not", () => {
+  const at = now.toISOString(), old = new Date(now.getTime() - 3 * 86_400_000).toISOString();
+  const i: BriefInput = { ...emptyBriefInput(now), regime: { at, byRoot: { ES: { label: "uptrend-midvol", close: 1, sma50: 1, sma200: 1, atr: 1, atrPct: 0.5, at }, GC: { label: "range-lowvol", close: 1, sma50: 1, sma200: 1, atr: 1, atrPct: 0.1, at: old } } } };
+  const { markdown } = renderFuturesBrief(i);
+  assert.ok(markdown.includes("- ES: **uptrend-midvol** · close")); assert.ok(markdown.includes("- GC: **range-lowvol** (stale — 3 d old) · close"));
 });

@@ -58,7 +58,9 @@ export function atrSeries(bars: DailyBar[], len = ATR_LEN): number[] {
   return out;
 }
 
-/** Fraction of the OTHER values in the window strictly below the last one (0 … 1); 0.5 with fewer than two values. */
+/** Fraction of the OTHER values in the window STRICTLY below the last one (0 … 1). Ties do not count as "below":
+ *  a flat ATR series reads 0 (lowvol), never 1. With fewer than 250 ATR values the window is simply what exists
+ *  (a young series is judged against its own history); fewer than two values → 0.5 (midvol). */
 export function percentileOfLast(values: number[]): number {
   if (values.length < 2) return 0.5;
   const last = values[values.length - 1];
@@ -121,6 +123,17 @@ export function parseRegime(raw: string | null | undefined): RegimeSnapshot | nu
     }
     return { at: v.at, byRoot };
   } catch { return null; }
+}
+/** A root's entry older than this is STALE: the refresh kept a previous label because the day's bars failed. */
+export const REGIME_STALE_AFTER_MS = 2 * 86_400_000;
+/** Days since a root's own `at` (the snapshot's top-level `at` is the run time, not the label's age); null when unreadable. */
+export function regimeAgeDays(info: { at: string } | null | undefined, nowMs: number): number | null {
+  const at = info ? Date.parse(info.at) : NaN;
+  return Number.isFinite(at) ? Math.max(0, (nowMs - at) / 86_400_000) : null;
+}
+export function regimeStale(info: { at: string } | null | undefined, nowMs: number): boolean {
+  const age = regimeAgeDays(info, nowMs);
+  return age == null || age * 86_400_000 > REGIME_STALE_AFTER_MS;
 }
 /** The label to stamp for a root: the snapshot's, or "unknown" when there is none. */
 export function regimeLabelFor(snap: RegimeSnapshot | null, root: string): RegimeLabel {

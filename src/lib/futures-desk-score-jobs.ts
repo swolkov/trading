@@ -81,13 +81,13 @@ export async function scoreSignal(signalId: number, a: AlertPayload, basisUsd: n
     const [regimeRaw, policyRaw] = await Promise.all([cfg(REGIME_KEY), cfg(EVENT_POLICY_KEY)]);
     const snap = parseRegime(regimeRaw);
     const regime = regimeStamp(snap, a.root);
-    if (a.action === "exit") { await stampSignal(signalId, { regime }); return { alert: a, score: null, regime, note: null }; }
+    if (a.action === "exit") { await stampSignal(signalId, { regime }); return { alert: { ...a, score: undefined }, score: null, regime, note: null }; }
     const mode = eventContextOf(policyRaw, now.getTime(), deskEventPolicy(now)).mode;
     const cells = await scoreCells(a.edge, a.root, regime, basisUsd).catch(() => ({ edgeRoot: null, edgeRegime: null }));
     const s = futuresOpportunityScore(a, regimeLabelFor(snap, a.root), mode, cells);
     await stampSignal(signalId, { score: s.score, scoreJson: scoreJsonOf(a, s), regime });
     return { alert: { ...a, score: s.score }, score: s, regime, note: null };
   } catch (e) {
-    return { alert: a, score: null, regime: null, note: `score: ${String(e).slice(0, 120)}` };
+    return { alert: { ...a, score: undefined }, score: null, regime: null, note: `score: ${String(e).slice(0, 120)}` };   // never a score the desk did not compute
   }
 }

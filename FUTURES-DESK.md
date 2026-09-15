@@ -322,7 +322,9 @@ reverse, else `range`) × vol = the ATR14 percentile over the last 250 daily ATR
 `highvol` ≥ 2/3, else `midvol`) → nine labels, `unknown` under 200 bars — never a throw. Written to
 `futures_desk_regime` `{at, byRoot: {ES: {label, close, sma50, sma200, atr, atrPct, at}, …}}`; a root
 whose bars failed keeps its previous entry (one bad fetch never blanks the stamp); one 30-second
-deadline, fail-soft, guardian notes. Stamped as `regime` on every signal row at receipt and on every
+deadline, fail-soft, guardian notes. Each root carries its own `at`; a label older than **2 days** (its
+bars kept failing) reads **stale** — amber chip on `/futures`, `(stale — N d old)` in the brief — never
+as fresh just because the snapshot's run time moved. Stamped as `regime` on every signal row at receipt and on every
 trade row (null when unknown, so the promotion gate's "≥ 3 regimes seen" counts only real labels).
 Two clocks (TradingView's delayed bar for the alert fields, Yahoo for the regime) — drift is stamped,
 not acted on.
@@ -337,13 +339,18 @@ desk's own leaderboard cells (edge × regime, edge × root; avg R −0.2 → 0, 
 10 resolved trades scores neutral). Missing Pine fields score their neutral part and are listed in
 `missing` — never NaN; every part is capped; the total is an integer ≤ 100. Written as `score` and in
 `score_json` (`{…Pine context, opportunity: {score, components, missing}}`) — the queue replay reads
-back only the Pine fields. The desk's own score REPLACES any chart-sent one.
+back only the Pine fields. **A chart-sent `score` is never read**: `parseAlert` drops it, `recordSignal`
+inserts the column NULL, and only `stampSignal` (from `scoreSignal`) writes it — so a holder of the
+webhook secret cannot grade, bucket or promote its own alerts; a scoring failure leaves the alert
+unscored (Normal grade).
 
 **Promotion.** The weekly review adds **score buckets** (≥ 80 / 70–79 / < 70 by n, mean R, PF, Welch
 t between the top and bottom buckets) and `scorePromotionVerdict`: green only when every bucket has
 ≥ 30 resolved, the ≥ 80 bucket beats the < 70 bucket by mean R, and t ≥ 2. `POST
 /api/futures/desk/enable` `{ "action": "promote-score", "confirm": "PROMOTE" }` sets
-`futures_desk_score_promoted` = `true` **only on a green verdict** (else 400 with the reasons). Once
+`futures_desk_score_promoted` = `true` **only on a green verdict** (else 400 with the reasons); the
+`/futures` "Score promotion" panel carries the typed-PROMOTE control, disabled with the reasons until
+the verdict is green. Once
 promoted: `gradeFor` unlocks Strong (≥ 80, 0.75%) and A+ (≥ 90, 1.0%), and
 **`futures_desk_min_score`** (default 0, clamped 0–100, unreadable → 0) becomes the refusal
 `score 64 is below the desk minimum 70` (a missing score refuses too: `score missing — the desk
@@ -354,7 +361,8 @@ Demotion = the key set to anything but `true` (a config write; only reduces risk
 
 **Watch alerts** (Pine v2 `watch`, E4/E5): stored as status `watch` with the dry-run size card as
 the reason, scored and regime-stamped like an entry, never executed and never queued, capped at three
-per root per ET day, expired after 24 h, and never counted as an execution error.
+per root per ET day (the capped rows are excluded from the brief), expired after 24 h, and never
+counted as an execution error.
 
 **The brief** (`renderFuturesBrief`, pure — the LIVE TRADE OUTPUT) has four sections in this order:
 `## MARKET REGIME` (per-root label · SMA50/200 · ATR percentile, the event window/mode, the next roll
@@ -374,8 +382,10 @@ and tables (no broker call). `/futures` shows it in the "Desk brief" panel.
 **Next roll per root** is calendar-derived (`nextRollByRoot`, `futures-desk-calendar.ts`): index
 roots the quarterlies' third Friday 09:30 ET; metals the last business day before the contract month
 (first notice); the front month is the nearest with more than `guardDays` to go (`deskContract`'s
-rule) and the roll is `expiry − (guardDays − 1)` days (`rollDue`). Labelled `source: "calendar"` —
-the broker's own maturity dates decide the real roll.
+rule) and the roll is `expiry − (guardDays − 1)` days (`rollDue`). A root the desk HOLDS shows the
+held month's roll instead (`ES held Z6 rolls ~Dec 16`) — inside the guard window the calendar would
+already name the next month while the guardian still rolls what is held. Labelled `source:
+"calendar"` — the broker's own maturity dates decide the real roll.
 
 **Dashboard** (`/futures` → "Desk numbers", from `deskStatus().dashboard`, no broker call beyond the
 existing snapshot): equity, HWM, drawdown % and tier with the budget multiplier, daily realized
