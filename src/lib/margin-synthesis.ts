@@ -25,6 +25,7 @@ import { botOwnership } from "@/lib/margin-executor";
 import { EXPECTED_SLIP_PCT } from "@/lib/margin-trade-card";
 import { loadClosedRoundTripTxids, loadRoundTripJournal, upsertRoundTripClose } from "@/lib/margin-round-trips";
 import { refreshCryptoRegime } from "@/lib/margin-crypto-regime";
+import { runPostTradeReviews } from "@/lib/margin-review";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -518,6 +519,10 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
   if (journaled) await cfgSet(SYNTH_JOURNALED, JSON.stringify([...journaledSet].slice(-500)));
   // Phase B of the live journal table (margin_round_trips): exit, fees, net, hold, slip. Idempotent.
   await journalClosedFills(fills).catch(() => 0);
+  // POST-TRADE REVIEW (C4, margin-review.ts): the seven questions per closed live round trip →
+  // Decisions/YYYY-MM-DD.md, once per txid (margin_review_done). Best-effort, after the journal.
+  let reviewed = 0;
+  try { reviewed = (await runPostTradeReviews(fills)).reviewed.length; } catch (e) { console.error("[margin-synthesis] reviews failed", e); }
 
   // Observations: what moved since the last run (verdict changes, divergence, milestones).
   const observations: string[] = [];
@@ -533,6 +538,7 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
   }
   if (div.fills && /DIVERGES/.test(div.verdict)) observations.push(`LIVE vs PAPER: ${div.verdict}`);
   if (journaled) observations.push(`${journaled} live round trip(s) journaled; live net ${money(div.realNet)} vs paper ${money(div.paperNet)} on the same trades`);
+  if (reviewed) observations.push(`${reviewed} post-trade review(s) written to Decisions/`);
   for (const o of observations) await logObservation("margin-synthesis", o).catch(() => {});
   await cfgSet("margin_synthesis_snapshot", JSON.stringify(snap));
 
