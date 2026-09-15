@@ -20,6 +20,10 @@ import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
 import { bookExposureMatches, recoveryBlocksPair, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
+import { maeR, mfeR, troughUpdate } from "@/lib/margin-shadow-excursion";
+import { upsertRoundTripOpen, type RoundTripOpen } from "@/lib/margin-round-trips";
+import { exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
+import { ANOMALY_KEY, bookMatchesCard, mergeAnomaly, unledgeredBesideOurStop, type CardForCheck } from "@/lib/margin-anomaly";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -50,8 +54,10 @@ type WatchState = {
   nakedBreached?: Record<string, number>;
   // ordertxid → the paper container's state for a bot position: 1R fixed at entry, the
   // best price reached (from completed 1-min bars), and the last bar scored — exactly the
-  // shadow_peak / shadow_stop / shadow_seen_t trio the paper record persists.
-  managed?: Record<string, { oneR: number; peak: number; seenT: number; addTriedT?: number }>;   // addTriedT: the 4h bar (open time) a pyramid add was last attempted on
+  // shadow_peak / shadow_stop / shadow_seen_t trio the paper record persists. `trough` is the
+  // worst price reached (paper's shadow_trough, MAE); `lastStopLevel` the stop level the
+  // guardian last knew to be resting for this book — the level A5's book check reads.
+  managed?: Record<string, { oneR: number; peak: number; seenT: number; addTriedT?: number; trough?: number; lastStopLevel?: number }>;   // addTriedT: the 4h bar (open time) a pyramid add was last attempted on
   // consecutive runs the order book read back EMPTY while bot positions existed. A rescue
   // stop on an empty read is placed only on the SECOND such run: a false-empty read with
   // the real attached stop resting at the same level would otherwise pair a reduce-only
@@ -101,10 +107,11 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
     for (const [k, v] of Object.entries(parsed.orphans ?? {})) { const n = num(v); if (n != null && n >= 0) orphans[k] = Math.floor(n); }
     const managed: NonNullable<WatchState["managed"]> = {};
     for (const [k, v] of Object.entries(parsed.managed ?? {})) {
-      const m = v as { oneR?: unknown; peak?: unknown; seenT?: unknown; addTriedT?: unknown };
-      const oneR = num(m?.oneR), peak = num(m?.peak), seenT = num(m?.seenT), addTriedT = num(m?.addTriedT);
+      const m = v as { oneR?: unknown; peak?: unknown; seenT?: unknown; addTriedT?: unknown; trough?: unknown; lastStopLevel?: unknown };
+      const oneR = num(m?.oneR), peak = num(m?.peak), seenT = num(m?.seenT), addTriedT = num(m?.addTriedT), trough = num(m?.trough), lastStopLevel = num(m?.lastStopLevel);
       // addTriedT must survive the round trip: it is the "one pyramid attempt per 4h bar" guard.
-      if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}) };
+      // trough / lastStopLevel are optional mirrors of peak (A4): absent or bad → recomputed.
+      if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}), ...(trough != null && trough > 0 ? { trough } : {}), ...(lastStopLevel != null && lastStopLevel > 0 ? { lastStopLevel } : {}) };
     }
     return {
       state: {
@@ -169,6 +176,22 @@ export async function GET(request: Request) {
   const sent: string[] = [];
   const errors: string[] = [];
   const { state, unreliable: stateUnreliable, corrupt: stateCorrupt } = await loadState();
+  // THE ANOMALY KILL SWITCH (margin-anomaly.ts): merge findings into kraken_margin_anomaly —
+  // the executor refuses NEW entries while it is non-blank — and page once an hour per key.
+  // Best-effort by construction: nothing here can throw into the protect loop.
+  const flagAnomaly = async (findings: string[], pageKey: string, message: string): Promise<void> => {
+    if (!findings.length) return;
+    try {
+      const row = await prisma.agentConfig.findUnique({ where: { key: ANOMALY_KEY } });
+      const value = mergeAnomaly(row?.value ?? null, findings);
+      await prisma.agentConfig.upsert({ where: { key: ANOMALY_KEY }, update: { value }, create: { key: ANOMALY_KEY, value } });
+    } catch (e) { errors.push(`anomaly write: ${String(e).slice(0, 80)}`); }
+    if (shouldFire(state, pageKey)) {
+      await sendNotification(message, "margin_urgent").catch(() => {});
+      state.alerts[pageKey] = new Date().toISOString();
+      sent.push(pageKey);
+    }
+  };
   if (stateUnreliable) errors.push("guardian state unreadable — alerts only this run (no reconciliation, no managed exit, no save)");
   if (stateCorrupt) {
     await sendNotification("🚨 margin_watch_state was CORRUPT and has been reset (raw value saved to margin_watch_state_corrupt_backup). Orphan counters and managed-exit 1R/peak restart from the resting stops.", "margin_urgent").catch(() => {});
@@ -394,6 +417,23 @@ export async function GET(request: Request) {
         }
       }
     }
+    // 3a) CORRELATED EXPOSURE (margin-exposure.ts): what the whole book loses if every stop is
+    //     hit at once, folded into kraken_margin_risk_state for the admin page and /api/margin/
+    //     status. Display only — the executor computes its own from fresh reads at entry time.
+    try {
+      const own = await botOwnership().catch(() => null);
+      const rsRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_risk_state" } }).catch(() => null);
+      const rs = rsRow?.value ? (JSON.parse(rsRow.value) as RiskState) : null;
+      if (rs) {
+        const haltPct = Math.max(1, await cfgNum("kraken_margin_max_drawdown_pct", 15));
+        const summary = exposureSummary(positions.map((p): ExposurePosition => {
+          const ours = own != null && !own.ledgerCorrupt && own.isOurs(p);
+          return { pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, leverage: p.leverage, ours, stopFrac: ours ? own!.stopFracOf(p.ordertxid) : null };
+        }), rs.equity, haltPct, rs.dd);
+        const next: RiskState = { ...rs, exposure: { ...summary, at: new Date().toISOString() } };
+        await prisma.agentConfig.upsert({ where: { key: "kraken_margin_risk_state" }, update: { value: JSON.stringify(next) }, create: { key: "kraken_margin_risk_state", value: JSON.stringify(next) } }).catch(() => {});
+      }
+    } catch (e) { errors.push(`exposure: ${String(e).slice(0, 80)}`); }
   } catch (e) {
     errors.push(`positions: ${e}`);
   }
@@ -459,11 +499,29 @@ export async function GET(request: Request) {
       // no position now is a book that just flattened — its attached close[] stop is not
       // reduce-only and must not wait two sightings. (Positions read is reliable here.)
       const hadBookLastRun = new Set(Object.keys(state.managed ?? {}).map((k) => k.split("|").slice(0, 2).join("|")));
+      const samePair3b = (a: string, b: string) => pairBase(a) === pairBase(b);
       for (const o of mine) {
         const isStop = o.ordertype.includes("stop");
         const isEntry = o.ordertype === "limit" || o.ordertype === "market";
         if (isStop) {
           if (positionsUnreliable || recoveryBlocksPair(recovery3b, o.pair)) continue; // preserve pending-add protection
+          // A BOT-SHAPED POSITION THE LEDGER DOES NOT KNOW: our stop beside a position that is not
+          // ours, with nothing of ours on that pair+side. Most likely a bot entry whose ledger write
+          // was lost — its only stop must NOT be swept. Page with the adopt instruction and set the
+          // anomaly (no new entries until an operator has looked). If it is Spencer's own position
+          // beside a stale stop, the page says so too: cancel the stop by hand and clear the key.
+          // Only a stop older than two minutes: a fresh entry's attached close[] can show before
+          // its ledger write lands, and that is not an unledgered position, it is one in flight.
+          const unledgered = (positionsReadAtSec - o.opentm) > 120 ? unledgeredBesideOurStop(o, positions, own3b && !own3b.ledgerCorrupt ? own3b.isOurs : null, samePair3b) : [];
+          if (unledgered.length) {
+            const ids = unledgered.map((p) => p.ordertxid || p.id).join(", ");
+            await flagAnomaly(
+              unledgered.map((p) => `${p.ordertxid || p.id}: bot-shaped position on ${o.pair} — our stop ${o.txid} rests beside it but the ledger does not know it`),
+              `anomaly-unledgered-${pairBase(o.pair)}-${o.side}`,
+              `🚨 ${o.pair}: our stop ${o.txid} rests beside position(s) ${ids} that the ledger does NOT know. If the bot opened it, ADOPT it now (kraken_margin_adopt_txids=${ids}) so the guardian manages it; if it is YOURS, cancel the stop on Kraken. Either way clear kraken_margin_anomaly afterwards — no new bot entries until then. The stop was NOT swept.`,
+            );
+            continue;
+          }
           if (!stopProtectsLive(o)) {
             const seen = (priorOrphans[o.txid] ?? 0) + 1;  // this run's sighting
             // Only a stop OLDER than a fresh entry could belong to the flattened book: an
@@ -573,6 +631,10 @@ export async function GET(request: Request) {
           if (priorBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
           continue;
         }
+        // THE JOURNAL ROW (margin-round-trips.ts, phase A): filled once the book's state is known,
+        // written in the finally so every path through the book — cover, time stop, breach, a
+        // thrown error — leaves the row current. Never before protectOk is decided; never a throw.
+        let rt: RoundTripOpen | null = null;
         try {
         const side = grp[0].side;
         const pairRaw = grp[0].pair;
@@ -625,7 +687,9 @@ export async function GET(request: Request) {
         if (bars.length && sinceS > 0 && bars[0].t > sinceS + 180) errors.push(`${pairRaw}: 1-min history gap ${((bars[0].t - sinceS) / 3600).toFixed(1)}h — peak may be under-counted`);
         const done = bars.slice(0, -1);
         let peak = prev?.peak ?? entryPrice;
-        for (const b of done) peak = side === "long" ? Math.max(peak, b.h) : Math.min(peak, b.l);
+        // The worst price too (MAE), the mirror of the peak, from the same completed bars.
+        let trough = prev?.trough ?? entryPrice;
+        for (const b of done) { peak = side === "long" ? Math.max(peak, b.h) : Math.min(peak, b.l); trough = troughUpdate(side === "long" ? 1 : -1, trough, b); }
         const seenT = done.length ? done[done.length - 1].t : (prev?.seenT ?? sinceS);
         let px = bars.length ? bars[bars.length - 1].c : 0;
         if (!(px > 0)) {
@@ -650,9 +714,46 @@ export async function GET(request: Request) {
           if (restingDist > 0 && restingDist / entryPrice >= 0.001 && restingDist / entryPrice <= 0.5) oneR = restingDist;
         }
         if (!(oneR > 0)) oneR = entryPrice * clampLiveStopFrac(stopCfgPct, leverage);
-        managedNext[stateKey] = { oneR, peak, seenT, ...(prev?.addTriedT ? { addTriedT: prev.addTriedT } : {}) };
         const initialStop = side === "long" ? entryPrice - oneR : entryPrice + oneR;
         const bestResting = fixedNow.length ? (side === "long" ? Math.max(...fixedNow.map((o) => o.price)) : Math.min(...fixedNow.map((o) => o.price))) : null;
+        // The stop level the guardian KNOWS to be resting: this run's best resting fixed stop, else
+        // the last one it ledgered (a naked book keeps its last level), else the initial stop.
+        // Updated by reconcile() when it places or keeps one — A5 compares Kraken's book to it.
+        let lastStopLevel = bestResting ?? prev?.lastStopLevel ?? initialStop;
+        managedNext[stateKey] = { oneR, peak, seenT, trough, lastStopLevel, ...(prev?.addTriedT ? { addTriedT: prev.addTriedT } : {}) };
+        const journalTxid = pyr ? pyr.parent.ordertxid : grp.map((g) => g.ordertxid).sort().join("+");
+        const dirN: 1 | -1 = side === "long" ? 1 : -1;
+        rt = {
+          txid: journalTxid, cardId: pyr ? ownership.cardIdOf(pyr.parent.ordertxid) : ownership.cardIdOf(grp[0].ordertxid), pair: pairRaw, side,
+          source: ownership.sourceOf(pyr ? pyr.parent.ordertxid : grp[0].ordertxid), entryPrice, oneR,
+          openedAt: Number.isFinite(oldestMs) ? new Date(oldestMs).toISOString() : null,
+          peak, trough, mfeR: mfeR(dirN, entryPrice, peak, oneR), maeR: maeR(dirN, entryPrice, trough, oneR), lastStopLevel,
+        };
+        // DOES THE LIVE BOOK MATCH ITS CARD? (margin-anomaly.ts) Per tranche: leverage, size and
+        // side against the trade card it was ledgered with; per book: the resting stop against the
+        // level the guardian ledgered LAST run (never wider). A mismatch pages and sets the anomaly;
+        // protection below continues regardless. Read-only here; any failure is an error line.
+        try {
+          const cardIds = grp.map((g) => ownership.cardIdOf(g.ordertxid)).filter((id): id is number => id != null);
+          const cards = new Map<number, CardForCheck>();
+          if (cardIds.length) {
+            const rows = await prisma.$queryRawUnsafe<{ id: number; card: { leverageUsed?: unknown; notional?: unknown; side?: unknown } | null }[]>(`SELECT id, card FROM margin_trade_cards WHERE id = ANY($1::int[])`, cardIds);
+            for (const r of rows) if (r.card && typeof r.card === "object") cards.set(r.id, { leverageUsed: Number(r.card.leverageUsed), notional: Number(r.card.notional), side: r.card.side === "sell" ? "sell" : "buy" });
+          }
+          const findings: string[] = [];
+          grp.forEach((g, i) => {
+            const cid = ownership.cardIdOf(g.ordertxid);
+            const check = bookMatchesCard(
+              { txid: g.ordertxid, leverage: g.leverage, notional: g.vol * g.entryPrice, side, restingStop: i === 0 ? bestResting : null, ledgeredStop: i === 0 ? (prev?.lastStopLevel ?? null) : null, px, breachGuard: (priorBreached[stateKey] ?? 0) > 0 },
+              cid != null ? cards.get(cid) ?? null : null,
+            );
+            findings.push(...check.findings);
+          });
+          if (findings.length) {
+            await flagAnomaly(findings, `anomaly-book-${bookKey}`, `🚨 ${pairRaw} ${side}: the live book does NOT match what was authorised — ${findings.join("; ").slice(0, 500)}. Protection continues; NEW bot entries are refused until kraken_margin_anomaly is cleared. Check the position on Kraken first.`);
+            errors.push(`anomaly ${bookKey}: ${findings.length} finding(s)`);
+          }
+        } catch (e) { errors.push(`book check ${bookKey}: ${String(e).slice(0, 80)}`); }
         // The managed level is computed from the AUTHORISED stop and the peak — never from
         // whatever stop happens to be resting (a temporary breach guard must not become the
         // permanent target). The planner keeps a resting stop that is already better.
@@ -672,6 +773,15 @@ export async function GET(request: Request) {
             return (res.txid as string[] | undefined)?.[0];
           },
           cancel: async (txid: string) => { await krakenCancelOrder(txid); orders = orders.filter((o) => o.txid !== txid); },
+        };
+        // Remember the level that is actually resting after a reconcile — the keeper's price or the
+        // one just placed — so state and the journal carry the LEDGERED stop, not a target.
+        const noteStopLevel = (keeperTxid: string | null, placed?: number) => {
+          const lvl = placed != null && placed > 0 ? placed : keeperTxid ? ourStopsOnBook().find((o) => o.txid === keeperTxid)?.price ?? 0 : 0;
+          if (!(lvl > 0)) return;
+          lastStopLevel = lvl;
+          if (managedNext[stateKey]) managedNext[stateKey].lastStopLevel = lvl;
+          if (rt) rt.lastStopLevel = lvl;
         };
         // Reconcile this book's cover to `wantVol` at `level`. Returns true when covered.
         const reconcile = async (wantVol: number, level: number, why: string): Promise<boolean> => {
@@ -701,7 +811,7 @@ export async function GET(request: Request) {
             orders = reread;
             plan = planReconcile({ side, vol: wantVol, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
-            if (!plan.place && !plan.cancel.length) return plan.covered;
+            if (!plan.place && !plan.cancel.length) { noteStopLevel(plan.keeper); return plan.covered; }
             if (withhold) { errors.push(`${pairRaw} (${why}): withholding stop changes on an unconfirmed empty book`); return false; }
           }
           // THE MANUAL-BOOK BOUNDARY: with an OLDER manual position on this pair+side, any exit
@@ -738,7 +848,7 @@ export async function GET(request: Request) {
             orders = rereadLocked;
             plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, fresh > 0 ? ourStopsOnBook() : ourStopsOnBookAged());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
-            if (!plan.place && !plan.cancel.length) return plan.covered;
+            if (!plan.place && !plan.cancel.length) { noteStopLevel(plan.keeper); return plan.covered; }
             if (fresh > 0 && freshRead.fifoHit) {
               await sendNotification(`🚨 ${pairRaw} ${side}: a manual position OLDER than the bot's remaining book appeared since the snapshot — cover NOT changed (${plan.reason}); any stop of ours would reduce YOUR position first (FIFO). Close it by hand.`, "margin_urgent").catch(() => {});
               errors.push(`${pairRaw}: fifo-blocked on re-read, cover left as is`);
@@ -746,6 +856,8 @@ export async function GET(request: Request) {
             }
             out = await applyReconcile(plan, io);
           } finally { await releaseCloseLock(lock); }
+          if (out.placed && plan.place) noteStopLevel(null, parseFloat(plan.place.level));
+          else if (out.covered) noteStopLevel(plan.keeper);
           if (out.placed) { sent.push(`stop-${plan.reason.replace(/[^a-z]+/gi, "-").toLowerCase()}-${pairRaw}`); }
           if (out.placeFailed) {
             await sendNotification(`🚨🚨 COULD NOT PLACE PROTECTIVE STOP on ${pairRaw} ${side} (${why}): ${out.placeFailed}. Existing cover left as is — act manually on Kraken now.${fifoNote}`, "margin_urgent").catch(() => {});
@@ -894,7 +1006,7 @@ export async function GET(request: Request) {
           }
           let covered = false;
           if (plan.blocked) errors.push(`${why} ${pairRaw}: remainder not re-covered — ${plan.blocked}`);
-          else if (!plan.place && !plan.cancel.length) covered = plan.covered;
+          else if (!plan.place && !plan.cancel.length) { covered = plan.covered; noteStopLevel(plan.keeper); }
           else if (left > 0 && leftRead?.fifoHit) {
             await sendNotification(`🚨 ${why} on ${pairRaw}: ${left} remains behind a manual position OLDER than it — cover NOT changed; a stop of ours would reduce YOUR position first (FIFO). Close it by hand.`, "margin_urgent").catch(() => {});
             errors.push(`${why} ${pairRaw}: remainder fifo-blocked, cover left as is`);
@@ -902,14 +1014,19 @@ export async function GET(request: Request) {
           else {
             const out = await applyReconcile(plan, io);
             covered = out.covered && out.failedCancels.length === 0;
+            // The guard cover just placed IS the ledgered level now — else the next run reads it as "wider".
+            if (out.placed && plan.place) noteStopLevel(null, parseFloat(plan.place.level));
+            else if (out.covered) noteStopLevel(plan.keeper);
             if (out.failedCancels.length) await sendNotification(`🚨 ${pairRaw}: could NOT cancel stop(s) ${out.failedCancels.join(", ")} after ${why}. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
           }
           if (left > 0) {
+            if (rt) rt.exitReason = why;
             await sendNotification(`⚠️ ${why} on ${pairRaw}: ${sentVol.toFixed(meta.lotDecimals)} sent, ${left} still open (partial fill${sendErr ? " / lost response" : ""}) — cover ${covered ? "re-set for the remainder" : "NOT confirmed"}. Retrying next run.`, "margin_urgent").catch(() => {});
             return "partial";
           }
           delete managedNext[stateKey];
           delete nextBreached[stateKey];
+          if (rt) rt.exitReason = why;
           await sendNotification(`⏱ ${why} — closed ${pairRaw} ${side} ${vol.toFixed(meta.lotDecimals)} (entry $${entryPrice.toFixed(meta.priceDecimals)}, now $${px > 0 ? px.toFixed(meta.priceDecimals) : "?"}, held ${Number.isFinite(ageMs) ? (ageMs / 3600_000).toFixed(0) : "?"}h).`, "margin_live").catch(() => {});
           sent.push(`${why.toLowerCase().replace(/[^a-z]+/g, "-")}-${pairRaw}`);
           return "closed";
@@ -992,6 +1109,14 @@ export async function GET(request: Request) {
           errors.push(`protect/exit ${bookKey}: ${String(err).slice(0, 120)}`);
           if (managedPrev[stateKey] && !managedNext[stateKey]) managedNext[stateKey] = managedPrev[stateKey];
           if (priorBreached[stateKey] && !nextBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
+        } finally {
+          // Phase A of the journal — after every decision above, whatever it was. A failed write
+          // is an error line, never a thrown one: it cannot touch protection or protectOk.
+          if (rt) {
+            const snap = rt;
+            try { await upsertRoundTripOpen(snap); }   // exitReason (time stop / breach) rides on the same upsert
+            catch (e) { errors.push(`journal ${bookKey}: ${String(e).slice(0, 80)}`); }
+          }
         }
       }
       protectOk = allCovered;

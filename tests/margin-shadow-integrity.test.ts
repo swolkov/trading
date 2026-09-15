@@ -74,3 +74,73 @@ test("risk assessment propagates missing required config", async () => {
     await assert.rejects(maybeDemote(), /risk config offline/);
   } finally { restore(); }
 });
+
+// ---- A4: adverse excursion (MAE), the mirror of the peak ----
+
+test("troughUpdate walks the worst price: a long's low, a short's high, never the favourable side; bad bars leave it alone", async () => {
+  const { troughUpdate, maeR, mfeR } = await import("../src/lib/margin-shadow-excursion");
+  assert.equal(troughUpdate(1, 100, { h: 105, l: 98 }), 98);
+  assert.equal(troughUpdate(1, 98, { h: 110, l: 99 }), 98, "a higher low does not raise the trough");
+  assert.equal(troughUpdate(-1, 100, { h: 103, l: 97 }), 103);
+  assert.equal(troughUpdate(-1, 103, { h: 102, l: 90 }), 103, "a lower high does not lower a short's trough");
+  assert.equal(troughUpdate(1, 100, { h: NaN, l: NaN }), 100);
+  // MAE is a positive magnitude in R on BOTH sides; a trade that only went our way reads 0.
+  assert.equal(maeR(1, 100, 98, 4), 0.5, "long: entry 100, trough 98, 1R=4 → 0.5R adverse");
+  assert.equal(maeR(-1, 100, 102, 4), 0.5, "short: entry 100, trough 102 → 0.5R adverse");
+  assert.equal(maeR(1, 100, 101, 4), 0, "a long whose trough is above entry never went against us");
+  assert.equal(maeR(-1, 100, 99, 4), 0);
+  assert.equal(maeR(1, 100, 98, 0), null, "no 1R, no R");
+  assert.equal(mfeR(1, 100, 108, 4), 2);
+  assert.equal(mfeR(-1, 100, 92, 4), 2);
+  assert.equal(mfeR(1, 100, 99, 4), 0);
+});
+
+test("the evaluator walks the trough beside the peak and writes MAE at resolution (stop-out bar counts)", async () => {
+  const writes: unknown[][] = [];
+  const t0 = Math.floor(Date.now() / 60_000) * 60 - 4 * 60;
+  const openRow = { ...row(0.5), shadow_add_px: null, shadow_add_t: null, shadow_add_notional: null, shadow_trough: null, shadow_peak: 100, shadow_stop: 96, shadow_seen_t: 0, mark_price: 100 };
+  stub(prisma, "$queryRawUnsafe", async () => [openRow]);
+  stub(prisma, "$executeRawUnsafe", async (...args: unknown[]) => { writes.push(args); return 1; });
+  stub(prisma.agentConfig, "findUnique", async () => null);
+  // Three completed bars then the in-progress one: 101/99 · 103/97.5 · stop-out bar low 95 (gap-free) · live 96.5/96.
+  stub(globalThis, "fetch", async () => Response.json({ error: [], result: {
+    ETHUSD: [
+      [t0, "100", "101", "99", "100.5", "100", "1", 1],
+      [t0 + 60, "100.5", "103", "97.5", "98", "100", "1", 1],
+      [t0 + 120, "98", "98.5", "95", "95.5", "97", "1", 1],
+      [t0 + 180, "95.5", "96.5", "96", "96.2", "96", "1", 1],
+    ], last: t0 + 180,
+  } }));
+  try {
+    const out = await evaluateShadowSignals();
+    assert.equal(out.length, 1, "the third bar's low (95) crosses the 96 stop");
+    const resolve = writes.find((a) => String(a[0]).includes("shadow_status='resolved'"));
+    assert.ok(resolve, "a resolution was written");
+    const sql = String(resolve![0]);
+    assert.ok(sql.includes("shadow_trough=$11") && sql.includes("shadow_mae_r=$12"), "trough and MAE ride on the resolve UPDATE, after the pinned params");
+    assert.equal(resolve![11], 95, "the trough includes the fatal bar's low");
+    assert.ok(Math.abs((resolve![12] as number) - (100 - 95) / 4) < 1e-9, `MAE = (100 − 95) ÷ 1R(4) = 1.25R, got ${resolve![12]}`);
+    // The pinned indices of the existing params are untouched.
+    assert.equal(resolve![6], 91); assert.equal(resolve![4], 103, "peak from the second bar");
+  } finally { restore(); }
+});
+
+test("a still-open row persists its trough beside the peak without disturbing the pinned parameter order", async () => {
+  const writes: unknown[][] = [];
+  const t0 = Math.floor(Date.now() / 60_000) * 60 - 2 * 60;
+  const openRow = { ...row(0.5), shadow_add_px: null, shadow_add_t: null, shadow_add_notional: null, shadow_trough: 99.5, shadow_peak: 100, shadow_stop: 96, shadow_seen_t: 0, mark_price: 100 };
+  stub(prisma, "$queryRawUnsafe", async () => [openRow]);
+  stub(prisma, "$executeRawUnsafe", async (...args: unknown[]) => { writes.push(args); return 1; });
+  stub(prisma.agentConfig, "findUnique", async () => null);
+  stub(globalThis, "fetch", async () => Response.json({ error: [], result: {
+    ETHUSD: [[t0, "100", "102", "98.7", "101", "100", "1", 1], [t0 + 60, "101", "101.5", "100.8", "101.2", "101", "1", 1]], last: t0 + 60,
+  } }));
+  try {
+    assert.deepEqual(await evaluateShadowSignals(), []);
+    const mark = writes.find((a) => String(a[0]).includes("shadow_unrealized=$3"));
+    assert.ok(mark);
+    assert.ok(String(mark![0]).includes("shadow_trough=$9"));
+    assert.equal(mark![9], 98.7, "the completed bar's low is the new trough (the in-progress bar is not walked)");
+    assert.equal(mark![1], 102, "peak from the completed bar only");
+  } finally { restore(); }
+});

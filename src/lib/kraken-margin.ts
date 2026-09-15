@@ -206,9 +206,72 @@ const LEDGER_TABLE_SQL = `CREATE TABLE IF NOT EXISTS kraken_my_ledger (
   fee double precision
 )`;
 
-export async function ensureMarginTables(): Promise<void> {
-  await prisma.$executeRawUnsafe(TRADES_TABLE_SQL);
-  await prisma.$executeRawUnsafe(LEDGER_TABLE_SQL);
+// THE TRADE CARDS (Sep 15 2026, margin-trade-card.ts): one row per live entry DECISION —
+// sent, validated or refused — with the full card as JSON. A refusal that never reached
+// sizing is a card-less row (card NULL) carrying only the reason.
+const TRADE_CARDS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_trade_cards (
+  id serial PRIMARY KEY,
+  at timestamptz NOT NULL DEFAULT now(),
+  symbol text NOT NULL,
+  side text NOT NULL,
+  source text,
+  action text NOT NULL,
+  reason text,
+  txid text,
+  card jsonb
+)`;
+
+// THE LIVE JOURNAL (Sep 15 2026, margin-round-trips.ts): one row per bot book keyed by its
+// opening order txid — card, 1R, MFE/MAE, the ledgered stop level, the guardian's exit reason,
+// then the synthesis's matched exit/fees/net. reconstructTrips stays the P&L truth.
+const ROUND_TRIPS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_round_trips (
+  txid text PRIMARY KEY,
+  card_id int,
+  pair text,
+  side text,
+  source text,
+  entry_price double precision,
+  one_r double precision,
+  opened_at timestamptz,
+  peak double precision,
+  trough double precision,
+  mfe_r double precision,
+  mae_r double precision,
+  last_stop_level double precision,
+  exit_reason text,
+  last_seen_at timestamptz,
+  exit_price double precision,
+  exit_at timestamptz,
+  fees double precision,
+  rollover double precision,
+  net_pnl double precision,
+  hold_minutes double precision,
+  stop_fill_slip_bp double precision,
+  paper_pnl_at_live_size double precision,
+  closed boolean DEFAULT false
+)`;
+
+const MARGIN_INDEX_SQL = [
+  `CREATE INDEX IF NOT EXISTS margin_trade_cards_txid_idx ON margin_trade_cards(txid)`,
+  `CREATE INDEX IF NOT EXISTS margin_trade_cards_at_idx ON margin_trade_cards(at)`,
+  // margin_round_trips is read by its PK (txid) only; no secondary index needed.
+];
+
+// Memoised per process: the DDL is idempotent, but every trade-card write, refusal row and
+// guardian journal upsert used to issue the whole set of round trips again. One successful run
+// per instance is enough; a rejection resets the memo so the next caller retries.
+let marginTablesReady: Promise<void> | null = null;
+export function ensureMarginTables(): Promise<void> {
+  if (!marginTablesReady) {
+    marginTablesReady = (async () => {
+      await prisma.$executeRawUnsafe(TRADES_TABLE_SQL);
+      await prisma.$executeRawUnsafe(LEDGER_TABLE_SQL);
+      await prisma.$executeRawUnsafe(TRADE_CARDS_TABLE_SQL);
+      await prisma.$executeRawUnsafe(ROUND_TRIPS_TABLE_SQL);
+      for (const sql of MARGIN_INDEX_SQL) await prisma.$executeRawUnsafe(sql);
+    })().catch((e) => { marginTablesReady = null; throw e; });
+  }
+  return marginTablesReady;
 }
 
 // Kraken's private-API rate limiter: ~15-20 counter points, TradesHistory/Ledgers cost
