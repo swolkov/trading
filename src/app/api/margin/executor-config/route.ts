@@ -4,6 +4,7 @@ import {
   effectiveMaxLeverage, leverageCapForEquity, liveContainerFor, liveNotional, liveRiskPct, parseLiveRiskBasePct,
 } from "@/lib/margin-live-risk";
 import { exitParams } from "@/lib/margin-shadow";
+import { DEFAULT_MAX_LOSSES_PER_DAY, parseDecayMultiplier, type RiskState } from "@/lib/margin-risk-tiers";
 
 // WHAT LIVE WOULD ACTUALLY DO, computed from the same config keys and the same helpers the
 // executor and guardian read — beside what PAPER does — so the admin page can show, per
@@ -24,6 +25,10 @@ export async function GET() {
       "kraken_margin_per_trade_usd", "kraken_margin_max_hold_h", "kraken_margin_max_positions", "kraken_margin_max_trades_per_day",
       "kraken_margin_trust_alert_conviction", "kraken_margin_live_sources",
       "kraken_shadow_ref_equity", "kraken_margin_max_risk_pct",
+      // Risk tiers (Sep 15 2026): the drawdown ladder's switch, the revenge pause, the decay
+      // multiplier the chain reads, and the guardian's display row.
+      "kraken_margin_dd_tiers", "kraken_margin_max_losses_per_day", "kraken_margin_decay_multiplier",
+      "kraken_margin_equity_peak", "kraken_margin_risk_state",
     ];
     const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const c: Record<string, string> = {};
@@ -66,6 +71,11 @@ export async function GET() {
       maxTradesPerDay: num("kraken_margin_max_trades_per_day", 6),
       trustAlertConviction: c.kraken_margin_trust_alert_conviction === "true",
       liveSources: (c.kraken_margin_live_sources ?? "").split(",").map((x) => x.trim()).filter(Boolean),
+      ddTiers: c.kraken_margin_dd_tiers !== "off",
+      maxLossesPerDay: num("kraken_margin_max_losses_per_day", DEFAULT_MAX_LOSSES_PER_DAY),
+      decayMultiplier: parseDecayMultiplier(c.kraken_margin_decay_multiplier ?? null),   // null = the executor refuses
+      equityPeak: num("kraken_margin_equity_peak", 0) || null,
+      riskState: (() => { try { return c.kraken_margin_risk_state ? (JSON.parse(c.kraken_margin_risk_state) as RiskState) : null; } catch { return null; } })(),
     };
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),

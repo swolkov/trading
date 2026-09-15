@@ -6,8 +6,10 @@ import {
   getKrakenMarginPositions,
   getKrakenOHLC,
   liquidationEstimate,
+  listRoundTrips,
   syncKrakenTrades,
 } from "@/lib/kraken-margin";
+import { drawdownTier, losersToday, type RiskState } from "@/lib/margin-risk-tiers";
 import { pairBase, publicPairFor, marginOrderPairFor } from "@/lib/kraken-pairs";
 import { macroEventWindows } from "@/lib/macro-events";
 import { MARGIN_USERREF, acquireCloseLock, botOwnership, executeAlert, recoverPendingPyramid, releaseCloseLock } from "@/lib/margin-executor";
@@ -52,6 +54,8 @@ type WatchState = {
   // the real attached stop resting at the same level would otherwise pair a reduce-only
   // stop with a non-reduce-only one that fire on the same tick.
   emptyOrdersStreak?: number;
+  // The drawdown tier seen last run (margin-risk-tiers), so a tier change pages once.
+  ddTier?: string;
 };
 
 async function cfg(key: string): Promise<string | null> {
@@ -95,7 +99,7 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
       if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}) };
     }
     return {
-      state: { ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined },
+      state: { ...parsed, alerts: parsed.alerts ?? {}, nakedBreached, orphans, managed, emptyOrdersStreak: num(parsed.emptyOrdersStreak) ?? 0, lastEquity: num(parsed.lastEquity) ?? undefined, ddTier: typeof parsed.ddTier === "string" ? parsed.ddTier : undefined },
       unreliable: false, corrupt: false,
     };
   } catch {
@@ -227,6 +231,31 @@ export async function GET(request: Request) {
         }).catch(() => {});
       }
       const dd = peak > 0 ? (peak - health.equity) / peak : 0;
+      // RISK TIERS (display + one page per tier change). The executor computes the same tier
+      // itself from fresh equity at entry time; this row is for the admin page and the intel
+      // route, which must never make a private Kraken call of their own.
+      try {
+        const tier = drawdownTier(peak, health.equity, ddPct * 100);
+        let losers: number | null = null;
+        try {
+          const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+          losers = losersToday(await listRoundTrips(), dayStart.getTime());
+        } catch { losers = null; }
+        const riskState: RiskState = { at: new Date().toISOString(), peak, equity: health.equity, dd: tier.dd, tier: tier.tier, mult: tier.mult, losersToday: losers };
+        await prisma.agentConfig.upsert({
+          where: { key: "kraken_margin_risk_state" }, update: { value: JSON.stringify(riskState) }, create: { key: "kraken_margin_risk_state", value: JSON.stringify(riskState) },
+        }).catch(() => {});
+        const tierKey = String(tier.tier);
+        if (state.ddTier != null && state.ddTier !== tierKey && shouldFire(state, `dd-tier-${tierKey}`)) {
+          const msg = tier.tier === 0
+            ? `✅ Drawdown tier 0 — equity $${health.equity.toFixed(0)} is ${tier.dd.toFixed(1)}% off peak $${peak.toFixed(0)}; live risk back to full size.`
+            : `🟠 Drawdown tier ${tierKey} — equity $${health.equity.toFixed(0)} is ${tier.dd.toFixed(1)}% off peak $${peak.toFixed(0)}; live per-trade risk ×${tier.mult} until it recovers (5% halves, 10% quarters, ${(ddPct * 100).toFixed(0)}% halts).`;
+          await sendNotification(msg, "margin_urgent").catch(() => {});
+          state.alerts[`dd-tier-${tierKey}`] = new Date().toISOString();
+          sent.push(`dd-tier-${tierKey}`);
+        }
+        state.ddTier = tierKey;
+      } catch (e) { errors.push(`risk tiers: ${String(e).slice(0, 80)}`); }
       const disarmed = (await cfg("kraken_margin_disarmed_dd")) === "true";
       if (!disarmed && dd >= ddPct) {
         await prisma.agentConfig.upsert({

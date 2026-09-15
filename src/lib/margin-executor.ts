@@ -77,7 +77,6 @@ import {
   fifoWouldHitManual,
   failClosedOnEmptyPositions,
   liveNotional,
-  liveRiskFraction,
   parseLiveRiskBasePct,
   pairHasExposure,
   liveContainerFor,
@@ -90,6 +89,7 @@ import {
   projectedMarginLevel,
   resolveConvictionTier,
 } from "@/lib/margin-live-risk";
+import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferMultiple, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, revengePauseHit, setupGradeFor, LIQ_BUFFER_MULT } from "@/lib/margin-risk-tiers";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -858,6 +858,8 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (!(await guardianFresh())) {
       return { executed: false, validated: false, note: "guardian protection has not completed in 15m — no new entries while nothing would manage them (failing closed)" };
     }
+    // Event-window multiplier for the sizing chain below — the event-calendar step wires it.
+    const eventMult = 1;
 
     // Layer 5: daily loss kill switch — realized round trips closed today plus open P&L.
     // Fails closed on ANY read problem, including a stale trade sync.
@@ -886,6 +888,24 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     if (!Number.isFinite(equity) || !(equity > 0)) {
       return { executed: false, validated: false, note: "equity reads 0/unreadable/non-finite — failing closed" };
     }
+    // Layer 8c: DRAWDOWN TIER (Sep 15 2026). The breaker above is a single wire at 15%; between
+    // flat and the wire, risk is scaled down as equity falls from its peak — ×0.5 from −5%,
+    // ×0.25 from −10% (margin-risk-tiers.ts). The peak is the guardian's own breaker memory
+    // (kraken_margin_equity_peak), read STRICTLY: an unreadable or non-positive peak is an
+    // entry sized blind, so it refuses. kraken_margin_dd_tiers="off" disables the MULTIPLIER
+    // only — the unknown-peak and at-halt refusals stand, because they are the breaker's own
+    // arithmetic read off fresh equity, not a new rule.
+    const peakRaw = await cfgStrict("kraken_margin_equity_peak");
+    const ddHaltPct = Math.max(1, await cfgNumStrict("kraken_margin_max_drawdown_pct", DEFAULT_DD_HALT_PCT));
+    const ddTiersOn = (await cfgStrict("kraken_margin_dd_tiers")) !== "off";
+    const ddTier = drawdownTier(peakRaw != null && peakRaw.trim() !== "" ? Number(peakRaw) : NaN, equity, ddHaltPct);
+    if (ddTier.tier === "unknown") {
+      return { executed: false, validated: false, note: `entry refused: drawdown tier unknown — failing closed (kraken_margin_equity_peak=${peakRaw ?? "missing"}, equity $${equity.toFixed(0)})` };
+    }
+    if (ddTier.tier === "halt") {
+      return { executed: false, validated: false, note: `entry refused: drawdown ${ddTier.dd.toFixed(1)}% from peak $${Number(peakRaw).toFixed(0)} is at/over the ${ddHaltPct}% halt — the breaker owns this, not a new entry` };
+    }
+    const ddMult = ddTiersOn ? ddTier.mult : 1;
     // Equity ladder: $5k book stays 2× even if the operator ceiling is 5. Risk % is
     // unchanged — larger equity just means larger dollar bets at the same 3%/6%.
     const maxLev = effectiveMaxLeverage(cfgMaxLev, equity);
@@ -910,6 +930,18 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         "kraken",
       );
       return { executed: false, validated: false, note: `daily loss cap hit (${which} < -${lossCap})` };
+    }
+    // Layer 5b: THE REVENGE PAUSE. N losing round trips closed today (UTC) → no new entries
+    // until tomorrow, whatever the dollar cap says. A pyramid add is exempt: it presses a
+    // trade that is already winning, which is the opposite of a revenge trade. Same trip
+    // population as the loss cap above (every round trip on the account). STRICT limit read;
+    // an explicit 0 blocks every entry, as the daily cap's 0 does.
+    if (!pyramid) {
+      const maxLosses = await cfgNumStrict("kraken_margin_max_losses_per_day", DEFAULT_MAX_LOSSES_PER_DAY);
+      const losers = losersToday(trips, dayStart.getTime());
+      if (revengePauseHit(losers, maxLosses)) {
+        return { executed: false, validated: false, note: `entry refused: ${losers} losing trades today — no revenge trades (max ${maxLosses})` };
+      }
     }
 
     // Layer 6: anti-stacking — count BOTH open positions AND our resting orders toward
@@ -1115,7 +1147,16 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         convTier = (await convictionForAlert(alert.symbol, alert.side))?.tier ?? null;
       } catch { convTier = null; }
     }
-    const maxRiskPct = liveRiskFraction(baseRiskPct, convTier);
+    // THE ONE MULTIPLIER CHAIN (margin-risk-tiers.ts): the conviction ladder × drawdown tier
+    // × event window × strategy decay, 8% ceiling applied last. kraken_margin_decay_multiplier
+    // is written by the decay rule (C3); missing = 1, anything outside 0.25–1 refuses.
+    const decayRaw = await cfgStrict("kraken_margin_decay_multiplier");
+    const decayMult = parseDecayMultiplier(decayRaw);
+    if (decayMult == null) {
+      return { executed: false, validated: false, note: `entry refused: kraken_margin_decay_multiplier "${decayRaw}" is outside 0.25–1 — failing closed` };
+    }
+    const riskPctChain = liveRiskPctChain({ basePct: baseRiskPct, conviction: convTier, ddMult, eventMult, decayMult });
+    const maxRiskPct = riskPctChain / 100;
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     // SIZE = risk × equity ÷ stop, capped at leverage × equity — paper's positionNotional
     // on the REAL account's equity, so dollar size grows with the account automatically.
@@ -1150,6 +1191,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         executed: false, validated: false,
         note: `entry refused: would leave margin level at ${after.toFixed(0)}% (floor ${mlFloor}%, Kraken calls at 80%). $${notional.toFixed(0)} notional at ${leverage}× on equity $${equity.toFixed(0)} with $${health.marginUsed.toFixed(0)} already posted. Lower kraken_margin_live_max_risk_pct or wait for a slot to close.`,
       };
+    }
+    // Layer 6c: the liquidation buffer, stated. leverageThatFitsStop already puts the isolated
+    // liquidation distance ≥ 1.67× the stop at every rung it returns, and the margin-level
+    // floor above holds the account-level distance wider still — so this refuses nothing
+    // today. It is the line that holds if the floor is disabled (kraken_margin_min_margin_level
+    // =0) or leverage ever arrives from a path that did not fit it to the stop.
+    if (!liqBufferOk(stopPct, leverage)) {
+      return { executed: false, validated: false, note: `entry refused: liquidation buffer ${liqBufferMultiple(stopPct, leverage).toFixed(2)}× the stop is under ${LIQ_BUFFER_MULT.toFixed(2)}× (stop ${(stopPct * 100).toFixed(2)}% at ${leverage}×) — the margin-level floor is disabled and nothing else holds this line` };
     }
     const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;
@@ -1271,7 +1320,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       executed: !validate,
       validated: validate,
       txid,
-      note: `${pyramid ? "PYRAMID ADD " : ""}${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
+      note: `${pyramid ? "PYRAMID ADD " : ""}${alert.side} $${notional.toFixed(0)} notional (${leverage}x, ${makerEntries ? "maker" : "market"}) ${pair}, ${stopDesc}, ${convTier ?? "unscored"} conviction (${setupGradeFor(convTier)}) · dd tier ${ddTier.tier} ×${ddMult} · event ×${eventMult} · decay ×${decayMult} → risk≤${(maxRiskPct * 100).toFixed(1)}% equity${validate ? " (validate)" : ""}${ledgered ? "" : " ⚠️ UNLEDGERED — adopt it"} — ${descr ?? ""}`,
     };
   } catch (e) {
     if (!addOrderSent) {
