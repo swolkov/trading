@@ -223,15 +223,95 @@ foreign-position report, unknown-status rows, the balance-read abort. Added:
   desk client's pinned mode, `DESK_MODE`, through the same mode→host rule `tradovate.ts` uses) ·
   `ES is not a root of index_daily_mr` · `contract month code V not in ACTIVE_MONTH_CODES for ES`
   (metals: `ACTIVE_MONTH_CODES`; index roots: the quarterlies H/M/U/Z) ·
-  `MESU6 is inside its roll window (expires in 1 day)` · `micro symbol MES does not match
-  MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` · `stop missing or on the wrong side of
-  price` · `risk $301.70 exceeds the $250 budget` · `already holding ES` · `event calendar not
-  checked in the last 20 minutes` (until E3 writes `futures_desk_event_policy` the key is missing and
-  this is a **warning**; a present-but-stale key is a failure) · feed stale = warning only.
+  `MESU6 expires in 1 day — inside the roll window; entry refused` (E3's `rollWindowRefusal`, the one
+  string) · `micro symbol MES does not match MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` ·
+  `stop missing or on the wrong side of price` · `risk $301.70 exceeds the $250 budget` · `already
+  holding ES` · `event calendar not checked in the last 20 minutes` (missing, unreadable or stale —
+  a failure since E3) · feed stale = warning only.
 
 **Manual (E5):** add the tenth chart — ES1! 60m, paste `pine/futures-desk-feed-heartbeat.pine`, set
 the secret input, one alert → *Any alert() function call* → the desk webhook, message empty,
 open-ended. Verify: `/api/health` → `desk.feedSeenAt` moves within the hour and `feedStale` is false.
+
+## Event calendar, no-trade windows, CME holidays, roll window (E3, `src/lib/futures-desk-calendar.ts`)
+
+**The guardian writes `futures_desk_event_policy` every run** — `{mode, reason, until, at, source:
+"static", event}` from the shared `event-calendar.ts` policy (`eventPolicyNow`) on the **static
+`MACRO_EVENTS` table only**: Finnhub's economic calendar is a premium endpoint on this account, so
+nothing is fetched and `source` is always `static`. A feed being down can therefore never refuse an
+entry; what does refuse is the guardian not having written the row lately. Modes: **paused** — a
+tier-1 print (FOMC decision, CPI, NFP) within ±30 min; **reduced** — tier 1 within −12h..+2h, or a
+tier-2 print (PPI, PCE, FOMC minutes) within ±30 min; **normal** otherwise. FOMC Sep 16 2026 14:00 ET:
+reduced from 02:00 ET, paused 13:30–14:30, reduced until 16:00.
+
+**The entry path** (`contextNow` → `entryRefusal`, then the checklist) reads the row back and takes
+the STRICTER of the row's mode and the policy recomputed at the entry instant (paused > reduced >
+normal) — the row is the freshness proof, the live recomputation closes the gap between guardian runs
+(a row written at 13:29 ET reading `reduced` cannot let a 13:33 entry through the pause):
+- missing, unreadable or older than **20 minutes** → `event calendar not checked in the last 20
+  minutes` (the E5 checklist item is now a **failure** for a missing key too — the warning is gone);
+- paused → `event window: FOMC rate decision 14:00 ET — paused until 14:30`;
+- reduced → the budget is halved **on top of** the drawdown tier (`budgetMult = tier × 0.5`; tier 2
+  in a reduced window sizes at ×0.25). A stale `reduced` row does not halve anything — it refuses.
+- `event_mode` is stamped on the signal row (before the verdict, so a refused row says what it met)
+  and on the trade row.
+
+**CME holidays close ENTRIES only** (`CME_HOLIDAYS_2026`: Thanksgiving Nov 26 early 13:00 ET, Nov 27
+early 13:15, Dec 24 early 13:15, Dec 25 closed, Jan 1 2027 closed, MLK Jan 18 2027 early 13:00,
+Presidents' Day Feb 15 2027 early 13:00 — refresh when the 2027 schedule publishes). `cmeOpenForEntry`
+= `cmeOpen` and no holiday closure; refusals `CME holiday: Christmas Day — closed; entry refused` and
+`CME early close 13:00 ET (Thanksgiving) — entry refused for the rest of the day` (the evening reopen
+on an early-close day is holiday-thin, so it stays closed to entries through the ET day). A
+**closed-all-day** holiday closes everything: the alert queue, the queue drain, time stops and rolls
+use `cmeOpenForDesk` (= `cmeOpen` and not a closed day); an early-close evening stays open for exits
+and rolls on the plain `cmeOpen`. A queued entry that drains onto an early-close afternoon is refused,
+not placed; queued alerts keep the 12h expiry. The watch card's dry run is sized at tier × event too.
+
+**Sessions** (`sessionOf`, E4) are a journal slice, never a gate. Health exposes `eventMode`,
+`eventPolicyAt`, `eventPolicyFresh` and `cmeOpenForEntry`.
+
+## Leaderboard, daily and weekly review, promotion gate (E6, `src/lib/futures-desk-review.ts`)
+
+No money path. `futures-desk-metrics.ts` computes the series metrics (PF, max drawdown as % of
+basis, per-trade Sharpe/Sortino, avg R, expectancy $ and R, hit rate, MFE/MAE, streaks) — it
+**mirrors the shared `margin-metrics.ts` `sleeveMetrics`** that lands with the crypto PR in what it
+measures, on this desk's own row shape (judged P&L, `risk_usd`, close instant, MFE/MAE in R); an
+adapter onto the shared module may follow once both are on main. `journalToMetricRows` folds roll chains into one row each
+(`mergeRollChains`, which moved here from the status module): the **judged P&L is
+`pnl_after_slip_usd` summed across the legs** where every leg has it, else the demo's own
+(`pnlSource` says which; a chain with any leg lacking the after-slip figure is judged on the demo's
+`pnl_usd` for the WHOLE chain — never a mixed sum), fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's
+session / regime / side; risk = `risk_usd`. `futuresLeaderboard` = per edge, per edge × root, and
+per edge by session / regime / day-of-week / direction. `profitDistribution` = best trade / day /
+week / market as a share of GROSS profit.
+
+**Promotion gate** (`futuresPromotionVerdict`, one verdict per edge, on `/futures` and
+`/api/futures/desk` as `promotion`): `donchian_60m_long` ≥ 100 resolved over ≥ 56 days;
+`index_daily_mr` ≥ 30 resolved over ≥ 84 days (the daily-bar exception, stated on the gate: at ~3–5
+signals a year per root even 30 is unlikely inside the window, so its live case rests on backtest
+concordance too); net after slip > 0; PF ≥ 1.4 (strong ≥ 1.6); max drawdown ≤ 8% of basis (strong
+≤ 6%); t ≥ 2; best trade ≤ 25% and best day ≤ 30% of gross profit; ≥ 3 regime labels seen (**until
+E7 stamps regimes this reads "not yet measurable" and counts as failed — no edge can read
+LIVE-CANDIDATE before E7**); execution-error rate ≤ 2% (inbox `error` rows + ledger classes over
+executed + errored entries); no open anomaly. Verdict: all gates pass → **LIVE-CANDIDATE** (`strong`
+when PF ≥ 1.6 and DD ≤ 6%); the sample gates (resolved, span) fail → **GATHERING**; otherwise
+**FAILING**, with `failedGates[]`. A verdict is a document, never a switch — a live account is a
+separate typed decision.
+
+**Daily review** — the first guardian run after 17:05 ET per ET weekday (`state.reviewDayKey`, stamped
+with `guardianAt` before the work, run after the MFE/MAE fold): gross (demo), net after slip, trades,
+wins/losses, win rate, avg winner/loser, PF, expectancy, largest win/loss, fees, modeled slip, max
+intraday drawdown (**n/a** — the guardian keeps one equity per run, not a series), rule violations
+(error classes on the day's rows and inbox), refusals by reason, best/worst setup, watch rows →
+appended to `Performance/futures-desk-daily.md` (**capped at 120 entries**, the oldest rolled into
+`Performance/futures-desk-daily-archive.md`) + one condensed Slack line on `futures_demo`.
+**Weekly review** — the first guardian run on a Monday per ISO week (`state.weeklyReviewKey`): the
+leaderboard tables by strategy / instrument / session / day / regime / direction, the profit
+distribution, the promotion verdicts and stage readiness → `Performance/futures-desk-weekly.md`
+(overwritten) + Slack. **No new Vercel cron**; both are fail-soft guardian notes. `/futures` shows
+"Edges — promotion gate" (gate rows with ok / value / target, the edge × market leaderboard) and the
+stage-readiness line; the API returns `leaderboard`, `promotion`, `stageReadiness` (`reviewError`
+when the read failed).
 
 ## Proof
 

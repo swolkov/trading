@@ -10,6 +10,7 @@ const good = { secret: "x", desk: "futures", edge: "index_daily_mr", symbol: "ES
 const okCtx: DeskContext = {
   enabled: true, openRoots: [], entriesToday: 0, dayPnlUsd: 0, equityUsd: 50_000, equityHighUsd: 50_000, guardianFreshMs: 60_000,
   openRiskUsd: 0, sameClusterSameSideRiskUsd: 0, dailyLossRemainingUsd: 750, ddMult: 1, newRiskUsd: 250,
+  eventMode: "normal", eventPolicyAgeMs: 60_000, eventWindow: null, budgetMult: 1, cmeHoliday: null,
 };
 const opts: SizeOpts = { grade: "normal", stage: "A", budgetMult: 1 };
 function alertOf(over: Record<string, unknown>): AlertPayload { const p = parseAlert({ ...good, ...over }); if (!p.ok) throw new Error(p.reason); return p.alert; }

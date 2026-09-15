@@ -17,10 +17,13 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import {
-  EDGES, budgetFor, cmeOpen, edgeByKey, entryRefusal, etDayKey, etShortDate, feePerSide, gradeFor, rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd,
+  EDGES, budgetFor, edgeByKey, entryRefusal, etDayKey, etShortDate, feePerSide, gradeFor, rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd,
   type AlertPayload, type DeskContext, type DeskLimits, type Side, type Stage,
 } from "@/lib/futures-desk-rules";
 import { ddTier, deskContextOf, riskStateOf } from "@/lib/futures-desk-risk";
+import { EVENT_POLICY_KEY, cmeHolidayRefusal, cmeOpenForDesk, deskEventPolicy, eventContextOf } from "@/lib/futures-desk-calendar";
+import { dailyReviewDue, isoWeekKey, weeklyReviewDue } from "@/lib/futures-desk-review";
+import { runDailyReview, runWeeklyReview } from "@/lib/futures-desk-review-jobs";
 import { entrySlipPts, excursionJobDue, insertTrade, pnlAfterSlip, sessionOf, slipModelUsd, slipPtsPerSide, toR, updateExcursions, watchCapReached, watchCard } from "@/lib/futures-desk-journal";
 import { EXECUTION_ERRORS_DISABLE_AT, EXECUTION_ERRORS_REASON, anomalyRefusal, detectAnomaly, executionErrorsToday, feedStale, hostForMode, parseAnomaly, preTradeChecklist } from "@/lib/futures-desk-safety";
 import {
@@ -52,7 +55,8 @@ export async function handleAlert(a: AlertPayload): Promise<AlertOutcome> {
   // A watch never executes, so it never queues either: it is sized on paper and logged, CME open or not.
   if (a.action === "watch") { try { return await watchSignal(rec.id, a); } catch (e) { const msg = String(e).slice(0, 200); await markSignal(rec.id, "error", msg).catch(() => {}); return { status: "error", reason: msg, signalId: rec.id }; } }
   // Exits queue too: a daily bar closes at 17:00 ET, inside the break, and a liquidation then is refused.
-  if (!cmeOpen(new Date())) { await markSignal(rec.id, "queued", "CME closed — sent at the reopen by the guardian"); return { status: "queued", reason: "CME closed", signalId: rec.id }; }
+  // A closed-all-day CME holiday queues everything as well (an early-close evening is open for exits).
+  if (!cmeOpenForDesk(new Date())) { await markSignal(rec.id, "queued", "CME closed — sent at the reopen by the guardian"); return { status: "queued", reason: "CME closed", signalId: rec.id }; }
   try {
     return a.action === "exit" ? await exitByRule(rec.id, a) : await enterFromSignal(rec.id, a);
   } catch (e) {
@@ -68,18 +72,29 @@ export async function handleAlert(a: AlertPayload): Promise<AlertOutcome> {
  *  is capped at three per root per ET day (the 60m rule can hover under its channel for hours). */
 async function watchSignal(signalId: number, a: AlertPayload): Promise<AlertOutcome> {
   if (watchCapReached(await watchesToday(a.root, signalId))) { await markSignal(signalId, "watch", "watch cap reached"); return { status: "watch", reason: "watch cap reached", signalId }; }
-  const [state, limits, promoted] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted")]);
+  const now = new Date();
+  const [state, limits, promoted, policyRaw] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted"), cfg(EVENT_POLICY_KEY)]);
   const grade = gradeFor(a, promoted === "true");
-  const card = watchCard(a, limits, { grade, stage: limits.stage, budgetMult: ddTier(state.equity ?? 0, state.equityHigh ?? 0).mult, stageDArmed: false });
+  // The dry run is sized the way an entry would be: the drawdown tier × the event window (0.5 while reduced).
+  const budgetMult = ddTier(state.equity ?? 0, state.equityHigh ?? 0).mult * eventContextOf(policyRaw, now.getTime(), deskEventPolicy(now)).budgetMult;
+  const card = watchCard(a, limits, { grade, stage: limits.stage, budgetMult, stageDArmed: false });
   await stampSignal(signalId, { grade });
   await markSignal(signalId, "watch", card);
   return { status: "watch", reason: card, signalId };
 }
 
-/** The entry container from the guardian's own numbers (≤ 20 min old by the freshness gate). */
-async function contextNow(s: DeskState, limits: DeskLimits, a: AlertPayload, newRiskUsd: number): Promise<DeskContext | { refusal: string }> {
-  const [open, n, enabled] = await Promise.all([openTrades(), entriesToday(), deskEnabled()]);
-  return deskContextOf({ enabled, state: s, open, entriesToday: n, limits, alert: a, newRiskUsd, now: new Date(), dayKey: etDayKey(new Date()) });
+/** The entry container from the guardian's own numbers (≤ 20 min old by the freshness gate) and the
+ *  event policy it last wrote (E3). The row is the freshness proof; the MODE is the stricter of the row's
+ *  and the policy recomputed now (pure), so a pause window that opened since the last guardian run still
+ *  refuses. A reduced window halves the budget on top of the tier's multiplier; paused, stale or missing
+ *  refuses in `entryRefusal`; a CME holiday refuses entries only. The raw row rides back for the checklist. */
+async function contextNow(s: DeskState, limits: DeskLimits, a: AlertPayload, budgetUsd: number, tierMult: number): Promise<{ ctx: DeskContext | { refusal: string }; policyRaw: string | null }> {
+  const now = new Date();
+  const [open, n, enabled, policyRaw] = await Promise.all([openTrades(), entriesToday(), deskEnabled(), cfg(EVENT_POLICY_KEY)]);
+  const event = eventContextOf(policyRaw, now.getTime(), deskEventPolicy(now));
+  const budgetMult = tierMult * event.budgetMult;
+  const ctx = deskContextOf({ enabled, state: s, open, entriesToday: n, limits, alert: a, newRiskUsd: budgetUsd * budgetMult, now, dayKey: etDayKey(now), event, budgetMult, cmeHoliday: cmeHolidayRefusal(now) });
+  return { ctx, policyRaw };
 }
 
 /** Exactly one working stop, or no position. Returns the working stop id, or null when the
@@ -134,18 +149,19 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const [state, limits, promoted] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted")]);
     const grade = gradeFor(a, promoted === "true");
     const tier = ddTier(state.equity ?? 0, state.equityHigh ?? 0);
-    const ctx = await contextNow(state, limits, a, budgetFor(grade, limits) * tier.mult);   // worst case: the whole budget
+    const { ctx, policyRaw } = await contextNow(state, limits, a, budgetFor(grade, limits), tier.mult);   // worst case: the whole budget × tier × event
+    const [eventMode, budgetMult] = "refusal" in ctx ? [null, tier.mult] : [ctx.eventMode, ctx.budgetMult];
+    await stampSignal(signalId, { grade, eventMode });   // stamped before the verdict, so a refused row still says what it met
     const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits) ?? anomalyRefusal(await cfg(ANOMALY_KEY));
     if (refusal) { await markSignal(signalId, "refused", refusal); return { status: "refused", reason: refusal, signalId }; }
     const stageDArmed = limits.stage === "D" && (await cfg("futures_desk_stage_d_armed")) === "true";
-    const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult: tier.mult, stageDArmed });
-    await stampSignal(signalId, { grade });
+    const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult, stageDArmed });
     if (!size.ok) { await markSignal(signalId, "refused", size.reason); return { status: "refused", reason: size.reason, signalId }; }
     const contract = await deskContract(size.micro);
     if (!contract) { await markSignal(signalId, "error", `no ${size.micro} contract on Tradovate`); return { status: "error", reason: "contract", signalId }; }
     // The enforced pre-trade checklist, stored whole on the signal row; the first failure is the refusal.
-    const [expiry, eventPolicyRaw, feedSeenAt] = await Promise.all([contractExpiry(contract.id), cfg("futures_desk_event_policy"), cfg(FEED_SEEN_KEY)]);
-    const check = preTradeChecklist(a, { brokerHost: hostForMode(DESK_MODE), expiryIso: expiry, guardDays: rollGuardDays(size.micro), openRoots: "refusal" in ctx ? [] : ctx.openRoots, eventPolicyRaw, feedSeenAt, now: new Date() }, contract, size, limits);
+    const [expiry, feedSeenAt] = await Promise.all([contractExpiry(contract.id), cfg(FEED_SEEN_KEY)]);
+    const check = preTradeChecklist(a, { brokerHost: hostForMode(DESK_MODE), expiryIso: expiry, guardDays: rollGuardDays(size.micro), openRoots: "refusal" in ctx ? [] : ctx.openRoots, eventPolicyRaw: policyRaw, feedSeenAt, now: new Date() }, contract, size, limits);
     await stampSignal(signalId, { checklistJson: JSON.stringify(check) });
     if (!check.ok) { await markSignal(signalId, "refused", check.failures[0]); return { status: "refused", reason: check.failures[0], signalId }; }
     const stopDist = size.stopPoints;
@@ -212,7 +228,7 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
       edge: a.edge, root: a.root, micro: size.micro, contract: contract.name, contractId: contract.id, side: a.side, qty: fill.qty, entryPrice: fill.price, stopPrice: stopPx,
       entryOrderId: orderId, stopOrderId, clOrdId, signalId, riskUsd, pointValue: size.pointValue, rolledFrom: null, note: partial ? `partial fill ${fill.qty}/${size.contracts}` : a.note,
       contractMonth: contract.name.slice(-2), stage: limits.stage, signalPrice: a.price, entrySlipPts: entrySlipPts(a.side, a.price, fill.price), stopPoints: stopDist, atrAtEntry: a.atr ?? null,
-      session: sessionOf(new Date()), regime: null, eventMode: null, grade: size.grade, errorClass: partial ? "partial_fill" : null, slipModelPts: slipPtsPerSide(a.root), slipModelUsd: slipModelUsd(a.root, fill.qty, size.pointValue),
+      session: sessionOf(new Date()), regime: null, eventMode, grade: size.grade, errorClass: partial ? "partial_fill" : null, slipModelPts: slipPtsPerSide(a.root), slipModelUsd: slipModelUsd(a.root, fill.qty, size.pointValue),
     });
 
     // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
@@ -313,6 +329,10 @@ async function guardBody(): Promise<GuardReport> {
   // The risk snapshot for the page and health (display-only; the entry path recomputes from `state`).
   const rs = riskStateOf({ equity, equityHigh: state.equityHigh, balance: bal.balance, dayStartBalance: state.dayStartBalance, open, limits, now: new Date() });
   await setKey("futures_desk_risk_state", JSON.stringify(rs)).catch(() => {});
+  // The event policy (E3) — static table only, written every run; an entry needs one under 20 minutes old.
+  const policy = deskEventPolicy(new Date());
+  await setKey(EVENT_POLICY_KEY, JSON.stringify(policy)).catch(() => notes.push("event policy not saved"));
+  if (policy.mode !== "normal") notes.push(`event policy: ${policy.mode} — ${policy.reason}`);
   let settled = 0;
   const expiries: Record<number, string | null> = {};   // open positions NOT rolled this run → roll planning below
   for (const t of open) {
@@ -325,12 +345,12 @@ async function guardBody(): Promise<GuardReport> {
     const live = { ...t, stop_order_id: stopId };
     // Time stop.
     const spec = edgeByKey(t.edge);
-    if (spec?.maxHoldDays && Date.now() - Date.parse(t.opened_at) > spec.maxHoldDays * 86_400_000 && cmeOpen(new Date())) {
+    if (spec?.maxHoldDays && Date.now() - Date.parse(t.opened_at) > spec.maxHoldDays * 86_400_000 && cmeOpenForDesk(new Date())) {
       const r = await closeTrade(live, "time"); notes.push(`${t.contract}: ${spec.maxHoldDays}-day time stop${r.ok ? "" : ` FAILED (${r.failure})`}`); continue;
     }
     // Roll before expiry / first notice: close the old month and re-open the new one at the same stop distance.
     const exp = await contractExpiry(t.contract_id);
-    if (rollDue(exp, Date.now(), rollGuardDays(t.micro)) && cmeOpen(new Date())) { await rollTrade(live, notes); continue; }
+    if (rollDue(exp, Date.now(), rollGuardDays(t.micro)) && cmeOpenForDesk(new Date())) { await rollTrade(live, notes); continue; }
     expiries[t.id] = exp;
   }
   const fresh = await loadState();
@@ -350,7 +370,8 @@ async function guardBody(): Promise<GuardReport> {
 
   await expireOldWatches().catch(() => {});
   // Queued alerts (CME break, lock contention, refused closes) — send at the reopen, expire when stale.
-  if (cmeOpen(new Date())) {
+  // A closed-all-day CME holiday skips the drain (an early-close evening does not).
+  if (cmeOpenForDesk(new Date())) {
     const queued = await rawRows<{ id: number; edge: string; root: string; action: string; side: Side; price: number; stop: number | null; bar: string; timeframe: string; note: string | null; received_at: string; score: number | null; score_json: string | null }>(
       `SELECT * FROM futures_desk_signals WHERE status = 'queued' ORDER BY id`);
     for (const q of queued) {
@@ -372,8 +393,12 @@ async function guardBody(): Promise<GuardReport> {
   // once per ET day after the 17:00 close) runs after it, so a slow Yahoo can never read as a stale guardian
   // or run twice. Fail-soft: a Yahoo problem is a note and the day's lastError.
   const foldDue = excursionJobDue(fresh.excursionDayKey, new Date());
+  // The reviews (E6) follow the same once-per-key discipline: keys stamped with guardianAt, work done after.
+  const dailyDue = dailyReviewDue(fresh.reviewDayKey, new Date());
+  const weeklyDue = weeklyReviewDue(fresh.weeklyReviewKey, new Date());
   await patchState((s) => {
     s.guardianAt = new Date().toISOString(); s.lastError = undefined; if (foldDue) s.excursionDayKey = day;
+    if (dailyDue) s.reviewDayKey = day; if (weeklyDue) s.weeklyReviewKey = isoWeekKey(new Date());
     // Merge this run's once-only stamps — except `anomaly-*` stamps a clear-anomaly removed meanwhile (the DB copy is the truth for those).
     for (const [k, v] of Object.entries(fresh.alerts)) if (!(k.startsWith("anomaly-") && !(k in s.alerts))) s.alerts[k] = v;
   });
@@ -382,6 +407,9 @@ async function guardBody(): Promise<GuardReport> {
     try { notes.push(...(await updateExcursions())); } catch (e) { excursionError = `excursions: ${String(e).slice(0, 160)}`; notes.push(excursionError); }
     if (excursionError) await patchState((s) => { s.lastError = excursionError; }).catch(() => notes.push("excursions: lastError not saved"));
   }
+  // Daily after the fold (so today's MFE/MAE are on the rows); weekly on Monday's first run. Both fail-soft.
+  if (dailyDue) { try { notes.push(...(await runDailyReview(day, limits))); } catch (e) { notes.push(`daily review: ${String(e).slice(0, 160)}`); } }
+  if (weeklyDue) { try { notes.push(...(await runWeeklyReview(limits))); } catch (e) { notes.push(`weekly review: ${String(e).slice(0, 160)}`); } }
   return { ok: true, equity, open: open.length - settled, settled, notes };
 }
 
