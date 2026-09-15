@@ -3,6 +3,8 @@
 import { prisma } from "@/lib/db";
 import { EDGES, deskVerdict, tStatOf } from "@/lib/futures-desk-rules";
 import { deskEnabled, deskLimits, ensureDeskTables, ledgerRows, loadState, openTrades, rawRows, type TradeRow } from "@/lib/futures-desk";
+import { ANOMALY_KEY, FEED_SEEN_KEY, cfg } from "@/lib/futures-desk-store";
+import { feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
 import { deskBalance, deskOrders, deskPositions, isWorking } from "@/lib/tradovate-desk";
 
 export interface EdgeCard {
@@ -52,8 +54,14 @@ export async function deskStatus() {
   await ensureDeskTables();
   const [enabled, limits, state, open, cards] = await Promise.all([deskEnabled(), deskLimits(), loadState(), openTrades(), edgeScoreboard()]);
   const ledger: TradeRow[] = await ledgerRows(60);
-  const signals = await rawRows<{ id: number; received_at: string; edge: string; root: string; action: string; side: string; price: number; stop: number | null; status: string; reason: string | null; trade_id: number | null }>(
-    `SELECT id, received_at, edge, root, action, side, price, stop, status, reason, trade_id FROM futures_desk_signals ORDER BY id DESC LIMIT 40`);
+  // Watch rows are context, not inbox: the inbox stays the desk's decisions; the last ten watches ride separately.
+  const signalCols = `id, received_at, edge, root, action, side, price, stop, status, reason, trade_id`;
+  type SignalRow = { id: number; received_at: string; edge: string; root: string; action: string; side: string; price: number; stop: number | null; status: string; reason: string | null; trade_id: number | null };
+  const [signals, watch, anomalyRaw, feedSeenAt] = await Promise.all([
+    rawRows<SignalRow>(`SELECT ${signalCols} FROM futures_desk_signals WHERE action <> 'watch' ORDER BY id DESC LIMIT 40`),
+    rawRows<SignalRow>(`SELECT ${signalCols} FROM futures_desk_signals WHERE action = 'watch' ORDER BY id DESC LIMIT 10`),
+    cfg(ANOMALY_KEY), cfg(FEED_SEEN_KEY),
+  ]);
   const entriesRow = await prisma.$queryRawUnsafe<{ n: bigint | number }[]>(`SELECT count(*) AS n FROM futures_desk_trades WHERE rolled_from IS NULL AND (opened_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date`);
   const entriesToday = Number(entriesRow[0]?.n ?? 0);
   let broker: { balance: number; netLiq: number; positions: { contractId: number; netPos: number; netPrice: number }[]; workingOrders: number } | null = null;
@@ -66,7 +74,9 @@ export async function deskStatus() {
   const closed = mergeRollChains(ledger).filter((t) => t.status === "closed" && t.pnl_usd != null);
   return {
     enabled, disabledReason: state.disabledReason ?? null, limits, state, entriesToday, guardian: { at: state.guardianAt ?? null, fresh: guardianAgeMs != null && guardianAgeMs < 20 * 60_000, lastError: state.lastError ?? null },
-    broker, brokerError, open, ledger, signals, cards,
+    broker, brokerError, open, ledger, signals, watch, cards,
+    anomaly: parseAnomaly(anomalyRaw),                                   // entries paused until cleared (type CLEAR)
+    feedSeenAt, feedStale: feedStale(feedSeenAt, Date.now()),            // the TradingView heartbeat; a NO TRADE chip, never a refusal
     record: { trades: closed.length, wins: closed.filter((t) => (t.pnl_usd as number) > 0).length, pnl: closed.reduce((s, t) => s + (t.pnl_usd as number), 0) },
     webhookPath: "/api/webhook/tradingview-futures",
     configured: !!(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET),

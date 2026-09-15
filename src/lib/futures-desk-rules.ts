@@ -175,7 +175,8 @@ export function gradeFor(a: AlertPayload, promotedScore: boolean): Grade {
 export interface AlertPayload {
   edge: EdgeKey;
   root: string;
-  action: "entry" | "exit";
+  /** `watch` (Pine v2): the rule is close to firing — logged and dry-run sized, never executed. */
+  action: "entry" | "exit" | "watch";
   side: Side;
   price: number;
   stop: number | null;
@@ -185,6 +186,16 @@ export interface AlertPayload {
   note: string;
   /** Optional 0–100 opportunity score from the chart (Pine v2). Absent on today's alerts. */
   score?: number;
+  // ---- Pine v2 context, all optional — stamps for the journal, never gates. A v1 alert has none.
+  atr?: number;
+  rsi?: number;
+  /** volume ÷ its 20-bar average on the alert bar. */
+  volRatio?: number;
+  /** close ÷ the prior 20-bar high − 1 (≤ 0 below the high). */
+  dist20h?: number;
+  /** Daily / 4-hour close above its 50-SMA. */
+  d1Up?: boolean;
+  h4Up?: boolean;
 }
 
 export type ParsedAlert = { ok: true; alert: AlertPayload } | { ok: false; reason: string };
@@ -204,16 +215,16 @@ export function parseAlert(body: unknown): ParsedAlert {
   if (!edge) return { ok: false, reason: `unknown edge '${String(b.edge ?? "")}' — only registered rules trade` };
   const root = String(b.symbol ?? b.root ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (!edge.roots.includes(root)) return { ok: false, reason: `${edge.key} does not trade ${root || "(blank)"}` };
-  const action = b.action === "exit" ? "exit" : b.action === "entry" ? "entry" : null;
-  if (!action) return { ok: false, reason: `action must be entry or exit, got '${String(b.action ?? "")}'` };
+  const action = b.action === "exit" ? "exit" : b.action === "entry" ? "entry" : b.action === "watch" ? "watch" : null;
+  if (!action) return { ok: false, reason: `action must be entry, exit or watch, got '${String(b.action ?? "")}'` };
   const side: Side | null = b.side === "long" ? "long" : b.side === "short" ? "short" : null;
   if (!side) return { ok: false, reason: `side must be long or short, got '${String(b.side ?? "")}'` };
   if (!edge.sides.includes(side)) return { ok: false, reason: `${edge.key} is ${edge.sides.join("/")}-only` };
   const price = numberField(b.price);
   if (price == null || price <= 0) return { ok: false, reason: "price missing" };
   const stop = numberField(b.stop);
-  if (action === "entry") {
-    if (stop == null || stop <= 0) return { ok: false, reason: "entry without a stop is refused — the stop travels with the order" };
+  if (action === "entry" && (stop == null || stop <= 0)) return { ok: false, reason: "entry without a stop is refused — the stop travels with the order" };
+  if (action !== "exit" && stop != null && stop > 0) {   // a watch may carry its projected stop; if it does, it is checked like an entry's
     if (side === "long" && stop >= price) return { ok: false, reason: `long stop ${stop} is not below price ${price}` };
     if (side === "short" && stop <= price) return { ok: false, reason: `short stop ${stop} is not above price ${price}` };
   }
@@ -226,7 +237,18 @@ export function parseAlert(body: unknown): ParsedAlert {
   const timeframe = String(b.timeframe ?? b.tf ?? edge.timeframe);
   const note = typeof b.note === "string" ? b.note.slice(0, 200) : "";
   const score = numberField(b.score);
-  return { ok: true, alert: { edge: edge.key, root, action, side, price, stop: action === "entry" ? stop : stop && stop > 0 ? stop : null, bar, timeframe, note, ...(score != null ? { score } : {}) } };
+  const opt: Partial<AlertPayload> = {};
+  if (score != null) opt.score = score;
+  for (const k of ["atr", "rsi", "volRatio", "dist20h"] as const) { const v = numberField(b[k]); if (v != null) opt[k] = v; }
+  for (const k of ["d1Up", "h4Up"] as const) { const v = boolField(b[k]); if (v != null) opt[k] = v; }
+  return { ok: true, alert: { edge: edge.key, root, action, side, price, stop: stop && stop > 0 ? stop : null, bar, timeframe, note, ...opt } };
+}
+/** Pine writes booleans as `true`/`false`; a template may quote them or send 1/0. Anything else is absent. */
+function boolField(v: unknown): boolean | null {
+  if (typeof v === "boolean") return v;
+  if (v === 1 || v === "1" || v === "true") return true;
+  if (v === 0 || v === "0" || v === "false") return false;
+  return null;
 }
 
 /** Identical alert (same rule, market, action, bar) = the same event; TradingView retries on timeout. */
