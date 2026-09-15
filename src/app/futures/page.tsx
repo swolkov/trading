@@ -6,6 +6,7 @@ import { Chip, verdictTone } from "@/components/ui/chip";
 import { Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { ago, money, pnl0, tone } from "@/lib/format";
 import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
+import { FuturesPromotionPanel, type LeaderRowView, type PromotionVerdictView, type StageReadinessView } from "@/components/futures/promotion-panel";
 
 // ============ FUTURES DESK — Tradovate DEMO ============
 // The futures edge lab. TradingView evaluates each registered rule on real-time CME data and
@@ -30,6 +31,8 @@ interface Status {
   brokerError: string | null; open: Trade[]; ledger: Trade[]; signals: Signal[]; watch: Signal[]; cards: Card[];
   anomaly: { kind: string; detail: string; at: string } | null; feedSeenAt: string | null; feedStale: boolean;
   record: { trades: number; wins: number; pnl: number }; webhookPath: string; error?: string;
+  // E6: the promotion gate, the leaderboard and stage readiness (null while the review read fails; `reviewError` says why).
+  promotion: PromotionVerdictView[] | null; leaderboard: { byEdgeRoot: LeaderRowView[] } | null; stageReadiness: StageReadinessView | null; reviewError: string | null;
 }
 
 const btn = "inline-flex h-8 items-center justify-center rounded-md border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40";
@@ -125,6 +128,8 @@ export default function FuturesDeskPage() {
           ))}
         </PanelBody>
       </Panel>
+
+      <FuturesPromotionPanel promotion={data.promotion} stageReadiness={data.stageReadiness} leaderboard={data.leaderboard} error={data.reviewError} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel>

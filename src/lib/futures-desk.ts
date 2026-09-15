@@ -22,6 +22,8 @@ import {
 } from "@/lib/futures-desk-rules";
 import { ddTier, deskContextOf, riskStateOf } from "@/lib/futures-desk-risk";
 import { EVENT_POLICY_KEY, cmeHolidayRefusal, deskEventPolicy, eventContextOf } from "@/lib/futures-desk-calendar";
+import { dailyReviewDue, isoWeekKey, weeklyReviewDue } from "@/lib/futures-desk-review";
+import { runDailyReview, runWeeklyReview } from "@/lib/futures-desk-review-jobs";
 import { entrySlipPts, excursionJobDue, insertTrade, pnlAfterSlip, sessionOf, slipModelUsd, slipPtsPerSide, toR, updateExcursions, watchCapReached, watchCard } from "@/lib/futures-desk-journal";
 import { EXECUTION_ERRORS_DISABLE_AT, EXECUTION_ERRORS_REASON, anomalyRefusal, detectAnomaly, executionErrorsToday, feedStale, hostForMode, parseAnomaly, preTradeChecklist } from "@/lib/futures-desk-safety";
 import {
@@ -383,8 +385,12 @@ async function guardBody(): Promise<GuardReport> {
   // once per ET day after the 17:00 close) runs after it, so a slow Yahoo can never read as a stale guardian
   // or run twice. Fail-soft: a Yahoo problem is a note and the day's lastError.
   const foldDue = excursionJobDue(fresh.excursionDayKey, new Date());
+  // The reviews (E6) follow the same once-per-key discipline: keys stamped with guardianAt, work done after.
+  const dailyDue = dailyReviewDue(fresh.reviewDayKey, new Date());
+  const weeklyDue = weeklyReviewDue(fresh.weeklyReviewKey, new Date());
   await patchState((s) => {
     s.guardianAt = new Date().toISOString(); s.lastError = undefined; if (foldDue) s.excursionDayKey = day;
+    if (dailyDue) s.reviewDayKey = day; if (weeklyDue) s.weeklyReviewKey = isoWeekKey(new Date());
     // Merge this run's once-only stamps — except `anomaly-*` stamps a clear-anomaly removed meanwhile (the DB copy is the truth for those).
     for (const [k, v] of Object.entries(fresh.alerts)) if (!(k.startsWith("anomaly-") && !(k in s.alerts))) s.alerts[k] = v;
   });
@@ -393,6 +399,9 @@ async function guardBody(): Promise<GuardReport> {
     try { notes.push(...(await updateExcursions())); } catch (e) { excursionError = `excursions: ${String(e).slice(0, 160)}`; notes.push(excursionError); }
     if (excursionError) await patchState((s) => { s.lastError = excursionError; }).catch(() => notes.push("excursions: lastError not saved"));
   }
+  // Daily after the fold (so today's MFE/MAE are on the rows); weekly on Monday's first run. Both fail-soft.
+  if (dailyDue) { try { notes.push(...(await runDailyReview(day, limits))); } catch (e) { notes.push(`daily review: ${String(e).slice(0, 160)}`); } }
+  if (weeklyDue) { try { notes.push(...(await runWeeklyReview(limits))); } catch (e) { notes.push(`weekly review: ${String(e).slice(0, 160)}`); } }
   return { ok: true, equity, open: open.length - settled, settled, notes };
 }
 

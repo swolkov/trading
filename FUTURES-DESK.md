@@ -265,6 +265,47 @@ is refused, not placed; queued alerts keep the 12h expiry.
 **Sessions** (`sessionOf`, E4) are a journal slice, never a gate. Health exposes `eventMode`,
 `eventPolicyAt`, `eventPolicyFresh` and `cmeOpenForEntry`.
 
+## Leaderboard, daily and weekly review, promotion gate (E6, `src/lib/futures-desk-review.ts`)
+
+No money path. `futures-desk-metrics.ts` computes the series metrics (PF, max drawdown as % of
+basis, per-trade Sharpe/Sortino, avg R, expectancy $ and R, hit rate, MFE/MAE, streaks) — it
+**mirrors the shared `margin-metrics.ts` `sleeveMetrics`** that lands with the crypto PR and becomes
+a re-export once both are on main. `journalToMetricRows` folds roll chains into one row each
+(`mergeRollChains`, which moved here from the status module): the **judged P&L is
+`pnl_after_slip_usd` summed across the legs** where every leg has it, else the demo's own
+(`pnlSource` says which), fees and modeled slip summed, MFE/MAE the chain's maxima, the origin leg's
+session / regime / side; risk = `risk_usd`. `futuresLeaderboard` = per edge, per edge × root, and
+per edge by session / regime / day-of-week / direction. `profitDistribution` = best trade / day /
+week / market as a share of GROSS profit.
+
+**Promotion gate** (`futuresPromotionVerdict`, one verdict per edge, on `/futures` and
+`/api/futures/desk` as `promotion`): `donchian_60m_long` ≥ 100 resolved over ≥ 56 days;
+`index_daily_mr` ≥ 30 resolved over ≥ 84 days (the daily-bar exception, stated on the gate: at ~3–5
+signals a year per root even 30 is unlikely inside the window, so its live case rests on backtest
+concordance too); net after slip > 0; PF ≥ 1.4 (strong ≥ 1.6); max drawdown ≤ 8% of basis (strong
+≤ 6%); t ≥ 2; best trade ≤ 25% and best day ≤ 30% of gross profit; ≥ 3 regime labels seen (**until
+E7 stamps regimes this reads "not yet measurable" and counts as failed — no edge can read
+LIVE-CANDIDATE before E7**); execution-error rate ≤ 2% (inbox `error` rows + ledger classes over
+executed + errored entries); no open anomaly. Verdict: all gates pass → **LIVE-CANDIDATE** (`strong`
+when PF ≥ 1.6 and DD ≤ 6%); the sample gates (resolved, span) fail → **GATHERING**; otherwise
+**FAILING**, with `failedGates[]`. A verdict is a document, never a switch — a live account is a
+separate typed decision.
+
+**Daily review** — the first guardian run after 17:05 ET per ET day (`state.reviewDayKey`, stamped
+with `guardianAt` before the work, run after the MFE/MAE fold): gross (demo), net after slip, trades,
+wins/losses, win rate, avg winner/loser, PF, expectancy, largest win/loss, fees, modeled slip, max
+intraday drawdown (**n/a** — the guardian keeps one equity per run, not a series), rule violations
+(error classes on the day's rows and inbox), refusals by reason, best/worst setup, watch rows →
+appended to `Performance/futures-desk-daily.md` (**capped at 120 entries**, the oldest rolled into
+`Performance/futures-desk-daily-archive.md`) + one condensed Slack line on `futures_demo`.
+**Weekly review** — the first guardian run on a Monday per ISO week (`state.weeklyReviewKey`): the
+leaderboard tables by strategy / instrument / session / day / regime / direction, the profit
+distribution, the promotion verdicts and stage readiness → `Performance/futures-desk-weekly.md`
+(overwritten) + Slack. **No new Vercel cron**; both are fail-soft guardian notes. `/futures` shows
+"Edges — promotion gate" (gate rows with ok / value / target, the edge × market leaderboard) and the
+stage-readiness line; the API returns `leaderboard`, `promotion`, `stageReadiness` (`reviewError`
+when the read failed).
+
 ## Proof
 
 `scripts/futures-desk-round-trip.ts` — 1× MES on the demo: OSO placed, fill confirmed, bracket stop

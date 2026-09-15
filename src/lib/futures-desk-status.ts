@@ -5,28 +5,16 @@ import { EDGES, deskVerdict, tStatOf } from "@/lib/futures-desk-rules";
 import { deskEnabled, deskLimits, ensureDeskTables, ledgerRows, loadState, openTrades, rawRows, type TradeRow } from "@/lib/futures-desk";
 import { ANOMALY_KEY, FEED_SEEN_KEY, cfg } from "@/lib/futures-desk-store";
 import { feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
+import { mergeRollChains } from "@/lib/futures-desk-review";
+import { reviewSnapshot } from "@/lib/futures-desk-review-jobs";
 import { deskBalance, deskOrders, deskPositions, isWorking } from "@/lib/tradovate-desk";
+
+// The roll-chain fold moved to futures-desk-review.ts (E6); the stage route and the tests keep this import.
+export { mergeRollChains };
 
 export interface EdgeCard {
   key: string; name: string; timeframe: string; roots: string[]; evidence: string;
   resolved: number; open: number; wins: number; net: number; meanR: number | null; tStat: number | null; days: number; verdict: string;
-}
-
-/** A rolled position is ONE trade: fold each leg that ended in a roll into its successor, so the
- *  scoreboard counts the round trip once with the summed P&L, and an open successor keeps the
- *  whole chain open. */
-export function mergeRollChains<T extends { id: number; status: string; exit_reason: string | null; pnl_usd: number | null; rolled_from: number | null }>(rows: T[]): T[] {
-  const byId = new Map(rows.map((r) => [r.id, { ...r }]));
-  const successorOf = new Map<number, number>();
-  for (const r of rows) if (r.rolled_from != null) successorOf.set(r.rolled_from, r.id);
-  const out: T[] = [];
-  for (const r of rows) {
-    if (r.exit_reason === "roll" && successorOf.has(r.id)) continue;      // folded into its successor
-    let pnl = r.pnl_usd ?? 0, from = r.rolled_from, complete = r.status === "closed" && r.pnl_usd != null;
-    while (from != null) { const leg = byId.get(from); if (!leg) break; if (leg.pnl_usd == null) complete = false; pnl += leg.pnl_usd ?? 0; from = leg.rolled_from; }
-    out.push({ ...r, pnl_usd: r.status === "closed" ? (complete ? pnl : null) : r.pnl_usd });
-  }
-  return out;
 }
 
 export async function edgeScoreboard(): Promise<EdgeCard[]> {
@@ -53,6 +41,8 @@ export async function edgeScoreboard(): Promise<EdgeCard[]> {
 export async function deskStatus() {
   await ensureDeskTables();
   const [enabled, limits, state, open, cards] = await Promise.all([deskEnabled(), deskLimits(), loadState(), openTrades(), edgeScoreboard()]);
+  // The leaderboard, the promotion gate and stage readiness (E6) — read-only, from the whole ledger; a failure here is a field, not a 500.
+  const review = await reviewSnapshot(limits).catch((e) => ({ error: String(e).slice(0, 200) }));
   const ledger: TradeRow[] = await ledgerRows(60);
   // Watch rows are context, not inbox: the inbox stays the desk's decisions; the last ten watches ride separately.
   const signalCols = `id, received_at, edge, root, action, side, price, stop, status, reason, trade_id`;
@@ -78,6 +68,8 @@ export async function deskStatus() {
     anomaly: parseAnomaly(anomalyRaw),                                   // entries paused until cleared (type CLEAR)
     feedSeenAt, feedStale: feedStale(feedSeenAt, Date.now()),            // the TradingView heartbeat; a NO TRADE chip, never a refusal
     record: { trades: closed.length, wins: closed.filter((t) => (t.pnl_usd as number) > 0).length, pnl: closed.reduce((s, t) => s + (t.pnl_usd as number), 0) },
+    leaderboard: "error" in review ? null : review.leaderboard, promotion: "error" in review ? null : review.promotion, stageReadiness: "error" in review ? null : review.readiness,
+    reviewError: "error" in review ? review.error : null,
     webhookPath: "/api/webhook/tradingview-futures",
     configured: !!(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET),
   };

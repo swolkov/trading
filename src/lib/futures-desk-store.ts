@@ -30,6 +30,9 @@ export interface DeskState {
   excursionDayKey?: string;
   /** Execution errors already on the day's count when the desk was last enabled: the trip is baseline + 3, so a re-enable starts a fresh allowance. */
   execErrorBaseline?: { day: string; count: number };
+  /** ET day key of the last daily review (first guardian run after 17:05 ET) and ISO week key of the last weekly review (first Monday run) — E6. */
+  reviewDayKey?: string;
+  weeklyReviewKey?: string;
 }
 
 export interface TradeRow {
