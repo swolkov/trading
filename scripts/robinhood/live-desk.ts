@@ -21,7 +21,7 @@ import { RobinhoodLiveBroker, regularSessionFor } from "../../src/lib/options-li
 import { OPTIONS_LIVE_RULES, drawdownHalt, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
 import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
 import { OPTIONS_EVENT_RULES, guardianExDivExit, spansEarnings } from "../../src/lib/options-events";
-import { directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
+import { chaseCheck, directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../../src/lib/options-operation";
 import type { StructureKind } from "../../src/lib/options-structures";
 
@@ -243,6 +243,11 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
       const shock = intradayShock(spyQuote, direction, Date.now());
       if (shock.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market shock veto — ${shock.reason}`); continue; }
     }
+    // Do not chase: the name's own move today (live quote, ≤15 min old) against its implied daily move from the research ATM IV.
+    // At 2× or more the desk waits for the next trigger. No quote, a stale one, or no IV → stamped null, never a veto.
+    const chase = chaseCheck(await broker.underlyingQuote(c.symbol), c.atmIv, c.symbol, Date.now());
+    log(`chase ${c.symbol}: ${chase.reason}`);
+    if (chase.vetoed) { refusals.push(`${c.symbol} ${c.kind}: ${chase.reason}`); continue; }
     const legs = c.legs.map((id, i) => ({ optionId: id, side: i === 0 ? "buy" as const : "sell" as const }));
     const contracts = await broker.contracts(c.legs);
     const net = openNetAsk(legs, contracts);
@@ -260,7 +265,7 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
       if (live.earningsAt <= c.expiry) { refusals.push(`${c.symbol} ${c.kind}: broker says earnings ${live.earningsAt}${live.timing ? ` (${live.timing})` : ""}${live.verified ? "" : ", tentative"} falls before expiry ${c.expiry} (via ${live.via})`); continue; }
       log(`earnings ${c.symbol}: next ${live.earningsAt}${live.verified ? "" : " (tentative)"} after expiry ${c.expiry} (via ${live.via}); research row ${earnings.note}`);
     }
-    return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity: 1, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} @ ${net.toFixed(2)} (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market };
+    return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity: 1, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} @ ${net.toFixed(2)} [dte ${c.dteBucket} · hold ${c.expectedHoldDays}d · theta ${c.thetaDragUsd == null ? "unknown" : `$${c.thetaDragUsd}`} · delta ${c.deltaBand} · chase ${chase.ratio ?? "unknown"}] (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market };
   }
   return { intent: null, note: refusals.length ? `refused: ${refusals.join("; ")}` : "the research candidates no longer fit the cap on live quotes", maxLossUsd: 0, underlying: "", expiry: "", market };
 }

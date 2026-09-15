@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { indexState, intradayShock, marketState, marketVeto, vixLevel } from "../src/lib/options-market-state";
+import { chaseCheck, chaseRatio, indexState, intradayShock, marketState, marketVeto, vixLevel } from "../src/lib/options-market-state";
 import { screenResearchContracts, type OptionsResearch, type ResearchBar, type ResearchContract } from "../src/lib/options-desk-model";
 
 const now = Date.parse("2026-09-12T16:00:00Z");
@@ -70,4 +70,24 @@ test("the screen stamps every candidate with the market state and its alignment,
   assert.equal(cand.market.spy.regime, "below"); assert.equal(cand.market.spy.dayPct, -2); assert.equal(cand.market.qqq.regime, "above"); assert.equal(cand.market.vix, 19); assert.equal(cand.market.aligned, false);
   delete r.bars.SPY;
   assert.equal(screenResearchContracts(r, 100, 500, now).map((x) => x.market.spy.regime)[0], "unknown"); assert.equal(screenResearchContracts(r, 100, 500, now)[0].market.aligned, null);
+});
+
+test("do not chase: today's move ÷ the implied daily move; 1.99× passes, 2.0× refuses with the WAIT FOR TRIGGER line; no quote, a stale one or no IV stamps null and never vetoes", () => {
+  // 40% IV → implied daily move 40/√252 = 2.52%. A +6.1% day is 2.42× → refused; the ratio is direction-blind.
+  assert.equal(chaseRatio(6.1, 0.4), 2.42); assert.equal(chaseRatio(-6.1, 0.4), 2.42);
+  assert.equal(chaseRatio(null, 0.4), null); assert.equal(chaseRatio(6.1, null), null); assert.equal(chaseRatio(6.1, 0), null);
+  const q = (last: number, ageMin = 1) => ({ last, previousClose: 100, atMs: now - ageMin * 60_000 });
+  const iv = 0.4, daily = iv / Math.sqrt(252) * 100;               // 2.5198%
+  const pass = chaseCheck(q(100 + 1.99 * daily), iv, "SOFI", now);   // 5.01% = 1.99×
+  assert.equal(pass.vetoed, false); assert.equal(pass.ratio, 1.99); assert.match(pass.reason, /SOFI \+5.01% today = 1.99× its implied daily move/);
+  const stop = chaseCheck(q(100 + 2 * daily), iv, "SOFI", now);       // 5.04% = 2×
+  assert.equal(stop.vetoed, true); assert.equal(stop.ratio, 2); assert.equal(stop.reason, "WAIT FOR TRIGGER: SOFI moved +5.04% today = 2× its implied daily move — not chasing");
+  assert.equal(chaseCheck(q(106.1), iv, "SOFI", now).reason, "WAIT FOR TRIGGER: SOFI moved +6.1% today = 2.42× its implied daily move — not chasing");
+  assert.equal(chaseCheck(q(93.9), iv, "SOFI", now).vetoed, true);   // a −6.1% day is not chased either (a put on a crash is still chasing)
+  const none = chaseCheck(null, iv, "SOFI", now);
+  assert.deepEqual([none.vetoed, none.ratio, none.movePct], [false, null, null]); assert.match(none.reason, /quote unavailable — chase check skipped/);
+  const stale = chaseCheck(q(106.1, 16), iv, "SOFI", now);
+  assert.deepEqual([stale.vetoed, stale.ratio], [false, null]); assert.match(stale.reason, /16 min old — chase check skipped/);
+  const noIv = chaseCheck(q(106.1), null, "SOFI", now);
+  assert.deepEqual([noIv.vetoed, noIv.ratio, noIv.movePct], [false, null, 6.1]); assert.match(noIv.reason, /ATM implied vol unavailable/);
 });

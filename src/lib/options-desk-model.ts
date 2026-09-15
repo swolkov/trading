@@ -1,6 +1,6 @@
 // Research uses broker prices. It never simulates fills or authorizes an order.
 import { exDivRisk, spansEarnings, type EarningsClass, type ResearchEvents } from "./options-events";
-import { directionOfKind, marketState, marketVeto, type MarketStamp } from "./options-market-state";
+import { chaseRatio, directionOfKind, marketState, marketVeto, type MarketStamp } from "./options-market-state";
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
 // The base research list. The index and mega-cap names give the desk its regime read, but at a
 // $100 max loss a single contract on a $300+ stock never fits, so the AFFORDABLE CORE (Sep 14 2026)
@@ -12,10 +12,17 @@ export const OPTIONS_WATCHLIST = [
 ];
 export const OPTIONS_DESK_RULES = {
   maxContracts: 1, maxPositions: 1, maxEntriesPerDay: 1,
-  // 28 days minimum (Sep 14 2026, was 21): a breakout needs days to weeks to pay, and at 21 days an
-  // at-the-money contract loses ~2.4% of its premium a day just waiting — ten flat days is most of
-  // the way to the 50% stop. At 28+ the same wait costs ~1.8%/day. Out at 7 either way.
-  minDte: 28, maxDte: 60, exitBeforeDte: 7,
+  // DTE ENGINE (Sep 15 2026): research pulls TWO expiries per name — the nearest ≥21 and the nearest
+  // ≥35 days out, both ≤60 — and the ranking below charges each structure its theta over the expected
+  // hold, so the longer expiry wins whenever the decay saved outweighs the extra premium. At-the-money
+  // decay per day as a share of premium (the theta table the 21-day floor is set against):
+  //   45 DTE ≈1.1%/day · 35 ≈1.4% · 28 ≈1.8% · 21 ≈2.4% · 14 ≈3.5% · 7 ≈7% · 0–1 DTE 36% or worse.
+  // 7–14 DTE and 0–1 DTE are deliberately not offered: at $100 a contract the friction alone is
+  // 15–30% a side and a flat week is the stop. Out at 7 either way.
+  minDte: 21, maxDte: 60, exitBeforeDte: 7,
+  // The hold the theta charge is computed over: a breakout pays inside two weeks or it does not, and the
+  // position is out 7 days before expiry regardless — so min(10, dte − exitBeforeDte).
+  expectedHoldDaysMax: 10,
   minOpenInterest: 500, minVolume: 100, maxSpreadPct: 10,
   // Single leg vs spread (Sep 14 2026): a long call/put is preferred only when the market is not
   // charging more than ~15% over what the stock has actually been doing (ATM implied vol ÷ 20-day
@@ -52,7 +59,18 @@ export interface ResearchCandidate {
   earningsClass: EarningsClass; earningsAt: string | null; exDivAt: string | null;
   /** Where SPY/QQQ sat on the signal day and whether this direction is aligned — a stamp; the live veto is applied by the desk. */
   market: MarketStamp & { aligned: boolean | null };
+  /** ATM implied vol on this expiry (annualized decimal) — the yardstick the live chase check divides today's move by. */
+  atmIv: number | null;
+  /** The signal day's close-to-close move as a multiple of the implied daily move (chaseRatio). A stamp; the desk re-computes it live. */
+  chase: number | null;
+  /** DTE engine stamps: which expiry shelf, the hold the theta charge assumes, and the charge itself (null when a leg has no theta). */
+  dteBucket: DteBucket; expectedHoldDays: number; thetaDragUsd: number | null;
+  /** Strike-window slice for D7: "prompt" = the long leg's |delta| in [0.40, 0.70]; "outer" = the rest of the 0.35–0.75 window (or no delta). */
+  deltaBand: "prompt" | "outer";
 }
+export type DteBucket = "21-30" | "30-45" | "45-60";
+export const dteBucketOf = (dte: number): DteBucket => (dte < 30 ? "21-30" : dte < 45 ? "30-45" : "45-60");
+export const deltaBandOf = (delta: number | null): "prompt" | "outer" => (delta != null && Math.abs(delta) >= 0.4 && Math.abs(delta) <= 0.7 ? "prompt" : "outer");
 const mean = (xs: number[]) => xs.reduce((a,b)=>a+b,0)/xs.length;
 export function researchSignals(bars: OptionsResearch["bars"], now=Date.now()): StrategySignal[] {
   return Object.entries(bars).flatMap(([symbol, rows]) => {
@@ -121,6 +139,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
   for (const signal of signals.filter(s=>["20-session breakout","20-session breakdown"].includes(s.setup))) {
     const bull=signal.direction==="bullish", cs=good.filter(c=>c.symbol===signal.symbol);
     const rv=realizedVol20(data.bars[signal.symbol]??[]);
+    const prevClose=data.bars[signal.symbol]?.at(-2)?.close, dayMovePct=prevClose!=null&&prevClose>0?(signal.close/prevClose-1)*100:null;
     const push=(kind:string,long:ResearchContract,short?:ResearchContract)=>{
       // Earnings on or before expiry (or no fresh calendar row) is an earnings trade the rule never asked for — dropped, not ranked.
       const earnings=spansEarnings(signal.symbol,long.expiry,data.events,now);
@@ -147,6 +166,11 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       if(!exDiv.permitted)return;
       const iv=atmImpliedVol(cs,long.expiry,signal.close);
       const ivToRealized=iv!=null&&rv!=null?Math.round(iv/rv*100)/100:null;
+      // DTE engine: the hold the theta charge assumes, and the charge — net theta (long − short, per share per day) × 100 × days.
+      // A leg without a broker theta charges nothing and says so (thetaDragUsd null) rather than inventing a number.
+      const dte=(Date.parse(long.expiry+"T00:00:00Z")-now)/86400000, expectedHoldDays=Math.max(0,Math.min(rules.expectedHoldDaysMax,dte-rules.exitBeforeDte));
+      const netTheta=long.theta==null||(short&&short.theta==null)?null:long.theta-(short?.theta??0);
+      const thetaDragUsd=netTheta==null?null:Math.round(-netTheta*100*expectedHoldDays*100)/100;
       const single=!short, singlePreferred=ivToRealized!=null&&ivToRealized<=rules.singleLegMaxIvToRealized;
       const volNote=ivToRealized==null?"implied vs realized vol unavailable → spreads preferred":`implied vol ${(iv!*100).toFixed(0)}% vs realized ${(rv!*100).toFixed(0)}% (${ivToRealized}×) → ${singlePreferred?"single leg preferred":"spread preferred"}${single===singlePreferred?"":" (this is the other family)"}`;
       const moveNote=em==null?"expected move unavailable":`worth $${payoff} at the market's expected ±${(em*100).toFixed(1)}% move`;
@@ -155,6 +179,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
         quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:emPct,payoffAtMoveUsd:payoff,ivToRealized,
         earningsClass:earnings.earningsClass,earningsAt:earnings.earningsAt,exDivAt:data.events?.[signal.symbol]?.exDivAt??null,
         market:{...stamp,aligned:marketVeto(stamp,directionOfKind(kind),signal.symbol).aligned},
+        atmIv:iv==null?null:Math.round(iv*10000)/10000,chase:chaseRatio(dayMovePct,iv),dteBucket:dteBucketOf(dte),expectedHoldDays:Math.round(expectedHoldDays*100)/100,thetaDragUsd,deltaBand:deltaBandOf(long.delta),
         reason:`${signal.setup}. ${volNote}. ${moveNote}. Research only; fresh broker review and operational checks required.`});
     };
     for(const long of cs){
@@ -171,9 +196,11 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
     }
   }
   // Order: the preferred family (single leg when vol is fair, spread when it is rich) first; within it,
-  // the most payoff per dollar at risk at the market's expected move; then the cheapest. No opinions.
+  // the most payoff per dollar at risk at the market's expected move AFTER the theta the expected hold
+  // costs — so of two expiries the longer wins whenever the decay it saves outweighs its extra premium;
+  // then the cheapest. No opinions.
   const family=(c:ResearchCandidate)=>((c.legs.length===1)===(c.ivToRealized!=null&&c.ivToRealized<=rules.singleLegMaxIvToRealized))?0:1;
-  const score=(c:ResearchCandidate)=>c.payoffAtMoveUsd==null?-Infinity:c.payoffAtMoveUsd/c.plannedLoss;
+  const score=(c:ResearchCandidate)=>c.payoffAtMoveUsd==null?-Infinity:(c.payoffAtMoveUsd-(c.thetaDragUsd??0))/c.plannedLoss;
   return result.sort((a,b)=>family(a)-family(b)||score(b)-score(a)||a.plannedLoss-b.plannedLoss).slice(0,24);
 }
 

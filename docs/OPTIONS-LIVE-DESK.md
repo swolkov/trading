@@ -85,11 +85,13 @@ afford.
 
 ## When the desk does what (Sep 14 2026)
 
-**Expiry.** Research pulls the nearest monthly 28–60 days out; the desk is out 7 days before expiry.
+**Expiry.** Research pulls two standard expirations per name — the nearest at least 21 days out and
+the nearest at least 35, both at most 60 (the DTE engine below); the desk is out 7 days before expiry.
 A breakout takes days to weeks to pay. At-the-money decay per day as a share of premium: ~1.1% at
-45 days, ~1.8% at 28, ~2.4% at 21, ~7% at 7, 36% or worse at 1. Seven-day and one-day options are
-not a setting this desk offers: at $100 a contract on a cheap name is $0.10–$0.30 wide on a nickel
-spread, so friction alone is 15–30% a side, and the decay means a flat week is the stop.
+45 days, ~1.4% at 35, ~1.8% at 28, ~2.4% at 21, ~3.5% at 14, ~7% at 7, 36% or worse at 1. Seven-day
+and one-day options are not a setting this desk offers: at $100 a contract on a cheap name is
+$0.10–$0.30 wide on a nickel spread, so friction alone is 15–30% a side, and the decay means a flat
+week is the stop.
 
 **Single leg or spread.** Decided by the market, not by mood: ATM implied vol ÷ 20-day realized vol.
 At or under 1.15× the option is fairly priced against how the stock actually moves → a long call (or
@@ -97,8 +99,9 @@ long put on a breakdown) with its upside uncapped. Above that the option is rich
 which sells the richness back. Sep 14 examples: SOFI 0.90× and AAPL 1.10× → single; SPY 1.44× → spread.
 
 **Which contract.** Within the preferred family, the most P&L per dollar at risk if the stock moves
-exactly the move the options market is pricing (ATM straddle ÷ spot), in the signal's direction. A
-structure worth nothing at that move is rejected outright — that is a lottery ticket.
+exactly the move the options market is pricing (ATM straddle ÷ spot), in the signal's direction,
+**after the theta the expected hold costs** (DTE engine below). A structure worth nothing at that
+move is rejected outright — that is a lottery ticket.
 
 **Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
 trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
@@ -176,3 +179,32 @@ layer is fail-soft; the earnings rule is the fail-closed one. The VIX read is ra
 8-second timeout so the guard loop can never stall on Yahoo. Off switch: `options_live_market_veto="false"` (default on). Entry log lines:
 `refused: SOFI long_call: market veto — SPY below its 20-day (651.2 vs 660.4) and -2.1% on 2026-09-14 — bullish single-name entries refused`
 and `… market shock veto — SPY -1.7% intraday against a bullish entry`.
+
+## Do not chase, the DTE engine and the strike-window slice (Sep 15 2026)
+
+**Do not chase.** `chaseRatio(todayMovePct, atmIv)` (`options-market-state.ts`, pure) = |today's
+move| ÷ the implied daily move (ATM IV ÷ √252). The screen stamps `chase` on every candidate from
+the signal day's close-to-close move and that expiry's ATM IV. At the moment of entry `pickCandidate`
+recomputes it from a live quote of the name itself (`broker.underlyingQuote`, last vs prior close,
+fresh ≤15 minutes) and **refuses at 2× or more**:
+`refused: SOFI long_call: WAIT FOR TRIGGER: SOFI moved +6.1% today = 2.4× its implied daily move — not chasing`.
+Direction-blind (a put on a −6% day is chasing too). No quote, a stale one, or no ATM IV → ratio
+null, no veto, logged as skipped — fail-soft like the market layer. Constant: `OPTIONS_MARKET_RULES.chaseMaxRatio = 2`.
+
+**DTE engine.** The research prompt asks for **two** standard expirations per name — the nearest
+≥21 days out and the nearest ≥35, both ≤60. `OPTIONS_DESK_RULES.minDte` is **21** (was 28);
+`exitBeforeDte` stays 7. The theta table the floor is set against (ATM decay per day as a share of
+premium): 45 DTE ≈1.1% · 35 ≈1.4% · 28 ≈1.8% · 21 ≈2.4% · 14 ≈3.5% · 7 ≈7% · 0–1 DTE ≥36%. 7–14
+DTE and 0–1 DTE are deliberately not offered. Ranking inside the preferred family is now
+`(payoffAtMoveUsd − thetaDragUsd) / plannedLoss` with `thetaDragUsd = −netTheta × 100 ×
+expectedHoldDays`, net theta = long − short from the broker greeks, `expectedHoldDays = min(10,
+dte − 7)` (always 10 inside the window). A leg without a broker theta charges nothing and stamps
+`thetaDragUsd: null` — no invented number. So of two expiries the longer wins whenever the decay it
+saves outweighs its extra premium (the test pins a 26-DTE call at −$0.08/day losing to a 55-DTE one
+at −$0.01/day). Stamps: `dteBucket` (`21-30` | `30-45` | `45-60`), `expectedHoldDays`,
+`thetaDragUsd`, `atmIv`; the entry note carries them (`[dte 45-60 · hold 10d · theta $10 · delta prompt · chase 0.4]`).
+
+**Strike window.** Live stays |delta| 0.35–0.75 (PR #166's band has zero trades; changing it would
+restart an empty record). Every candidate is stamped `deltaBand`: **prompt** = the long leg's
+|delta| in [0.40, 0.70], **outer** = the rest of the window (or no delta). D7 measures the slice
+before anything moves.

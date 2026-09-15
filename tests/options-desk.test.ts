@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
-import { isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
+import { OPTIONS_DESK_RULES, contractQualityFailures, deltaBandOf, dteBucketOf, isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
 import { mergeResearchSnapshot } from "../src/lib/options-research-ingest";
 import { exDivRisk, nextExDiv, spansEarnings } from "../src/lib/options-events";
 import { loadOptionsNews } from "../src/lib/options-news";
@@ -221,4 +221,37 @@ test("nextExDiv: no dividend → null; upcoming ex-date → scheduled; past ex-d
  assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-10-30",Date.parse("2026-09-15T16:00:00Z"),"projected").permitted,true);
  assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"scheduled").permitted,true);   // the same date scheduled is after expiry
  assert.match(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"projected").note,/projected ex-dividend 2026-11-10 \(±7d\)/);
+});
+
+test("DTE engine: 21 days is the floor (a 20-DTE contract is outside the window, 21 passes); buckets and the delta band stamp; ranking charges theta over min(10, dte−7) days and prefers the longer expiry when the drag flips the order",()=>{
+ assert.equal(OPTIONS_DESK_RULES.minDte,21); assert.equal(OPTIONS_DESK_RULES.exitBeforeDte,7);
+ const midnight=Date.parse("2026-09-12T00:00:00Z"), c0=research().contracts[0];
+ assert.ok(contractQualityFailures({...c0,expiry:"2026-10-02",at:new Date(midnight).toISOString()},midnight).includes("Outside expiration window"));   // exactly 20 DTE
+ assert.equal(contractQualityFailures({...c0,expiry:"2026-10-03",at:new Date(midnight).toISOString()},midnight).length,0);                             // exactly 21
+ assert.deepEqual([dteBucketOf(21),dteBucketOf(29.9),dteBucketOf(30),dteBucketOf(44.9),dteBucketOf(45),dteBucketOf(60)],["21-30","21-30","30-45","30-45","45-60","45-60"]);
+ assert.deepEqual([deltaBandOf(0.5),deltaBandOf(-0.7),deltaBandOf(0.4),deltaBandOf(0.39),deltaBandOf(0.71),deltaBandOf(null)],["prompt","prompt","prompt","outer","outer","outer"]);
+ // Two expiries of the same ATM call on a $105 spot. Near (Oct 9, 26.7 DTE): straddle 2.375 → worth $146.5 at the expected move for $91;
+ // far (Nov 6, 54.7 DTE): straddle 1.80 → $84 for $96. Raw payoff per dollar prefers the near one (1.61 vs 0.88); charging theta over a
+ // 10-day hold (near −0.08/day = $80, far −0.01/day = $10) flips it: (146.5−80)/91 = 0.73 < (84−10)/96 = 0.77.
+ const r=research(); const rv=realizedVol20(r.bars.TEST)!, iv=rv*1.1;
+ const near={...c0,id:"nc",expiry:"2026-10-09",iv,theta:-0.08}, nearPut={...c0,id:"np",type:"put" as const,bid:1.45,ask:1.55,delta:-0.5,iv,theta:-0.08,expiry:"2026-10-09"};
+ const far={...c0,id:"fc",expiry:"2026-11-06",bid:0.9,ask:0.95,iv,theta:-0.01}, farPut={...c0,id:"fp",type:"put" as const,bid:0.85,ask:0.9,delta:-0.5,iv,theta:-0.01,expiry:"2026-11-06"};
+ r.contracts=[near,nearPut,far,farPut];
+ const ranked=screenResearchContracts(r,100,500,now).filter(c=>c.kind==="long_call");
+ assert.deepEqual(ranked.map(c=>c.expiry),["2026-11-06","2026-10-09"]);
+ const [f,n]=ranked;
+ assert.deepEqual([f.dteBucket,n.dteBucket],["45-60","21-30"]); assert.deepEqual([f.expectedHoldDays,n.expectedHoldDays],[10,10]);
+ assert.deepEqual([f.thetaDragUsd,n.thetaDragUsd],[10,80]); assert.deepEqual([f.payoffAtMoveUsd,n.payoffAtMoveUsd],[84,146.5]);
+ assert.equal(f.deltaBand,"prompt"); assert.equal(f.atmIv,Math.round(iv*10000)/10000);
+ assert.equal(f.chase,Math.round(5/(iv/Math.sqrt(252)*100)*100)/100);   // the signal day closed 105 on a 100 prior close: +5% ÷ the implied daily move
+ // Without broker theta there is no charge and no invented number: the raw order returns and thetaDragUsd is null.
+ const blind=structuredClone(r); for(const x of blind.contracts)x.theta=null;
+ const raw=screenResearchContracts(blind,100,500,now).filter(c=>c.kind==="long_call");
+ assert.deepEqual(raw.map(c=>c.expiry),["2026-10-09","2026-11-06"]); assert.equal(raw[0].thetaDragUsd,null);
+ // A short leg without theta also leaves the spread uncharged. The hold is min(10, dte−7): inside the 21–60 window that is always 10 (it would only shrink under 17 DTE, which the window refuses).
+ const short={...far,id:"fs",strike:110,bid:0.28,ask:0.3,delta:0.35,theta:null};
+ const spread=screenResearchContracts({...r,contracts:[far,farPut,short]},100,500,now).find(c=>c.kind==="call_debit")!;
+ assert.equal(spread.thetaDragUsd,null); assert.equal(spread.deltaBand,"prompt");
+ const soon=screenResearchContracts({...r,contracts:[{...near,expiry:"2026-10-06"},{...nearPut,expiry:"2026-10-06"}]},100,500,now)[0];   // 23.3 DTE → 21-30, hold 10
+ assert.equal(soon.dteBucket,"21-30"); assert.equal(soon.expectedHoldDays,10);
 });
