@@ -89,6 +89,7 @@ function rsi14(closes: number[]): number {
 // do not read this and are unchanged — pinned by test.
 export interface TfFeatures {
   close: number;
+  ret1: number;           // close ÷ the previous bar's close − 1 (the forming bar's move so far)
   sma20: number;          // mean of the last 20 closes (the forming bar included)
   prevClose20: number;    // the close 20 bars ago — with sma20 gives the direction stamp
   hh20: number; ll20: number;   // extremes of the 20 COMPLETED bars, as evaluate() reads them
@@ -139,6 +140,7 @@ export function barFeatures(bars: KrakenBar[], intervalMin: number, nowMs: numbe
   else if (staleMs > 2 * step * 1000) dataReason = `newest bar ${Math.round(staleMs / 60_000)} min past its close (> 2× ${intervalMin}m)`;
   return {
     close: last ? last.c : NaN,
+    ret1: lastClosed && lastClosed.c > 0 && last ? last.c / lastClosed.c - 1 : NaN,
     sma20: n >= 20 ? mean(closes.slice(-20)) : NaN,
     prevClose20: n >= 21 ? closes[n - 21] : NaN,
     hh20: win20.length >= 20 ? Math.max(...win20.map((b) => b.h)) : NaN,
