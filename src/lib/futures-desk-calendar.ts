@@ -167,3 +167,77 @@ export function rollWindowRefusal(contractName: string, expiryIso: string | null
   const days = Math.max(0, Math.round((Date.parse(expiryIso as string) - now.getTime()) / 86_400_000));
   return `${contractName} expires in ${days} day${days === 1 ? "" : "s"} — inside the roll window; entry refused`;
 }
+
+// ---- next roll per root (calendar-derived, for the brief and the dashboard) ---------------------------------
+/** The months each root trades: index roots the quarterlies; metals their liquid months (contract-months.ts). */
+const MONTH_CODES = "FGHJKMNQUVXZ";
+const ROLL_MONTHS: Record<string, string> = { ES: "HMUZ", NQ: "HMUZ", YM: "HMUZ", RTY: "HMUZ", GC: "GJMQVZ", SI: "HKNUZ", HG: "HKNUZ" };
+const MICRO_OF: Record<string, string> = { ES: "MES", NQ: "MNQ", YM: "MYM", RTY: "M2K", GC: "MGC", SI: "SIL", HG: "MHG" };
+
+/** A New York wall-clock instant as UTC ms (DST-aware through the platform's tz data). */
+export function etToUtcMs(y: number, m: number, d: number, hh: number, mm: number): number {
+  const guess = Date.UTC(y, m - 1, d, hh, mm);
+  const et = new Date(new Date(guess).toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const offset = Date.UTC(et.getFullYear(), et.getMonth(), et.getDate(), et.getHours(), et.getMinutes()) - guess;
+  return guess - offset;
+}
+/** Index contracts cash-settle on the THIRD FRIDAY of the contract month at 09:30 ET. */
+export function thirdFriday(y: number, m: number): { y: number; m: number; d: number } {
+  const dow = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  return { y, m, d: 1 + ((5 - dow + 7) % 7) + 14 };
+}
+/** Deliverable metals: first notice is the LAST BUSINESS DAY of the month BEFORE the contract month (CME
+ *  holidays are not applied — a day early at worst, which is the safe side for a roll estimate). */
+export function lastBusinessDayBefore(y: number, m: number): { y: number; m: number; d: number } {
+  const prev = new Date(Date.UTC(y, m - 1, 0));   // day 0 of month m = last day of month m−1
+  while (prev.getUTCDay() === 0 || prev.getUTCDay() === 6) prev.setUTCDate(prev.getUTCDate() - 1);
+  return { y: prev.getUTCFullYear(), m: prev.getUTCMonth() + 1, d: prev.getUTCDate() };
+}
+
+export interface RootRoll { root: string; micro: string; contract: string; kind: "expiry" | "first notice"; expiry: string; rollOn: string; daysUntilRoll: number; source: "calendar"; /** The desk holds this month: the roll shown is the HELD month's, even inside the guard window. */ held: boolean }
+
+function rollOf(root: string, y: number, m: number, nowMs: number, guard: number, held: boolean): RootRoll {
+  const micro = MICRO_OF[root], metal = root === "GC" || root === "SI" || root === "HG";
+  const d = metal ? lastBusinessDayBefore(y, m) : thirdFriday(y, m);
+  const expMs = etToUtcMs(d.y, d.m, d.d, metal ? 17 : 9, metal ? 0 : 30);
+  const rollMs = expMs - (guard - 1) * 86_400_000;
+  return { root, micro, contract: `${micro}${MONTH_CODES[m - 1]}${String(y).slice(-1)}`, kind: metal ? "first notice" : "expiry", expiry: new Date(expMs).toISOString(), rollOn: new Date(rollMs).toISOString(), daysUntilRoll: (rollMs - nowMs) / 86_400_000, source: "calendar", held };
+}
+/** `MESZ6` → { m: 12, y: 2026 }: the month code after the micro and the year's last digit, resolved to the year
+ *  nearest `now` (±5 years). Null when the name does not parse. */
+export function contractMonthYear(contract: string, micro: string, now: Date): { m: number; y: number } | null {
+  if (!contract.startsWith(micro) || contract.length !== micro.length + 2) return null;
+  const m = MONTH_CODES.indexOf(contract[micro.length]) + 1, digit = Number(contract[micro.length + 1]);
+  if (m < 1 || !Number.isInteger(digit)) return null;
+  const base = now.getUTCFullYear();
+  let best = base - (base % 10) + digit;
+  for (const y of [best - 10, best + 10]) if (Math.abs(y - base) < Math.abs(best - base)) best = y;
+  return { m, y: best };
+}
+
+/** For each root, the month the desk would trade now (the nearest listed month whose expiry / first notice
+ *  is more than `guardDays` away — `deskContract`'s own rule) and when the guardian would roll out of it
+ *  (expiry − (guardDays − 1) days, `rollDue`). A root the desk HOLDS (`held`: root → contract name) shows the
+ *  held month's roll instead, even inside the guard window — the guardian rolls what is held, not what the
+ *  calendar would open. CALENDAR-DERIVED: the broker's own maturity dates decide the real roll; this is the
+ *  brief's and the dashboard's estimate, labelled `source: "calendar"`. */
+export function nextRollByRoot(now: Date, guardDaysOf: (micro: string) => number, roots: readonly string[] = Object.keys(ROLL_MONTHS), held: Record<string, string> = {}): RootRoll[] {
+  const out: RootRoll[] = [];
+  const nowMs = now.getTime();
+  for (const root of roots) {
+    const codes = ROLL_MONTHS[root], micro = MICRO_OF[root];
+    if (!codes || !micro) continue;
+    const guard = guardDaysOf(micro);
+    const heldMonth = held[root] ? contractMonthYear(held[root], micro, now) : null;
+    if (heldMonth) { out.push(rollOf(root, heldMonth.y, heldMonth.m, nowMs, guard, true)); continue; }
+    const start = new Date(nowMs);
+    for (let k = 0; k < 24 && !out.some((r) => r.root === root); k++) {
+      const y = start.getUTCFullYear() + Math.floor((start.getUTCMonth() + k) / 12), m = ((start.getUTCMonth() + k) % 12) + 1;
+      if (!codes.includes(MONTH_CODES[m - 1])) continue;
+      const r = rollOf(root, y, m, nowMs, guard, false);
+      if (Date.parse(r.expiry) - nowMs <= guard * 86_400_000) continue;
+      out.push(r);
+    }
+  }
+  return out;
+}

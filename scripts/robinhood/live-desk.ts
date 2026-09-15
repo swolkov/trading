@@ -26,8 +26,9 @@ import { chaseCheck, directionOfKind, intradayShock, marketState, marketVeto, vi
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../../src/lib/options-operation";
 import { OPTIONS_LADDER_RULES, clusterOf, clusterRisk, ddTier, gradeFor, maxLossFor, reserveRefusal, slotsFor, type DrawdownTier, type OptionsGrade } from "../../src/lib/options-risk-ladder";
 import { divergenceVerdict, roundTrips } from "../../src/lib/options-live-ledger";
-import { legSpreadPct } from "../../src/lib/options-desk-model";
+import { legSpreadPct, type ResearchCandidate } from "../../src/lib/options-desk-model";
 import type { StructureKind } from "../../src/lib/options-structures";
+import { persistEntryDecision, safeEntryTickCards, type LivePricing, type RefusedCandidate } from "./live-desk-cards";
 
 export type LiveDeskMode = "guard" | "entry" | "probe";
 let MODE: LiveDeskMode = "guard";
@@ -249,22 +250,29 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         else {
           const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0, { equity: totalValue, tier, promoted, owned });
           state.candidate = pick.note; state.market = pick.market; state.grade = pick.grade; state.cap = pick.cap;
+          let res: Awaited<ReturnType<typeof executeOptionsIntent>> | null = null;
           if (!pick.intent) log(`entry: ${pick.note}`);
           else {
             // The ladder's answer becomes the policy the core enforces on review AND re-review: this tick's cap, slots and contracts — never above the armed ceiling.
             const entryDeps: OptionsExecutorDependencies = { ...deps, policy: async () => { const base = await readOptionsExecutionPolicy(); return { ...base, maxLossUsd: base.maxLossUsd == null ? null : Math.min(base.maxLossUsd, pick.cap), maxOpenPositions: slots, maxQuantity: pick.intent!.quantity }; } };
             broker.noteTheoreticalMaxLoss(pick.maxLossUsd);
-            const res = await executeOptionsIntent(pick.intent, entryDeps);
+            res = await executeOptionsIntent(pick.intent, entryDeps);
             log(`ENTRY ${pick.intent.kind} ${pick.underlying} × ${pick.intent.quantity} [${pick.grade} cap $${pick.cap}]: ${res.status}${res.reason ? ` — ${res.reason}` : ""}${res.orderId ? ` order ${res.orderId}` : ""}`);
-            if (res.status === "accepted") {
-              // Stash the thesis on the reservation RECORD (the intent stays canonical): the fill ingest copies the range edge onto the owned record.
-              if (pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
-                .catch((e) => log(`could not stash the candidate on ${pick.intent!.refId} (invalidation rule will be skipped for it): ${String(e).slice(0, 160)}`));
-              await page(`📥 Options ENTRY placed: ${pick.intent.kind} ${pick.underlying} ${pick.expiry} × ${pick.intent.quantity} at ${pick.intent.limitPrice.toFixed(2)} (grade ${pick.grade}, max loss $${pick.maxLossUsd.toFixed(0)} + fees under a $${pick.cap} cap${tier && tier.tier > 0 ? `, drawdown tier ${tier.tier} ×${tier.mult}` : ""}; invalidation ${pick.candidate?.direction === "bullish" ? `below ${pick.candidate.rangeLow}` : `above ${pick.candidate?.rangeHigh}`}). Order ${res.orderId}.`);
-            }
+            // Stash the thesis on the reservation RECORD (the intent stays canonical): the fill ingest copies the range edge onto the owned record.
+            // Written before anything else follows the core's answer — the guardian's invalidation rule depends on it.
+            if (res.status === "accepted" && pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
+              .catch((e) => log(`could not stash the candidate on ${pick.intent!.refId} (invalidation rule will be skipped for it): ${String(e).slice(0, 160)}`));
+          }
+          // The trade cards (D5): built from what the tick knew, AFTER the core has answered and the thesis is stashed; a throw yields no cards
+          // (safeEntryTickCards), the write is `.catch`ed — never on the order's path.
+          const cards = safeEntryTickCards({ data: pick.data ?? null, refused: pick.refused ?? [], equity: totalValue, feeReserveUsd: policy.feeBudgetUsd ?? 0,
+            chosen: pick.intent && pick.research && pick.live && pick.grade ? { candidate: pick.research, live: pick.live, quantity: pick.intent.quantity, grade: pick.grade, cap: pick.cap } : null, result: res }, log);
+          if (pick.intent && res) {
+            if (res.status === "accepted") await page(`📥 Options ENTRY placed: ${pick.intent.kind} ${pick.underlying} ${pick.expiry} × ${pick.intent.quantity} at ${pick.intent.limitPrice.toFixed(2)} (grade ${pick.grade}, max loss $${pick.maxLossUsd.toFixed(0)} + fees under a $${pick.cap} cap${tier && tier.tier > 0 ? `, drawdown tier ${tier.tier} ×${tier.mult}` : ""}; invalidation ${pick.candidate?.direction === "bullish" ? `below ${pick.candidate.rangeLow}` : `above ${pick.candidate?.rangeHigh}`}). Order ${res.orderId}.${cards[0] ? `\n${cards[0].text}` : ""}`);
             else if (res.status === "refused") log(`entry refused by the core: ${res.reason}`);
             else await page(`🚨 Options entry ended ${res.status}: ${res.reason}. No retry until reconciled.`);
           }
+          await persistEntryDecision(cards, log).catch((e) => log(`trade cards: ${String(e).slice(0, 160)}`));
         }
       }
       await setCfg(STATE_KEY, JSON.stringify(state));
@@ -289,7 +297,11 @@ interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: n
 interface SizingContext { equity: number | null; tier: DrawdownTier | null; promoted: boolean; owned: OwnedPositionRecord[] }
 /** What the runner remembers about the setup beside the canonical intent — written on the reservation record after acceptance. */
 interface CandidateStash { symbol: string; kind: string; setup: string; direction: "bullish" | "bearish"; rangeLow: number; rangeHigh: number; grade: OptionsGrade; cap: number; spreadPct: number | null; quantity: number }
-interface Pick { intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string; market?: MarketView; grade: OptionsGrade | null; cap: number; candidate?: CandidateStash }
+interface Pick {
+  intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string; market?: MarketView; grade: OptionsGrade | null; cap: number; candidate?: CandidateStash;
+  /** For the trade card, written AFTER the decision: the chosen research row re-priced live, every refused row with its gate, and the snapshot the greeks come from. */
+  research?: ResearchCandidate; live?: LivePricing; refused?: RefusedCandidate[]; data?: OptionsResearch | null;
+}
 /** Top debit candidate from the research screen, re-priced on quotes fetched THIS second and sized by the ladder:
  *  cap = min(ceiling, maxLossFor(grade, equity)) × drawdown multiplier; two contracts only on a Strong-or-better grade whose structure fits twice. */
 async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePolicy, buyingPower: number, ctx: SizingContext): Promise<Pick> {
@@ -297,7 +309,8 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
   const ceiling = policy.maxLossUsd ?? 0, fee = policy.feeBudgetUsd ?? 0, mult = ctx.tier?.mult ?? 1;
   // The screen runs at the widest cap any grade could earn this tick; each candidate's own grade narrows it below.
   const cap = Math.round(maxLossFor(ctx.promoted ? "A+" : "Strong", ctx.equity, ceiling) * mult * 100) / 100;
-  const none = (note: string, market?: MarketView): Pick => ({ intent: null, note, maxLossUsd: 0, underlying: "", expiry: "", market, grade: null, cap });
+  const refused: RefusedCandidate[] = [];
+  const none = (note: string, market?: MarketView): Pick => ({ intent: null, note, maxLossUsd: 0, underlying: "", expiry: "", market, grade: null, cap, refused, data });
   if (!data) return none("no broker research on file");
   // Broad market first: SPY/QQQ against their averages from the research bars, VIX from Yahoo (stamp only, null on failure),
   // SPY's intraday move from a live quote (fail-soft). The one pre-registered veto is on unless options_live_market_veto="false".
@@ -313,39 +326,42 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
   const ownedLegs = ctx.owned.map((o) => ({ symbol: o.underlying, kind: o.kind }));
   const openAtRiskUsd = ctx.owned.reduce((sum, o) => sum + (o.entryPrice * 100 + fee) * (o.legs[0]?.quantity ?? 1), 0);
   const refusals: string[] = [];
+  const refuse = (c: ResearchCandidate, gate: string) => { refusals.push(`${c.symbol} ${c.kind}: ${gate}`); refused.push({ candidate: c, gate }); };
   for (const c of candidates.slice(0, 3)) {
     // The screen ran on the snapshot's clock; the desk runs on its own. A row that aged past 36h since then refuses here.
     const earnings = spansEarnings(c.symbol, c.expiry, data.events, Date.now());
-    if (!earnings.permitted) { refusals.push(`${c.symbol} ${c.kind}: ${earnings.note}`); continue; }
+    if (!earnings.permitted) { refuse(c, earnings.note); continue; }
     if (vetoOn) {
       const direction = directionOfKind(c.kind);
       const veto = marketVeto(stamp, direction, c.symbol);
-      if (veto.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market veto — ${veto.reason}`); continue; }
+      if (veto.vetoed) { refuse(c, `market veto — ${veto.reason}`); continue; }
       const shock = intradayShock(spyQuote, direction, Date.now());
-      if (shock.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market shock veto — ${shock.reason}`); continue; }
+      if (shock.vetoed) { refuse(c, `market shock veto — ${shock.reason}`); continue; }
     }
     // Do not chase: the name's own move today (live quote, ≤15 min old) against its implied daily move from the research ATM IV.
     // At 2× or more the desk waits for the next trigger. No quote, a stale one, or no IV → stamped null, never a veto.
     const chase = chaseCheck(await broker.underlyingQuote(c.symbol), c.atmIv, c.symbol, Date.now());
     log(`chase ${c.symbol}: ${chase.reason}`);
-    if (chase.vetoed) { refusals.push(`${c.symbol} ${c.kind}: ${chase.reason}`); continue; }
+    if (chase.vetoed) { refuse(c, chase.reason); continue; }
     // Cluster: the same direction in the same group, or an index ETF beside a semis/megacap name, is one bet already on.
     const cluster = clusterRisk(ownedLegs, { symbol: c.symbol, kind: c.kind });
-    if (cluster.refused) { refusals.push(`${c.symbol} ${c.kind}: ${cluster.reason}`); continue; }
+    if (cluster.refused) { refuse(c, cluster.reason!); continue; }
     const legs = c.legs.map((id, i) => ({ optionId: id, side: i === 0 ? "buy" as const : "sell" as const }));
     const contracts = await broker.contracts(c.legs);
     const net = openNetAsk(legs, contracts);
     if (net == null || net <= 0) continue;
+    // For the card only: the net mid ("mark") beside the natural the desk pays. Not a gate.
+    const mark = Math.round(legs.reduce((sum, l) => { const k = contracts.find((x) => x.optionId === l.optionId)!; return sum + (l.side === "buy" ? 1 : -1) * (k.bid + k.ask) / 2; }, 0) * 100) / 100;
     // Grade on LIVE spreads (the research stamp is the same rule on older quotes), then the cap this grade earns at this equity and tier.
     const spreadPct = legSpreadPct(contracts.filter((k) => c.legs.includes(k.optionId)));
     const verdict = gradeFor({ ...c, spreadPct }, ctx.promoted);
     const gradeCap = Math.round(maxLossFor(verdict.grade, ctx.equity, ceiling) * mult * 100) / 100;
     const perContract = net * 100 + fee;
-    if (perContract > gradeCap) { refusals.push(`${c.symbol} ${c.kind}: $${perContract.toFixed(0)} max loss over the $${gradeCap} ${verdict.grade} cap (${verdict.reasons[0]})`); continue; }
+    if (perContract > gradeCap) { refuse(c, `$${perContract.toFixed(0)} max loss over the $${gradeCap} ${verdict.grade} cap (${verdict.reasons[0]})`); continue; }
     const quantity = verdict.grade !== "Normal" && perContract * 2 <= gradeCap ? 2 : 1;
     const maxLossUsd = net * 100 * quantity;
     const reserve = reserveRefusal(openAtRiskUsd, maxLossUsd + fee * quantity, ctx.equity);
-    if (reserve) { refusals.push(`${c.symbol} ${c.kind}: ${reserve}`); continue; }
+    if (reserve) { refuse(c, reserve); continue; }
     const dte = dteOf(c.expiry, Date.now());
     if (dte < OPTIONS_DESK_RULES.minDte || dte > OPTIONS_DESK_RULES.maxDte) continue;
     // One live earnings read for the chosen name only. Any failure — tool missing, shape unknown, broker error — refuses:
@@ -353,13 +369,14 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     if (!OPTIONS_EVENT_RULES.indexEtfs.includes(c.symbol)) {
       let live: Awaited<ReturnType<typeof broker.nextEarnings>>;
       try { live = await broker.nextEarnings(c.symbol); }
-      catch (e) { refusals.push(`${c.symbol} ${c.kind}: live earnings check failed — ${String(e).slice(0, 160)} (refused, fail closed)`); continue; }
-      if (live.earningsAt <= c.expiry) { refusals.push(`${c.symbol} ${c.kind}: broker says earnings ${live.earningsAt}${live.timing ? ` (${live.timing})` : ""}${live.verified ? "" : ", tentative"} falls before expiry ${c.expiry} (via ${live.via})`); continue; }
+      catch (e) { refuse(c, `live earnings check failed — ${String(e).slice(0, 160)} (refused, fail closed)`); continue; }
+      if (live.earningsAt <= c.expiry) { refuse(c, `broker says earnings ${live.earningsAt}${live.timing ? ` (${live.timing})` : ""}${live.verified ? "" : ", tentative"} falls before expiry ${c.expiry} (via ${live.via})`); continue; }
       log(`earnings ${c.symbol}: next ${live.earningsAt}${live.verified ? "" : " (tentative)"} after expiry ${c.expiry} (via ${live.via}); research row ${earnings.note}`);
     }
     log(`grade ${c.symbol} ${c.kind}: ${verdict.grade} (${verdict.reasons.join("; ")}) → cap $${gradeCap}${mult < 1 ? ` after ×${mult} drawdown tier` : ""}, ${quantity} contract${quantity === 1 ? "" : "s"}`);
     return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} × ${quantity} @ ${net.toFixed(2)} [${verdict.grade} cap $${gradeCap} · dte ${c.dteBucket} · hold ${c.expectedHoldDays}d · theta ${c.thetaDragUsd == null ? "unknown" : `$${c.thetaDragUsd}`} · delta ${c.deltaBand} · chase ${chase.ratio ?? "unknown"} · cluster ${clusterOf(c.symbol) ?? "none"}] (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market, grade: verdict.grade, cap: gradeCap,
-      candidate: { symbol: c.symbol, kind: c.kind, setup: c.setup, direction: directionOfKind(c.kind), rangeLow: c.rangeLow, rangeHigh: c.rangeHigh, grade: verdict.grade, cap: gradeCap, spreadPct, quantity } };
+      candidate: { symbol: c.symbol, kind: c.kind, setup: c.setup, direction: directionOfKind(c.kind), rangeLow: c.rangeLow, rangeHigh: c.rangeHigh, grade: verdict.grade, cap: gradeCap, spreadPct, quantity },
+      research: c, live: { natural: net, mark, expectedFill: net }, refused, data };
   }
   return none(refusals.length ? `refused: ${refusals.join("; ")}` : "the research candidates no longer fit the cap on live quotes", market);
 }

@@ -33,6 +33,8 @@ export interface DeskState {
   /** ET day key of the last daily review (first guardian run after 17:05 ET) and ISO week key of the last weekly review (first Monday run) — E6. */
   reviewDayKey?: string;
   weeklyReviewKey?: string;
+  /** ET day key of the last regime refresh (E7: Yahoo daily bars per root, once a day). The desk brief (E8) follows `reviewDayKey`. */
+  regimeDayKey?: string;
 }
 
 export interface TradeRow {
@@ -154,8 +156,9 @@ export async function watchesToday(root: string, excludeId: number): Promise<num
 }
 
 // ---- the inbox -----------------------------------------------------------------------------------
-/** The alert's own stamps travel with the row: the score and the Pine v2 context fields (as JSON) and
- *  the ET session it arrived in. Grade and the checklist are stamped later, by the entry path. */
+/** The alert's own stamps travel with the row: the Pine v2 context fields (as JSON) and the ET session it
+ *  arrived in. `score` is inserted NULL — ONLY `stampSignal` (from `scoreSignal`, the desk's own computation)
+ *  ever writes it, so no score in the table came from a sender. Grade and the checklist are stamped later. */
 export async function recordSignal(a: AlertPayload, status: string, reason: string): Promise<{ id: number; duplicate: boolean }> {
   await ensureDeskTables();
   const key = dedupeKey(a);
@@ -164,7 +167,7 @@ export async function recordSignal(a: AlertPayload, status: string, reason: stri
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
     `INSERT INTO futures_desk_signals (dedupe_key, edge, root, action, side, price, stop, bar, timeframe, note, status, reason, score, score_json, session)
      VALUES ($1,$2,$3,$4,$5,$6::float8,$7::float8,$8::timestamptz,$9,$10,$11,$12,$13::int,$14,$15) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`,
-    key, a.edge, a.root, a.action, a.side, a.price, a.stop, a.bar, a.timeframe, a.note, status, reason, a.score ?? null, scoreJson, sessionOf(new Date()));
+    key, a.edge, a.root, a.action, a.side, a.price, a.stop, a.bar, a.timeframe, a.note, status, reason, null, scoreJson, sessionOf(new Date()));
   if (rows.length) return { id: rows[0].id, duplicate: false };
   const existing = await prisma.$queryRawUnsafe<{ id: number }[]>(`SELECT id FROM futures_desk_signals WHERE dedupe_key = $1`, key);
   return { id: existing[0]?.id ?? 0, duplicate: true };
@@ -174,9 +177,14 @@ export async function markSignal(id: number, status: string, reason: string, tra
     `UPDATE futures_desk_signals SET status = $2::text, reason = $3::text, executed_at = CASE WHEN $2::text IN ('executed','refused','error','expired','watch') THEN now() ELSE executed_at END,
      trade_id = COALESCE($4::int, trade_id), error_class = COALESCE($5::text, error_class) WHERE id = $1`, id, status, reason.slice(0, 400), tradeId, errorClass);
 }
-/** The entry path's stamps on the signal row: the grade it was sized at, the event mode it met (E3) and the pre-trade checklist. */
-export async function stampSignal(id: number, v: { grade?: string; eventMode?: string | null; checklistJson?: string }): Promise<void> {
-  await prisma.$executeRawUnsafe(`UPDATE futures_desk_signals SET grade = COALESCE($2::text, grade), event_mode = COALESCE($3::text, event_mode), checklist_json = COALESCE($4::text, checklist_json) WHERE id = $1`, id, v.grade ?? null, v.eventMode ?? null, v.checklistJson ?? null);
+/** The stamps on the signal row: the grade it was sized at, the event mode it met (E3), the pre-trade
+ *  checklist (E5), and — from the scoring pass at receipt (E7) — the score, the score JSON (Pine context +
+ *  components) and the regime label. Every field is COALESCE'd, so a stamp never blanks another. */
+export async function stampSignal(id: number, v: { grade?: string; eventMode?: string | null; checklistJson?: string; score?: number | null; scoreJson?: string | null; regime?: string | null }): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    `UPDATE futures_desk_signals SET grade = COALESCE($2::text, grade), event_mode = COALESCE($3::text, event_mode), checklist_json = COALESCE($4::text, checklist_json),
+     score = COALESCE($5::int, score), score_json = COALESCE($6::text, score_json), regime = COALESCE($7::text, regime) WHERE id = $1`,
+    id, v.grade ?? null, v.eventMode ?? null, v.checklistJson ?? null, v.score ?? null, v.scoreJson ?? null, v.regime ?? null);
 }
 /** Watch rows are a day's context, not an inbox item: after 24 h they expire. */
 export async function expireOldWatches(): Promise<number> {
