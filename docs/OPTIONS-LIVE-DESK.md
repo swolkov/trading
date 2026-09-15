@@ -327,3 +327,134 @@ ago · 3 unmatched quotes · 2 error lines"). A rising count is the first sign a
 
 After this ships, the first two runs (one A, one B) fill both halves; until then the merged
 snapshot carries whatever the old 18-name runs left, and the ten new names simply have no bars yet.
+
+## Trade cards and the long-vs-spread comparison (Sep 15 2026, `src/lib/options-trade-card.ts`)
+
+Every structure the desk considers becomes a **trade card** — the prompt's TOP-5 / LIVE TRADE OUTPUT
+in one record: symbol, direction, structure, expiry/DTE, strikes, **natural** (`openNetAsk`, what the
+desk pays) vs **mark** (net mid) vs **expected fill** (the limit sent), contracts, debit, max loss
+(incl. the fee reserve) and max gain (uncapped on a long call), breakeven, % of equity at risk, R:R
+(max gain ÷ max loss) and payoff at the market's expected move ÷ risk, net delta/theta, ATM IV and
+IV/RV, the expected move and its level, **target** (the short strike, or the expected-move level for
+a single), **invalidation** (`invalidationLevel` on the signal's 20-session range — the same number
+the guardian watches), expected hold, grade, cap, and **confidence = the 0–100 score labelled "paper
+ranker"**. `renderOptionsTradeCard` is the text on the Slack entry page and in the log.
+
+`structureComparison` puts the researched families side by side (cost, max loss/gain, return on
+risk, breakeven, net greeks, IV vs realized, payoff at the expected move, theta drag) and applies the
+prompt's rule — a single leg only when it costs **≤1.15× the best spread and pays at least as much
+per dollar at the expected move**. This EXPLAINS the live desk's choice; it does not make it. The
+desk keeps choosing by the IV/RV family rule (PR #166); when the two would differ the card says so
+under `disagreement` and the existing rule wins. Stamp and measure.
+
+**Ledger:** raw-SQL table `options_trade_cards` (id, at, source `research|entry|refusal`, symbol,
+kind, expiry, score, grade, action, payload). Writers: the research ingest (top five per run, no
+Slack) and the live desk (every entry attempt and every refused candidate with its gate), written
+**after** the core has answered and `.catch`ed — never on the order's path. On entry ticks the runner
+also writes a `logDecision("options-desk", …)` line into the vault's `Decisions/YYYY-MM-DD.md`
+(fail-soft). A refusal card names its gate (`REFUSED — market veto — SPY below its 20-day …`).
+
+## The 0–100 score is a paper ranker (Sep 15 2026, `src/lib/options-score.ts`, `options-score-ledger.ts`)
+
+`optionsOpportunityScore` → `{score, components, missing}`: direction 20 · catalyst 15 (0 with
+earnings inside the expiry; an event within 3 days of expiry −5; unknown → 7 and named in `missing`)
+· pricing 15 (IV/RV 5, **IV-rank 4 — only once the archive holds ≥30 days, else listed in `missing`**,
+spread % 3, theta/day as % of premium 3) · liquidity 10 · R:R 15 (payoff at the expected move ÷
+planned loss) · momentum 10 (relative volume; halved at a chase ≥2×) · market 5 (SPY alignment) · EV
+10 (payoff × p − loss × (1 − p) with **p = the long leg's |delta|, a stated proxy**). The prompt's
+80+ line is `OPTIONS_SCORE_RULES.liveLine` — documented, never enforced.
+
+**Scoring universe = breakouts AND Trend-watch names.** `screenResearchContracts(…, {includeWatch:
+true})` builds structures for trend-aligned names without a range break and stamps them `refusedBy:
+"no breakout"`; they are appended after every breakout structure and exist only in the research
+ledger. **The live desk never sets `includeWatch`; its output is byte-identical** (a test asserts
+it). This is what makes thirty resolved rows per bucket reachable in weeks rather than quarters.
+
+**Measurement:** each research run archives its scored rows on the observation
+(`OptionsObservation.candidates`, schema-tolerant: older records parse without it, a malformed row
+drops, never the record). `resolveCandidates` settles each row at **min(expiry − 7 days, +10 sessions
+after the signal day)** on later broker daily bars as intrinsic value − debit − fee reserve, per
+contract — a **settlement proxy: no fills, no slippage, no stop, no trail**. It ranks the score; it
+does not estimate the desk's P&L. One row per (structure, signal day): the first run that scored it
+counts. `bucketStats` ≥80 / 70–79 / <70 with n, mean, sd, t; `promotionVerdict` is green only with
+**≥30 resolved in every bucket, the ≥80 mean above the <70 mean, and Welch t ≥ 2** between them
+(registered 2026-09-15, before the first row was scored; three buckets are compared, so a lone t ≥ 2
+is weaker than it looks — the verdict also needs the means ordered).
+
+**Promotion:** the admin's typed **PROMOTE** (`promote-score` on `/api/options/live-desk`) sets
+`options_score_promoted="true"` **only on a green verdict** (409 otherwise). What promotion does
+today: the A+ rung ($225 / 15%) unlocks on the **next ARM** (`gradeFor` reads the switch). What it
+does NOT yet do: the runner passes no score to `gradeFor` (`options-score` is not imported by the
+decision path — asserted by a test), so A+ stays unreachable until a later, reviewed PR feeds the
+score in. That is the intended order: measured first, then promoted, then wired. `GET
+/api/options/score` and the "Does the 0–100 score rank?" panel on `/options` show buckets, verdict,
+the latest run's top scores, recently settled rows and the last twenty trade cards.
+
+## The desk brief and conditional orders (Sep 15 2026, `src/lib/options-brief.ts`)
+
+`renderOptionsBrief` writes six sections in order — **ACCOUNT** (equity, buying power, at risk,
+screen cap, drawdown tier, armed) / **MARKET** (SPY, QQQ vs their 20/50-day, vol regime from VIX,
+catalysts today among researched names, veto on/off) / **TOP 5** (cards by score) / **BEST TRADE**
+(what the tick would take: the first of the screen's top three that passes every stamped gate, its
+card, and each gate ✓/✗) / **ACTION** / **CONDITIONAL ORDERS**. `ACTION` is **ENTER NOW** only when
+the best structure passes every gate on stamped data **through the same functions the entry tick
+calls** — `spansEarnings`, `marketVeto`, the chase ratio against `chaseMaxRatio`, `clusterRisk`,
+`gradeFor`/`maxLossFor` × `ddTier`, `reserveRefusal`, the DTE window, armed+verified — never a
+re-implementation; the two checks that need a live quote (intraday SPY shock, the broker's own
+earnings confirm) are named as tick-time checks. **WAIT FOR TRIGGER** when a Trend-watch name is
+within 2% of its range edge or a breakout was refused for chasing; otherwise **NO TRADE**. Each
+Trend-watch name gets the rule the tick executes: `enter long call 12 2026-10-16 only if WTCH closes
+above 12 with SPY/QQQ constructive and no earnings before 2026-10-16; max debit $100.50` (the Normal
+cap at this equity × the drawdown tier).
+
+Written by the research ingest after every run and re-rendered by the 17:32 account collect with the
+fresh snapshot: `options_desk_brief` (JSON + text), vault `Brain/options-desk-brief.md`, and the
+`options` Slack lane **only when the action or the best symbol changed** (`options_desk_brief_last`).
+`GET /api/options/brief` + the Desk brief panel on `/options`. Read-only on the desk: the brief can
+place, size or gate nothing.
+
+## The prompt, mapped to code (Sep 15 2026)
+
+**EXISTS (before this week):** the 20-session breakout/breakdown signal with 50/200-day alignment
+(`researchSignals`) · quality gates (OI ≥500, volume ≥100, spread ≤10%, standard contracts, two-sided
+market) · expected-move ranking (ATM straddle ÷ spot, payoff at that move, lottery tickets rejected)
+· the IV/RV single-vs-spread family rule (≤1.15× → single) · stop at half the premium, 1.5× trail
+keeping half the best gain, 90%-of-width exit, out 7 days before expiry · the $100 cap and one entry
+a day · fresh broker quotes at the moment of the order (chain analysis is live, never stale) · debit
+structures only (the never-do list is the policy core).
+
+**BUILT NOW (D1–D9):** earnings + ex-dividend veto with a fail-closed live confirm (D1) · SPY/QQQ
+alignment stamp and the one pre-registered market veto + intraday shock (D2) · do-not-chase, the DTE
+engine (21–60, two expiries, theta-charged ranking), the 0.40–0.70 delta-band stamp (D3) · the size
+ladder Normal $100 / Strong $150 / A+ $225 (locked), drawdown tiers 5/10/15/20%, cluster and 25%
+reserve, slots (D4) · trade cards with the long-vs-spread comparison, the ledger and Decisions/ (D5)
+· thesis-invalidation exit on two ticks and 2-lot partials (D6) · the 0–100 score as a paper ranker
+with its settlement ledger and typed promotion (D7) · the desk brief with conditional orders (D8) ·
+the 28-name universe in two research slices (D9).
+
+**PAPER-ONLY (measured, not acted on):** the 0–100 score (stamped on every card; promotion needs the
+ledger verdict; a live input only after a later PR) · the 0.40–0.70 delta slice (`deltaBand` stamped
+on every candidate; live stays 0.35–0.75) · credit spreads (the screen still builds `put_credit` /
+`call_credit` for the research ledger; `OPTIONS_LIVE_RULES.entryKinds` is debit-only and there is no
+short-leg guardian) · Trend-watch structures (`refusedBy: "no breakout"`, ledger only).
+
+**REJECTED WITH EVIDENCE:** 0–1 DTE (decay 36%+/day, friction 15–30% a side at $100) · 7–14 DTE as
+the default (3.5–7%/day decay; a flat week is the stop — the table in "When the desk does what") ·
+the score as a live gate before it ranks (this account's conviction score ranked backwards; the
+verdict needs t ≥ 2 with thirty per bucket) · A+ before proof (locked to the promoted switch) · a
+second slot before ten closed live trades with the divergence check green · credit spreads live
+before a short-leg guardian and a record · intraday market structure (research has daily bars only —
+a later research item, not built).
+
+**Promotion ladder (what earns what):**
+
+| Rung | Gate | Unlocks |
+|---|---|---|
+| Score → live input | ≥30 resolved per bucket, ≥80 mean > <70 mean, Welch t ≥ 2 (`promotionVerdict`), typed PROMOTE | `options_score_promoted`; A+ on the next ARM; a later PR feeds the score to `gradeFor` |
+| A+ rung ($225 / 15%) | promoted **and** score ≥80 on the candidate **and** Strong's own rules | the ceiling written at ARM |
+| Second slot | 10 closed live round trips with the divergence verdict green (`slotsFor`) | `maxOpenPositions: 2` on the tick |
+| Second contract | Strong-or-better grade whose structure fits twice under the cap | `quantity: 2` (the 2-lot review path is still unverified against a real broker response) |
+| Delta band 0.40–0.70 | D7's ledger split by `deltaBand` at ≥30 per slice | a later PR; nothing moves before |
+| Credit spreads | a short-leg guardian + a measured record on the ledger | a later PR |
+
+**Deploy classes and the re-ARM note.** **R** = the Railway worker (`options-desk`, `scripts/robinhood/desk-worker.ts` → `live-desk.ts`, `collect.ts`): the live desk, the guardian, the 17:32 collect and its brief re-render. **M** = the Mac research job (`scripts/options-market-run.sh` → `options-research-ingest.ts`): the research prompt, the ingest, the score ledger, research cards, the brief. **V** = the Vercel admin: `/options`, `/api/options/*`. D5 = R + V + M, D7 = M + V (+ R for the live cards), D8 = M + R + V, D10 = V. **Sections 1–4 changed no research prompt line in `options-market-run.sh` beyond D1/D3/D9's** — the D5/D7/D8 ingest changes are code-side, so no by-hand pipeline re-run is needed for them (the next scheduled run picks them up; the first run after deploy writes the first scored observation and the first brief). **Re-ARM:** the ceiling is written at ARM time — after D4 deployed, one re-ARM (typed ARM) sets `options_live_max_loss_usd` to the ladder's ceiling ($150; $225 only after promotion **and** another re-ARM). Nothing in D5/D7/D8 needs a re-ARM.
