@@ -9,7 +9,10 @@
 // notional, and rollover on its own notional to ITS OWN exit time — the banked leg stops paying
 // carry the moment it is closed, exactly as Kraken bills a reduced position. The trail keeps
 // running on the first unit's entry and R; only the notional it protects shrinks.
-export interface LegFees { entry: number; taker: number; roll4h: number }   // fractions of notional
+export interface LegFees {
+  entry: number; taker: number; roll4h: number;   // fractions of notional
+  periods?: (ageH: number) => number;             // rollover periods for a hold; default = the evaluator's ceil(age ÷ 4). The replay passes its linear age ÷ 4.
+}
 export interface PartialLeg { px: number; t: number; notional: number }       // t = epoch secs of the fill bar
 export interface LegResult { pnl: number; fees: number }
 
@@ -22,7 +25,7 @@ export function rollPeriods(ageH: number): number {
 export function legPnl(dir: 1 | -1, entry: number, exit: number, notional: number, ageH: number, carry: boolean, fees: LegFees): LegResult {
   if (!(entry > 0) || !(notional > 0) || !Number.isFinite(exit)) return { pnl: 0, fees: 0 };
   const grossPct = (dir * (exit - entry)) / entry;
-  const feeFrac = fees.entry + fees.taker + (carry ? rollPeriods(ageH) * fees.roll4h : 0);
+  const feeFrac = fees.entry + fees.taker + (carry ? (fees.periods ?? rollPeriods)(ageH) * fees.roll4h : 0);
   return { pnl: (grossPct - feeFrac) * notional, fees: feeFrac * notional };
 }
 

@@ -277,6 +277,15 @@ const PENDING_ENTRIES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_pending_ent
   reason text
 )`;
 
+// NATIVE 4h BARS (Sep 15 2026, margin-bars-cache.ts): the scan universe's complete 4h bars,
+// appended daily so the desk's own history outgrows Kraken's 720-bar OHLC window.
+const BARS_4H_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_bars_4h (
+  symbol text NOT NULL,
+  t bigint NOT NULL,
+  o double precision, h double precision, l double precision, c double precision, v double precision,
+  PRIMARY KEY (symbol, t)
+)`;
+
 const MARGIN_INDEX_SQL = [
   `CREATE INDEX IF NOT EXISTS margin_pending_entries_status_idx ON margin_pending_entries(status, expires_at)`,
   `CREATE INDEX IF NOT EXISTS margin_trade_cards_txid_idx ON margin_trade_cards(txid)`,
@@ -296,6 +305,7 @@ export function ensureMarginTables(): Promise<void> {
       await prisma.$executeRawUnsafe(TRADE_CARDS_TABLE_SQL);
       await prisma.$executeRawUnsafe(ROUND_TRIPS_TABLE_SQL);
       await prisma.$executeRawUnsafe(PENDING_ENTRIES_TABLE_SQL);
+      await prisma.$executeRawUnsafe(BARS_4H_TABLE_SQL);
       for (const sql of MARGIN_INDEX_SQL) await prisma.$executeRawUnsafe(sql);
     })().catch((e) => { marginTablesReady = null; throw e; });
   }

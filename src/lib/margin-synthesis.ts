@@ -27,6 +27,7 @@ import { loadClosedRoundTripTxids, loadRoundTripJournal, upsertRoundTripClose } 
 import { refreshCryptoRegime } from "@/lib/margin-crypto-regime";
 import { runPostTradeReviews } from "@/lib/margin-review";
 import { pendingSummary, type PendingSummary } from "@/lib/margin-pending";
+import { snapshotBars4h } from "@/lib/margin-bars-cache";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -567,6 +568,8 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
   await maybeDemote().catch(() => null);
   // Brain/crypto-regime.md — refreshed daily here as well as by the desk brief (soft).
   await refreshCryptoRegime().catch(() => null);
+  // Native 4h history past Kraken's 720-bar window (margin_bars_4h, C6) — fail-soft.
+  await snapshotBars4h().catch(() => null);
   await cfgSet(SYNTH_LAST_RUN, at);
   const armedLine = auto === "true" && validate === "false" ? "ARMED" : "disarmed";
   const best = [...strategies].filter((s) => s.resolved > 0).sort((a, b) => (b.tStat ?? -9) - (a.tStat ?? -9))[0];
