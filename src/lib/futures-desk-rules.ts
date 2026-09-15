@@ -79,25 +79,73 @@ export const MICRO_FOR_ROOT: Record<string, { micro: string; pointValue: number 
 /** Modeled commission + exchange + clearing per contract per side on a micro. The demo reports none. */
 export const FEE_PER_SIDE_MICRO = 0.85;
 
+/** Modeled fee per side on a MINI too — no separate mini fee is invented; Stage D is documented as
+ *  unreachable in practice (one ES mini at a $500 budget needs a ≤10-pt stop). */
+export const MINI_FOR_ROOT: Record<string, { mini: string; pointValue: number }> = {
+  ES: { mini: "ES", pointValue: 50 },
+  NQ: { mini: "NQ", pointValue: 20 },
+  YM: { mini: "YM", pointValue: 5 },
+  GC: { mini: "GC", pointValue: 100 },
+  SI: { mini: "SI", pointValue: 5000 },
+  HG: { mini: "HG", pointValue: 25000 },
+  RTY: { mini: "RTY", pointValue: 50 },
+};
+
+/** "$1,000" / "$301.70" — every refusal string uses one formatter so the wording is stable. */
+export function usd(n: number, decimals = 0): string {
+  return `$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+}
+
+// ---- stages and grades ---------------------------------------------------------------------------
+/** A: one micro until earned · B: two · C: five · D: one MINI (needs `futures_desk_stage_d_armed`). */
+export type Stage = "A" | "B" | "C" | "D";
+export const STAGES: readonly Stage[] = ["A", "B", "C", "D"];
+export const STAGE_MAX_CONTRACTS: Record<Stage, number> = { A: 1, B: 2, C: 5, D: 1 };
+export const STAGE_UNIT: Record<Stage, "micro" | "mini"> = { A: "micro", B: "micro", C: "micro", D: "mini" };
+/** Normal 0.5% / Strong 0.75% / A+ 1.0% of the basis. Locked at Normal until the score is promoted. */
+export type Grade = "normal" | "strong" | "aplus";
+
 export interface DeskLimits {
   sizingBasisUsd: number;   // the "$50k account" — sizing is a % of THIS, not of the demo's drifting balance
-  riskPct: number;          // % of basis risked per trade (house level 3)
-  maxContracts: number;     // hard cap per trade
+  riskPct: number;          // % of basis risked per NORMAL trade (the ladder's floor)
+  riskPctStrong: number;    // % for a Strong (score ≥ 80, promoted) signal
+  riskPctAplus: number;     // % for an A+ (score ≥ 90, promoted) signal — also the per-cluster cap
+  maxContracts: number;     // absolute ceiling per trade; the stage cap binds first
   maxPositions: number;     // one per root, at most this many
   maxEntriesPerDay: number;
   dailyLossPausePct: number; // pause new entries for the rest of the day once the day is down this % of basis
-  drawdownDisablePct: number; // disable the desk (manual re-enable) once equity is down this % from the high
+  maxOpenRiskPct: number;    // Σ open risk_usd + the new trade's budget may not exceed this % of basis
+  drawdownDisablePct: number; // halt the desk (manual re-enable) once equity is down this % from the high
+  stage: Stage;
 }
 
 export const DEFAULT_LIMITS: DeskLimits = {
   sizingBasisUsd: 50_000,
-  riskPct: 3,
+  riskPct: 0.5,
+  riskPctStrong: 0.75,
+  riskPctAplus: 1.0,
   maxContracts: 20,
   maxPositions: 6,
   maxEntriesPerDay: 4,
-  dailyLossPausePct: 6,
-  drawdownDisablePct: 20,
+  dailyLossPausePct: 1.5,
+  maxOpenRiskPct: 2,
+  drawdownDisablePct: 10,
+  stage: "A",
 };
+
+export function budgetFor(grade: Grade, limits: DeskLimits): number {
+  const pct = grade === "aplus" ? limits.riskPctAplus : grade === "strong" ? limits.riskPctStrong : limits.riskPct;
+  return limits.sizingBasisUsd * (pct / 100);
+}
+
+/** Normal unless the 0–100 score has been PROMOTED (it ranks at t ≥ 2 on this desk's own record);
+ *  a score with no promotion is a stamp, never a size. */
+export function gradeFor(a: AlertPayload, promotedScore: boolean): Grade {
+  if (!promotedScore || a.score == null) return "normal";
+  if (a.score >= 90) return "aplus";
+  if (a.score >= 80) return "strong";
+  return "normal";
+}
 
 // ---- alert payload -------------------------------------------------------------------------
 export interface AlertPayload {
@@ -111,6 +159,8 @@ export interface AlertPayload {
   bar: string;
   timeframe: string;
   note: string;
+  /** Optional 0–100 opportunity score from the chart (Pine v2). Absent on today's alerts. */
+  score?: number;
 }
 
 export type ParsedAlert = { ok: true; alert: AlertPayload } | { ok: false; reason: string };
@@ -151,7 +201,8 @@ export function parseAlert(body: unknown): ParsedAlert {
   else return { ok: false, reason: "bar time missing — TradingView must send {{time}}" };
   const timeframe = String(b.timeframe ?? b.tf ?? edge.timeframe);
   const note = typeof b.note === "string" ? b.note.slice(0, 200) : "";
-  return { ok: true, alert: { edge: edge.key, root, action, side, price, stop: action === "entry" ? stop : stop && stop > 0 ? stop : null, bar, timeframe, note } };
+  const score = numberField(b.score);
+  return { ok: true, alert: { edge: edge.key, root, action, side, price, stop: action === "entry" ? stop : stop && stop > 0 ? stop : null, bar, timeframe, note, ...(score != null ? { score } : {}) } };
 }
 
 /** Identical alert (same rule, market, action, bar) = the same event; TradingView retries on timeout. */
@@ -163,28 +214,79 @@ export function dedupeKey(a: AlertPayload): string {
 export interface SizeResult {
   ok: boolean;
   reason: string;
+  /** The contract symbol traded (a micro at stages A–C, the mini at stage D) — field name kept for the ledger. */
   micro: string;
   contracts: number;
   stopPoints: number;
   riskPerContractUsd: number;
   riskUsd: number;
   riskBudgetUsd: number;
+  grade: Grade;
+  stage: Stage;
+  unit: "micro" | "mini";
+  budgetMult: number;
 }
 
-/** Contracts = floor(budget / risk per micro). Below one contract the trade is refused, never
- *  stretched: a rule whose stop costs more than the budget on one micro is a rule this basis cannot
- *  trade at this risk, and saying so is the honest outcome. */
-export function sizeEntry(a: AlertPayload, limits: DeskLimits): SizeResult {
-  const spec = MICRO_FOR_ROOT[a.root];
-  const budget = limits.sizingBasisUsd * (limits.riskPct / 100);
-  if (!spec) return { ok: false, reason: `no micro contract mapped for ${a.root}`, micro: "", contracts: 0, stopPoints: 0, riskPerContractUsd: 0, riskUsd: 0, riskBudgetUsd: budget };
+export interface SizeOpts { grade: Grade; stage: Stage; budgetMult: number; stageDArmed?: boolean }
+
+/** Contracts = min(floor(budget / risk per contract), stage cap, maxContracts). Below one contract
+ *  the trade is refused, never stretched: a rule whose stop costs more than the budget on one
+ *  contract is a rule this basis cannot trade at this risk, and saying so is the honest outcome.
+ *  `budgetMult` is the drawdown tier's multiplier (1 / 0.75 / 0.5 / 0.25). */
+export function sizeEntry(a: AlertPayload, limits: DeskLimits, opts: SizeOpts): SizeResult {
+  const { grade, stage, budgetMult } = opts;
+  const unit = STAGE_UNIT[stage];
+  const spec = unit === "mini" ? MINI_FOR_ROOT[a.root] : MICRO_FOR_ROOT[a.root];
+  const symbol = spec ? ("micro" in spec ? spec.micro : spec.mini) : "";
+  const budget = budgetFor(grade, limits) * budgetMult;
+  const base = { micro: symbol, contracts: 0, stopPoints: 0, riskPerContractUsd: 0, riskUsd: 0, riskBudgetUsd: budget, grade, stage, unit, budgetMult };
+  if (stage === "D" && !opts.stageDArmed) return { ...base, ok: false, reason: "stage D (minis) is not armed — refused" };
+  if (!spec) return { ...base, ok: false, reason: `no ${unit} contract mapped for ${a.root}` };
   const stopPoints = Math.abs(a.price - (a.stop ?? a.price));
-  if (!(stopPoints > 0)) return { ok: false, reason: "zero-width stop", micro: spec.micro, contracts: 0, stopPoints, riskPerContractUsd: 0, riskUsd: 0, riskBudgetUsd: budget };
-  const perContract = stopPoints * spec.pointValue + 2 * FEE_PER_SIDE_MICRO;
+  if (!(stopPoints > 0)) return { ...base, ok: false, reason: "zero-width stop", stopPoints };
+  const perContract = stopPoints * spec.pointValue + 2 * FEE_PER_SIDE_MICRO;   // minis reuse the micro fee model (D is unreachable in practice)
   const raw = Math.floor(budget / perContract);
-  const contracts = Math.min(raw, limits.maxContracts);
-  if (contracts < 1) return { ok: false, reason: `one ${spec.micro} risks $${perContract.toFixed(0)} against a $${budget.toFixed(0)} budget`, micro: spec.micro, contracts: 0, stopPoints, riskPerContractUsd: perContract, riskUsd: 0, riskBudgetUsd: budget };
-  return { ok: true, reason: raw > limits.maxContracts ? `capped at ${limits.maxContracts} contracts` : "", micro: spec.micro, contracts, stopPoints, riskPerContractUsd: perContract, riskUsd: contracts * perContract, riskBudgetUsd: budget };
+  const cap = Math.min(STAGE_MAX_CONTRACTS[stage], limits.maxContracts);
+  const contracts = Math.min(raw, cap);
+  if (contracts < 1) return { ...base, ok: false, reason: `one ${symbol} risks ${usd(perContract, 2)} against a ${usd(budget, Number.isInteger(budget) ? 0 : 2)} budget (${grade} · stage ${stage}) — refused, never stretched`, stopPoints, riskPerContractUsd: perContract };
+  return { ...base, ok: true, reason: raw > cap ? `capped at ${cap} contracts (stage ${stage})` : "", contracts, stopPoints, riskPerContractUsd: perContract, riskUsd: contracts * perContract };
+}
+
+// ---- stage readiness -----------------------------------------------------------------------------
+export interface ReadinessRow { status: string; pnl_usd: number | null; stage?: string | null }
+export interface Readiness { ok: boolean; reasons: string[]; resolved: number; net: number; profitFactor: number; maxDrawdownUsd: number }
+
+/** Gross wins ÷ gross losses; Infinity when nothing was lost (and something was won). */
+export function profitFactor(pnls: number[]): number {
+  const wins = pnls.filter((p) => p > 0).reduce((s, p) => s + p, 0);
+  const losses = pnls.filter((p) => p < 0).reduce((s, p) => s - p, 0);
+  if (losses === 0) return wins > 0 ? Infinity : 0;
+  return wins / losses;
+}
+
+/** Largest peak-to-trough dip of the cumulative P&L, in resolve order. */
+export function maxDrawdown(pnls: number[]): number {
+  let cum = 0, peak = 0, dd = 0;
+  for (const p of pnls) { cum += p; peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum); }
+  return dd;
+}
+
+/** The next stage is EARNED: ≥ 30 resolved at this stage, net > 0, PF ≥ 1.2, max drawdown ≤ 3% of
+ *  basis. Every failing reason is reported, not just the first. Rows arrive already merged by roll chain. */
+export function stageReadiness(rows: ReadinessRow[], stage: Stage, limits: DeskLimits): Readiness {
+  // A row stamped with another stage (or a legacy null — sized before the ladder) does not count toward this one.
+  const pnls = rows.filter((r) => r.status === "closed" && r.pnl_usd != null && (r.stage === undefined || r.stage === stage)).map((r) => r.pnl_usd as number);
+  const resolved = pnls.length;
+  const net = pnls.reduce((s, p) => s + p, 0);
+  const pf = profitFactor(pnls);
+  const dd = maxDrawdown(pnls);
+  const ddCap = limits.sizingBasisUsd * 0.03;
+  const reasons: string[] = [];
+  if (resolved < 30) reasons.push(`only ${resolved} of 30 resolved at stage ${stage}`);
+  if (!(net > 0)) reasons.push(`net is ${net < 0 ? "−" : ""}${usd(net)} — must be positive`);
+  if (!(pf >= 1.2)) reasons.push(`profit factor ${Number.isFinite(pf) ? pf.toFixed(2) : "∞"} is below 1.2`);
+  if (dd > ddCap) reasons.push(`max drawdown ${usd(dd)} exceeds 3% of basis (${usd(ddCap)})`);
+  return { ok: reasons.length === 0, reasons, resolved, net, profitFactor: pf, maxDrawdownUsd: dd };
 }
 
 /** Round to the contract's tick so the broker cannot reject the stop as "Illegal Price". */

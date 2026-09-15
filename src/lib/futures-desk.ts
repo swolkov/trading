@@ -17,8 +17,8 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import {
-  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate,
-  rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd, type AlertPayload, type DeskContext, type DeskLimits, type Side,
+  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, STAGES, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate, gradeFor,
+  rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd, type AlertPayload, type DeskContext, type DeskLimits, type Side, type Stage,
 } from "@/lib/futures-desk-rules";
 import {
   avgFill, cancelDeskOrder, contractExpiry, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
@@ -53,6 +53,8 @@ export interface TradeRow {
   fees_usd: number | null; risk_usd: number; point_value: number; rolled_from: number | null; note: string | null;
   /** Month code of the contract this leg trades (`U6`, `Z6`) — a roll chain reads as one trade across two months. */
   contract_month: string | null;
+  /** The sizing stage (A–D) the trade was opened at; readiness for the next stage counts only its own rows. */
+  stage: string | null;
 }
 
 // ---- type normalisation at the raw-SQL boundary --------------------------------------------------
@@ -82,9 +84,16 @@ function num(v: string | null, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Overrides are clamped to the ladder (0.25–1.0%); an unreadable stage reads as "A" — a bad key can only shrink risk. */
 export async function deskLimits(): Promise<DeskLimits> {
-  const [basis, risk] = await Promise.all([cfg("futures_desk_sizing_basis"), cfg("futures_desk_risk_pct")]);
-  return { ...DEFAULT_LIMITS, sizingBasisUsd: num(basis, DEFAULT_LIMITS.sizingBasisUsd), riskPct: Math.min(6, Math.max(0.25, num(risk, DEFAULT_LIMITS.riskPct))) };
+  const [basis, risk, strong, aplus, stage] = await Promise.all([
+    cfg("futures_desk_sizing_basis"), cfg("futures_desk_risk_pct"), cfg("futures_desk_risk_pct_strong"), cfg("futures_desk_risk_pct_aplus"), cfg("futures_desk_stage")]);
+  const pct = (v: string | null, fb: number) => Math.min(1.0, Math.max(0.25, num(v, fb)));
+  return {
+    ...DEFAULT_LIMITS, sizingBasisUsd: num(basis, DEFAULT_LIMITS.sizingBasisUsd),
+    riskPct: pct(risk, DEFAULT_LIMITS.riskPct), riskPctStrong: pct(strong, DEFAULT_LIMITS.riskPctStrong), riskPctAplus: pct(aplus, DEFAULT_LIMITS.riskPctAplus),
+    stage: STAGES.includes(stage as Stage) ? (stage as Stage) : "A",
+  };
 }
 
 export async function deskEnabled(): Promise<boolean> {
@@ -125,6 +134,7 @@ export async function ensureDeskTables(): Promise<void> {
     closed_at timestamptz, exit_reason text, pnl_usd double precision, fees_usd double precision, risk_usd double precision,
     point_value double precision, rolled_from integer, note text)`);
   await prisma.$executeRawUnsafe(`ALTER TABLE futures_desk_trades ADD COLUMN IF NOT EXISTS contract_month text`);
+  await prisma.$executeRawUnsafe(`ALTER TABLE futures_desk_trades ADD COLUMN IF NOT EXISTS stage text`);
   tablesReady = true;
 }
 
@@ -256,7 +266,9 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const [state, limits] = await Promise.all([loadState(), deskLimits()]);
     const refusal = entryRefusal(a, await contextNow(state), limits);
     if (refusal) { await markSignal(signalId, "refused", refusal); return { status: "refused", reason: refusal, signalId }; }
-    const size = sizeEntry(a, limits);
+    const promoted = (await cfg("futures_desk_score_promoted")) === "true";
+    const stageDArmed = limits.stage === "D" && (await cfg("futures_desk_stage_d_armed")) === "true";
+    const size = sizeEntry(a, limits, { grade: gradeFor(a, promoted), stage: limits.stage, budgetMult: 1, stageDArmed });
     if (!size.ok) { await markSignal(signalId, "refused", size.reason); return { status: "refused", reason: size.reason, signalId }; }
     const contract = await deskContract(size.micro);
     if (!contract) { await markSignal(signalId, "error", `no ${size.micro} contract on Tradovate`); return { status: "error", reason: "contract", signalId }; }
@@ -321,10 +333,10 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     const spec = MICRO_FOR_ROOT[a.root];
     const riskUsd = fill.qty * size.riskPerContractUsd;
     const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-      `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note, contract_month)
-       VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16,$17) RETURNING id`,
+      `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note, contract_month, stage)
+       VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16,$17,$18) RETURNING id`,
       a.edge, a.root, size.micro, contract.name, contract.id, a.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, signalId,
-      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note, contract.name.slice(-2));
+      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note, contract.name.slice(-2), limits.stage);
     const tradeId = rows[0].id;
 
     // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
@@ -340,7 +352,7 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
       return { status: "error", reason: "unprotected — closed", signalId, tradeId };
     }
     await markSignal(signalId, "executed", `${fill.qty}× ${contract.name} @ ${fill.price}`, tradeId);
-    await sendNotification(`🟢 FUTURES DESK opened ${a.side.toUpperCase()} ${fill.qty}× ${contract.name} @ ${fill.price} · stop ${stopPx} · risk $${riskUsd.toFixed(0)} · ${a.edge}`, LANE).catch(() => {});
+    await sendNotification(`🟢 FUTURES DESK opened ${a.side.toUpperCase()} ${fill.qty}× ${contract.name} @ ${fill.price} · stop ${stopPx} · risk $${riskUsd.toFixed(0)} · ${a.edge} · ${size.grade} · stage ${size.stage}`, LANE).catch(() => {});
     return { status: "executed", reason: "", signalId, tradeId };
   } finally {
     await releaseLock(ENTRY_LOCK_KEY, lock);
@@ -535,9 +547,9 @@ async function rollTrade(t: TradeRow, notes: string[]): Promise<void> {
   const stopPx = roundToTick(t.side === "long" ? fill.price - stopDist : fill.price + stopDist, next.tickSize);
   // Ledger row first (the new leg keeps the ORIGINAL opened_at so the time stop does not restart), then protection.
   const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
-    `INSERT INTO futures_desk_trades (opened_at, edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, rolled_from, note, contract_month)
-     VALUES ($1::timestamptz,$2,$3,$4,$5,$6::int,$7,$8::int,$9::float8,$10::float8,$11::bigint,$12::bigint,$13,$14::int,'open',$15::float8,$16::float8,$17::int,$18,$19) RETURNING id`,
-    t.opened_at, t.edge, t.root, t.micro, next.name, next.id, t.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, t.signal_id, t.risk_usd, t.point_value, t.id, `rolled from ${t.contract}`, next.name.slice(-2));
+    `INSERT INTO futures_desk_trades (opened_at, edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, rolled_from, note, contract_month, stage)
+     VALUES ($1::timestamptz,$2,$3,$4,$5,$6::int,$7,$8::int,$9::float8,$10::float8,$11::bigint,$12::bigint,$13,$14::int,'open',$15::float8,$16::float8,$17::int,$18,$19,$20) RETURNING id`,
+    t.opened_at, t.edge, t.root, t.micro, next.name, next.id, t.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, t.signal_id, t.risk_usd, t.point_value, t.id, `rolled from ${t.contract}`, next.name.slice(-2), t.stage);
   if (stopOrderId) { try { await modifyStop(stopOrderId, fill.qty, stopPx); } catch { /* verified below */ } }
   const stopId = await ensureProtected({ contractId: next.id, contract: next.name, side: t.side, qty: fill.qty, stopPx, stopOrderId, clOrdId, why: "roll" });
   await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET stop_order_id = $2::bigint, exit_reason = $3::text WHERE id = $1`, rows[0].id, stopId, stopId == null ? "unprotected" : null);
@@ -551,6 +563,12 @@ export async function setDeskEnabled(enabled: boolean, who: string): Promise<voi
   // the guardian would disable it again on its next run.
   await patchState((s) => { if (enabled) { s.disabledReason = undefined; s.equityHigh = s.equity ?? 0; } });
   await sendNotification(`${enabled ? "▶️" : "⏸"} FUTURES DESK ${enabled ? "ENABLED" : "DISABLED"} by ${who}.`, LANE).catch(() => {});
+}
+
+/** Advance the sizing stage (A→B→C) — the route checks readiness first; this only records and announces. */
+export async function setDeskStage(to: Stage, who: string): Promise<void> {
+  await setKey("futures_desk_stage", to);
+  await sendNotification(`⬆️ FUTURES DESK stage → ${to} by ${who}.`, LANE).catch(() => {});
 }
 
 export { EDGES };
