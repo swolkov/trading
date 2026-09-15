@@ -5,6 +5,8 @@ import {
   percentileOf, proseAllowed, renderReview, reviewFacts, reviewOneLiner, sizeBand, type ReviewContext, type ReviewFill,
 } from "../src/lib/margin-review";
 import { MODEL_CHASE_BP, MODEL_STOP_SLIP_BP, MODEL_TAKER_FEE_PCT } from "../src/lib/margin-synthesis";
+import { REVIEW_DONE_KEY, REVIEW_MAX_PER_RUN, REVIEW_TWIN_SOURCES, planReviews, runPostTradeReviews } from "../src/lib/margin-review";
+import { prisma } from "../src/lib/db";
 
 // C4 — the post-trade review answers the seven questions mechanically. These pin the wording the
 // Decisions/ log will carry, the size bands, the slippage flag, the regime flip, and the
@@ -43,7 +45,7 @@ test("twin comparison wording: every twin's outcome on the same signal is named,
   assert.match(lost.stop.text, /a wider container survived this one: the difference is the exit rule, not the entry/);
   // …and where every twin lost too, the move — not the stop width — is named.
   const all = reviewFacts(fill({ realNet: -380, mfeR: 0.4, maeR: 1.0, paperPnlAtLiveSize: -375, paperReason: "initial stop" }), ctx({ twins: [{ source: "swing-wide", pnl: -400, reason: "initial stop", open: false }, { source: "swing-lock", pnl: null, reason: null, open: true }] }));
-  assert.match(all.stop.text, /every twin lost too: the move went against the entry, not the stop width/);
+  assert.match(all.stop.text, /every twin lost too: price went against the entry, not the stop width/);
   assert.match(all.stop.text, /swing-lock still open/);
 });
 
@@ -141,9 +143,83 @@ test("prose rules: the forbidden verbs and the word budget", () => {
   assert.equal(proseAllowed("Consider whether to TIGHTEN the trail."), false);
   assert.equal(proseAllowed("Raise the risk to 10%."), false);
   assert.equal(proseAllowed("lower the hold"), false);
-  assert.equal(proseAllowed("A future sleeve could test a wider stop."), true, "naming a future, separately registered test is allowed");
+  assert.equal(proseAllowed("Use a wider stop next time."), false, "an adjective-form proposal is still a parameter change");
+  assert.equal(proseAllowed("Consider whether to move the trail closer."), false);
+  assert.equal(proseAllowed("Set the hold to ten days."), false);
+  assert.equal(proseAllowed("Reduce risk until the read is stable."), false);
+  assert.equal(proseAllowed("A future sleeve could test the retest entry."), true, "naming a future, separately registered test is allowed");
+  assert.equal(proseAllowed("The 2R trail sat at breakeven by design; fees were 58% of gross."), true);
   assert.equal(proseAllowed(""), false);
   assert.equal(proseAllowed(null), false);
   assert.equal(proseAllowed(Array.from({ length: PROSE_MAX_WORDS + 1 }, () => "word").join(" ")), false);
   assert.equal(proseAllowed(Array.from({ length: PROSE_MAX_WORDS }, () => "word").join(" ")), true);
+});
+
+test("the review compares against every swing twin, the Sep 15 ones included", () => {
+  for (const s of ["swing-wide", "swing-lock", "swing-pyr", "swing-partial", "swing-atr", "swing-mtf", "swing-retest"]) assert.ok(REVIEW_TWIN_SOURCES.includes(s as never), s);
+});
+
+test("planReviews: the first run seeds every already-closed txid without reviewing; later runs take the oldest 5 not yet done", () => {
+  const closed = (id: string, exitAt: string) => fill({ liveTxid: id, realExitAt: exitAt });
+  const fills = [closed("O7", "2026-09-17T00:00:00Z"), closed("O3", "2026-09-13T00:00:00Z"), closed("O1", "2026-09-11T00:00:00Z"), closed("O5", "2026-09-15T00:00:00Z"), closed("O6", "2026-09-16T00:00:00Z"), closed("O2", "2026-09-12T00:00:00Z"), closed("O4", "2026-09-14T00:00:00Z"),
+    fill({ liveTxid: "OPEN", realExitAt: null, realNet: null }), fill({ liveTxid: "ORT", source: "roundtrip" })];
+  const first = planReviews(fills, null);
+  assert.deepEqual(first.todo, [], "no reviews on the first run");
+  assert.deepEqual([...first.seed].sort(), ["O1", "O2", "O3", "O4", "O5", "O6", "O7"], "every closed trip is seeded as done; open and round-trip fills are not");
+  const later = planReviews(fills, new Set(["O1"]));
+  assert.equal(REVIEW_MAX_PER_RUN, 5);
+  assert.deepEqual(later.todo.map((f) => f.liveTxid), ["O2", "O3", "O4", "O5", "O6"], "oldest first, capped at 5, O1 already done");
+  assert.deepEqual(later.seed, []);
+  assert.deepEqual(planReviews(fills, new Set(["O1", "O2", "O3", "O4", "O5", "O6", "O7"])).todo, []);
+});
+
+// ---- the I/O contract, with prisma and the vault stubbed --------------------------------------
+const restores: (() => void)[] = [];
+function stub(object: object, key: string, value: unknown) { const prev = Reflect.get(object, key); Reflect.set(object, key, value); restores.push(() => Reflect.set(object, key, prev)); }
+function restore() { while (restores.length) restores.pop()!(); }
+
+function stubWorld(doneRaw: string | null, opts: { failOn?: string } = {}) {
+  const cfg: Record<string, string> = {}; if (doneRaw != null) cfg[REVIEW_DONE_KEY] = doneRaw;
+  const persisted: string[][] = []; const vaultWrites: string[] = [];
+  stub(prisma.agentConfig, "findUnique", async ({ where }: { where: { key: string } }) => (cfg[where.key] != null ? { key: where.key, value: cfg[where.key] } : null));
+  stub(prisma.agentConfig, "upsert", async ({ where, update }: { where: { key: string }; update: { value: string } }) => { cfg[where.key] = update.value; if (where.key === REVIEW_DONE_KEY) persisted.push(JSON.parse(update.value)); return null; });
+  stub(prisma, "$queryRawUnsafe", async () => []);
+  stub(prisma, "$executeRawUnsafe", async () => 0);
+  stub(prisma.vaultDocument, "findUnique", async () => null);
+  stub(prisma.vaultDocument, "upsert", async ({ where, create }: { where: { path: string }; create: { content: string } }) => {
+    if (opts.failOn && create.content.includes(opts.failOn)) throw new Error("vault down");
+    vaultWrites.push(`${where.path}: ${create.content}`); return null;
+  });
+  stub(globalThis, "fetch", async () => { throw new Error("no kraken in tests"); });
+  return { cfg, persisted, vaultWrites };
+}
+const closedFill = (id: string, exitAt: string) => fill({ liveTxid: id, realExitAt: exitAt, realEntryAt: exitAt });
+
+test("first run: every already-closed round trip is seeded into margin_review_done and NOTHING is reviewed", async () => {
+  const w = stubWorld(null);
+  try {
+    const r = await runPostTradeReviews([closedFill("O1", "2026-09-11T00:00:00.000Z"), closedFill("O2", "2026-09-12T00:00:00.000Z")], { withProse: false });
+    assert.deepEqual(r.reviewed, []); assert.equal(r.seeded, 2);
+    assert.deepEqual(JSON.parse(w.cfg[REVIEW_DONE_KEY]).sort(), ["O1", "O2"]);
+    assert.deepEqual(w.vaultWrites, [], "no Decisions/ entry for the backlog");
+  } finally { restore(); }
+});
+
+test("later runs review the oldest 5 not done and persist the done-set after EACH fill — a failure mid-loop keeps the earlier ones done", async () => {
+  const w = stubWorld("[]", { failOn: "O3" });
+  const fills = ["O1", "O2", "O3", "O4", "O5", "O6", "O7"].map((id, i) => closedFill(id, `2026-09-1${i + 1}T00:00:00.000Z`));
+  try {
+    const r = await runPostTradeReviews(fills, { withProse: false });
+    assert.deepEqual(r.reviewed, ["O1", "O2", "O4", "O5"], "5 attempted (O1..O5), O3 failed, O6/O7 wait for the next run");
+    assert.equal(r.errors.length, 1); assert.match(r.errors[0], /^O3: /);
+    assert.deepEqual(w.persisted, [["O1"], ["O1", "O2"], ["O1", "O2", "O4"], ["O1", "O2", "O4", "O5"]], "one persist per reviewed fill, in order");
+    assert.ok(w.vaultWrites.some((v) => /^Decisions\/\d{4}-\d{2}-\d{2}\.md: [\s\S]*### D\w+\n```yaml\n[\s\S]*rationale: "ETH\/USD long \(swing-pyr\) closed/.test(v)), "logDecision wrote the one-liner");
+    assert.ok(w.vaultWrites.some((v) => /### Post-trade review — ETH\/USD long \(swing-pyr\) — O1/.test(v)), "the full block follows");
+    // The next run picks up O3, O6, O7 only.
+    restore();
+    const w2 = stubWorld(JSON.stringify(["O1", "O2", "O4", "O5"]));
+    const r2 = await runPostTradeReviews(fills, { withProse: false });
+    assert.deepEqual(r2.reviewed, ["O3", "O6", "O7"]);
+    assert.deepEqual(w2.persisted[w2.persisted.length - 1].sort(), ["O1", "O2", "O3", "O4", "O5", "O6", "O7"]);
+  } finally { restore(); }
 });

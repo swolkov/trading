@@ -77,8 +77,8 @@ export async function GET(request: Request) {
   const state = await loadState();
   // PENDING (DEFERRED) ENTRIES (margin-pending.ts, C5b): the swing-retest twin's queued breakouts
   // are resolved FIRST — a fill is a paper row like any other and must exist before this tick's
-  // evaluator runs. ≤10 symbols, inside the deadline, fail-soft: a Kraken hiccup here costs nothing.
-  const pending = await resolvePendingEntries({ deadlineMs: routeDeadlineMs }).catch((e) => ({ checked: 0, filled: [], failed: [], expired: [], errors: [`pending: ${String(e).slice(0, 80)}`] }));
+  // evaluator runs. ≤10 rows under its own 20 s wall clock, fail-soft: a Kraken hiccup costs nothing.
+  const pending = await resolvePendingEntries().catch((e) => ({ checked: 0, filled: [], failed: [], expired: [], errors: [`pending: ${String(e).slice(0, 80)}`], stoppedForBudget: false }));
   // DERIVATIVES RESEARCH FEED (margin-derivatives.ts): funding / OI / mark from public perp
   // tickers, ≥15 min apart, BEFORE the 130-call scan so the stamp on this tick's rows is this
   // tick's read. Fail-soft and deadline-guarded: a dead feed stamps NULLs and costs nothing else.

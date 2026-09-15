@@ -568,8 +568,6 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
   await maybeDemote().catch(() => null);
   // Brain/crypto-regime.md — refreshed daily here as well as by the desk brief (soft).
   await refreshCryptoRegime().catch(() => null);
-  // Native 4h history past Kraken's 720-bar window (margin_bars_4h, C6) — fail-soft.
-  await snapshotBars4h().catch(() => null);
   await cfgSet(SYNTH_LAST_RUN, at);
   const armedLine = auto === "true" && validate === "false" ? "ARMED" : "disarmed";
   const best = [...strategies].filter((s) => s.resolved > 0).sort((a, b) => (b.tStat ?? -9) - (a.tStat ?? -9))[0];
@@ -577,5 +575,8 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
     `📚 Margin synthesis: ${strategies.filter((s) => s.resolved > 0).length} sleeves scored · best ${best ? `${best.label} (${best.resolved} resolved, t=${best.tStat?.toFixed(2) ?? "—"}, ${best.verdict})` : "—"} · live ${armedLine}, ${div.fills} fills (${div.closed} closed): ${div.verdict}${observations.length ? `\n• ${observations.join("\n• ")}` : ""}${lessons ? "\nLessons updated → Lessons/margin-lessons.md" : ""}`,
     "margin_results",
   ).catch(() => {});
+  // Native 4h history past Kraken's 720-bar window (margin_bars_4h, C6): LAST, after the run is
+  // stamped and reported — incremental (since = newest stored bar), 30 s budget, fail-soft.
+  await snapshotBars4h().catch(() => null);
   return { ran: true, reason: force ? "forced" : "daily", fills: div.fills, closed: div.closed, journaled, lessons, observations, divergence: div.verdict };
 }

@@ -274,7 +274,9 @@ const PENDING_ENTRIES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_pending_ent
   fill_px double precision,
   fill_t double precision,
   alert_id int,
-  reason text
+  reason text,
+  armed boolean NOT NULL DEFAULT false,
+  fail_t double precision
 )`;
 
 // NATIVE 4h BARS (Sep 15 2026, margin-bars-cache.ts): the scan universe's complete 4h bars,
@@ -288,6 +290,8 @@ const BARS_4H_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_bars_4h (
 
 const MARGIN_INDEX_SQL = [
   `CREATE INDEX IF NOT EXISTS margin_pending_entries_status_idx ON margin_pending_entries(status, expires_at)`,
+  `ALTER TABLE margin_pending_entries ADD COLUMN IF NOT EXISTS armed boolean NOT NULL DEFAULT false`,
+  `ALTER TABLE margin_pending_entries ADD COLUMN IF NOT EXISTS fail_t double precision`,
   `CREATE INDEX IF NOT EXISTS margin_trade_cards_txid_idx ON margin_trade_cards(txid)`,
   `CREATE INDEX IF NOT EXISTS margin_trade_cards_at_idx ON margin_trade_cards(at)`,
   // margin_round_trips is read by its PK (txid) only; no secondary index needed.

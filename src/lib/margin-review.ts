@@ -27,10 +27,12 @@ export const REVIEW_DONE_KEY = "margin_review_done";
 export const REVIEW_MODEL_CHASE_BP = 10;        // = margin-synthesis MODEL_CHASE_BP (kept local: synthesis imports this file)
 export const REVIEW_MODEL_FEE_PCT = 0.25;       // = MODEL_TAKER_FEE_PCT
 export const REVIEW_MODEL_STOP_SLIP_BP = 70;    // = MODEL_STOP_SLIP_BP (EXPECTED_SLIP_PCT 0.7% × 100)
-export const REVIEW_TWIN_SOURCES = ["swing-lev", "swing-wide", "swing-lock", "swing-pyr"] as const;
-/** The verbs a review may never use with "the": the prose proposes no parameter change. */
-export const FORBIDDEN_PROSE_RE = /\b(widen|tighten|raise|lower|loosen)\s+(the|your|its|our)\b/i;
+export const REVIEW_TWIN_SOURCES = ["swing-lev", "swing-wide", "swing-lock", "swing-pyr", "swing-partial", "swing-atr", "swing-mtf", "swing-retest"] as const;
+/** A change verb within a clause of a parameter noun: the prose proposes no parameter change ("use a wider stop" included). */
+export const FORBIDDEN_PROSE_RE = /\b(widen|tighten|raise|lower|loosen|increase|decrease|reduce|extend|shorten|move|change|adjust|set|wider|tighter|looser|higher|longer|shorter)\b[^.]{0,40}\b(stop|trail|hold|size|leverage|risk|target)/i;
 export const PROSE_MAX_WORDS = 120;
+/** Reviews written per synthesis run, oldest first — a backlog never eats the route. */
+export const REVIEW_MAX_PER_RUN = 5;
 
 /** The slice of a LiveFill (margin-synthesis.ts) the review reads. Structural, so the two files do not cycle. */
 export interface ReviewFill {
@@ -110,7 +112,7 @@ export function reviewFacts(f: ReviewFill, ctx: ReviewContext): ReviewFacts {
   if (f.exitKind === "stop" && exitKind === "initial stop" && twinsResolved.length) {
     const allStopped = twinsResolved.every((t) => (t.pnl ?? 0) <= 0);
     stopText += allStopped
-      ? ` — every twin lost too: the move went against the entry, not the stop width`
+      ? ` — every twin lost too: price went against the entry, not the stop width`
       : ` — a wider container survived this one: the difference is the exit rule, not the entry`;
   }
   const stop = { exitKind, maeR: f.maeR, mfeR: f.mfeR, twins: ctx.twins, text: stopText };
@@ -202,7 +204,7 @@ Rules:
 - No hedging filler. Start with whether this trade was variance or deterioration.
 
 Facts:
-${renderReview(r, null, "omitted").split("\n").slice(0, 30).join("\n")}`;
+${renderReview(r, null, "omitted").split("\n").filter((l) => !l.startsWith("> _(prose")).join("\n")}`;
   const res = await anthropic.messages.create({ model: "claude-sonnet-5", max_tokens: 400, messages: [{ role: "user", content: prompt }] });
   const text = res.content.map((c) => (c.type === "text" ? c.text : "")).join("").trim();
   if (!text) return { text: null, note: "skipped — empty response" };
@@ -270,21 +272,50 @@ export async function reviewContextFor(f: ReviewFill): Promise<ReviewContext> {
   return ctx;
 }
 
-export interface ReviewRun { reviewed: string[]; skipped: number; errors: string[] }
+export interface ReviewRun { reviewed: string[]; skipped: number; errors: string[]; seeded: number }
+
+/** The closed, reviewable fills, oldest exit first. */
+export function reviewable(fills: ReviewFill[]): ReviewFill[] {
+  return fills.filter((f) => f.realExitAt && f.realNet != null && f.source !== "roundtrip")
+    .sort((a, b) => Date.parse(a.realExitAt as string) - Date.parse(b.realExitAt as string));
+}
 
 /**
- * Review every CLOSED live fill not yet reviewed, once each (REVIEW_DONE_KEY = the txids done).
- * Writes Decisions/<today>.md via logDecision (the one-line rationale) plus the full block. A
- * failure on one fill is logged and never blocks the next; nothing here throws out.
+ * PURE: which fills this run reviews. On the FIRST run (no done-set stored) every round trip
+ * already closed is seeded as done WITHOUT a review — the deploy check promises only "the first
+ * closed round trip after the deploy", and a backlog of old trades would be reviewed against a
+ * regime and a rolling read they never saw. Otherwise: the oldest `max` not yet done.
+ */
+export function planReviews(fills: ReviewFill[], done: Set<string> | null, max = REVIEW_MAX_PER_RUN): { todo: ReviewFill[]; seed: string[] } {
+  const closed = reviewable(fills);
+  if (done == null) return { todo: [], seed: closed.map((f) => f.liveTxid) };
+  return { todo: closed.filter((f) => !done.has(f.liveTxid)).slice(0, max), seed: [] };
+}
+
+async function persistDone(doneSet: Set<string>): Promise<void> {
+  await cfgSet(REVIEW_DONE_KEY, JSON.stringify([...doneSet].slice(-500)));
+}
+
+/**
+ * Review the oldest REVIEW_MAX_PER_RUN closed live fills not yet reviewed, once each
+ * (REVIEW_DONE_KEY = the txids done, persisted after EACH fill so a crash mid-loop never
+ * re-reviews). Writes Decisions/<today>.md via logDecision (the one-line rationale) plus the
+ * full block. A failure on one fill is logged and never blocks the next; nothing here throws out.
  */
 export async function runPostTradeReviews(fills: ReviewFill[], opts: { withProse?: boolean } = {}): Promise<ReviewRun> {
-  const out: ReviewRun = { reviewed: [], skipped: 0, errors: [] };
-  let done: string[] = [];
-  try { done = JSON.parse((await cfgGet(REVIEW_DONE_KEY)) ?? "[]") as string[]; } catch { done = []; }
-  const doneSet = new Set(done);
-  for (const f of fills) {
-    if (!f.realExitAt || f.realNet == null || f.source === "roundtrip") { out.skipped++; continue; }
-    if (doneSet.has(f.liveTxid)) { out.skipped++; continue; }
+  const out: ReviewRun = { reviewed: [], skipped: 0, errors: [], seeded: 0 };
+  const raw = await cfgGet(REVIEW_DONE_KEY);
+  let done: Set<string> | null = null;
+  if (raw != null) { try { done = new Set(JSON.parse(raw) as string[]); } catch { done = new Set(); } }
+  const plan = planReviews(fills, done);
+  const doneSet = done ?? new Set<string>();
+  if (plan.seed.length || done == null) {
+    for (const id of plan.seed) doneSet.add(id);
+    out.seeded = plan.seed.length;
+    await persistDone(doneSet).catch(() => {});
+  }
+  out.skipped = fills.length - plan.todo.length;
+  for (const f of plan.todo) {
     try {
       const ctx = await reviewContextFor(f);
       const facts = reviewFacts(f, ctx);
@@ -296,10 +327,10 @@ export async function runPostTradeReviews(fills: ReviewFill[], opts: { withProse
       await vaultAppend(`Decisions/${today}.md`, renderReview(facts, prose.text, prose.note), "margin-review");
       doneSet.add(f.liveTxid);
       out.reviewed.push(f.liveTxid);
+      await persistDone(doneSet);   // after EACH fill: a crash on the next one never re-reviews this one
     } catch (e) {
       out.errors.push(`${f.liveTxid}: ${String(e).slice(0, 80)}`);
     }
   }
-  if (out.reviewed.length) await cfgSet(REVIEW_DONE_KEY, JSON.stringify([...doneSet].slice(-500))).catch(() => {});
   return out;
 }

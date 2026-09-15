@@ -99,9 +99,13 @@ the number is the reason; do not re-litigate).
 ## 4. Pre-registration ledger — dated 2026-09-15, committed before any twin opens a trade
 
 Every entry below is judged at **30 resolved, paired against its comparator on identical
-signals, t ≥ 2, 7+ distinct days**. "Kill" fires by itself in the weekly memo's KILL CANDIDATE
-line; the retire is a PR. All five are `TWIN_SOURCES` / `OWN_SIGNAL_PAPER_SOURCES` members — never
-pooled, never armable (no live container; `tests/margin-containers.test.ts` proves it).
+signals, t ≥ 2, 7+ distinct days**. What fires by itself: only the generic **KILL CANDIDATE**
+line in the weekly memo (`weeklyAction`: resolved ≥ 30 and live-priced net ≤ $0). The twin-specific
+kill reads below — paired t, fill rate, maxDD comparison — are **computed by the synthesis agent
+from the scoreboard, the leaderboard and the statistics file and acted on by hand**; nothing in
+code evaluates them, and the retire is a PR. All five are `TWIN_SOURCES` /
+`OWN_SIGNAL_PAPER_SOURCES` members — never pooled, never armable (no live container;
+`tests/margin-containers.test.ts` proves it).
 
 ### 5a `swing-partial` — bank 30% at +2R, trail the rest 2R
 
@@ -123,9 +127,16 @@ pooled, never armable (no live container; `tests/margin-containers.test.ts` prov
 
 - **Container:** swing-wide's, on a **deferred** plan: the 4h breakout is queued in
   `margin_pending_entries` with `level` = the pierced 20-bar high. The resolver (top of each
-  `margin-scan` tick, ≤10 symbols, inside the route deadline) walks completed 1-min bars:
-  the first bar whose low touches ≤ level × 1.005 **and** closes above level fills the row at that
-  close (chased 0.1%); a close below level × 0.995 fails it; 24h unfilled expires it.
+  `margin-scan` tick, ≤10 rows, its own 20 s wall clock) walks completed 1-min bars in three
+  steps: **arm** — a bar must first CLOSE above level × 1.005 (price has left the level; stored
+  as `armed`); **fill** — once armed, the first bar whose low touches ≤ level × 1.005 **and**
+  closes above level fills the row at that close (chased 0.1%); **fail** — any bar closing below
+  level × 0.995, armed or not; 24h unfilled expires it, as does a hole in the resolver's walk
+  (first new bar > 2 min after the last one walked → `coverage gap`, never judged blind). A fill
+  is claimed (`status='filling'`) before the row is opened, so overlapping ticks cannot open it
+  twice. *Correction note: the rule as first written (touch + close, no arming) would have filled
+  on the first bar after the pierce — a chase, not a retest. Corrected in review on 2026-09-15
+  before the resolver ever ran in production; no row could have filled under the old text.*
 - **Hypothesis:** entering on the retest rather than the pierce buys a better average entry (the
   0.1% chase plus the breakout bar's extension) at the cost of missing the breaks that never look
   back.
@@ -242,7 +253,7 @@ Verdict words appear only at |t| ≥ 2; every table carries n, t and a 95% CI.
 |---|---|---|
 | `margin-watch` (guardian) | */5 | Protect every bot book (stops, ratchet, time stop, pyramid trigger), risk state, event policy, anomaly checks, journal phase A. Stamps `margin_watch_protect_ok`. |
 | `margin-scan` | 2-57/5 | Derivatives snapshot → **pending-entry resolver (5b)** → 130-call universe scan → resolve open paper rows → `maybeDemote` → fresh signals → paper plans (+ the five twins) → live hand-off for the armed sleeve → tsmom → brief after 13:00. |
-| `margin-synthesis` | 00:20 daily | Statistics file, journal phase B, **post-trade reviews (C4)**, observations, lessons, stage 3, `maybeDemote`, crypto regime file, **4h bars snapshot (`margin_bars_4h`, C6)**. |
+| `margin-synthesis` | 00:20 daily | Statistics file, journal phase B, **post-trade reviews (C4: oldest 5 per run, done-set persisted after each; the first run seeds every already-closed trip as done)**, observations, lessons, stage 3, `maybeDemote`, crypto regime file, run stamp + Slack, then LAST the **4h bars snapshot (`margin_bars_4h`, C6: since = newest stored bar, one insert per coin, 30 s budget)**. |
 | `margin-weekly` | Mon 13:00 | Weekly memo: leaderboard, `weeklyAction` per sleeve (PROMOTE-READY / REDUCE / KILL CANDIDATE / KEEP). |
 | `kraken` | */30 | Spot/ledger sync for the parked book. |
 
