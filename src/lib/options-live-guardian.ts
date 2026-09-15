@@ -4,6 +4,7 @@
 // contract, not a strategy claim.
 import type { StructureKind } from "./options-structures";
 import type { LiveContract, OwnedOptionsPosition } from "./options-live-policy";
+import { OPTIONS_LADDER_RULES, ddTier } from "./options-risk-ladder";
 
 export const OPTIONS_LIVE_RULES = {
   premiumStopFrac: 0.5,     // close when the structure is worth half what we paid
@@ -14,9 +15,8 @@ export const OPTIONS_LIVE_RULES = {
   trailLockFrac: 0.5,
   exitBeforeDte: 7,         // close inside the last week regardless (gamma/assignment window)
   staleEntryMinutes: 15,    // an unfilled entry is cancelled after this
-  drawdownHaltUsd: 300,     // account value this far under its high → disarm entries (20% of $1,500)
-  maxEntriesPerDay: 1,
-  maxOpenPositions: 1,
+  drawdownHaltUsd: 300,     // the halt's dollar floor: entries disarm at the larger of this and 20% under the high (options-risk-ladder.ts ddTier)
+  maxEntriesPerDay: 1,      // open slots come from the ladder (slotsFor): one, a second after ten closed live trades with the divergence check green
   entryKinds: ["long_call", "long_put", "call_debit", "put_debit"] as StructureKind[],   // debit only: max loss = what we paid
 };
 
@@ -75,10 +75,10 @@ export function openNetAsk(legs: { optionId: string; side: "buy" | "sell" }[], c
   return Math.ceil(net * 100 - 1e-8) / 100;
 }
 
-/** Account drawdown halt: the desk disarms itself when value falls this far under its high-water mark. */
+/** Account drawdown halt: the desk disarms itself at tier 4 of the ladder — the larger of $300 and 20% under its high-water mark. */
 export function drawdownHalt(totalValue: number, high: number, rules = OPTIONS_LIVE_RULES): { halt: boolean; newHigh: number } {
-  const newHigh = Math.max(high, totalValue);
-  return { halt: totalValue < newHigh - rules.drawdownHaltUsd, newHigh };
+  const tier = ddTier(totalValue, high, { ...OPTIONS_LADDER_RULES, ddHaltFloorUsd: rules.drawdownHaltUsd });
+  return { halt: tier.halt, newHigh: tier.newHigh };
 }
 
 /** The ET calendar day (YYYY-MM-DD) a timestamp falls on — entries per day are counted in ET. */

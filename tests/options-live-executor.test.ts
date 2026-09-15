@@ -289,11 +289,57 @@ test("the approved $100 loss cap includes the full round-trip fee reserve", () =
   assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /maximum loss plus fee reserve/);
 });
 
-test("initial live entries cannot increase to multiple contracts", async () => {
+test("initial live entries cannot increase to multiple contracts unless the policy's maxQuantity says so — and never past the hard limit", async () => {
   const f = fixture();
   const order = intent();
   order.quantity = 2;
   const result = await executeOptionsIntent(order, f.deps);
   assert.equal(result.status, "refused");
-  assert.match(result.reason ?? "", /exactly one contract/);
+  assert.match(result.reason ?? "", /at most 1 contract per leg \(asked 2\)/);
+  f.policy.maxQuantity = 2;
+  assert.equal(prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW).params.quantity, "2");
+  assert.equal(prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW).theoreticalMaxLossUsd, 300);
+  assert.throws(() => prepareOptionsOrder({ ...order, quantity: 3 }, f.policy, f.snapshot, null, NOW), /at most 2 contracts per leg/);
+  f.policy.maxQuantity = 3;
+  assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /outside the hard limits/);
+  f.policy.maxQuantity = 2; f.policy.maxOpenPositions = 3;
+  assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /outside the hard limits/);
+});
+
+test("the fee reserve scales with contracts, in the policy and in the broker review", async () => {
+  const f = fixture();
+  f.policy.maxQuantity = 2; f.policy.feeBudgetUsd = 10; f.policy.maxLossUsd = 320;
+  const two = { ...intent(), quantity: 2 };                         // 2 × $150 + 2 × $10 = $320 fits exactly
+  assert.equal(prepareOptionsOrder(two, f.policy, f.snapshot, null, NOW).theoreticalMaxLossUsd, 300);
+  f.policy.maxLossUsd = 319.99;
+  assert.throws(() => prepareOptionsOrder(two, f.policy, f.snapshot, null, NOW), /maximum loss plus fee reserve/);
+  // Review: a $15 broker fee is inside a 2-contract reserve of $20 and outside a 1-contract reserve of $10.
+  f.policy.maxLossUsd = 500;
+  const send = f.deps.broker.callTool;
+  f.deps.broker.callTool = async (name, args) => { const raw = await send(name, args) as Record<string, unknown>; return name === "review_option_order" ? { ...raw, estimatedFeeUsd: 15, maxLossUsd: 300, buyingPowerRequiredUsd: 315 } : raw; };
+  assert.equal((await executeOptionsIntent(two, f.deps)).status, "accepted");
+  assert.deepEqual(f.records.get(REF)?.review, { estimatedFeeUsd: 15, maxLossUsd: 300, buyingPowerRequiredUsd: 315 }, "the broker's review figures are stamped on the record");
+  assert.equal(f.records.get(REF)?.intent?.quantity, 2);
+  const one = fixture(); one.policy.feeBudgetUsd = 10;
+  const sendOne = one.deps.broker.callTool;
+  one.deps.broker.callTool = async (name, args) => { const raw = await sendOne(name, args) as Record<string, unknown>; return name === "review_option_order" ? { ...raw, estimatedFeeUsd: 15 } : raw; };
+  assert.equal((await executeOptionsIntent(intent(), one.deps)).status, "refused");
+  assert.equal(one.calls.filter((c) => c.name === "place_option_order").length, 0);
+});
+
+test("the second slot: a second position is refused at maxOpenPositions 1 and accepted at 2 — but never while an entry intent is unsettled", async () => {
+  const f = fixture();
+  f.snapshot.positions = [{ id: "first", legs: [{ optionId: "B", side: "long", quantity: 1 }] }];
+  const r1 = await executeOptionsIntent(intent(), f.deps);
+  assert.equal(r1.status, "refused"); assert.match(r1.reason ?? "", /position limit: 1 open, policy allows 1/);
+  f.policy.maxOpenPositions = 2;
+  assert.equal((await executeOptionsIntent(intent(), f.deps)).status, "accepted");
+  // That entry is accepted but not settled (order open): a further open is refused before any broker call — one unsettled intent at a time.
+  const r3 = await executeOptionsIntent({ ...intent(), refId: REF2 }, f.deps);
+  assert.equal(r3.status, "refused"); assert.match(r3.reason ?? "", /outstanding durable intent must reconcile first/);
+  assert.equal(f.calls.filter((c) => c.name === "place_option_order").length, 1);
+  f.snapshot.positions.push({ id: "second", legs: [{ optionId: "A", side: "long", quantity: 1 }] });
+  f.records.set(REF, { ...f.records.get(REF)!, state: "settled" });
+  const r4 = await executeOptionsIntent({ ...intent(), refId: REF2 }, f.deps);
+  assert.equal(r4.status, "refused"); assert.match(r4.reason ?? "", /position limit: 2 open, policy allows 2/);
 });

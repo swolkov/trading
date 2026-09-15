@@ -59,6 +59,8 @@ export interface OptionsResearch {
 export interface StrategySignal { symbol: string; direction: "bullish" | "bearish" | "neutral"; setup: string; close: number; day: string; relativeVolume: number | null; reason: string }
 export interface ResearchCandidate {
   symbol: string; kind: string; expiry: string; legs: string[]; strikes: number[];
+  /** The signal's setup ("20-session breakout" / "20-session breakdown") and the widest leg's bid/ask as % of mid — the grade (options-risk-ladder.ts) reads both. */
+  setup: string; spreadPct: number | null;
   quantity: 1; limit: number; plannedLoss: number; feeReserve: number; maxProfit: number | null;
   quoteAt: string; quoteFresh: boolean; reason: string;
   /** Market-implied move to expiry (ATM straddle ÷ spot), the yardstick every structure is ranked on. */
@@ -113,6 +115,11 @@ export function contractQualityFailures(c: ResearchContract, now = Date.now()): 
   if (!(dte >= r.minDte && dte <= r.maxDte)) failures.push("Outside expiration window");
   if (!Number.isFinite(Date.parse(c.at)) || Date.parse(c.at) > now) failures.push("Invalid quote timestamp");
   return failures;
+}
+/** The widest leg's bid/ask spread as a percentage of its mid; null when a leg has no usable mid. */
+export function legSpreadPct(legs: { bid: number; ask: number }[]): number | null {
+  const pcts = legs.map((l) => { const mid = (l.bid + l.ask) / 2; return mid > 0 ? (l.ask - l.bid) / mid * 100 : null; });
+  return pcts.every((p): p is number => p != null) ? Math.round(Math.max(...pcts) * 100) / 100 : null;
 }
 /** 20-session close-to-close realized volatility, annualized. What implied vol is judged against. */
 export function realizedVol20(bars: ResearchBar[]): number | null {
@@ -188,7 +195,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const single=!short, singlePreferred=ivToRealized!=null&&ivToRealized<=rules.singleLegMaxIvToRealized;
       const volNote=ivToRealized==null?"implied vs realized vol unavailable → spreads preferred":`implied vol ${(iv!*100).toFixed(0)}% vs realized ${(rv!*100).toFixed(0)}% (${ivToRealized}×) → ${singlePreferred?"single leg preferred":"spread preferred"}${single===singlePreferred?"":" (this is the other family)"}`;
       const moveNote=em==null?"expected move unavailable":`worth $${payoff} at the market's expected ±${(em*100).toFixed(1)}% move`;
-      result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,
+      result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,setup:signal.setup,spreadPct:legSpreadPct([long,...(short?[short]:[])]),
         limit:Math.round(price*100)/100,plannedLoss:Math.round(loss*100)/100,feeReserve:fee,maxProfit:maxProfit==null?null:Math.round(maxProfit*100)/100,
         quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:emPct,payoffAtMoveUsd:payoff,ivToRealized,
         earningsClass:earnings.earningsClass,earningsAt:earnings.earningsAt,exDivAt:data.events?.[signal.symbol]?.exDivAt??null,

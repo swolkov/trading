@@ -9,9 +9,13 @@ export const LIVE_GUARDIAN_MAX_AGE_MS = 60_000;
 export interface OptionsLivePolicy {
   armed: boolean;
   maxLossUsd: number | null; // No default. Includes the complete fee reserve.
-  feeBudgetUsd: number | null; // Explicit reserve for the whole round trip.
+  feeBudgetUsd: number | null; // Explicit reserve for ONE contract's round trip; scaled by quantity.
   guardianHealthyAtMs: number | null;
+  maxOpenPositions?: number; // Default 1. The ladder (options-risk-ladder.ts) may raise it to the hard limit, never past.
+  maxQuantity?: number;      // Default 1 contract per leg on an entry. Same ceiling.
 }
+/** What no policy override can exceed: the second slot and the second contract are the ladder's whole range. */
+export const OPTIONS_LIVE_HARD_LIMITS = { maxOpenPositions: 2, maxQuantity: 2 };
 export interface LiveContract {
   optionId: string; underlying: string; kind: "call" | "put"; strike: number;
   expiry: string; multiplier: number; bid: number; ask: number; quoteAtMs: number;
@@ -23,6 +27,7 @@ export type OrderState = "pending" | "open" | "partially_filled" | "filled" | "c
 export interface NormalizedOptionsOrder {
   id: string; accountNumber: string; refId: string; requestFingerprint: string;
   state: OrderState; filledQuantity: number;
+  averagePrice?: number | null; // Fail-soft fill price for the ledger's divergence check; never a gate.
 }
 export interface OptionsBrokerSnapshot {
   accountNumber: string; active: boolean; agenticAllowed: boolean;
@@ -76,12 +81,15 @@ export function prepareOptionsOrder(intent: OptionsLiveIntent, policy: OptionsLi
     || now < session.opensAtMs || now >= session.closesAtMs) fail("outside a verified regular trading session");
   const active = snapshot.orders.filter((o) => !["filled", "cancelled", "rejected"].includes(o.state));
   if (active.length) fail("outstanding broker orders must resolve first");
+  const maxQuantity = policy.maxQuantity ?? 1, maxOpen = policy.maxOpenPositions ?? 1;
+  if (!Number.isSafeInteger(maxQuantity) || maxQuantity < 1 || maxQuantity > OPTIONS_LIVE_HARD_LIMITS.maxQuantity
+    || !Number.isSafeInteger(maxOpen) || maxOpen < 1 || maxOpen > OPTIONS_LIVE_HARD_LIMITS.maxOpenPositions) fail("policy quantity or position limit is outside the hard limits");
   if (intent.action === "open") {
-    if (intent.quantity !== 1) fail("initial live entries allow exactly one contract per leg");
+    if (intent.quantity > maxQuantity) fail(`initial live entries allow at most ${maxQuantity} contract${maxQuantity === 1 ? "" : "s"} per leg (asked ${intent.quantity})`);
     if (!policy.armed) fail("live entries are disarmed");
     if (!positive(policy.maxLossUsd)) fail("explicit positive maximum loss required");
     if (!fresh(policy.guardianHealthyAtMs, now, LIVE_GUARDIAN_MAX_AGE_MS)) fail("live guardian is not healthy");
-    if (snapshot.positions.length) fail("one-position account limit");
+    if (snapshot.positions.length >= maxOpen) fail(`position limit: ${snapshot.positions.length} open, policy allows ${maxOpen}`);
   }
   if (intent.legs.length < 1 || intent.legs.length > 2 || new Set(intent.legs.map((l) => l.optionId)).size !== intent.legs.length) fail("only a long option or a two-leg vertical is allowed");
   const contracts = intent.legs.map((leg) => {
@@ -125,8 +133,9 @@ export function prepareOptionsOrder(intent: OptionsLiveIntent, policy: OptionsLi
   const direction = intent.action === "open" ? entryDirection : entryDirection === "debit" ? "credit" : "debit";
   const theoreticalMaxLossUsd = intent.action === "close" ? 0
     : (entryDirection === "debit" ? intent.limitPrice : width - intent.limitPrice) * 100 * intent.quantity;
-  if (intent.action === "open" && (theoreticalMaxLossUsd + policy.feeBudgetUsd! > policy.maxLossUsd!
-    || theoreticalMaxLossUsd + policy.feeBudgetUsd! > snapshot.buyingPowerUsd)) fail("maximum loss plus fee reserve exceeds the authorized budget or buying power");
+  const feeReserve = policy.feeBudgetUsd! * intent.quantity;   // the reserve is per contract round trip
+  if (intent.action === "open" && (theoreticalMaxLossUsd + feeReserve > policy.maxLossUsd!
+    || theoreticalMaxLossUsd + feeReserve > snapshot.buyingPowerUsd)) fail("maximum loss plus fee reserve exceeds the authorized budget or buying power");
   const params: OptionOrderParams = {
     account_number: OPTIONS_LIVE_ACCOUNT,
     legs: intent.legs.map((l) => ({ option_id: l.optionId, side: l.side, position_effect: intent.action, ratio_quantity: 1 })),

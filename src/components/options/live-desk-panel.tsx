@@ -6,24 +6,27 @@ import { Chip } from "@/components/ui/chip";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { ago, money, when } from "@/lib/format";
 
-// THE OPTIONS LIVE DESK — real money, one contract at a time, inside the approved $100 cap. This
-// panel is the switch and the receipt: what the desk on the Mac last did, whether the broker
+// THE OPTIONS LIVE DESK — real money, sized by the ladder under the armed ceiling (Normal $100 /
+// Strong $150 / A+ locked, × the drawdown tier). This panel is the switch and the receipt: what the desk last did, whether the broker
 // adapter has been verified on a real review, the guardian's heartbeat, and every intent it has
 // reserved. The desk runs on the Mac (the broker credential lives there); this page only flips
 // the switch it reads on every tick.
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 interface Intent { refId: string; action: string; state: string; orderId: string | null; updatedAt: string }
-interface Owned { id: string; kind: string; underlying: string; expiry: string; entryPrice: number; width: number }
+interface Owned { id: string; kind: string; underlying: string; expiry: string; entryPrice: number; width: number; cluster?: string | null; legs?: { quantity: number }[] }
+interface Ladder { rungs: Record<string, { usd: number; pct: number }>; promoted: boolean; ceilingOnArm: number; reserveMaxFrac: number; ddTierPcts: number[]; ddTierMults: number[]; slotUnlockClosedTrades: number }
+interface DdTier { tier: number; mult: number; label: string; ddPct: number; ddUsd?: number; haltAtUsd?: number; at?: string }
 interface IndexView { day: string | null; close: number | null; sma20: number | null; dayPct: number | null; regime: "above" | "below" | "unknown" }
 interface MarketView { spy: IndexView; qqq: IndexView; vix: number | null; veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
 const pct = (x: number | null | "unknown" | "stale" | undefined) => (typeof x === "number" ? `${x >= 0 ? "+" : ""}${x}%` : x === "stale" ? "stale" : "unknown");
 const marketLine = (m: MarketView) => `SPY ${m.spy.regime} 20d ${pct(m.spy.dayPct)} · QQQ ${m.qqq.regime} 20d ${pct(m.qqq.dayPct)} · VIX ${m.vix ?? "unknown"} · SPY intraday ${pct(m.spyIntradayPct)} · veto ${m.veto}`;
 interface Data {
   armed: boolean; verified: boolean; maxLossUsd: number | null; feeReserveUsd: number | null;
+  ladder: Ladder; ddTier: DdTier | null;
   guardian: { at: string | null; fresh: boolean };
   rules: { premiumStopFrac: number; trailArmMult: number; trailLockFrac: number; exitBeforeDte: number; drawdownHaltUsd: number; maxEntriesPerDay: number; entryKinds: string[] };
-  state: { at?: string; mode?: string; lastError?: string; candidate?: string; buyingPower?: number; totalValue?: number; equityHigh?: number; guardianOk?: boolean; market?: MarketView } | null;
+  state: { at?: string; mode?: string; lastError?: string; candidate?: string; buyingPower?: number; totalValue?: number; equityHigh?: number; guardianOk?: boolean; market?: MarketView; slots?: number; grade?: string | null; cap?: number; ledger?: { closedTrades: number; divergenceGreen: boolean; reasons: string[] } } | null;
   probe: { at: string; ok: boolean; reason?: string; candidate?: string; fee?: number; buyingPower?: number } | null;
   research: { capturedAt: string; symbols: number; contracts: number; unmatchedQuotes: number; errors: number } | null;
   log: string[]; armLog: string[]; intents: Intent[]; owned: Owned[];
@@ -51,14 +54,20 @@ export function OptionsLiveDeskPanel() {
           aside={<Chip tone={canTrade ? "red" : data.armed ? "amber" : "grey"} dot={canTrade}>{canTrade ? "Armed · verified" : data.armed ? "Armed · adapter not yet verified" : "Disarmed"}</Chip>} />
         <PanelBody className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-4">
-            <Stat label="Max loss per trade" value={data.maxLossUsd != null ? money(data.maxLossUsd) : "Not set"} sub={`incl. fees · reserve ${data.feeReserveUsd != null ? money(data.feeReserveUsd) : "unset"}`} />
+            <Stat label="Ceiling per trade" value={data.maxLossUsd != null ? money(data.maxLossUsd) : "Not set"} sub={`by grade: Normal ${money(data.ladder.rungs.Normal.usd)} · Strong ${money(data.ladder.rungs.Strong.usd)} · A+ ${data.ladder.promoted ? money(data.ladder.rungs["A+"].usd) : "locked"} · fee reserve ${data.feeReserveUsd != null ? money(data.feeReserveUsd) : "unset"}/contract`} />
             <Stat label="Guardian" value={data.guardian.fresh ? "Reporting" : "Not reporting"} sub={data.guardian.at ? `last clean run ${ago(data.guardian.at)}` : "has not run"} />
             <Stat label="Broker adapter" value={data.verified ? "Verified" : "Unverified"} sub={data.probe ? `probe ${ago(data.probe.at)}: ${data.probe.ok ? "ok" : data.probe.reason ?? "failed"}` : "no probe yet"} />
-            <Stat label="Account high-water" value={data.state?.totalValue != null ? money(data.state.totalValue) : "—"} sub={data.state?.equityHigh != null ? `high ${money(data.state.equityHigh)} · halt at −${money(data.rules.drawdownHaltUsd)}` : ""} />
+            <Stat label="Account high-water" value={data.state?.totalValue != null ? money(data.state.totalValue) : "—"} sub={data.state?.equityHigh != null ? `high ${money(data.state.equityHigh)} · halt at the larger of −${money(data.rules.drawdownHaltUsd)} and −20%` : ""} />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Stat label="Drawdown tier" value={data.ddTier ? `Tier ${data.ddTier.tier} · ×${data.ddTier.mult}` : "—"} sub={data.ddTier ? `${data.ddTier.label} (${data.ddTier.ddPct}% under the high)` : "no guard tick with an account value yet"} />
+            <Stat label="Slots" value={data.state?.slots != null ? `${data.owned.length} of ${data.state.slots}` : `${data.owned.length} of 1`} sub={data.state?.ledger ? `${data.state.ledger.closedTrades} closed live trades · divergence ${data.state.ledger.divergenceGreen ? "green" : "red"} · second slot at ${data.ladder.slotUnlockClosedTrades}` : `second slot after ${data.ladder.slotUnlockClosedTrades} closed live trades with the divergence check green`} />
+            <Stat label="Last grade" value={data.state?.grade ?? "—"} sub={data.state?.cap != null ? `cap ${money(data.state.cap)} at the last entry tick · reserve ≤ ${Math.round(data.ladder.reserveMaxFrac * 100)}% of equity` : `reserve ≤ ${Math.round(data.ladder.reserveMaxFrac * 100)}% of equity at risk`} />
           </div>
           <Note>
             Rules in force: debit structures only (long call, long put, call or put debit spread), so the most a trade can lose is what it paid plus fees.
-            One contract, one position at a time, {data.rules.maxEntriesPerDay} entry a day. The guardian runs every 5 minutes in the session: it sells at half the premium, has no fixed target — once a position has been worth {data.rules.trailArmMult}× the premium a trail keeps {Math.round(data.rules.trailLockFrac * 100)}% of the best gain seen — and gets out {data.rules.exitBeforeDte} days before expiry.
+            Size by grade under the ceiling — Normal {money(data.ladder.rungs.Normal.usd)} or {(data.ladder.rungs.Normal.pct * 100).toFixed(1)}% of equity, Strong (breakout, market aligned, spread ≤5%, payoff ≥1.5× risk) {money(data.ladder.rungs.Strong.usd)} or {Math.round(data.ladder.rungs.Strong.pct * 100)}%, A+ {money(data.ladder.rungs["A+"].usd)} or {Math.round(data.ladder.rungs["A+"].pct * 100)}% once the score is promoted — scaled ×{data.ladder.ddTierMults.join(" / ×")} at {data.ladder.ddTierPcts.map((p) => `${p}%`).join(" / ")} under the high. Two contracts only on a Strong-or-better structure that fits twice. One cluster per direction (an index ETF beside a semis or megacap name counts as one tech bet); everything at risk stays under {Math.round(data.ladder.reserveMaxFrac * 100)}% of equity.
+            One slot ({data.ladder.slotUnlockClosedTrades} closed live trades with the divergence check green unlock a second), {data.rules.maxEntriesPerDay} entry a day. The guardian runs every 5 minutes in the session: it sells at half the premium, has no fixed target — once a position has been worth {data.rules.trailArmMult}× the premium a trail keeps {Math.round(data.rules.trailLockFrac * 100)}% of the best gain seen — and gets out {data.rules.exitBeforeDte} days before expiry.
             Entries come from the research screen&apos;s 20-session breakout rule on real Robinhood quotes fetched at the moment of the order. Before the first order the desk sends a broker review only and must decode fees and buying power from the real response; that is the adapter verification above.
           </Note>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -83,7 +92,7 @@ export function OptionsLiveDeskPanel() {
         <PanelHeader title="Desk positions and intents" aside={<span>{data.owned.length} owned · {data.intents.filter((i) => i.state !== "settled").length} unsettled intent(s)</span>} />
         <PanelBody className="space-y-3">
           {data.owned.length === 0 ? <Empty>The desk owns no position.</Empty> : (
-            <ul className="text-[13px]">{data.owned.map((o) => <li key={o.id}>{o.kind} {o.underlying} {o.expiry} · entry {o.entryPrice.toFixed(2)}{o.width ? ` · ${o.width}-wide` : ""}</li>)}</ul>
+            <ul className="text-[13px]">{data.owned.map((o) => <li key={o.id}>{o.kind} {o.underlying} {o.expiry}{o.legs?.[0]?.quantity ? ` × ${o.legs[0].quantity}` : ""} · entry {o.entryPrice.toFixed(2)}{o.width ? ` · ${o.width}-wide` : ""} · cluster {o.cluster ?? "none"}</li>)}</ul>
           )}
           {data.intents.length > 0 && (
             <ul className="space-y-1 text-xs">{data.intents.map((i) => (

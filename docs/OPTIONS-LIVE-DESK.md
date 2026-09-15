@@ -18,12 +18,45 @@ credential lives there; Vercel never holds it) and reports to the admin like the
 | Schedulers | `scripts/com.esbueno.options-live-guard.plist` (StartInterval 300), `scripts/com.esbueno.options-live-entry.plist` (:05/:35, 09–15 h weekdays), `scripts/options-live-run.sh` | Install once: copy both plists to `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$UID <plist>`. They fast-forward `/Users/user/trading-rh-options` from `main` before each run. |
 | Admin | `/options` → Live desk panel (typed **ARM** / Disarm, state, probe, intents, log); `/api/options/live-desk`; System Health rows; Orders → Robinhood segment | The switch the runner reads on every tick. |
 
-## Rules in force (`OPTIONS_LIVE_RULES`)
+## Rules in force (`OPTIONS_LIVE_RULES` + `options-risk-ladder.ts`)
 
 Debit structures only (long call, long put, call/put debit spread) so max loss = premium paid + fees ·
-one contract · one open position · one entry per day · no entries in the last 30 minutes · premium
-stop at 50% of entry · no fixed target: once worth 1.5× entry a trail keeps half the best gain (a spread at full width exits) · out 7 days before expiry · unfilled entry cancelled after
-15 min · account value $300 under its high-water mark → desk disarms itself (positions stay managed).
+sized by the ladder below (one contract, two only on a Strong-or-better structure that fits twice) ·
+one slot (a second after ten closed live trades with the divergence check green) · one entry per day ·
+no entries in the last 30 minutes · premium stop at 50% of entry · no fixed target: once worth 1.5×
+entry a trail keeps half the best gain (a spread at full width exits) · out 7 days before expiry ·
+unfilled entry cancelled after 15 min · account value the larger of $300 and 20% under its high-water
+mark → desk disarms itself (positions stay managed).
+
+## The size ladder, drawdown tiers, clusters and the reserve (Sep 15 2026, `src/lib/options-risk-ladder.ts`)
+
+**ARM sets `options_live_max_loss_usd` to the CEILING** — $150, or $225 once `options_score_promoted="true"`.
+Per trade the runner grades the candidate and sizes under it, then hands the core that cap as the
+policy it enforces on review and re-review (`maxLossUsd`, `maxOpenPositions`, `maxQuantity`; the core
+refuses anything past its hard limit of 2 and 2):
+
+| Grade | Rule | Max loss (the larger of) |
+|---|---|---|
+| Normal | any candidate the screen passed | $100 / 6.7% of equity |
+| Strong | 20-session breakout or breakdown **and** SPY aligned with the direction **and** every leg's spread ≤5% on the live quote **and** payoff at the market's expected move ≥1.5× the planned loss | $150 / 10% |
+| A+ | Strong **and** score ≥80 **and** the score promoted (D7) — locked until then | $225 / 15% |
+
+× the **drawdown tier** from `options_account_snapshot.totalValue` against `options_live_equity_high`:
+tier 0 (<5% under) ×1 · tier 1 (5%) ×1 · tier 2 (10%) ×0.5 · tier 3 (15%) ×0.25 · tier 4 (the larger
+of $300 and 20%) halt — `drawdownHalt` delegates to `ddTier`; the tier is written to `options_live_dd_tier`.
+**Two contracts** only when the grade is Strong or better and one contract's max loss plus its fee
+reserve fits twice inside the cap; the $2 fee reserve is per contract and the core scales it.
+**Cluster**: `clusterOf` = the paper universe's correlation group plus RIOT/MARA/COIN/MSTR →
+`crypto-proxy`, F/RIVN/AAL/CCL/NCLH/T/PFE/WBD/DKNG → `consumer`, NFLX → `megacap`, SOFI → `fintech`.
+The same direction in the same cluster, or an index ETF beside any semis/megacap name in the same
+direction, is one bet — a second is refused (`cluster: SPY call + NVDA call would be one tech bet — refused`).
+**Reserve**: open max loss + the new trade's ≤25% of equity (`reserve: $325 already at risk + $150
+would exceed 25% of $1,500`); no account value on file refuses. **Slots** (`slotsFor`): one, a second
+once `options-live-ledger.ts` counts ten closed round trips with the divergence verdict green — no
+`unknown` intent, every stamped broker review fee inside the reserve, every fill within 5% of its
+limit (from the order's fail-soft `averagePrice`; the limit stands in when the broker gave none).
+The executor stamps the broker's review figures (`review {estimatedFeeUsd, maxLossUsd,
+buyingPowerRequiredUsd}`) on the intent RECORD, not the intent, so recovery identity is untouched.
 Entry signal = the research screen's 20-session breakout/breakdown with 50/200-day alignment, on the
 day's broker bars; the structure is chosen by the screen and re-priced on live quotes.
 
