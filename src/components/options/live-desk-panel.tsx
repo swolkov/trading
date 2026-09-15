@@ -25,8 +25,10 @@ interface Data {
   rules: { premiumStopFrac: number; trailArmMult: number; trailLockFrac: number; exitBeforeDte: number; drawdownHaltUsd: number; maxEntriesPerDay: number; entryKinds: string[] };
   state: { at?: string; mode?: string; lastError?: string; candidate?: string; buyingPower?: number; totalValue?: number; equityHigh?: number; guardianOk?: boolean; market?: MarketView } | null;
   probe: { at: string; ok: boolean; reason?: string; candidate?: string; fee?: number; buyingPower?: number } | null;
+  research: { capturedAt: string; symbols: number; contracts: number; unmatchedQuotes: number; errors: number } | null;
   log: string[]; armLog: string[]; intents: Intent[]; owned: Owned[];
 }
+const researchLine = (r: Data["research"]) => (r ? `${r.contracts} contracts on ${r.symbols} names, last run ${ago(r.capturedAt)} · ${r.unmatchedQuotes} unmatched quote${r.unmatchedQuotes === 1 ? "" : "s"} · ${r.errors} error line${r.errors === 1 ? "" : "s"}` : "no broker research on file");
 const btn = "inline-flex h-8 items-center justify-center rounded-md border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40";
 const intentTone = (s: string) => (s === "settled" ? "grey" : s === "accepted" ? "green" : s === "unknown" ? "red" : "amber");
 
@@ -71,6 +73,7 @@ export function OptionsLiveDeskPanel() {
             <span className="text-xs text-muted-foreground">{data.state?.at ? `Desk last ran ${ago(data.state.at)} (${data.state.mode})${data.state.candidate ? ` · ${data.state.candidate}` : ""}${data.state.lastError ? ` · ⚠️ ${data.state.lastError}` : ""}` : "The desk has not run yet."}</span>
           </div>
           {data.state?.market && <span className="block text-xs text-muted-foreground">Market at the last entry tick: {marketLine(data.state.market)}</span>}
+          <span className="block text-xs text-muted-foreground">Research the entry tick screens: {researchLine(data.research)}</span>
           {msg && <Note>{msg}</Note>}
           {data.armLog.length > 0 && <Note>Last · {data.armLog[data.armLog.length - 1]}</Note>}
         </PanelBody>

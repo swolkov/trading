@@ -85,11 +85,13 @@ afford.
 
 ## When the desk does what (Sep 14 2026)
 
-**Expiry.** Research pulls the nearest monthly 28–60 days out; the desk is out 7 days before expiry.
+**Expiry.** Research pulls two standard expirations per name — the nearest at least 21 days out and
+the nearest at least 35, both at most 60 (the DTE engine below); the desk is out 7 days before expiry.
 A breakout takes days to weeks to pay. At-the-money decay per day as a share of premium: ~1.1% at
-45 days, ~1.8% at 28, ~2.4% at 21, ~7% at 7, 36% or worse at 1. Seven-day and one-day options are
-not a setting this desk offers: at $100 a contract on a cheap name is $0.10–$0.30 wide on a nickel
-spread, so friction alone is 15–30% a side, and the decay means a flat week is the stop.
+45 days, ~1.4% at 35, ~1.8% at 28, ~2.4% at 21, ~3.5% at 14, ~7% at 7, 36% or worse at 1. Seven-day
+and one-day options are not a setting this desk offers: at $100 a contract on a cheap name is
+$0.10–$0.30 wide on a nickel spread, so friction alone is 15–30% a side, and the decay means a flat
+week is the stop.
 
 **Single leg or spread.** Decided by the market, not by mood: ATM implied vol ÷ 20-day realized vol.
 At or under 1.15× the option is fairly priced against how the stock actually moves → a long call (or
@@ -97,8 +99,9 @@ long put on a breakdown) with its upside uncapped. Above that the option is rich
 which sells the richness back. Sep 14 examples: SOFI 0.90× and AAPL 1.10× → single; SPY 1.44× → spread.
 
 **Which contract.** Within the preferred family, the most P&L per dollar at risk if the stock moves
-exactly the move the options market is pricing (ATM straddle ÷ spot), in the signal's direction. A
-structure worth nothing at that move is rejected outright — that is a lottery ticket.
+exactly the move the options market is pricing (ATM straddle ÷ spot), in the signal's direction,
+**after the theta the expected hold costs** (DTE engine below). A structure worth nothing at that
+move is rejected outright — that is a lottery ticket.
 
 **Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
 trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
@@ -176,3 +179,81 @@ layer is fail-soft; the earnings rule is the fail-closed one. The VIX read is ra
 8-second timeout so the guard loop can never stall on Yahoo. Off switch: `options_live_market_veto="false"` (default on). Entry log lines:
 `refused: SOFI long_call: market veto — SPY below its 20-day (651.2 vs 660.4) and -2.1% on 2026-09-14 — bullish single-name entries refused`
 and `… market shock veto — SPY -1.7% intraday against a bullish entry`.
+
+## Do not chase, the DTE engine and the strike-window slice (Sep 15 2026)
+
+**Do not chase.** `chaseRatio(todayMovePct, atmIv)` (`options-market-state.ts`, pure) = |today's
+move| ÷ the implied daily move (ATM IV ÷ √252). The screen stamps `chase` on every candidate from
+the signal day's close-to-close move and that expiry's ATM IV. At the moment of entry `pickCandidate`
+recomputes it from a live quote of the name itself (`broker.underlyingQuote`, last vs prior close,
+fresh ≤15 minutes) and **refuses at 2× or more**:
+`refused: SOFI long_call: WAIT FOR TRIGGER: SOFI moved +6.1% today = 2.4× its implied daily move — not chasing`.
+Direction-blind (a put on a −6% day is chasing too). No quote, a stale one, or no ATM IV → ratio
+null, no veto, logged as skipped — fail-soft like the market layer. Constant: `OPTIONS_MARKET_RULES.chaseMaxRatio = 2`.
+
+**DTE engine.** The research prompt asks for **two** standard expirations per name — the nearest
+≥21 days out and the nearest ≥35, both ≤60. `OPTIONS_DESK_RULES.minDte` is **21** (was 28);
+`exitBeforeDte` stays 7. The theta table the floor is set against (ATM decay per day as a share of
+premium): 45 DTE ≈1.1% · 35 ≈1.4% · 28 ≈1.8% · 21 ≈2.4% · 14 ≈3.5% · 7 ≈7% · 0–1 DTE ≥36%. 7–14
+DTE and 0–1 DTE are deliberately not offered. Ranking inside the preferred family is now
+`(payoffAtMoveUsd − thetaDragUsd) / plannedLoss` with `thetaDragUsd = −netTheta × 100 ×
+expectedHoldDays`, net theta = long − short from the broker greeks, `expectedHoldDays = min(10,
+dte − 7)` (always 10 inside the window). A leg without a broker theta charges nothing and stamps
+`thetaDragUsd: null` — no invented number. A structure whose theta-adjusted payoff is ≤ 0 is
+rejected like the lottery ticket it is. This is a **heuristic**, not a pricing model: at-expiry
+payoff at the expected move minus a flat 10-day theta charge (theta is not constant over the hold
+and the position is rarely held to expiry) — good enough to order two expiries of the same idea,
+not a forecast. DTE follows the guardian's one convention (`dteOf`: expiry at the 20:00Z close), so
+an expiry 21 calendar days out reads 21.x during the day. So of two expiries the longer wins
+whenever the decay it saves outweighs its extra premium (the test pins a 26-DTE call at −$0.08/day
+losing to a 55-DTE one at −$0.01/day). Stamps: `dteBucket` (`21-30` | `30-45` | `45-60`), `expectedHoldDays`,
+`thetaDragUsd`, `atmIv`; the entry note carries them (`[dte 45-60 · hold 10d · theta $10 · delta prompt · chase 0.4]`).
+
+**Strike window.** Live stays |delta| 0.35–0.75 (PR #166's band has zero trades; changing it would
+restart an empty record). Every candidate is stamped `deltaBand`: **prompt** = the long leg's
+|delta| in [0.40, 0.70], **outer** = the rest of the window (or no delta). D7 measures the slice
+before anything moves.
+
+## Universe expansion and research slices (Sep 15 2026)
+
+`OPTIONS_WATCHLIST` is now **28 base names** = `OPTIONS_WATCHLIST_SLICES.A ∪ B` (order preserved; a
+test pins the partition):
+
+- **A (18)** — the six index/mega names (SPY QQQ IWM AAPL AMD NVDA) that give the desk its regime
+  read, plus the affordable core (F AAL T PFE CCL NCLH WBD DKNG RIOT SOFI MARA RIVN). It takes the
+  post-close refresh, since the core is where the live desk actually trades.
+- **B (10)** — TSLA MSFT AMZN META GOOGL AVGO NFLX PLTR COIN MSTR. At their prices only a $2.5–5-wide
+  debit spread fits the cap; the screen enforces that by price, nothing special-cases them. Scanner
+  **discovery** names (≤6) ride in this slice only.
+- For D4's cluster map: RIOT, MARA, COIN and MSTR are one `crypto-proxy` bet, not four.
+
+**The load math.** 28 base + ≤6 discovery = 34 names × 2 expiries × 5 strikes × 2 types =
+**680 contracts** per full pass (34 quote batches of 20) against 180 (9 batches) before, and the
+broker's instrument reads already flaked past ~100 in one run. So each run reads **≤360 contracts**:
+slice A = 18 × 20 = 360; slice B = (10 + 6) × 20 = 320. One run takes roughly **10–15 minutes**
+(bars, two chains per name, quote batches until every ID answers, the calendar twice, fundamentals
+in tens).
+
+**The schedule** stays one plist (`scripts/com.esbueno.options-market.plist`, four weekday
+entries). launchd cannot vary the environment per `StartCalendarInterval`, so
+`scripts/options-market-run.sh` picks the slice by ET hour — **10:15 and 17:45 → A; 12:15 and
+15:15 → B** (any other hour → A) — unless `RESEARCH_SLICE=A|B` is set for a hand run (anything
+else refuses and logs). The script derives `BASE_SYMBOLS` from that slice, runs the scanner
+session and adds the discovery clause only in B (a failed scanner session is logged and the run
+continues without discovery — the large caps are still read), exports `RESEARCH_SLICE` so the
+ingest log line carries `slice`, `runSymbols`, `runContracts` and `unmatchedQuotes`.
+
+**The merge** (`mergeResearchSnapshot`) keeps every watchlist symbol's bars, contracts and event
+rows from whichever run last observed them, so a slice-B run never drops slice A's data and the
+screen always sees all 28 (a test pins both directions). A run that observed no discovery names
+(slice A never asks) carries the last run's discoveries forward instead of dropping them for half
+the day; a run that observed some replaces them (six at most, sorted). `errors` are the run's own.
+
+**Unmatched quotes on the panel.** The ingest already writes `N requested contracts lacked usable
+matched quotes` into the snapshot's `errors`; `unmatchedQuoteCount(errors)` reads it back and
+`/api/options/live-desk` exposes `research {capturedAt, symbols, contracts, unmatchedQuotes,
+errors}`, shown on the Live desk panel's research line ("412 contracts on 28 names, last run 2h
+ago · 3 unmatched quotes · 2 error lines"). A rising count is the first sign a slice is too big.
+
+After this ships, the first two runs (one A, one B) fill both halves; until then the merged
+snapshot carries whatever the old 18-name runs left, and the ten new names simply have no bars yet.
