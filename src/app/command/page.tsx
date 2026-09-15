@@ -172,6 +172,17 @@ export default function SystemHealthPage() {
             chip={<Chip tone={data.futures.desk.cmeOpen ? "blue" : "grey"}>{data.futures.desk.cmeOpen ? "Open" : "Closed"}</Chip>} />
           <HealthRow label="Demo equity (guardian's last read)" sub="Sizing uses the fixed $50k basis, not this number."
             chip={<Chip tone="grey">{data.futures.desk.equity != null ? `$${Math.round(data.futures.desk.equity).toLocaleString()}` : "—"}</Chip>} />
+          <HealthRow label="Drawdown tier · open risk · daily loss left" sub="From the guardian's risk snapshot. Tier 1–3 shrink the budget (×0.75 / ×0.5 / ×0.25); tier 4 halts the desk."
+            chip={<Chip tone={data.futures.desk.ddTier == null ? "grey" : data.futures.desk.ddTier >= 2 ? "red" : data.futures.desk.ddTier === 1 ? "amber" : "green"}>{data.futures.desk.ddTier == null ? "—" : `tier ${data.futures.desk.ddTier}`}</Chip>}>
+            <span>open risk {data.futures.desk.openRisk != null ? `$${Math.round(data.futures.desk.openRisk).toLocaleString()}` : "—"} · daily loss left {data.futures.desk.dailyLossRemaining != null ? `$${Math.round(data.futures.desk.dailyLossRemaining).toLocaleString()}` : "—"}</span>
+          </HealthRow>
+          <HealthRow label="Event mode · feed heartbeat" sub="Paused refuses entries; reduced halves the budget. A stale TradingView heartbeat (180 CME-open minutes) reads NO TRADE but does not refuse."
+            chip={<Chip tone={data.futures.desk.eventMode === "paused" ? "red" : data.futures.desk.eventMode === "reduced" ? "amber" : data.futures.desk.eventMode ? "green" : "grey"}>{data.futures.desk.eventMode ?? "no policy"}</Chip>}>
+            <span>feed {data.futures.desk.feedStale ? "STALE" : "live"} · last seen {data.futures.desk.feedSeenAt ? ago(data.futures.desk.feedSeenAt) : "never"}</span>
+          </HealthRow>
+          {data.futures.desk.anomaly && (
+            <HealthRow label="Anomaly — entries paused" chip={<Chip tone="red">Clear on /futures</Chip>}><span>{data.futures.desk.anomaly}</span></HealthRow>
+          )}
           {data.futures.desk.lastError && (
             <HealthRow label="Last desk error" chip={<Chip tone="amber">Inspect</Chip>}><span>{data.futures.desk.lastError}</span></HealthRow>
           )}

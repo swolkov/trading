@@ -7,6 +7,7 @@ import { Explainer, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from
 import { ago, money, pnl0, tone } from "@/lib/format";
 import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
 import { FuturesPromotionPanel, type LeaderRowView, type PromotionVerdictView, type StageReadinessView } from "@/components/futures/promotion-panel";
+import { FuturesBriefPanel, FuturesDashboard, FuturesScorePanel, type FuturesBriefView, type FuturesDashboardView } from "@/components/futures/desk-brief";
 
 // ============ FUTURES DESK — Tradovate DEMO ============
 // The futures edge lab. TradingView evaluates each registered rule on real-time CME data and
@@ -23,8 +24,10 @@ type Trade = FuturesTrade;
 type Signal = FuturesSignal;
 interface Status {
   enabled: boolean; disabledReason: string | null; configured: boolean;
-  limits: { sizingBasisUsd: number; riskPct: number; maxContracts: number; maxPositions: number; maxEntriesPerDay: number; dailyLossPausePct: number; drawdownDisablePct: number };
+  limits: { sizingBasisUsd: number; riskPct: number; maxContracts: number; maxPositions: number; maxEntriesPerDay: number; dailyLossPausePct: number; drawdownDisablePct: number; stage: string };
   state: { equity?: number; equityHigh?: number; dayStartEquity?: number; dayKey?: string };
+  // E8: the dashboard numbers (guardian keys + review rows) and the latest desk brief.
+  dashboard: FuturesDashboardView; brief: FuturesBriefView | null;
   entriesToday: number;
   guardian: { at: string | null; fresh: boolean; lastError: string | null };
   broker: { balance: number; netLiq: number; positions: { contractId: number; netPos: number; netPrice: number }[]; workingOrders: number } | null;
@@ -43,6 +46,7 @@ export default function FuturesDeskPage() {
   const { data, mutate } = useSWR<Status>("/api/futures/desk", fetcher, { refreshInterval: 30_000 });
   const [confirm, setConfirm] = useState("");
   const [clear, setClear] = useState("");
+  const [promote, setPromote] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -51,8 +55,8 @@ export default function FuturesDeskPage() {
     try {
       const r = await fetch("/api/futures/desk/enable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
-      setMsg(j.error ?? (body.action === "clear-anomaly" ? "anomaly cleared — entries resume on the next alert" : j.enabled ? "ENABLED — the next registered alert trades on the demo" : "disabled"));
-      setConfirm(""); setClear(""); await mutate();
+      setMsg(j.error ? `${j.error}${j.reasons ? ` — ${j.reasons.join(" · ")}` : ""}` : body.action === "promote-score" ? "score PROMOTED — Strong/A+ unlock and the minimum score refuses from the next alert" : body.action === "clear-anomaly" ? "anomaly cleared — entries resume on the next alert" : j.enabled ? "ENABLED — the next registered alert trades on the demo" : "disabled");
+      setConfirm(""); setClear(""); setPromote(""); await mutate();
     } catch (e) { setMsg(String(e)); }
     setBusy(false);
   }
@@ -129,7 +133,11 @@ export default function FuturesDeskPage() {
         </PanelBody>
       </Panel>
 
+      <FuturesDashboard d={data.dashboard} equity={s.equity ?? null} equityHigh={s.equityHigh ?? null} positions={data.open.length} trades={data.record.trades} feedSeenAt={data.feedSeenAt} feedStale={data.feedStale} stage={L.stage} />
+      <FuturesBriefPanel brief={data.brief} />
+
       <FuturesPromotionPanel promotion={data.promotion} stageReadiness={data.stageReadiness} leaderboard={data.leaderboard} error={data.reviewError} />
+      <FuturesScorePanel verdict={data.dashboard.scoreVerdict} promoted={data.dashboard.scorePromoted} minScore={data.dashboard.minScore} busy={busy} confirm={promote} setConfirm={setPromote} onPromote={() => post({ action: "promote-score", confirm: promote })} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel>
