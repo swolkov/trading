@@ -51,6 +51,11 @@ test("owned structures are grouped from broker legs exactly; anything else is fo
   // A quantity mismatch is not ours — the structure stands as two foreign legs.
   const off = groupPositions(legs, [{ ...owned[0], legs: [{ optionId: "A", side: "long", quantity: 2 }, { optionId: "B", side: "short", quantity: 1 }] }]);
   assert.deepEqual(off.map((p) => p.id), ["A:long", "B:short", "C:long"]);
+  // A partial close: the runner rewrote the 2-lot record to its 1-lot remainder, the broker shows 1 — the remainder is OURS, not closed and not foreign.
+  const remainder = [{ id: "ref-2", accountNumber: OPTIONS_LIVE_ACCOUNT, openingRefId: "ref-2", legs: [{ optionId: "C", side: "long" as const, quantity: 1 }] }];
+  const after = groupPositions([{ optionId: "C", side: "long", quantity: 1 }], remainder);
+  assert.deepEqual(after, [{ id: "ref-2", legs: [{ optionId: "C", side: "long", quantity: 1 }] }]);
+  assert.deepEqual(groupPositions([{ optionId: "C", side: "long", quantity: 1 }], [{ ...remainder[0], legs: [{ optionId: "C", side: "long", quantity: 2 }] }]).map((p) => p.id), ["C:long"], "until the record is rewritten the 1-lot is not matched — which is why the runner never releases while a close is in flight");
 });
 
 test("review decoding: fees found → approved; fees missing → not approved; blocking alert → not approved", () => {

@@ -27,6 +27,10 @@ export interface OptionsIntentRecord {
   intent?: OptionsLiveIntent;
   createdAtMs?: number;       // When the reservation was written — the adapter's lost-response recovery window starts here.
   maxFilledQuantity?: number; // Monotonic evidence; a later zero cannot erase a fill.
+  /** The broker's own review figures, stamped after checkReview passed. On the record, not the intent: recovery identity is untouched. */
+  review?: { estimatedFeeUsd: number; maxLossUsd: number; buyingPowerRequiredUsd: number };
+  /** What the runner knew about the setup (thesis, range, grade) — written by the runner after acceptance; the intent stays canonical. */
+  candidate?: Record<string, unknown>;
 }
 export interface OptionsLiveStore {
   // Exclusive ACROSS PROCESSES, held through review/submission/persistence. Must not
@@ -58,14 +62,16 @@ function matchingOrder(raw: unknown, record: OptionsIntentRecord): NormalizedOpt
   return raw as unknown as NormalizedOptionsOrder;
 }
 function checkReview(raw: unknown, prepared: PreparedOptionsOrder, policy: OptionsLivePolicy,
-  snapshot: OptionsBrokerSnapshot, action: "open" | "close", now: number): void {
+  snapshot: OptionsBrokerSnapshot, action: "open" | "close", now: number): OptionsIntentRecord["review"] {
   if (!object(raw) || raw.approved !== true || raw.accountNumber !== OPTIONS_LIVE_ACCOUNT
     || raw.requestFingerprint !== prepared.fingerprint || !amount(raw.asOfMs) || raw.asOfMs > now
     || now - raw.asOfMs > LIVE_SNAPSHOT_MAX_AGE_MS || !amount(raw.maxLossUsd)
     || !amount(raw.estimatedFeeUsd) || !amount(raw.buyingPowerRequiredUsd)) throw new Error("review response schema or order identity is unverified");
-  if (raw.estimatedFeeUsd > policy.feeBudgetUsd! || raw.buyingPowerRequiredUsd > snapshot.buyingPowerUsd) throw new Error("broker review exceeds fee reserve or available buying power");
+  const feeReserve = policy.feeBudgetUsd! * Number(prepared.params.quantity);   // per contract round trip, as in the policy
+  if (raw.estimatedFeeUsd > feeReserve || raw.buyingPowerRequiredUsd > snapshot.buyingPowerUsd) throw new Error("broker review exceeds fee reserve or available buying power");
   if (action === "open" && (raw.maxLossUsd < prepared.theoreticalMaxLossUsd
-    || raw.maxLossUsd + policy.feeBudgetUsd! > policy.maxLossUsd!)) throw new Error("broker-reviewed maximum loss is incompatible with the authorized budget");
+    || raw.maxLossUsd + feeReserve > policy.maxLossUsd!)) throw new Error("broker-reviewed maximum loss is incompatible with the authorized budget");
+  return { estimatedFeeUsd: raw.estimatedFeeUsd, maxLossUsd: raw.maxLossUsd, buyingPowerRequiredUsd: raw.buyingPowerRequiredUsd };
 }
 async function reconcileLocked(record: OptionsIntentRecord, deps: OptionsExecutorDependencies): Promise<OptionsExecutionResult> {
   const snapshot = await deps.broker.snapshot([], record.refId);
@@ -136,9 +142,9 @@ export async function executeOptionsIntent(intent: OptionsLiveIntent, deps: Opti
       const currentOwned = intent.positionId ? await deps.store.ownedPosition(intent.positionId) : null;
       const freshPrepared = prepareOptionsOrder(intent, policy, snapshot, currentOwned, deps.now());
       if (freshPrepared.fingerprint !== prepared.fingerprint || snapshot.orders.some((o) => o.refId === intent.refId)) throw new Error("order identity changed during review");
-      checkReview(review, freshPrepared, policy, snapshot, intent.action, deps.now());
+      const reviewed = checkReview(review, freshPrepared, policy, snapshot, intent.action, deps.now());
       const record: OptionsIntentRecord = { refId: intent.refId, accountNumber: OPTIONS_LIVE_ACCOUNT,
-        action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting", canonicalOrder: structuredClone(prepared.params), intent: structuredClone(intent), createdAtMs: deps.now() };
+        action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting", canonicalOrder: structuredClone(prepared.params), intent: structuredClone(intent), createdAtMs: deps.now(), review: reviewed };
       // Durable reservation BEFORE the broker call. If the process dies here, zero orders
       // on a later lookup is still unknown, never permission to blindly retry.
       await deps.store.putIntent(record);

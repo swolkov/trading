@@ -73,6 +73,8 @@ export function optionIdOf(leg: Record<string, unknown>): string | null {
 export interface BrokerOrder {
   id: string; state: OrderState; rawState: string; filledQuantity: number; quantity: number | null;
   price: number | null; direction: string | null; placedAgent: string | null; createdAtMs: number | null;
+  /** Average fill per contract (`average_net_premium_paid`, else `average_price`), absolute; null when the row has neither. Ledger only. */
+  averagePrice: number | null;
   legs: { optionId: string; side: string; positionEffect: string; ratio: number }[] | null;
 }
 export function decodeBrokerOrder(row: unknown): BrokerOrder | null {
@@ -85,8 +87,9 @@ export function decodeBrokerOrder(row: unknown): BrokerOrder | null {
     legs = decoded.every((l): l is { optionId: string; side: string; positionEffect: string; ratio: number } => !!l && !!l.optionId && !!l.side && !!l.positionEffect) ? decoded : null;
   }
   const created = Date.parse(str(row.created_at) ?? "");
+  const avg = num(row.average_net_premium_paid) ?? num(row.average_price);
   return { id, state, rawState: String(row.state), filledQuantity: filled, quantity: num(row.quantity), price: num(row.price), direction: str(row.direction),
-    placedAgent: str(row.placed_agent), createdAtMs: Number.isFinite(created) ? created : null, legs };
+    placedAgent: str(row.placed_agent), createdAtMs: Number.isFinite(created) ? created : null, averagePrice: avg == null || !(Math.abs(avg) > 0) ? null : Math.abs(avg), legs };
 }
 /** Exact request identity on the broker's own row: same legs (id, side, effect, ratio), quantity, price and direction. */
 export function orderMatchesCanonical(order: BrokerOrder, params: OptionOrderParams): boolean {
@@ -352,7 +355,7 @@ export class RobinhoodLiveBroker implements OptionsLiveBroker {
     }
     const orders = brokerOrders
       .filter((o) => bound.has(o.id) || !["filled", "cancelled", "rejected"].includes(o.state))
-      .map((o) => ({ id: o.id, accountNumber: OPTIONS_LIVE_ACCOUNT, refId: bound.has(o.id) ? refId : "", requestFingerprint: bound.has(o.id) ? intent!.fingerprint : "", state: o.state, filledQuantity: o.filledQuantity }));
+      .map((o) => ({ id: o.id, accountNumber: OPTIONS_LIVE_ACCOUNT, refId: bound.has(o.id) ? refId : "", requestFingerprint: bound.has(o.id) ? intent!.fingerprint : "", state: o.state, filledQuantity: o.filledQuantity, averagePrice: o.averagePrice }));
     const wanted = [...new Set([...optionIds, ...legs.map((l) => l.optionId), ...(intent?.intent?.legs.map((l) => l.optionId) ?? [])])];
     const contracts = wanted.length ? await this.contracts(wanted) : [];
     const now = this.io.now();
