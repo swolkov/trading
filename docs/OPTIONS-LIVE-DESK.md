@@ -199,9 +199,14 @@ DTE and 0–1 DTE are deliberately not offered. Ranking inside the preferred fam
 `(payoffAtMoveUsd − thetaDragUsd) / plannedLoss` with `thetaDragUsd = −netTheta × 100 ×
 expectedHoldDays`, net theta = long − short from the broker greeks, `expectedHoldDays = min(10,
 dte − 7)` (always 10 inside the window). A leg without a broker theta charges nothing and stamps
-`thetaDragUsd: null` — no invented number. So of two expiries the longer wins whenever the decay it
-saves outweighs its extra premium (the test pins a 26-DTE call at −$0.08/day losing to a 55-DTE one
-at −$0.01/day). Stamps: `dteBucket` (`21-30` | `30-45` | `45-60`), `expectedHoldDays`,
+`thetaDragUsd: null` — no invented number. A structure whose theta-adjusted payoff is ≤ 0 is
+rejected like the lottery ticket it is. This is a **heuristic**, not a pricing model: at-expiry
+payoff at the expected move minus a flat 10-day theta charge (theta is not constant over the hold
+and the position is rarely held to expiry) — good enough to order two expiries of the same idea,
+not a forecast. DTE follows the guardian's one convention (`dteOf`: expiry at the 20:00Z close), so
+an expiry 21 calendar days out reads 21.x during the day. So of two expiries the longer wins
+whenever the decay it saves outweighs its extra premium (the test pins a 26-DTE call at −$0.08/day
+losing to a 55-DTE one at −$0.01/day). Stamps: `dteBucket` (`21-30` | `30-45` | `45-60`), `expectedHoldDays`,
 `thetaDragUsd`, `atmIv`; the entry note carries them (`[dte 45-60 · hold 10d · theta $10 · delta prompt · chase 0.4]`).
 
 **Strike window.** Live stays |delta| 0.35–0.75 (PR #166's band has zero trades; changing it would
@@ -215,7 +220,8 @@ before anything moves.
 test pins the partition):
 
 - **A (18)** — the six index/mega names (SPY QQQ IWM AAPL AMD NVDA) that give the desk its regime
-  read, plus the affordable core (F AAL T PFE CCL NCLH WBD DKNG RIOT SOFI MARA RIVN).
+  read, plus the affordable core (F AAL T PFE CCL NCLH WBD DKNG RIOT SOFI MARA RIVN). It takes the
+  post-close refresh, since the core is where the live desk actually trades.
 - **B (10)** — TSLA MSFT AMZN META GOOGL AVGO NFLX PLTR COIN MSTR. At their prices only a $2.5–5-wide
   debit spread fits the cap; the screen enforces that by price, nothing special-cases them. Scanner
   **discovery** names (≤6) ride in this slice only.
@@ -230,11 +236,12 @@ in tens).
 
 **The schedule** stays one plist (`scripts/com.esbueno.options-market.plist`, four weekday
 entries). launchd cannot vary the environment per `StartCalendarInterval`, so
-`scripts/options-market-run.sh` picks the slice by ET hour — **10:15 and 15:15 → A; 12:15 and
-17:45 → B** (any other hour → A) — unless `RESEARCH_SLICE=A|B` is set for a hand run (anything
+`scripts/options-market-run.sh` picks the slice by ET hour — **10:15 and 17:45 → A; 12:15 and
+15:15 → B** (any other hour → A) — unless `RESEARCH_SLICE=A|B` is set for a hand run (anything
 else refuses and logs). The script derives `BASE_SYMBOLS` from that slice, runs the scanner
-session and adds the discovery clause only in B, exports `RESEARCH_SLICE` so the ingest log line
-carries `slice`, `runSymbols`, `runContracts` and `unmatchedQuotes`.
+session and adds the discovery clause only in B (a failed scanner session is logged and the run
+continues without discovery — the large caps are still read), exports `RESEARCH_SLICE` so the
+ingest log line carries `slice`, `runSymbols`, `runContracts` and `unmatchedQuotes`.
 
 **The merge** (`mergeResearchSnapshot`) keeps every watchlist symbol's bars, contracts and event
 rows from whichever run last observed them, so a slice-B run never drops slice A's data and the

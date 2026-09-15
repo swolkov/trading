@@ -9,7 +9,7 @@ import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scrip
 import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
 import { optionsRequestFingerprint, OPTIONS_LIVE_ACCOUNT } from "../src/lib/options-live-policy";
 import type { OptionsIntentRecord } from "../src/lib/options-live-executor";
-const now=Date.parse("2026-09-12T16:00:00Z");
+const now=Date.parse("2026-09-12T15:00:00Z");   // a daytime instant: DTE is measured to the 20:00Z close (dteOf), so the fraction of the day matters
 const capture=(name:string,data:unknown)=>JSON.stringify({message:{content:[{type:"tool_use",id:"read-1",name:`mcp__robinhood-trading__${name}`,input:{}}]}})+"\n"+JSON.stringify({message:{content:[{type:"tool_result",tool_use_id:"read-1",content:JSON.stringify({data})}]}});
 function research():OptionsResearch{
  const bars=Array.from({length:201},(_,i)=>({day:new Date(now-(201-i)*86400000).toISOString().slice(0,10),open:100,high:i===200?106:101,low:99,close:i===200?105:100,volume:1000000}));
@@ -225,13 +225,19 @@ test("nextExDiv: no dividend → null; upcoming ex-date → scheduled; past ex-d
 
 test("DTE engine: 21 days is the floor (a 20-DTE contract is outside the window, 21 passes); buckets and the delta band stamp; ranking charges theta over min(10, dte−7) days and prefers the longer expiry when the drag flips the order",()=>{
  assert.equal(OPTIONS_DESK_RULES.minDte,21); assert.equal(OPTIONS_DESK_RULES.exitBeforeDte,7);
- const midnight=Date.parse("2026-09-12T00:00:00Z"), c0=research().contracts[0];
- assert.ok(contractQualityFailures({...c0,expiry:"2026-10-02",at:new Date(midnight).toISOString()},midnight).includes("Outside expiration window"));   // exactly 20 DTE
- assert.equal(contractQualityFailures({...c0,expiry:"2026-10-03",at:new Date(midnight).toISOString()},midnight).length,0);                             // exactly 21
+ const c0=research().contracts[0];
+ // DTE is the guardian's convention (dteOf: expiry at the 20:00Z close). Research at Fri Sep 11 14:15Z for Fri Oct 2 (21 calendar days) reads 21.24 → passes;
+ // Oct 1 (20 days) reads 20.24 → refused. Under a midnight convention the same Oct 2 contract would have read 20.4 and been refused all day.
+ const friday=Date.parse("2026-09-11T14:15:00Z");
+ assert.equal(contractQualityFailures({...c0,expiry:"2026-10-02",at:new Date(friday).toISOString()},friday).length,0);
+ assert.ok(contractQualityFailures({...c0,expiry:"2026-10-01",at:new Date(friday).toISOString()},friday).includes("Outside expiration window"));
+ const close=Date.parse("2026-09-11T20:00:00Z");   // at the close, 21 days is exactly 21.0 and still passes; 20 is exactly 20.0 and does not
+ assert.equal(contractQualityFailures({...c0,expiry:"2026-10-02",at:new Date(close).toISOString()},close).length,0);
+ assert.ok(contractQualityFailures({...c0,expiry:"2026-10-01",at:new Date(close).toISOString()},close).includes("Outside expiration window"));
  assert.deepEqual([dteBucketOf(21),dteBucketOf(29.9),dteBucketOf(30),dteBucketOf(44.9),dteBucketOf(45),dteBucketOf(60)],["21-30","21-30","30-45","30-45","45-60","45-60"]);
  assert.deepEqual([deltaBandOf(0.5),deltaBandOf(-0.7),deltaBandOf(0.4),deltaBandOf(0.39),deltaBandOf(0.71),deltaBandOf(null)],["prompt","prompt","prompt","outer","outer","outer"]);
- // Two expiries of the same ATM call on a $105 spot. Near (Oct 9, 26.7 DTE): straddle 2.375 → worth $146.5 at the expected move for $91;
- // far (Nov 6, 54.7 DTE): straddle 1.80 → $84 for $96. Raw payoff per dollar prefers the near one (1.61 vs 0.88); charging theta over a
+ // Two expiries of the same ATM call on a $105 spot. Near (Oct 9, 27.2 DTE): straddle 2.375 → worth $146.5 at the expected move for $91;
+ // far (Nov 6, 55.2 DTE): straddle 1.80 → $84 for $96. Raw payoff per dollar prefers the near one (1.61 vs 0.88); charging theta over a
  // 10-day hold (near −0.08/day = $80, far −0.01/day = $10) flips it: (146.5−80)/91 = 0.73 < (84−10)/96 = 0.77.
  const r=research(); const rv=realizedVol20(r.bars.TEST)!, iv=rv*1.1;
  const near={...c0,id:"nc",expiry:"2026-10-09",iv,theta:-0.08}, nearPut={...c0,id:"np",type:"put" as const,bid:1.45,ask:1.55,delta:-0.5,iv,theta:-0.08,expiry:"2026-10-09"};
@@ -252,8 +258,13 @@ test("DTE engine: 21 days is the floor (a 20-DTE contract is outside the window,
  const short={...far,id:"fs",strike:110,bid:0.28,ask:0.3,delta:0.35,theta:null};
  const spread=screenResearchContracts({...r,contracts:[far,farPut,short]},100,500,now).find(c=>c.kind==="call_debit")!;
  assert.equal(spread.thetaDragUsd,null); assert.equal(spread.deltaBand,"prompt");
- const soon=screenResearchContracts({...r,contracts:[{...near,expiry:"2026-10-06"},{...nearPut,expiry:"2026-10-06"}]},100,500,now)[0];   // 23.3 DTE → 21-30, hold 10
+ const soon=screenResearchContracts({...r,contracts:[{...near,expiry:"2026-10-06"},{...nearPut,expiry:"2026-10-06"}]},100,500,now)[0];   // 24.2 DTE → 21-30, hold 10
  assert.equal(soon.dteBucket,"21-30"); assert.equal(soon.expectedHoldDays,10);
+ // A structure the 10-day theta charge eats whole is rejected outright: the near call at −$0.15/day ($150 > $146.5 payoff) is gone, the far one stays.
+ const eaten=screenResearchContracts({...r,contracts:[{...near,theta:-0.15},{...nearPut,theta:-0.15},far,farPut]},100,500,now).filter(c=>c.kind==="long_call");
+ assert.deepEqual(eaten.map(c=>c.expiry),["2026-11-06"]);
+ assert.equal(screenResearchContracts({...r,contracts:[{...near,theta:-0.146},{...nearPut,theta:-0.146},far,farPut]},100,500,now).filter(c=>c.kind==="long_call").length,2);   // $146 of drag against $146.50 leaves $0.50 → stays; $146.50 exactly leaves 0 → rejected
+ assert.equal(screenResearchContracts({...r,contracts:[{...near,theta:-0.1465},{...nearPut,theta:-0.1465},far,farPut]},100,500,now).filter(c=>c.kind==="long_call").length,1);
 });
 
 test("universe: the two research slices partition the 28-name watchlist in order, each under the 360-contract cap; the ten large caps are slice B",()=>{

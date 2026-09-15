@@ -18,7 +18,7 @@ import { executeOptionsIntent, reconcileOptionsIntent, type OptionsExecutorDepen
 import { PostgresOptionsLiveStore } from "../../src/lib/options-live-store";
 import { readOptionsExecutionPolicy } from "../../src/lib/options-live-runtime";
 import { RobinhoodLiveBroker, regularSessionFor } from "../../src/lib/options-live-broker";
-import { OPTIONS_LIVE_RULES, drawdownHalt, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
+import { OPTIONS_LIVE_RULES, drawdownHalt, dteOf, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
 import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
 import { OPTIONS_EVENT_RULES, guardianExDivExit, spansEarnings } from "../../src/lib/options-events";
 import { chaseCheck, directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
@@ -254,7 +254,7 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     if (net == null || net <= 0) continue;
     const maxLossUsd = net * 100;
     if (maxLossUsd + fee > cap) { continue; }
-    const dte = (Date.parse(`${c.expiry}T00:00:00Z`) - Date.now()) / 86_400_000;
+    const dte = dteOf(c.expiry, Date.now());
     if (dte < OPTIONS_DESK_RULES.minDte || dte > OPTIONS_DESK_RULES.maxDte) continue;
     // One live earnings read for the chosen name only. Any failure — tool missing, shape unknown, broker error — refuses:
     // an unconfirmed earnings date is an earnings trade the desk did not ask for. Index ETFs have none to confirm.

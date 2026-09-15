@@ -1,11 +1,12 @@
 // Research uses broker prices. It never simulates fills or authorizes an order.
 import { exDivRisk, spansEarnings, type EarningsClass, type ResearchEvents } from "./options-events";
 import { chaseRatio, directionOfKind, marketState, marketVeto, type MarketStamp } from "./options-market-state";
+import { dteOf } from "./options-live-guardian";   // ONE DTE convention (expiry at 20:00Z, the close) shared with the guardian
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
 // The base research list, in two SLICES (Sep 15 2026) because one run cannot read it all: 28 base +
 // ≤6 discovery names × 2 expiries × 5 strikes × 2 types = 680 contracts, and the broker's instrument
 // reads already flaked past ~100 per run. Each slice is ≤360 contracts. The research job picks the
-// slice by ET hour (10:15 and 15:15 → A; 12:15 and 17:45 → B) unless RESEARCH_SLICE says otherwise;
+// slice by ET hour (10:15 and 17:45 → A; 12:15 and 15:15 → B) unless RESEARCH_SLICE says otherwise;
 // the merge keeps the other slice's bars, contracts and events, so the screen always sees all 28.
 //   A — the six index/mega names (the desk's regime read) + the AFFORDABLE CORE (Sep 14 2026): at a
 //       $100 max loss a single contract on a $300+ stock never fits, so $11–$30 names with deep,
@@ -103,7 +104,7 @@ export function researchSignals(bars: OptionsResearch["bars"], now=Date.now()): 
 // Shared by screening and diagnostics so admin explains the actual research gates.
 export function contractQualityFailures(c: ResearchContract, now = Date.now()): string[] {
   const r = OPTIONS_DESK_RULES, failures: string[] = [];
-  const dte = (Date.parse(c.expiry + "T00:00:00Z") - now) / 86400000;
+  const dte = dteOf(c.expiry, now);
   const mid = (c.bid + c.ask) / 2;
   if (c.multiplier !== 100) failures.push("Nonstandard contract");
   if (!(c.bid > 0 && c.ask >= c.bid && c.bidSize >= 1 && c.askSize >= 1)) failures.push("No usable two-sided market");
@@ -179,9 +180,11 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const ivToRealized=iv!=null&&rv!=null?Math.round(iv/rv*100)/100:null;
       // DTE engine: the hold the theta charge assumes, and the charge — net theta (long − short, per share per day) × 100 × days.
       // A leg without a broker theta charges nothing and says so (thetaDragUsd null) rather than inventing a number.
-      const dte=(Date.parse(long.expiry+"T00:00:00Z")-now)/86400000, expectedHoldDays=Math.max(0,Math.min(rules.expectedHoldDaysMax,dte-rules.exitBeforeDte));
+      const dte=dteOf(long.expiry,now), expectedHoldDays=Math.max(0,Math.min(rules.expectedHoldDaysMax,dte-rules.exitBeforeDte));
       const netTheta=long.theta==null||(short&&short.theta==null)?null:long.theta-(short?.theta??0);
       const thetaDragUsd=netTheta==null?null:Math.round(-netTheta*100*expectedHoldDays*100)/100;
+      // A structure the hold's decay eats whole is a lottery ticket with extra steps. Heuristic: at-expiry payoff minus a 10-day charge.
+      if(thetaDragUsd!=null&&payoff!=null&&payoff-thetaDragUsd<=0)return;
       const single=!short, singlePreferred=ivToRealized!=null&&ivToRealized<=rules.singleLegMaxIvToRealized;
       const volNote=ivToRealized==null?"implied vs realized vol unavailable → spreads preferred":`implied vol ${(iv!*100).toFixed(0)}% vs realized ${(rv!*100).toFixed(0)}% (${ivToRealized}×) → ${singlePreferred?"single leg preferred":"spread preferred"}${single===singlePreferred?"":" (this is the other family)"}`;
       const moveNote=em==null?"expected move unavailable":`worth $${payoff} at the market's expected ±${(em*100).toFixed(1)}% move`;
