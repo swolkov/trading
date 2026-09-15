@@ -57,6 +57,29 @@ once `options-live-ledger.ts` counts ten closed round trips with the divergence 
 limit (from the order's fail-soft `averagePrice`; the limit stands in when the broker gave none).
 The executor stamps the broker's review figures (`review {estimatedFeeUsd, maxLossUsd,
 buyingPowerRequiredUsd}`) on the intent RECORD, not the intent, so recovery identity is untouched.
+Names outside both cluster maps (discovery names) are `speculative`, so two of them in the same
+direction are one bet.
+
+**Sizing facts, stated plainly (Sep 15 2026 review):**
+- The dollar rung is a FLOOR, not a percentage: at $900 equity Normal is still $100 (11% of the
+  account), Strong $150 (17%). The percentages only bite once equity is past $1,500.
+- Rungs above the armed ceiling are dead: with the $150 ceiling, Strong and Normal are the whole
+  ladder; A+ ($225) only exists after promotion **and** a re-ARM (the ceiling is written at ARM time —
+  changing `OPTIONS_LADDER` or the ceiling does nothing to a desk armed under the old one).
+- The halt WIDENS with the high-water mark: `max($300, 20% × high)` — $300 at a $1,500 high, $400 at
+  $2,000. It never tightens below $300, so a shrinking account is not ratcheted into a halt.
+- Equity for the tier and the reserve is the **17:32 ET account snapshot** (`options_account_snapshot`),
+  not a live read; intraday P&L moves neither. No snapshot on file → every entry is refused by the reserve.
+- ARM refuses when the score is promoted but $225 would exceed 15% of that snapshot.
+- **The 2-lot review path is unverified against a real broker response.** Every review to date was
+  one contract; a quantity-2 review (fees, buying power, max loss decoded ×2) has never been seen.
+  Run `probe` on a Strong day before relying on a 2-lot entry.
+- A partially filled 2-lot ENTRY is cancelled at once (not after the 15-min sweep); the filled
+  contracts become an owned 1-lot on the next tick and are stop-managed like any other.
+- With two slots a wanted CLOSE cancels a live entry order first (the policy refuses any order beside
+  an outstanding one); the close goes the same tick if the cancel confirms, else the next.
+- A leg-quantity mismatch at the broker never releases the record: release only when NONE of the
+  record's legs (option + side) is at the broker; a mismatch is kept, logged and paged once.
 Entry signal = the research screen's 20-session breakout/breakdown with 50/200-day alignment, on the
 day's broker bars; the structure is chosen by the screen and re-priced on live quotes.
 
@@ -140,8 +163,10 @@ move is rejected outright — that is a lottery ticket.
 trail keeps half of the best gain seen. A spread worth 90% or more of its width exits whole. Out 7
 days before expiry. **Thesis invalidation (Sep 15 2026):** the entry stashes the signal's 20-session
 range edges on the reservation record (`candidate`, beside the canonical intent); at fill the edge the
-signal cleared becomes `invalidationPx` on the owned record (`rangeLow` for bullish, `rangeHigh` for
-bearish) with `signalDirection`. The guardian reads the underlying's live quote each tick
+signal CLEARED, back inside the range by the pre-registered 0.5% buffer, becomes `invalidationPx` on the
+owned record — `rangeHigh × 0.995` for a bullish breakout, `rangeLow × 1.005` for a bearish breakdown
+(`invalidationLevel`; SOFI at 12.10 over a 10.20–12.00 range → 11.94) — with `signalDirection`. A failed
+breakout, not noise at the line. The guardian reads the underlying's live quote each tick
 (`underlyingQuote`, fail-soft) and exits at the executable mark once the stock has TRADED beyond that
 level on **two consecutive ticks** (`invalidationTicks`, persisted on the record so a restart cannot
 forget) — trades, not closes, because the premium stop already fires intraday; a quote inside the level,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OPTIONS_LIVE_RULES, closeNetBid, drawdownHalt, etDay, exitDecision, openNetAsk, ownedRecordAfter, type OwnedPositionRecord } from "../src/lib/options-live-guardian";
+import { OPTIONS_LIVE_RULES, closeBlockedBy, closeNetBid, drawdownHalt, entryOrderAction, etDay, exitDecision, invalidationLevel, openNetAsk, ownedRecordAfter, ownershipVerdict, type OwnedPositionRecord } from "../src/lib/options-live-guardian";
 import { OPTIONS_LIVE_ACCOUNT, type LiveContract } from "../src/lib/options-live-policy";
 import { guardianExDivExit } from "../src/lib/options-events";
 
@@ -112,4 +112,54 @@ test("partial exits: a 2-lot banks one contract at 2× entry and trails the rest
   assert.equal(wide.exit, true); assert.equal(wide.quantity, undefined); assert.match(wide.reason, /max value: 0.91 is 91% of the 1.00 width — closing all/);
   assert.equal(exitDecision({ ...twoSpread, entryPrice: 0.4 }, [c("L", 1.6, 1.65, 100), c("S", 0.7, 0.79, 101)], now).quantity, 1, "at 81% of the width (2× a 0.40 entry) a 2-lot spread partials");
   assert.equal(exitDecision({ ...spread, entryPrice: 0.4 }, [c("L", 1.6, 1.65, 100), c("S", 0.7, 0.79, 101)], now).exit, false, "a 1-lot spread at 81% holds");
+});
+
+test("invalidation level is the edge the signal CLEARED, back inside by 0.5%: SOFI breakout at 12.10 over 10.20–12.00 → 11.94; two ticks at 11.90 exit, one holds; bearish mirror", () => {
+  assert.equal(OPTIONS_LIVE_RULES.invalidationBufferPct, 0.5);
+  assert.equal(invalidationLevel("bullish", 10.2, 12), 11.94);
+  assert.equal(invalidationLevel("bearish", 10.2, 12), 10.251);
+  assert.equal(invalidationLevel("bullish", 0, 12), null);
+  const sofi: OwnedPositionRecord = { ...spread, kind: "long_call", width: 0, underlying: "SOFI", legs: [{ optionId: "L", side: "long", quantity: 1 }], invalidationPx: invalidationLevel("bullish", 10.2, 12), signalDirection: "bullish", invalidationTicks: 0 };
+  const held = [c("L", 0.6, 0.65, 12)];
+  const q = (last: number) => ({ last, atMs: now - 60_000 });
+  const one = exitDecision(sofi, held, now, OPTIONS_LIVE_RULES, q(11.9));
+  assert.equal(one.exit, false); assert.equal(one.invalidationTicks, 1);
+  const two = exitDecision({ ...sofi, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, q(11.9));
+  assert.equal(two.exit, true); assert.match(two.reason, /thesis invalidated: SOFI 11.9 below its 11.94 level on 2 consecutive ticks/);
+  assert.equal(exitDecision({ ...sofi, invalidationTicks: 1 }, held, now, OPTIONS_LIVE_RULES, q(11.95)).invalidationTicks, 0, "still above the level: a breakout holding the line is not a failure");
+  const bear: OwnedPositionRecord = { ...sofi, kind: "long_put", signalDirection: "bearish", invalidationPx: invalidationLevel("bearish", 10.2, 12), invalidationTicks: 1 };
+  assert.equal(exitDecision(bear, held, now, OPTIONS_LIVE_RULES, q(10.26)).exit, true);
+  assert.equal(exitDecision(bear, held, now, OPTIONS_LIVE_RULES, q(10.25)).exit, false);
+});
+
+test("a partially filled 2-lot ENTRY is cancelled at once; an unfilled one only after the stale window; a close order is left to the window", () => {
+  const t0 = now;
+  assert.deepEqual(entryOrderAction({ action: "open", createdAtMs: t0, order: { state: "partially_filled" } }, t0 + 60_000).cancel, true);
+  assert.match(entryOrderAction({ action: "open", createdAtMs: t0, order: { state: "partially_filled" } }, t0 + 60_000).reason, /partially filled entry — cancelling the rest now/);
+  assert.equal(entryOrderAction({ action: "open", createdAtMs: t0, order: { state: "open" } }, t0 + 14 * 60_000).cancel, false);
+  assert.equal(entryOrderAction({ action: "open", createdAtMs: t0, order: { state: "open" } }, t0 + 16 * 60_000).cancel, true);
+  assert.equal(entryOrderAction({ action: "close", createdAtMs: t0, order: { state: "partially_filled" } }, t0 + 60_000).cancel, false, "a partially filled CLOSE keeps working inside the window");
+  assert.equal(entryOrderAction({ action: "close", createdAtMs: t0, order: { state: "partially_filled" } }, t0 + 16 * 60_000).cancel, true);
+  assert.equal(entryOrderAction({ action: "open", createdAtMs: t0, order: { state: "filled" } }, t0 + 60 * 60_000).cancel, false);
+});
+
+test("a wanted close names the live entry order it must cancel first; settled or terminal entries do not block", () => {
+  const live = { action: "open" as const, state: "accepted", order: { id: "o-entry", state: "open" } };
+  assert.deepEqual(closeBlockedBy([live]), { id: "o-entry", state: "open" });
+  assert.deepEqual(closeBlockedBy([{ ...live, order: { id: "o-entry", state: "partially_filled" } }])?.id, "o-entry");
+  assert.equal(closeBlockedBy([{ ...live, order: { id: "o-entry", state: "cancelled" } }]), null);
+  assert.equal(closeBlockedBy([{ ...live, state: "settled" }]), null);
+  assert.equal(closeBlockedBy([{ action: "close", state: "accepted", order: { id: "o-close", state: "open" } }]), null, "another close is the core's business, not a cancel");
+  assert.equal(closeBlockedBy([]), null);
+});
+
+test("ownership: a quantity mismatch at the broker keeps the record and pages once; only legs entirely gone release", () => {
+  const rec: OwnedPositionRecord = { ...spread, kind: "long_call", width: 0, legs: [{ optionId: "L", side: "long", quantity: 1 }] };
+  assert.deepEqual(ownershipVerdict(rec, [{ optionId: "L", side: "long" }], true), { action: "manage", page: null });
+  const kept = ownershipVerdict(rec, [{ optionId: "L", side: "long" }], false);   // broker shows the leg (at 2), the grouper did not match the 1-lot record
+  assert.equal(kept.action, "keep"); assert.match(kept.page ?? "", /different quantity than the record .*Kept, not released/);
+  assert.deepEqual(ownershipVerdict({ ...rec, mismatchPagedAtMs: now }, [{ optionId: "L", side: "long" }], false), { action: "keep", page: null }, "paged once");
+  assert.deepEqual(ownershipVerdict(rec, [], false), { action: "release", page: null });
+  assert.deepEqual(ownershipVerdict(rec, [{ optionId: "L", side: "short" }], false).action, "release", "the same contract on the other side is not our leg");
+  assert.equal(ownershipVerdict(spread, [{ optionId: "S", side: "short" }], false).action, "keep", "one leg of a spread still there → keep");
 });

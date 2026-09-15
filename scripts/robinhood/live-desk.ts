@@ -19,7 +19,7 @@ import { executeOptionsIntent, reconcileOptionsIntent, type OptionsExecutorDepen
 import { PostgresOptionsLiveStore } from "../../src/lib/options-live-store";
 import { readOptionsExecutionPolicy } from "../../src/lib/options-live-runtime";
 import { RobinhoodLiveBroker, regularSessionFor } from "../../src/lib/options-live-broker";
-import { OPTIONS_LIVE_RULES, drawdownHalt, dteOf, etDay, exitDecision, openNetAsk, ownedRecordAfter, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
+import { OPTIONS_LIVE_RULES, closeBlockedBy, drawdownHalt, dteOf, entryOrderAction, etDay, exitDecision, invalidationLevel, openNetAsk, ownedRecordAfter, ownershipVerdict, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
 import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
 import { OPTIONS_EVENT_RULES, guardianExDivExit, spansEarnings } from "../../src/lib/options-events";
 import { chaseCheck, directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
@@ -109,15 +109,14 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
               // The thesis the runner stashed on the record after acceptance: the range edge the signal cleared becomes the invalidation level.
               const cand = rec.candidate as Partial<CandidateStash> | undefined;
               const signalDirection = cand?.direction === "bullish" || cand?.direction === "bearish" ? cand.direction : undefined;
-              const edge = signalDirection === "bullish" ? cand?.rangeLow : signalDirection === "bearish" ? cand?.rangeHigh : undefined;
-              const invalidationPx = typeof edge === "number" && Number.isFinite(edge) && edge > 0 ? edge : null;
+              const invalidationPx = signalDirection && typeof cand?.rangeLow === "number" && typeof cand?.rangeHigh === "number" ? invalidationLevel(signalDirection, cand.rangeLow, cand.rangeHigh) : null;
               const owned: OwnedPositionRecord = { id: rec.refId, accountNumber: ACCOUNT, openingRefId: rec.refId, legs, kind: rec.intent!.kind, direction: rec.canonicalOrder!.direction,
                 entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "",
                 exDivAt: event?.exDivAt ?? null, ...(event?.exDivSource ? { exDivSource: event.exDivSource } : {}), shortStrike,
                 invalidationPx, ...(signalDirection ? { signalDirection } : {}), invalidationTicks: 0 };
               await store.putOwnedPosition(owned);
               await store.putIntent({ ...rec, state: "settled" });
-              await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${filledQty}${filledQty < rec.intent!.quantity ? ` of ${rec.intent!.quantity} (rest ${rec.order!.state})` : ""} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), ${invalidationPx != null ? `out if ${owned.underlying} trades ${signalDirection === "bullish" ? "below" : "above"} ${invalidationPx} on two ticks, ` : ""}${filledQty >= 2 ? "one contract banked at 2×, " : ""}out 7 days before expiry.`);
+              await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${filledQty}${filledQty < rec.intent!.quantity ? ` of ${rec.intent!.quantity} (rest ${rec.order!.state})` : ""} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), ${invalidationPx != null ? `out if ${owned.underlying} trades back ${signalDirection === "bullish" ? "below" : "above"} ${invalidationPx} (failed breakout) on two ticks, ` : ""}${filledQty >= 2 ? "one contract banked at 2×, " : ""}out 7 days before expiry.`);
             } else if (rec.action === "close" && rec.positionId) {
               // A close that filled fewer contracts than the position holds leaves a remainder the guardian keeps managing.
               const pos = await store.ownedPosition(rec.positionId) as OwnedPositionRecord | null;
@@ -128,11 +127,16 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
               await page(`✅ Options CLOSED: ${filledQty} of ${held} on position ${rec.positionId} at ${rec.canonicalOrder!.price} (order ${rec.order!.id})${rest > 0 ? ` — ${rest} left under the guardian` : ""}.`);
             }
           });
-        } else if (["open", "partially_filled"].includes(rec.order.state) && rec.createdAtMs && Date.now() - rec.createdAtMs > OPTIONS_LIVE_RULES.staleEntryMinutes * 60_000) {
-          try { await broker.cancel(rec.order.id); log(`stale ${rec.action} ${rec.refId} cancelled after ${OPTIONS_LIVE_RULES.staleEntryMinutes} min; next tick settles or ingests its fills`); }
-          catch (e) { fail("cancel stale order", e); }
+        } else {
+          const act = entryOrderAction(rec, Date.now());
+          if (act.cancel) {
+            try { await broker.cancel(rec.order.id); log(`${rec.action} ${rec.refId} cancelled: ${act.reason}; next tick settles or ingests its fills`); }
+            catch (e) { fail("cancel order", e); }
+          }
         }
       }
+      // What is still pending after the reconcile pass: a close later in this tick must clear any live entry order first.
+      let pending = await store.withAccountLock(ACCOUNT, () => store.unsettledIntents(ACCOUNT));
 
       // 2) Broker snapshot: account, positions, orders, quotes for our legs.
       // The adapter reads intents and owned positions from the store while building a snapshot, and
@@ -149,10 +153,18 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         // 3) Manage what we own; release what the broker no longer shows.
         for (const pos of owned) {
           const live = snapshot.positions.find((p) => p.id === pos.id);
-          if (!live && unsettled.some((r) => r.action === "close" && r.positionId === pos.id && r.state !== "settled")) { log(`${pos.underlying} ${pos.kind}: legs do not match the record while a close is in flight — waiting for it to settle`); continue; }
-          if (!live) {
+          const verdict = ownershipVerdict(pos, snapshot.positions.flatMap((p) => p.legs), !!live);
+          // A close in flight explains any difference (its fill is ingested next tick) — neither released nor paged.
+          if (verdict.action !== "manage" && pending.some((r) => r.action === "close" && r.positionId === pos.id)) { log(`${pos.underlying} ${pos.kind}: legs do not match the record while a close is in flight — waiting for it to settle`); continue; }
+          if (verdict.action === "release") {
             await store.withAccountLock(ACCOUNT, () => store.releaseOwnedPosition(pos.id));
             await page(`⚠️ Options position ${pos.id} (${pos.kind} ${pos.underlying}) is no longer at the broker — expired, assigned or closed by hand. Released from the guardian.`);
+            continue;
+          }
+          if (verdict.action === "keep") {
+            // Legs are there at another quantity: paged ONCE and left for a human. Never released.
+            log(`${pos.underlying} ${pos.kind}: leg quantities at the broker differ from the record — kept, not managed, not released`);
+            if (verdict.page) { await page(verdict.page); await store.withAccountLock(ACCOUNT, () => store.putOwnedPosition({ ...pos, mismatchPagedAtMs: Date.now() })); }
             continue;
           }
           // The underlying's live quote feeds the thesis-invalidation rule and the ex-dividend rule. Fail-soft: no quote, both skipped and said so.
@@ -176,6 +188,18 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
           const quantity = Math.min(decision.quantity ?? pos.legs[0].quantity, pos.legs[0].quantity);
           const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity, limitPrice: decision.limitPrice,
             legs: pos.legs.map((l) => ({ optionId: l.optionId, side: l.side === "long" ? "sell" as const : "buy" as const })) };
+          // With two slots an entry order may be live while a close is wanted; the policy refuses any order beside an outstanding one, so
+          // cancel the entry first. If the cancel confirms on an immediate reconcile the close goes now, otherwise next tick.
+          const blocker = closeBlockedBy(pending);
+          if (blocker) {
+            try { await broker.cancel(blocker.id); log(`close ${pos.id}: cancelled live entry order ${blocker.id} (${blocker.state}) to make way`); } catch (e) { fail("cancel entry for close", e); continue; }
+            const open = pending.find((r) => r.order?.id === blocker.id)!;
+            const rc = await reconcileOptionsIntent(open.refId, deps);
+            log(`close ${pos.id}: entry ${open.refId} after cancel → ${rc.status}${rc.reason ? ` — ${rc.reason}` : ""}`);
+            pending = await store.withAccountLock(ACCOUNT, () => store.unsettledIntents(ACCOUNT));
+            const after = pending.find((r) => r.refId === open.refId) ?? null;   // settled = no longer pending = cancelled with no fills
+            if (rc.status === "unknown" || (after && (!after.order || ["pending", "open", "partially_filled"].includes(after.order.state)))) { log(`close ${pos.id}: entry order not yet confirmed cancelled — close goes next tick`); clean = clean && rc.status !== "unknown"; continue; }
+          }
           broker.noteTheoreticalMaxLoss(0);
           const res = await executeOptionsIntent(closeIntent, deps);
           log(`close ${pos.id} × ${quantity}: ${res.status}${res.reason ? ` — ${res.reason}` : ""}`);

@@ -78,6 +78,12 @@ export async function POST(request: Request) {
     if (body.confirm !== "ARM") return Response.json({ ok: false, error: "type ARM to confirm" }, { status: 400 });
     const promoted = (await prisma.agentConfig.findUnique({ where: { key: PROMOTED_KEY } }))?.value === "true";
     const ceiling = ceilingFor(promoted);
+    // Sanity on the promoted ceiling: $225 is the A+ rung's dollar floor, never more than 15% of the last account snapshot.
+    if (promoted) {
+      const acct = await prisma.agentConfig.findUnique({ where: { key: "options_account_snapshot" } }).then((r) => (r?.value ? JSON.parse(r.value) as { totalValue?: number } : null)).catch(() => null);
+      const equity = typeof acct?.totalValue === "number" && acct.totalValue > 0 ? acct.totalValue : null;
+      if (equity == null || ceiling > OPTIONS_LADDER["A+"].pct * equity) return Response.json({ ok: false, error: `score is promoted but the $${ceiling} ceiling exceeds ${OPTIONS_LADDER["A+"].pct * 100}% of the last account value (${equity == null ? "no account snapshot on file" : `$${equity.toFixed(0)}`}) — not armed` }, { status: 409 });
+    }
     await set(OPTIONS_MAX_LOSS_KEY, String(ceiling));
     const fee = parseOptionsMaxLoss((await prisma.agentConfig.findUnique({ where: { key: "options_live_verified_fee_reserve_usd" } }))?.value);
     if (!fee) await set("options_live_verified_fee_reserve_usd", String(DEFAULT_FEE_RESERVE_USD));

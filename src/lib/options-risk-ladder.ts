@@ -72,8 +72,9 @@ const LOCAL_CLUSTERS: Record<string, OptionsCluster> = {
   F: "consumer", RIVN: "consumer", AAL: "consumer", CCL: "consumer", NCLH: "consumer", T: "consumer", PFE: "consumer", WBD: "consumer", DKNG: "consumer",
   NFLX: "megacap", SOFI: "fintech",
 };
-export function clusterOf(symbol: string): OptionsCluster | null {
-  return LOCAL_CLUSTERS[symbol] ?? groupOf(symbol) ?? null;
+/** A name outside both maps (a discovery name, say) is `speculative`: two unmapped names in the same direction are still one bet. */
+export function clusterOf(symbol: string): OptionsCluster {
+  return LOCAL_CLUSTERS[symbol] ?? groupOf(symbol) ?? "speculative";
 }
 export interface ClusterLeg { symbol: string; kind: string }
 const TECH_BETA: OptionsCluster[] = ["semis", "megacap"];
@@ -84,8 +85,8 @@ export function clusterRisk(owned: ClusterLeg[], candidate: ClusterLeg): { refus
   for (const o of owned) {
     if (directionOfKind(o.kind) !== cDir) continue;
     const oCluster = clusterOf(o.symbol);
-    const same = cCluster != null && oCluster === cCluster;
-    const techPair = (oCluster === "index" && cCluster != null && TECH_BETA.includes(cCluster)) || (cCluster === "index" && oCluster != null && TECH_BETA.includes(oCluster));
+    const same = oCluster === cCluster;
+    const techPair = (oCluster === "index" && TECH_BETA.includes(cCluster)) || (cCluster === "index" && TECH_BETA.includes(oCluster));
     if (same || techPair) return { refused: true, reason: `cluster: ${o.symbol} ${word(cDir)} + ${candidate.symbol} ${word(cDir)} would be one ${techPair ? "tech" : cCluster} bet — refused` };
   }
   return { refused: false, reason: null };

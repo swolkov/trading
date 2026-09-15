@@ -55,7 +55,8 @@ test("drawdown tiers at 5/10/15/20% under the high: 4.99% is tier 0; the halt is
 test("clusters: SPY + QQQ + NVDA calls are one tech bet; NVDA call + F put are two; RIOT and MSTR share crypto-proxy", () => {
   assert.equal(clusterOf("SPY"), "index"); assert.equal(clusterOf("NVDA"), "semis"); assert.equal(clusterOf("F"), "consumer");
   assert.equal(clusterOf("MSTR"), "crypto-proxy"); assert.equal(clusterOf("RIOT"), "crypto-proxy"); assert.equal(clusterOf("NFLX"), "megacap"); assert.equal(clusterOf("SOFI"), "fintech");
-  assert.equal(clusterOf("ZZZZ"), null);
+  assert.equal(clusterOf("ZZZZ"), "speculative", "an unmapped discovery name is speculative");
+  assert.equal(clusterRisk([{ symbol: "ZZZZ", kind: "long_call" }], { symbol: "QQQQ", kind: "long_call" }).refused, true, "two unmapped names in the same direction are one bet");
   const spyCall = { symbol: "SPY", kind: "long_call" };
   assert.deepEqual(clusterRisk([spyCall], { symbol: "QQQ", kind: "call_debit" }), { refused: true, reason: "cluster: SPY call + QQQ call would be one index bet — refused" });
   assert.deepEqual(clusterRisk([spyCall], { symbol: "NVDA", kind: "long_call" }), { refused: true, reason: "cluster: SPY call + NVDA call would be one tech bet — refused" });
@@ -92,11 +93,25 @@ function ledger(trips: number, extra: OptionsIntentRecord[] = []): OptionsIntent
   return [...out, ...extra];
 }
 
-test("round trips pair a filled open with the close that names it; unfilled or open-ended intents are not trips", () => {
+test("round trips pair a filled open with every close that names it; closed only when the closes add up to what the open filled", () => {
   const trips = roundTrips(ledger(2, [rec(90, "open", { orderState: "cancelled" }), rec(91, "open")]));
   assert.equal(trips.length, 3); assert.equal(trips.filter((t) => t.closed).length, 2);
   assert.equal(trips[2].open.refId, uuid(91)); assert.equal(trips[2].closed, false);
-  assert.equal(trips[0].close?.refId, uuid(2));
+  assert.equal(trips[0].closes[0]?.refId, uuid(2));
+  // A 2-lot closed in two partials: one close of 1 leaves it open; the second closes it; the divergence check sees both closes.
+  const half = [rec(50, "open", { qty: 2 }), rec(51, "close", { positionId: uuid(50), qty: 1 })];
+  const t1 = roundTrips(half)[0];
+  assert.deepEqual([t1.openQuantity, t1.closedQuantity, t1.closed], [2, 1, false]);
+  const whole = [...half, rec(52, "close", { positionId: uuid(50), qty: 1, avg: 1.2 })];
+  const t2 = roundTrips(whole)[0];
+  assert.deepEqual([t2.closedQuantity, t2.closed, t2.closes.length], [2, true, 2]);
+  const v = divergenceVerdict([t2], whole, 2);
+  assert.equal(v.green, false); assert.match(v.reasons[0], /close 12345678: fill 1.2 vs limit 1 diverges 20.0%/);
+  // A cancelled-with-fills open (1 of 2) is a 1-lot trip: one close of 1 closes it.
+  const partialOpen = { ...rec(60, "open", { qty: 2, orderState: "cancelled" }), maxFilledQuantity: 1 };
+  partialOpen.order!.filledQuantity = 1;
+  const t3 = roundTrips([partialOpen, rec(61, "close", { positionId: uuid(60), qty: 1 })])[0];
+  assert.deepEqual([t3.openQuantity, t3.closedQuantity, t3.closed], [1, 1, true]);
 });
 
 test("slot unlock: 10 closed trips all green open the second slot; 10 with one unknown intent (or a wide fill, or a fee over the reserve) do not", () => {

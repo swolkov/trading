@@ -7,14 +7,27 @@
 import type { OptionsIntentRecord } from "./options-live-executor";
 
 export const OPTIONS_LEDGER_RULES = { divergenceWindow: 10, maxFillDivergenceFrac: 0.05 };
-export interface RoundTrip { open: OptionsIntentRecord; close: OptionsIntentRecord | null; closed: boolean }
-const filled = (r: OptionsIntentRecord) => r.state === "settled" && r.order?.state === "filled";
-/** Filled, settled opens paired with the filled close whose positionId is the open's refId. Oldest first. */
+export interface RoundTrip { open: OptionsIntentRecord; closes: OptionsIntentRecord[]; openQuantity: number; closedQuantity: number; closed: boolean }
+/** Contracts an intent actually filled: the whole intent when the order filled; what the broker reported (never less than the
+ *  monotonic evidence) when it was cancelled with fills; nothing otherwise. */
+export function filledQuantityOf(r: OptionsIntentRecord): number {
+  if (!r.order) return 0;
+  if (r.order.state === "filled") return r.intent?.quantity ?? r.order.filledQuantity;
+  if (["cancelled", "rejected"].includes(r.order.state)) return Math.min(r.intent?.quantity ?? 0, Math.max(r.order.filledQuantity, r.maxFilledQuantity ?? 0));
+  return 0;
+}
+const settledWithFills = (r: OptionsIntentRecord) => r.state === "settled" && filledQuantityOf(r) > 0;
+/** Settled opens with fills, each with EVERY settled close that names it (a 2-lot may close in two partials); closed only once the
+ *  closes' filled quantities add up to the open's. Oldest first. */
 export function roundTrips(intents: OptionsIntentRecord[]): RoundTrip[] {
-  const closes = intents.filter((r) => r.action === "close" && filled(r));
-  return intents.filter((r) => r.action === "open" && filled(r))
+  const closes = intents.filter((r) => r.action === "close" && settledWithFills(r));
+  return intents.filter((r) => r.action === "open" && settledWithFills(r))
     .sort((a, b) => (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0))
-    .map((open) => { const close = closes.find((c) => c.positionId === open.refId) ?? null; return { open, close, closed: close != null }; });
+    .map((open) => {
+      const mine = closes.filter((c) => c.positionId === open.refId).sort((a, b) => (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0));
+      const openQuantity = filledQuantityOf(open), closedQuantity = mine.reduce((n, c) => n + filledQuantityOf(c), 0);
+      return { open, closes: mine, openQuantity, closedQuantity, closed: closedQuantity >= openQuantity };
+    });
 }
 export interface DivergenceRow { refId: string; action: "open" | "close"; limit: number; fill: number; fillSource: "broker" | "limit"; divergenceFrac: number; feeUsd: number | null; ok: boolean; note: string }
 export interface DivergenceVerdict { green: boolean; closedTrades: number; checked: number; reasons: string[]; rows: DivergenceRow[] }
@@ -25,7 +38,7 @@ export function divergenceVerdict(trips: RoundTrip[], intents: OptionsIntentReco
   if (unknown.length) reasons.push(`${unknown.length} unknown intent${unknown.length === 1 ? "" : "s"} (${unknown.map((r) => r.refId.slice(0, 8)).join(", ")})`);
   const closed = trips.filter((t) => t.closed);
   for (const t of closed.slice(-rules.divergenceWindow)) {
-    for (const rec of [t.open, t.close!]) {
+    for (const rec of [t.open, ...t.closes]) {
       const limit = rec.intent?.limitPrice ?? Number(rec.canonicalOrder?.price ?? NaN), qty = rec.intent?.quantity ?? 1;
       const broker = rec.order?.averagePrice;
       const fill = typeof broker === "number" && Number.isFinite(broker) && broker > 0 ? broker : limit;

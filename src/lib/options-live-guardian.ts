@@ -16,6 +16,7 @@ export const OPTIONS_LIVE_RULES = {
   widthExitFrac: 0.9,       // a spread worth this share of its width closes whole: the last 10% is not worth the gamma
   partialAtMult: 2,         // a 2-lot banks one contract once the structure is worth this × entry; the rest rides the trail
   invalidationTicks: 2,     // the underlying must TRADE beyond the thesis level on this many consecutive guard ticks (10 min) before the exit fires
+  invalidationBufferPct: 0.5,   // pre-registered: the level is the edge the signal CLEARED, back inside the range by this much (a failed breakout, not noise at the line)
   invalidationQuoteMaxAgeMs: 15 * 60_000,   // an older underlying quote counts as no quote: the tick count resets, nothing fires
   exitBeforeDte: 7,         // close inside the last week regardless (gamma/assignment window)
   staleEntryMinutes: 15,    // an unfilled entry is cancelled after this
@@ -33,11 +34,20 @@ export interface OwnedPositionRecord extends OwnedOptionsPosition {
   exDivAt?: string | null;
   exDivSource?: "scheduled" | "projected";
   shortStrike?: number | null;
-  /** Thesis invalidation (Sep 15 2026): the 20-session range edge the signal cleared (rangeLow for bullish, rangeHigh for bearish) and the
-   *  direction; `invalidationTicks` counts consecutive guard ticks the underlying has traded beyond it — persisted so a restart cannot forget. */
+  /** Thesis invalidation (Sep 15 2026): the 20-session range edge the signal CLEARED, back inside by the buffer — rangeHigh × (1 − 0.5%) for a
+   *  bullish breakout, rangeLow × (1 + 0.5%) for a bearish breakdown (`invalidationLevel`) — and the direction; `invalidationTicks` counts
+   *  consecutive guard ticks the underlying has traded beyond it, persisted so a restart cannot forget. */
   invalidationPx?: number | null;
   signalDirection?: "bullish" | "bearish";
   invalidationTicks?: number;
+  /** Set once the desk has paged about a leg-quantity mismatch at the broker, so it pages once and not every five minutes. */
+  mismatchPagedAtMs?: number;
+}
+/** The failed-breakout level: the edge the signal cleared, back inside the range by the buffer. null when the range is unusable. */
+export function invalidationLevel(direction: "bullish" | "bearish", rangeLow: number, rangeHigh: number, rules = OPTIONS_LIVE_RULES): number | null {
+  if (!(rangeLow > 0) || !(rangeHigh >= rangeLow)) return null;
+  const buffer = rules.invalidationBufferPct / 100;
+  return Math.round((direction === "bullish" ? rangeHigh * (1 - buffer) : rangeLow * (1 + buffer)) * 10000) / 10000;
 }
 
 /** Executable net price to CLOSE a debit structure now: sell the long at its bid, buy the short back at its ask. */
@@ -92,6 +102,27 @@ function invalidationTick(pos: OwnedPositionRecord, spot: UnderlyingSpot | null 
   const beyond = pos.signalDirection === "bullish" ? spot.last < pos.invalidationPx : spot.last > pos.invalidationPx;
   if (!beyond) return { ticks: 0, note: `${pos.underlying} ${spot.last} inside its ${pos.invalidationPx} level` };
   return { ticks: (pos.invalidationTicks ?? 0) + 1, note: `${pos.underlying} ${spot.last} ${pos.signalDirection === "bullish" ? "below" : "above"} its ${pos.invalidationPx} level` };
+}
+/** What the guard does with a live ENTRY order: a partially filled 2-lot is cancelled at once (the filled part is ingested next tick, the
+ *  rest must not keep filling under a moved market); an unfilled entry is cancelled after the stale window. */
+export function entryOrderAction(rec: { action: "open" | "close"; createdAtMs?: number; order?: { state: string } }, nowMs: number, rules = OPTIONS_LIVE_RULES): { cancel: boolean; reason: string } {
+  const state = rec.order?.state ?? "";
+  if (rec.action === "open" && state === "partially_filled") return { cancel: true, reason: "partially filled entry — cancelling the rest now; the filled contracts are ingested next tick" };
+  if (["open", "partially_filled"].includes(state) && rec.createdAtMs != null && nowMs - rec.createdAtMs > rules.staleEntryMinutes * 60_000) return { cancel: true, reason: `stale after ${rules.staleEntryMinutes} min` };
+  return { cancel: false, reason: state ? `${state} for ${rec.createdAtMs != null ? ((nowMs - rec.createdAtMs) / 60_000).toFixed(0) : "?"} min` : "no broker order" };
+}
+/** The pending ENTRY whose broker order is still live — a wanted close must cancel it first (the policy refuses any order while one is outstanding). */
+export function closeBlockedBy(pending: { action: "open" | "close"; state: string; order?: { id: string; state: string } }[]): { id: string; state: string } | null {
+  const live = pending.find((r) => r.action === "open" && r.state !== "settled" && r.order && ["pending", "open", "partially_filled"].includes(r.order.state));
+  return live?.order ?? null;
+}
+/** Ownership against the broker: matched → manage; none of the record's legs at the broker → release; some legs there but not as recorded
+ *  (a quantity mismatch) → KEEP the record and page once — never release exposure on a count the desk cannot explain. */
+export function ownershipVerdict(pos: OwnedPositionRecord, brokerLegs: { optionId: string; side: "long" | "short" }[], matched: boolean): { action: "manage" | "release" | "keep"; page: string | null } {
+  if (matched) return { action: "manage", page: null };
+  const present = pos.legs.filter((l) => brokerLegs.some((b) => b.optionId === l.optionId && b.side === l.side));
+  if (!present.length) return { action: "release", page: null };
+  return { action: "keep", page: pos.mismatchPagedAtMs ? null : `⚠️ Options position ${pos.id} (${pos.kind} ${pos.underlying}): the broker shows its legs at a different quantity than the record (${pos.legs.map((l) => `${l.side} ${l.optionId.slice(0, 8)} × ${l.quantity}`).join(", ")}). Kept, not released — reconcile by hand; the guardian cannot manage it until the record matches.` };
 }
 /** The owned record the runner must persist after a decision (peak and invalidation count), or null when nothing changed. */
 export function ownedRecordAfter(pos: OwnedPositionRecord, decision: ExitDecision): OwnedPositionRecord | null {
