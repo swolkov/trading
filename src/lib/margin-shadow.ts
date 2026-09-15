@@ -52,7 +52,8 @@ const MAX_HOLD_H = 48;
 // Spencer trades a coin on margin, recalibrate its rate here from the real kraken_my_ledger.
 const ROLLOVER_4H: Record<string, number> = { BTC: 0.00015, ETH: 0.0002, SOL: 0.0003 };
 const ROLLOVER_DEFAULT = 0.0003;
-function rollover4h(symbol: string): number {
+/** Exported for the trade card's expected-financing line (margin-trade-card.ts); the paper model's own number. */
+export function rollover4h(symbol: string): number {
   return ROLLOVER_4H[pairBase(symbol)] ?? ROLLOVER_DEFAULT;
 }
 

@@ -206,9 +206,25 @@ const LEDGER_TABLE_SQL = `CREATE TABLE IF NOT EXISTS kraken_my_ledger (
   fee double precision
 )`;
 
+// THE TRADE CARDS (Sep 15 2026, margin-trade-card.ts): one row per live entry DECISION —
+// sent, validated or refused — with the full card as JSON. A refusal that never reached
+// sizing is a card-less row (card NULL) carrying only the reason.
+const TRADE_CARDS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_trade_cards (
+  id serial PRIMARY KEY,
+  at timestamptz NOT NULL DEFAULT now(),
+  symbol text NOT NULL,
+  side text NOT NULL,
+  source text,
+  action text NOT NULL,
+  reason text,
+  txid text,
+  card jsonb
+)`;
+
 export async function ensureMarginTables(): Promise<void> {
   await prisma.$executeRawUnsafe(TRADES_TABLE_SQL);
   await prisma.$executeRawUnsafe(LEDGER_TABLE_SQL);
+  await prisma.$executeRawUnsafe(TRADE_CARDS_TABLE_SQL);
 }
 
 // Kraken's private-API rate limiter: ~15-20 counter points, TradesHistory/Ledgers cost
