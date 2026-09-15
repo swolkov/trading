@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
-import { isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
-import { mergeResearchSnapshot } from "../src/lib/options-research-ingest";
+import { OPTIONS_DESK_RULES, OPTIONS_WATCHLIST, OPTIONS_WATCHLIST_SLICES, contractQualityFailures, deltaBandOf, dteBucketOf, isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
+import { mergeResearchSnapshot, unmatchedQuoteCount } from "../src/lib/options-research-ingest";
 import { exDivRisk, nextExDiv, spansEarnings } from "../src/lib/options-events";
 import { loadOptionsNews } from "../src/lib/options-news";
 import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scripts/robinhood/client";
 import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
 import { optionsRequestFingerprint, OPTIONS_LIVE_ACCOUNT } from "../src/lib/options-live-policy";
 import type { OptionsIntentRecord } from "../src/lib/options-live-executor";
-const now=Date.parse("2026-09-12T16:00:00Z");
+const now=Date.parse("2026-09-12T15:00:00Z");   // a daytime instant: DTE is measured to the 20:00Z close (dteOf), so the fraction of the day matters
 const capture=(name:string,data:unknown)=>JSON.stringify({message:{content:[{type:"tool_use",id:"read-1",name:`mcp__robinhood-trading__${name}`,input:{}}]}})+"\n"+JSON.stringify({message:{content:[{type:"tool_result",tool_use_id:"read-1",content:JSON.stringify({data})}]}});
 function research():OptionsResearch{
  const bars=Array.from({length:201},(_,i)=>({day:new Date(now-(201-i)*86400000).toISOString().slice(0,10),open:100,high:i===200?106:101,low:99,close:i===200?105:100,volume:1000000}));
@@ -221,4 +221,88 @@ test("nextExDiv: no dividend → null; upcoming ex-date → scheduled; past ex-d
  assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-10-30",Date.parse("2026-09-15T16:00:00Z"),"projected").permitted,true);
  assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"scheduled").permitted,true);   // the same date scheduled is after expiry
  assert.match(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"projected").note,/projected ex-dividend 2026-11-10 \(±7d\)/);
+});
+
+test("DTE engine: 21 days is the floor (a 20-DTE contract is outside the window, 21 passes); buckets and the delta band stamp; ranking charges theta over min(10, dte−7) days and prefers the longer expiry when the drag flips the order",()=>{
+ assert.equal(OPTIONS_DESK_RULES.minDte,21); assert.equal(OPTIONS_DESK_RULES.exitBeforeDte,7);
+ const c0=research().contracts[0];
+ // DTE is the guardian's convention (dteOf: expiry at the 20:00Z close). Research at Fri Sep 11 14:15Z for Fri Oct 2 (21 calendar days) reads 21.24 → passes;
+ // Oct 1 (20 days) reads 20.24 → refused. Under a midnight convention the same Oct 2 contract would have read 20.4 and been refused all day.
+ const friday=Date.parse("2026-09-11T14:15:00Z");
+ assert.equal(contractQualityFailures({...c0,expiry:"2026-10-02",at:new Date(friday).toISOString()},friday).length,0);
+ assert.ok(contractQualityFailures({...c0,expiry:"2026-10-01",at:new Date(friday).toISOString()},friday).includes("Outside expiration window"));
+ const close=Date.parse("2026-09-11T20:00:00Z");   // at the close, 21 days is exactly 21.0 and still passes; 20 is exactly 20.0 and does not
+ assert.equal(contractQualityFailures({...c0,expiry:"2026-10-02",at:new Date(close).toISOString()},close).length,0);
+ assert.ok(contractQualityFailures({...c0,expiry:"2026-10-01",at:new Date(close).toISOString()},close).includes("Outside expiration window"));
+ assert.deepEqual([dteBucketOf(21),dteBucketOf(29.9),dteBucketOf(30),dteBucketOf(44.9),dteBucketOf(45),dteBucketOf(60)],["21-30","21-30","30-45","30-45","45-60","45-60"]);
+ assert.deepEqual([deltaBandOf(0.5),deltaBandOf(-0.7),deltaBandOf(0.4),deltaBandOf(0.39),deltaBandOf(0.71),deltaBandOf(null)],["prompt","prompt","prompt","outer","outer","outer"]);
+ // Two expiries of the same ATM call on a $105 spot. Near (Oct 9, 27.2 DTE): straddle 2.375 → worth $146.5 at the expected move for $91;
+ // far (Nov 6, 55.2 DTE): straddle 1.80 → $84 for $96. Raw payoff per dollar prefers the near one (1.61 vs 0.88); charging theta over a
+ // 10-day hold (near −0.08/day = $80, far −0.01/day = $10) flips it: (146.5−80)/91 = 0.73 < (84−10)/96 = 0.77.
+ const r=research(); const rv=realizedVol20(r.bars.TEST)!, iv=rv*1.1;
+ const near={...c0,id:"nc",expiry:"2026-10-09",iv,theta:-0.08}, nearPut={...c0,id:"np",type:"put" as const,bid:1.45,ask:1.55,delta:-0.5,iv,theta:-0.08,expiry:"2026-10-09"};
+ const far={...c0,id:"fc",expiry:"2026-11-06",bid:0.9,ask:0.95,iv,theta:-0.01}, farPut={...c0,id:"fp",type:"put" as const,bid:0.85,ask:0.9,delta:-0.5,iv,theta:-0.01,expiry:"2026-11-06"};
+ r.contracts=[near,nearPut,far,farPut];
+ const ranked=screenResearchContracts(r,100,500,now).filter(c=>c.kind==="long_call");
+ assert.deepEqual(ranked.map(c=>c.expiry),["2026-11-06","2026-10-09"]);
+ const [f,n]=ranked;
+ assert.deepEqual([f.dteBucket,n.dteBucket],["45-60","21-30"]); assert.deepEqual([f.expectedHoldDays,n.expectedHoldDays],[10,10]);
+ assert.deepEqual([f.thetaDragUsd,n.thetaDragUsd],[10,80]); assert.deepEqual([f.payoffAtMoveUsd,n.payoffAtMoveUsd],[84,146.5]);
+ assert.equal(f.deltaBand,"prompt"); assert.equal(f.atmIv,Math.round(iv*10000)/10000);
+ assert.equal(f.chase,Math.round(5/(iv/Math.sqrt(252)*100)*100)/100);   // the signal day closed 105 on a 100 prior close: +5% ÷ the implied daily move
+ // Without broker theta there is no charge and no invented number: the raw order returns and thetaDragUsd is null.
+ const blind=structuredClone(r); for(const x of blind.contracts)x.theta=null;
+ const raw=screenResearchContracts(blind,100,500,now).filter(c=>c.kind==="long_call");
+ assert.deepEqual(raw.map(c=>c.expiry),["2026-10-09","2026-11-06"]); assert.equal(raw[0].thetaDragUsd,null);
+ // A short leg without theta also leaves the spread uncharged. The hold is min(10, dte−7): inside the 21–60 window that is always 10 (it would only shrink under 17 DTE, which the window refuses).
+ const short={...far,id:"fs",strike:110,bid:0.28,ask:0.3,delta:0.35,theta:null};
+ const spread=screenResearchContracts({...r,contracts:[far,farPut,short]},100,500,now).find(c=>c.kind==="call_debit")!;
+ assert.equal(spread.thetaDragUsd,null); assert.equal(spread.deltaBand,"prompt");
+ const soon=screenResearchContracts({...r,contracts:[{...near,expiry:"2026-10-06"},{...nearPut,expiry:"2026-10-06"}]},100,500,now)[0];   // 24.2 DTE → 21-30, hold 10
+ assert.equal(soon.dteBucket,"21-30"); assert.equal(soon.expectedHoldDays,10);
+ // A structure the 10-day theta charge eats whole is rejected outright: the near call at −$0.15/day ($150 > $146.5 payoff) is gone, the far one stays.
+ const eaten=screenResearchContracts({...r,contracts:[{...near,theta:-0.15},{...nearPut,theta:-0.15},far,farPut]},100,500,now).filter(c=>c.kind==="long_call");
+ assert.deepEqual(eaten.map(c=>c.expiry),["2026-11-06"]);
+ assert.equal(screenResearchContracts({...r,contracts:[{...near,theta:-0.146},{...nearPut,theta:-0.146},far,farPut]},100,500,now).filter(c=>c.kind==="long_call").length,2);   // $146 of drag against $146.50 leaves $0.50 → stays; $146.50 exactly leaves 0 → rejected
+ assert.equal(screenResearchContracts({...r,contracts:[{...near,theta:-0.1465},{...nearPut,theta:-0.1465},far,farPut]},100,500,now).filter(c=>c.kind==="long_call").length,1);
+});
+
+test("universe: the two research slices partition the 28-name watchlist in order, each under the 360-contract cap; the ten large caps are slice B",()=>{
+ const {A,B}=OPTIONS_WATCHLIST_SLICES;
+ assert.deepEqual(OPTIONS_WATCHLIST,[...A,...B]); assert.equal(OPTIONS_WATCHLIST.length,28); assert.equal(new Set(OPTIONS_WATCHLIST).size,28);
+ assert.equal(A.filter(x=>(B as readonly string[]).includes(x)).length,0);
+ assert.deepEqual([...B],["TSLA","MSFT","AMZN","META","GOOGL","AVGO","NFLX","PLTR","COIN","MSTR"]);
+ assert.deepEqual(A.slice(0,6),["SPY","QQQ","IWM","AAPL","AMD","NVDA"]); assert.equal(A.length,18);
+ const perName=2*5*2;                                                    // two expiries × five strikes × calls and puts
+ assert.ok(A.length*perName<=360); assert.ok((B.length+6)*perName<=360); // discovery (≤6) rides in B
+ assert.equal(OPTIONS_WATCHLIST.length*perName+6*perName,680);
+});
+
+test("a slice-B run keeps slice A's bars, contracts and events; a slice-A run keeps slice B's and carries the last discoveries forward; the unmatched-quote count is read back out of the error lines",()=>{
+ const base=research(), at=new Date(now).toISOString();
+ const bars=(close:number)=>base.bars.TEST.map(b=>({...b,close}));
+ const contract=(symbol:string,id:string)=>({...base.contracts[0],id,symbol});
+ const event=(when:string)=>({earningsAt:null,earningsTiming:null,calendarThrough:"2026-11-11",exDivAt:null,dividendAmount:null,at:when});
+ const sliceA:OptionsResearch={...base,bars:{SPY:bars(500),SOFI:bars(20)},contracts:[contract("SPY","spy1"),contract("SOFI","sofi1")],events:{SPY:event("2026-09-12T14:00:00Z"),SOFI:event("2026-09-12T14:00:00Z")},errors:[]};
+ const sliceB:OptionsResearch={...base,bars:{TSLA:bars(300),COIN:bars(200),ZZZ:bars(15)},contracts:[contract("TSLA","tsla1"),contract("COIN","coin1"),contract("ZZZ","zzz1")],events:{TSLA:event(at),COIN:event(at),ZZZ:event(at)},errors:["3 requested contracts lacked usable matched quotes"]};
+ const afterB=mergeResearchSnapshot(sliceA,sliceB);
+ assert.deepEqual(Object.keys(afterB.bars).sort(),["COIN","SOFI","SPY","TSLA","ZZZ"]);
+ assert.deepEqual(afterB.contracts.map(c=>c.id).sort(),["coin1","sofi1","spy1","tsla1","zzz1"]);
+ assert.equal(afterB.events?.SPY.at,"2026-09-12T14:00:00Z"); assert.equal(afterB.events?.TSLA.at,at);   // A's rows keep their own clock
+ assert.equal(afterB.bars.SPY[0].close,500); assert.deepEqual(afterB.errors,sliceB.errors);           // errors are the run's own
+ assert.equal(unmatchedQuoteCount(afterB.errors),3);
+ // The next slice-A run refreshes A, keeps B, and does not drop the discovery name it never asked for.
+ const afterA=mergeResearchSnapshot(afterB,{...sliceA,bars:{SPY:bars(510),SOFI:bars(21)},errors:[]});
+ assert.deepEqual(Object.keys(afterA.bars).sort(),["COIN","SOFI","SPY","TSLA","ZZZ"]);
+ assert.equal(afterA.bars.SPY[0].close,510); assert.equal(afterA.bars.TSLA[0].close,300); assert.ok(afterA.contracts.some(c=>c.id==="zzz1"));
+ assert.equal(unmatchedQuoteCount(afterA.errors),0);
+ // A later slice-B run that observed a different discovery set replaces it (six at most, sorted).
+ const afterB2=mergeResearchSnapshot(afterA,{...sliceB,bars:{TSLA:bars(310),YYY:bars(12)},contracts:[contract("TSLA","tsla2"),contract("YYY","yyy1")],errors:[]});
+ assert.equal("ZZZ" in afterB2.bars,false); assert.ok("YYY" in afterB2.bars); assert.ok("COIN" in afterB2.bars);
+ assert.equal(unmatchedQuoteCount(["12 requested contracts lacked usable matched quotes","F: no matched option quotes in this collection","x requested contracts lacked usable matched quotes"]),12);
+ // The parser writes the line the counter reads.
+ const use=(id:string,name:string,input:unknown)=>({type:"tool_use",id,name:`mcp__robinhood-trading__${name}`,input});
+ const res=(id:string,data:unknown)=>({type:"tool_result",tool_use_id:id,content:JSON.stringify({data})});
+ const parsed=parseRobinhoodResearchEvents([{message:{content:[use("q","get_option_quotes",{instrument_ids:["i1","i2"]})]}},{message:{content:[res("q",{results:[]})]}}].map(l=>JSON.stringify(l)).join("\n"),at);
+ assert.equal(unmatchedQuoteCount(parsed.errors),2);
 });

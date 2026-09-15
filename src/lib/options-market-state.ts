@@ -12,6 +12,7 @@ import type { ResearchBar } from "./options-desk-model";
 export const OPTIONS_MARKET_RULES = {
   vetoDayPct: 1.5,          // close-to-close move on the signal day that, with the wrong side of the 20-day, vetoes
   shockPct: 1.5,            // intraday SPY move against the trade at the moment of entry
+  chaseMaxRatio: 2,         // today's move ÷ the implied daily move (ATM IV ÷ √252); at or above this the desk waits, it does not chase
   indexEtfs: ["SPY", "QQQ", "IWM"],   // the veto is for single names; an ETF breakout IS the market
   staleDays: 4,
   maxQuoteAgeMs: 15 * 60_000,   // an intraday quote older than this is "unavailable": stamped stale, never a veto
@@ -56,6 +57,25 @@ export function intradayShock(quote: { last: number; previousClose: number; atMs
   return { vetoed: against, movePct, stale: false, reason: against ? `SPY ${movePct >= 0 ? "+" : ""}${movePct}% intraday against a ${direction} entry` : `SPY ${movePct >= 0 ? "+" : ""}${movePct}% intraday` };
 }
 export const directionOfKind = (kind: string): Direction => (kind === "long_call" || kind === "call_debit" || kind === "put_credit" ? "bullish" : "bearish");
+
+/** DO NOT CHASE (Sep 15 2026): today's move as a multiple of the implied daily move (ATM IV ÷ √252). `atmIv` is an annualized
+ *  decimal. A 6.1% day on a 40% IV name is 6.1 / (40/15.87) = 2.4×. null when either input is missing. */
+export function chaseRatio(todayMovePct: number | null, atmIv: number | null): number | null {
+  if (todayMovePct == null || !Number.isFinite(todayMovePct) || atmIv == null || !(atmIv > 0)) return null;
+  return round(Math.abs(todayMovePct) / (atmIv / Math.sqrt(252) * 100), 2);
+}
+/** The live chase check on the candidate's own quote at the moment of entry. At or above `chaseMaxRatio` the desk waits for the next
+ *  trigger instead of buying a move that has already happened. No quote, a stale one, or no ATM IV → ratio null, no veto, said so. */
+export function chaseCheck(quote: { last: number; previousClose: number; atMs: number } | null, atmIv: number | null, symbol: string, now: number, rules = OPTIONS_MARKET_RULES): { vetoed: boolean; ratio: number | null; movePct: number | null; reason: string } {
+  if (!quote || !(quote.last > 0) || !(quote.previousClose > 0)) return { vetoed: false, ratio: null, movePct: null, reason: `${symbol} quote unavailable — chase check skipped (stamped unknown)` };
+  if (!(now - quote.atMs <= rules.maxQuoteAgeMs)) return { vetoed: false, ratio: null, movePct: null, reason: `${symbol} quote is ${((now - quote.atMs) / 60_000).toFixed(0)} min old — chase check skipped (stamped stale)` };
+  const movePct = round((quote.last / quote.previousClose - 1) * 100), ratio = chaseRatio(movePct, atmIv);
+  const move = `${movePct >= 0 ? "+" : ""}${movePct}%`;
+  if (ratio == null) return { vetoed: false, ratio, movePct, reason: `${symbol} ${move} today; ATM implied vol unavailable — chase check skipped` };
+  return { vetoed: ratio >= rules.chaseMaxRatio, ratio, movePct, reason: ratio >= rules.chaseMaxRatio
+    ? `WAIT FOR TRIGGER: ${symbol} moved ${move} today = ${ratio}× its implied daily move — not chasing`
+    : `${symbol} ${move} today = ${ratio}× its implied daily move` };
+}
 
 /** VIX close from Yahoo, stamped only. null on any failure. NEVER cross-asset.ts, which fabricates VIX=20 when the read fails. */
 export async function vixLevel(fetchBars?: (symbol: string, days: number) => Promise<{ c: number }[]>, timeoutMs = OPTIONS_MARKET_RULES.vixTimeoutMs): Promise<number | null> {
