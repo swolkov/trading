@@ -28,6 +28,8 @@ export interface DeskState {
   disabledReason?: string;
   /** ET day key of the last MFE/MAE fold (runs once a day after 17:05 ET). */
   excursionDayKey?: string;
+  /** Execution errors already on the day's count when the desk was last enabled: the trip is baseline + 3, so a re-enable starts a fresh allowance. */
+  execErrorBaseline?: { day: string; count: number };
 }
 
 export interface TradeRow {
@@ -183,12 +185,12 @@ export const ANOMALY_KEY = "futures_desk_anomaly";
 export const FEED_SEEN_KEY = "futures_desk_feed_seen_at";
 /** The heartbeat chart's proof of life — a timestamp only, never a signal row. */
 export async function noteFeedSeen(): Promise<void> { await setKey(FEED_SEEN_KEY, new Date().toISOString()); }
-/** Execution errors of the last two days, for the daily count: signal rows that ended in `error`, plus
+/** Execution errors of the last two days, for the daily count: signal rows that ended in `error` (watch rows never count), plus
  *  ledger rows classed roll_failed / close_refused / unprotected — an unprotected ENTRY is already its
  *  signal's error, so it is not counted twice. An open row with a class is dated now (the problem is live). */
 export async function executionErrorEvents(): Promise<{ at: string; errorClass: string | null }[]> {
   const rows = await prisma.$queryRawUnsafe<{ at: Date | string; error_class: string | null }[]>(
-    `SELECT received_at AS at, COALESCE(error_class, 'entry_error') AS error_class FROM futures_desk_signals WHERE status = 'error' AND received_at > now() - interval '2 days'
+    `SELECT received_at AS at, COALESCE(error_class, 'entry_error') AS error_class FROM futures_desk_signals WHERE status = 'error' AND action <> 'watch' AND received_at > now() - interval '2 days'
      UNION ALL
      SELECT CASE WHEN t.status = 'open' THEN now() ELSE COALESCE(t.closed_at, t.opened_at) END AS at, t.error_class FROM futures_desk_trades t
      WHERE t.error_class IN ('roll_failed', 'close_refused', 'unprotected') AND COALESCE(t.closed_at, now()) > now() - interval '2 days'

@@ -56,10 +56,10 @@ export function FuturesLedgerTable({ ledger, record }: { ledger: FuturesTrade[];
   );
 }
 
-export function FuturesAlertInbox({ signals, emptyHint }: { signals: FuturesSignal[]; emptyHint: string }) {
+export function FuturesAlertInbox({ signals, emptyHint, title = "Alert inbox", aside = "every alert TradingView sent, and what the desk did with it" }: { signals: FuturesSignal[]; emptyHint: string; title?: string; aside?: string }) {
   return (
     <Panel>
-      <PanelHeader title="Alert inbox" aside={<span>every alert TradingView sent, and what the desk did with it</span>} />
+      <PanelHeader title={title} aside={<span>{aside}</span>} />
       {signals.length === 0 ? <PanelBody><Empty>{emptyHint}</Empty></PanelBody> : (
         <DataTable dense maxH="20rem">
           <thead><tr><Th>Received</Th><Th>Edge</Th><Th>Market</Th><Th>Action</Th><Th num>Price</Th><Th num>Stop</Th><Th>Status</Th><Th>Why</Th></tr></thead>

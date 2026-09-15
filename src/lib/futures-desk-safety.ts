@@ -2,6 +2,7 @@
 // checklist (E5). Pure: the guardian and the entry path feed it rows, keys and clocks; it returns
 // strings and booleans. Fail closed on ENTRIES only — nothing here is consulted by a close, a roll
 // or a re-protect.
+import { ACTIVE_MONTH_CODES, monthCodeOf } from "@/lib/contract-months";
 import {
   MICRO_FOR_ROOT, MINI_FOR_ROOT, STAGE_MAX_CONTRACTS, cmeOpen, edgeByKey, etDayKey, rollDue, usd,
   type AlertPayload, type DeskLimits, type SizeResult,
@@ -94,12 +95,12 @@ export const DEMO_HOST = "demo.tradovateapi.com";
 /** The host `tradovate.ts` resolves for a mode (`getBaseUrl`: live → live.tradovateapi.com, anything else → demo). */
 export function hostForMode(mode: string): string { return mode === "live" ? "live.tradovateapi.com" : DEMO_HOST; }
 export const EVENT_POLICY_FRESH_MS = 20 * 60_000;
+/** Index contracts list quarterlies only; `ACTIVE_MONTH_CODES` has no entry for them (see contract-months.ts). */
+const QUARTERLIES = new Set(["H", "M", "U", "Z"]);
 
 export interface ChecklistContext {
   /** The broker host the desk's client will hit — asserted, not assumed. */
   brokerHost: string;
-  /** The desk's own front-month pick for this micro (`deskContract`) — the contract must be it. */
-  frontMonth: string | null;
   /** Expiry (first notice for metals) of the contract about to trade, and the roll guard for it. */
   expiryIso: string | null;
   guardDays: number;
@@ -116,14 +117,17 @@ function eventPolicyAge(raw: string | null, nowMs: number): number | null {
 }
 
 /** Every failure is listed; the entry path refuses on the FIRST and stores the whole thing as
- *  `checklist_json` on the signal row. Order = severity: wrong account, wrong rule, wrong month, roll
- *  window, wrong symbol, stage cap, stop, budget, duplicate root, event calendar. */
+ *  `checklist_json` on the signal row. Order = severity: wrong account, wrong rule, thin/unknown month,
+ *  roll window, wrong symbol, stage cap, stop, budget, duplicate root, event calendar. */
 export function preTradeChecklist(a: AlertPayload, ctx: ChecklistContext, contract: { name: string }, size: SizeResult, limits: DeskLimits): Checklist {
   const failures: string[] = [], warnings: string[] = [];
   if (ctx.brokerHost !== DEMO_HOST) failures.push(`account is not the demo (host must be ${DEMO_HOST})`);
   const edge = edgeByKey(a.edge);
   if (!edge || !edge.roots.includes(a.root)) failures.push(`${a.root} is not a root of ${a.edge}`);
-  if (ctx.frontMonth && contract.name !== ctx.frontMonth) failures.push(`contract ${contract.name} is not the desk's front month (${ctx.frontMonth})`);
+  // The month must be one the root actually trades: `ACTIVE_MONTH_CODES` for the metals (GC: G J M Q V Z …),
+  // the quarterlies for the index roots (only H/M/U/Z are listed for them). A thin or mis-parsed month is refused.
+  const month = monthCodeOf(size.micro, contract.name);
+  if (!(ACTIVE_MONTH_CODES[a.root] ?? QUARTERLIES).has(month)) failures.push(`contract month code ${month || "(none)"} not in ACTIVE_MONTH_CODES for ${a.root}`);
   if (rollDue(ctx.expiryIso, ctx.now.getTime(), ctx.guardDays)) {
     const days = Math.max(0, Math.round((Date.parse(ctx.expiryIso as string) - ctx.now.getTime()) / 86_400_000));
     failures.push(`${contract.name} is inside its roll window (expires in ${days} day${days === 1 ? "" : "s"})`);

@@ -139,45 +139,55 @@ export async function insertTrade(v: NewTradeRow): Promise<number> {
 /** Yahoo's continuous front-month symbols. In roll week the front month jumps, so an excursion on
  *  the old month carries the calendar spread — labelled by `mfe_source`, never corrected. */
 export const YAHOO_FOR_ROOT: Record<string, string> = { ES: "ES=F", NQ: "NQ=F", YM: "YM=F", GC: "GC=F", SI: "SI=F", HG: "HG=F", RTY: "RTY=F" };
-const YAHOO_TIMEOUT_MS = 15_000;
+const YAHOO_DEADLINE_MS = 30_000;
 const BACKFILL_AFTER_MS = 5 * 86_400_000;
 
 interface ExcursionRow { id: number; root: string; side: Side; entry_price: number; stop_points: number | null; opened_at: Date | string; closed_at: Date | string | null; mfe_pts: number | null; mae_pts: number | null; bars_held: number | null; mfe_source: string | null; mfe_to: Date | string | null }
 type YBar = { t: number; h: number; l: number };
+type BarKind = "1h" | "1d";
 const iso = (d: Date | string | null): string | null => (d == null ? null : d instanceof Date ? d.toISOString() : d);
+/** Resolve to `fallback` once `ms` has passed; the timer is cleared either way so nothing lingers. */
 function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-  return Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clock = new Promise<T>((r) => { timer = setTimeout(() => r(fallback), ms); });
+  return Promise.race([p, clock]).finally(() => clearTimeout(timer));
+}
+async function yahooBars(sym: string, kind: BarKind): Promise<YBar[]> {
+  const y = await import("@/lib/yahoo");
+  if (kind === "1h") return (await y.getIntradayBars(sym, "1h", "5d")).map((x) => ({ t: x.t * 1000, h: x.h, l: x.l }));
+  return (await y.getHistoricalBars(sym, 60)).map((x) => ({ t: Date.parse(x.t), h: x.h, l: x.l }));
 }
 
-/** Fold the bars since each row's last fold (or its open) into mfe/mae/bars_held. Open rows and rows
- *  closed today are folded from 1h bars (5-day window); a row first seen more than 5 days old is
- *  backfilled from daily bars and stays labelled `yahoo_1d`. Fail-soft: every problem is a note, and
- *  a market whose bars do not arrive is skipped for the day. */
-export async function updateExcursions(now = new Date(), loadBars?: (sym: string, kind: "1h" | "1d") => Promise<YBar[]>): Promise<string[]> {
+/** Fold the bars since each row's last fold (or its open) into mfe/mae/bars_held. Open rows, and rows
+ *  closed in the last 7 days whose fold has not yet reached their close, are folded from 1h bars (5-day
+ *  window); a row first seen more than 5 days old is backfilled from daily bars and stays labelled
+ *  `yahoo_1d`. Every distinct (symbol, kind) is fetched once, all in parallel, under ONE 30-second
+ *  deadline; a market whose bars did not arrive is a note and is skipped for the day. Fail-soft. */
+export async function updateExcursions(now = new Date(), loadBars: (sym: string, kind: BarKind) => Promise<YBar[]> = yahooBars): Promise<string[]> {
   const notes: string[] = [];
   const rows = await prisma.$queryRawUnsafe<ExcursionRow[]>(
     `SELECT id, root, side, entry_price, stop_points, opened_at, closed_at, mfe_pts, mae_pts, bars_held, mfe_source, mfe_to FROM futures_desk_trades
-     WHERE status = 'open' OR (status = 'closed' AND (closed_at AT TIME ZONE 'America/New_York')::date = $1::date) ORDER BY id`, etDayKey(now));
+     WHERE status = 'open' OR (status = 'closed' AND closed_at > now() - interval '7 days' AND (mfe_to IS NULL OR mfe_to < closed_at)) ORDER BY id`);
   if (!rows.length) return notes;
-  const bars = loadBars ?? (async (sym, kind) => {
-    const y = await import("@/lib/yahoo");
-    if (kind === "1h") return withTimeout(y.getIntradayBars(sym, "1h", "5d").then((b) => b.map((x) => ({ t: x.t * 1000, h: x.h, l: x.l }))), YAHOO_TIMEOUT_MS, []);
-    return withTimeout(y.getHistoricalBars(sym, 60).then((b) => b.map((x) => ({ t: Date.parse(x.t), h: x.h, l: x.l }))), YAHOO_TIMEOUT_MS, []);
-  });
-  const cache = new Map<string, Promise<YBar[]>>();
-  const load = (sym: string, kind: "1h" | "1d") => { const k = `${sym}|${kind}`; if (!cache.has(k)) cache.set(k, bars(sym, kind).catch(() => [])); return cache.get(k)!; };
-  let folded = 0;
-  for (const r of rows) {
-    const sym = YAHOO_FOR_ROOT[r.root];
-    if (!sym) { notes.push(`excursions: no Yahoo symbol for ${r.root}`); continue; }
+  const plan = rows.map((r) => {
     const openedMs = Date.parse(iso(r.opened_at)!);
+    const backfill = r.mfe_to == null && now.getTime() - openedMs > BACKFILL_AFTER_MS;
+    const kind: BarKind = backfill || r.mfe_source === "yahoo_1d" ? "1d" : "1h";
+    return { r, openedMs, kind, sym: YAHOO_FOR_ROOT[r.root] as string | undefined };
+  });
+  // One fetch per distinct (symbol, kind), all at once, one deadline; results land in the map as they arrive.
+  const results = new Map<string, YBar[]>();
+  const keys = [...new Set(plan.filter((p) => p.sym).map((p) => `${p.sym}|${p.kind}`))];
+  await withTimeout(Promise.all(keys.map(async (k) => { const [sym, kind] = k.split("|") as [string, BarKind]; results.set(k, await loadBars(sym, kind).catch(() => [])); })), YAHOO_DEADLINE_MS, undefined);
+  let folded = 0;
+  for (const { r, openedMs, kind, sym } of plan) {
+    if (!sym) { notes.push(`excursions: no Yahoo symbol for ${r.root}`); continue; }
+    const all = results.get(`${sym}|${kind}`);
+    if (!all) { notes.push(`excursions: ${kind} bars for ${sym} did not arrive within ${YAHOO_DEADLINE_MS / 1000}s`); continue; }
+    if (!all.length) { notes.push(`excursions: no ${kind} bars for ${sym}`); continue; }
     const closedMs = r.closed_at ? Date.parse(iso(r.closed_at)!) : now.getTime();
     const fromMs = r.mfe_to ? Date.parse(iso(r.mfe_to)!) : openedMs;
-    const backfill = r.mfe_to == null && now.getTime() - openedMs > BACKFILL_AFTER_MS;
-    const kind: "1h" | "1d" = backfill || r.mfe_source === "yahoo_1d" ? "1d" : "1h";
-    const all = await load(sym, kind);
     const fresh = all.filter((b) => b.t > fromMs && b.t <= closedMs && b.h > 0 && b.l > 0);
-    if (!all.length) { notes.push(`excursions: no ${kind} bars for ${sym}`); continue; }
     if (!fresh.length) continue;
     const prev: Excursion | null = r.mfe_pts != null ? { mfePts: r.mfe_pts, maePts: r.mae_pts ?? 0, bars: r.bars_held ?? 0 } : null;
     const ex = updateExcursion(prev, r.side, r.entry_price, fresh);

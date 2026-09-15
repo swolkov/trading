@@ -125,12 +125,14 @@ the old $1,500 budget keep their stops and `risk_usd` — nothing is resized. De
 
 ## Journal completeness and demo realism (E4, `src/lib/futures-desk-journal.ts`)
 
-**The judged series is `pnl_after_slip_usd`, not `pnl_usd`.** The demo fills at the touch and reports
+**The judged series WILL be `pnl_after_slip_usd`, not `pnl_usd`** (E6 wires the leaderboard and the
+verdict to it; until then the scoreboard still reads `pnl_usd`). The demo fills at the touch and reports
 no slippage, so every row also carries a per-market slippage model: `slip_model_pts` per side
 (`SLIP_PTS_PER_SIDE` — ES 0.89 · NQ 11.74 · GC 0.50 **measured** in the edge factory; YM 4 · SI 0.01
 · HG 0.0025 · RTY 0.5 **assumed** and labelled so) and `slip_model_usd` = 2 × slip × point value ×
 contracts (an MNQ 1-lot round trip = $46.96). `settle` writes `pnl_after_slip_usd = pnl_usd −
-slip_model_usd`; `pnl_usd` stays the demo's own number. Entry slip is also **measured** per trade:
+slip_model_usd`; `pnl_usd` stays the demo's own number. A rolled chain is charged per leg — each leg
+models its own round trip, so one roll costs four sides of slippage. Entry slip is also **measured** per trade:
 `signal_price` is the alert's close, `entry_slip_pts` = fill − signal (long; sign flipped for a
 short), positive = paid. TradingView's alert arrives on a delayed bar close, so a non-zero figure is
 the expected cost, recorded rather than hidden.
@@ -139,16 +141,21 @@ the expected cost, recorded rather than hidden.
 `session` (ET slice at entry — overnight 18–02 · european 02–07 · premarket 07–09:30 · open 09:30–10
 · morning 10–11:30 · midday 11:30–14 · power 14–15:30 · close 15:30–17 · break 17–18; a stamp, never a
 gate), `grade`, `regime` / `event_mode` (null until E7 / E3 stamp them), `error_class` and the
-excursion columns. **`error_class`** (mistake tracking): `partial_fill` (entry filled short),
+excursion columns. **`error_class`** (mistake tracking): `partial_fill` (an entry or a roll re-open filled short — the remainder is cancelled before the row is written),
 `unprotected` (no stop could be placed — the position was closed), `roll_failed` (old month closed,
 new month did not open), `close_refused` (the broker refused a liquidation), `queue_expired` (a
-queued alert aged out — on the SIGNAL row), `auth_backoff`, `foreign_position`. `classifyError`
-reads the class off a stamped row, or from the text of a row written before the column existed.
+queued alert aged out — on the SIGNAL row), `auth_backoff`, `foreign_position`. Precedence on one
+row: `unprotected` overwrites anything (the position is gone); `close_refused` is written only when
+the row has no class yet (`COALESCE`), so a partial fill or an unprotected close keeps its class.
+`classifyError` reads the class off a stamped row, or from the text of a row written before the
+column existed.
 
 **MFE / MAE** (`mfe_pts`, `mae_pts`, `mfe_r`, `mae_r`, `bars_held`, `mfe_source`, `mfe_to`): the desk
 has no price feed, so the guardian folds **delayed Yahoo 1-hour bars** (`ES=F`, `NQ=F`, `YM=F`,
-`GC=F`, `SI=F`, `HG=F`) into every open row and every row closed that day, **once per ET day after
-17:05 ET** (`futures_desk_state.excursionDayKey`). `mfe_source = yahoo_1h_delayed`; a row first seen
+`GC=F`, `SI=F`, `HG=F`) into every open row and every row closed in the last 7 days whose fold has
+not yet reached its close, **once per ET day after 17:05 ET** (`futures_desk_state.excursionDayKey`,
+stamped together with `guardianAt` BEFORE the fold runs). Every distinct (symbol, kind) is fetched
+once, in parallel, under one 30-second deadline. `mfe_source = yahoo_1h_delayed`; a row first seen
 more than 5 days old is backfilled from daily bars and stays `yahoo_1d`. `mfe_to` is the last bar
 folded, so bars are never counted twice. Fail-soft: a Yahoo problem is a guardian note and the day's
 `lastError`, never an exception. Roll week caveat: Yahoo's symbol is the continuous front month, so a
@@ -185,9 +192,10 @@ foreign-position report, unknown-status rows, the balance-read abort. Added:
 
 - **Three execution errors in one ET day disable the desk** (`disabledReason = "3 execution errors
   today"`, one Slack; a person re-enables from `/futures`). Counted: inbox rows that ended in `error`
-  plus ledger rows classed `roll_failed` / `close_refused` / `unprotected` (an unprotected entry is
-  its signal's error, counted once). Tripped once per day, so a re-enable is not undone by the next
-  guardian run.
+  (watch rows never count) plus ledger rows classed `roll_failed` / `close_refused` / `unprotected`
+  (an unprotected entry is its signal's error, counted once). Enabling records today's count as
+  `state.execErrorBaseline`; the trip is `count ≥ baseline + 3`, so a re-enable is a fresh allowance
+  of three, not an instant re-trip.
 - **Anomalies pause ENTRIES until a person clears them** (`futures_desk_anomaly` = `{kind, detail,
   at}`; refusal `anomaly open: foreign position #123 — entries paused until cleared`). The guardian
   writes one on: a contract the desk did not open (`foreign_position`), a broker position that
@@ -195,8 +203,12 @@ foreign-position report, unknown-status rows, the balance-read abort. Added:
   long 1`), or **equity moving more than 30% between two runs with no fills** (`equity_jump`). A
   manual trade in the Tradovate app therefore pauses the desk — intended. Closes, rolls and
   re-protection are never gated. While an entry is in flight (its fill exists before its ledger row)
-  the foreign/mismatch read is skipped for that run. Clear: `/futures` → `POST /api/futures/desk/enable`
-  `{ "action": "clear-anomaly", "confirm": "CLEAR" }`.
+  the foreign/mismatch read is skipped for that run. A stop-out between two runs is settled AFTER the
+  check, so it counts as no fill — at $250 of risk on $50k it cannot move equity 30%, by design.
+  `/futures` shows the open anomaly (kind, detail, when) in a red panel with a **type CLEAR** control;
+  the API is `POST /api/futures/desk/enable` `{ "action": "clear-anomaly", "confirm": "CLEAR" }`.
+  `deskStatus()` returns `anomaly`, `feedSeenAt`, `feedStale`, and the last ten `watch` rows separately
+  from the 40-row inbox.
 - **Feed heartbeat.** The tenth chart, `pine/futures-desk-feed-heartbeat.pine` on **ES1! 60m**, posts
   `{"action":"heartbeat"}` every confirmed bar. The webhook (secret required, rate-limited like any
   alert) stores `futures_desk_feed_seen_at` and writes **no signal row**. `feedStale` = more than
@@ -209,7 +221,8 @@ foreign-position report, unknown-status rows, the balance-read abort. Added:
   and is stored whole as `checklist_json` on the signal row; the **first failure is the refusal**.
   Exact strings: `account is not the demo (host must be demo.tradovateapi.com)` (asserted from the
   desk client's pinned mode, `DESK_MODE`, through the same mode→host rule `tradovate.ts` uses) ·
-  `ES is not a root of index_daily_mr` · `contract MESU6 is not the desk's front month (MESZ6)` ·
+  `ES is not a root of index_daily_mr` · `contract month code V not in ACTIVE_MONTH_CODES for ES`
+  (metals: `ACTIVE_MONTH_CODES`; index roots: the quarterlies H/M/U/Z) ·
   `MESU6 is inside its roll window (expires in 1 day)` · `micro symbol MES does not match
   MICRO_FOR_ROOT` · `qty 2 exceeds the stage A cap of 1` · `stop missing or on the wrong side of
   price` · `risk $301.70 exceeds the $250 budget` · `already holding ES` · `event calendar not

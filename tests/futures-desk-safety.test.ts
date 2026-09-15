@@ -14,7 +14,7 @@ function alertOf(over: Record<string, unknown> = {}): AlertPayload { const p = p
 const now = new Date("2026-09-15T16:00:00Z");   // Tue 12:00 ET
 const es = alertOf();
 const size: SizeResult = sizeEntry(es, DEFAULT_LIMITS, { grade: "normal", stage: "A", budgetMult: 1 });
-const okCtx: ChecklistContext = { brokerHost: DEMO_HOST, frontMonth: "MESZ6", expiryIso: "2026-12-18T14:30:00Z", guardDays: 3, openRoots: [], eventPolicyRaw: null, feedSeenAt: "2026-09-15T15:00:00Z", now };
+const okCtx: ChecklistContext = { brokerHost: DEMO_HOST, expiryIso: "2026-12-18T14:30:00Z", guardDays: 3, openRoots: [], eventPolicyRaw: null, feedSeenAt: "2026-09-15T15:00:00Z", now };
 const mesz6 = { name: "MESZ6" };
 
 // (a)
@@ -104,9 +104,15 @@ test("the checklist's exact failure strings, one fixture each", () => {
   const f = (a: AlertPayload, ctx: Partial<ChecklistContext>, contract = mesz6, sz = size) => preTradeChecklist(a, { ...okCtx, ...ctx }, contract, sz, DEFAULT_LIMITS).failures;
   assert.deepEqual(f(es, { brokerHost: "live.tradovateapi.com" }), ["account is not the demo (host must be demo.tradovateapi.com)"]);
   assert.ok(f({ ...es, edge: "donchian_60m_long", root: "RTY" }, {}).includes("RTY is not a root of donchian_60m_long"));
-  assert.deepEqual(f(es, {}, { name: "MESU6" }), ["contract MESU6 is not the desk's front month (MESZ6)"]);
-  assert.deepEqual(f(es, { frontMonth: "MESU6", expiryIso: "2026-09-16T16:00:00Z" }, { name: "MESU6" }), ["MESU6 is inside its roll window (expires in 1 day)"]);
-  assert.deepEqual(f(es, { frontMonth: "MESU6", expiryIso: "2026-09-17T17:00:00Z" }, { name: "MESU6" }), []);   // 2.04 days out: a 3-day guard rolls only under 2
+  // Month membership: index roots list quarterlies only; metals use ACTIVE_MONTH_CODES (GC has no U).
+  assert.deepEqual(f(es, {}, { name: "MESV6" }), ["contract month code V not in ACTIVE_MONTH_CODES for ES"]);
+  assert.deepEqual(f(es, {}, { name: "MNQZ6" }), ["contract month code (none) not in ACTIVE_MONTH_CODES for ES", "micro symbol MES does not match MICRO_FOR_ROOT"]);   // wrong symbol: both fail
+  const gc = alertOf({ edge: "donchian_60m_long", symbol: "GC", tf: "60" });
+  const gcSize = sizeEntry(gc, DEFAULT_LIMITS, { grade: "normal", stage: "A", budgetMult: 1 });
+  assert.deepEqual(f(gc, {}, { name: "MGCU6" }, gcSize), ["contract month code U not in ACTIVE_MONTH_CODES for GC"]);
+  assert.deepEqual(f(gc, {}, { name: "MGCZ6" }, gcSize), []);
+  assert.deepEqual(f(es, { expiryIso: "2026-09-16T16:00:00Z" }, { name: "MESU6" }), ["MESU6 is inside its roll window (expires in 1 day)"]);
+  assert.deepEqual(f(es, { expiryIso: "2026-09-17T17:00:00Z" }, { name: "MESU6" }), []);   // 2.04 days out: a 3-day guard rolls only under 2
   assert.deepEqual(f(alertOf({ symbol: "NQ" }), {}), ["micro symbol MES does not match MICRO_FOR_ROOT"]);
   assert.deepEqual(f(es, {}, mesz6, { ...size, contracts: 2 }), ["qty 2 exceeds the stage A cap of 1"]);
   assert.deepEqual(f({ ...es, stop: null }, {}), ["stop missing or on the wrong side of price"]);
