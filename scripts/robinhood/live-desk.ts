@@ -20,6 +20,8 @@ import { readOptionsExecutionPolicy } from "../../src/lib/options-live-runtime";
 import { RobinhoodLiveBroker, regularSessionFor } from "../../src/lib/options-live-broker";
 import { OPTIONS_LIVE_RULES, drawdownHalt, etDay, exitDecision, openNetAsk, type OwnedPositionRecord } from "../../src/lib/options-live-guardian";
 import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOptionsResearch, noCandidateNote, screenResearchContracts, type OptionsResearch } from "../../src/lib/options-desk-model";
+import { OPTIONS_EVENT_RULES, guardianExDivExit, spansEarnings } from "../../src/lib/options-events";
+import { directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../../src/lib/options-operation";
 import type { StructureKind } from "../../src/lib/options-structures";
 
@@ -33,6 +35,7 @@ const PROBE_KEY = "options_live_probe";
 const VERIFIED_KEY = "options_live_integration_verified";
 const ARMED_KEY = "options_live_armed";
 const LOG_KEY = "options_live_log";
+const MARKET_VETO_KEY = "options_live_market_veto";   // "false" switches the pre-registered SPY veto off; anything else = on
 
 let lines: string[] = [];
 const log = (s: string) => { const line = `${new Date().toISOString()} ${s}`; lines.push(line); console.log(line); };
@@ -91,8 +94,12 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
               const contracts = await broker.contracts(legs.map((l) => l.optionId));
               const strikes = contracts.map((c) => c.strike);
               const width = strikes.length === 2 ? Math.abs(strikes[0] - strikes[1]) : 0;
+              const shortLeg = legs.find((l) => l.side === "short");
+              const shortStrike = shortLeg ? contracts.find((c) => c.optionId === shortLeg.optionId)?.strike ?? null : null;
+              const event = (await research())?.events?.[contracts[0]?.underlying ?? ""];
               const owned: OwnedPositionRecord = { id: rec.refId, accountNumber: ACCOUNT, openingRefId: rec.refId, legs, kind: rec.intent!.kind, direction: rec.canonicalOrder!.direction,
-                entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "" };
+                entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "",
+                exDivAt: event?.exDivAt ?? null, ...(event?.exDivSource ? { exDivSource: event.exDivSource } : {}), shortStrike };
               await store.putOwnedPosition(owned);
               await store.putIntent({ ...rec, state: "settled" });
               await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${rec.intent!.quantity} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), out 7 days before expiry.`);
@@ -130,6 +137,15 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
           log(`${pos.underlying} ${pos.kind}: ${decision.reason}`);
           // The trail's anchor lives on the owned record, so a restart cannot forget the best mark seen.
           if (decision.peakNet != null && decision.peakNet !== pos.peakNet) await store.withAccountLock(ACCOUNT, () => store.putOwnedPosition({ ...pos, peakNet: decision.peakNet }));
+          // Ex-dividend assignment rule: a call debit spread with its short call in the money and the ex-date ≤ 2 days out closes at
+          // its executable mark. The underlying quote is fail-soft — no quote, rule skipped and said so.
+          if (!decision.exit && pos.kind === "call_debit" && pos.exDivAt) {
+            const q = await broker.underlyingQuote(pos.underlying);
+            const ex = guardianExDivExit(pos, q, Date.now());
+            log(`${pos.underlying} ${pos.kind}: ${ex.reason}`);
+            if (ex.exit && decision.markNet != null && decision.markNet > 0) { decision.exit = true; decision.reason = ex.reason; decision.limitPrice = Math.min(decision.markNet, pos.width > 0 ? pos.width : decision.markNet); }
+            else if (ex.exit) log(`${pos.underlying} ${pos.kind}: ex-dividend exit wanted but no bid — will retry next tick`);
+          }
           if (!decision.exit || decision.limitPrice == null) continue;
           const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity: pos.legs[0].quantity, limitPrice: decision.limitPrice,
             legs: pos.legs.map((l) => ({ optionId: l.optionId, side: l.side === "long" ? "sell" as const : "buy" as const })) };
@@ -174,7 +190,7 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         else if (todays.length >= OPTIONS_LIVE_RULES.maxEntriesPerDay) log(`entry: ${todays.length} entry attempt(s) already today`);
         else {
           const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0);
-          state.candidate = pick.note;
+          state.candidate = pick.note; state.market = pick.market;
           if (!pick.intent) log(`entry: ${pick.note}`);
           else {
             broker.noteTheoreticalMaxLoss(pick.maxLossUsd);
@@ -197,14 +213,36 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
 async function research(): Promise<OptionsResearch | null> {
   try { const r = JSON.parse((await cfg(OPTIONS_RESEARCH_KEY)) ?? "null"); return isOptionsResearch(r) ? r : null; } catch { return null; }
 }
+/** What the desk saw of the market on this tick — stamped into options_live_state.market beside the candidate note. */
+interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
 /** Top debit candidate from the research screen, re-priced on quotes fetched THIS second. */
-async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePolicy, buyingPower: number): Promise<{ intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string }> {
+async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePolicy, buyingPower: number): Promise<{ intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string; market?: MarketView }> {
   const data = await research();
   const cap = policy.maxLossUsd ?? 0, fee = policy.feeBudgetUsd ?? 0;
   if (!data) return { intent: null, note: "no broker research on file", maxLossUsd: 0, underlying: "", expiry: "" };
-  const candidates = screenResearchContracts(data, cap, buyingPower).filter((c) => OPTIONS_LIVE_RULES.entryKinds.includes(c.kind as StructureKind));
-  if (!candidates.length) return { intent: null, note: noCandidateNote(data, cap), maxLossUsd: 0, underlying: "", expiry: "" };
+  // Broad market first: SPY/QQQ against their averages from the research bars, VIX from Yahoo (stamp only, null on failure),
+  // SPY's intraday move from a live quote (fail-soft). The one pre-registered veto is on unless options_live_market_veto="false".
+  const vetoOn = (await cfg(MARKET_VETO_KEY)) !== "false";
+  const vix = await vixLevel();
+  const stamp = marketState({ SPY: data.bars.SPY, QQQ: data.bars.QQQ }, vix, Date.now());
+  const spyQuote = vetoOn ? await broker.underlyingQuote("SPY") : null;
+  const shockNow = intradayShock(spyQuote, "bullish", Date.now());
+  const market: MarketView = { spy: stamp.spy, qqq: stamp.qqq, vix: stamp.vix, veto: vetoOn ? "on" : "off", spyIntradayPct: shockNow.movePct ?? (shockNow.stale ? "stale" : "unknown"), at: new Date().toISOString() };
+  log(`market: SPY ${stamp.spy.regime} 20d${stamp.spy.dayPct != null ? ` ${stamp.spy.dayPct >= 0 ? "+" : ""}${stamp.spy.dayPct}% on ${stamp.spy.day}` : ""} · QQQ ${stamp.qqq.regime} 20d${stamp.qqq.dayPct != null ? ` ${stamp.qqq.dayPct >= 0 ? "+" : ""}${stamp.qqq.dayPct}%` : ""} · VIX ${stamp.vix ?? "unknown"} · SPY intraday ${market.spyIntradayPct === "unknown" ? "unknown" : `${market.spyIntradayPct >= 0 ? "+" : ""}${market.spyIntradayPct}%`} · veto ${market.veto}`);
+  const candidates = screenResearchContracts(data, cap, buyingPower, Date.now(), { vix }).filter((c) => OPTIONS_LIVE_RULES.entryKinds.includes(c.kind as StructureKind));
+  if (!candidates.length) return { intent: null, note: noCandidateNote(data, cap), maxLossUsd: 0, underlying: "", expiry: "", market };
+  const refusals: string[] = [];
   for (const c of candidates.slice(0, 3)) {
+    // The screen ran on the snapshot's clock; the desk runs on its own. A row that aged past 36h since then refuses here.
+    const earnings = spansEarnings(c.symbol, c.expiry, data.events, Date.now());
+    if (!earnings.permitted) { refusals.push(`${c.symbol} ${c.kind}: ${earnings.note}`); continue; }
+    if (vetoOn) {
+      const direction = directionOfKind(c.kind);
+      const veto = marketVeto(stamp, direction, c.symbol);
+      if (veto.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market veto — ${veto.reason}`); continue; }
+      const shock = intradayShock(spyQuote, direction, Date.now());
+      if (shock.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market shock veto — ${shock.reason}`); continue; }
+    }
     const legs = c.legs.map((id, i) => ({ optionId: id, side: i === 0 ? "buy" as const : "sell" as const }));
     const contracts = await broker.contracts(c.legs);
     const net = openNetAsk(legs, contracts);
@@ -213,9 +251,18 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     if (maxLossUsd + fee > cap) { continue; }
     const dte = (Date.parse(`${c.expiry}T00:00:00Z`) - Date.now()) / 86_400_000;
     if (dte < OPTIONS_DESK_RULES.minDte || dte > OPTIONS_DESK_RULES.maxDte) continue;
-    return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity: 1, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} @ ${net.toFixed(2)} (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry };
+    // One live earnings read for the chosen name only. Any failure — tool missing, shape unknown, broker error — refuses:
+    // an unconfirmed earnings date is an earnings trade the desk did not ask for. Index ETFs have none to confirm.
+    if (!OPTIONS_EVENT_RULES.indexEtfs.includes(c.symbol)) {
+      let live: Awaited<ReturnType<typeof broker.nextEarnings>>;
+      try { live = await broker.nextEarnings(c.symbol); }
+      catch (e) { refusals.push(`${c.symbol} ${c.kind}: live earnings check failed — ${String(e).slice(0, 160)} (refused, fail closed)`); continue; }
+      if (live.earningsAt <= c.expiry) { refusals.push(`${c.symbol} ${c.kind}: broker says earnings ${live.earningsAt}${live.timing ? ` (${live.timing})` : ""}${live.verified ? "" : ", tentative"} falls before expiry ${c.expiry} (via ${live.via})`); continue; }
+      log(`earnings ${c.symbol}: next ${live.earningsAt}${live.verified ? "" : " (tentative)"} after expiry ${c.expiry} (via ${live.via}); research row ${earnings.note}`);
+    }
+    return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity: 1, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} @ ${net.toFixed(2)} (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market };
   }
-  return { intent: null, note: "the research candidates no longer fit the cap on live quotes", maxLossUsd: 0, underlying: "", expiry: "" };
+  return { intent: null, note: refusals.length ? `refused: ${refusals.join("; ")}` : "the research candidates no longer fit the cap on live quotes", maxLossUsd: 0, underlying: "", expiry: "", market };
 }
 /** A cap-sized debit spread to REVIEW when no signal is live: adjacent strikes, same expiry, quality-passing, cheapest first. */
 async function probeStructure(broker: RobinhoodLiveBroker, cap: number, fee: number): Promise<Awaited<ReturnType<typeof pickCandidate>>> {

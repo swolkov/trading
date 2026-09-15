@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
 import { isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
+import { mergeResearchSnapshot } from "../src/lib/options-research-ingest";
+import { exDivRisk, nextExDiv, spansEarnings } from "../src/lib/options-events";
 import { loadOptionsNews } from "../src/lib/options-news";
 import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scripts/robinhood/client";
 import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
@@ -12,7 +14,8 @@ const capture=(name:string,data:unknown)=>JSON.stringify({message:{content:[{typ
 function research():OptionsResearch{
  const bars=Array.from({length:201},(_,i)=>({day:new Date(now-(201-i)*86400000).toISOString().slice(0,10),open:100,high:i===200?106:101,low:99,close:i===200?105:100,volume:1000000}));
  const c:ResearchContract={id:"a",symbol:"TEST",type:"call",strike:105,expiry:"2026-10-16",multiplier:100,bid:0.85,ask:0.9,bidSize:10,askSize:10,at:new Date(now).toISOString(),delta:0.5,iv:0.25,theta:-0.01,volume:500,openInterest:1000,selloutAt:null};
- return {source:"Robinhood MCP",capturedAt:new Date(now).toISOString(),bars:{TEST:bars},contracts:[c],scans:[],errors:[]};
+ // A fresh event row: calendar read (no earnings ahead), fundamentals read (no ex-dividend). Without it a single name is refused as unknown.
+ return {source:"Robinhood MCP",capturedAt:new Date(now).toISOString(),bars:{TEST:bars},contracts:[c],scans:[],errors:[],events:{TEST:{earningsAt:null,earningsTiming:null,calendarThrough:"2026-11-11",exDivAt:null,dividendAmount:null,at:new Date(now).toISOString()}}};
 }
 test("after-close Friday bar is included, intraday incomplete bar excluded",()=>{
  const raw=capture("get_equity_historicals",{results:[{symbol:"SPY",interval:"day",bounds:"regular",bars:[{begins_at:"2026-09-11T00:00:00Z",open_price:"100",high_price:"102",low_price:"99",close_price:"101",volume:1000}]}]});
@@ -96,4 +99,126 @@ test("single leg vs spread follows implied-versus-realized vol; ranking is payof
  assert.deepEqual(r2.map(x=>x.kind),["long_call","call_debit"]); assert.match(r2[0].reason,/single leg preferred/);
  const noIv=structuredClone(rich); for(const x of noIv.contracts)x.iv=null;           // unknown vol → spreads by default
  assert.equal(screenResearchContracts(noIv,100,500,now)[0].kind,"call_debit");
+});
+
+test("ingest: earnings calendar and fundamentals become event rows for researched symbols only; unknown shapes are errors, not rows",()=>{
+ const use=(id:string,name:string,input:unknown={})=>({type:"tool_use",id,name:`mcp__robinhood-trading__${name}`,input});
+ const res=(id:string,data:unknown)=>({type:"tool_result",tool_use_id:id,content:JSON.stringify({data})});
+ const bars=Array.from({length:3},(_,i)=>({begins_at:`2026-09-0${8+i}T00:00:00Z`,open_price:"100",high_price:"102",low_price:"99",close_price:"101",volume:1000}));
+ // Real broker shapes captured live Sep 15 2026 (get_earnings_calendar page, get_equity_fundamentals for F / SOFI / SPY).
+ const calendarRow=(symbol:string,date:string,timing:"am"|"pm"|null,verified=false)=>({symbol,year:2026,quarter:3,eps:{estimate:"0.170000",actual:null},report:{date,timing,verified}});
+ const noDividend={dividend_yield:null,dividend_per_share:null,distribution_frequency:null,payable_date:null,ex_dividend_date:null,record_date:null};
+ const fundamentals={
+  F:{symbol:"F",market_cap:"45000000000",pe_ratio:"11.2",dividend_yield:"4.294918",dividend_per_share:"0.150000",distribution_frequency:"Quarterly",payable_date:"2026-09-01",ex_dividend_date:"2026-08-11",record_date:"2026-08-11"},
+  SOFI:{symbol:"SOFI",market_cap:"30000000000",pe_ratio:"48.1",...noDividend},
+  SPY:{symbol:"SPY",dividend_yield:"1.1",dividend_per_share:"1.750000",distribution_frequency:"Quarterly",payable_date:"2026-10-31",ex_dividend_date:"2026-09-18",record_date:"2026-09-18"},
+ };
+ const page1=[calendarRow("NOTUS","2026-10-01","pm",true),calendarRow("F","2026-10-14","pm",true)], page2=[calendarRow("SOFI","2026-10-27","am"),calendarRow("F","2026-10-28","pm",true)];
+ type Page={input:Record<string,unknown>;data:Record<string,unknown>};
+ const build=(sofiFundamentals:unknown,pages:Page[]=[{input:{days:31},data:{results:page1}},{input:{start_date:"2026-10-16",days:31},data:{results:page2}}],fundKey="results")=>[
+  {message:{content:[use("h","get_equity_historicals"),...pages.map((p,i)=>use(`e${i}`,"get_earnings_calendar",p.input)),use("f","get_equity_fundamentals",{symbols:["F","SOFI","SPY"]})]}},
+  {message:{content:[res("h",{results:["F","SOFI","SPY"].map(symbol=>({symbol,interval:"day",bounds:"regular",bars}))})]}},
+  {message:{content:pages.map((p,i)=>res(`e${i}`,p.data))}},
+  {message:{content:[res("f",{[fundKey]:[fundamentals.F,sofiFundamentals,fundamentals.SPY]})]}},
+ ].map(l=>JSON.stringify(l)).join("\n");
+ const r=parseRobinhoodResearchEvents(build(fundamentals.SOFI),"2026-09-15T21:30:00Z");
+ assert.deepEqual(r.events,{
+  F:{earningsAt:"2026-10-14",earningsTiming:"pm",calendarThrough:"2026-11-15",exDivAt:"2026-11-10",exDivSource:"projected",dividendAmount:0.15,at:"2026-09-15T21:30:00Z"},   // earliest of two; last ex-date Aug 11 + 91d
+  SOFI:{earningsAt:"2026-10-27",earningsTiming:"am",calendarThrough:"2026-11-15",exDivAt:null,dividendAmount:null,at:"2026-09-15T21:30:00Z"},                          // tentative counts; no dividend
+  SPY:{earningsAt:null,earningsTiming:null,calendarThrough:"2026-11-15",exDivAt:"2026-09-18",exDivSource:"scheduled",dividendAmount:1.75,at:"2026-09-15T21:30:00Z"},  // absent from both pages = none through Nov 15
+ });
+ assert.equal(isOptionsResearch(r),true);
+ // Coverage is proven per page: one page → through day 31 only; an empty page or a paginated one proves nothing; a gap ends the run.
+ const one=parseRobinhoodResearchEvents(build(fundamentals.SOFI,[{input:{days:31},data:{results:page1}}]),"2026-09-15T21:30:00Z");
+ assert.equal(one.events!.SPY.calendarThrough,"2026-10-15");
+ assert.equal(spansEarnings("SPY","2026-10-16",one.events,Date.parse("2026-09-15T21:30:00Z")).permitted,true);     // ETF: exempt regardless
+ assert.equal(spansEarnings("SOFI","2026-10-15",one.events,Date.parse("2026-09-15T21:30:00Z")).permitted,true);
+ const past=spansEarnings("SOFI","2026-10-16",one.events,Date.parse("2026-09-15T21:30:00Z"));
+ assert.equal(past.permitted,false); assert.equal(past.earningsClass,"unknown"); assert.match(past.note,/proven only through 2026-10-15; expiry 2026-10-16 is beyond it/);
+ const empty=parseRobinhoodResearchEvents(build(fundamentals.SOFI,[{input:{days:31},data:{results:[]}}]),"2026-09-15T21:30:00Z");
+ assert.equal(empty.events,undefined); assert.ok(empty.errors.some(e=>/page from 2026-09-15 proves no coverage \(empty\)/.test(e)));
+ const paged=parseRobinhoodResearchEvents(build(fundamentals.SOFI,[{input:{days:31},data:{results:page1,next:"cursor-2"}}]),"2026-09-15T21:30:00Z");
+ assert.equal(paged.events,undefined); assert.ok(paged.errors.some(e=>/proves no coverage \(paginated\)/.test(e)));
+ const gap=parseRobinhoodResearchEvents(build(fundamentals.SOFI,[{input:{days:31},data:{results:page1}},{input:{start_date:"2026-10-20",days:31},data:{results:page2}}]),"2026-09-15T21:30:00Z");
+ assert.equal(gap.events!.SOFI.calendarThrough,"2026-10-15");
+ const late=parseRobinhoodResearchEvents(build(fundamentals.SOFI,[{input:{start_date:"2026-10-16",days:31},data:{results:page2}}]),"2026-09-15T21:30:00Z");
+ assert.equal(late.events,undefined);
+ // A past ex-date with an unknown frequency cannot be projected → the ex-dividend key stays absent (spreads refused), and the parser says so.
+ const odd=parseRobinhoodResearchEvents(build({...fundamentals.F,symbol:"SOFI",distribution_frequency:"Irregular"}),"2026-09-15T21:30:00Z");
+ assert.equal("exDivAt" in odd.events!.SOFI,false); assert.ok(odd.errors.some(e=>/SOFI: next ex-dividend cannot be placed \(last 2026-08-11, Irregular\)/.test(e)));
+ // A fundamentals row without the dividend fields, or a calendar row without a report object, is not the broker's shape → error, nothing recorded.
+ const noFields=parseRobinhoodResearchEvents(build({symbol:"SOFI",pe_ratio:"12"}),"2026-09-15T21:30:00Z");
+ assert.equal(noFields.events!.SPY.exDivAt,undefined); assert.ok(noFields.errors.some(e=>/get_equity_fundamentals: unrecognized shape/.test(e)));
+ const badCal=parseRobinhoodResearchEvents(build(fundamentals.SOFI,[{input:{days:31},data:{stuff:page1}}]),"2026-09-15T21:30:00Z");
+ assert.equal(badCal.events,undefined); assert.ok(badCal.errors.some(e=>/get_earnings_calendar: unrecognized shape/.test(e))); assert.ok(badCal.errors.some(e=>/earnings calendar not read/.test(e)));
+ // Stored snapshots written before events existed still load; a malformed row does not.
+ assert.equal(isOptionsResearch({...research(),events:undefined}),true);
+ assert.equal(isOptionsResearch({...research(),events:{TEST:{earningsAt:"soon",earningsTiming:null,calendarThrough:"2026-11-11",at:"2026-09-12T21:30:00Z"}}}),false);
+ assert.equal(isOptionsResearch({...research(),events:{TEST:{earningsAt:null,earningsTiming:null,at:"2026-09-12T21:30:00Z"}}}),false);   // no proven coverage is not a row
+ assert.equal(isOptionsResearch({...research(),events:{TEST:{earningsAt:null,earningsTiming:null,calendarThrough:"2026-11-11",exDivAt:"2026-10-01",exDivSource:"guessed",at:"2026-09-12T21:30:00Z"}}}),false);
+ // Merge carries a prior row forward with its original clock when the run lacks one; a fresh row wins.
+ const prior={...research(),events:{TEST:{earningsAt:null,earningsTiming:null,calendarThrough:"2026-11-09",exDivAt:null,dividendAmount:null,at:"2026-09-10T21:30:00Z"}}};
+ assert.equal(mergeResearchSnapshot(prior,{...research(),events:undefined}).events?.TEST.at,"2026-09-10T21:30:00Z");
+ assert.equal(mergeResearchSnapshot(prior,research()).events?.TEST.at,new Date(now).toISOString());
+});
+
+test("earnings on or before expiry is an EARNINGS TRADE: zero candidates and the note names the date; unknown or stale rows refuse a single name; index ETFs are exempt",()=>{
+ const r=research(); r.events!.TEST.earningsAt="2026-10-14"; r.events!.TEST.earningsTiming="pm";
+ assert.equal(screenResearchContracts(r,100,500,now).length,0);
+ assert.match(noCandidateNote(r,100,now),/signal on TEST bullish but earnings 2026-10-14 falls before expiry 2026-10-16 \(1 refused by the earnings rule\)/);
+ const after=research(); after.events!.TEST.earningsAt="2026-10-17";
+ assert.equal(screenResearchContracts(after,100,500,now)[0].earningsAt,"2026-10-17"); assert.equal(screenResearchContracts(after,100,500,now)[0].earningsClass,"none");
+ const none=research(); delete none.events;
+ assert.equal(screenResearchContracts(none,100,500,now).length,0); assert.match(noCandidateNote(none,100,now),/earnings unknown — no calendar read for TEST/);
+ const stale=research(); stale.events!.TEST.at=new Date(now-37*3600_000).toISOString();
+ assert.equal(screenResearchContracts(stale,100,500,now).length,0); assert.match(noCandidateNote(stale,100,now),/earnings data for TEST is 37h old/);
+ assert.equal(screenResearchContracts({...research(),events:{TEST:{...research().events!.TEST,at:new Date(now-35*3600_000).toISOString()}}},100,500,now).length,1);
+ const etf=research(); etf.bars={SPY:etf.bars.TEST}; etf.contracts=[{...etf.contracts[0],symbol:"SPY"}]; delete etf.events;
+ const spy=screenResearchContracts(etf,100,500,now); assert.equal(spy.length,1); assert.equal(spy[0].earningsClass,"none"); assert.equal(spy[0].exDivAt,null);
+ assert.deepEqual(spansEarnings("QQQ","2026-10-16",undefined,now).permitted,true);
+ assert.equal(spansEarnings("TEST","2026-10-16",{TEST:{earningsAt:"2026-09-01",earningsTiming:null,calendarThrough:"2026-11-11",at:new Date(now).toISOString()}},now).permitted,true); // already reported
+});
+
+test("ex-dividend: a call debit whose short call the expected move can reach before the ex-date is refused, a put debit is not; no fundamentals → spreads refused, single legs allowed",()=>{
+ const base=research(); const c0=base.contracts[0];                                   // spot 105, ATM call 105 @ 0.90
+ const put={...c0,id:"p",type:"put" as const,strike:105,bid:0.85,ask:0.9,delta:-0.5};
+ const near={...c0,id:"near",strike:106,bid:0.5,ask:0.55,delta:0.45};                // reach = 105 × (1 + 1.75/105) = 106.75 ≥ 106
+ base.contracts=[{...c0,iv:0.9},{...put,iv:0.9},{...near,iv:0.9}];
+ const kinds=(r:OptionsResearch)=>screenResearchContracts(r,100,500,now).map(x=>x.kind);
+ assert.deepEqual(kinds(base),["call_debit","long_call","long_call"]);                // both calls qualify as singles; the 105/106 spread leads
+ const inside=structuredClone(base); inside.events!.TEST.exDivAt="2026-10-02";
+ assert.deepEqual(kinds(inside),["long_call","long_call"]);                           // the spread is gone, both singles stay
+ const outside=structuredClone(base); outside.events!.TEST.exDivAt="2026-10-20";
+ assert.deepEqual(kinds(outside),["call_debit","long_call","long_call"]);             // ex-date after expiry: no hold spans it
+ const unread=structuredClone(base); delete unread.events!.TEST.exDivAt;
+ assert.deepEqual(kinds(unread),["long_call","long_call"]);                           // fundamentals never read → spreads refused
+ assert.equal(screenResearchContracts(inside,100,500,now)[0].exDivAt,"2026-10-02");
+ assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-10-02","2026-10-16",now).permitted,false);
+ assert.equal(exDivRisk("call_debit",110,"call",105,1.67,"2026-10-02","2026-10-16",now).permitted,true);
+ assert.equal(exDivRisk("call_debit",110,"call",105,null,"2026-10-02","2026-10-16",now).permitted,false);   // no expected move → cannot clear the short call
+ assert.equal(exDivRisk("long_call",null,null,105,1.67,undefined,"2026-10-16",now).permitted,true);
+ // Bearish twin: a 20-session breakdown with a put debit spread — the short put is not assigned for a dividend.
+ const bear=research();
+ bear.bars.TEST=Array.from({length:201},(_,i)=>{const c=300-i;return {day:bear.bars.TEST[i].day,open:c,high:c+1,low:i===200?97:c-1,close:i===200?98:c,volume:1000000};});
+ const lp={...c0,id:"lp",type:"put" as const,strike:100,bid:0.85,ask:0.9,delta:-0.5},sp={...c0,id:"sp",type:"put" as const,strike:95,bid:0.3,ask:0.32,delta:-0.2},atmCall={...c0,id:"ac",strike:100,bid:0.85,ask:0.9};
+ bear.contracts=[lp,sp,atmCall]; bear.events!.TEST.exDivAt="2026-10-02";
+ assert.ok(screenResearchContracts(bear,100,500,now).map(x=>x.kind).includes("put_debit"));
+});
+
+test("nextExDiv: no dividend → null; upcoming ex-date → scheduled; past ex-date + known frequency → projected forward; past + unknown frequency → unknown",()=>{
+ const today="2026-09-15";
+ assert.deepEqual(nextExDiv({dividend_yield:null,dividend_per_share:null,distribution_frequency:null,payable_date:null,ex_dividend_date:null,record_date:null},today),{known:true,exDivAt:null,source:null,amount:null});
+ assert.deepEqual(nextExDiv({dividend_yield:"1.1",dividend_per_share:"1.750000",distribution_frequency:"Quarterly",payable_date:"2026-10-31",ex_dividend_date:"2026-09-18",record_date:"2026-09-18"},today),{known:true,exDivAt:"2026-09-18",source:"scheduled",amount:1.75});
+ assert.deepEqual(nextExDiv({dividend_yield:"4.294918",dividend_per_share:"0.150000",distribution_frequency:"Quarterly",payable_date:"2026-09-01",ex_dividend_date:"2026-08-11",record_date:"2026-08-11"},today),{known:true,exDivAt:"2026-11-10",source:"projected",amount:0.15});
+ assert.equal(nextExDiv({dividend_per_share:"0.05",distribution_frequency:"Monthly",ex_dividend_date:"2026-09-01"},today).exDivAt,"2026-10-01");
+ assert.equal(nextExDiv({dividend_per_share:"0.5",distribution_frequency:"Quarterly",ex_dividend_date:"2025-12-10"},today).exDivAt,"2026-12-09");   // stale: rolled forward four periods until past today
+ assert.deepEqual(nextExDiv({dividend_yield:"2",dividend_per_share:"0.3",distribution_frequency:"Irregular",payable_date:null,ex_dividend_date:"2026-08-11",record_date:null},today),{known:false,exDivAt:null,source:null,amount:0.3});
+ assert.equal(nextExDiv({dividend_yield:"2",ex_dividend_date:null},today).known,false);   // a payer with no ex-date at all
+ assert.equal(nextExDiv({dividend_per_share:"0.05",distribution_frequency:"Monthly",ex_dividend_date:"2023-01-01"},today).known,false);   // too stale to roll forward honestly
+ assert.equal(nextExDiv({ex_dividend_date:today,distribution_frequency:"Quarterly"},today).source,"scheduled");
+ // A projected date is a ±7-day window for the spread rule: Nov 10 ± 7 = Nov 3..17 overlaps an Nov 6 expiry, not an Oct 30 one.
+ assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"projected").permitted,false);
+ assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-10-30",Date.parse("2026-09-15T16:00:00Z"),"projected").permitted,true);
+ assert.equal(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"scheduled").permitted,true);   // the same date scheduled is after expiry
+ assert.match(exDivRisk("call_debit",106,"call",105,1.67,"2026-11-10","2026-11-06",Date.parse("2026-09-15T16:00:00Z"),"projected").note,/projected ex-dividend 2026-11-10 \(±7d\)/);
 });

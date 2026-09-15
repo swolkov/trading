@@ -1,8 +1,27 @@
 import { OPTIONS_WATCHLIST, type OptionsResearch, type ResearchBar, type ResearchContract, type NativeScan } from "./options-desk-model";
+import { nextExDiv, type ResearchEvent, type ResearchEvents } from "./options-events";
 const obj=(x:unknown):Record<string,unknown>=>x&&typeof x==="object"&&!Array.isArray(x)?x as Record<string,unknown>:{};
 const num=(x:unknown):number=>typeof x==="number"||typeof x==="string"&&x.trim()!==""?Number(x):NaN;
 const text=(x:unknown):string=>typeof x==="string"?x:"";
 const rows=(x:unknown):Record<string,unknown>[]=>Array.isArray(x)?x.map(obj):[];
+const list=(x:unknown,...keys:string[]):Record<string,unknown>[]|null=>{
+  if(Array.isArray(x))return rows(x);
+  for(const k of keys){const v=obj(x)[k];if(Array.isArray(v))return rows(v);}
+  return null;
+};
+const dayOf=(x:unknown):string|null=>{const t=text(x);const d=t.slice(0,10);return /^\d{4}-\d{2}-\d{2}$/.test(d)&&Number.isFinite(Date.parse(d))?d:null;};
+const timingOf=(x:unknown):"am"|"pm"|null=>{const t=text(x).toLowerCase();return /^(am|bmo|before|pre)/.test(t)?"am":/^(pm|amc|after|post)/.test(t)?"pm":null;};
+const symbolOf=(row:Record<string,unknown>)=>text(row.symbol);
+// Broker shapes captured live Sep 15 2026. Earnings rows (calendar and results alike):
+//   {symbol, year, quarter, eps:{estimate, actual}, report:{date:"YYYY-MM-DD", timing:"am"|"pm"|null, verified}} — `verified:false` is
+//   tentative and still counts. Fundamentals rows: {symbol, dividend_yield, dividend_per_share, distribution_frequency, payable_date,
+//   ex_dividend_date, record_date, …} where ex_dividend_date is the MOST RECENT scheduled ex-date (past or upcoming) and a non-payer
+//   has every dividend field null. A row must carry a `report` object to be an earnings row at all.
+function earningsOf(row:Record<string,unknown>):{day:string|null;timing:"am"|"pm"|null}{
+  const report=obj(row.report);
+  return {day:dayOf(report.date),timing:timingOf(report.timing)};
+}
+const DIVIDEND_FIELDS=["dividend_yield","dividend_per_share","distribution_frequency","payable_date","ex_dividend_date","record_date"];
 function response(content:unknown):Record<string,unknown>{
   if(typeof content==="string")return obj(JSON.parse(content));
   if(Array.isArray(content)){
@@ -17,6 +36,9 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   const uses=new Map<string,{name:string;input:Record<string,unknown>}>();
   const requestedQuotes=new Set<string>();
   const instruments=new Map<string,Record<string,unknown>>(),quotes=new Map<string,Record<string,unknown>>(),scans=new Map<string,NativeScan>();
+  const earnings=new Map<string,{day:string;timing:"am"|"pm"|null}>(),dividends=new Map<string,{exDivAt:string|null;source:"scheduled"|"projected"|null;amount:number|null}>();
+  const covered:{from:string;through:string}[]=[];   // calendar pages that PROVE coverage: non-empty, unpaginated, with a known window
+  const shift=(d:string,days:number)=>new Date(Date.parse(`${d}T00:00:00Z`)+days*86400000).toISOString().slice(0,10);
   for(const line of jsonl.split("\n").filter(Boolean)){
     const event=obj(JSON.parse(line));
     for(const block of rows(obj(event.message).content)){
@@ -30,9 +52,36 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
       if(block.type!=="tool_result")continue;
       const use=uses.get(text(block.tool_use_id));if(!use||!use.name.startsWith("mcp__robinhood-trading__"))continue;
       if(block.is_error){result.errors.push(`${use.name}: broker read failed`);continue;}
-      let data:Record<string,unknown>;
-      try {const envelope=response(block.content);if(envelope.error)throw Error("Broker error");data=obj(envelope.data);}catch{result.errors.push(`${use.name}: unreadable response`);continue;}
+      let data:Record<string,unknown>,rawData:unknown;
+      try {const envelope=response(block.content);if(envelope.error)throw Error("Broker error");rawData=envelope.data;data=obj(envelope.data);}catch{result.errors.push(`${use.name}: unreadable response`);continue;}
       const name=use.name.replace("mcp__robinhood-trading__","");
+      if(name==="get_earnings_calendar"||name==="get_earnings_results"){
+        const entries=list(rawData,"results");
+        if(!entries||!entries.every(row=>row.report!==undefined)){result.errors.push(`${name}: unrecognized shape`);continue;}
+        // Only a market-wide calendar page can vouch for "none" — and only for the window it was asked for, only when it is
+        // non-empty (an empty page proves nothing) and not paginated (a cursor means the page is not the whole window).
+        if(name==="get_earnings_calendar"){
+          const start=dayOf(use.input.start_date)??capturedAt.slice(0,10),days=num(use.input.days);
+          const paged=data.next!=null||data.next_cursor!=null;
+          if(entries.length&&!paged&&Number.isSafeInteger(days)&&days>0)covered.push({from:start,through:shift(start,days-1)});
+          else result.errors.push(`get_earnings_calendar: page from ${start} proves no coverage (${!entries.length?"empty":paged?"paginated":"no day count"})`);
+        }
+        for(const row of entries){
+          const symbol=symbolOf(row),{day,timing}=earningsOf(row);
+          if(!/^[A-Z.]{1,10}$/.test(symbol)||!day||day<capturedAt.slice(0,10))continue;
+          const prior=earnings.get(symbol);if(!prior||day<prior.day)earnings.set(symbol,{day,timing});
+        }
+      }
+      if(name==="get_equity_fundamentals"){
+        const entries=list(rawData,"results");
+        if(!entries||!entries.every(row=>DIVIDEND_FIELDS.some(k=>k in row))){result.errors.push("get_equity_fundamentals: unrecognized shape");continue;}
+        for(const row of entries){
+          const symbol=symbolOf(row);if(!/^[A-Z.]{1,10}$/.test(symbol))continue;
+          const d=nextExDiv(row,capturedAt.slice(0,10));
+          if(!d.known){result.errors.push(`${symbol}: next ex-dividend cannot be placed (last ${text(row.ex_dividend_date)||"?"}, ${text(row.distribution_frequency)||"unknown frequency"}) — spreads refused`);continue;}
+          dividends.set(symbol,{exDivAt:d.exDivAt,source:d.source,amount:d.amount});
+        }
+      }
       if(name==="get_equity_historicals")for(const history of rows(data.results)){
         const symbol=text(history.symbol);if(!/^[A-Z.]{1,10}$/.test(symbol)||history.interval!=="day"||history.bounds!=="regular")continue;
         const bars:ResearchBar[]=rows(history.bars).map(b=>({day:text(b.begins_at).slice(0,10),open:num(b.open_price),high:num(b.high_price),low:num(b.low_price),close:num(b.close_price),volume:num(b.volume)}));
@@ -73,6 +122,25 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   const unmatched=[...requestedQuotes].filter(id=>!matched.has(id)).length;
   if(unmatched>0)result.errors.push(`${unmatched} requested contracts lacked usable matched quotes`);
   for(const symbol of Object.keys(result.bars))if(!result.contracts.some(c=>c.symbol===symbol))result.errors.push(`${symbol}: no matched option quotes in this collection`);
+  // One event row per researched symbol, only once the calendar itself was read: "no earnings" is a statement the
+  // broker made, never one this parser infers from silence. The ex-dividend key is present only when fundamentals came back.
+  // Coverage = the contiguous run of proven windows starting on the capture day. A gap ends it; a run that starts later proves nothing.
+  let calendarThrough="";
+  for(const w of [...covered].sort((a,b)=>a.from.localeCompare(b.from))){
+    if(!calendarThrough){if(w.from<=capturedAt.slice(0,10))calendarThrough=w.through;else break;}
+    else if(w.from<=shift(calendarThrough,1))calendarThrough=w.through>calendarThrough?w.through:calendarThrough;
+    else break;
+  }
+  if(calendarThrough){
+    const events:ResearchEvents={};
+    for(const symbol of new Set([...Object.keys(result.bars),...result.contracts.map(c=>c.symbol)])){
+      const e=earnings.get(symbol),d=dividends.get(symbol);
+      const row:ResearchEvent={earningsAt:e?.day??null,earningsTiming:e?.timing??null,calendarThrough,at:capturedAt};
+      if(d){row.exDivAt=d.exDivAt;if(d.source)row.exDivSource=d.source;row.dividendAmount=d.amount;}
+      events[symbol]=row;
+    }
+    result.events=events;
+  } else if(Object.keys(result.bars).length||result.contracts.length) result.errors.push("earnings calendar not read — every single-name candidate will be refused as unknown");
   result.scans=[...scans.values()];return result;
 }
 
@@ -87,12 +155,18 @@ export function mergeResearchSnapshot(prior: OptionsResearch | null, next: Optio
     const rows = next.bars[symbol] ?? prior?.bars[symbol];
     return rows ? [[symbol, rows]] : [];
   }));
+  // Event rows carry forward with their original `at`: a stale row refuses on its own (36h) instead of being invented fresh.
+  const events = Object.fromEntries([...selected].flatMap(symbol => {
+    const row = next.events?.[symbol] ?? prior?.events?.[symbol];
+    return row ? [[symbol, row]] : [];
+  }));
   return { ...next, bars,
     contracts: [...selected].flatMap(symbol => {
       const fresh = next.contracts.filter(c => c.symbol === symbol);
       return fresh.length ? fresh : (prior?.contracts ?? []).filter(c => c.symbol === symbol);
     }),
-    scans: next.scans.length ? next.scans : prior?.scans ?? [] };
+    scans: next.scans.length ? next.scans : prior?.scans ?? [],
+    ...(Object.keys(events).length ? { events } : {}) };
 }
 
 // Small deterministic seed list extracted by code from actual broker scan pages,
