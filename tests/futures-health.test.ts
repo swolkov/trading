@@ -55,3 +55,13 @@ test("desk health fails to red on a stale, missing or malformed guardian report"
   const d = futuresHealth({ futures_desk_enabled: "false", futures_desk_state: JSON.stringify({ disabledReason: "equity −20% from high", lastError: "auth 401" }) }, now).desk;
   assert.equal(d.enabled, false); assert.equal(d.disabledReason, "equity −20% from high"); assert.equal(d.lastError, "auth 401");
 });
+
+test("desk health exposes the guardian's risk snapshot, and nulls when it is absent or malformed", () => {
+  const risk = JSON.stringify({ dd: -3.2, tier: 1, mult: 0.75, openRisk: 500, clusterRisk: { index_long: 500, index_short: 0, metals_long: 0, metals_short: 0 }, dailyLossRemaining: 250, at: "2026-09-12T17:50:00Z" });
+  const d = futuresHealth({ futures_desk_risk_state: risk }, now).desk;
+  assert.equal(d.ddTier, 1); assert.equal(d.ddMult, 0.75); assert.equal(d.openRisk, 500); assert.equal(d.dailyLossRemaining, 250);
+  for (const raw of [undefined, "{", "[]", JSON.stringify({ tier: 1 })]) {
+    const x = futuresHealth(raw == null ? {} : { futures_desk_risk_state: raw }, now).desk;
+    assert.equal(x.ddTier, null); assert.equal(x.ddMult, null); assert.equal(x.openRisk, null); assert.equal(x.dailyLossRemaining, null);
+  }
+});

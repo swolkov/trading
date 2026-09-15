@@ -90,6 +90,31 @@ merged): ≥ 30 resolved · net > 0 · profit factor ≥ 1.2 · max drawdown ≤
 failing reasons are returned. Ceremony: `POST /api/futures/desk/stage` `{ confirm: "STAGE", to: "B" }`
 — one step at a time, A→B or B→C only; D is never reachable from the route.
 
+## Portfolio risk (`src/lib/futures-desk-risk.ts`)
+
+Checked on every entry, after the container above, in this order — each with its exact reason:
+
+- **Open-risk cap 2% of basis ($1,000)**: Σ `risk_usd` of the open ledger + the new budget must stay
+  UNDER the cap → `open risk $750 + $250 would exceed the 2% cap ($1,000)`.
+- **Cluster cap** = the A+ budget ($500) per cluster × side; ES/NQ/YM/RTY are one `index` cluster,
+  GC/SI/HG `metals`. ES $250 + NQ $250 long is allowed; a YM third is
+  `index longs already risk $500 — adding $250 exceeds the $500 cluster cap`.
+- **Daily loss $750 counting open risk**: remaining = $750 + (balance − day-start balance) − open
+  risk; an entry needs its whole budget to fit →
+  `daily loss limit reached: −$620 realized and $250 open risk against $750`. Realized comes from
+  Tradovate's cash balance; if the demo only settles it at end of day, intraday realized reads 0 and
+  the equity-based "day is down" pause (net liq) stays the intraday backstop.
+- **Drawdown tiers** from the equity high: −3% budget ×0.75 · −5% ×0.5 · −7% ×0.25 (micros only +
+  investigate; one Slack a day) · −10% `equity is 10% off its high — desk halted pending review`
+  (the guardian sets `disabledReason`; a person re-enables). The multiplier shrinks the budget, so
+  at tier 1 ($187.50) most MES/MNQ signals refuse at Normal — by design; refusals are counted.
+
+The guardian stamps `balance` / `dayStartBalance` on `futures_desk_state` and writes the snapshot
+`futures_desk_risk_state` {dd, tier, mult, openRisk, clusterRisk by cluster × side,
+dailyLossRemaining, at} for the page and `/api/health`. Until the first guardian run after deploy
+has stamped the balances, entries refuse with `risk state not computed yet — waiting for the
+guardian` — closes, rolls and re-protection are never gated by any of this.
+
 **Migration note (Sep 15).** No `futures_desk_*` override keys exist in prod, so the new
 `DEFAULT_LIMITS` (0.5% / $750 daily pause / 10% halt / stage A) apply on deploy. Positions opened at
 the old $1,500 budget keep their stops and `risk_usd` — nothing is resized. Deploy after 4 PM ET.
@@ -105,4 +130,5 @@ with the Railway env: `PROBE_PRICE=<MES last> node --env-file=<railway kv> --imp
 `futures_desk_signals` (inbox), `futures_desk_trades` (ledger) — raw SQL, never prisma-managed.
 `futures_desk_state` (JSON), `futures_desk_enabled`, `futures_desk_risk_pct` (Normal %),
 `futures_desk_risk_pct_strong`, `futures_desk_risk_pct_aplus`, `futures_desk_sizing_basis`,
-`futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_entry_lock`. Slack lane `futures_demo` (`webhook_futures_demo`).
+`futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_risk_state` (JSON),
+`futures_desk_entry_lock`. Slack lane `futures_demo` (`webhook_futures_demo`).

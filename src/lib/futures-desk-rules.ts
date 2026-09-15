@@ -91,6 +91,11 @@ export const MINI_FOR_ROOT: Record<string, { mini: string; pointValue: number }>
   RTY: { mini: "RTY", pointValue: 50 },
 };
 
+/** Correlated markets share one cap: the four index micros move together, so do the metals. */
+export type Cluster = "index" | "metals";
+export const CLUSTER_OF: Record<string, Cluster> = { ES: "index", NQ: "index", YM: "index", RTY: "index", GC: "metals", SI: "metals", HG: "metals" };
+export function clusterOf(root: string): Cluster | null { return CLUSTER_OF[root] ?? null; }
+
 /** "$1,000" / "$301.70" — every refusal string uses one formatter so the wording is stable. */
 export function usd(n: number, decimals = 0): string {
   return `$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
@@ -305,7 +310,20 @@ export interface DeskContext {
   equityUsd: number;
   equityHighUsd: number;
   guardianFreshMs: number | null;
+  /** Σ risk_usd of the open ledger (a rolled leg is closed, its successor open — no double count). */
+  openRiskUsd: number;
+  /** Σ risk_usd of open positions in the alert's cluster on the alert's side. */
+  sameClusterSameSideRiskUsd: number;
+  /** basis × dailyLossPausePct + (balance − day-start balance) − open risk; negative = spent. */
+  dailyLossRemainingUsd: number;
+  /** The drawdown tier's budget multiplier (1 / 0.75 / 0.5 / 0.25 / 0). */
+  ddMult: number;
+  /** The budget this entry would risk — the worst case, before sizing rounds down. */
+  newRiskUsd: number;
 }
+
+/** `−$620` / `+$30` — the Unicode minus the desk's Slack lines already use. */
+function signedUsd(n: number): string { return `${n < 0 ? "−" : "+"}${usd(n)}`; }
 
 export function entryRefusal(a: AlertPayload, ctx: DeskContext, limits: DeskLimits): string | null {
   if (!ctx.enabled) return "desk is disabled";
@@ -314,7 +332,18 @@ export function entryRefusal(a: AlertPayload, ctx: DeskContext, limits: DeskLimi
   if (ctx.openRoots.length >= limits.maxPositions) return `${limits.maxPositions} positions already open`;
   if (ctx.entriesToday >= limits.maxEntriesPerDay) return `${limits.maxEntriesPerDay} entries already today`;
   if (ctx.dayPnlUsd <= -limits.sizingBasisUsd * (limits.dailyLossPausePct / 100)) return `day is down $${Math.abs(ctx.dayPnlUsd).toFixed(0)} — paused until tomorrow`;
-  if (ctx.equityHighUsd > 0 && ctx.equityUsd <= ctx.equityHighUsd * (1 - limits.drawdownDisablePct / 100)) return `equity is ${limits.drawdownDisablePct}% off its high — desk disabled pending review`;
+  if (ctx.equityHighUsd > 0 && ctx.equityUsd <= ctx.equityHighUsd * (1 - limits.drawdownDisablePct / 100)) return `equity is ${limits.drawdownDisablePct}% off its high — desk halted pending review`;
+  // The 2% cap is a ceiling the book stays UNDER: $750 open + a $250 entry = $1,000 is refused.
+  const cap = limits.sizingBasisUsd * (limits.maxOpenRiskPct / 100);
+  if (ctx.openRiskUsd + ctx.newRiskUsd >= cap) return `open risk ${usd(ctx.openRiskUsd)} + ${usd(ctx.newRiskUsd)} would exceed the ${limits.maxOpenRiskPct}% cap (${usd(cap)})`;
+  const cluster = clusterOf(a.root);
+  const clusterCap = budgetFor("aplus", limits);
+  if (cluster && ctx.sameClusterSameSideRiskUsd + ctx.newRiskUsd > clusterCap) return `${cluster} ${a.side}s already risk ${usd(ctx.sameClusterSameSideRiskUsd)} — adding ${usd(ctx.newRiskUsd)} exceeds the ${usd(clusterCap)} cluster cap`;
+  const dailyCap = limits.sizingBasisUsd * (limits.dailyLossPausePct / 100);
+  if (ctx.dailyLossRemainingUsd < ctx.newRiskUsd) {
+    const realized = ctx.dailyLossRemainingUsd + ctx.openRiskUsd - dailyCap;   // remaining = cap + realized − openRisk
+    return `daily loss limit reached: ${signedUsd(realized)} realized and ${usd(ctx.openRiskUsd)} open risk against ${usd(dailyCap)}`;
+  }
   return null;
 }
 

@@ -1,4 +1,5 @@
 import { cmeOpen } from "@/lib/futures-desk-rules";
+import { parseRiskState } from "@/lib/futures-desk-risk";
 
 // Read-only operational status. A saved "ready" flag is not evidence of a running engine.
 export function futuresHeartbeat(raw: string | undefined, now = Date.now()) {
@@ -34,6 +35,7 @@ export function futuresDeskHealth(config: Record<string, string>, now = Date.now
   } catch { /* unreadable state reads as "no guardian report", never as healthy */ }
   const guardianTs = typeof state.guardianAt === "string" ? Date.parse(state.guardianAt) : NaN;
   const guardianValid = Number.isFinite(guardianTs) && guardianTs <= now;
+  const risk = parseRiskState(config.futures_desk_risk_state);   // the guardian's portfolio snapshot; null until it has run
   return {
     configured,                                                  // broker + webhook credentials present on the server
     enabled: config.futures_desk_enabled === "true",             // the typed-ENABLE switch
@@ -42,6 +44,10 @@ export function futuresDeskHealth(config: Record<string, string>, now = Date.now
     guardianFresh: guardianValid && now - guardianTs < DESK_GUARDIAN_FRESH_MS,
     lastError: typeof state.lastError === "string" ? state.lastError : null,
     equity: typeof state.equity === "number" && Number.isFinite(state.equity) ? state.equity : null,
+    ddTier: risk?.tier ?? null,
+    ddMult: risk?.mult ?? null,
+    openRisk: risk?.openRisk ?? null,
+    dailyLossRemaining: risk?.dailyLossRemaining ?? null,
     cmeOpen: cmeOpen(new Date(now)),
   };
 }

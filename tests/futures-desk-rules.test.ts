@@ -7,7 +7,10 @@ import {
 } from "../src/lib/futures-desk-rules";
 
 const good = { secret: "x", desk: "futures", edge: "index_daily_mr", symbol: "ES", action: "entry", side: "long", price: 6500, stop: 6440, bar: "2026-09-14T21:00:00Z", tf: "1D" };
-const okCtx: DeskContext = { enabled: true, openRoots: [], entriesToday: 0, dayPnlUsd: 0, equityUsd: 50_000, equityHighUsd: 50_000, guardianFreshMs: 60_000 };
+const okCtx: DeskContext = {
+  enabled: true, openRoots: [], entriesToday: 0, dayPnlUsd: 0, equityUsd: 50_000, equityHighUsd: 50_000, guardianFreshMs: 60_000,
+  openRiskUsd: 0, sameClusterSameSideRiskUsd: 0, dailyLossRemainingUsd: 750, ddMult: 1, newRiskUsd: 250,
+};
 const opts: SizeOpts = { grade: "normal", stage: "A", budgetMult: 1 };
 function alertOf(over: Record<string, unknown>): AlertPayload { const p = parseAlert({ ...good, ...over }); if (!p.ok) throw new Error(p.reason); return p.alert; }
 
@@ -146,7 +149,11 @@ test("entryRefusal: the container refuses in the right order", () => {
   assert.match(entryRefusal(a, { ...okCtx, openRoots: ["NQ", "YM", "GC", "SI", "HG", "RTY"] }, DEFAULT_LIMITS)!, /positions already open/);
   assert.match(entryRefusal(a, { ...okCtx, entriesToday: 4 }, DEFAULT_LIMITS)!, /entries already today/);
   assert.match(entryRefusal(a, { ...okCtx, dayPnlUsd: -3000 }, DEFAULT_LIMITS)!, /paused/);
-  assert.match(entryRefusal(a, { ...okCtx, equityUsd: 39_000 }, DEFAULT_LIMITS)!, /off its high/);
+  assert.match(entryRefusal(a, { ...okCtx, equityUsd: 39_000 }, DEFAULT_LIMITS)!, /halted/);
+  assert.match(entryRefusal(a, { ...okCtx, openRiskUsd: 750 }, DEFAULT_LIMITS)!, /exceed the 2% cap/);
+  assert.match(entryRefusal(a, { ...okCtx, sameClusterSameSideRiskUsd: 500 }, DEFAULT_LIMITS)!, /cluster cap/);
+  assert.match(entryRefusal(a, { ...okCtx, dailyLossRemainingUsd: 200 }, DEFAULT_LIMITS)!, /daily loss limit reached/);
+  assert.equal(entryRefusal(a, { ...okCtx, dailyLossRemainingUsd: 250 }, DEFAULT_LIMITS), null);   // exactly enough is enough
 });
 
 test("CME hours: closed Saturday, closed in the 17:00–18:00 ET break, open Sunday evening", () => {

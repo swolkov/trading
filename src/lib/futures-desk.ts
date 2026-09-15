@@ -17,9 +17,10 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import {
-  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, STAGES, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate, gradeFor,
+  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, STAGES, budgetFor, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate, gradeFor,
   rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd, type AlertPayload, type DeskContext, type DeskLimits, type Side, type Stage,
 } from "@/lib/futures-desk-rules";
+import { ddTier, deskContextOf, riskStateOf } from "@/lib/futures-desk-risk";
 import {
   avgFill, cancelDeskOrder, contractExpiry, deskBalance, deskContract, deskOrders, deskPositions, fillsForOrder,
   findOrderByClOrdId, forgetContract, isWorking, liquidate, modifyStop, orderItem, placeEntryWithStop, placeStop, rollGuardDays,
@@ -40,6 +41,9 @@ export interface DeskState {
   equityHigh?: number;
   dayKey?: string;
   dayStartEquity?: number;
+  /** Cash balance (realized) and its value at the ET day start — the daily loss budget counts realized + open risk. */
+  balance?: number;
+  dayStartBalance?: number;
   alerts: Record<string, string>;
   lastError?: string;
   disabledReason?: string;
@@ -73,26 +77,20 @@ export async function rawRows<T extends object>(sql: string, ...params: unknown[
 
 // ---- config / state ------------------------------------------------------------------------------
 async function cfg(key: string): Promise<string | null> {
-  const row = await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null);
-  return row?.value ?? null;
+  return (await prisma.agentConfig.findUnique({ where: { key } }).catch(() => null))?.value ?? null;
 }
 async function setKey(key: string, value: string): Promise<void> {
   await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
 }
-function num(v: string | null, fallback: number): number {
-  const n = v == null ? NaN : parseFloat(v);
-  return Number.isFinite(n) ? n : fallback;
-}
+function num(v: string | null, fallback: number): number { const n = v == null ? NaN : parseFloat(v); return Number.isFinite(n) ? n : fallback; }
 
 /** Overrides are clamped to the ladder (0.25–1.0%); an unreadable stage reads as "A" — a bad key can only shrink risk. */
 export async function deskLimits(): Promise<DeskLimits> {
-  const [basis, risk, strong, aplus, stage] = await Promise.all([
-    cfg("futures_desk_sizing_basis"), cfg("futures_desk_risk_pct"), cfg("futures_desk_risk_pct_strong"), cfg("futures_desk_risk_pct_aplus"), cfg("futures_desk_stage")]);
+  const [basis, risk, strong, aplus, stage] = await Promise.all(["sizing_basis", "risk_pct", "risk_pct_strong", "risk_pct_aplus", "stage"].map((k) => cfg(`futures_desk_${k}`)));
   const pct = (v: string | null, fb: number) => Math.min(1.0, Math.max(0.25, num(v, fb)));
   return {
-    ...DEFAULT_LIMITS, sizingBasisUsd: num(basis, DEFAULT_LIMITS.sizingBasisUsd),
+    ...DEFAULT_LIMITS, sizingBasisUsd: num(basis, DEFAULT_LIMITS.sizingBasisUsd), stage: STAGES.includes(stage as Stage) ? (stage as Stage) : "A",
     riskPct: pct(risk, DEFAULT_LIMITS.riskPct), riskPctStrong: pct(strong, DEFAULT_LIMITS.riskPctStrong), riskPctAplus: pct(aplus, DEFAULT_LIMITS.riskPctAplus),
-    stage: STAGES.includes(stage as Stage) ? (stage as Stage) : "A",
   };
 }
 
@@ -105,13 +103,9 @@ export async function loadState(): Promise<DeskState> {
   if (!raw) return { alerts: {} };
   try { const s = JSON.parse(raw); return { alerts: {}, ...s }; } catch { return { alerts: {} }; }
 }
-async function saveState(s: DeskState): Promise<void> {
-  await setKey(STATE_KEY, JSON.stringify(s));
-}
+async function saveState(s: DeskState): Promise<void> { await setKey(STATE_KEY, JSON.stringify(s)); }
 /** Field-scoped write: load the freshest row, patch, save. */
-async function patchState(patch: (s: DeskState) => void): Promise<void> {
-  const s = await loadState(); patch(s); await saveState(s);
-}
+async function patchState(patch: (s: DeskState) => void): Promise<void> { const s = await loadState(); patch(s); await saveState(s); }
 async function alertOnce(s: DeskState, key: string, text: string, everyMs = 60 * 60_000): Promise<void> {
   const last = s.alerts[key];
   if (last && Date.now() - Date.parse(last) < everyMs) return;
@@ -208,18 +202,10 @@ export async function handleAlert(a: AlertPayload): Promise<AlertOutcome> {
   }
 }
 
-async function contextNow(s: DeskState): Promise<DeskContext> {
+/** The entry container from the guardian's own numbers (≤ 20 min old by the freshness gate). */
+async function contextNow(s: DeskState, limits: DeskLimits, a: AlertPayload, newRiskUsd: number): Promise<DeskContext | { refusal: string }> {
   const [open, n, enabled] = await Promise.all([openTrades(), entriesToday(), deskEnabled()]);
-  const day = etDayKey(new Date());
-  return {
-    enabled: enabled && !s.disabledReason,
-    openRoots: open.map((t) => t.root),
-    entriesToday: n,
-    dayPnlUsd: s.equity != null && s.dayStartEquity != null && s.dayKey === day ? s.equity - s.dayStartEquity : 0,
-    equityUsd: s.equity ?? 0,
-    equityHighUsd: s.equityHigh ?? 0,
-    guardianFreshMs: s.guardianAt ? Date.now() - Date.parse(s.guardianAt) : null,
-  };
+  return deskContextOf({ enabled, state: s, open, entriesToday: n, limits, alert: a, newRiskUsd, now: new Date(), dayKey: etDayKey(new Date()) });
 }
 
 /** Exactly one working stop, or no position. Returns the working stop id, or null when the
@@ -263,12 +249,14 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
   const lock = await acquireLock(ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS);
   if (!lock) { await markSignal(signalId, "queued", "another entry in flight — retried by the guardian"); return { status: "queued", reason: "entry lock busy", signalId }; }
   try {
-    const [state, limits] = await Promise.all([loadState(), deskLimits()]);
-    const refusal = entryRefusal(a, await contextNow(state), limits);
+    const [state, limits, promoted] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted")]);
+    const grade = gradeFor(a, promoted === "true");
+    const tier = ddTier(state.equity ?? 0, state.equityHigh ?? 0);
+    const ctx = await contextNow(state, limits, a, budgetFor(grade, limits) * tier.mult);   // worst case: the whole budget
+    const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits);
     if (refusal) { await markSignal(signalId, "refused", refusal); return { status: "refused", reason: refusal, signalId }; }
-    const promoted = (await cfg("futures_desk_score_promoted")) === "true";
     const stageDArmed = limits.stage === "D" && (await cfg("futures_desk_stage_d_armed")) === "true";
-    const size = sizeEntry(a, limits, { grade: gradeFor(a, promoted), stage: limits.stage, budgetMult: 1, stageDArmed });
+    const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult: tier.mult, stageDArmed });
     if (!size.ok) { await markSignal(signalId, "refused", size.reason); return { status: "refused", reason: size.reason, signalId }; }
     const contract = await deskContract(size.micro);
     if (!contract) { await markSignal(signalId, "error", `no ${size.micro} contract on Tradovate`); return { status: "error", reason: "contract", signalId }; }
@@ -420,8 +408,9 @@ async function guardBody(): Promise<GuardReport> {
   try { bal = await deskBalance(); }
   catch (e) { await patchState((s) => { s.lastError = `broker: ${String(e).slice(0, 160)}`; }); return { ok: false, equity: state.equity ?? 0, open: 0, settled: 0, notes: [String(e).slice(0, 160)] }; }
   const equity = bal.netLiq || bal.balance;
+  if (state.dayKey !== day || state.dayStartBalance == null) state.dayStartBalance = bal.balance;   // `== null` covers the deploy day
   if (state.dayKey !== day) { state.dayKey = day; state.dayStartEquity = equity; }
-  state.equity = equity;
+  state.equity = equity; state.balance = bal.balance;
   state.equityHigh = Math.max(state.equityHigh ?? 0, equity);
   if (!state.disabledReason && state.equityHigh > 0 && equity <= state.equityHigh * (1 - limits.drawdownDisablePct / 100)) {
     state.disabledReason = `equity $${equity.toFixed(0)} is ${limits.drawdownDisablePct}% off its high $${state.equityHigh.toFixed(0)}`;
@@ -432,6 +421,9 @@ async function guardBody(): Promise<GuardReport> {
   await saveState(state);
 
   const [positions, orders, open] = await Promise.all([deskPositions(), deskOrders(), openTrades()]);
+  // The risk snapshot for the page and health (display-only; the entry path recomputes from `state`).
+  const rs = riskStateOf({ equity, equityHigh: state.equityHigh, balance: bal.balance, dayStartBalance: state.dayStartBalance, open, limits, now: new Date() });
+  await setKey("futures_desk_risk_state", JSON.stringify(rs)).catch(() => {});
   let settled = 0;
   const expiries: Record<number, string | null> = {};   // open positions NOT rolled this run → roll planning below
   for (const t of open) {
@@ -453,6 +445,7 @@ async function guardBody(): Promise<GuardReport> {
     expiries[t.id] = exp;
   }
   const fresh = await loadState();
+  if (rs.tier === 3) await alertOnce(fresh, `dd-tier3-${day}`, `⚠️ FUTURES DESK drawdown ${rs.dd.toFixed(1)}% from the high — tier 3: budget ×0.25, micros only; investigate before the −10% halt.`, 24 * 60 * 60_000);
   // Roll planning: inside the last 5 days of a month, say when it rolls and into what; one Slack the day before.
   for (const plan of rollPreview(open.filter((t) => expiries[t.id] !== undefined), expiries, new Date(), rollGuardDays)) {
     forgetContract(plan.micro);
