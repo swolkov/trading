@@ -6,11 +6,16 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "./db";
 import type { OptionsTradeCard } from "./options-trade-card";
 
-export async function ensureOptionsTradeCardsTable(): Promise<void> {
-  await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS options_trade_cards (
-    id text PRIMARY KEY, at timestamptz NOT NULL, source text NOT NULL, symbol text NOT NULL, kind text NOT NULL,
-    expiry text NOT NULL, score double precision, grade text, action text NOT NULL, payload jsonb NOT NULL)`);
-  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS options_trade_cards_time ON options_trade_cards(at DESC)`);
+let ensured: Promise<void> | null = null;   // once per process; a failed attempt clears so the next write retries
+export function ensureOptionsTradeCardsTable(): Promise<void> {
+  ensured ??= (async () => {
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS options_trade_cards (
+      id text PRIMARY KEY, at timestamptz NOT NULL, source text NOT NULL, symbol text NOT NULL, kind text NOT NULL,
+      expiry text NOT NULL, score double precision, grade text, action text NOT NULL, payload jsonb NOT NULL)`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS options_trade_cards_time ON options_trade_cards(at DESC)`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS options_trade_cards_symbol ON options_trade_cards(symbol, at DESC)`);
+  })().catch((e) => { ensured = null; throw e; });
+  return ensured;
 }
 export async function saveOptionsTradeCards(cards: OptionsTradeCard[]): Promise<number> {
   if (!cards.length) return 0;

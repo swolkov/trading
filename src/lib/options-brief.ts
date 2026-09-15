@@ -2,20 +2,24 @@
 //
 // The prompt's LIVE TRADE OUTPUT as one text: ACCOUNT / MARKET / TOP 5 / BEST TRADE / ACTION / CONDITIONAL
 // ORDERS. `ACTION` says ENTER NOW only when the best structure passes every live gate on STAMPED data —
-// through the same functions the entry tick calls (spansEarnings, marketVeto, chase, clusterRisk,
-// gradeFor/maxLossFor, reserveRefusal, ddTier), never a re-implementation; the two checks that need a
-// live quote (intraday SPY shock, the broker's own earnings confirm) are named as tick-time checks.
+// through the same functions the entry tick calls (spansEarnings, marketVeto, chaseCheck on the signal-day
+// bar, clusterRisk, gradeFor/maxLossFor, reserveRefusal, ddTier, an open slot), never a re-implementation;
+// what the tick alone can check (entries/day, the last-30-minutes rule, the intraday SPY shock, the broker's
+// own earnings confirm, the slot count) is NAMED in the action line so ENTER NOW is honest about its limits.
+// Credit spreads never reach the brief: every row passes `liveEnterableKinds` (debit only), as the tick's do.
 // WAIT FOR TRIGGER when a Trend-watch name sits within 2% of its range edge or a breakout was refused
 // for chasing; otherwise NO TRADE. The conditional line per watch name is the rule the tick executes.
-import { OPTIONS_DESK_RULES, researchSignals, screenResearchContracts, type OptionsResearch, type ResearchCandidate, type StrategySignal } from "./options-desk-model";
+import { OPTIONS_DESK_RULES, liveEnterableKinds, researchSignals, screenResearchContracts, type OptionsResearch, type ResearchCandidate, type StrategySignal } from "./options-desk-model";
 import { OPTIONS_EVENT_RULES, spansEarnings } from "./options-events";
 import { dteOf } from "./options-live-guardian";
-import { OPTIONS_MARKET_RULES, directionOfKind, marketState, marketVeto, type IndexState, type MarketStamp } from "./options-market-state";
+import { OPTIONS_MARKET_RULES, chaseCheck, directionOfKind, marketState, marketVeto, type IndexState, type MarketStamp } from "./options-market-state";
 import { clusterRisk, ddTier, gradeFor, maxLossFor, reserveRefusal, type ClusterLeg, type DrawdownTier } from "./options-risk-ladder";
 import { optionsOpportunityScore, scoreInputsFor } from "./options-score";
 import { buildOptionsTradeCard, candidateKey, structureComparison, type OptionsTradeCard } from "./options-trade-card";
 
-export const OPTIONS_BRIEF_RULES = { triggerDistancePct: 2, topN: 5, sectionOrder: ["ACCOUNT", "MARKET", "TOP 5", "BEST TRADE", "ACTION", "CONDITIONAL ORDERS"] as const };
+export const OPTIONS_BRIEF_RULES = { triggerDistancePct: 2, topN: 5, sectionOrder: ["ACCOUNT", "MARKET", "TOP 5", "BEST TRADE", "ACTION", "CONDITIONAL ORDERS"] as const,
+  /** What only the entry tick can check — named on every ENTER NOW. */
+  tickOnlyChecks: "not checked here: entries today vs the daily limit, the last-30-minutes rule, the intraday SPY shock, the broker's live earnings date, the exact slot count" };
 export type BriefAction = "ENTER NOW" | "WAIT FOR TRIGGER" | "NO TRADE";
 export interface BriefGate { name: string; pass: boolean; note: string }
 export interface WatchLine {
@@ -42,7 +46,7 @@ export const volRegimeOf = (vix: number | null): string => (vix == null ? "unkno
 
 /** The action truth table. ENTER NOW needs a best structure passing every gate; WAIT FOR TRIGGER needs a watch name at its edge or a chase refusal. */
 export function deriveOptionsAction(i: { best: boolean; gatesPass: boolean; watchNear: string[]; chaseWait: string[]; failed: string[] }): { action: BriefAction; reason: string } {
-  if (i.best && i.gatesPass) return { action: "ENTER NOW", reason: "the best structure passes every gate on stamped data; the tick re-checks the intraday shock and the broker's earnings date" };
+  if (i.best && i.gatesPass) return { action: "ENTER NOW", reason: `the best structure passes every stamped gate — ${OPTIONS_BRIEF_RULES.tickOnlyChecks}` };
   if (i.chaseWait.length) return { action: "WAIT FOR TRIGGER", reason: `${i.chaseWait.join(", ")} moved ≥${OPTIONS_MARKET_RULES.chaseMaxRatio}× the implied daily move — not chasing` };
   if (i.watchNear.length) return { action: "WAIT FOR TRIGGER", reason: `${i.watchNear.join(", ")} within ${OPTIONS_BRIEF_RULES.triggerDistancePct}% of the range edge — enter only on the close beyond it` };
   if (i.best) return { action: "NO TRADE", reason: `best structure refused: ${i.failed.join("; ") || "gate failed"}` };
@@ -68,7 +72,7 @@ export function buildOptionsBrief(ctx: BriefContext): OptionsBriefInput {
   const empty = (bestNote: string): OptionsBriefInput => ({ at, account, market, cards: [], best: null, bestNote, gates: [], watch: [], chaseWait: [], action: deriveOptionsAction({ best: false, gatesPass: false, watchNear: [], chaseWait: [], failed: [] }) });
   if (!data) return empty("no broker research on file");
   if (!(cap > 0) || ctx.buyingPower == null || !(ctx.buyingPower > 0)) return empty(`no cap (${cap}) or buying power (${ctx.buyingPower ?? "unknown"}) to screen against`);
-  const all = screenResearchContracts(data, cap, ctx.buyingPower, ctx.now, { vix: ctx.vix, includeWatch: true });
+  const all = liveEnterableKinds(screenResearchContracts(data, cap, ctx.buyingPower, ctx.now, { vix: ctx.vix, includeWatch: true }));
   const scoreOf = (c: ResearchCandidate) => optionsOpportunityScore(scoreInputsFor(c, data.contracts, ctx.ivRanks?.[c.symbol] ?? null)).score;
   const scores = new Map(all.map((c) => [candidateKey(c), scoreOf(c)]));
   const breakouts = all.filter((c) => !c.refusedBy), watchRows = all.filter((c) => c.refusedBy === "no breakout");
@@ -81,12 +85,16 @@ export function buildOptionsBrief(ctx: BriefContext): OptionsBriefInput {
     const direction = directionOfKind(c.kind), earnings = spansEarnings(c.symbol, c.expiry, data.events, ctx.now), veto = marketVeto(stamp, direction, c.symbol);
     const cluster = clusterRisk(ownedLegs, { symbol: c.symbol, kind: c.kind }), grade = gradeFor(c, ctx.promoted), gradeCap = r2(maxLossFor(grade.grade, equity, ceiling) * mult);
     const reserve = reserveRefusal(atRiskUsd, c.plannedLoss, equity), dte = dteOf(c.expiry, ctx.now);
+    // The tick's own chaseCheck on the signal-day bar (close vs the prior close, timestamped now so it is not "stale"); the tick re-runs it on a live quote.
+    const rows = data.bars[c.symbol] ?? [], prev = rows.at(-2)?.close;
+    const chase = chaseCheck(prev != null && prev > 0 ? { last: c.spot, previousClose: prev, atMs: ctx.now } : null, c.atmIv, c.symbol, ctx.now);
     return [
       { name: "armed", pass: ctx.armed && ctx.verified, note: ctx.armed ? (ctx.verified ? "armed and verified" : "armed, adapter unverified") : "desk disarmed" },
       { name: "drawdown tier", pass: mult > 0, note: tier ? `${tier.label} ×${tier.mult}` : "no account value on file — tier unknown, sizing ×1" },
+      { name: "slot", pass: ctx.owned.length === 0, note: ctx.owned.length === 0 ? "no position open" : `${ctx.owned.length} position${ctx.owned.length === 1 ? "" : "s"} held — WAIT, the tick's slot count (slotsFor) decides` },
       { name: "earnings", pass: earnings.permitted, note: earnings.note },
       { name: "market veto", pass: !ctx.vetoOn || !veto.vetoed, note: ctx.vetoOn ? veto.reason : "veto switched off" },
-      { name: "chase", pass: c.chase == null || c.chase < OPTIONS_MARKET_RULES.chaseMaxRatio, note: c.chase == null ? "no stamped chase ratio (checked live at the tick)" : `${c.chase}× the implied daily move on the signal day (re-checked live)` },
+      { name: "chase", pass: !chase.vetoed, note: `${chase.reason} (signal-day bar; re-checked live at the tick)` },
       { name: "cluster", pass: !cluster.refused, note: cluster.reason ?? `no ${direction} bet in the same cluster` },
       { name: "ladder cap", pass: c.plannedLoss <= gradeCap, note: `${grade.grade} cap ${usd(gradeCap, 2)} vs ${usd(c.plannedLoss, 2)} planned loss (${grade.reasons[0]})` },
       { name: "reserve", pass: reserve == null, note: reserve ?? `${usd(atRiskUsd)} at risk + ${usd(c.plannedLoss)} inside 25% of ${usd(equity)}` },
@@ -106,7 +114,7 @@ export function buildOptionsBrief(ctx: BriefContext): OptionsBriefInput {
     const earningsNote = earnings ? earnings.note : OPTIONS_EVENT_RULES.indexEtfs.includes(s.symbol) ? "index ETF — no earnings" : "no structure on file to check earnings against";
     const structure = top ? { kind: top.kind, strikes: [...top.strikes], expiry: top.expiry, debit: top.limit } : null;
     const line = structure
-      ? `enter ${structure.kind.replaceAll("_", " ")} ${structure.strikes.join("/")} ${structure.expiry} only if ${s.symbol} closes ${direction === "bullish" ? "above" : "below"} ${direction === "bullish" ? s.rangeHigh : s.rangeLow} with SPY/QQQ constructive and no earnings before ${structure.expiry}; max debit ${usd(normalCap, 2)}`
+      ? `enter ${structure.kind.replaceAll("_", " ")} ${structure.strikes.join("/")} ${structure.expiry} only if ${s.symbol} closes ${direction === "bullish" ? "above" : "below"} ${direction === "bullish" ? s.rangeHigh : s.rangeLow} with SPY/QQQ constructive and no earnings before ${structure.expiry}; max loss incl. fee ${usd(normalCap, 2)}`
       : `no structure under the ${usd(normalCap)} cap on file for ${s.symbol} — nothing to enter on a close ${direction === "bullish" ? "above" : "below"} ${direction === "bullish" ? s.rangeHigh : s.rangeLow}`;
     return { symbol: s.symbol, direction, close: s.close, rangeLow: s.rangeLow, rangeHigh: s.rangeHigh, distancePct, withinTrigger, structure, maxDebitUsd: normalCap, earningsNote, line };
   }).sort((a, b) => a.distancePct - b.distancePct);

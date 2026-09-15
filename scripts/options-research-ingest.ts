@@ -8,7 +8,7 @@ import { readAccountSnapshot } from "../src/lib/options-quote-store";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../src/lib/options-operation";
 import { buildOptionsObservation } from "../src/lib/options-evidence-model";
 import { readOptionsIvHistory, saveOptionsObservation } from "../src/lib/options-evidence-store";
-import { screenResearchContracts } from "../src/lib/options-desk-model";
+import { liveEnterableKinds, screenResearchContracts } from "../src/lib/options-desk-model";
 import { researchTradeCards } from "../src/lib/options-trade-card";
 import { saveOptionsTradeCards } from "../src/lib/options-trade-card-store";
 import { ivRanksFor, scoreResearchCandidates } from "../src/lib/options-score-ledger";
@@ -49,7 +49,7 @@ async function main(){
   let cards=0;
   if(cap&&account){
     const scores=new Map([...scoreResearchCandidates(merged,cap,account.buyingPower,Date.now(),ivRanksFor(merged,ivHistory)).scores].map(([k,s])=>[k,s.score]));
-    cards=await saveOptionsTradeCards(researchTradeCards(screenResearchContracts(merged,cap,account.buyingPower),merged.contracts,{equity:account.totalValue,scores})).catch(e=>{console.error(`trade cards not written: ${String(e).slice(0,160)}`);return 0;});
+    cards=await saveOptionsTradeCards(researchTradeCards(liveEnterableKinds(screenResearchContracts(merged,cap,account.buyingPower)),merged.contracts,{equity:account.totalValue,scores})).catch(e=>{console.error(`trade cards not written: ${String(e).slice(0,160)}`);return 0;});
   }
   // Desk brief (D8): rendered from the merged snapshot and the last account snapshot; Slack only when the action or best name changed.
   const brief=await refreshOptionsBrief("ingest").then(b=>b.action.action).catch(e=>{console.error(`brief not rendered: ${String(e).slice(0,160)}`);return null;});

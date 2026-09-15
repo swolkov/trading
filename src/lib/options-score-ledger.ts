@@ -8,7 +8,7 @@
 // the promotion verdict is green only with ≥30 resolved in every bucket, the top bucket's mean above
 // the bottom's, and Welch t ≥ 2 between them. Pre-registered here before the first row was scored.
 import { welchT } from "./margin-metrics";
-import { screenResearchContracts, type OptionsResearch, type ResearchBar, type ResearchCandidate } from "./options-desk-model";
+import { liveEnterableKinds, screenResearchContracts, type OptionsResearch, type ResearchBar, type ResearchCandidate } from "./options-desk-model";
 import { directionOfKind } from "./options-market-state";
 import { optionsOpportunityScore, scoreInputsFor, ivRank, OPTIONS_SCORE_RULES, type OptionsScore } from "./options-score";
 import { candidateKey } from "./options-trade-card";
@@ -45,11 +45,12 @@ export function intrinsicAt(kind: string, strikes: number[], S: number): number 
 /** Settlement P&L for one contract: intrinsic − debit, minus the fee reserve. */
 export const settlementPnl = (c: ScoredCandidate, S: number) => r2((intrinsicAt(c.kind, c.strikes, S) - c.debit) * 100 - c.feeReserve);
 
-/** One research run's ledger rows: every structure the screen builds for breakouts AND Trend-watch names (`includeWatch`), scored.
- *  `ivRanks` come from the archive (options-score.ts `ivRank`); absent → the score lists IV-rank as missing. The live desk never sees these. */
+/** One research run's ledger rows: every LIVE-ENTERABLE structure (debit only — `liveEnterableKinds`) the screen builds for breakouts AND
+ *  Trend-watch names (`includeWatch`), scored. `ivRanks` come from the archive (options-score.ts `ivRank`); absent → the score lists IV-rank
+ *  as missing. The live desk never sees these. Credit spreads never enter the ledger: the settlement math here is debit math. */
 export function scoreResearchCandidates(data: OptionsResearch, cap: number, buyingPower: number, now: number, ivRanks: Record<string, number | null> = {}): { rows: ScoredCandidate[]; scores: Map<string, OptionsScore> } {
   const scores = new Map<string, OptionsScore>();
-  const rows = screenResearchContracts(data, cap, buyingPower, now, { includeWatch: true }).map((c) => {
+  const rows = liveEnterableKinds(screenResearchContracts(data, cap, buyingPower, now, { includeWatch: true })).map((c) => {
     const key = candidateKey(c), s = optionsOpportunityScore(scoreInputsFor(c, data.contracts, ivRanks[c.symbol] ?? null));
     scores.set(key, s);
     return scoredRow(c, key, s);
@@ -72,15 +73,15 @@ export function ivRanksFor(data: OptionsResearch, observations: { capturedAt: st
   return out;
 }
 export interface LedgerObservation { screenedAt: string; candidates?: ScoredCandidate[] }
-/** Settles every archived structure whose settlement session the bars have reached. One row per (structure, signal day): the first run
- *  that scored it counts; the same structure re-scored by later runs that day is the same row. */
+/** Settles every archived structure whose settlement session the bars have reached. ONE ROW PER STRUCTURE PER SETTLEMENT WINDOW: the first
+ *  run that scored a structure (symbol/kind/expiry/strikes) owns it until that row settles; a Trend-watch name re-screened daily with
+ *  overlapping windows would otherwise be counted many times over as one autocorrelated bet. A re-scoring after the settlement day starts a new row. */
 export function resolveCandidates(observations: LedgerObservation[], bars: Record<string, ResearchBar[] | undefined>, rules = OPTIONS_SCORE_LEDGER_RULES): { resolved: ResolvedCandidate[]; pending: PendingCandidate[] } {
-  const seen = new Set<string>(), resolved: ResolvedCandidate[] = [], pending: PendingCandidate[] = [];
+  const owned = new Map<string, string | null>(), resolved: ResolvedCandidate[] = [], pending: PendingCandidate[] = [];   // key → settledOn (null while pending)
   const sorted = [...observations].sort((a, b) => a.screenedAt.localeCompare(b.screenedAt));
   for (const o of sorted) for (const c of o.candidates ?? []) {
-    const id = `${c.key}:${c.signalDay}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
+    const prior = owned.get(c.key);
+    if (prior === null || (prior != null && o.screenedAt.slice(0, 10) <= prior)) continue;
     const rows = (bars[c.symbol] ?? []).filter((b) => b.day > c.signalDay).sort((a, b) => a.day.localeCompare(b.day));
     const lastDay = shiftDay(c.expiry, -rules.settleBeforeExpiryDays);
     // The settlement bar: the Nth session after the signal, or the last session on/before expiry − 7 days, whichever comes first.
@@ -89,7 +90,8 @@ export function resolveCandidates(observations: LedgerObservation[], bars: Recor
     const expiryReached = rows.some((b) => b.day > lastDay);   // a bar past the cutoff proves the cutoff session has closed
     const bar = byCount && (!byExpiry || byCount.day <= byExpiry.day) ? byCount : expiryReached ? byExpiry : null;
     const base = { ...c, screenedAt: o.screenedAt, bucket: bucketOf(c.score, rules) };
-    if (!bar) { pending.push({ ...base, settlesBy: lastDay }); continue; }
+    if (!bar) { owned.set(c.key, null); pending.push({ ...base, settlesBy: lastDay }); continue; }
+    owned.set(c.key, bar.day);
     resolved.push({ ...base, settledOn: bar.day, settleClose: bar.close, pnlUsd: settlementPnl(c, bar.close), note: "settlement proxy, no fills, no slippage" });
   }
   return { resolved, pending };
@@ -114,5 +116,5 @@ export function promotionVerdict(buckets: BucketStat[], rules = OPTIONS_SCORE_LE
   if (top.mean != null && bottom.mean != null && !(top.mean > bottom.mean)) reasons.push(`≥80 mean $${top.mean} does not beat <70 mean $${bottom.mean}`);
   if (t == null) { if (top.n >= 2 && bottom.n >= 2) reasons.push("no variance to test"); }
   else if (t < rules.minT) reasons.push(`Welch t ${t.toFixed(2)} < ${rules.minT}`);
-  return { green: reasons.length === 0, reasons, welchT: t == null ? null : r2(t), registeredAt: rules.registeredAt, rule: `≥${rules.minPerBucket} resolved per bucket · ≥80 mean > <70 mean · Welch t ≥ ${rules.minT} · settlement proxy at min(expiry − ${rules.settleBeforeExpiryDays}d, +${rules.settleSessions} sessions)` };
+  return { green: reasons.length === 0, reasons, welchT: t == null ? null : r2(t), registeredAt: rules.registeredAt, rule: `≥${rules.minPerBucket} resolved per bucket · ≥80 mean > <70 mean · Welch t ≥ ${rules.minT} · settlement proxy at min(expiry − ${rules.settleBeforeExpiryDays}d, +${rules.settleSessions} sessions) · one row per structure per settlement window (first scoring wins) · debit structures only, credit spreads not measured yet` };
 }

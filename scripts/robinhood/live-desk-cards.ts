@@ -6,6 +6,7 @@ import { buildOptionsTradeCard, structureComparison, type OptionsTradeCard } fro
 import { saveOptionsTradeCards } from "../../src/lib/options-trade-card-store";
 import type { OptionsGrade } from "../../src/lib/options-risk-ladder";
 import { optionsOpportunityScore, scoreInputsFor } from "../../src/lib/options-score";
+import { etDay } from "../../src/lib/options-live-guardian";
 import { logDecision } from "../../src/lib/vault";
 
 export interface LivePricing { natural: number | null; mark: number | null; expectedFill: number | null }
@@ -42,14 +43,29 @@ export function entryTickCards(input: EntryDecisionInput): OptionsTradeCard[] {
   }
   return cards;
 }
+/** The card builder that can never reach the runner: a throw inside it is logged and yields no cards, so the candidate stash, the fill
+ *  page and the state write after it are untouched. */
+export function safeEntryTickCards(input: EntryDecisionInput, log: (s: string) => void): OptionsTradeCard[] {
+  try { return entryTickCards(input); }
+  catch (e) { log(`trade cards: not built — ${String(e).slice(0, 160)}`); return []; }
+}
+/** SKIP lines already written to Decisions/ this process: one per symbol per ET day (an ENTRY always writes). */
+const skipsWritten = new Set<string>();
+export function skipAlreadyLogged(symbol: string, nowMs: number, seen = skipsWritten): boolean {
+  const key = `${etDay(nowMs)}:${symbol}`;
+  if (seen.has(key)) return true;
+  seen.add(key);
+  return false;
+}
 /** Persists the cards and writes the Decisions/ line. Each write is independent and swallowed into the log; the caller `.catch`es the rest. */
-export async function persistEntryDecision(cards: OptionsTradeCard[], log: (s: string) => void): Promise<void> {
-  await saveOptionsTradeCards(cards).then((n) => { if (n) log(`trade cards: ${n} written (${cards.map((c) => `${c.symbol} ${c.action}`).join(", ")})`); })
+export async function persistEntryDecision(cards: OptionsTradeCard[], log: (s: string) => void, nowMs = Date.now()): Promise<void> {
+  await saveOptionsTradeCards(cards)
+    .then((n) => { if (n) log(`trade cards: ${n} written (${cards.map((c) => `${c.symbol} ${c.action}`).join(", ")})`); })
     .catch((e) => log(`trade cards: not written — ${String(e).slice(0, 160)}`));
   const first = cards[0];
-  if (first) {
-    const rationale = `${first.text.split("\n")[0]}${cards.length > 1 ? ` · ${cards.length - 1} other structure${cards.length === 2 ? "" : "s"} refused` : ""}`;
-    await logDecision("options-desk", first.action === "ENTER" ? "ENTRY" : "SKIP", `OPT:${first.symbol}`, rationale, first.confidence.score ?? 0)
-      .catch((e) => log(`decision log: not written — ${String(e).slice(0, 160)}`));
-  }
+  if (!first) return;
+  if (first.action !== "ENTER" && skipAlreadyLogged(first.symbol, nowMs)) return;   // one SKIP per symbol per day, not one per refused tick
+  const rationale = `${first.text.split("\n")[0]}${cards.length > 1 ? ` · ${cards.length - 1} other structure${cards.length === 2 ? "" : "s"} refused` : ""}`;
+  await logDecision("options-desk", first.action === "ENTER" ? "ENTRY" : "SKIP", `OPT:${first.symbol}`, rationale, first.confidence.score ?? 0)
+    .catch((e) => log(`decision log: not written — ${String(e).slice(0, 160)}`));
 }

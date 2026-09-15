@@ -348,11 +348,22 @@ desk keeps choosing by the IV/RV family rule (PR #166); when the two would diffe
 under `disagreement` and the existing rule wins. Stamp and measure.
 
 **Ledger:** raw-SQL table `options_trade_cards` (id, at, source `research|entry|refusal`, symbol,
-kind, expiry, score, grade, action, payload). Writers: the research ingest (top five per run, no
-Slack) and the live desk (every entry attempt and every refused candidate with its gate), written
-**after** the core has answered and `.catch`ed — never on the order's path. On entry ticks the runner
-also writes a `logDecision("options-desk", …)` line into the vault's `Decisions/YYYY-MM-DD.md`
-(fail-soft). A refusal card names its gate (`REFUSED — market veto — SPY below its 20-day …`).
+kind, expiry, score, grade, action, payload; indexed by time and by symbol). Writers: the research
+ingest (top five per run, no Slack) and the live desk (every entry attempt and every refused candidate
+with its gate), written **after** the core has answered **and after the thesis is stashed on the
+reservation record** (the guardian's invalidation rule depends on that stash, so nothing card-shaped
+runs before it); the builder is throw-safe (`safeEntryTickCards`: a throw logs and yields no cards)
+and the write is `.catch`ed — never on the order's path. On entry ticks the runner also writes a
+`logDecision("options-desk", …)` line into the vault's `Decisions/YYYY-MM-DD.md` (fail-soft; ENTRY
+always, SKIP at most once per symbol per ET day per process). A refusal card names its gate
+(`REFUSED — market veto — SPY below its 20-day …`).
+
+**Credit spreads: not measured yet.** The screen still builds `put_credit` / `call_credit` for the
+research page, but the card's max loss / max gain / breakeven, the ledger's settlement and the brief
+are all **debit math** (a credit's max loss is width − credit and it profits expiring worthless — the
+sign inverts). Every reader passes through `liveEnterableKinds` (= `OPTIONS_LIVE_RULES.entryKinds`,
+debit only), exactly as the entry tick does, so no credit structure reaches a card, the score ledger
+or the brief until a credit-math PR exists.
 
 ## The 0–100 score is a paper ranker (Sep 15 2026, `src/lib/options-score.ts`, `options-score-ledger.ts`)
 
@@ -375,8 +386,11 @@ it). This is what makes thirty resolved rows per bucket reachable in weeks rathe
 drops, never the record). `resolveCandidates` settles each row at **min(expiry − 7 days, +10 sessions
 after the signal day)** on later broker daily bars as intrinsic value − debit − fee reserve, per
 contract — a **settlement proxy: no fills, no slippage, no stop, no trail**. It ranks the score; it
-does not estimate the desk's P&L. One row per (structure, signal day): the first run that scored it
-counts. `bucketStats` ≥80 / 70–79 / <70 with n, mean, sd, t; `promotionVerdict` is green only with
+does not estimate the desk's P&L. **One row per structure per settlement window:** the first run
+that scored a structure (symbol/kind/expiry/strikes) owns it until that row settles — a Trend-watch
+name re-screened daily would otherwise be counted many times over as one autocorrelated bet; a
+re-scoring after the settlement day starts a new row. Debit structures only (credit spreads are not
+measured yet). `bucketStats` ≥80 / 70–79 / <70 with n, mean, sd, t; `promotionVerdict` is green only with
 **≥30 resolved in every bucket, the ≥80 mean above the <70 mean, and Welch t ≥ 2** between them
 (registered 2026-09-15, before the first row was scored; three buckets are compared, so a lone t ≥ 2
 is weaker than it looks — the verdict also needs the means ordered).
@@ -398,18 +412,24 @@ catalysts today among researched names, veto on/off) / **TOP 5** (cards by score
 (what the tick would take: the first of the screen's top three that passes every stamped gate, its
 card, and each gate ✓/✗) / **ACTION** / **CONDITIONAL ORDERS**. `ACTION` is **ENTER NOW** only when
 the best structure passes every gate on stamped data **through the same functions the entry tick
-calls** — `spansEarnings`, `marketVeto`, the chase ratio against `chaseMaxRatio`, `clusterRisk`,
-`gradeFor`/`maxLossFor` × `ddTier`, `reserveRefusal`, the DTE window, armed+verified — never a
-re-implementation; the two checks that need a live quote (intraday SPY shock, the broker's own
-earnings confirm) are named as tick-time checks. **WAIT FOR TRIGGER** when a Trend-watch name is
-within 2% of its range edge or a breakout was refused for chasing; otherwise **NO TRADE**. Each
-Trend-watch name gets the rule the tick executes: `enter long call 12 2026-10-16 only if WTCH closes
-above 12 with SPY/QQQ constructive and no earnings before 2026-10-16; max debit $100.50` (the Normal
-cap at this equity × the drawdown tier).
+calls** — `spansEarnings`, `marketVeto`, `chaseCheck` on the signal-day bar (close vs the prior
+close), `clusterRisk`, `gradeFor`/`maxLossFor` × `ddTier`, `reserveRefusal`, the DTE window,
+armed+verified, and an **open slot** (any held position fails it: "WAIT, the tick's slot count
+decides") — never a re-implementation. What only the tick can check is **named on every ENTER NOW**:
+entries today vs the daily limit, the last-30-minutes rule, the intraday SPY shock, the broker's
+live earnings date, the exact slot count. Every row passes `liveEnterableKinds` first (debit only).
+**WAIT FOR TRIGGER** when a Trend-watch name is within 2% of its range edge or a breakout was refused
+for chasing; otherwise **NO TRADE**. Each Trend-watch name gets the rule the tick executes: `enter
+long call 12 2026-10-16 only if WTCH closes above 12 with SPY/QQQ constructive and no earnings before
+2026-10-16; max loss incl. fee $100.50` (the Normal cap at this equity × the drawdown tier).
 
 Written by the research ingest after every run and re-rendered by the 17:32 account collect with the
 fresh snapshot: `options_desk_brief` (JSON + text), vault `Brain/options-desk-brief.md`, and the
-`options` Slack lane **only when the action or the best symbol changed** (`options_desk_brief_last`).
+`options` Slack lane — **one line** (action, best symbol, reason; the full brief is on the page and in
+the vault), **only when the action or the best symbol changed, at most twice per ET day**
+(`options_desk_brief_last` carries the day and count and is written **before** the send, so a failed
+write can never re-send). The at-risk figure reads `options_live_verified_fee_reserve_usd`, the
+runner's own formula.
 `GET /api/options/brief` + the Desk brief panel on `/options`. Read-only on the desk: the brief can
 place, size or gate nothing.
 

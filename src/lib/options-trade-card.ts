@@ -12,7 +12,7 @@
 //     the fill it expects, the target, the invalidation level (the 20-session range edge the guardian
 //     watches) and the 0–100 score labelled for what it is — a paper ranker, not a gate.
 // Nothing here changes which trade the desk enters, its size, or any gate.
-import { OPTIONS_DESK_RULES, type ResearchCandidate, type ResearchContract } from "./options-desk-model";
+import { OPTIONS_DESK_RULES, liveEnterableKinds, type ResearchCandidate, type ResearchContract } from "./options-desk-model";
 import { invalidationLevel } from "./options-live-guardian";
 import { directionOfKind, type Direction } from "./options-market-state";
 import type { OptionsGrade } from "./options-risk-ladder";
@@ -194,8 +194,10 @@ export function renderOptionsTradeCard(c: Omit<OptionsTradeCard, "text">): strin
   }
   return lines.join("\n");
 }
-/** The top-N research cards, one per candidate in screen order (the screen already ranks). */
-export function researchTradeCards(candidates: ResearchCandidate[], contracts: ResearchContract[], opts: { equity?: number | null; scores?: Map<string, number | null>; at?: string } = {}, rules = OPTIONS_CARD_RULES): OptionsTradeCard[] {
+/** The top-N research cards, one per LIVE-ENTERABLE candidate in screen order (the screen already ranks). Credit spreads are dropped here
+ *  as well as upstream: the card's max loss / gain / breakeven are debit math. */
+export function researchTradeCards(input: ResearchCandidate[], contracts: ResearchContract[], opts: { equity?: number | null; scores?: Map<string, number | null>; at?: string } = {}, rules = OPTIONS_CARD_RULES): OptionsTradeCard[] {
+  const candidates = liveEnterableKinds(input);
   const bySymbol = new Map<string, ResearchCandidate[]>();
   for (const c of candidates) bySymbol.set(c.symbol, [...(bySymbol.get(c.symbol) ?? []), c]);
   return candidates.slice(0, rules.topN).map((c) => buildOptionsTradeCard({

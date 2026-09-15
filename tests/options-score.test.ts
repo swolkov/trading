@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { OPTIONS_SCORE_RULES, SCORE_CAPS, ivRank, optionsOpportunityScore, scoreInputsFor, type ScoreInputs } from "../src/lib/options-score";
 import { OPTIONS_SCORE_LEDGER_RULES, bucketOf, bucketStats, intrinsicAt, promotionVerdict, resolveCandidates, scoreResearchCandidates, type ResolvedCandidate } from "../src/lib/options-score-ledger";
 import { buildOptionsObservation, parseOptionsObservation } from "../src/lib/options-evidence-model";
-import { screenResearchContracts, type OptionsResearch, type ResearchBar, type ResearchContract } from "../src/lib/options-desk-model";
+import { liveEnterableKinds, noCandidateNote, screenResearchContracts, type OptionsResearch, type ResearchBar, type ResearchContract } from "../src/lib/options-desk-model";
+import { OPTIONS_LIVE_RULES } from "../src/lib/options-live-guardian";
 import type { AccountSnapshot } from "../src/lib/options-quote-store";
 
 const NOW = Date.parse("2026-09-15T15:00:00Z");
@@ -66,6 +67,7 @@ function fixture(): OptionsResearch {
   const base = { multiplier: 100, bidSize: 20, askSize: 20, at: AT, volume: 3000, openInterest: 8000, selloutAt: null, expiry: "2026-10-16", iv: 0.4, theta: -0.02 };
   const contracts: ResearchContract[] = [
     { ...base, id: "sc", symbol: "SOFI", type: "call", strike: 12, bid: 0.80, ask: 0.85, delta: 0.55 },
+    { ...base, id: "sc13", symbol: "SOFI", type: "call", strike: 13, bid: 0.37, ask: 0.40, delta: 0.35 },
     { ...base, id: "sp", symbol: "SOFI", type: "put", strike: 12, bid: 0.65, ask: 0.70, delta: -0.45 },
     { ...base, id: "wc", symbol: "WTCH", type: "call", strike: 12, bid: 0.50, ask: 0.55, delta: 0.45 },
     { ...base, id: "wp", symbol: "WTCH", type: "put", strike: 12, bid: 0.80, ask: 0.85, delta: -0.55 },
@@ -78,35 +80,62 @@ const account: AccountSnapshot = { accountNumber: "685528705", type: "limited_ma
 test("the scoring universe is breakouts AND trend-watch names: includeWatch builds-but-refuses watch structures stamped 'no breakout', appended after the breakouts; the live screen without it is unchanged", () => {
   const data = fixture();
   const live = screenResearchContracts(data, 150, 1500, NOW);
-  assert.deepEqual(live.map((c) => [c.symbol, c.refusedBy]), [["SOFI", null]]);
+  assert.deepEqual(live.map((c) => [c.symbol, c.kind, c.strikes.join("/"), c.refusedBy]), [["SOFI", "call_debit", "12/13", null], ["SOFI", "long_call", "12", null]]);   // the 13 call's theta eats its payoff
   const all = screenResearchContracts(data, 150, 1500, NOW, { includeWatch: true });
-  assert.deepEqual(all.map((c) => [c.symbol, c.setup, c.refusedBy]), [["SOFI", "20-session breakout", null], ["WTCH", "Trend watch", "no breakout"]]);
-  assert.deepEqual(all[0], live[0], "the breakout row is byte-identical either way");
+  assert.deepEqual(all.map((c) => [c.symbol, c.setup, c.refusedBy]), [["SOFI", "20-session breakout", null], ["SOFI", "20-session breakout", null], ["WTCH", "Trend watch", "no breakout"]]);
+  assert.deepEqual(all.filter((c) => !c.refusedBy), live, "every breakout row, in order, is byte-identical either way");
+  assert.equal(noCandidateNote(data, 150, NOW), noCandidateNote({ ...data, bars: { ...data.bars } }, 150, NOW));
+  const noBreak = { ...data, bars: { WTCH: data.bars.WTCH } };
+  assert.match(noCandidateNote(noBreak, 150, NOW), /^no entry: no 20-session breakout or breakdown among the 1 researched names/);
   assert.equal(all[0].signalDay, data.bars.SOFI.at(-1)!.day); assert.equal(all[0].relativeVolume, 2);
   const { rows, scores } = scoreResearchCandidates(data, 150, 1500, NOW);
-  assert.equal(rows.length, 2); assert.ok(rows[0].score > rows[1].score, "the breakout outscores the watch name");
-  assert.equal(rows[1].refusedBy, "no breakout"); assert.ok(rows[0].missing.includes("IV-rank (needs ≥30 archive days)"));
-  assert.equal(scores.get(rows[0].key)!.components.direction.points, 20); assert.equal(scores.get(rows[1].key)!.components.direction.points, 8);
-  const inputs = scoreInputsFor(all[0], data.contracts, 25);
+  assert.equal(rows.length, 3); assert.ok(rows[0].score > rows[2].score, "the breakout outscores the watch name");
+  assert.equal(rows[2].refusedBy, "no breakout"); assert.ok(rows[0].missing.includes("IV-rank (needs ≥30 archive days)"));
+  assert.equal(scores.get(rows[0].key)!.components.direction.points, 20); assert.equal(scores.get(rows[2].key)!.components.direction.points, 8);
+  const inputs = scoreInputsFor(all[1], data.contracts, 25);
   assert.deepEqual([inputs.openInterest, inputs.volume, inputs.targetDelta, inputs.ivRank, inputs.thetaPerDayPct], [8000, 3000, 0.55, 25, 2.35]);   // 0.02 / 0.85
   // The observation carries the scored rows (tolerant: a record without them still parses; a malformed row is dropped, not the record).
   const obs = buildOptionsObservation(data, 150, account, NOW, { ivRanks: { SOFI: 25 } });
-  assert.equal(obs.candidates!.length, 2); assert.equal(obs.symbols.find((s) => s.symbol === "WTCH")!.researchCandidates, 0, "the existing per-symbol count stays breakout-only");
+  assert.equal(obs.candidates!.length, 3); assert.equal(obs.symbols.find((s) => s.symbol === "WTCH")!.researchCandidates, 0, "the existing per-symbol count stays breakout-only");
   const parsed = parseOptionsObservation(JSON.stringify(obs))!;
-  assert.equal(parsed.candidates!.length, 2);
+  assert.equal(parsed.candidates!.length, 3);
   const legacy = parseOptionsObservation(JSON.stringify({ ...obs, candidates: undefined }))!;
   assert.equal(legacy.candidates, undefined);
   const dirty = parseOptionsObservation(JSON.stringify({ ...obs, candidates: [obs.candidates![0], { junk: true }] }))!;
   assert.equal(dirty.candidates!.length, 1);
 });
 
-test("resolution: settles at the 10th session after the signal, or at expiry − 7 days when that comes first, as intrinsic − debit − fee; duplicates across runs on one day count once; unreached rows stay pending", () => {
+test("credit spreads never enter the ledger: two puts below the close build a put credit for research (debit math would settle it with the sign inverted), and it is filtered out of every scored row", () => {
+  const data = fixture();
+  const base = { multiplier: 100, bidSize: 20, askSize: 20, at: AT, volume: 3000, openInterest: 8000, selloutAt: null, expiry: "2026-10-16", iv: 0.4, theta: -0.02, symbol: "SOFI" };
+  data.contracts.push({ ...base, id: "p11", type: "put", strike: 11, bid: 0.40, ask: 0.42, delta: -0.25 }, { ...base, id: "p10", type: "put", strike: 10, bid: 0.10, ask: 0.12, delta: -0.12 });
+  const raw = screenResearchContracts(data, 150, 1500, NOW, { includeWatch: true });
+  const credit = raw.find((c) => c.kind === "put_credit")!;
+  assert.ok(credit, "the screen still builds the credit for research display"); assert.ok(credit.strikes[0] < credit.strikes[1] && credit.strikes[1] < 12.1, "long put below the short put, both below the close");
+  assert.equal(intrinsicAt(credit.kind, credit.strikes, 13) - credit.limit < 0, true, "debit math would call a worthless-expiring credit a loss — the sign is wrong for a credit");
+  assert.deepEqual(liveEnterableKinds(raw).map((c) => c.kind), raw.filter((c) => (OPTIONS_LIVE_RULES.entryKinds as string[]).includes(c.kind)).map((c) => c.kind));
+  assert.ok(liveEnterableKinds(raw).length < raw.length);
+  const { rows } = scoreResearchCandidates(data, 150, 1500, NOW);
+  assert.ok(rows.length >= 3 && rows.every((r) => !r.kind.endsWith("_credit")), `no credit row in ${rows.map((r) => r.kind)}`);
+  const obs = buildOptionsObservation(data, 150, account, NOW);
+  assert.ok(obs.candidates!.every((r) => !r.kind.endsWith("_credit")));
+});
+
+test("resolution: settles at the 10th session after the signal, or at expiry − 7 days when that comes first, as intrinsic − debit − fee; one row per structure per settlement window (first scoring wins, a re-score after settlement starts a new row); unreached rows stay pending", () => {
   const data = fixture();
   const { rows } = scoreResearchCandidates(data, 150, 1500, NOW);
-  const sofi = rows[0];
+  const sofi = rows.find((r) => r.kind === "long_call" && r.strikes[0] === 12)!;   // the 12 call at 0.85
   const signalDay = data.bars.SOFI.at(-1)!.day;
   const later = (n: number, close: number): ResearchBar[] => Array.from({ length: n }, (_, i) => ({ day: new Date(Date.parse(`${signalDay}T00:00:00Z`) + (i + 1) * 86_400_000).toISOString().slice(0, 10), open: close, high: close, low: close, close, volume: 1 }));
   const obsA = { screenedAt: AT, candidates: [sofi] }, obsB = { screenedAt: new Date(NOW + 3_600_000).toISOString(), candidates: [{ ...sofi, debit: 0.99 }] };
+  // A Trend-watch name re-screened the NEXT day is the same structure inside the same settlement window: one row, the first scoring's.
+  const obsC = { screenedAt: new Date(NOW + 86_400_000).toISOString(), candidates: [{ ...sofi, debit: 0.70, signalDay: later(1, 12)[0].day }] };
+  const overlap = resolveCandidates([obsA, obsB, obsC], { SOFI: [...data.bars.SOFI, ...later(10, 13)] });
+  assert.equal(overlap.resolved.length, 1); assert.equal(overlap.resolved[0].debit, 0.85); assert.equal(overlap.pending.length, 0);
+  // Re-scored AFTER that row settled (day 12, a fresh signal) → a new row in a new window, pending until its own bars arrive.
+  const obsD = { screenedAt: new Date(NOW + 12 * 86_400_000).toISOString(), candidates: [{ ...sofi, debit: 0.70, signalDay: later(12, 12)[11].day }] };
+  const rescored = resolveCandidates([obsA, obsD], { SOFI: [...data.bars.SOFI, ...later(12, 13)] });
+  assert.equal(rescored.resolved.length, 1); assert.equal(rescored.pending.length, 1); assert.equal(rescored.pending[0].debit, 0.70);
   // Nine sessions after the signal → pending, with the latest settlement day named.
   const nine = resolveCandidates([obsA, obsB], { SOFI: [...data.bars.SOFI, ...later(9, 13)] });
   assert.equal(nine.resolved.length, 0); assert.equal(nine.pending.length, 1); assert.equal(nine.pending[0].settlesBy, "2026-10-09");
@@ -129,6 +158,7 @@ test("promotion gate: refuses at n=29 in any bucket, refuses when the top mean d
   const green = [...fill(85, 30, 40, 20), ...fill(75, 30, 10, 20), ...fill(50, 30, -20, 20)];
   const v = promotionVerdict(bucketStats(green));
   assert.equal(v.green, true); assert.deepEqual(v.reasons, []); assert.ok(v.welchT! >= 2); assert.equal(v.registeredAt, OPTIONS_SCORE_LEDGER_RULES.registeredAt);
+  assert.match(v.rule, /one row per structure per settlement window \(first scoring wins\) · debit structures only, credit spreads not measured yet/);
   const short = promotionVerdict(bucketStats([...fill(85, 29, 40, 20), ...fill(75, 30, 10, 20), ...fill(50, 30, -20, 20)]));
   assert.equal(short.green, false); assert.deepEqual(short.reasons, ["≥80: 29 of 30 resolved"]);
   const middleShort = promotionVerdict(bucketStats([...fill(85, 30, 40, 20), ...fill(75, 29, 10, 20), ...fill(50, 30, -20, 20)]));
@@ -142,13 +172,29 @@ test("promotion gate: refuses at n=29 in any bucket, refuses when the top mean d
   assert.deepEqual([bucketOf(80), bucketOf(79.9), bucketOf(70), bucketOf(69), bucketOf(100), bucketOf(0)], ["≥80", "70–79", "70–79", "<70", "≥80", "<70"]);
 });
 
-test("the score never reaches the live entry gate: the runner's decision path, the policy, the executor, the ladder and the screen do not import it", () => {
+test("the score never reaches the live entry gate: the runner's decision path, the policy, the executor, the ladder and the screen do not import it; structurally, pickCandidate holds no score or card reference and the cards are built only after the core has answered and the thesis is stashed", () => {
   for (const file of ["scripts/robinhood/live-desk.ts", "src/lib/options-live-policy.ts", "src/lib/options-live-executor.ts", "src/lib/options-risk-ladder.ts", "src/lib/options-desk-model.ts", "src/lib/options-live-guardian.ts"]) {
     const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
     assert.ok(!/options-score/.test(src), `${file} must not import the score`);
     assert.ok(!/optionsOpportunityScore/.test(src), `${file} must not call the score`);
   }
-  // The runner passes no `score` to gradeFor, so A+ stays unreachable even after promotion until a later PR feeds it one — by design.
   const runner = readFileSync(new URL("../scripts/robinhood/live-desk.ts", import.meta.url), "utf8");
-  assert.match(runner, /gradeFor\(\{ \.\.\.c, spreadPct \}, ctx\.promoted\)/);
+  // The decision function, sliced to its own body: from its signature to the next top-level function.
+  const start = runner.indexOf("async function pickCandidate(");
+  const rest = runner.slice(start + 1), nextTop = rest.search(/\n(async )?function /);
+  const body = runner.slice(start, start + 1 + nextTop);
+  assert.ok(start > 0 && nextTop > 0 && body.length > 2000, "pickCandidate located");
+  const code = body.replace(/\/\/[^\n]*/g, "");   // identifiers, not comments
+  assert.ok(!/\bscore\b/i.test(code), "no score inside pickCandidate");
+  assert.ok(!/[cC]ards?\b/.test(code), "no card inside pickCandidate");
+  assert.match(body, /gradeFor\(\{ \.\.\.c, spreadPct \}, ctx\.promoted\)/, "the runner passes no score to gradeFor — A+ stays unreachable until a later PR feeds it");
+  // In the entry tick, every card reference comes AFTER the core's answer and after the candidate stash; the builder is the throw-safe one.
+  const execAt = runner.indexOf("res = await executeOptionsIntent(pick.intent, entryDeps)");
+  const stashAt = runner.indexOf("candidate: { ...pick.candidate }");
+  const cardsAt = runner.indexOf("safeEntryTickCards(");
+  const persistAt = runner.indexOf("persistEntryDecision(cards");
+  assert.ok(execAt > 0 && stashAt > execAt && cardsAt > stashAt && persistAt > cardsAt, `order: exec ${execAt} < stash ${stashAt} < cards ${cardsAt} < persist ${persistAt}`);
+  assert.equal(runner.split("safeEntryTickCards(").length, 2, "one card build per tick");
+  assert.ok(!/\bentryTickCards\(/.test(runner), "the runner never calls the raw builder");
+  assert.equal(runner.indexOf("safeEntryTickCards("), runner.lastIndexOf("safeEntryTickCards("));
 });

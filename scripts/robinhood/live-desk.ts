@@ -28,7 +28,7 @@ import { OPTIONS_LADDER_RULES, clusterOf, clusterRisk, ddTier, gradeFor, maxLoss
 import { divergenceVerdict, roundTrips } from "../../src/lib/options-live-ledger";
 import { legSpreadPct, type ResearchCandidate } from "../../src/lib/options-desk-model";
 import type { StructureKind } from "../../src/lib/options-structures";
-import { entryTickCards, persistEntryDecision, type LivePricing, type RefusedCandidate } from "./live-desk-cards";
+import { persistEntryDecision, safeEntryTickCards, type LivePricing, type RefusedCandidate } from "./live-desk-cards";
 
 export type LiveDeskMode = "guard" | "entry" | "probe";
 let MODE: LiveDeskMode = "guard";
@@ -250,29 +250,29 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         else {
           const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0, { equity: totalValue, tier, promoted, owned });
           state.candidate = pick.note; state.market = pick.market; state.grade = pick.grade; state.cap = pick.cap;
-          // The trade cards (D5): built from what the tick knew, AFTER the core has answered, persisted `.catch`ed — never on the order's path.
-          const cardsFor = (result: { status: string; reason?: string } | null) => entryTickCards({ data: pick.data ?? null, refused: pick.refused ?? [], equity: totalValue, feeReserveUsd: policy.feeBudgetUsd ?? 0,
-            chosen: pick.intent && pick.research && pick.live && pick.grade ? { candidate: pick.research, live: pick.live, quantity: pick.intent.quantity, grade: pick.grade, cap: pick.cap } : null, result });
-          if (!pick.intent) {
-            log(`entry: ${pick.note}`);
-            await persistEntryDecision(cardsFor(null), log).catch((e) => log(`trade cards: ${String(e).slice(0, 160)}`));
-          } else {
+          let res: Awaited<ReturnType<typeof executeOptionsIntent>> | null = null;
+          if (!pick.intent) log(`entry: ${pick.note}`);
+          else {
             // The ladder's answer becomes the policy the core enforces on review AND re-review: this tick's cap, slots and contracts — never above the armed ceiling.
             const entryDeps: OptionsExecutorDependencies = { ...deps, policy: async () => { const base = await readOptionsExecutionPolicy(); return { ...base, maxLossUsd: base.maxLossUsd == null ? null : Math.min(base.maxLossUsd, pick.cap), maxOpenPositions: slots, maxQuantity: pick.intent!.quantity }; } };
             broker.noteTheoreticalMaxLoss(pick.maxLossUsd);
-            const res = await executeOptionsIntent(pick.intent, entryDeps);
+            res = await executeOptionsIntent(pick.intent, entryDeps);
             log(`ENTRY ${pick.intent.kind} ${pick.underlying} × ${pick.intent.quantity} [${pick.grade} cap $${pick.cap}]: ${res.status}${res.reason ? ` — ${res.reason}` : ""}${res.orderId ? ` order ${res.orderId}` : ""}`);
-            const cards = cardsFor(res);
-            if (res.status === "accepted") {
-              // Stash the thesis on the reservation RECORD (the intent stays canonical): the fill ingest copies the range edge onto the owned record.
-              if (pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
-                .catch((e) => log(`could not stash the candidate on ${pick.intent!.refId} (invalidation rule will be skipped for it): ${String(e).slice(0, 160)}`));
-              await page(`📥 Options ENTRY placed: ${pick.intent.kind} ${pick.underlying} ${pick.expiry} × ${pick.intent.quantity} at ${pick.intent.limitPrice.toFixed(2)} (grade ${pick.grade}, max loss $${pick.maxLossUsd.toFixed(0)} + fees under a $${pick.cap} cap${tier && tier.tier > 0 ? `, drawdown tier ${tier.tier} ×${tier.mult}` : ""}; invalidation ${pick.candidate?.direction === "bullish" ? `below ${pick.candidate.rangeLow}` : `above ${pick.candidate?.rangeHigh}`}). Order ${res.orderId}.${cards[0] ? `\n${cards[0].text}` : ""}`);
-            }
+            // Stash the thesis on the reservation RECORD (the intent stays canonical): the fill ingest copies the range edge onto the owned record.
+            // Written before anything else follows the core's answer — the guardian's invalidation rule depends on it.
+            if (res.status === "accepted" && pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
+              .catch((e) => log(`could not stash the candidate on ${pick.intent!.refId} (invalidation rule will be skipped for it): ${String(e).slice(0, 160)}`));
+          }
+          // The trade cards (D5): built from what the tick knew, AFTER the core has answered and the thesis is stashed; a throw yields no cards
+          // (safeEntryTickCards), the write is `.catch`ed — never on the order's path.
+          const cards = safeEntryTickCards({ data: pick.data ?? null, refused: pick.refused ?? [], equity: totalValue, feeReserveUsd: policy.feeBudgetUsd ?? 0,
+            chosen: pick.intent && pick.research && pick.live && pick.grade ? { candidate: pick.research, live: pick.live, quantity: pick.intent.quantity, grade: pick.grade, cap: pick.cap } : null, result: res }, log);
+          if (pick.intent && res) {
+            if (res.status === "accepted") await page(`📥 Options ENTRY placed: ${pick.intent.kind} ${pick.underlying} ${pick.expiry} × ${pick.intent.quantity} at ${pick.intent.limitPrice.toFixed(2)} (grade ${pick.grade}, max loss $${pick.maxLossUsd.toFixed(0)} + fees under a $${pick.cap} cap${tier && tier.tier > 0 ? `, drawdown tier ${tier.tier} ×${tier.mult}` : ""}; invalidation ${pick.candidate?.direction === "bullish" ? `below ${pick.candidate.rangeLow}` : `above ${pick.candidate?.rangeHigh}`}). Order ${res.orderId}.${cards[0] ? `\n${cards[0].text}` : ""}`);
             else if (res.status === "refused") log(`entry refused by the core: ${res.reason}`);
             else await page(`🚨 Options entry ended ${res.status}: ${res.reason}. No retry until reconciled.`);
-            await persistEntryDecision(cards, log).catch((e) => log(`trade cards: ${String(e).slice(0, 160)}`));
           }
+          await persistEntryDecision(cards, log).catch((e) => log(`trade cards: ${String(e).slice(0, 160)}`));
         }
       }
       await setCfg(STATE_KEY, JSON.stringify(state));

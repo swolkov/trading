@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { screenResearchContracts, realizedVol20, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
 import { buildOptionsTradeCard, breakevenOf, candidateKey, renderOptionsTradeCard, researchTradeCards, structureComparison } from "../src/lib/options-trade-card";
-import { entryTickCards } from "../scripts/robinhood/live-desk-cards";
+import { entryTickCards, safeEntryTickCards, skipAlreadyLogged } from "../scripts/robinhood/live-desk-cards";
 
 // SOFI, Tue Sep 15 2026 15:00Z: a 20-session breakout to 12.10 over a 10.20–12.00 range, two expiries (Oct 16 = 31.2 DTE, Nov 6 = 52.2 DTE),
 // a single call and a 12/13 call debit on each. Every number on the card is pinned by hand below.
@@ -123,4 +123,35 @@ test("a refusal card carries the gate; research cards are the top five in screen
   const coreNo = entryTickCards({ data, chosen: { candidate: cands[0], live: { natural: 0.5, mark: 0.45, expectedFill: 0.5 }, quantity: 1, grade: "Strong", cap: 150 }, result: { status: "refused", reason: "live guardian is not healthy" }, refused: [], equity: 1500, feeReserveUsd: 2 });
   assert.equal(coreNo[0].source, "refusal"); assert.equal(coreNo[0].gate, "core refused: live guardian is not healthy");
   assert.equal(entryTickCards({ data, chosen: null, result: null, refused: [], equity: null, feeReserveUsd: 2 }).length, 0);
+});
+
+test("a throwing card builder yields no cards and a log line — the runner's candidate stash, fill page and state write never depend on it", () => {
+  const data = sofi(0.40);
+  const cands = screenResearchContracts(data, 150, 1500, NOW);
+  const lines: string[] = [];
+  const input = { data, chosen: { candidate: cands[0], live: { natural: 0.5, mark: 0.45, expectedFill: 0.5 }, quantity: 1, grade: "Strong" as const, cap: 150 }, result: { status: "accepted" }, refused: [], equity: 1500, feeReserveUsd: 2, scoreOf: () => { throw new Error("score blew up"); } };
+  assert.throws(() => entryTickCards(input), /score blew up/);
+  assert.deepEqual(safeEntryTickCards(input, (line: string) => lines.push(line)), []);
+  assert.match(lines[0], /^trade cards: not built — Error: score blew up/);
+  assert.equal(safeEntryTickCards({ ...input, scoreOf: () => 50 }, (line: string) => lines.push(line)).length, 1);
+});
+
+test("Decisions/ SKIP lines: at most one per symbol per ET day; a new day or another symbol writes again", () => {
+  const seen = new Set<string>();
+  const t = Date.parse("2026-09-15T14:00:00Z");
+  assert.equal(skipAlreadyLogged("SOFI", t, seen), false);
+  assert.equal(skipAlreadyLogged("SOFI", t + 30 * 60_000, seen), true);
+  assert.equal(skipAlreadyLogged("AAPL", t, seen), false);
+  assert.equal(skipAlreadyLogged("SOFI", t + 86_400_000, seen), false);
+  assert.equal(seen.size, 3);
+});
+
+test("credit spreads never become research cards: two puts below the close build a put credit that the card writer drops (its max loss / gain / breakeven are debit math)", () => {
+  const data = sofi(0.40);
+  const base = { symbol: "SOFI", multiplier: 100, bidSize: 20, askSize: 20, at: AT, volume: 3000, openInterest: 8000, selloutAt: null, expiry: "2026-10-16", iv: 0.4, theta: -0.02 };
+  data.contracts.push({ ...base, id: "p11", type: "put", strike: 11, bid: 0.40, ask: 0.42, delta: -0.25 }, { ...base, id: "p10", type: "put", strike: 10, bid: 0.10, ask: 0.12, delta: -0.12 });
+  const cands = screenResearchContracts(data, 150, 1500, NOW);
+  assert.ok(cands.some((c) => c.kind === "put_credit"));
+  const cards = researchTradeCards(cands, data.contracts, { equity: 1500, at: AT });
+  assert.ok(cards.length === 5 && cards.every((c) => !c.structure.endsWith("_credit") && c.comparison!.rows.every((r) => !r.kind.endsWith("_credit"))));
 });

@@ -1,7 +1,8 @@
 // Research uses broker prices. It never simulates fills or authorizes an order.
 import { exDivRisk, spansEarnings, type EarningsClass, type ResearchEvents } from "./options-events";
 import { chaseRatio, directionOfKind, marketState, marketVeto, type MarketStamp } from "./options-market-state";
-import { dteOf } from "./options-live-guardian";   // ONE DTE convention (expiry at 20:00Z, the close) shared with the guardian
+import { OPTIONS_LIVE_RULES, dteOf } from "./options-live-guardian";   // ONE DTE convention (expiry at 20:00Z, the close) shared with the guardian
+import type { StructureKind } from "./options-structures";
 export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
 // The base research list, in two SLICES (Sep 15 2026) because one run cannot read it all: 28 base +
 // ≤6 discovery names × 2 expiries × 5 strikes × 2 types = 680 contracts, and the broker's instrument
@@ -245,6 +246,12 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
   return [...rank(breakouts),...rank(watch)];
 }
 
+/** Only the structures the live desk can enter (`OPTIONS_LIVE_RULES.entryKinds`, debit only). The screen still builds credit spreads for
+ *  research display, but every downstream reader with debit math — the score ledger, the trade cards, the brief — must pass through this:
+ *  a credit's max loss is width − credit and it profits expiring worthless, so debit math inverts its sign. Credit spreads are not measured yet. */
+export function liveEnterableKinds<T extends { kind: string }>(cands: T[]): T[] {
+  return cands.filter((c) => OPTIONS_LIVE_RULES.entryKinds.includes(c.kind as StructureKind));
+}
 export function isOptionsResearch(value:unknown):value is OptionsResearch{
   if(!value||typeof value!=="object")return false;
   const r=value as OptionsResearch;
