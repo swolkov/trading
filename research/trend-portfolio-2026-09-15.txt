@@ -1,0 +1,74 @@
+# Donchian 100/50 60m reproduction on main — 2026-09-15 (E10)
+# scripts/trend-portfolio.ts ported verbatim from codex/trading-safety-parity (14b5d3b); data/tf15y (Databento GLBX.MDP3 continuous v.0, 1-minute, 2011→2026); Panama back-adjusted; cost 0.05 ATR per round turn; no slippage model beyond that.
+# Node v24.14.0, Apple M5 Pro
+
+### RUN 1 — all tf15y markets (the Aug 23 command): TF=60 STOP_ATR=4 SIDE=long ACCOUNT_SIM=4368 DETAIL=1 npx tsx scripts/trend-portfolio.ts 100 50
+
+TREND PORTFOLIO — Donchian 100/50 on 60-minute bars, stop 4xATR, cost 0.05 ATR
+10 markets, 2011-01-12 → 2026-08-19
+
+  ALL      n= 3607 exp=+0.101R PF=1.17 win=31% net=+363R maxDD=83R t=2.93
+  1st half n= 1803 exp=+0.091R PF=1.15 win=31% net=+165R maxDD=83R t=1.92
+  2nd half n= 1804 exp=+0.110R PF=1.19 win=32% net=+198R maxDD=60R t=2.22
+
+  BY MARKET
+  YM    n=  363 exp=+0.224R PF=1.40 win=34% net=+81R maxDD=18R t=1.98
+  GC    n=  354 exp=+0.229R PF=1.39 win=34% net=+81R maxDD=20R t=1.90
+  NQ    n=  380 exp=+0.198R PF=1.35 win=36% net=+75R maxDD=14R t=2.03
+  SI    n=  339 exp=+0.220R PF=1.35 win=32% net=+75R maxDD=28R t=1.56
+  ES    n=  365 exp=+0.167R PF=1.32 win=37% net=+61R maxDD=21R t=1.74
+  PA    n=  379 exp=+0.090R PF=1.14 win=26% net=+34R maxDD=33R t=0.74
+  PL    n=  370 exp=+0.046R PF=1.08 win=31% net=+17R maxDD=21R t=0.45
+  HG    n=  375 exp=+0.010R PF=1.02 win=29% net=+4R maxDD=37R t=0.10
+  CL    n=  344 exp=-0.090R PF=0.85 win=30% net=-31R maxDD=40R t=-1.06
+  NG    n=  338 exp=-0.102R PF=0.85 win=26% net=-35R maxDD=56R t=-1.03
+  8/10 markets net-positive
+
+  BY DIRECTION — a long-only result in a bull market is regime, not edge
+  long         n= 3607 exp=+0.101R PF=1.17 win=31% net=+363R maxDD=83R t=2.93
+
+  BY EXIT REASON
+  stop         n= 1820 exp=-1.013R PF=0.00 win=0% net=-1843R maxDD=1843R t=-1416376420858115.25
+  channel      n= 1787 exp=+1.234R PF=7.93 win=64% net=+2205R maxDD=5R t=21.28
+
+  ACCOUNT SIM — 1 micro contract per signal, SIL/MGC/MHG/MES/MNQ/MYM/MCL
+  $4368 → $83454 over 2520 trades | worst $3009 | maxDD $19875 (455% of start)
+  median risk per position $143 (3.3% of account)
+  >>> survives
+
+Research only — continuous-contract history, no margin model, no real fills.
+
+real 24.30
+user 34.47
+sys 1.46
+
+### RUN 2 — the desk's six roots: SYMS=ES,NQ,YM,GC,SI,HG TF=60 STOP_ATR=4 SIDE=long DETAIL=1 npx tsx scripts/trend-portfolio.ts 100 50
+
+TREND PORTFOLIO — Donchian 100/50 on 60-minute bars, stop 4xATR, cost 0.05 ATR
+6 markets, 2011-01-12 → 2026-08-18
+
+  ALL      n= 2176 exp=+0.173R PF=1.30 win=34% net=+377R maxDD=49R t=3.83
+  1st half n= 1088 exp=+0.164R PF=1.28 win=33% net=+179R maxDD=48R t=2.55
+  2nd half n= 1088 exp=+0.182R PF=1.32 win=34% net=+198R maxDD=49R t=2.86
+
+  BY MARKET
+  YM    n=  363 exp=+0.224R PF=1.40 win=34% net=+81R maxDD=18R t=1.98
+  GC    n=  354 exp=+0.229R PF=1.39 win=34% net=+81R maxDD=20R t=1.90
+  NQ    n=  380 exp=+0.198R PF=1.35 win=36% net=+75R maxDD=14R t=2.03
+  SI    n=  339 exp=+0.220R PF=1.35 win=32% net=+75R maxDD=28R t=1.56
+  ES    n=  365 exp=+0.167R PF=1.32 win=37% net=+61R maxDD=21R t=1.74
+  HG    n=  375 exp=+0.010R PF=1.02 win=29% net=+4R maxDD=37R t=0.10
+  6/6 markets net-positive
+
+  BY DIRECTION — a long-only result in a bull market is regime, not edge
+  long         n= 2176 exp=+0.173R PF=1.30 win=34% net=+377R maxDD=49R t=3.83
+
+  BY EXIT REASON
+  stop         n= 1056 exp=-1.013R PF=0.00 win=0% net=-1069R maxDD=1069R t=-1588210981047599.00
+  channel      n= 1120 exp=+1.291R PF=8.65 win=65% net=+1446R maxDD=4R t=17.50
+
+Research only — continuous-contract history, no margin model, no real fills.
+
+real 16.47
+user 23.95
+sys 1.17

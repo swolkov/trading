@@ -11,13 +11,15 @@ export interface ResearchBar {
 }
 
 export interface MarketSpec {
-  symbol: "ES" | "NQ" | "GC";
-  tradedSymbol: "MES" | "MNQ" | "MGC";
+  symbol: "ES" | "NQ" | "GC" | "YM" | "SI" | "HG";
+  tradedSymbol: "MES" | "MNQ" | "MGC" | "MYM" | "SIL" | "MHG";
   pointValue: number;
   tickSize: number;
   commissionRoundTurn: number;
   entrySlippagePoints: number;
   exitSlippagePoints: number;
+  /** Where the slippage figure comes from: fills on the demo (`measured`) or a stated guess (`assumed`). */
+  slippageSource?: "measured" | "assumed";
 }
 
 export interface EdgeSignal {
@@ -30,10 +32,18 @@ export interface EdgeSignal {
   rationale: string;
 }
 
+export type EdgeFamily =
+  | "compression_breakout" | "opening_drive" | "slow_trend"
+  // The TRADOVATE FUTURES prompt's families (E10), pre-registered in research/edge-factory-trials.json.
+  | "orb_continuation" | "vwap_reclaim" | "vwap_deviation_mr" | "pdh_pdl_break"
+  | "overnight_range_break" | "liquidity_sweep_reversal" | "range_expansion_momentum" | "ma_continuation";
+
 export interface EdgeCandidate {
   key: string;
   version: string;
-  family: "compression_breakout" | "opening_drive" | "slow_trend";
+  family: EdgeFamily;
+  /** The bar size the rule is evaluated on (the replay feeds it bars aggregated to this width). */
+  barMinutes: number;
   minimumHistory: number;
   evaluate: (bars: readonly ResearchBar[], index: number) => EdgeSignal | null;
 }
@@ -71,6 +81,8 @@ export interface EdgeStatistics {
   trades: number;
   netPnl: number;
   expectancyR: number;
+  /** 95% confidence interval on the mean R (normal approximation, ±1.96 standard errors). */
+  expectancyCi95: [number, number];
   profitFactor: number;
   winRate: number;
   tStat: number;

@@ -62,12 +62,13 @@ export function oneSidedStudentTPValue(tStat: number, degreesOfFreedom: number):
 }
 
 export function edgeStatistics(rows: readonly ReplayTrade[]): EdgeStatistics {
-  if (!rows.length) return { trades: 0, netPnl: 0, expectancyR: 0, profitFactor: 0, winRate: 0, tStat: 0, maxDrawdownR: 0, firstHalfR: 0, secondHalfR: 0, largestWinnerShare: 1 };
+  if (!rows.length) return { trades: 0, netPnl: 0, expectancyR: 0, expectancyCi95: [0, 0], profitFactor: 0, winRate: 0, tStat: 0, maxDrawdownR: 0, firstHalfR: 0, secondHalfR: 0, largestWinnerShare: 1 };
   const r = rows.map((row) => row.rMultiple);
   const pnl = rows.map((row) => row.pnl);
   const mean = r.reduce((sum, value) => sum + value, 0) / r.length;
   const variance = r.length > 1 ? r.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (r.length - 1) : 0;
-  const tStat = variance > 0 ? mean / (Math.sqrt(variance) / Math.sqrt(r.length)) : 0;
+  const standardError = Math.sqrt(variance) / Math.sqrt(r.length);
+  const tStat = standardError > 0 ? mean / standardError : 0;
   const grossProfit = pnl.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
   const grossLoss = Math.abs(pnl.filter((value) => value < 0).reduce((sum, value) => sum + value, 0));
   let cumulative = 0, peak = 0, maxDrawdownR = 0;
@@ -82,6 +83,7 @@ export function edgeStatistics(rows: readonly ReplayTrade[]): EdgeStatistics {
     trades: rows.length,
     netPnl: pnl.reduce((sum, value) => sum + value, 0),
     expectancyR: mean,
+    expectancyCi95: [mean - 1.96 * standardError, mean + 1.96 * standardError],
     profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0,
     winRate: pnl.filter((value) => value > 0).length / pnl.length,
     tStat,
