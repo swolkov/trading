@@ -12,6 +12,7 @@ import { maybeDemote } from "@/lib/margin-synthesis";
 import { gatherIntel, stampSql } from "@/lib/margin-intel";
 import { readEventPolicy } from "@/lib/margin-events";
 import { recordRefusal } from "@/lib/margin-trade-card";
+import { altEntryVetoed, btcShock, btcStateStamp, btcVetoEnabled, BTC_VETO_KEY, carryShock, type BtcShockCarry } from "@/lib/margin-btc-shock";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -30,7 +31,8 @@ const TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_scan_signals (
   price double precision
 )`;
 
-interface State { fired: Record<string, string> }
+// btcShock: the BTC-shock veto carried across ticks (margin-btc-shock.ts carryShock).
+interface State { fired: Record<string, string>; btcShock?: BtcShockCarry | null }
 
 async function loadState(): Promise<State> {
   try {
@@ -75,7 +77,15 @@ export async function GET(request: Request) {
   // The event policy is stamped on paper rows for the byEventMode slice; paper is NEVER gated
   // by it (the executor applies the veto). Fail-soft here: unreadable stamps nothing.
   const eventStamp = await readEventPolicy().then((p) => ({ mode: p.mode })).catch(() => null);
-  const intel = gatherIntel(scan, eventStamp);
+  // BTC-SHOCK VETO (margin-btc-shock.ts): read once per tick from the BTC bars the scan already
+  // holds, merged with the veto carried from earlier ticks. Alt entries AGAINST a fresh ≥3%/1h
+  // BTC move (or a ≥2.5× ATR hourly bar) are not handed to the executor for an hour; the paper
+  // row still opens, stamped btc_state. Missing bars → "unknown", never a veto. The off switch
+  // is read fail-CLOSED for entries: unreadable → the veto stays on.
+  const btcState = carryShock(btcShock(scan.btcBars.m5, scan.btcBars.h1), state.btcShock ?? null);
+  state.btcShock = { shock: btcState.shock, until: btcState.until };
+  const btcVetoOn = await prisma.agentConfig.findUnique({ where: { key: BTC_VETO_KEY } }).then((r) => btcVetoEnabled(r?.value)).catch(() => true);
+  const intel = gatherIntel(scan, eventStamp, { state: btcStateStamp(btcState) });
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "");
   let entryChecksPassed = errors.length === 0;
   // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
@@ -308,7 +318,16 @@ export async function GET(request: Request) {
           // record keeps measuring; only the live hand-off waits for the next clean tick.
           const feat = scan.features[`${s.coin}:${s.timeframe}`];
           const dataProblem = !feat ? "features unavailable" : !feat.dataOk ? feat.dataReason : null;
-          if (dataProblem) {
+          // BTC-SHOCK VETO: an alt entry against a fresh BTC shock waits out the hour. Same shape
+          // as the data-quality skip — paper keeps measuring, only the live hand-off is withheld.
+          const btcVeto = btcVetoOn ? altEntryVetoed(btcState, side, s.coin) : { vetoed: false, note: null };
+          if (btcVeto.vetoed) {
+            note_(s.coin, s.timeframe, s.kind, "btc vetoed", conv.tier, btcVeto.note ?? undefined);
+            if (rowId != null) {
+              await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET live_exec_note=$1 WHERE id=$2`, `live skipped: ${btcVeto.note}`.slice(0, 300), rowId).catch(() => {});
+            }
+            if (armedSources && isSourceArmed(armedSources, plan.source)) await recordRefusal(s.symbol, side, plan.source, `live skipped: ${btcVeto.note}`).catch(() => {});
+          } else if (dataProblem) {
             note_(s.coin, s.timeframe, s.kind, "live skipped", conv.tier, `data quality: ${dataProblem}`);
             if (rowId != null) {
               await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET live_exec_note=$1 WHERE id=$2`, `live skipped: data quality: ${dataProblem}`.slice(0, 300), rowId).catch(() => {});
@@ -457,8 +476,8 @@ export async function GET(request: Request) {
   const dataIssues = Object.values(scan.features).filter((f) => !f.dataOk).length;
   await prisma.agentConfig.upsert({
     where: { key: "kraken_margin_intel_latest" },
-    update: { value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null }) },
-    create: { key: "kraken_margin_intel_latest", value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null }) },
+    update: { value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null, btcShock: btcState, btcVetoOn }) },
+    create: { key: "kraken_margin_intel_latest", value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null, btcShock: btcState, btcVetoOn }) },
   }).catch(() => {});
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
   // PERSIST THE TICK. Same reasoning as the options book: what the desk REFUSED is at least

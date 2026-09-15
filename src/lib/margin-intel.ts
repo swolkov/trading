@@ -16,18 +16,20 @@ import { SCAN_COINS } from "@/lib/margin-scanner";
 export const INTEL_VERSION = "i1";
 
 export interface EventStamp { mode: "normal" | "reduced" | "paused" }
+/** btc_state: unknown | calm | shock-up | shock-down (margin-btc-shock.ts btcStateStamp). */
+export interface BtcStamp { state: string }
 export interface Intel {
   version: string;
   mtf: Record<string, MtfState>;
   event: EventStamp | null;
-  btc: null;
+  btc: BtcStamp | null;
   deriv: null;
 }
 
-export function gatherIntel(scan: Pick<UniverseScan, "features">, event: EventStamp | null = null): Intel {
+export function gatherIntel(scan: Pick<UniverseScan, "features">, event: EventStamp | null = null, btc: BtcStamp | null = null): Intel {
   const mtf: Record<string, MtfState> = {};
   for (const c of SCAN_COINS) mtf[c.name] = mtfState(scan.features, c.name);
-  return { version: INTEL_VERSION, mtf, event, btc: null, deriv: null };
+  return { version: INTEL_VERSION, mtf, event, btc, deriv: null };
 }
 
 export type StampValue = string | number | null;
@@ -36,5 +38,6 @@ export function stampSql(intel: Intel, coin: string): { columns: string[]; value
   const columns = ["mtf_state", "intel_version"];
   const values: StampValue[] = [intel.mtf[coin]?.text ?? null, intel.version];
   if (intel.event) { columns.push("event_mode"); values.push(intel.event.mode); }
+  if (intel.btc) { columns.push("btc_state"); values.push(intel.btc.state); }
   return { columns, values };
 }

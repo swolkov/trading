@@ -23,6 +23,7 @@ import { bookExposureMatches, recoveryBlocksPair, type PyramidRecovery } from "@
 import { maeR, mfeR, troughUpdate } from "@/lib/margin-shadow-excursion";
 import { upsertRoundTripOpen, type RoundTripOpen } from "@/lib/margin-round-trips";
 import { exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
+import { BTC_VETO_KEY, btcVetoEnabled, fastMoveVetoSuffix } from "@/lib/margin-btc-shock";
 import { ANOMALY_KEY, bookMatchesCard, mergeAnomaly, unledgeredBesideOurStop, type CardForCheck } from "@/lib/margin-anomaly";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
@@ -1143,8 +1144,11 @@ export async function GET(request: Request) {
         const dir = move > 0 ? "up" : "down";
         const key = `move-${symbol}-${dir}`;
         if (shouldFire(state, key)) {
+          // A BTC move at this size is also the scan's alt-entry veto (margin-btc-shock.ts) — say so on the line.
+          const vetoLine = symbol === "BTC/USD" && (await prisma.agentConfig.findUnique({ where: { key: BTC_VETO_KEY } }).then((r) => btcVetoEnabled(r?.value)).catch(() => true))
+            ? ` ${fastMoveVetoSuffix(dir)}.` : "";
           await sendNotification(
-            `${move > 0 ? "📈" : "📉"} ${symbol} ${dir} ${(move * 100).toFixed(1)}% in the last hour ($${now.toLocaleString()}).`,
+            `${move > 0 ? "📈" : "📉"} ${symbol} ${dir} ${(move * 100).toFixed(1)}% in the last hour ($${now.toLocaleString()}).${vetoLine}`,
             "margin_signals",
           );
           state.alerts[key] = new Date().toISOString();
