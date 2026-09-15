@@ -5,6 +5,7 @@ import { strategyBreakdown, candidateDetail, SLICE_MIN_RESOLVED, EXPERIMENT_SOUR
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { loadLiveFills, divergenceSummary, readStage3, readDemotion, type LiveFill, type Divergence, type Stage3, type Demotion } from "@/lib/margin-synthesis";
 import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
+import { leaderboard, type LeaderboardRow, type PromotionVerdict } from "@/lib/margin-leaderboard";
 
 // ── THE MONDAY REVIEW ──────────────────────────────────────────────────────────────────────
 // One page a week, written by rule, not by mood: where the live book stands, whether the
@@ -13,11 +14,21 @@ import { RETIRED_AUTO_SOURCES } from "@/lib/margin-auto-plans";
 // verdict ladder the arm switch uses. It changes nothing. The two automatic gates (stage 3
 // graduation, demotion) act; this page is what a founder reads so nothing acts unseen.
 
-export type WeeklyAction = "PROMOTE-READY" | "KILL CANDIDATE" | "KEEP · gathering" | "KEEP · promising" | "retired";
+export type WeeklyAction = "PROMOTE-READY" | "REDUCE · decaying" | "KEEP · paper-only (no container)" | "KILL CANDIDATE" | "KEEP · gathering" | "KEEP · promising" | "retired";
 
-export function weeklyAction(s: Pick<StrategyStat, "key" | "resolved" | "liveNet" | "verdict">): WeeklyAction {
+/**
+ * With the promotion verdict (margin-leaderboard.ts) the ladder reads the FULL gate — drawdown,
+ * profit factor, decay and a live container on top of the scoreboard's four — so PROMOTE-READY
+ * means the same thing here as on the page. Without it (older callers) the scoreboard verdict
+ * alone decides, exactly as before.
+ */
+export function weeklyAction(s: Pick<StrategyStat, "key" | "resolved" | "liveNet" | "verdict">, promotion?: Pick<PromotionVerdict, "ready" | "stage"> | null): WeeklyAction {
   if (RETIRED_AUTO_SOURCES.has(s.key) || s.verdict.startsWith("retired")) return "retired";
-  if (s.verdict.startsWith("REAL EDGE")) return "PROMOTE-READY";
+  if (promotion) {
+    if (promotion.stage === "REDUCE") return "REDUCE · decaying";
+    if (promotion.ready) return "PROMOTE-READY";
+    if (promotion.stage === "PAPER-ONLY") return "KEEP · paper-only (no container)";
+  } else if (s.verdict.startsWith("REAL EDGE")) return "PROMOTE-READY";
   if (s.resolved >= 30 && s.liveNet <= 0) return "KILL CANDIDATE";
   if (s.resolved < 30) return "KEEP · gathering";
   return "KEEP · promising";
@@ -33,11 +44,13 @@ export interface WeeklyInput {
   strategies: StrategyStat[];
   candidate: CandidateDetail | null;
   capacity: CapacityReport | null;
+  leaderboard?: LeaderboardRow[];   // per-sleeve metrics + the explicit gate (absent on older callers)
 }
 
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(0)}`;
 const pct = (n: number | null | undefined) => (n == null ? "—" : `${(n * 100).toFixed(0)}%`);
 const tf = (t: number | null | undefined) => (t == null ? "—" : t.toFixed(2));
+const pfText = (pf: number | null | undefined) => (pf == null ? "—" : pf === Infinity ? "∞" : pf.toFixed(2));
 
 export function renderWeeklyMemo(i: WeeklyInput): string {
   const L: string[] = [];
@@ -91,21 +104,29 @@ export function renderWeeklyMemo(i: WeeklyInput): string {
 
   // 5. Sleeves
   L.push("## 5 · Every sleeve — keep, kill, promote", "");
-  L.push("| sleeve | resolved | open | hit | net (live-sized) | t | days | ACTION |", "|---|---|---|---|---|---|---|---|");
+  L.push("| sleeve | resolved | open | hit | net (live-sized) | t | days | ACTION | Sharpe | Sortino | PF | max DD | avg R | MAE (R) | rolling 30 |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   const rows = i.strategies.filter((s) => s.resolved > 0 || s.open > 0).sort((a, b) => b.resolved - a.resolved);
+  const boardOf = (key: string) => i.leaderboard?.find((r) => r.key === key) ?? null;
+  const actionOf = (s: StrategyStat) => weeklyAction(s, boardOf(s.key)?.promotion ?? null);
   for (const s of rows) {
-    const a = weeklyAction(s);
+    const a = actionOf(s);
     const twin = EXPERIMENT_SOURCES.includes(s.key) ? " · twin, not pooled" : "";
-    L.push(`| ${s.label}${twin} | ${s.resolved}${s.forwardResolved != null ? ` (${s.forwardResolved} fwd)` : ""} | ${s.open} | ${pct(s.hitRate)} | ${money(s.liveNet)} | ${tf(s.tStat)} | ${s.days ?? "—"} | **${a}** |`);
+    const b = boardOf(s.key); const m = b?.metrics;
+    const cols = m
+      ? `${tf(m.sharpe)} | ${tf(m.sortino)} | ${pfText(m.profitFactor)} | ${m.maxDDPct != null ? `${(m.maxDDPct * 100).toFixed(1)}% (${m.maxDDTrades} tr)` : "—"} | ${m.avgR != null ? `${m.avgR.toFixed(2)}R` : "—"} | ${m.maeR != null ? `${m.maeR.toFixed(2)}R` : "—"} | ${b!.rolling.state}`
+      : "— | — | — | — | — | — | —";
+    L.push(`| ${s.label}${twin} | ${s.resolved}${s.forwardResolved != null ? ` (${s.forwardResolved} fwd)` : ""} | ${s.open} | ${pct(s.hitRate)} | ${money(s.liveNet)} | ${tf(s.tStat)} | ${s.days ?? "—"} | **${a}** | ${cols} |`);
   }
-  L.push("", "ACTION ladder: KEEP · gathering (<30 resolved) → KEEP · promising (positive, t<2) → PROMOTE-READY (REAL EDGE: 30+, net>0 at live sizing, t≥2, 7+ days) · KILL CANDIDATE (30+ resolved, net ≤ 0 at live sizing — retire it by hand; the live sleeve demotes itself). A twin is promoted only by beating its base on the same signals.", "");
+  L.push("", "ACTION ladder: KEEP · gathering (<30 resolved) → KEEP · promising (positive, t<2, or short of the full gate) → PROMOTE-READY (every gate green: 30+ forward, net>0 at live sizing, t≥2, 7+ days, max DD inside the breaker, PF≥1.2, rolling not DECAYING, a guardian-mirrored container) · KEEP · paper-only (every gate green but no live container — it cannot be armed) · REDUCE · decaying (the last 30 are significantly worse than the record — live risk is halved by rule) · KILL CANDIDATE (30+ resolved, net ≤ 0 at live sizing — retire it by hand; the live sleeve demotes itself). Sharpe/Sortino rank and gate nothing (overlapping crypto trades inflate them). A twin is promoted only by beating its base on the same signals.", "");
 
   // 6. What changes
-  const kills = rows.filter((s) => weeklyAction(s) === "KILL CANDIDATE").map((s) => s.key);
-  const promos = rows.filter((s) => weeklyAction(s) === "PROMOTE-READY").map((s) => s.key);
+  const kills = rows.filter((s) => actionOf(s) === "KILL CANDIDATE").map((s) => s.key);
+  const promos = rows.filter((s) => actionOf(s) === "PROMOTE-READY").map((s) => s.key);
+  const reduces = rows.filter((s) => actionOf(s) === "REDUCE · decaying").map((s) => s.key);
   L.push("## 6 · What changes this week", "");
-  if (!kills.length && !promos.length && !i.demoted) L.push("- **Nothing.** No rule fired. Leave every parameter alone; the samples are still being earned.");
+  if (!kills.length && !promos.length && !reduces.length && !i.demoted) L.push("- **Nothing.** No rule fired. Leave every parameter alone; the samples are still being earned.");
   if (promos.length) L.push(`- PROMOTE-READY: ${promos.join(", ")} — the paper gate is green; arming is Spencer's decision on Live Desk.`);
+  if (reduces.length) L.push(`- REDUCE · decaying: ${reduces.join(", ")} — the rolling-30 record is significantly worse than the rest; if armed, live risk is already halved by rule (kraken_margin_decay_multiplier). Nothing to do by hand; watch whether it restores.`);
   if (kills.length) L.push(`- KILL CANDIDATE: ${kills.join(", ")} — retire by adding to RETIRED_AUTO_SOURCES (open trades still resolve).`);
   if (i.demoted) L.push(`- DEMOTED: ${i.demoted.source} — read the record before acknowledging; arming again is a separate act.`);
   L.push("");
@@ -120,23 +141,24 @@ export async function runMarginWeekly(): Promise<{ ok: boolean; path: string; ac
   let equity: number | null = null;
   try { const p = watchState ? (JSON.parse(watchState) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : null; } catch { equity = null; }
   const peak = peakRaw ? parseFloat(peakRaw) : NaN;
-  const [strategies, candidate, capacity, fills, stage3, demoted] = await Promise.all([
+  const [strategies, candidate, capacity, fills, stage3, demoted, board] = await Promise.all([
     strategyBreakdown().catch(() => [] as StrategyStat[]),
     candidateDetail(candSource).catch(() => null),
     capacityReport(candSource).catch(() => null),
     loadLiveFills().catch(() => [] as LiveFill[]),
     readStage3().catch(() => null),
     readDemotion().catch(() => null),
+    leaderboard().catch(() => [] as LeaderboardRow[]),
   ]);
   const at = new Date().toISOString();
   const memo = renderWeeklyMemo({
     at, live: { armed: auto === "true" && validate === "false", sources, equity, equityPeak: Number.isFinite(peak) && peak > 0 ? peak : null },
-    stage3, demoted, fills, div: divergenceSummary(fills), strategies, candidate, capacity,
+    stage3, demoted, fills, div: divergenceSummary(fills), strategies, candidate, capacity, leaderboard: board,
   });
   const path = "Performance/margin-weekly.md";
   await vaultWrite(path, memo, "margin-weekly");
-  const actions = strategies.filter((s) => s.resolved > 0 || s.open > 0).map((s) => `${s.key}: ${weeklyAction(s)}`);
-  const headline = actions.filter((a) => /PROMOTE-READY|KILL CANDIDATE/.test(a));
+  const actions = strategies.filter((s) => s.resolved > 0 || s.open > 0).map((s) => `${s.key}: ${weeklyAction(s, board.find((r) => r.key === s.key)?.promotion ?? null)}`);
+  const headline = actions.filter((a) => /PROMOTE-READY|KILL CANDIDATE|REDUCE/.test(a));
   await vaultAppend("Performance/margin-weekly-log.md", `\n- [${at.slice(0, 10)}] ${headline.length ? headline.join(" · ") : "no rule fired — nothing changes"}${demoted ? ` · DEMOTED ${demoted.source}` : ""}`, "margin-weekly").catch(() => {});
   await sendNotification(`📋 Monday review written to the vault (${path}). ${headline.length ? headline.join(" · ") : "No rule fired — nothing changes this week."}`, "margin_results").catch(() => {});
   return { ok: true, path, actions };

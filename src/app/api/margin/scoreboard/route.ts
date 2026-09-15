@@ -1,6 +1,7 @@
 import { computeMarginScoreboard, listRoundTrips } from "@/lib/kraken-margin";
 import { shadowScore, strategyBreakdown, recentPaperTrades, edgeBreakdowns, candidateDetail } from "@/lib/margin-shadow";
 import { capacityReport } from "@/lib/margin-capacity";
+import { leaderboard } from "@/lib/margin-leaderboard";
 import { prisma } from "@/lib/db";
 
 // The "was I winning" scoreboard: Spencer's real margin round trips, hit rate,
@@ -20,7 +21,7 @@ export async function GET() {
     const degraded: string[] = [];
     const soft = <T,>(name: string, p: Promise<T>, fallback: T): Promise<T> =>
       p.catch((e) => { degraded.push(`${name}: ${String(e?.message ?? e).slice(0, 80)}`); return fallback; });
-    const [scoreboard, trips, shadow, strategies, log, edges, candidate, capacity] = await Promise.all([
+    const [scoreboard, trips, shadow, strategies, log, edges, candidate, capacity, board] = await Promise.all([
       computeMarginScoreboard(),
       listRoundTrips(),
       soft("shadow", shadowScore(), null),
@@ -29,6 +30,7 @@ export async function GET() {
       soft("edges", edgeBreakdowns(), { byDirection: [], byCoin: [] }),
       soft("candidate", candidateDetail(candSource), null),
       soft("capacity", capacityReport(candSource), null),
+      soft("leaderboard", leaderboard(), []),
     ]);
     const scanRaw = await prisma.agentConfig.findUnique({ where: { key: "margin_scan_last_result" } }).then((r) => r?.value ?? null).catch(() => null);
     let scanLook: unknown = null;
@@ -51,6 +53,8 @@ export async function GET() {
       candidate,
       // Cost of capacity: what the setups the executor refused since arming went on to do, and a slot replay.
       capacity,
+      // The leaderboard: every sleeve's row with Sharpe/Sortino/PF/maxDD/R/MAE, the rolling decay read and the explicit live gate.
+      leaderboard: board,
     });
   } catch (error) {
     console.error("[/api/margin/scoreboard]", error);

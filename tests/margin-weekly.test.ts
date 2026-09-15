@@ -70,3 +70,41 @@ test("a quiet week says so, and a demotion is shown", () => {
   assert.match(dem, /⛔ Demoted 2026-09-20 10:00 UTC: the forward-only paper record is not paying/);
   assert.match(dem, /DEMOTED: selective — read the record before acknowledging/);
 });
+
+// ---- C2: the ACTION ladder reads the full promotion gate when it is given ----
+
+const promo = (o: Partial<{ ready: boolean; stage: string }> = {}) => ({ ready: false, stage: "promising", gates: [], failed: [], note: "", ...o }) as { ready: boolean; stage: "gathering" | "not paying" | "promising" | "PAPER-ONLY" | "PROMOTE-READY" | "REDUCE" | "retired"; gates: []; failed: []; note: string };
+
+test("with a promotion verdict the ladder gains PROMOTE-READY / REDUCE · decaying / KEEP · paper-only; without one it reads as before", () => {
+  const edge = strat("swing-pyr", { resolved: 45, liveNet: 2628, verdict: "REAL EDGE — significant" });
+  assert.equal(weeklyAction(edge), "PROMOTE-READY", "no promotion arg → the scoreboard verdict decides, unchanged");
+  assert.equal(weeklyAction(edge, null), "PROMOTE-READY");
+  assert.equal(weeklyAction(edge, promo({ ready: true, stage: "PROMOTE-READY" })), "PROMOTE-READY");
+  assert.equal(weeklyAction(edge, promo({ stage: "REDUCE" })), "REDUCE · decaying");
+  assert.equal(weeklyAction(edge, promo({ stage: "PAPER-ONLY" })), "KEEP · paper-only (no container)");
+  // REAL EDGE on the scoreboard but short of the full gate (PF / drawdown) → not PROMOTE-READY any more
+  assert.equal(weeklyAction(edge, promo({ stage: "promising" })), "KEEP · promising");
+  assert.equal(weeklyAction(strat("a", { resolved: 31, liveNet: -5, verdict: "not paying" }), promo({ stage: "not paying" })), "KILL CANDIDATE");
+  assert.equal(weeklyAction(strat("a", { resolved: 12, liveNet: 40, verdict: "gathering (12/30)" }), promo({ stage: "gathering" })), "KEEP · gathering");
+  assert.equal(weeklyAction(strat("fast-tight", { resolved: 60, liveNet: -900, verdict: "retired — not paying" }), promo({ ready: true, stage: "PROMOTE-READY" })), "retired", "retired wins over everything");
+});
+
+test("the memo's sleeve table carries the leaderboard columns and the REDUCE line", () => {
+  const metrics = { series: "live" as const, n: 45, net: 2628, expectancy: 58.4, grossExpectancy: 70, feeShare: 0.17, hitRate: 0.5, avgWin: 300, avgLoss: -180, profitFactor: 1.67, tStat: 1.9, sharpe: 2.35, sortino: 3.9, tradesPerYear: 600, spanDays: 27, maxDD: 610, maxDDPct: 0.122, maxDDTrades: 4, longestLossStreak: 3, avgR: 0.41, medianR: -0.2, rN: 45, rDist: [], mfeR: 1.3, mfeN: 45, maeR: null, maeN: 0 };
+  const text = renderWeeklyMemo({
+    at: "2026-09-21T13:00:00.000Z", live: { armed: true, sources: ["swing-pyr"], equity: 4700, equityPeak: 5140 }, stage3: null, demoted: null, fills: [], div: divergenceSummary([]),
+    strategies: [strat("swing-pyr", { resolved: 45, open: 1, liveNet: 2628, tStat: 1.9, days: 9, verdict: "promising (could be luck)" })],
+    candidate: null, capacity: null,
+    leaderboard: [{
+      ...strat("swing-pyr", { resolved: 45, open: 1, liveNet: 2628, tStat: 1.9, days: 9, verdict: "promising (could be luck)" }),
+      metrics, paperMetrics: metrics,
+      rolling: { state: "DECAYING", window: 30, welchT: -2.4, note: "last 30: −$40/trade vs $95/trade before (Welch t=-2.40 ≤ -2)", lastN: 30, lastExpectancy: -40, priorExpectancy: 95, lastNet: -1200 },
+      promotion: { ready: false, stage: "REDUCE", gates: [], failed: ["Confidence (t)", "Rolling record"], note: "REDUCE — the rolling-30 record is decaying" },
+    }],
+  });
+  assert.match(text, /\| sleeve \| resolved \| open \| hit \| net \(live-sized\) \| t \| days \| ACTION \| Sharpe \| Sortino \| PF \| max DD \| avg R \| MAE \(R\) \| rolling 30 \|/);
+  assert.match(text, /\| swing-pyr · twin, not pooled \| 45 \(0 fwd\) \| 1 \| 50% \| \$2628 \| 1\.90 \| 9 \| \*\*REDUCE · decaying\*\* \| 2\.35 \| 3\.90 \| 1\.67 \| 12\.2% \(4 tr\) \| 0\.41R \| — \| DECAYING \|/);
+  assert.match(text, /REDUCE · decaying: swing-pyr — the rolling-30 record is significantly worse/);
+  assert.doesNotMatch(text, /\*\*Nothing\.\*\*/);
+  assert.match(text, /Sharpe\/Sortino rank and gate nothing/);
+});
