@@ -1,41 +1,19 @@
-import type { EdgeCandidate, EdgeSignal, ResearchBar } from "./types";
+import { atr, hasOneInstrument, keyNumber, range, signal } from "./indicators";
+import { et } from "./session";
+import type { EdgeCandidate } from "./types";
 
-function trueRange(bars: readonly ResearchBar[], index: number): number {
-  const bar = bars[index], prior = bars[index - 1];
-  return prior ? Math.max(bar.h - bar.l, Math.abs(bar.h - prior.c), Math.abs(bar.l - prior.c)) : bar.h - bar.l;
-}
-
-function atr(bars: readonly ResearchBar[], index: number, period: number): number {
-  if (index < period) return 0;
-  let sum = 0;
-  for (let i = index - period + 1; i <= index; i++) sum += trueRange(bars, i);
-  return sum / period;
-}
-
-function range(bars: readonly ResearchBar[], start: number, end: number): { high: number; low: number } {
-  let high = -Infinity, low = Infinity;
-  for (let i = start; i <= end; i++) { high = Math.max(high, bars[i].h); low = Math.min(low, bars[i].l); }
-  return { high, low };
-}
-
-function hasOneInstrument(bars: readonly ResearchBar[], start: number, end: number): boolean {
-  if (start < 0 || end >= bars.length || start > end) return false;
-  const instrumentId = bars[start].instrumentId;
-  for (let index = start + 1; index <= end; index++) {
-    if (bars[index].instrumentId !== instrumentId) return false;
-  }
-  return true;
-}
-
-function signal(candidate: EdgeCandidate, direction: "long" | "short", stop: number, targetR: number, hold: number, rationale: string): EdgeSignal {
-  return { edgeKey: candidate.key, version: candidate.version, direction, stopDistance: stop, targetDistance: stop * targetR, maxHoldBars: hold, rationale };
-}
+export { PROMPT_FAMILY_CANDIDATES } from "./prompt-families";
+export {
+  liquiditySweepReversal, maContinuation, orbContinuation, overnightRangeBreak, pdhPdlBreak,
+  rangeExpansionMomentum, vwapDeviationMr, vwapReclaim,
+} from "./prompt-families";
 
 export function compressionBreakout(compressionRatio: number, targetR: number): EdgeCandidate {
   const candidate: EdgeCandidate = {
-    key: `compression_breakout_c${String(compressionRatio).replace(".", "")}_t${String(targetR).replace(".", "")}`,
+    key: `compression_breakout_c${keyNumber(compressionRatio)}_t${keyNumber(targetR)}`,
     version: "1.0.0",
     family: "compression_breakout",
+    barMinutes: 5,
     minimumHistory: 60,
     evaluate: (bars, index) => {
       const current = bars[index];
@@ -58,24 +36,12 @@ export function compressionBreakout(compressionRatio: number, targetR: number): 
   return candidate;
 }
 
-const etFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York", hour12: false,
-  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
-});
-const etCache = new Map<number, { date: string; hour: number; minute: number }>();
-function et(t: number) {
-  const cached = etCache.get(t); if (cached) return cached;
-  const parts: Record<string, string> = {};
-  for (const part of etFormatter.formatToParts(t)) parts[part.type] = part.value;
-  const value = { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) % 24, minute: Number(parts.minute) };
-  etCache.set(t, value); return value;
-}
-
 export function openingDrive(minimumDriveAtr: number, targetR: number): EdgeCandidate {
   const candidate: EdgeCandidate = {
-    key: `opening_drive_d${String(minimumDriveAtr).replace(".", "")}_t${String(targetR).replace(".", "")}`,
+    key: `opening_drive_d${keyNumber(minimumDriveAtr)}_t${keyNumber(targetR)}`,
     version: "1.0.0",
     family: "opening_drive",
+    barMinutes: 5,
     minimumHistory: 400,
     evaluate: (bars, index) => {
       const stamp = et(bars[index].t);
@@ -107,9 +73,10 @@ export function openingDrive(minimumDriveAtr: number, targetR: number): EdgeCand
 
 export function slowTrendBreakout(lookback: number, targetR: number): EdgeCandidate {
   const candidate: EdgeCandidate = {
-    key: `slow_trend_b${lookback}_t${String(targetR).replace(".", "")}`,
+    key: `slow_trend_b${lookback}_t${keyNumber(targetR)}`,
     version: "1.0.0",
     family: "slow_trend",
+    barMinutes: 60,
     minimumHistory: Math.max(lookback + 30, 100),
     evaluate: (bars, index) => {
       if (!hasOneInstrument(bars, index - lookback, index)) return null;

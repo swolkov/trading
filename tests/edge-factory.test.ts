@@ -14,7 +14,7 @@ const market: MarketSpec = {
 };
 
 const candidate: EdgeCandidate = {
-  key: "test_edge", version: "1", family: "compression_breakout", minimumHistory: 1,
+  key: "test_edge", version: "1", family: "compression_breakout", barMinutes: 5, minimumHistory: 1,
   evaluate: (_bars, index) => index === 1 || index === 2
     ? { edgeKey: "test_edge", version: "1", direction: "long", stopDistance: 2, targetDistance: 4, maxHoldBars: 3, rationale: "test" }
     : null,
