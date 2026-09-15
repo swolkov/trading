@@ -363,7 +363,21 @@ export interface DeskContext {
   ddMult: number;
   /** The budget this entry would risk — the worst case, before sizing rounds down. */
   newRiskUsd: number;
+  // ---- the calendar (E3): what the guardian last wrote to `futures_desk_event_policy`, read back.
+  /** normal / reduced / paused; null when the key is missing or unreadable (a refusal, never "normal"). */
+  eventMode: "normal" | "reduced" | "paused" | null;
+  /** Age of the policy row; null when missing. Older than 20 minutes refuses. */
+  eventPolicyAgeMs: number | null;
+  /** `FOMC rate decision 14:00 ET — paused until 14:30` while paused. */
+  eventWindow: string | null;
+  /** The composed budget multiplier the entry is sized at: drawdown tier × event (0.5 when reduced). */
+  budgetMult: number;
+  /** A CME holiday closing entries right now (closed day, or after an early close) — null on a normal day. */
+  cmeHoliday: string | null;
 }
+
+/** The guardian writes the event policy every run (5 min); an entry needs one younger than this. */
+export const EVENT_POLICY_FRESH_MS = 20 * 60_000;
 
 /** `−$620` / `+$30` — the Unicode minus the desk's Slack lines already use. */
 function signedUsd(n: number): string { return `${n < 0 ? "−" : "+"}${usd(n)}`; }
@@ -371,6 +385,9 @@ function signedUsd(n: number): string { return `${n < 0 ? "−" : "+"}${usd(n)}`
 export function entryRefusal(a: AlertPayload, ctx: DeskContext, limits: DeskLimits): string | null {
   if (!ctx.enabled) return "desk is disabled";
   if (ctx.guardianFreshMs == null || ctx.guardianFreshMs > 20 * 60_000) return "guardian has not run in the last 20 minutes";
+  if (ctx.eventPolicyAgeMs == null || ctx.eventPolicyAgeMs > EVENT_POLICY_FRESH_MS) return "event calendar not checked in the last 20 minutes";
+  if (ctx.eventMode === "paused") return `event window: ${ctx.eventWindow ?? "tier-1 print within 30 minutes"}`;
+  if (ctx.cmeHoliday) return ctx.cmeHoliday;
   if (ctx.openRoots.includes(a.root)) return `already holding ${a.root}`;
   if (ctx.openRoots.length >= limits.maxPositions) return `${limits.maxPositions} positions already open`;
   if (ctx.entriesToday >= limits.maxEntriesPerDay) return `${limits.maxEntriesPerDay} entries already today`;

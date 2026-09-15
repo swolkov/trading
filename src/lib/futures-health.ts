@@ -1,4 +1,5 @@
-import { cmeOpen } from "@/lib/futures-desk-rules";
+import { EVENT_POLICY_FRESH_MS, cmeOpen } from "@/lib/futures-desk-rules";
+import { cmeOpenForEntry, parseEventPolicy } from "@/lib/futures-desk-calendar";
 import { parseRiskState } from "@/lib/futures-desk-risk";
 import { feedStale, parseAnomaly } from "@/lib/futures-desk-safety";
 
@@ -39,6 +40,8 @@ export function futuresDeskHealth(config: Record<string, string>, now = Date.now
   const risk = parseRiskState(config.futures_desk_risk_state);   // the guardian's portfolio snapshot; null until it has run
   const feedTs = typeof config.futures_desk_feed_seen_at === "string" ? Date.parse(config.futures_desk_feed_seen_at) : NaN;
   const anomaly = parseAnomaly(config.futures_desk_anomaly);
+  const policy = parseEventPolicy(config.futures_desk_event_policy);   // the guardian's event policy (E3); stale or missing refuses entries
+  const policyTs = policy ? Date.parse(policy.at) : NaN;
   return {
     configured,                                                  // broker + webhook credentials present on the server
     enabled: config.futures_desk_enabled === "true",             // the typed-ENABLE switch
@@ -52,6 +55,10 @@ export function futuresDeskHealth(config: Record<string, string>, now = Date.now
     openRisk: risk?.openRisk ?? null,
     dailyLossRemaining: risk?.dailyLossRemaining ?? null,
     cmeOpen: cmeOpen(new Date(now)),
+    cmeOpenForEntry: cmeOpenForEntry(new Date(now)),               // false on a CME holiday (closed, or after the early close) — entries only
+    eventMode: policy?.mode ?? null,
+    eventPolicyAt: Number.isFinite(policyTs) ? new Date(policyTs).toISOString() : null,
+    eventPolicyFresh: Number.isFinite(policyTs) && now - policyTs <= EVENT_POLICY_FRESH_MS,
     // The TradingView heartbeat (E5): red after 180 CME-open minutes of silence — a NO TRADE chip, not a refusal.
     feedSeenAt: Number.isFinite(feedTs) ? new Date(feedTs).toISOString() : null,
     feedStale: feedStale(config.futures_desk_feed_seen_at, now),

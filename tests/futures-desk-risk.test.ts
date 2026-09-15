@@ -5,9 +5,12 @@ import { CLUSTER_OF, clusterOf, clusterRisk, dailyLossRemaining, ddTier, deskCon
 
 const es = (): AlertPayload => { const p = parseAlert({ desk: "futures", edge: "index_daily_mr", symbol: "ES", action: "entry", side: "long", price: 6500, stop: 6440, bar: "2026-09-14T21:00:00Z" }); if (!p.ok) throw new Error(p.reason); return p.alert; };
 const ym = (): AlertPayload => ({ ...es(), root: "YM" });
+/** A fresh, normal event policy and no holiday — the calendar (E3) out of the way for these tests. */
+const calendarOk = { event: { mode: "normal" as const, ageMs: 60_000, window: null }, budgetMult: 1, cmeHoliday: null };
 const okCtx: DeskContext = {
   enabled: true, openRoots: [], entriesToday: 0, dayPnlUsd: 0, equityUsd: 50_000, equityHighUsd: 50_000, guardianFreshMs: 60_000,
   openRiskUsd: 0, sameClusterSameSideRiskUsd: 0, dailyLossRemainingUsd: 750, ddMult: 1, newRiskUsd: 250,
+  eventMode: "normal", eventPolicyAgeMs: 60_000, eventWindow: null, budgetMult: 1, cmeHoliday: null,
 };
 const book: OpenRow[] = [{ root: "ES", side: "long", risk_usd: 250 }, { root: "NQ", side: "long", risk_usd: 250 }, { root: "GC", side: "long", risk_usd: 250 }];
 
@@ -40,13 +43,13 @@ test("refusal strings, exactly", () => {
   assert.equal(entryRefusal(es(), { ...okCtx, openRiskUsd: 750, newRiskUsd: 250 }, DEFAULT_LIMITS), "open risk $750 + $250 would use up the 2% cap ($1,000)");
   // ES $250 + NQ $250 already long → a YM third would take the index cluster past the $500 (A+) cap.
   const two = [book[0], book[1]];
-  const ctx = deskContextOf({ enabled: true, state: { equity: 50_000, equityHigh: 50_000, dayKey: "2026-09-15", dayStartEquity: 50_000, balance: 50_000, dayStartBalance: 50_000, guardianAt: "2026-09-15T15:59:00Z" }, open: two, entriesToday: 2, limits: DEFAULT_LIMITS, alert: { root: "YM", side: "long" }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15" });
+  const ctx = deskContextOf({ enabled: true, state: { equity: 50_000, equityHigh: 50_000, dayKey: "2026-09-15", dayStartEquity: 50_000, balance: 50_000, dayStartBalance: 50_000, guardianAt: "2026-09-15T15:59:00Z" }, open: two, entriesToday: 2, limits: DEFAULT_LIMITS, alert: { root: "YM", side: "long" }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15", ...calendarOk });
   assert.ok(!("refusal" in ctx));
   if ("refusal" in ctx) return;
   assert.equal(ctx.sameClusterSameSideRiskUsd, 500); assert.equal(ctx.openRiskUsd, 500); assert.equal(ctx.dailyLossRemainingUsd, 250);
   assert.equal(entryRefusal(ym(), ctx, DEFAULT_LIMITS), "index longs already risk $500 — adding $250 exceeds the $500 cluster cap");
   // ES + NQ only: the second index long is allowed.
-  const one = deskContextOf({ enabled: true, state: { equity: 50_000, equityHigh: 50_000, dayKey: "2026-09-15", dayStartEquity: 50_000, balance: 50_000, dayStartBalance: 50_000, guardianAt: "2026-09-15T15:59:00Z" }, open: [book[0]], entriesToday: 1, limits: DEFAULT_LIMITS, alert: { root: "NQ", side: "long" }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15" });
+  const one = deskContextOf({ enabled: true, state: { equity: 50_000, equityHigh: 50_000, dayKey: "2026-09-15", dayStartEquity: 50_000, balance: 50_000, dayStartBalance: 50_000, guardianAt: "2026-09-15T15:59:00Z" }, open: [book[0]], entriesToday: 1, limits: DEFAULT_LIMITS, alert: { root: "NQ", side: "long" }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15", ...calendarOk });
   if ("refusal" in one) throw new Error(one.refusal);
   assert.equal(entryRefusal({ ...es(), root: "NQ" }, one, DEFAULT_LIMITS), null);
   assert.equal(entryRefusal(es(), { ...okCtx, dailyLossRemainingUsd: -120, openRiskUsd: 250 }, DEFAULT_LIMITS), "daily loss limit reached: −$620 realized and $250 open risk against $750");
@@ -64,7 +67,7 @@ test("riskStateOf carries the four cluster keys; parseRiskState round-trips and 
 });
 
 test("deskContextOf fails closed on entries until the guardian has stamped the balances", () => {
-  const base = { enabled: true, open: [] as OpenRow[], entriesToday: 0, limits: DEFAULT_LIMITS, alert: { root: "ES", side: "long" as const }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15" };
+  const base = { enabled: true, open: [] as OpenRow[], entriesToday: 0, limits: DEFAULT_LIMITS, alert: { root: "ES", side: "long" as const }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15", ...calendarOk };
   const r = deskContextOf({ ...base, state: { equity: 50_000, equityHigh: 50_000, guardianAt: "2026-09-15T15:59:00Z" } });
   assert.ok("refusal" in r && /waiting for the guardian/.test(r.refusal));
   const ok = deskContextOf({ ...base, state: { equity: 50_000, equityHigh: 50_000, guardianAt: "2026-09-15T15:59:00Z", balance: 49_900, dayStartBalance: 50_000, dayKey: "2026-09-15", dayStartEquity: 50_000 } });

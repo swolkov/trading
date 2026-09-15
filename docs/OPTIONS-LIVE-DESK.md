@@ -18,12 +18,68 @@ credential lives there; Vercel never holds it) and reports to the admin like the
 | Schedulers | `scripts/com.esbueno.options-live-guard.plist` (StartInterval 300), `scripts/com.esbueno.options-live-entry.plist` (:05/:35, 09–15 h weekdays), `scripts/options-live-run.sh` | Install once: copy both plists to `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$UID <plist>`. They fast-forward `/Users/user/trading-rh-options` from `main` before each run. |
 | Admin | `/options` → Live desk panel (typed **ARM** / Disarm, state, probe, intents, log); `/api/options/live-desk`; System Health rows; Orders → Robinhood segment | The switch the runner reads on every tick. |
 
-## Rules in force (`OPTIONS_LIVE_RULES`)
+## Rules in force (`OPTIONS_LIVE_RULES` + `options-risk-ladder.ts`)
 
 Debit structures only (long call, long put, call/put debit spread) so max loss = premium paid + fees ·
-one contract · one open position · one entry per day · no entries in the last 30 minutes · premium
-stop at 50% of entry · no fixed target: once worth 1.5× entry a trail keeps half the best gain (a spread at full width exits) · out 7 days before expiry · unfilled entry cancelled after
-15 min · account value $300 under its high-water mark → desk disarms itself (positions stay managed).
+sized by the ladder below (one contract, two only on a Strong-or-better structure that fits twice) ·
+one slot (a second after ten closed live trades with the divergence check green) · one entry per day ·
+no entries in the last 30 minutes · premium stop at 50% of entry · no fixed target: once worth 1.5×
+entry a trail keeps half the best gain (a spread at full width exits) · out 7 days before expiry ·
+unfilled entry cancelled after 15 min · account value the larger of $300 and 20% under its high-water
+mark → desk disarms itself (positions stay managed).
+
+## The size ladder, drawdown tiers, clusters and the reserve (Sep 15 2026, `src/lib/options-risk-ladder.ts`)
+
+**ARM sets `options_live_max_loss_usd` to the CEILING** — $150, or $225 once `options_score_promoted="true"`.
+Per trade the runner grades the candidate and sizes under it, then hands the core that cap as the
+policy it enforces on review and re-review (`maxLossUsd`, `maxOpenPositions`, `maxQuantity`; the core
+refuses anything past its hard limit of 2 and 2):
+
+| Grade | Rule | Max loss (the larger of) |
+|---|---|---|
+| Normal | any candidate the screen passed | $100 / 6.7% of equity |
+| Strong | 20-session breakout or breakdown **and** SPY aligned with the direction **and** every leg's spread ≤5% on the live quote **and** payoff at the market's expected move ≥1.5× the planned loss | $150 / 10% |
+| A+ | Strong **and** score ≥80 **and** the score promoted (D7) — locked until then | $225 / 15% |
+
+× the **drawdown tier** from `options_account_snapshot.totalValue` against `options_live_equity_high`:
+tier 0 (<5% under) ×1 · tier 1 (5%) ×1 · tier 2 (10%) ×0.5 · tier 3 (15%) ×0.25 · tier 4 (the larger
+of $300 and 20%) halt — `drawdownHalt` delegates to `ddTier`; the tier is written to `options_live_dd_tier`.
+**Two contracts** only when the grade is Strong or better and one contract's max loss plus its fee
+reserve fits twice inside the cap; the $2 fee reserve is per contract and the core scales it.
+**Cluster**: `clusterOf` = the paper universe's correlation group plus RIOT/MARA/COIN/MSTR →
+`crypto-proxy`, F/RIVN/AAL/CCL/NCLH/T/PFE/WBD/DKNG → `consumer`, NFLX → `megacap`, SOFI → `fintech`.
+The same direction in the same cluster, or an index ETF beside any semis/megacap name in the same
+direction, is one bet — a second is refused (`cluster: SPY call + NVDA call would be one tech bet — refused`).
+**Reserve**: open max loss + the new trade's ≤25% of equity (`reserve: $325 already at risk + $150
+would exceed 25% of $1,500`); no account value on file refuses. **Slots** (`slotsFor`): one, a second
+once `options-live-ledger.ts` counts ten closed round trips with the divergence verdict green — no
+`unknown` intent, every stamped broker review fee inside the reserve, every fill within 5% of its
+limit (from the order's fail-soft `averagePrice`; the limit stands in when the broker gave none).
+The executor stamps the broker's review figures (`review {estimatedFeeUsd, maxLossUsd,
+buyingPowerRequiredUsd}`) on the intent RECORD, not the intent, so recovery identity is untouched.
+Names outside both cluster maps (discovery names) are `speculative`, so two of them in the same
+direction are one bet.
+
+**Sizing facts, stated plainly (Sep 15 2026 review):**
+- The dollar rung is a FLOOR, not a percentage: at $900 equity Normal is still $100 (11% of the
+  account), Strong $150 (17%). The percentages only bite once equity is past $1,500.
+- Rungs above the armed ceiling are dead: with the $150 ceiling, Strong and Normal are the whole
+  ladder; A+ ($225) only exists after promotion **and** a re-ARM (the ceiling is written at ARM time —
+  changing `OPTIONS_LADDER` or the ceiling does nothing to a desk armed under the old one).
+- The halt WIDENS with the high-water mark: `max($300, 20% × high)` — $300 at a $1,500 high, $400 at
+  $2,000. It never tightens below $300, so a shrinking account is not ratcheted into a halt.
+- Equity for the tier and the reserve is the **17:32 ET account snapshot** (`options_account_snapshot`),
+  not a live read; intraday P&L moves neither. No snapshot on file → every entry is refused by the reserve.
+- ARM refuses when the score is promoted but $225 would exceed 15% of that snapshot.
+- **The 2-lot review path is unverified against a real broker response.** Every review to date was
+  one contract; a quantity-2 review (fees, buying power, max loss decoded ×2) has never been seen.
+  Run `probe` on a Strong day before relying on a 2-lot entry.
+- A partially filled 2-lot ENTRY is cancelled at once (not after the 15-min sweep); the filled
+  contracts become an owned 1-lot on the next tick and are stop-managed like any other.
+- With two slots a wanted CLOSE cancels a live entry order first (the policy refuses any order beside
+  an outstanding one); the close goes the same tick if the cancel confirms, else the next.
+- A leg-quantity mismatch at the broker never releases the record: release only when NONE of the
+  record's legs (option + side) is at the broker; a mismatch is kept, logged and paged once.
 Entry signal = the research screen's 20-session breakout/breakdown with 50/200-day alignment, on the
 day's broker bars; the structure is chosen by the screen and re-priced on live quotes.
 
@@ -104,7 +160,21 @@ exactly the move the options market is pricing (ATM straddle ÷ spot), in the si
 move is rejected outright — that is a lottery ticket.
 
 **Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
-trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
+trail keeps half of the best gain seen. A spread worth 90% or more of its width exits whole. Out 7
+days before expiry. **Thesis invalidation (Sep 15 2026):** the entry stashes the signal's 20-session
+range edges on the reservation record (`candidate`, beside the canonical intent); at fill the edge the
+signal CLEARED, back inside the range by the pre-registered 0.5% buffer, becomes `invalidationPx` on the
+owned record — `rangeHigh × 0.995` for a bullish breakout, `rangeLow × 1.005` for a bearish breakdown
+(`invalidationLevel`; SOFI at 12.10 over a 10.20–12.00 range → 11.94) — with `signalDirection`. A failed
+breakout, not noise at the line. The guardian reads the underlying's live quote each tick
+(`underlyingQuote`, fail-soft) and exits at the executable mark once the stock has TRADED beyond that
+level on **two consecutive ticks** (`invalidationTicks`, persisted on the record so a restart cannot
+forget) — trades, not closes, because the premium stop already fires intraday; a quote inside the level,
+stale (>15 min) or missing resets the count. Premium stop, width, trail and time exits take precedence.
+**Partials:** only a 2-lot (Strong-or-better structure that fit twice) banks one contract at 2× entry
+(a close intent with `quantity: 1`) and trails the rest; the policy's close check is now *owned ≥
+intent quantity*, the fill ingest rewrites the owned record with the remainder, and the guardian never
+releases a position while a close intent is unsettled (a 1-lot remainder must not be misread as gone).
 
 ## Earnings and ex-dividend (Sep 15 2026)
 

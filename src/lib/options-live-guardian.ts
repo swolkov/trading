@@ -4,6 +4,7 @@
 // contract, not a strategy claim.
 import type { StructureKind } from "./options-structures";
 import type { LiveContract, OwnedOptionsPosition } from "./options-live-policy";
+import { OPTIONS_LADDER_RULES, ddTier } from "./options-risk-ladder";
 
 export const OPTIONS_LIVE_RULES = {
   premiumStopFrac: 0.5,     // close when the structure is worth half what we paid
@@ -12,11 +13,15 @@ export const OPTIONS_LIVE_RULES = {
   // half of the best gain seen (entry + (peak − entry) × 0.5). A spread at its full width exits: nothing left to earn.
   trailArmMult: 1.5,
   trailLockFrac: 0.5,
+  widthExitFrac: 0.9,       // a spread worth this share of its width closes whole: the last 10% is not worth the gamma
+  partialAtMult: 2,         // a 2-lot banks one contract once the structure is worth this × entry; the rest rides the trail
+  invalidationTicks: 2,     // the underlying must TRADE beyond the thesis level on this many consecutive guard ticks (10 min) before the exit fires
+  invalidationBufferPct: 0.5,   // pre-registered: the level is the edge the signal CLEARED, back inside the range by this much (a failed breakout, not noise at the line)
+  invalidationQuoteMaxAgeMs: 15 * 60_000,   // an older underlying quote counts as no quote: the tick count resets, nothing fires
   exitBeforeDte: 7,         // close inside the last week regardless (gamma/assignment window)
   staleEntryMinutes: 15,    // an unfilled entry is cancelled after this
-  drawdownHaltUsd: 300,     // account value this far under its high → disarm entries (20% of $1,500)
-  maxEntriesPerDay: 1,
-  maxOpenPositions: 1,
+  drawdownHaltUsd: 300,     // the halt's dollar floor: entries disarm at the larger of this and 20% under the high (options-risk-ladder.ts ddTier)
+  maxEntriesPerDay: 1,      // open slots come from the ladder (slotsFor): one, a second after ten closed live trades with the divergence check green
   entryKinds: ["long_call", "long_put", "call_debit", "put_debit"] as StructureKind[],   // debit only: max loss = what we paid
 };
 
@@ -29,6 +34,20 @@ export interface OwnedPositionRecord extends OwnedOptionsPosition {
   exDivAt?: string | null;
   exDivSource?: "scheduled" | "projected";
   shortStrike?: number | null;
+  /** Thesis invalidation (Sep 15 2026): the 20-session range edge the signal CLEARED, back inside by the buffer — rangeHigh × (1 − 0.5%) for a
+   *  bullish breakout, rangeLow × (1 + 0.5%) for a bearish breakdown (`invalidationLevel`) — and the direction; `invalidationTicks` counts
+   *  consecutive guard ticks the underlying has traded beyond it, persisted so a restart cannot forget. */
+  invalidationPx?: number | null;
+  signalDirection?: "bullish" | "bearish";
+  invalidationTicks?: number;
+  /** Set once the desk has paged about a leg-quantity mismatch at the broker, so it pages once and not every five minutes. */
+  mismatchPagedAtMs?: number;
+}
+/** The failed-breakout level: the edge the signal cleared, back inside the range by the buffer. null when the range is unusable. */
+export function invalidationLevel(direction: "bullish" | "bearish", rangeLow: number, rangeHigh: number, rules = OPTIONS_LIVE_RULES): number | null {
+  if (!(rangeLow > 0) || !(rangeHigh >= rangeLow)) return null;
+  const buffer = rules.invalidationBufferPct / 100;
+  return Math.round((direction === "bullish" ? rangeHigh * (1 - buffer) : rangeLow * (1 + buffer)) * 10000) / 10000;
 }
 
 /** Executable net price to CLOSE a debit structure now: sell the long at its bid, buy the short back at its ask. */
@@ -45,22 +64,71 @@ export function closeNetBid(pos: OwnedPositionRecord, contracts: LiveContract[])
 export function dteOf(expiry: string, nowMs: number): number {
   return (Date.parse(`${expiry}T20:00:00Z`) - nowMs) / 86_400_000;
 }
-export interface ExitDecision { exit: boolean; reason: string; limitPrice: number | null; markNet: number | null; /** The peak the caller must persist on the owned record. */ peakNet?: number }
-export function exitDecision(pos: OwnedPositionRecord, contracts: LiveContract[], nowMs: number, rules = OPTIONS_LIVE_RULES): ExitDecision {
+export interface ExitDecision {
+  exit: boolean; reason: string; limitPrice: number | null; markNet: number | null;
+  /** The peak the caller must persist on the owned record. */ peakNet?: number;
+  /** Contracts to close; absent = the whole position. Set only by the partial rule. */ quantity?: number;
+  /** Consecutive ticks beyond the invalidation level — the caller persists it (ownedRecordAfter). */ invalidationTicks?: number;
+}
+export interface UnderlyingSpot { last: number; atMs: number }
+/** The exit rules in precedence: premium stop → width → trail → time → thesis invalidation (two ticks) → partial (2-lot at 2×) → hold.
+ *  `spot` is the underlying's live quote (fail-soft: absent or stale = the invalidation count resets and the rule is skipped). */
+export function exitDecision(pos: OwnedPositionRecord, contracts: LiveContract[], nowMs: number, rules = OPTIONS_LIVE_RULES, spot?: UnderlyingSpot | null): ExitDecision {
   if (pos.direction !== "debit") return { exit: false, reason: "credit structures are not managed by this guardian version", limitPrice: null, markNet: null };
   const net = closeNetBid(pos, contracts);
   if (net == null) return { exit: false, reason: "quote missing for a leg", limitPrice: null, markNet: null };
   const dte = dteOf(pos.expiry, nowMs);
   const entry = pos.entryPrice, peak = Math.max(pos.peakNet ?? entry, net);
   const limit = net > 0 ? Math.min(net, pos.width > 0 ? pos.width : net) : null;
-  if (net <= entry * rules.premiumStopFrac) return { exit: limit != null, reason: limit != null ? `premium stop: ${net.toFixed(2)} ≤ ${(entry * rules.premiumStopFrac).toFixed(2)}` : "expiring worthless, no bid", limitPrice: limit, markNet: net, peakNet: peak };
-  if (pos.width > 0 && net >= pos.width) return { exit: true, reason: `max value: spread is worth its full ${pos.width.toFixed(2)} width`, limitPrice: limit, markNet: net, peakNet: peak };
+  // Thesis invalidation: the underlying TRADES beyond the range edge the signal cleared, on consecutive ticks. Counted first so every
+  // branch below carries the count to persist; a fresh quote inside the level, or no usable quote, resets it.
+  const inv = invalidationTick(pos, spot, nowMs, rules);
+  const base = { markNet: net, peakNet: peak, invalidationTicks: inv.ticks };
+  if (net <= entry * rules.premiumStopFrac) return { exit: limit != null, reason: limit != null ? `premium stop: ${net.toFixed(2)} ≤ ${(entry * rules.premiumStopFrac).toFixed(2)}` : "expiring worthless, no bid", limitPrice: limit, ...base };
+  if (pos.width > 0 && net >= pos.width * rules.widthExitFrac) return { exit: true, reason: net >= pos.width ? `max value: spread is worth its full ${pos.width.toFixed(2)} width` : `max value: ${net.toFixed(2)} is ${(net / pos.width * 100).toFixed(0)}% of the ${pos.width.toFixed(2)} width — closing all`, limitPrice: limit, ...base };
   if (peak >= entry * rules.trailArmMult) {
     const floor = entry + (peak - entry) * rules.trailLockFrac;
-    if (net <= floor) return { exit: true, reason: `trail: ${net.toFixed(2)} ≤ ${floor.toFixed(2)} after a peak of ${peak.toFixed(2)} (entry ${entry.toFixed(2)})`, limitPrice: limit, markNet: net, peakNet: peak };
+    if (net <= floor) return { exit: true, reason: `trail: ${net.toFixed(2)} ≤ ${floor.toFixed(2)} after a peak of ${peak.toFixed(2)} (entry ${entry.toFixed(2)})`, limitPrice: limit, ...base };
   }
-  if (dte <= rules.exitBeforeDte) return { exit: limit != null, reason: limit != null ? `time exit: ${dte.toFixed(1)} days to expiry` : "expiring worthless, no bid", limitPrice: limit, markNet: net, peakNet: peak };
-  return { exit: false, reason: `holding: mark ${net.toFixed(2)} vs entry ${entry.toFixed(2)}, peak ${peak.toFixed(2)}${peak >= entry * rules.trailArmMult ? " (trail armed)" : ""}, ${dte.toFixed(1)} dte`, limitPrice: null, markNet: net, peakNet: peak };
+  if (dte <= rules.exitBeforeDte) return { exit: limit != null, reason: limit != null ? `time exit: ${dte.toFixed(1)} days to expiry` : "expiring worthless, no bid", limitPrice: limit, ...base };
+  if (inv.ticks >= rules.invalidationTicks) return { exit: limit != null, reason: limit != null ? `thesis invalidated: ${inv.note} on ${inv.ticks} consecutive ticks` : `thesis invalidated (${inv.note}) but no bid — will retry`, limitPrice: limit, ...base };
+  const held = pos.legs[0]?.quantity ?? 1;
+  if (held >= 2 && net >= entry * rules.partialAtMult && limit != null) return { exit: true, quantity: 1, reason: `partial: ${net.toFixed(2)} ≥ ${rules.partialAtMult}× entry ${entry.toFixed(2)} — closing 1 of ${held}, trailing the rest`, limitPrice: limit, ...base };
+  return { exit: false, reason: `holding: mark ${net.toFixed(2)} vs entry ${entry.toFixed(2)}, peak ${peak.toFixed(2)}${peak >= entry * rules.trailArmMult ? " (trail armed)" : ""}, ${dte.toFixed(1)} dte${inv.ticks ? ` · ${inv.note} (tick ${inv.ticks} of ${rules.invalidationTicks})` : ""}`, limitPrice: null, ...base };
+}
+function invalidationTick(pos: OwnedPositionRecord, spot: UnderlyingSpot | null | undefined, nowMs: number, rules: typeof OPTIONS_LIVE_RULES): { ticks: number; note: string } {
+  if (pos.invalidationPx == null || !Number.isFinite(pos.invalidationPx) || !pos.signalDirection) return { ticks: 0, note: "no invalidation level on the record" };
+  if (!spot || !(spot.last > 0) || !(nowMs - spot.atMs <= rules.invalidationQuoteMaxAgeMs)) return { ticks: 0, note: "underlying quote unavailable or stale" };
+  const beyond = pos.signalDirection === "bullish" ? spot.last < pos.invalidationPx : spot.last > pos.invalidationPx;
+  if (!beyond) return { ticks: 0, note: `${pos.underlying} ${spot.last} inside its ${pos.invalidationPx} level` };
+  return { ticks: (pos.invalidationTicks ?? 0) + 1, note: `${pos.underlying} ${spot.last} ${pos.signalDirection === "bullish" ? "below" : "above"} its ${pos.invalidationPx} level` };
+}
+/** What the guard does with a live ENTRY order: a partially filled 2-lot is cancelled at once (the filled part is ingested next tick, the
+ *  rest must not keep filling under a moved market); an unfilled entry is cancelled after the stale window. */
+export function entryOrderAction(rec: { action: "open" | "close"; createdAtMs?: number; order?: { state: string } }, nowMs: number, rules = OPTIONS_LIVE_RULES): { cancel: boolean; reason: string } {
+  const state = rec.order?.state ?? "";
+  if (rec.action === "open" && state === "partially_filled") return { cancel: true, reason: "partially filled entry — cancelling the rest now; the filled contracts are ingested next tick" };
+  if (["open", "partially_filled"].includes(state) && rec.createdAtMs != null && nowMs - rec.createdAtMs > rules.staleEntryMinutes * 60_000) return { cancel: true, reason: `stale after ${rules.staleEntryMinutes} min` };
+  return { cancel: false, reason: state ? `${state} for ${rec.createdAtMs != null ? ((nowMs - rec.createdAtMs) / 60_000).toFixed(0) : "?"} min` : "no broker order" };
+}
+/** The pending ENTRY whose broker order is still live — a wanted close must cancel it first (the policy refuses any order while one is outstanding). */
+export function closeBlockedBy(pending: { action: "open" | "close"; state: string; order?: { id: string; state: string } }[]): { id: string; state: string } | null {
+  const live = pending.find((r) => r.action === "open" && r.state !== "settled" && r.order && ["pending", "open", "partially_filled"].includes(r.order.state));
+  return live?.order ?? null;
+}
+/** Ownership against the broker: matched → manage; none of the record's legs at the broker → release; some legs there but not as recorded
+ *  (a quantity mismatch) → KEEP the record and page once — never release exposure on a count the desk cannot explain. */
+export function ownershipVerdict(pos: OwnedPositionRecord, brokerLegs: { optionId: string; side: "long" | "short" }[], matched: boolean): { action: "manage" | "release" | "keep"; page: string | null } {
+  if (matched) return { action: "manage", page: null };
+  const present = pos.legs.filter((l) => brokerLegs.some((b) => b.optionId === l.optionId && b.side === l.side));
+  if (!present.length) return { action: "release", page: null };
+  return { action: "keep", page: pos.mismatchPagedAtMs ? null : `⚠️ Options position ${pos.id} (${pos.kind} ${pos.underlying}): the broker shows its legs at a different quantity than the record (${pos.legs.map((l) => `${l.side} ${l.optionId.slice(0, 8)} × ${l.quantity}`).join(", ")}). Kept, not released — reconcile by hand; the guardian cannot manage it until the record matches.` };
+}
+/** The owned record the runner must persist after a decision (peak and invalidation count), or null when nothing changed. */
+export function ownedRecordAfter(pos: OwnedPositionRecord, decision: ExitDecision): OwnedPositionRecord | null {
+  const peak = decision.peakNet ?? pos.peakNet, ticks = decision.invalidationTicks ?? 0;
+  if (peak === pos.peakNet && ticks === (pos.invalidationTicks ?? 0)) return null;
+  return { ...pos, ...(peak != null ? { peakNet: peak } : {}), invalidationTicks: ticks };
 }
 
 /** Executable net price to OPEN a debit structure now: buy the long at its ask, sell the short at its bid. */
@@ -75,10 +143,10 @@ export function openNetAsk(legs: { optionId: string; side: "buy" | "sell" }[], c
   return Math.ceil(net * 100 - 1e-8) / 100;
 }
 
-/** Account drawdown halt: the desk disarms itself when value falls this far under its high-water mark. */
+/** Account drawdown halt: the desk disarms itself at tier 4 of the ladder — the larger of $300 and 20% under its high-water mark. */
 export function drawdownHalt(totalValue: number, high: number, rules = OPTIONS_LIVE_RULES): { halt: boolean; newHigh: number } {
-  const newHigh = Math.max(high, totalValue);
-  return { halt: totalValue < newHigh - rules.drawdownHaltUsd, newHigh };
+  const tier = ddTier(totalValue, high, { ...OPTIONS_LADDER_RULES, ddHaltFloorUsd: rules.drawdownHaltUsd });
+  return { halt: tier.halt, newHigh: tier.newHigh };
 }
 
 /** The ET calendar day (YYYY-MM-DD) a timestamp falls on — entries per day are counted in ET. */
