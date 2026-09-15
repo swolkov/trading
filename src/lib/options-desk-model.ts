@@ -67,6 +67,8 @@ export interface ResearchCandidate {
   setup: string; spreadPct: number | null;
   /** The signal's 20-session range edges, carried to the owned record as the invalidation level. */
   rangeLow: number; rangeHigh: number;
+  /** The signal day's close — the spot every payoff and expected-move level on the trade card is measured from. */
+  spot: number;
   quantity: 1; limit: number; plannedLoss: number; feeReserve: number; maxProfit: number | null;
   quoteAt: string; quoteFresh: boolean; reason: string;
   /** Market-implied move to expiry (ATM straddle ÷ spot), the yardstick every structure is ranked on. */
@@ -202,7 +204,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const single=!short, singlePreferred=ivToRealized!=null&&ivToRealized<=rules.singleLegMaxIvToRealized;
       const volNote=ivToRealized==null?"implied vs realized vol unavailable → spreads preferred":`implied vol ${(iv!*100).toFixed(0)}% vs realized ${(rv!*100).toFixed(0)}% (${ivToRealized}×) → ${singlePreferred?"single leg preferred":"spread preferred"}${single===singlePreferred?"":" (this is the other family)"}`;
       const moveNote=em==null?"expected move unavailable":`worth $${payoff} at the market's expected ±${(em*100).toFixed(1)}% move`;
-      result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,setup:signal.setup,spreadPct:legSpreadPct([long,...(short?[short]:[])]),rangeLow:signal.rangeLow,rangeHigh:signal.rangeHigh,
+      result.push({symbol:signal.symbol,kind,expiry:long.expiry,legs:[long.id,...(short?[short.id]:[])],strikes:[long.strike,...(short?[short.strike]:[])],quantity:1,setup:signal.setup,spreadPct:legSpreadPct([long,...(short?[short]:[])]),rangeLow:signal.rangeLow,rangeHigh:signal.rangeHigh,spot:signal.close,
         limit:Math.round(price*100)/100,plannedLoss:Math.round(loss*100)/100,feeReserve:fee,maxProfit:maxProfit==null?null:Math.round(maxProfit*100)/100,
         quoteAt:at,quoteFresh:now-Date.parse(at)<=15000,expectedMovePct:emPct,payoffAtMoveUsd:payoff,ivToRealized,
         earningsClass:earnings.earningsClass,earningsAt:earnings.earningsAt,exDivAt:data.events?.[signal.symbol]?.exDivAt??null,
