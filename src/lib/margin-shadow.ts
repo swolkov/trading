@@ -87,6 +87,19 @@ export async function ensureShadowColumns(): Promise<void> {
     "sim_version text",                    // measurement-model cohort (see SIM_VERSION)
     "live_txid text",                      // the Kraken ORDER txid when this row was also traded LIVE
     "live_exec_note text",                 // the executor's note for that attempt (sent / refused why)
+    // INTELLIGENCE STAMPS (Sep 15 2026, margin-intel.ts) — what the scan knew at entry, for the
+    // pre-registered slices. All added at once so the table never migrates piecemeal.
+    "mtf_state text",                      // "U/U/F" = 1d/4h/1h direction (B1)
+    "event_mode text",                     // normal | reduced | paused at entry (B2)
+    "btc_state text",                      // BTC shock state at entry (B3)
+    "deriv_funding double precision",      // funding rate at entry (B4)
+    "deriv_oi double precision",           // open interest at entry (B4)
+    "deriv_oi_chg_24h double precision",   // 24h OI change at entry (B4)
+    "deriv_source text",                   // kraken-futures | bybit (B4)
+    "opportunity_score double precision",  // the 0–100 paper ranker (B5)
+    "opportunity_json text",               // its components (B5)
+    "intel_version text",                  // INTEL_VERSION the stamps were written under
+    "regime_label text",                   // regimeLabel(features) (B6)
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
   }

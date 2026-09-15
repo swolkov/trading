@@ -81,6 +81,82 @@ function rsi14(closes: number[]): number {
   return isFinite(r) ? r : 100;
 }
 
+// ---------- BAR FEATURES (intel foundation, Sep 15 2026) ----------
+// The scanner fetched 130 bar series per tick and kept only the signals. These are the plain
+// numbers the intelligence layer stamps on paper rows (multi-timeframe direction, regime,
+// opportunity score) and that the desk brief reads — computed ONCE per fetch, never a second
+// call. Pure, never mutates `bars`, NaN where under-sampled. evaluate() and scoreConviction()
+// do not read this and are unchanged — pinned by test.
+export interface TfFeatures {
+  close: number;
+  sma20: number;          // mean of the last 20 closes (the forming bar included)
+  prevClose20: number;    // the close 20 bars ago — with sma20 gives the direction stamp
+  hh20: number; ll20: number;   // extremes of the 20 COMPLETED bars, as evaluate() reads them
+  hh90: number; ll90: number;   // extremes of the last 90 bars (the decision zone)
+  atr14: number;
+  atrRatio30: number;     // ATR now ÷ its own 30-bar average (compression <0.55, expansion ≥1.8)
+  volRatio20: number;     // last completed bar's volume ÷ 20-bar average
+  rsi14: number;
+  lastRange: number;      // (high − low) ÷ close of the forming bar
+  dollarVol20: number;    // mean of volume × close over the 20 completed bars
+  // DATA QUALITY. A series with a hole or a stale newest bar must not size a live order.
+  gapBars: number;        // missing bars inside the last 21 (spacing > the timeframe)
+  dupBars: number;        // repeated timestamps inside the last 21
+  staleMs: number;        // how long past the newest bar's scheduled close `now` is (0 while forming)
+  dataOk: boolean;
+  dataReason: string | null;
+}
+
+export function barFeatures(bars: KrakenBar[], intervalMin: number, nowMs: number = Date.now()): TfFeatures {
+  const n = bars.length;
+  const last = bars[n - 1];
+  const closes = bars.map((b) => b.c);
+  const prev = bars.slice(0, -1);
+  const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : NaN);
+  const win20 = prev.slice(-20);
+  const win90 = bars.slice(-90);
+  const catr = n >= 15 ? atr14(bars) : [];
+  const atrNow = catr.length ? catr[catr.length - 1] : NaN;
+  const atrWin = catr.slice(-31, -1).filter((x) => !isNaN(x));
+  const lastClosed = prev[prev.length - 1];
+  const avgVol = win20.length ? mean(win20.map((b) => b.v)) : NaN;
+  // Data quality over the last 21 bars: consecutive timestamps must differ by exactly one
+  // interval (Kraken's OHLC omits empty buckets on thin pairs — that is a gap, not a bar).
+  const step = intervalMin * 60;
+  const tail = bars.slice(-21);
+  let gapBars = 0, dupBars = 0;
+  for (let i = 1; i < tail.length; i++) {
+    const d = tail[i].t - tail[i - 1].t;
+    if (d === 0) dupBars++;
+    else if (d > step) gapBars += Math.round(d / step) - 1;
+    else if (d < 0) dupBars++;   // out of order reads as a duplicate: the series is not trustworthy
+  }
+  const staleMs = last ? Math.max(0, nowMs - (last.t + step) * 1000) : NaN;
+  let dataReason: string | null = null;
+  if (n < 21) dataReason = `insufficient bars (${n})`;
+  else if (dupBars > 0) dataReason = `${dupBars} duplicate bar(s) in the last 20`;
+  else if (gapBars > 0) dataReason = `${gapBars} gap(s) in the last 20 bars`;
+  else if (staleMs > 2 * step * 1000) dataReason = `newest bar ${Math.round(staleMs / 60_000)} min past its close (> 2× ${intervalMin}m)`;
+  return {
+    close: last ? last.c : NaN,
+    sma20: n >= 20 ? mean(closes.slice(-20)) : NaN,
+    prevClose20: n >= 21 ? closes[n - 21] : NaN,
+    hh20: win20.length >= 20 ? Math.max(...win20.map((b) => b.h)) : NaN,
+    ll20: win20.length >= 20 ? Math.min(...win20.map((b) => b.l)) : NaN,
+    hh90: win90.length ? Math.max(...win90.map((b) => b.h)) : NaN,
+    ll90: win90.length ? Math.min(...win90.map((b) => b.l)) : NaN,
+    atr14: atrNow,
+    atrRatio30: atrWin.length && atrNow > 0 ? atrNow / mean(atrWin) : NaN,
+    volRatio20: lastClosed && avgVol > 0 ? lastClosed.v / avgVol : NaN,
+    rsi14: rsi14(closes),
+    lastRange: last && last.c > 0 ? (last.h - last.l) / last.c : NaN,
+    dollarVol20: win20.length >= 20 ? mean(win20.map((b) => b.v * b.c)) : NaN,
+    gapBars, dupBars, staleMs,
+    dataOk: dataReason == null,
+    dataReason,
+  };
+}
+
 export function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bars: KrakenBar[]): ScanSignal[] {
   const out: ScanSignal[] = [];
   if (bars.length < 25) return out;
@@ -168,21 +244,29 @@ export function evaluate(coin: { name: string; symbol: string }, tf: TfSpec, bar
 // Scan the whole universe. Paced ~150ms/call to stay well under Kraken's public limit
 // (26 coins × 5 timeframes = 130 calls ≈ 20s, comfortably inside the 300s cron budget).
 // A coin/timeframe that errors (bad pair, thin history) is skipped, not fatal.
-export async function scanUniverse(): Promise<{ signals: ScanSignal[]; errors: string[] }> {
+// Also returns the per-series FEATURES ("COIN:tf" → TfFeatures) and BTC's 5m/1h bars, from
+// the same fetches — the intelligence layer reads these; the signal path is unchanged.
+export interface UniverseScan { signals: ScanSignal[]; errors: string[]; features: Record<string, TfFeatures>; btcBars: { m5: KrakenBar[]; h1: KrakenBar[] } }
+export async function scanUniverse(): Promise<UniverseScan> {
   const signals: ScanSignal[] = [];
   const errors: string[] = [];
+  const features: Record<string, TfFeatures> = {};
+  const btcBars: UniverseScan["btcBars"] = { m5: [], h1: [] };
   for (const coin of SCAN_COINS) {
     for (const tf of TIMEFRAMES) {
       try {
         const bars = await getKrakenOHLC(coin.symbol, tf.interval);
         signals.push(...evaluate(coin, tf, bars));
+        try { features[`${coin.name}:${tf.label}`] = barFeatures(bars, tf.interval); } catch { /* features are additive; a bad series just has none */ }
+        if (coin.name === "BTC" && tf.interval === 5) btcBars.m5 = bars;
+        if (coin.name === "BTC" && tf.interval === 60) btcBars.h1 = bars;
       } catch (e) {
         errors.push(`${coin.name}@${tf.label}: ${String(e).slice(0, 60)}`);
       }
       await new Promise((r) => setTimeout(r, 150));
     }
   }
-  return { signals, errors };
+  return { signals, errors, features, btcBars };
 }
 
 // Scan ONE coin across every timeframe — the live path's entry point into the same
