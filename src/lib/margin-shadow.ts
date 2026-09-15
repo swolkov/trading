@@ -19,8 +19,9 @@ import {
   pyramidAddDue,
   pyramidAddNotional,
 } from "@/lib/margin-live-risk";
-import { RETIRED_AUTO_SOURCES, TWIN_SOURCES } from "@/lib/margin-auto-plans";
+import { OWN_SIGNAL_PAPER_SOURCES, RETIRED_AUTO_SOURCES, TWIN_SOURCES } from "@/lib/margin-auto-plans";
 import { maeR, troughUpdate } from "@/lib/margin-shadow-excursion";
+import { partialDue, partialFillPx, partialTradePnl } from "@/lib/margin-shadow-legs";
 
 // FEE MODEL — an honest ESTIMATE, not exact truth (that's the real scoreboard, which
 // reads actual fills+fees from Kraken's ledger). Modeled: maker entry + taker exit on
@@ -53,6 +54,14 @@ const MAX_HOLD_H = 48;
 // Spencer trades a coin on margin, recalibrate its rate here from the real kraken_my_ledger.
 const ROLLOVER_4H: Record<string, number> = { BTC: 0.00015, ETH: 0.0002, SOL: 0.0003 };
 const ROLLOVER_DEFAULT = 0.0003;
+/**
+ * STOP-FILL SLIPPAGE HAIRCUT on paper stop exits, in bp of the stop level (C7 §5, Sep 15 2026).
+ * Live stops fill past the level; A4 measures the real number per stop exit
+ * (margin_round_trips.stop_fill_slip_bp). This stays 0 — INERT — until ≥10 measured stop fills
+ * exist, then a deliberate PR sets it to the measured average (pre-registered). At 0 the paper
+ * arithmetic below is byte-identical to what it was.
+ */
+export const PAPER_STOP_SLIP_BP = 0;
 /** Exported for the trade card's expected-financing line (margin-trade-card.ts); the paper model's own number. */
 export function rollover4h(symbol: string): number {
   return ROLLOVER_4H[pairBase(symbol)] ?? ROLLOVER_DEFAULT;
@@ -101,6 +110,9 @@ export async function ensureShadowColumns(): Promise<void> {
     "shadow_add_px double precision",      // PYRAMID: the second unit's entry price (null = no add yet)
     "shadow_add_t double precision",       // epoch secs of the 1-min bar (a 4h close) that triggered the add
     "shadow_add_notional double precision", // the second unit's notional (risk-sized to the stop)
+    "shadow_partial_px double precision",   // PARTIAL (swing-partial): the banked leg's fill price (null = not banked yet)
+    "shadow_partial_t double precision",    // epoch secs of the 1-min bar that filled the partial
+    "shadow_partial_notional double precision", // the banked leg's notional (partialFrac × the position)
     "shadow_seen_t double precision",      // epoch secs of the last 1-min bar already evaluated —
                                            // bars are never scored twice, so a ratcheted stop
                                            // can't be retro-applied to wicks it didn't exist for
@@ -205,6 +217,7 @@ export const SWING_REACTIVATED_AT = "2026-09-08T14:55:00Z";
 /** The moment after which a sleeve's record tests the rule as it stands today. */
 export function policyCutFor(source: string): string {
   return source === "swing-lev" || source === "swing-spot" || source === "swing-wide" || source === "swing-lock" || source === "swing-pyr"
+    || source === "swing-partial" || source === "swing-retest" || source === "swing-mtf" || source === "swing-atr" || source === "swing-short"
     ? SWING_REACTIVATED_AT
     : POLICY_CUT_AT;
 }
@@ -231,6 +244,8 @@ interface OpenRow {
   shadow_seen_t: number | null; conviction: string | null; source: string | null;
   shadow_add_px: number | null; shadow_add_t: number | null; shadow_add_notional: number | null;
   shadow_notional: number | null; shadow_trough?: number | null;
+  shadow_stop_frac?: number | null;   // C5d: the ATR twin's per-row stop fraction (null = the container's fixed stop)
+  shadow_partial_px?: number | null; shadow_partial_t?: number | null; shadow_partial_notional?: number | null;
 }
 
 // Per-strategy exit profile. Fast breakouts cut quickly (tight, leverage-scaled stop, 2-day
@@ -243,6 +258,7 @@ export interface ExitProfile {
   tightAfterR?: number; tightTrailR?: number;   // once the peak reaches tightAfterR, trail tightTrailR behind it (default 1R)
   launchH?: number; launchMinR?: number;        // failure to launch: still below launchMinR after launchH hours → close
   addAtR?: number;                              // PYRAMID: one risk-sized add when a 4h bar closes ≥ +addAtR (default: never)
+  partialAtR?: number; partialFrac?: number;    // PARTIAL: bank partialFrac of the notional once the peak reaches +partialAtR (default: never)
 }
 /**
  * Paper's managed exit as ONE pure function (the guardian mirrors the default form in
@@ -265,7 +281,12 @@ export function managedStop(dir: number, entry: number, peak: number, stopPx: nu
 export function launchStopDue(p: Pick<ExitProfile, "launchH" | "launchMinR">, ageH: number, peakR: number): boolean {
   return p.launchH != null && p.launchMinR != null && ageH >= p.launchH && peakR < p.launchMinR;
 }
-export function exitParams(source: string | null, lev: number, entry: number): ExitProfile {
+/**
+ * `stopFrac` (optional, default 0.04) is read ONLY by the ATR twin (swing-atr): every other branch
+ * keeps its fixed stop whatever is passed, so legacy three-argument calls — and the containers
+ * test that pins live to paper — are unaffected.
+ */
+export function exitParams(source: string | null, lev: number, entry: number, stopFrac = 0.04): ExitProfile {
   if (source === "swing-spot") return { maxHoldH: 24 * 14, oneR: entry * 0.06, carry: false };
   if (source === "swing-lev") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
   // SWING-WIDE (registered 2026-09-09) — swing-lev's container and signals with ONE change:
@@ -316,6 +337,19 @@ export function exitParams(source: string | null, lev: number, entry: number): E
   // added at +1.8R with the stop still at breakeven risks ~2R (worst −$694). LIVE-CAPABLE: the
   // guardian triggers the add and the executor sizes it with the same functions.
   if (source === "swing-pyr") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2, addAtR: 1 };
+  // ── THE SEP 15 2026 TWINS (docs/KRAKEN-DESK-OPERATING-MODEL.md §4 — hypotheses and kill rules
+  // were committed before any of these opened a row). All PAPER ONLY: no live container, the
+  // containers test proves none can be armed. Comparator = swing-wide on identical signals.
+  // 5a swing-partial: swing-wide's container; bank 30% at +2R (margin-shadow-legs.ts), trail the rest 2R.
+  if (source === "swing-partial") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2, partialAtR: 2, partialFrac: 0.3 };
+  // 5b swing-retest: swing-wide's container on a DEFERRED entry — filled by margin-pending.ts on the retest.
+  if (source === "swing-retest") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2 };
+  // 5c swing-mtf: swing-wide's container, opened only when 1d and 4h closes are above their SMA20 (expected to fail).
+  if (source === "swing-mtf") return { maxHoldH: 24 * 7, oneR: entry * 0.04, carry: true, trailR: 2 };
+  // 5d swing-atr: swing-wide's hold and trail; the stop is the row's own clamp(2×ATR14/close, 2%, 8%).
+  if (source === "swing-atr") return { maxHoldH: 24 * 7, oneR: entry * (stopFrac > 0 ? stopFrac : 0.04), carry: true, trailR: 2 };
+  // 5e swing-short: swing-lev's container mirrored on 4h BREAKDOWNS in a BTC down-regime, paper only.
+  if (source === "swing-short") return { maxHoldH: 24 * 4, oneR: entry * 0.04, carry: true };
   // Fast-breakout A/B: same entries, different stop width — the scoreboard decides which earns
   // more. 'fast-tight' cuts a failed break fast (~2%, resolves in minutes-hours); 'scanner' is
   // the wide 6% control. BOTH RETIRED (Sep 1 / Sep 4). Exit profiles stay so already-open
@@ -370,10 +404,10 @@ export const SIZE_MULTIPLIER: Record<string, number> = { "selective-x5": 5 };
 // 3.5× the weight) in the headline totals, the conviction table, the edges by direction and
 // coin, the milestone reports, and the daily lessons. They keep their own scoreboard row and
 // the log; every POOLED statistic reads through this predicate instead of RECORD_SQL.
-export const EXPERIMENT_SOURCES: string[] = [...Object.keys(SIZE_MULTIPLIER), ...TWIN_SOURCES];
+export const EXPERIMENT_SOURCES: string[] = [...Object.keys(SIZE_MULTIPLIER), ...TWIN_SOURCES, ...OWN_SIGNAL_PAPER_SOURCES];
 export const POOLED_SQL = `${RECORD_SQL} AND COALESCE(source,'manual') NOT IN (${EXPERIMENT_SOURCES.map((s) => `'${s}'`).join(",")})`;
-export function positionNotional(source: string | null, lev: number, entry: number, refEquity: number, maxRiskPct: number): number {
-  const { oneR } = exitParams(source, lev, entry);
+export function positionNotional(source: string | null, lev: number, entry: number, refEquity: number, maxRiskPct: number, stopFrac?: number | null): number {
+  const { oneR } = exitParams(source, lev, entry, stopFrac != null && stopFrac > 0 ? stopFrac : undefined);
   maxRiskPct = maxRiskPct * (SIZE_MULTIPLIER[source ?? ""] ?? 1);
   const stopDistPct = entry > 0 ? oneR / entry : 0;
   const levCap = refEquity * Math.max(1, lev);
@@ -430,13 +464,13 @@ async function sizingParams(strict = false): Promise<{ refEquity: number; maxRis
 // Legacy rows can be reconstructed once for display but never labelled entry-verified.
 export async function snapshotShadowSizing(id: number, atEntry = true): Promise<number | null> {
   const { refEquity, maxRiskPct } = await sizingParams(atEntry);
-  const rows = await prisma.$queryRawUnsafe<{ source: string | null; leverage: number; mark_price: number; conviction: string | null; time: Date }[]>(
-    `SELECT source, leverage, mark_price, conviction, time FROM tradingview_alerts WHERE id=$1`, id,
+  const rows = await prisma.$queryRawUnsafe<{ source: string | null; leverage: number; mark_price: number; conviction: string | null; time: Date; shadow_stop_frac: number | null }[]>(
+    `SELECT source, leverage, mark_price, conviction, time, shadow_stop_frac FROM tradingview_alerts WHERE id=$1`, id,
   );
   const row = rows[0];
   if (!row || !(row.mark_price > 0)) return null;
   const fraction = convictionRisk(row.conviction, maxRiskPct);
-  const notional = positionNotional(row.source, row.leverage || 2, row.mark_price, refEquity, fraction);
+  const notional = positionNotional(row.source, row.leverage || 2, row.mark_price, refEquity, fraction, row.shadow_stop_frac);
   const frozen = await prisma.$queryRawUnsafe<{ shadow_notional: number }[]>(
     `UPDATE tradingview_alerts SET shadow_notional=COALESCE(shadow_notional,$2),
       shadow_ref_equity=CASE WHEN shadow_notional IS NULL THEN $3 ELSE shadow_ref_equity END,
@@ -476,7 +510,8 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
   ).catch(() => {});
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source,
-            shadow_add_px, shadow_add_t, shadow_add_notional, shadow_notional, shadow_trough
+            shadow_add_px, shadow_add_t, shadow_add_notional, shadow_notional, shadow_trough,
+            shadow_stop_frac, shadow_partial_px, shadow_partial_t, shadow_partial_notional
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 500`,
@@ -516,7 +551,7 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     const entry = r.mark_price;
     const lev = Math.max(1, Math.min(20, r.leverage || 2));
     const dir: 1 | -1 = r.side === "buy" ? 1 : -1;
-    const profile = exitParams(r.source, lev, entry);   // per-strategy exit profile
+    const profile = exitParams(r.source, lev, entry, r.shadow_stop_frac ?? undefined);   // per-strategy exit profile (the ATR twin's row-level stop)
     const { maxHoldH, oneR, carry } = profile;
     const notional = r.shadow_notional ?? await snapshotShadowSizing(r.id, false);
     if (!(notional != null && notional > 0)) continue;
@@ -568,6 +603,11 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
       r.shadow_add_px != null && r.shadow_add_px > 0 && r.shadow_add_notional != null && r.shadow_add_notional > 0
         ? { px: r.shadow_add_px, t: r.shadow_add_t ?? 0, notional: r.shadow_add_notional }
         : null;
+    // PARTIAL (swing-partial): the banked leg, if one has been banked. Persisted like the add.
+    let partial: { px: number; t: number; notional: number } | null =
+      r.shadow_partial_px != null && r.shadow_partial_px > 0 && r.shadow_partial_notional != null && r.shadow_partial_notional > 0
+        ? { px: r.shadow_partial_px, t: r.shadow_partial_t ?? 0, notional: r.shadow_partial_notional }
+        : null;
     const riskUsd = entry > 0 ? notional * (oneR / entry) : 0;   // what the first unit risks at its stop
     // Breakeven once +1R, then trail behind the peak — ratchet only (never loosen). The
     // trail width is the profile's (1R for the record; selective-tight narrows after +2R).
@@ -591,6 +631,11 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
         const px = dir > 0 ? b.c * 1.001 : b.c * 0.999;
         const n2 = pyramidAddNotional(riskUsd, dir > 0 ? "long" : "short", px, stopPx, notional);
         if (n2 > 0) add = { px, t: b.t, notional: n2 };
+      }
+      // The partial fires on a completed bar whose favourable extreme reached +partialAtR, after that
+      // bar's stop test and ratchet; a resting limit, so a gap through the level fills at the open.
+      if (!partial && partialDue(profile.partialAtR, dir, entry, oneR, b, false) && profile.partialFrac != null && profile.partialFrac > 0) {
+        partial = { px: partialFillPx(dir, entry, oneR, profile.partialAtR as number, b.o), t: b.t, notional: notional * profile.partialFrac };
       }
     }
     if (exit == null && liveBar) {
@@ -622,6 +667,8 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
       exit = now;
       reason = timeStopLabel;
     }
+    // Stop-fill haircut (PAPER_STOP_SLIP_BP): stop exits only, never a time stop. Exact at 0.
+    if (exit != null && PAPER_STOP_SLIP_BP > 0 && (reason === "initial stop" || reason === "trailing stop")) exit = exit * (1 - dir * PAPER_STOP_SLIP_BP / 1e4);
 
     if (exit == null) {
       // Still open — persist peak/stop for trailing, PLUS the live mark-to-market P&L: what
@@ -631,6 +678,10 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
       const uRoll = Math.ceil(ageH / 4);
       const uNet = uGross - ENTRY_FEE - TAKER - (carry ? uRoll * rollover4h(r.symbol) : 0);
       let unrealized = uNet * notional;
+      if (partial) {
+        // The banked leg is realised; the remainder floats. Same fee split as the resolution below.
+        unrealized = partialTradePnl({ dir, entry, exit: now, notional, partial, tOpen, tExit: Date.now() / 1000, carry, fees: { entry: ENTRY_FEE, taker: TAKER, roll4h: rollover4h(r.symbol) } }).pnl;
+      }
       if (add) {
         // The second unit: taker in and out, its own rollover from its own fill time.
         const addAgeH = Math.max(0, (Date.now() / 1000 - add.t) / 3600);
@@ -641,8 +692,9 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
       // overwrite peak/stop on a row the other run has since resolved — shadow_peak
       // feeds the give-back metric and must freeze at resolution.
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5, shadow_add_px=COALESCE(shadow_add_px,$6), shadow_add_t=COALESCE(shadow_add_t,$7), shadow_add_notional=COALESCE(shadow_add_notional,$8), shadow_trough=$9 WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
-        peak, stopPx, unrealized, r.id, nextSeenT, add?.px ?? null, add?.t ?? null, add?.notional ?? null, trough,
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5, shadow_add_px=COALESCE(shadow_add_px,$6), shadow_add_t=COALESCE(shadow_add_t,$7), shadow_add_notional=COALESCE(shadow_add_notional,$8), shadow_trough=$9,
+           shadow_partial_px=COALESCE(shadow_partial_px,$10), shadow_partial_t=COALESCE(shadow_partial_t,$11), shadow_partial_notional=COALESCE(shadow_partial_notional,$12) WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
+        peak, stopPx, unrealized, r.id, nextSeenT, add?.px ?? null, add?.t ?? null, add?.notional ?? null, trough, partial?.px ?? null, partial?.t ?? null, partial?.notional ?? null,
       );
       continue;
     }
@@ -655,6 +707,11 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     const netPct = grossPct - feeFrac;
     let pnl = netPct * notional;
     let feeDollars = feeFrac * notional;   // the fee drag on this trade (for gross-vs-net)
+    if (partial) {
+      // Two legs sharing one entry: the banked leg to its own time, the remainder to this exit.
+      const legs = partialTradePnl({ dir, entry, exit, notional, partial, tOpen, tExit: Date.now() / 1000, carry, fees: { entry: ENTRY_FEE, taker: TAKER, roll4h: rollover4h(r.symbol) } });
+      pnl = legs.pnl; feeDollars = legs.fees;
+    }
     if (add) {
       // The second unit exits with the first, at the same price; its own fees and carry.
       const addAgeH = Math.max(0, (Date.now() / 1000 - add.t) / 3600);
@@ -668,8 +725,9 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     // death. The still-open guard makes overlapping cron runs harmless: whichever run
     // resolves the row first wins, the loser affects 0 rows and reports nothing.
     const affected = await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7, shadow_add_px=COALESCE(shadow_add_px,$8), shadow_add_t=COALESCE(shadow_add_t,$9), shadow_add_notional=COALESCE(shadow_add_notional,$10), shadow_trough=$11, shadow_mae_r=$12 WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
-      exit, pnl, reason, peak, stopPx, r.id, feeDollars, add?.px ?? null, add?.t ?? null, add?.notional ?? null, trough, maeR(dir, entry, trough, oneR),
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7, shadow_add_px=COALESCE(shadow_add_px,$8), shadow_add_t=COALESCE(shadow_add_t,$9), shadow_add_notional=COALESCE(shadow_add_notional,$10), shadow_trough=$11, shadow_mae_r=$12,
+         shadow_partial_px=COALESCE(shadow_partial_px,$13), shadow_partial_t=COALESCE(shadow_partial_t,$14), shadow_partial_notional=COALESCE(shadow_partial_notional,$15) WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
+      exit, pnl, reason, peak, stopPx, r.id, feeDollars, add?.px ?? null, add?.t ?? null, add?.notional ?? null, trough, maeR(dir, entry, trough, oneR), partial?.px ?? null, partial?.t ?? null, partial?.notional ?? null,
     );
     if (affected === 0) continue;
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction, source: r.source });
@@ -808,6 +866,11 @@ const STRATEGY_LABELS: Record<string, string> = {
   "swing-wide": "Swing WIDE TRAIL — swing-lev's trades, trailing 2R behind the peak instead of 1R, 7-day hold — twin (Sep 9), not pooled, live-capable (Sep 12)",
   "swing-lock": "Swing WIDE + LOCK — swing-lev's trades on a 2R trail, locking 0.5R behind the peak once +3R — twin (Sep 11), not pooled, paper only",
   "swing-pyr": "Swing WIDE + PYRAMID — swing-wide plus one risk-sized add when a 4h bar closes ≥ +1R, 2R trail on both — twin (Sep 12), not pooled, live-capable",
+  "swing-partial": "Swing WIDE + PARTIAL — swing-wide's trades, 30% banked at +2R, the rest trails 2R — twin (Sep 15), not pooled, paper only",
+  "swing-retest": "Swing WIDE on the RETEST — swing-wide's signals entered only on a retest of the pierced level within 24h — twin (Sep 15), not pooled, paper only",
+  "swing-mtf": "Swing WIDE + MTF GATE — swing-wide's signals only when 1d and 4h close above their 20-bar averages — twin (Sep 15, expected to fail), not pooled, paper only",
+  "swing-atr": "Swing WIDE + ATR STOP — swing-wide's trades with the stop at 2×ATR14 (2–8%), risk-sized — twin (Sep 15), not pooled, paper only",
+  "swing-short": "Swing SHORT — high-conviction 4h breakdowns in a BTC DOWN-regime, swing-lev's container mirrored — own signals (Sep 15), not pooled, paper only",
   "swing-spot": "Spot swing — same entries, 1×, 6% / 14d, no rollover — REACTIVATED Sep 8 (spot, not margin-tradeable by the executor)",
   "sweep-fade": "Liquidity-sweep fade — RETIRED Sep 3 (proven loser)",
   selective: "Selective — high-conviction 5m/15m longs, 3% / 48h",
@@ -977,10 +1040,10 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     id: number; time: Date; source: string | null; symbol: string; side: string;
     leverage: number | null; conviction: string | null; mark_price: number | null;
     shadow_exit: number | null; shadow_pnl: number | null; shadow_unrealized: number | null;
-    shadow_status: string | null; shadow_reason: string | null; sim_version: string | null; shadow_notional: number | null;
+    shadow_status: string | null; shadow_reason: string | null; sim_version: string | null; shadow_notional: number | null; shadow_stop_frac: number | null;
   }[]>(
     `SELECT id, time, source, symbol, side, leverage, conviction, mark_price,
-            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason, sim_version, shadow_notional
+            shadow_exit, shadow_pnl, shadow_unrealized, shadow_status, shadow_reason, sim_version, shadow_notional, shadow_stop_frac
      FROM tradingview_alerts
      WHERE side IN ('buy','sell')
      ORDER BY time DESC LIMIT $1`,
@@ -998,7 +1061,7 @@ export async function recentPaperTrades(limit = 100): Promise<PaperTradeRow[]> {
     exit: r.shadow_exit,
     unrealized: r.shadow_status === "resolved" ? null : r.shadow_unrealized,
     pnl: r.shadow_pnl,
-    notional: r.shadow_notional ?? (r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, convictionRisk(r.conviction, maxRiskPct)) : null),
+    notional: r.shadow_notional ?? (r.mark_price ? positionNotional(r.source, Math.max(1, Math.min(20, r.leverage ?? 2)), r.mark_price, refEquity, convictionRisk(r.conviction, maxRiskPct), r.shadow_stop_frac) : null),
     status: r.shadow_status ?? "open",
     reason: r.shadow_reason,
     simVersion: r.sim_version ?? SIM_VERSION,

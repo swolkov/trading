@@ -54,10 +54,10 @@ test("plans: the two container twins always ride along; the regime twin only in 
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: false }).map((p) => p.source), base, "down-regime → no regime twin");
   assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: true }).map((p) => p.source), [...base, "selective-btc"]);
   assert.deepEqual(autoShadowPlans("breakout", "1h", high, 5, { btcUp: true }), [], "twins never widen the entry rule");
-  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide", "swing-lock", "swing-pyr"], "4h/1d go to the slow family and its own trail twins, never to the fast twins");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }).map((p) => p.source), ["swing-lev", "swing-spot", "swing-wide", "swing-lock", "swing-pyr", "swing-partial"], "4h/1d go to the slow family and its own trail twins, never to the fast twins");
   assert.deepEqual(autoShadowPlans("breakout", "4h", { tier: "med", factors: [] }, 5), [], "slow family is high conviction only");
-  assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }), [], "slow family is longs only; the 5m/15m short sleeve does not take 4h");
-  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-lock", "swing-pyr"]);
+  assert.deepEqual(autoShadowPlans("breakdown", "4h", high, 5, { btcUp: false }).map((p) => p.source), ["swing-short"], "the slow family's longs are longs only; a 4h breakdown in a down-regime feeds the paper-only swing-short (Sep 15); the 5m/15m short sleeve does not take 4h");
+  assert.deepEqual(TWIN_SOURCES, ["selective-tight", "selective-launch", "selective-btc", "selective-majors", "swing-wide", "swing-lock", "swing-pyr", "swing-partial", "swing-retest", "swing-mtf", "swing-atr"]);
 });
 
 test("BTC regime and tsmom signals need 21 complete closes and read close vs 20-day average", () => {
@@ -204,4 +204,81 @@ test("swing-lock rides swing-lev's signals and is never pooled with the record",
   assert.ok(sources.includes("swing-lev") && sources.includes("swing-lock"), "same signal, both sleeves");
   assert.ok(TWIN_SOURCES.includes("swing-lock" as never), "twins are excluded from the pooled totals");
   assert.ok(!autoShadowPlans("breakout", "5m", { tier: "high", factors: [] }, 5).map((p) => p.source).includes("swing-lock"));
+});
+
+// ── The Sep 15 2026 twins (C5): every exitParams pinned; the legacy sources byte-identical ──
+const LEGACY_SOURCES = ["swing-spot", "swing-lev", "swing-wide", "swing-lock", "swing-pyr", "fast-tight", "sweep-fade", "selective", "selective-x5", "selective-tight", "selective-launch", "selective-btc", "selective-majors", "selective-short", "tsmom-short", "tsmom", "tv:esbueno", "selective-swing", "scanner", "manual", null] as const;
+// A FIXTURE, not a call: what every pre-Sep-15 source's container was on origin/main 6f585f0, at
+// entry 100 and lev 2. If a twin's branch ever leaks into a legacy source, this fails.
+const LEGACY_FIXTURE: Record<string, object> = {
+  "swing-spot": { maxHoldH: 336, oneR: 6, carry: false },
+  "swing-lev": { maxHoldH: 96, oneR: 4, carry: true },
+  "swing-wide": { maxHoldH: 168, oneR: 4, carry: true, trailR: 2 },
+  "swing-lock": { maxHoldH: 168, oneR: 4, carry: true, trailR: 2, tightAfterR: 3, tightTrailR: 0.5 },
+  "swing-pyr": { maxHoldH: 168, oneR: 4, carry: true, trailR: 2, addAtR: 1 },
+  "fast-tight": { maxHoldH: 48, oneR: 2, carry: true },
+  "sweep-fade": { maxHoldH: 24, oneR: 2.5, carry: true },
+  selective: { maxHoldH: 48, oneR: 3, carry: true },
+  "selective-x5": { maxHoldH: 48, oneR: 3, carry: true },
+  "selective-tight": { maxHoldH: 48, oneR: 3, carry: true, tightAfterR: 2, tightTrailR: 0.5 },
+  "selective-launch": { maxHoldH: 48, oneR: 3, carry: true, launchH: 8, launchMinR: 0.5 },
+  "selective-btc": { maxHoldH: 48, oneR: 3, carry: true },
+  "selective-majors": { maxHoldH: 48, oneR: 3, carry: true },
+  "selective-short": { maxHoldH: 48, oneR: 3, carry: true },
+  "tsmom-short": { maxHoldH: 336, oneR: 8, carry: true },
+  tsmom: { maxHoldH: 336, oneR: 8, carry: true },
+  "tv:esbueno": { maxHoldH: 48, oneR: 3, carry: true },
+  "selective-swing": { maxHoldH: 96, oneR: 5, carry: true },
+  scanner: { maxHoldH: 48, oneR: 15, carry: true },
+  manual: { maxHoldH: 48, oneR: 15, carry: true },
+  null: { maxHoldH: 48, oneR: 15, carry: true },
+};
+test("C5 INVARIANT: every pre-existing source's exitParams is byte-identical to the fixture, with and without the new 4th argument", () => {
+  for (const src of LEGACY_SOURCES) {
+    const key = src === null ? "null" : src;
+    assert.deepEqual(exitParams(src, 2, 100), LEGACY_FIXTURE[key], `${key} (3 args)`);
+    assert.deepEqual(exitParams(src, 2, 100, 0.07), LEGACY_FIXTURE[key], `${key} ignores the ATR twin's stop fraction`);
+    assert.deepEqual(exitParams(src, 2, 100, 0.04), LEGACY_FIXTURE[key], `${key} (explicit default)`);
+  }
+  // The 4h and 5m plan lists for the legacy sources are exactly what they were: filtering the new
+  // twins out of the list yields the pre-Sep-15 list, in order, with the same leverage.
+  const legacy = new Set(["swing-lev", "swing-spot", "swing-wide", "swing-lock", "swing-pyr"]);
+  const extras = { mtfUp: true, level: 123.4, atrFrac: 0.02 };
+  assert.deepEqual(autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }, "SOL/USD", extras).filter((p) => legacy.has(p.source)), [{ source: "swing-lev", lev: 5 }, { source: "swing-spot", lev: 1 }, { source: "swing-wide", lev: 5 }, { source: "swing-lock", lev: 5 }, { source: "swing-pyr", lev: 5 }]);
+  assert.deepEqual(autoShadowPlans("breakout", "5m", high, 5, { btcUp: true }, "BTC/USD", extras).map((p) => p.source), ["selective", "selective-x5", "selective-tight", "selective-launch", "selective-btc", "selective-majors"], "the fast family never sees the 4h twins");
+  assert.deepEqual(autoShadowPlans("breakdown", "5m", high, 5, { btcUp: false }, "SOL/USD", extras).map((p) => p.source), [SHORT_SOURCE], "the 5m short sleeve is untouched");
+  assert.deepEqual(autoShadowPlans("breakout", "1d", high, 5, { btcUp: true }, "SOL/USD", extras), [{ source: "swing-spot", lev: 1 }], "1d stays spot-only — no 4h twin leaks onto the daily");
+});
+
+test("the five Sep 15 twins' containers are what was registered (docs/KRAKEN-DESK-OPERATING-MODEL.md §4)", () => {
+  const wide = exitParams("swing-wide", 2, 100);
+  assert.deepEqual(exitParams("swing-partial", 2, 100), { ...wide, partialAtR: 2, partialFrac: 0.3 }, "5a: swing-wide + bank 30% at +2R");
+  assert.deepEqual(exitParams("swing-retest", 2, 100), wide, "5b: swing-wide's container on a deferred entry");
+  assert.deepEqual(exitParams("swing-mtf", 2, 100), wide, "5c: swing-wide's container behind the MTF gate");
+  assert.deepEqual(exitParams("swing-atr", 2, 100), wide, "5d: without a row stop it IS swing-wide (4%)");
+  assert.deepEqual(exitParams("swing-atr", 2, 100, 0.065), { ...wide, oneR: 6.5 }, "5d: the row's ATR stop replaces the 4%");
+  assert.deepEqual(exitParams("swing-atr", 2, 100, 0), wide, "a junk stop fraction falls back to 4%");
+  assert.deepEqual(exitParams("swing-short", 2, 100), exitParams("swing-lev", 2, 100), "5e: swing-lev's container mirrored");
+  for (const s of ["swing-partial", "swing-retest", "swing-mtf", "swing-atr"]) assert.ok(TWIN_SOURCES.includes(s as never), `${s} is a twin — never pooled`);
+  assert.ok(!TWIN_SOURCES.includes("swing-short" as never), "swing-short has its own signals — a sleeve, not a twin");
+  for (const s of ["swing-partial", "swing-retest", "swing-mtf", "swing-atr", "swing-short"]) assert.equal(liveContainerFor(s), null, `${s} cannot be armed`);
+});
+
+test("the twins' plans: partial always, retest only with a level, mtf only when the coin's trend reads up, atr only with an ATR", () => {
+  const src = (extra?: Parameters<typeof autoShadowPlans>[6]) => autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }, "SOL/USD", extra).map((p) => p.source);
+  const base = ["swing-lev", "swing-spot", "swing-wide", "swing-lock", "swing-pyr", "swing-partial"];
+  assert.deepEqual(src(undefined), base);
+  assert.deepEqual(src({}), base);
+  assert.deepEqual(src({ level: 150 }), [...base, "swing-retest"]);
+  assert.deepEqual(src({ mtfUp: true }), [...base, "swing-mtf"]);
+  assert.deepEqual(src({ mtfUp: false }), base, "down/flat → no mtf twin");
+  assert.deepEqual(src({ mtfUp: null }), base, "unreadable → no mtf twin");
+  assert.deepEqual(src({ atrFrac: 0.03 }), [...base, "swing-atr"]);
+  assert.deepEqual(src({ atrFrac: NaN }), base);
+  assert.deepEqual(src({ level: 150, mtfUp: true, atrFrac: 0.03 }), [...base, "swing-retest", "swing-mtf", "swing-atr"]);
+  const plans = autoShadowPlans("breakout", "4h", high, 5, { btcUp: true }, "SOL/USD", { level: 150, atrFrac: 0.03 });
+  assert.deepEqual(plans.find((p) => p.source === "swing-retest"), { source: "swing-retest", lev: 5, deferred: true, level: 150 });
+  assert.deepEqual(plans.find((p) => p.source === "swing-atr"), { source: "swing-atr", lev: 5, stopFrac: 0.06 });
+  assert.ok(plans.filter((p) => p.source !== "swing-retest").every((p) => p.deferred == null), "only the retest twin is deferred");
+  assert.deepEqual(autoShadowPlans("breakout", "4h", { tier: "med", factors: [] }, 5, { btcUp: true }, "SOL/USD", { level: 150, mtfUp: true, atrFrac: 0.03 }), [], "the twins never widen the entry rule");
 });

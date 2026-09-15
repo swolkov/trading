@@ -26,6 +26,7 @@ import { EXPECTED_SLIP_PCT } from "@/lib/margin-trade-card";
 import { loadClosedRoundTripTxids, loadRoundTripJournal, upsertRoundTripClose } from "@/lib/margin-round-trips";
 import { refreshCryptoRegime } from "@/lib/margin-crypto-regime";
 import { runPostTradeReviews } from "@/lib/margin-review";
+import { pendingSummary, type PendingSummary } from "@/lib/margin-pending";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -169,7 +170,7 @@ export function divergenceSummary(fills: LiveFill[]): Divergence {
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(0)}`;
 const pct = (n: number | null) => (n == null ? "—" : `${(n * 100).toFixed(0)}%`);
 
-export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null; capacity?: CapacityReport | null; leaderboard?: LeaderboardRow[] }): string {
+export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null; capacity?: CapacityReport | null; leaderboard?: LeaderboardRow[]; pending?: PendingSummary[] }): string {
   const s = input.strategies.filter((x) => x.resolved > 0 || x.open > 0);
   const lines: string[] = [];
   lines.push("---", `last_updated: "${input.at.slice(0, 10)}"`, 'updated_by: "margin-synthesis"', "tags: [performance, margin, paper, live]", "---", "");
@@ -198,6 +199,8 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
   }
   lines.push("", "Verdict ladder: gathering → not paying → promising (could be luck) → **REAL EDGE** (30+ resolved, net>0 at live sizing, t≥2, 7+ distinct days). Arm nothing below REAL EDGE. The **gate** column is the full promotion gate (margin-leaderboard.ts): those four plus max DD inside the breaker, PF ≥ 1.2, rolling-30 not DECAYING, and a guardian-mirrored container — PROMOTE-READY only when all eight are green. Sharpe/Sortino rank and gate nothing: overlapping crypto trades inflate them. R is fee-inclusive (a clean stop ≈ −1.05R).", "");
   if (input.shadow) lines.push(`Shadow totals (current cohort, US universe, experiment twins excluded): ${input.shadow.resolved} resolved · ${pct(input.shadow.hitRate)} hit · net ${money(input.shadow.totalPnl)} · ${input.shadow.open} open (${money(input.shadow.openUnrealized)} unrealized).`, "");
+  // The conditional-entry twin's queue (C5b): its first kill rule is the fill rate at ≥ 40 queued.
+  for (const q of input.pending ?? []) lines.push(`Conditional entries (${q.source}): ${q.queued} queued · ${q.filled} filled · ${q.failed} failed · ${q.expired} expired · ${q.pending} waiting · fill rate ${q.fillRate != null ? `${(q.fillRate * 100).toFixed(0)}%` : "—"} (kill rule: < 25% after 40 queued).`, "");
   const c = input.candidate;
   if (c && (c.byTimeframe.length > 0 || c.recent.length > 0)) {
     const tfmt = (t: number | null) => (t == null ? "—" : t.toFixed(2));
@@ -485,7 +488,7 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
 
   // The candidate whose detail is reported = the armed sleeve if one is armed, else selective.
   const candSource = ((await cfgGet("kraken_margin_live_sources")) ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0] || "selective";
-  const [strategies, shadow, edges, fills, candidate, capacity, board] = await Promise.all([
+  const [strategies, shadow, edges, fills, candidate, capacity, board, pending] = await Promise.all([
     strategyBreakdown().catch(() => [] as StrategyStat[]),
     shadowScore().catch(() => null),
     edgeBreakdowns().catch(() => ({ byDirection: [], byCoin: [] }) as EdgeBreakdowns),
@@ -493,13 +496,14 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
     candidateDetail(candSource).catch(() => null),
     capacityReport(candSource).catch(() => null),
     leaderboard().catch(() => [] as LeaderboardRow[]),
+    pendingSummary().catch(() => [] as PendingSummary[]),
   ]);
   const div = divergenceSummary(fills);
   const [auto, validate, sources, watchState] = await Promise.all([cfgGet("kraken_margin_auto"), cfgGet("kraken_margin_validate_only"), cfgGet("kraken_margin_live_sources"), cfgGet("margin_watch_state")]);
   let equity: number | null = null;
   try { const p = watchState ? (JSON.parse(watchState) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : null; } catch { equity = null; }
   const at = new Date().toISOString();
-  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, capacity, leaderboard: board, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
+  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, capacity, leaderboard: board, pending, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
   await vaultWrite("Performance/margin-statistics.md", stats, "margin-synthesis");
 
   // Journal each closed live round trip once.

@@ -22,6 +22,10 @@ test("every live container equals its paper container (stop %, hold hours, trail
 
 test("sleeves whose paper EXIT the guardian does not mirror have no live container and cannot be armed", () => {
   for (const s of ["selective-tight", "selective-launch", "selective-x5", "swing-spot", "swing-lock", "scanner", "fast-tight", "sweep-fade", "selective-swing", "nonsense", "constructor", "__proto__", "toString"]) assert.equal(liveContainerFor(s), null, s);
+  // The five Sep 15 2026 twins (docs/KRAKEN-DESK-OPERATING-MODEL.md §4) are PAPER ONLY: a partial the
+  // guardian does not take, a conditional entry it does not place, a gate it does not read, a stop
+  // it does not size, a short leg it has no container for. None can be armed.
+  for (const s of ["swing-partial", "swing-retest", "swing-mtf", "swing-atr", "swing-short"]) { assert.equal(liveContainerFor(s), null, `${s} cannot be armed`); assert.ok(!armableSources().includes(s), `${s} is not offered by the arm switch`); }
   for (const s of RETIRED_AUTO_SOURCES) assert.equal(liveContainerFor(s), null, `retired ${s}`);
   assert.equal(liveContainerFor(null), null);
   assert.equal(liveContainerFor(""), null);
