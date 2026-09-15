@@ -20,6 +20,8 @@ import { CUSHION_URGENT_AT, CUSHION_WARN_AT, LIVE_MAX_HOLD_H, LIVE_STOP_DEFAULT_
 import { applyReconcile, planReconcile } from "@/lib/margin-book";
 import { advanceRoundTrip } from "@/lib/margin-round-trip";
 import { bookExposureMatches, recoveryBlocksPair, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
+import { maeR, mfeR, troughUpdate } from "@/lib/margin-shadow-excursion";
+import { upsertRoundTripOpen, type RoundTripOpen } from "@/lib/margin-round-trips";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -50,8 +52,10 @@ type WatchState = {
   nakedBreached?: Record<string, number>;
   // ordertxid → the paper container's state for a bot position: 1R fixed at entry, the
   // best price reached (from completed 1-min bars), and the last bar scored — exactly the
-  // shadow_peak / shadow_stop / shadow_seen_t trio the paper record persists.
-  managed?: Record<string, { oneR: number; peak: number; seenT: number; addTriedT?: number }>;   // addTriedT: the 4h bar (open time) a pyramid add was last attempted on
+  // shadow_peak / shadow_stop / shadow_seen_t trio the paper record persists. `trough` is the
+  // worst price reached (paper's shadow_trough, MAE); `lastStopLevel` the stop level the
+  // guardian last knew to be resting for this book — the level A5's book check reads.
+  managed?: Record<string, { oneR: number; peak: number; seenT: number; addTriedT?: number; trough?: number; lastStopLevel?: number }>;   // addTriedT: the 4h bar (open time) a pyramid add was last attempted on
   // consecutive runs the order book read back EMPTY while bot positions existed. A rescue
   // stop on an empty read is placed only on the SECOND such run: a false-empty read with
   // the real attached stop resting at the same level would otherwise pair a reduce-only
@@ -101,10 +105,11 @@ async function loadState(): Promise<{ state: WatchState; unreliable: boolean; co
     for (const [k, v] of Object.entries(parsed.orphans ?? {})) { const n = num(v); if (n != null && n >= 0) orphans[k] = Math.floor(n); }
     const managed: NonNullable<WatchState["managed"]> = {};
     for (const [k, v] of Object.entries(parsed.managed ?? {})) {
-      const m = v as { oneR?: unknown; peak?: unknown; seenT?: unknown; addTriedT?: unknown };
-      const oneR = num(m?.oneR), peak = num(m?.peak), seenT = num(m?.seenT), addTriedT = num(m?.addTriedT);
+      const m = v as { oneR?: unknown; peak?: unknown; seenT?: unknown; addTriedT?: unknown; trough?: unknown; lastStopLevel?: unknown };
+      const oneR = num(m?.oneR), peak = num(m?.peak), seenT = num(m?.seenT), addTriedT = num(m?.addTriedT), trough = num(m?.trough), lastStopLevel = num(m?.lastStopLevel);
       // addTriedT must survive the round trip: it is the "one pyramid attempt per 4h bar" guard.
-      if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}) };
+      // trough / lastStopLevel are optional mirrors of peak (A4): absent or bad → recomputed.
+      if (oneR != null && oneR > 0 && peak != null && peak > 0 && seenT != null) managed[k] = { oneR, peak, seenT, ...(addTriedT != null && addTriedT > 0 ? { addTriedT } : {}), ...(trough != null && trough > 0 ? { trough } : {}), ...(lastStopLevel != null && lastStopLevel > 0 ? { lastStopLevel } : {}) };
     }
     return {
       state: {
@@ -573,6 +578,10 @@ export async function GET(request: Request) {
           if (priorBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
           continue;
         }
+        // THE JOURNAL ROW (margin-round-trips.ts, phase A): filled once the book's state is known,
+        // written in the finally so every path through the book — cover, time stop, breach, a
+        // thrown error — leaves the row current. Never before protectOk is decided; never a throw.
+        let rt: RoundTripOpen | null = null;
         try {
         const side = grp[0].side;
         const pairRaw = grp[0].pair;
@@ -625,7 +634,9 @@ export async function GET(request: Request) {
         if (bars.length && sinceS > 0 && bars[0].t > sinceS + 180) errors.push(`${pairRaw}: 1-min history gap ${((bars[0].t - sinceS) / 3600).toFixed(1)}h — peak may be under-counted`);
         const done = bars.slice(0, -1);
         let peak = prev?.peak ?? entryPrice;
-        for (const b of done) peak = side === "long" ? Math.max(peak, b.h) : Math.min(peak, b.l);
+        // The worst price too (MAE), the mirror of the peak, from the same completed bars.
+        let trough = prev?.trough ?? entryPrice;
+        for (const b of done) { peak = side === "long" ? Math.max(peak, b.h) : Math.min(peak, b.l); trough = troughUpdate(side === "long" ? 1 : -1, trough, b); }
         const seenT = done.length ? done[done.length - 1].t : (prev?.seenT ?? sinceS);
         let px = bars.length ? bars[bars.length - 1].c : 0;
         if (!(px > 0)) {
@@ -650,9 +661,21 @@ export async function GET(request: Request) {
           if (restingDist > 0 && restingDist / entryPrice >= 0.001 && restingDist / entryPrice <= 0.5) oneR = restingDist;
         }
         if (!(oneR > 0)) oneR = entryPrice * clampLiveStopFrac(stopCfgPct, leverage);
-        managedNext[stateKey] = { oneR, peak, seenT, ...(prev?.addTriedT ? { addTriedT: prev.addTriedT } : {}) };
         const initialStop = side === "long" ? entryPrice - oneR : entryPrice + oneR;
         const bestResting = fixedNow.length ? (side === "long" ? Math.max(...fixedNow.map((o) => o.price)) : Math.min(...fixedNow.map((o) => o.price))) : null;
+        // The stop level the guardian KNOWS to be resting: this run's best resting fixed stop, else
+        // the last one it ledgered (a naked book keeps its last level), else the initial stop.
+        // Updated by reconcile() when it places or keeps one — A5 compares Kraken's book to it.
+        let lastStopLevel = bestResting ?? prev?.lastStopLevel ?? initialStop;
+        managedNext[stateKey] = { oneR, peak, seenT, trough, lastStopLevel, ...(prev?.addTriedT ? { addTriedT: prev.addTriedT } : {}) };
+        const journalTxid = pyr ? pyr.parent.ordertxid : grp.map((g) => g.ordertxid).sort().join("+");
+        const dirN: 1 | -1 = side === "long" ? 1 : -1;
+        rt = {
+          txid: journalTxid, cardId: pyr ? ownership.cardIdOf(pyr.parent.ordertxid) : ownership.cardIdOf(grp[0].ordertxid), pair: pairRaw, side,
+          source: ownership.sourceOf(pyr ? pyr.parent.ordertxid : grp[0].ordertxid), entryPrice, oneR,
+          openedAt: Number.isFinite(oldestMs) ? new Date(oldestMs).toISOString() : null,
+          peak, trough, mfeR: mfeR(dirN, entryPrice, peak, oneR), maeR: maeR(dirN, entryPrice, trough, oneR), lastStopLevel,
+        };
         // The managed level is computed from the AUTHORISED stop and the peak — never from
         // whatever stop happens to be resting (a temporary breach guard must not become the
         // permanent target). The planner keeps a resting stop that is already better.
@@ -672,6 +695,15 @@ export async function GET(request: Request) {
             return (res.txid as string[] | undefined)?.[0];
           },
           cancel: async (txid: string) => { await krakenCancelOrder(txid); orders = orders.filter((o) => o.txid !== txid); },
+        };
+        // Remember the level that is actually resting after a reconcile — the keeper's price or the
+        // one just placed — so state and the journal carry the LEDGERED stop, not a target.
+        const noteStopLevel = (keeperTxid: string | null, placed?: number) => {
+          const lvl = placed != null && placed > 0 ? placed : keeperTxid ? ourStopsOnBook().find((o) => o.txid === keeperTxid)?.price ?? 0 : 0;
+          if (!(lvl > 0)) return;
+          lastStopLevel = lvl;
+          if (managedNext[stateKey]) managedNext[stateKey].lastStopLevel = lvl;
+          if (rt) rt.lastStopLevel = lvl;
         };
         // Reconcile this book's cover to `wantVol` at `level`. Returns true when covered.
         const reconcile = async (wantVol: number, level: number, why: string): Promise<boolean> => {
@@ -701,7 +733,7 @@ export async function GET(request: Request) {
             orders = reread;
             plan = planReconcile({ side, vol: wantVol, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, ourStopsOnBook());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
-            if (!plan.place && !plan.cancel.length) return plan.covered;
+            if (!plan.place && !plan.cancel.length) { noteStopLevel(plan.keeper); return plan.covered; }
             if (withhold) { errors.push(`${pairRaw} (${why}): withholding stop changes on an unconfirmed empty book`); return false; }
           }
           // THE MANUAL-BOOK BOUNDARY: with an OLDER manual position on this pair+side, any exit
@@ -738,7 +770,7 @@ export async function GET(request: Request) {
             orders = rereadLocked;
             plan = planReconcile({ side, vol: fresh, targetLevel: level, px, priceDecimals: meta.priceDecimals, lotDecimals: meta.lotDecimals }, fresh > 0 ? ourStopsOnBook() : ourStopsOnBookAged());
             if (plan.blocked) { errors.push(`${pairRaw} (${why}): not acting after re-read — ${plan.blocked}`); return false; }
-            if (!plan.place && !plan.cancel.length) return plan.covered;
+            if (!plan.place && !plan.cancel.length) { noteStopLevel(plan.keeper); return plan.covered; }
             if (fresh > 0 && freshRead.fifoHit) {
               await sendNotification(`🚨 ${pairRaw} ${side}: a manual position OLDER than the bot's remaining book appeared since the snapshot — cover NOT changed (${plan.reason}); any stop of ours would reduce YOUR position first (FIFO). Close it by hand.`, "margin_urgent").catch(() => {});
               errors.push(`${pairRaw}: fifo-blocked on re-read, cover left as is`);
@@ -746,6 +778,8 @@ export async function GET(request: Request) {
             }
             out = await applyReconcile(plan, io);
           } finally { await releaseCloseLock(lock); }
+          if (out.placed && plan.place) noteStopLevel(null, parseFloat(plan.place.level));
+          else if (out.covered) noteStopLevel(plan.keeper);
           if (out.placed) { sent.push(`stop-${plan.reason.replace(/[^a-z]+/gi, "-").toLowerCase()}-${pairRaw}`); }
           if (out.placeFailed) {
             await sendNotification(`🚨🚨 COULD NOT PLACE PROTECTIVE STOP on ${pairRaw} ${side} (${why}): ${out.placeFailed}. Existing cover left as is — act manually on Kraken now.${fifoNote}`, "margin_urgent").catch(() => {});
@@ -905,11 +939,13 @@ export async function GET(request: Request) {
             if (out.failedCancels.length) await sendNotification(`🚨 ${pairRaw}: could NOT cancel stop(s) ${out.failedCancels.join(", ")} after ${why}. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
           }
           if (left > 0) {
+            if (rt) rt.exitReason = why;
             await sendNotification(`⚠️ ${why} on ${pairRaw}: ${sentVol.toFixed(meta.lotDecimals)} sent, ${left} still open (partial fill${sendErr ? " / lost response" : ""}) — cover ${covered ? "re-set for the remainder" : "NOT confirmed"}. Retrying next run.`, "margin_urgent").catch(() => {});
             return "partial";
           }
           delete managedNext[stateKey];
           delete nextBreached[stateKey];
+          if (rt) rt.exitReason = why;
           await sendNotification(`⏱ ${why} — closed ${pairRaw} ${side} ${vol.toFixed(meta.lotDecimals)} (entry $${entryPrice.toFixed(meta.priceDecimals)}, now $${px > 0 ? px.toFixed(meta.priceDecimals) : "?"}, held ${Number.isFinite(ageMs) ? (ageMs / 3600_000).toFixed(0) : "?"}h).`, "margin_live").catch(() => {});
           sent.push(`${why.toLowerCase().replace(/[^a-z]+/g, "-")}-${pairRaw}`);
           return "closed";
@@ -992,6 +1028,14 @@ export async function GET(request: Request) {
           errors.push(`protect/exit ${bookKey}: ${String(err).slice(0, 120)}`);
           if (managedPrev[stateKey] && !managedNext[stateKey]) managedNext[stateKey] = managedPrev[stateKey];
           if (priorBreached[stateKey] && !nextBreached[stateKey]) nextBreached[stateKey] = priorBreached[stateKey];
+        } finally {
+          // Phase A of the journal — after every decision above, whatever it was. A failed write
+          // is an error line, never a thrown one: it cannot touch protection or protectOk.
+          if (rt) {
+            const snap = rt;
+            try { await upsertRoundTripOpen(snap); }   // exitReason (time stop / breach) rides on the same upsert
+            catch (e) { errors.push(`journal ${bookKey}: ${String(e).slice(0, 80)}`); }
+          }
         }
       }
       protectOk = allCovered;

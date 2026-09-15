@@ -221,10 +221,41 @@ const TRADE_CARDS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_trade_cards (
   card jsonb
 )`;
 
+// THE LIVE JOURNAL (Sep 15 2026, margin-round-trips.ts): one row per bot book keyed by its
+// opening order txid — card, 1R, MFE/MAE, the ledgered stop level, the guardian's exit reason,
+// then the synthesis's matched exit/fees/net. reconstructTrips stays the P&L truth.
+const ROUND_TRIPS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS margin_round_trips (
+  txid text PRIMARY KEY,
+  card_id int,
+  pair text,
+  side text,
+  source text,
+  entry_price double precision,
+  one_r double precision,
+  opened_at timestamptz,
+  peak double precision,
+  trough double precision,
+  mfe_r double precision,
+  mae_r double precision,
+  last_stop_level double precision,
+  exit_reason text,
+  last_seen_at timestamptz,
+  exit_price double precision,
+  exit_at timestamptz,
+  fees double precision,
+  rollover double precision,
+  net_pnl double precision,
+  hold_minutes double precision,
+  stop_fill_slip_bp double precision,
+  paper_pnl_at_live_size double precision,
+  closed boolean DEFAULT false
+)`;
+
 export async function ensureMarginTables(): Promise<void> {
   await prisma.$executeRawUnsafe(TRADES_TABLE_SQL);
   await prisma.$executeRawUnsafe(LEDGER_TABLE_SQL);
   await prisma.$executeRawUnsafe(TRADE_CARDS_TABLE_SQL);
+  await prisma.$executeRawUnsafe(ROUND_TRIPS_TABLE_SQL);
 }
 
 // Kraken's private-API rate limiter: ~15-20 counter points, TradesHistory/Ledgers cost

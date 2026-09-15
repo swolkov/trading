@@ -20,6 +20,7 @@ import {
   pyramidAddNotional,
 } from "@/lib/margin-live-risk";
 import { RETIRED_AUTO_SOURCES, TWIN_SOURCES } from "@/lib/margin-auto-plans";
+import { maeR, troughUpdate } from "@/lib/margin-shadow-excursion";
 
 // FEE MODEL — an honest ESTIMATE, not exact truth (that's the real scoreboard, which
 // reads actual fills+fees from Kraken's ledger). Modeled: maker entry + taker exit on
@@ -107,7 +108,10 @@ export async function ensureShadowColumns(): Promise<void> {
     "live_txid text",                      // the Kraken ORDER txid when this row was also traded LIVE
     "live_exec_note text",                 // the executor's note for that attempt (sent / refused why)
     "shadow_stop_frac double precision",   // the initial stop as a fraction of entry (C5's ATR twin fills it; null = exitParams' fixed stop)
-    "shadow_trough double precision",      // worst ADVERSE price reached (MAE) — A4 fills it; null until then
+    "shadow_trough double precision",      // worst ADVERSE price reached (MAE) — walked beside shadow_peak (A4)
+    "shadow_mae_r double precision",       // dir × (entry − trough) ÷ 1R at resolution, ≥ 0 (margin-shadow-excursion.ts)
+    "btc_regime text",                     // BTC daily regime the scan read when the row opened: up | down | unknown
+    "risk_pct double precision",           // the conviction-scaled risk % the row was sized at (snapshotShadowSizing)
     ...INTEL_STAMP_COLUMNS,
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
@@ -226,7 +230,7 @@ interface OpenRow {
   mark_price: number; shadow_peak: number | null; shadow_stop: number | null;
   shadow_seen_t: number | null; conviction: string | null; source: string | null;
   shadow_add_px: number | null; shadow_add_t: number | null; shadow_add_notional: number | null;
-  shadow_notional: number | null;
+  shadow_notional: number | null; shadow_trough?: number | null;
 }
 
 // Per-strategy exit profile. Fast breakouts cut quickly (tight, leverage-scaled stop, 2-day
@@ -437,9 +441,10 @@ export async function snapshotShadowSizing(id: number, atEntry = true): Promise<
     `UPDATE tradingview_alerts SET shadow_notional=COALESCE(shadow_notional,$2),
       shadow_ref_equity=CASE WHEN shadow_notional IS NULL THEN $3 ELSE shadow_ref_equity END,
       shadow_risk_fraction=CASE WHEN shadow_notional IS NULL THEN $4 ELSE shadow_risk_fraction END,
-      shadow_sizing_verified=CASE WHEN shadow_notional IS NULL THEN $5 ELSE shadow_sizing_verified END
+      shadow_sizing_verified=CASE WHEN shadow_notional IS NULL THEN $5 ELSE shadow_sizing_verified END,
+      risk_pct=COALESCE(risk_pct, $6)
       WHERE id=$1 RETURNING shadow_notional`,
-    id, notional, refEquity, fraction, atEntry && Date.now() - row.time.getTime() >= 0 && Date.now() - row.time.getTime() < 120_000,
+    id, notional, refEquity, fraction, atEntry && Date.now() - row.time.getTime() >= 0 && Date.now() - row.time.getTime() < 120_000, fraction * 100,
   );
   return frozen[0]?.shadow_notional ?? null;
 }
@@ -471,7 +476,7 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
   ).catch(() => {});
   const rows = await prisma.$queryRawUnsafe<OpenRow[]>(
     `SELECT id, time, symbol, side, leverage, mark_price, shadow_peak, shadow_stop, shadow_seen_t, conviction, source,
-            shadow_add_px, shadow_add_t, shadow_add_notional, shadow_notional
+            shadow_add_px, shadow_add_t, shadow_add_notional, shadow_notional, shadow_trough
      FROM tradingview_alerts
      WHERE side IN ('buy','sell') AND mark_price > 0 AND COALESCE(shadow_status,'open') = 'open'
      ORDER BY time ASC LIMIT 500`,
@@ -510,7 +515,7 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
   for (const r of rows) {
     const entry = r.mark_price;
     const lev = Math.max(1, Math.min(20, r.leverage || 2));
-    const dir = r.side === "buy" ? 1 : -1;
+    const dir: 1 | -1 = r.side === "buy" ? 1 : -1;
     const profile = exitParams(r.source, lev, entry);   // per-strategy exit profile
     const { maxHoldH, oneR, carry } = profile;
     const notional = r.shadow_notional ?? await snapshotShadowSizing(r.id, false);
@@ -548,6 +553,11 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     // is the conservative reading. Gap-aware fill: a bar OPENING beyond the stop fills
     // at its (worse) open.
     let peak = r.shadow_peak ?? entry;
+    // The worst adverse price (MAE), walked beside the peak: updated BEFORE each bar's stop
+    // test so a stop-out's fatal bar counts, and by the in-progress bar only when it kills the
+    // trade (its extremes can still grow). Rows opened before the column existed start at the
+    // entry — their MAE is under-counted and reads as such (margin-shadow-excursion.ts).
+    let trough = r.shadow_trough ?? entry;
     let stopPx = r.shadow_stop ?? entry - dir * oneR;
     let exit: number | null = null;
     let reason = "";
@@ -563,6 +573,7 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     // trail width is the profile's (1R for the record; selective-tight narrows after +2R).
     const ratchet = () => { stopPx = managedStop(dir, entry, peak, stopPx, oneR, profile); };
     for (const b of doneBars) {
+      trough = troughUpdate(dir, trough, b);
       if (dir > 0 ? b.l <= stopPx : b.h >= stopPx) {
         exit = dir > 0 ? Math.min(stopPx, b.o) : Math.max(stopPx, b.o);
         // Mechanism only — the P&L number carries whether it was actually a profit; at
@@ -586,6 +597,7 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
       // In-progress bar: stop touch only, against the stop as it stood after the last
       // COMPLETE bar. No ratchet, no peak credit — see the note above doneBars.
       if (dir > 0 ? liveBar.l <= stopPx : liveBar.h >= stopPx) {
+        trough = troughUpdate(dir, trough, liveBar);
         exit = dir > 0 ? Math.min(stopPx, liveBar.o) : Math.max(stopPx, liveBar.o);
         reason = (dir * (peak - entry)) / oneR >= 1 ? "trailing stop" : "initial stop";
       }
@@ -593,6 +605,7 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     if (exit == null && tb.length === 0) {
       // Seconds-old trade with no bar yet: the latest close is all we know.
       peak = dir > 0 ? Math.max(peak, now) : Math.min(peak, now);
+      trough = troughUpdate(dir, trough, { h: now, l: now });
       ratchet();
       if (dir > 0 ? now <= stopPx : now >= stopPx) {
         exit = dir > 0 ? Math.min(stopPx, now) : Math.max(stopPx, now);
@@ -628,8 +641,8 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
       // overwrite peak/stop on a row the other run has since resolved — shadow_peak
       // feeds the give-back metric and must freeze at resolution.
       await prisma.$executeRawUnsafe(
-        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5, shadow_add_px=COALESCE(shadow_add_px,$6), shadow_add_t=COALESCE(shadow_add_t,$7), shadow_add_notional=COALESCE(shadow_add_notional,$8) WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
-        peak, stopPx, unrealized, r.id, nextSeenT, add?.px ?? null, add?.t ?? null, add?.notional ?? null,
+        `UPDATE tradingview_alerts SET shadow_peak=$1, shadow_stop=$2, shadow_unrealized=$3, shadow_seen_t=$5, shadow_add_px=COALESCE(shadow_add_px,$6), shadow_add_t=COALESCE(shadow_add_t,$7), shadow_add_notional=COALESCE(shadow_add_notional,$8), shadow_trough=$9 WHERE id=$4 AND COALESCE(shadow_status,'open')='open'`,
+        peak, stopPx, unrealized, r.id, nextSeenT, add?.px ?? null, add?.t ?? null, add?.notional ?? null, trough,
       );
       continue;
     }
@@ -655,8 +668,8 @@ export async function evaluateShadowSignals(opts: { requiredSources?: string[] }
     // death. The still-open guard makes overlapping cron runs harmless: whichever run
     // resolves the row first wins, the loser affects 0 rows and reports nothing.
     const affected = await prisma.$executeRawUnsafe(
-      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7, shadow_add_px=COALESCE(shadow_add_px,$8), shadow_add_t=COALESCE(shadow_add_t,$9), shadow_add_notional=COALESCE(shadow_add_notional,$10) WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
-      exit, pnl, reason, peak, stopPx, r.id, feeDollars, add?.px ?? null, add?.t ?? null, add?.notional ?? null,
+      `UPDATE tradingview_alerts SET shadow_status='resolved', shadow_exit=$1, shadow_pnl=$2, shadow_reason=$3, shadow_resolved_at=now(), shadow_peak=$4, shadow_stop=$5, shadow_unrealized=NULL, shadow_fees=$7, shadow_add_px=COALESCE(shadow_add_px,$8), shadow_add_t=COALESCE(shadow_add_t,$9), shadow_add_notional=COALESCE(shadow_add_notional,$10), shadow_trough=$11, shadow_mae_r=$12 WHERE id=$6 AND COALESCE(shadow_status,'open')='open'`,
+      exit, pnl, reason, peak, stopPx, r.id, feeDollars, add?.px ?? null, add?.t ?? null, add?.notional ?? null, trough, maeR(dir, entry, trough, oneR),
     );
     if (affected === 0) continue;
     resolved.push({ id: r.id, symbol: r.symbol, side: r.side, entry, exit, pnl, pnlPct: netPct, reason, leverage: lev, conviction: r.conviction, source: r.source });

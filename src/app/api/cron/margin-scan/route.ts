@@ -285,12 +285,15 @@ export async function GET(request: Request) {
           const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
           // The intelligence stamps ride on the same INSERT (columns created by ensureShadowColumns).
           const stamp = stampSql(intel, s.coin);
-          const stampCols = stamp.columns.length ? `, ${stamp.columns.join(", ")}` : "";
-          const stampVals = stamp.columns.length ? `, ${stamp.columns.map((_, i) => `$${10 + i}`).join(",")}` : "";
+          // The BTC daily regime rides on the row too (A4's journal stamp; risk_pct is written by
+          // snapshotShadowSizing beside the frozen size it belongs to).
+          const btcRegime = regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown";
+          const stampCols = `, ${[...stamp.columns, "btc_regime"].join(", ")}`;
+          const stampVals = `, ${[...stamp.columns, "btc_regime"].map((_, i) => `$${10 + i}`).join(",")}`;
           const inserted = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version${stampCols})
              VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9${stampVals}) RETURNING id`,
-            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values, btcRegime,
           );
           const rowId = inserted[0]?.id ?? null;
           const frozenNotional = rowId != null ? await snapshotShadowSizing(rowId) : null;
