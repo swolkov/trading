@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PROMOTION_MIN_PF, promotionVerdict, type PromotionInput } from "../src/lib/margin-leaderboard";
 import { LIVE_RESCALE_SQL, RECORD_SQL } from "../src/lib/margin-shadow";
-import { liveContainerFor } from "../src/lib/margin-live-risk";
+import { LIVE_RISK_CEILING_PCT, liveContainerFor } from "../src/lib/margin-live-risk";
 
 // The explicit live gate. Eight named gates in a fixed order; `ready` needs every one of them;
 // the stage names the first thing that is missing. Each case flips ONE gate on an otherwise
@@ -86,8 +86,10 @@ test("the stage ladder and the 'N of 8 green' note", () => {
   assert.equal(r.ready, false); assert.equal(r.stage, "retired");
 });
 
-test("LIVE_RESCALE_SQL is the one paper→live factor, bound to $1 (live base) and $2 (paper base)", () => {
-  assert.match(LIVE_RESCALE_SQL, /^\(LEAST\(6\.0, \$1::float \* CASE conviction WHEN 'high' THEN 2\.0 WHEN 'low' THEN 0\.5 ELSE 1\.0 END\)/);
-  assert.match(LIVE_RESCALE_SQL, /\/ LEAST\(6\.0, \$2::float \* CASE conviction WHEN 'high' THEN 2\.0 WHEN 'low' THEN 0\.5 ELSE 1\.0 END\)\)$/);
+test("LIVE_RESCALE_SQL is the one paper→live factor, bound to $1 (live base) and $2 (paper base), clamped at the executor's own ceiling", () => {
+  assert.equal(LIVE_RISK_CEILING_PCT, 8);
+  assert.match(LIVE_RESCALE_SQL, /^\(LEAST\(8::float, \$1::float \* CASE conviction WHEN 'high' THEN 2\.0 WHEN 'low' THEN 0\.5 ELSE 1\.0 END\)/);
+  assert.match(LIVE_RESCALE_SQL, /\/ LEAST\(8::float, \$2::float \* CASE conviction WHEN 'high' THEN 2\.0 WHEN 'low' THEN 0\.5 ELSE 1\.0 END\)\)$/);
+  assert.doesNotMatch(LIVE_RESCALE_SQL, /6\.0/, "the stale literal 6 is gone from both arms");
   assert.match(RECORD_SQL, /sim_version='v2'/);
 });

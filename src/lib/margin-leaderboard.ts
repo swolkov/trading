@@ -6,8 +6,14 @@
 // max drawdown, R-multiples, MFE/MAE, the rolling decay read — and to promotionVerdict, the
 // operating spec's live gate written out as an ordered list of named gates so the page, the
 // weekly memo and the arm switch all read the same words. It changes nothing; it reports.
+//
+// TWO CUTS OF THE SAME ROWS. The leaderboard DISPLAY (metrics, Sharpe, drawdown, the rolling
+// chip) is POOLED — every resolved row of the sleeve since the cohort began — because the
+// ranking columns want the whole record. The GATE's sample count and the DECAY rule read the
+// policy-cut slice (rows entered after policyCutFor(source), the rule as it stands today):
+// gate 0 counts those rows, and maybeDecayReduce loads only them via `since`.
 import { prisma } from "@/lib/db";
-import { LIVE_RESCALE_SQL, RECORD_SQL, ensureShadowColumns, exitParams, strategyBreakdown, type StrategyStat } from "@/lib/margin-shadow";
+import { LIVE_RESCALE_SQL, RECORD_SQL, ensureShadowColumns, exitParams, policyCutFor, strategyBreakdown, type StrategyStat } from "@/lib/margin-shadow";
 import { rollingVerdict, sleeveMetrics, type RollingState, type SleeveMetrics, type SleeveRow } from "@/lib/margin-metrics";
 import { LIVE_RISK_DEFAULT_PCT, liveContainerFor, parseLiveRiskBasePct } from "@/lib/margin-live-risk";
 import { DEFAULT_DD_HALT_PCT } from "@/lib/margin-risk-tiers";
@@ -35,25 +41,35 @@ type RawRow = {
   id: number; source: string; side: string; time: Date; shadow_resolved_at: Date | null; mark_price: number | null;
   shadow_exit: number | null; shadow_pnl: number | null; live_pnl: number | null; shadow_fees: number | null;
   shadow_notional: number | null; shadow_stop_frac: number | null; shadow_peak: number | null; shadow_trough: number | null;
+  shadow_ref_equity: number | null; shadow_risk_fraction: number | null;
   leverage: number | null; shadow_reason: string | null; conviction: string | null;
 };
 
 /**
  * Every resolved row of the record (RECORD_SQL), oldest resolution first, with the live-priced
- * P&L beside the paper one. One R in dollars = notional × the stop fraction — the stored
- * shadow_stop_frac when a sleeve set one (C5's ATR twin), else the container's fixed stop from
- * exitParams. Legacy rows without a frozen notional have riskUsd 0 and land in the "no R" bucket.
+ * P&L beside the paper one. `since` restricts to rows ENTERED after that instant (the policy
+ * cut, for the gate and the decay rule); without it the load is pooled.
+ *
+ * One R in dollars: the paper sizer froze `shadow_ref_equity × shadow_risk_fraction` at entry —
+ * the dollars it actually put at risk to the initial stop — and that is used when both are
+ * present. It matters for a pyramided row: the add is sized to risk one more R to the stop
+ * resting at that moment, so notional × stop over-states the first unit's R. Rows frozen before
+ * those columns existed fall back to notional × the stop fraction (the stored shadow_stop_frac
+ * when a sleeve set one — C5's ATR twin — else the container's fixed stop from exitParams).
+ * Legacy rows without a frozen notional have riskUsd 0 and land in the "no R" bucket.
  */
-export async function loadSleeveRows(opts: { source?: string } = {}): Promise<SleeveRow[]> {
+export async function loadSleeveRows(opts: { source?: string; since?: string } = {}): Promise<SleeveRow[]> {
   await ensureShadowColumns();
   const p = await leaderboardParams();
   const args: unknown[] = [p.liveRiskPct, p.paperRiskPct];
   let where = `shadow_status='resolved' AND ${RECORD_SQL}`;
-  if (opts.source) { args.push(opts.source); where += ` AND COALESCE(source,'manual') = $3`; }
+  if (opts.source) { args.push(opts.source.toLowerCase()); where += ` AND lower(COALESCE(source,'manual')) = $${args.length}`; }
+  if (opts.since) { args.push(opts.since); where += ` AND time > $${args.length}::timestamptz`; }
   const rows = await prisma.$queryRawUnsafe<RawRow[]>(
     `SELECT id, COALESCE(source,'manual') AS source, side, time, shadow_resolved_at, mark_price, shadow_exit, shadow_pnl,
        shadow_pnl * ${LIVE_RESCALE_SQL} AS live_pnl,
-       shadow_fees, shadow_notional, shadow_stop_frac, shadow_peak, shadow_trough, leverage, shadow_reason, conviction
+       shadow_fees, shadow_notional, shadow_stop_frac, shadow_peak, shadow_trough, shadow_ref_equity, shadow_risk_fraction,
+       leverage, shadow_reason, conviction
      FROM tradingview_alerts
      WHERE ${where}
      ORDER BY shadow_resolved_at, id`,
@@ -65,11 +81,13 @@ export async function loadSleeveRows(opts: { source?: string } = {}): Promise<Sl
     const { oneR } = exitParams(r.source === "manual" ? null : r.source, lev, entry);
     const stopFrac = r.shadow_stop_frac != null && r.shadow_stop_frac > 0 ? r.shadow_stop_frac : entry > 0 ? oneR / entry : 0;
     const notional = r.shadow_notional ?? 0;
+    const frozenRisk = r.shadow_ref_equity != null && r.shadow_ref_equity > 0 && r.shadow_risk_fraction != null && r.shadow_risk_fraction > 0
+      ? r.shadow_ref_equity * r.shadow_risk_fraction : null;
     return {
       id: r.id, source: r.source, side: r.side,
       time: r.time.toISOString(), resolvedAt: (r.shadow_resolved_at ?? r.time).toISOString(),
       entry, exit: r.shadow_exit, pnl: r.shadow_pnl ?? 0, livePnl: r.live_pnl ?? r.shadow_pnl ?? 0, fees: r.shadow_fees ?? 0,
-      notional, riskUsd: notional * stopFrac,
+      notional, riskUsd: frozenRisk ?? notional * stopFrac,
       peak: r.shadow_peak, trough: r.shadow_trough,
       oneR: r.shadow_stop_frac != null && r.shadow_stop_frac > 0 ? entry * r.shadow_stop_frac : oneR,
       reason: r.shadow_reason, conviction: r.conviction,
@@ -86,7 +104,7 @@ export const PROMOTION_MIN_PF = 1.2;
 
 export interface PromotionInput {
   source: string;
-  forwardResolved: number;      // resolved trades entered under the rule as it stands
+  forwardResolved: number;      // resolved trades ENTERED after policyCutFor(source) — the rule as it stands (candidateDetail's forward slice)
   liveNet: number;              // net at live sizing
   tStat: number | null;         // on the live-priced series
   days: number;                 // distinct resolution days
@@ -115,7 +133,7 @@ const pfText = (pf: number | null) => (pf == null ? "—" : pf === Infinity ? "�
 export function promotionVerdict(i: PromotionInput): PromotionVerdict {
   const ddPct = i.maxDDPct != null ? i.maxDDPct * 100 : null;
   const gates: PromotionGate[] = [
-    { name: "Forward resolved trades", ok: i.forwardResolved >= PROMOTION_MIN_RESOLVED, value: String(i.forwardResolved), target: String(PROMOTION_MIN_RESOLVED) },
+    { name: "Forward resolved trades", ok: i.forwardResolved >= PROMOTION_MIN_RESOLVED, value: `${i.forwardResolved} since ${policyCutFor(i.source).slice(0, 10)}`, target: String(PROMOTION_MIN_RESOLVED) },
     { name: "Net at live sizing", ok: i.forwardResolved > 0 && i.liveNet > 0, value: money(i.liveNet), target: "> $0" },
     { name: "Confidence (t)", ok: i.tStat != null && i.tStat >= PROMOTION_MIN_T, value: i.tStat == null ? "—" : i.tStat.toFixed(2), target: PROMOTION_MIN_T.toFixed(2) },
     { name: "Distinct days", ok: i.days >= PROMOTION_MIN_DAYS, value: String(i.days), target: String(PROMOTION_MIN_DAYS) },
@@ -171,8 +189,13 @@ export async function leaderboard(): Promise<LeaderboardRow[]> {
     const metrics = sleeveMetrics(sleeveRows, { series: "live", refEquity: p.refEquity });
     const paperMetrics = sleeveMetrics(sleeveRows, { series: "paper", refEquity: p.refEquity });
     const rolling = rollingVerdict(sleeveRows, undefined, { series: "live", refEquity: p.refEquity });
+    // Gate 0 counts the POLICY-CUT slice (entered after the sleeve's rule last changed) — the
+    // same predicate as candidateDetail().forward — not StrategyStat.forwardResolved, which
+    // dates the Sep 5 universe fix. Computed from the rows already loaded, no extra query.
+    const cutMs = Date.parse(policyCutFor(s.key));
+    const forwardResolved = sleeveRows.filter((r) => Date.parse(r.time) > cutMs).length;
     const promotion = promotionVerdict({
-      source: s.key, forwardResolved: s.forwardResolved, liveNet: s.liveNet, tStat: s.tStat, days: s.days,
+      source: s.key, forwardResolved, liveNet: s.liveNet, tStat: s.tStat, days: s.days,
       maxDDPct: metrics.maxDDPct, breakerPct: p.breakerPct, profitFactor: metrics.profitFactor,
       rolling: rolling.state, hasContainer: liveContainerFor(s.key) != null,
       retired: RETIRED_AUTO_SOURCES.has(s.key) || s.verdict.startsWith("retired"),

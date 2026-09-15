@@ -18,7 +18,7 @@ import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault"
 import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, candidateDetail, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
 import { leaderboard, type LeaderboardRow } from "@/lib/margin-leaderboard";
-import { DECAY_FULL_MULT, DECAY_MULT_KEY, maybeDecayReduce, type DecayRun } from "@/lib/margin-decay";
+import { DECAY_FULL_MULT, DECAY_MULT_KEY, applyDecay, readDecay, type DecayRead } from "@/lib/margin-decay";
 import type { RollingState } from "@/lib/margin-metrics";
 import { pairBase } from "@/lib/kraken-pairs";
 import { botOwnership } from "@/lib/margin-executor";
@@ -367,13 +367,19 @@ export async function maybeDemote(): Promise<Demotion | null> {
   if (!(auto === "true" && validate === "false")) return null;   // only an ARMED executor can be demoted
   const source = (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0];
   if (!source) throw new Error("Armed source unavailable");
-  // REDUCE before demote: the decay rule reads the same armed sleeve and halves live risk on a
-  // DECAYING read; its rolling verdict is then the third input to the demotion rule below.
-  const decay: DecayRun | null = await maybeDecayReduce();
+  // REDUCE before demote. The decay READ comes first and on its own try/catch: a failure there
+  // (a slow row load, a bad state JSON) must never stop rules 1–2 from running — it just means
+  // the third rule has nothing to judge this tick. The WRITE (0.5×) happens after the verdict
+  // and is skipped when the sleeve is being demoted anyway: one page, not two.
+  let decay: DecayRead | null = null;
+  try { decay = await readDecay(source); } catch (e) { console.error("[maybeDemote] decay read failed", e); decay = null; }
   const [detail, fills] = await Promise.all([candidateDetail(source), loadLiveFills()]);
   const forward = detail?.forward ? { resolved: detail.forward.resolved, net: detail.forward.net } : null;
   const rolling = decay ? { state: decay.rolling.state, welchT: decay.rolling.welchT, lastNet: decay.rolling.last.net, window: decay.rolling.window } : null;
   const reason = demotionVerdict(forward, divergenceSummary(fills), rolling);
+  if (decay) {
+    try { await applyDecay(decay, { suppressReduce: reason != null }); } catch (e) { console.error("[maybeDemote] decay write failed", e); }
+  }
   if (!reason) return null;
   const d: Demotion = { at: new Date().toISOString(), source, reason };
   await cfgSet("kraken_margin_auto", "false");        // risk off FIRST

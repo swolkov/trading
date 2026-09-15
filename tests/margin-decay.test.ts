@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DECAY_FULL_MULT, DECAY_MULT_KEY, DECAY_REDUCED_MULT, DECAY_STATE_KEY, decayTransition } from "../src/lib/margin-decay";
+import { prisma } from "../src/lib/db";
+import { DECAY_FULL_MULT, DECAY_MULT_KEY, DECAY_REDUCED_MULT, DECAY_STATE_KEY, applyDecay, decayTransition, type DecayState } from "../src/lib/margin-decay";
+import { rollingVerdict, type SleeveRow } from "../src/lib/margin-metrics";
 import { demotionVerdict, divergenceSummary } from "../src/lib/margin-synthesis";
 import { renderWeeklyMemo } from "../src/lib/margin-weekly";
 import { REFUSAL_RE, parseDecayMultiplier } from "../src/lib/margin-risk-tiers";
@@ -26,15 +28,93 @@ test("DECAYING writes 0.5 once: from 1, from missing, from a hand-set 0.7 — an
   assert.deepEqual(decayTransition("garbage", "DECAYING"), { next: "0.5", change: "REDUCED" }, "an unreadable value is replaced by the safe one on a DECAYING read");
 });
 
-test("hysteresis: only `stable` restores, and only from the 0.5 this rule wrote; cooling and insufficient keep 0.5", () => {
-  assert.deepEqual(decayTransition("0.5", "stable"), { next: "1", change: "RESTORED" });
-  assert.deepEqual(decayTransition("0.5", "cooling"), { next: "0.5", change: null }, "cooling keeps the reduction");
-  assert.deepEqual(decayTransition("0.5", "insufficient"), { next: "0.5", change: null });
-  assert.deepEqual(decayTransition("1", "stable"), { next: "1", change: null });
-  assert.deepEqual(decayTransition(null, "stable"), { next: null, change: null });
-  assert.deepEqual(decayTransition("0.25", "stable"), { next: "0.25", change: null }, "a hand-set 0.25 is not this rule's to undo");
-  assert.deepEqual(decayTransition("garbage", "stable"), { next: "garbage", change: null }, "an unreadable value stays visible (the executor refuses on it) rather than being silently repaired");
-  assert.deepEqual(decayTransition("1", "cooling"), { next: "1", change: null });
+test("hysteresis: only `stable` restores, and only a 0.5 this rule wrote (ruleOwned); a hand-set 0.5 is never restored; cooling and insufficient keep 0.5", () => {
+  assert.deepEqual(decayTransition("0.5", "stable", true), { next: "1", change: "RESTORED" });
+  assert.deepEqual(decayTransition("0.5", "stable", false), { next: "0.5", change: null }, "a hand-set 0.5 is not this rule's to undo");
+  assert.deepEqual(decayTransition("0.5", "stable"), { next: "0.5", change: null }, "ownership defaults to false — the caller must prove it");
+  assert.deepEqual(decayTransition("0.5", "cooling", true), { next: "0.5", change: null }, "cooling keeps the reduction");
+  assert.deepEqual(decayTransition("0.5", "insufficient", true), { next: "0.5", change: null });
+  assert.deepEqual(decayTransition("1", "stable", true), { next: "1", change: null });
+  assert.deepEqual(decayTransition(null, "stable", true), { next: null, change: null });
+  assert.deepEqual(decayTransition("0.25", "stable", true), { next: "0.25", change: null }, "a hand-set 0.25 is not this rule's to undo");
+  assert.deepEqual(decayTransition("garbage", "stable", true), { next: "garbage", change: null }, "an unreadable value stays visible (the executor refuses on it) rather than being silently repaired");
+  assert.deepEqual(decayTransition("1", "cooling", true), { next: "1", change: null });
+});
+
+// ---- applyDecay against a stubbed config store: the release on a sleeve switch, the
+// suppressed write when a demotion is about to fire, and ownership of the restore ----
+
+const restores: (() => void)[] = [];
+function stub(object: object, key: string, value: unknown) {
+  const previous = Reflect.get(object, key);
+  Reflect.set(object, key, value);
+  restores.push(() => { Reflect.set(object, key, previous); });
+}
+function restore() { while (restores.length) restores.pop()!(); }
+function fakeConfig(initial: Record<string, string>) {
+  const store = new Map(Object.entries(initial));
+  stub(prisma.agentConfig, "findUnique", async ({ where }: { where: { key: string } }) => (store.has(where.key) ? { key: where.key, value: store.get(where.key) } : null));
+  stub(prisma.agentConfig, "upsert", async ({ where, update }: { where: { key: string }; update: { value: string } }) => { store.set(where.key, update.value); return { key: where.key, value: update.value }; });
+  return store;
+}
+const T0 = Date.parse("2026-09-01T00:00:00Z");
+const rowsOf = (pnls: number[]): SleeveRow[] => pnls.map((pnl, i) => ({
+  id: i + 1, source: "swing-pyr", side: "buy", time: new Date(T0 + i * 6 * 3600_000).toISOString(), resolvedAt: new Date(T0 + i * 6 * 3600_000 + 4 * 3600_000).toISOString(),
+  entry: 100, exit: 100 + pnl / 25, pnl, livePnl: pnl, fees: 5, notional: 2500, riskUsd: 100, peak: 101, trough: null, oneR: 4, reason: null, conviction: "high",
+}));
+const decaying = rollingVerdict(rowsOf([...Array.from({ length: 60 }, (_, i) => 50 + (i % 2 ? 10 : -10)), ...Array.from({ length: 30 }, (_, i) => -40 + (i % 2 ? 10 : -10))]));
+const stableRead = rollingVerdict(rowsOf(Array.from({ length: 60 }, (_, i) => (i % 3 === 0 ? -100 : 90))));
+const prevState = (o: Partial<DecayState>): DecayState => ({ source: "swing-pyr", state: "DECAYING", at: "2026-09-19T08:00:00.000Z", welchT: -2.4, last30Net: -400, lastExpectancy: -13, priorExpectancy: 50, reducedAt: "2026-09-19T08:00:00.000Z", note: "n", ...o });
+
+test("a sleeve switch releases a reduction the rule wrote for the previous sleeve, and the new sleeve's record decides from there", async () => {
+  assert.equal(decaying.state, "DECAYING"); assert.equal(stableRead.state, "stable");
+  const store = fakeConfig({ kraken_margin_decay_multiplier: "0.5", kraken_margin_arm_log: "[]" });
+  try {
+    const run = await applyDecay({ source: "swing-pyr", rolling: stableRead, current: "0.5", prev: prevState({ source: "swing-lev" }) });
+    assert.equal(run.released, true);
+    assert.equal(run.change, null, "the new sleeve is stable — no further transition");
+    assert.equal(store.get("kraken_margin_decay_multiplier"), "1");
+    assert.match(store.get("kraken_margin_arm_log") ?? "", /sleeve changed \(swing-lev → swing-pyr\) — decay reduction released/);
+    const st = JSON.parse(store.get("kraken_margin_decay_state") ?? "{}") as DecayState;
+    assert.equal(st.source, "swing-pyr"); assert.equal(st.reducedAt, undefined);
+    // …and if the new sleeve is itself DECAYING, it is reduced on its own record in the same tick.
+    const store2 = fakeConfig({ kraken_margin_decay_multiplier: "0.5", kraken_margin_arm_log: "[]" });
+    const run2 = await applyDecay({ source: "swing-pyr", rolling: decaying, current: "0.5", prev: prevState({ source: "swing-lev" }) });
+    assert.equal(run2.released, true); assert.equal(run2.change, "REDUCED");
+    assert.equal(store2.get("kraken_margin_decay_multiplier"), "0.5");
+    assert.ok(JSON.parse(store2.get("kraken_margin_decay_state")!).reducedAt);
+  } finally { restore(); }
+});
+
+test("suppressReduce (a demotion is firing this tick) skips the 0.5 write and records no reducedAt", async () => {
+  const store = fakeConfig({ kraken_margin_decay_multiplier: "1", kraken_margin_arm_log: "[]" });
+  try {
+    const run = await applyDecay({ source: "swing-pyr", rolling: decaying, current: "1", prev: null }, { suppressReduce: true });
+    assert.equal(run.change, null); assert.equal(run.multiplier, "1");
+    assert.equal(store.get("kraken_margin_decay_multiplier"), "1");
+    assert.doesNotMatch(store.get("kraken_margin_arm_log") ?? "", /REDUCED/);
+    const st = JSON.parse(store.get("kraken_margin_decay_state") ?? "{}") as DecayState;
+    assert.equal(st.state, "DECAYING"); assert.equal(st.reducedAt, undefined);
+    const run2 = await applyDecay({ source: "swing-pyr", rolling: decaying, current: "1", prev: null });
+    assert.equal(run2.change, "REDUCED"); assert.equal(store.get("kraken_margin_decay_multiplier"), "0.5");
+    assert.match(store.get("kraken_margin_arm_log") ?? "", /REDUCED to 0\.5× risk: swing-pyr is DECAYING/);
+  } finally { restore(); }
+});
+
+test("restore needs the rule's own reducedAt: a hand-set 0.5 stays; a rule-owned 0.5 restores on stable and carries reducedAt through cooling", async () => {
+  const store = fakeConfig({ kraken_margin_decay_multiplier: "0.5", kraken_margin_arm_log: "[]" });
+  try {
+    const hand = await applyDecay({ source: "swing-pyr", rolling: stableRead, current: "0.5", prev: prevState({ reducedAt: undefined, state: "stable" }) });
+    assert.equal(hand.change, null); assert.equal(store.get("kraken_margin_decay_multiplier"), "0.5");
+    const owned = await applyDecay({ source: "swing-pyr", rolling: stableRead, current: "0.5", prev: prevState({}) });
+    assert.equal(owned.change, "RESTORED"); assert.equal(store.get("kraken_margin_decay_multiplier"), "1");
+    assert.match(store.get("kraken_margin_arm_log") ?? "", /RESTORED to 1× risk: swing-pyr's rolling read is stable again/);
+    const cooling = { ...decaying, state: "cooling" as const };
+    const store3 = fakeConfig({ kraken_margin_decay_multiplier: "0.5", kraken_margin_arm_log: "[]" });
+    const kept = await applyDecay({ source: "swing-pyr", rolling: cooling, current: "0.5", prev: prevState({}) });
+    assert.equal(kept.change, null); assert.equal(store3.get("kraken_margin_decay_multiplier"), "0.5");
+    assert.equal(JSON.parse(store3.get("kraken_margin_decay_state")!).reducedAt, "2026-09-19T08:00:00.000Z", "ownership survives a cooling tick");
+  } finally { restore(); }
 });
 
 test("third demotion rule: DECAYING and last-30 net ≤ 0 → demote; DECAYING but still paying → keep (REDUCE only); the older cases are unchanged", () => {

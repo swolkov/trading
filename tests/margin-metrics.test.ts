@@ -48,7 +48,11 @@ test("alternating +2R / −1R → PF 2, hit 0.5, avg R 0.5, expectancy after cos
   assert.equal(m.avgLoss, -100);
   assert.equal(m.net, 1500);
   assert.ok(m.tStat != null && m.tStat > 1.5);
-  assert.ok(m.sharpe != null && m.sharpe > 0, "7.5-day span annualises");
+  // By hand: mean 50, sample sd √(30·150²/29) = 152.56; span = 29 × 6h + 4h = 7.417 days →
+  // 1477.5 trades/yr; Sharpe = 50/152.56 × √1477.5 = 12.60. Sortino on the same (n−1)
+  // denominator: downside √(15·100²/29) = 71.92 → 26.72.
+  assert.equal(m.sharpe?.toFixed(1), "12.6", "7.4-day span annualises");
+  assert.equal(m.sortino?.toFixed(1), "26.7");
   assert.ok(m.sortino != null && m.sortino > (m.sharpe ?? 0), "downside deviation is smaller than total sd here");
   assert.equal(m.maxDD, 100);
   assert.equal(m.maxDDPct, 100 / 5000);

@@ -172,7 +172,8 @@ export function sleeveMetrics(rows: SleeveRow[], opts: MetricsOptions = {}): Sle
   const spanDays = entryMs.length && resolveMs.length ? Math.max(0, (Math.max(...resolveMs) - Math.min(...entryMs)) / MS_DAY) : 0;
   const tradesPerYear = n >= 2 && spanDays >= SHARPE_MIN_SPAN_DAYS ? (n * 365.25) / spanDays : null;
   const sharpe = tradesPerYear != null && fin(sd) && sd > 0 ? (m / sd) * Math.sqrt(tradesPerYear) : null;
-  const downside = n >= 2 ? Math.sqrt(pnls.reduce((s, x) => s + Math.min(0, x) ** 2, 0) / n) : NaN;
+  // Downside deviation over the SAME sample denominator as Sharpe's sd (n − 1), target 0.
+  const downside = n >= 2 ? Math.sqrt(pnls.reduce((s, x) => s + Math.min(0, x) ** 2, 0) / (n - 1)) : NaN;
   const sortino = tradesPerYear != null && fin(downside) && downside > 0 ? (m / downside) * Math.sqrt(tradesPerYear) : null;
 
   const { dd, trades: ddTrades } = maxDrawdown(pnls);
