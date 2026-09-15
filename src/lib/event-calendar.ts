@@ -34,6 +34,7 @@ export function familyOf(name: string): EventFamily | null {
   if (/Minutes/i.test(name)) return "minutes";
   if (/FOMC|Fed Interest Rate/i.test(name)) return "fomc";
   if (/\bCPI\b|Consumer Price/i.test(name)) return "cpi";
+  if (/ADP|Productivity/i.test(name)) return null;   // ADP payrolls / unit labour costs are not the NFP print
   if (/Nonfarm|Non-Farm|Payroll/i.test(name)) return "nfp";
   if (/\bPPI\b|Producer Price/i.test(name)) return "ppi";
   if (/\bPCE\b/i.test(name)) return "pce";
@@ -74,19 +75,30 @@ export function staticCalendar(events: MacroEvent[] = MACRO_EVENTS): CalendarEve
 function utcDay(ms: number): string { return new Date(ms).toISOString().slice(0, 10); }
 
 /**
- * One list: deduped by (UTC date, family). Finnhub's time wins; the static entry's presence is
- * recorded in `source`. Events more than 24h in the past are dropped. Sorted by time.
+ * One list, deduped by (UTC date, family, instant): Finnhub's rows replace a static row of the
+ * same family on the same day (its time is the live one) and are labelled "finnhub+static";
+ * a family Finnhub lists at TWO instants on one day (the FOMC decision and the press
+ * conference) keeps both, so the policy pauses on whichever is nearer. When two Finnhub rows
+ * collide on the same instant the one named like a decision wins. Events more than 24h in
+ * the past are dropped. Sorted by time.
  */
 export function mergeCalendar(finnhub: CalendarEvent[], statics: CalendarEvent[], nowMs: number): CalendarEvent[] {
-  const byKey = new Map<string, CalendarEvent>();
-  for (const e of statics) byKey.set(`${utcDay(e.atMs)}|${e.family}`, { ...e, source: "static" });
+  const dayKey = (e: CalendarEvent) => `${utcDay(e.atMs)}|${e.family}`;
+  const fhByDay = new Map<string, Map<number, CalendarEvent>>();
   for (const e of finnhub) {
-    const key = `${utcDay(e.atMs)}|${e.family}`;
-    const prev = byKey.get(key);
-    byKey.set(key, { ...e, source: prev ? "finnhub+static" : "finnhub", approx: false });
+    const byAt = fhByDay.get(dayKey(e)) ?? new Map<number, CalendarEvent>();
+    const prev = byAt.get(e.atMs);
+    if (!prev || (/Decision|Rate/i.test(e.name) && !/Decision|Rate/i.test(prev.name))) byAt.set(e.atMs, e);
+    fhByDay.set(dayKey(e), byAt);
+  }
+  const out: CalendarEvent[] = [];
+  const staticDays = new Set(statics.map(dayKey));
+  for (const e of statics) if (!fhByDay.has(dayKey(e))) out.push({ ...e, source: "static" });
+  for (const [key, byAt] of fhByDay) {
+    for (const e of byAt.values()) out.push({ ...e, source: staticDays.has(key) ? "finnhub+static" : "finnhub", approx: false });
   }
   const cutoff = nowMs - 24 * 3600_000;
-  return [...byKey.values()].filter((e) => e.atMs >= cutoff).sort((a, b) => a.atMs - b.atMs);
+  return out.filter((e) => e.atMs >= cutoff).sort((a, b) => a.atMs - b.atMs);
 }
 
 function fmtRel(ms: number): string {

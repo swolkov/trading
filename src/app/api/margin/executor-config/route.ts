@@ -31,7 +31,7 @@ export async function GET() {
       "kraken_margin_dd_tiers", "kraken_margin_max_losses_per_day", "kraken_margin_decay_multiplier",
       "kraken_margin_equity_peak", "kraken_margin_risk_state",
       // Event veto (B2): the guardian-written policy and the operator's off switch.
-      "kraken_margin_event_policy", "kraken_margin_event_veto",
+      "kraken_margin_event_policy", "kraken_margin_event_veto", "kraken_margin_calendar_feed",
     ];
     const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const c: Record<string, string> = {};
@@ -80,6 +80,7 @@ export async function GET() {
       equityPeak: num("kraken_margin_equity_peak", 0) || null,
       riskState: (() => { try { return c.kraken_margin_risk_state ? (JSON.parse(c.kraken_margin_risk_state) as RiskState) : null; } catch { return null; } })(),
       eventVeto: c.kraken_margin_event_veto !== "false",
+      calendarFeed: c.kraken_margin_calendar_feed === "finnhub" ? "finnhub" : "static",   // Finnhub's economic calendar is premium; opt-in
       eventPolicy: resolveEventPolicy(c.kraken_margin_event_policy ?? null, c.kraken_margin_event_veto ?? null, Date.now()),
     };
     const paper = {

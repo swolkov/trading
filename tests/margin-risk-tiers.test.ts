@@ -117,18 +117,37 @@ test("setup grades are labels on the existing ladder: Normal 2 / Strong 4 / A+ 8
 
 // ---- revenge pause ----
 
-test("losersToday counts losing round trips closed since day start; undated trips count (fail closed)", () => {
+test("losersToday counts TRADES, not FIFO lots: a pyramid book closed by one order is one loss; two fee-only scratches are none", () => {
   const day = Date.parse("2026-09-15T00:00:00Z");
-  const trips = [
-    { closedAt: "2026-09-15T03:00:00Z", netPnl: -50 },
-    { closedAt: "2026-09-15T04:00:00Z", netPnl: 20 },
-    { closedAt: "2026-09-14T23:59:59Z", netPnl: -80 },   // yesterday
-    { closedAt: "2026-09-15T00:00:00Z", netPnl: -1 },    // exactly midnight counts
-    { closedAt: "garbage", netPnl: -5 },
-    { closedAt: "2026-09-15T05:00:00Z", netPnl: 0 },     // scratch is not a loss
+  const equity = 5_000;   // scratch floor = $5
+  // ONE close of a pyramid book: reconstructTrips emits two lots with the same pair+closedAt —
+  // the parent exited at breakeven minus fees, the add lost 1R. One trade, one loss.
+  const pyramid = [
+    { pair: "XETHZUSD", closedAt: "2026-09-15T03:00:00Z", netPnl: -3, entryPrice: 4_000, volume: 1 },       // parent: fees only
+    { pair: "XETHZUSD", closedAt: "2026-09-15T03:00:00Z", netPnl: -160, entryPrice: 4_040, volume: 1 },     // add: −1R at a 4% stop
   ];
-  assert.equal(losersToday(trips, day), 3);
-  assert.equal(losersToday([], day), 0);
+  assert.equal(losersToday(pyramid, day, equity, 0.04), 1);
+  // Two separate breakeven exits that only paid fees are scratches, not losses (each −$3 on a
+  // $5k account is under the 0.1% floor, and under a quarter of a 4% stop on $4k notional).
+  const scratches = [
+    { pair: "XXBTZUSD", closedAt: "2026-09-15T04:00:00Z", netPnl: -3, entryPrice: 60_000, volume: 0.0667 },
+    { pair: "SOLUSD", closedAt: "2026-09-15T05:00:00Z", netPnl: -3, entryPrice: 200, volume: 20 },
+  ];
+  assert.equal(losersToday(scratches, day, equity, 0.04), 0);
+  // The same two with a real loss each → two losses; a win is never a loss.
+  assert.equal(losersToday([{ ...scratches[0], netPnl: -50 }, { ...scratches[1], netPnl: -50 }, { pair: "ADAUSD", closedAt: "2026-09-15T06:00:00Z", netPnl: 20 }], day, equity, 0.04), 2);
+  // Without a stop the floor alone decides: −$6 on $5k is a loss, −$4 is a scratch.
+  assert.equal(losersToday([{ pair: "A", closedAt: "2026-09-15T06:00:00Z", netPnl: -6 }], day, equity, null), 1);
+  assert.equal(losersToday([{ pair: "A", closedAt: "2026-09-15T06:00:00Z", netPnl: -4 }], day, equity, null), 0);
+  // Yesterday's close does not count; exactly midnight does; an undated trip counts (fail closed).
+  assert.equal(losersToday([{ pair: "A", closedAt: "2026-09-14T23:59:59Z", netPnl: -80 }], day, equity), 0);
+  assert.equal(losersToday([{ pair: "A", closedAt: "2026-09-15T00:00:00Z", netPnl: -80 }], day, equity), 1);
+  assert.equal(losersToday([{ pair: "A", closedAt: "garbage", netPnl: -80 }], day, equity), 1);
+  // Two closes of the same pair at different times are two trades.
+  assert.equal(losersToday([{ pair: "A", closedAt: "2026-09-15T01:00:00Z", netPnl: -80 }, { pair: "A", closedAt: "2026-09-15T02:00:00Z", netPnl: -80 }], day, equity), 2);
+  assert.equal(losersToday([], day, equity), 0);
+  // Unreadable equity: the floor is 0 and any negative net (beyond the stop rule) is a loss.
+  assert.equal(losersToday([{ pair: "A", closedAt: "2026-09-15T01:00:00Z", netPnl: -0.5 }], day, NaN), 1);
 });
 
 test("revengePauseHit: 1 of 2 trades on; 2 of 2 refuses; an explicit 0 or an unreadable limit refuses everything", () => {

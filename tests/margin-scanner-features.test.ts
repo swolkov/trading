@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { barFeatures, evaluate, scoreConviction, type TfSpec } from "../src/lib/margin-scanner";
 import { gatherIntel, INTEL_VERSION, stampSql } from "../src/lib/margin-intel";
+import { INTEL_STAMP_COLUMNS } from "../src/lib/margin-shadow";
 import type { KrakenBar } from "../src/lib/kraken-margin";
 
 // A deterministic synthetic 4h series: a gentle uptrend, one volume spike on the last
@@ -92,7 +93,8 @@ test("data quality: a gap in the last 20 bars, a duplicate bar, or a stale newes
   assert.equal(barFeatures(clean, 240, (clean[clean.length - 1].t + 14400 * 3) * 1000).dataOk, true);
 });
 
-test("gatherIntel + stampSql: every scanned coin gets an MTF stamp; the columns match ensureShadowColumns", () => {
+test("gatherIntel + stampSql: every scanned coin gets an MTF stamp; every stamped column is one ensureShadowColumns creates", () => {
+  const created = new Set(INTEL_STAMP_COLUMNS.map((c) => c.split(" ")[0]));
   const bars = synth(120);
   const features = { "TST:1d": barFeatures(bars, 1440), "TST:4h": barFeatures(bars, 240), "TST:1h": barFeatures(bars, 60), "BTC:4h": barFeatures(bars, 240) };
   const intel = gatherIntel({ features });
@@ -107,4 +109,5 @@ test("gatherIntel + stampSql: every scanned coin gets an MTF stamp; the columns 
   const withEvent = stampSql(gatherIntel({ features }, { mode: "reduced" }), "BTC");
   assert.deepEqual(withEvent.columns, ["mtf_state", "intel_version", "event_mode"]);
   assert.equal(withEvent.values[2], "reduced");
+  for (const c of [...s.columns, ...withEvent.columns]) assert.ok(created.has(c), `${c} is created by ensureShadowColumns`);
 });

@@ -139,7 +139,7 @@ export default function MarginCockpitPage() {
         sub="What Kraken says right now — real money. Positions, margin level, signals, and the track record from the ledger. Margin call at 80% margin level, forced liquidation at 40%."
         right={<>
           {krakenDown ? <Chip tone="red" size="md" dot>Kraken unreachable</Chip> : <Chip tone={mlTone} size="md" title="Account margin level: equity ÷ margin used">{ml != null ? `Margin level ${ml.toFixed(0)}%` : status ? "Margin not in use" : "Loading…"}</Chip>}
-          <Chip tone={evTone} size="md" dot={ev?.mode === "paused"} title={evTitle}>{ev ? `Events ${ev.mode === "paused" ? "PAUSED" : ev.mode}` : "Events …"}</Chip>
+          <Chip tone={evTone} size="md" dot={ev?.mode === "paused"} title={evTitle}>{ev ? `Events ${ev.mode === "paused" ? "PAUSED" : ev.mode}${ev.source ? ` · ${ev.source}` : ""}` : "Events …"}</Chip>
         </>}
       />
 

@@ -90,7 +90,7 @@ import {
   resolveConvictionTier,
 } from "@/lib/margin-live-risk";
 import { eventRiskMultiplier, readEventPolicy } from "@/lib/margin-events";
-import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferMultiple, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, revengePauseHit, setupGradeFor, LIQ_BUFFER_MULT } from "@/lib/margin-risk-tiers";
+import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, refusalNote, revengePauseHit, setupGradeFor } from "@/lib/margin-risk-tiers";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -866,9 +866,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // Applies to pyramid adds too: an add is new risk into the same print.
     let eventPolicy: Awaited<ReturnType<typeof readEventPolicy>>;
     try { eventPolicy = await readEventPolicy(); }
-    catch (e) { return { executed: false, validated: false, note: `entry refused: could not read the event policy (${String(e).slice(0, 60)}) — failing closed` }; }
+    catch (e) { return { executed: false, validated: false, note: refusalNote.eventUnreadable(String(e)) }; }
     if (eventPolicy.mode === "paused") {
-      return { executed: false, validated: false, note: `entry refused: event window — ${eventPolicy.reason}` };
+      return { executed: false, validated: false, note: refusalNote.eventWindow(eventPolicy.reason) };
     }
     const eventMult = eventRiskMultiplier(eventPolicy.mode);
 
@@ -911,10 +911,10 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const ddTiersOn = (await cfgStrict("kraken_margin_dd_tiers")) !== "off";
     const ddTier = drawdownTier(peakRaw != null && peakRaw.trim() !== "" ? Number(peakRaw) : NaN, equity, ddHaltPct);
     if (ddTier.tier === "unknown") {
-      return { executed: false, validated: false, note: `entry refused: drawdown tier unknown — failing closed (kraken_margin_equity_peak=${peakRaw ?? "missing"}, equity $${equity.toFixed(0)})` };
+      return { executed: false, validated: false, note: refusalNote.ddUnknown(peakRaw, equity) };
     }
     if (ddTier.tier === "halt") {
-      return { executed: false, validated: false, note: `entry refused: drawdown ${ddTier.dd.toFixed(1)}% from peak $${Number(peakRaw).toFixed(0)} is at/over the ${ddHaltPct}% halt — the breaker owns this, not a new entry` };
+      return { executed: false, validated: false, note: refusalNote.ddHalt(ddTier.dd, Number(peakRaw), ddHaltPct) };
     }
     const ddMult = ddTiersOn ? ddTier.mult : 1;
     // Equity ladder: $5k book stays 2× even if the operator ceiling is 5. Risk % is
@@ -942,16 +942,20 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       );
       return { executed: false, validated: false, note: `daily loss cap hit (${which} < -${lossCap})` };
     }
-    // Layer 5b: THE REVENGE PAUSE. N losing round trips closed today (UTC) → no new entries
-    // until tomorrow, whatever the dollar cap says. A pyramid add is exempt: it presses a
-    // trade that is already winning, which is the opposite of a revenge trade. Same trip
-    // population as the loss cap above (every round trip on the account). STRICT limit read;
-    // an explicit 0 blocks every entry, as the daily cap's 0 does.
+    // Layer 5b: THE REVENGE PAUSE. N losing TRADES closed today (UTC) → no new entries until
+    // tomorrow, whatever the dollar cap says. Trades, not FIFO lots: a pyramid book closed by
+    // one order is regrouped by (pair, close time) and judged on its summed net against a
+    // scratch threshold (0.1% of equity or a quarter of its risk to the sleeve's stop), so a
+    // breakeven exit that only paid fees is not a trigger. A pyramid add is exempt: it presses
+    // a trade that is already winning, the opposite of a revenge trade. Same trip population
+    // as the loss cap above (every round trip on the account). STRICT limit read; an explicit
+    // 0 blocks every entry, as the daily cap's 0 does.
     if (!pyramid) {
       const maxLosses = await cfgNumStrict("kraken_margin_max_losses_per_day", DEFAULT_MAX_LOSSES_PER_DAY);
-      const losers = losersToday(trips, dayStart.getTime());
+      const sleeveStop = liveContainerFor(alert.source)?.stopPct;
+      const losers = losersToday(trips, dayStart.getTime(), equity, sleeveStop != null ? sleeveStop / 100 : null);
       if (revengePauseHit(losers, maxLosses)) {
-        return { executed: false, validated: false, note: `entry refused: ${losers} losing trades today — no revenge trades (max ${maxLosses})` };
+        return { executed: false, validated: false, note: refusalNote.revenge(losers, maxLosses) };
       }
     }
 
@@ -1164,10 +1168,14 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     const decayRaw = await cfgStrict("kraken_margin_decay_multiplier");
     const decayMult = parseDecayMultiplier(decayRaw);
     if (decayMult == null) {
-      return { executed: false, validated: false, note: `entry refused: kraken_margin_decay_multiplier "${decayRaw}" is outside 0.25–1 — failing closed` };
+      return { executed: false, validated: false, note: refusalNote.decay(decayRaw) };
     }
     const riskPctChain = liveRiskPctChain({ basePct: baseRiskPct, conviction: convTier, ddMult, eventMult, decayMult });
     const maxRiskPct = riskPctChain / 100;
+    // A chain that multiplies to nothing is a refusal with its reasons, not a "no notional".
+    if (!(maxRiskPct > 0)) {
+      return { executed: false, validated: false, note: refusalNote.chainZero(ddMult, eventMult, decayMult) };
+    }
     const riskDist = trailPct > 0 ? trailPct / 100 : stopPct;   // fraction; price-independent
     // SIZE = risk × equity ÷ stop, capped at leverage × equity — paper's positionNotional
     // on the REAL account's equity, so dollar size grows with the account automatically.
@@ -1209,7 +1217,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // today. It is the line that holds if the floor is disabled (kraken_margin_min_margin_level
     // =0) or leverage ever arrives from a path that did not fit it to the stop.
     if (!liqBufferOk(stopPct, leverage)) {
-      return { executed: false, validated: false, note: `entry refused: liquidation buffer ${liqBufferMultiple(stopPct, leverage).toFixed(2)}× the stop is under ${LIQ_BUFFER_MULT.toFixed(2)}× (stop ${(stopPct * 100).toFixed(2)}% at ${leverage}×) — the margin-level floor is disabled and nothing else holds this line` };
+      return { executed: false, validated: false, note: refusalNote.liqBuffer(stopPct, leverage) };
     }
     const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;

@@ -303,8 +303,12 @@ export async function GET(request: Request) {
           // chart that may not be real. The paper row above still opens (and is stamped), so the
           // record keeps measuring; only the live hand-off waits for the next clean tick.
           const feat = scan.features[`${s.coin}:${s.timeframe}`];
-          if (feat && !feat.dataOk) {
-            note_(s.coin, s.timeframe, s.kind, "live skipped", conv.tier, `data quality: ${feat.dataReason}`);
+          const dataProblem = !feat ? "features unavailable" : !feat.dataOk ? feat.dataReason : null;
+          if (dataProblem) {
+            note_(s.coin, s.timeframe, s.kind, "live skipped", conv.tier, `data quality: ${dataProblem}`);
+            if (rowId != null) {
+              await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET live_exec_note=$1 WHERE id=$2`, `live skipped: data quality: ${dataProblem}`.slice(0, 300), rowId).catch(() => {});
+            }
           } else if (entryChecksPassed && frozenNotional != null && frozenNotional > 0 && armedSources && isSourceArmed(armedSources, plan.source)) {
             try {
               // LEVERAGE MUST TRAVEL WITH THE PLAN. The executor takes

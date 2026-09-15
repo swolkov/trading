@@ -102,15 +102,37 @@ export function setupGradeFor(conviction: string | null | undefined): SetupGrade
 }
 
 /**
- * Losing round trips closed since `dayStartMs`. An unparseable close time counts as today
+ * Losing TRADES closed since `dayStartMs` — trades, not FIFO lots. reconstructTrips emits one
+ * trip per lot consumed, so a pyramid book (parent + add) closed by one order is two trips
+ * sharing a pair and a closing time; they are grouped back into the one close here and
+ * judged on their summed net. A group is a LOSS only when it lost more than a scratch:
+ * max(0.1% of equity, 25% of the trade's risk to its stop), where the risk is the group's
+ * notional × `stopFrac` when the caller knows the container's stop. A breakeven exit that
+ * merely paid its fees is not a revenge trigger. An unparseable close time counts as today
  * (fail closed: a trip we cannot date is not evidence of a clean day).
  */
-export function losersToday(trips: { closedAt: string; netPnl: number }[], dayStartMs: number): number {
-  let n = 0;
+export function losersToday(
+  trips: { pair: string; closedAt: string; netPnl: number; entryPrice?: number; volume?: number }[],
+  dayStartMs: number,
+  equity: number,
+  stopFrac: number | null = null,
+): number {
+  const groups = new Map<string, { net: number; notional: number }>();
   for (const t of trips) {
-    if (!(t.netPnl < 0)) continue;
     const at = Date.parse(t.closedAt);
-    if (!Number.isFinite(at) || at >= dayStartMs) n++;
+    if (Number.isFinite(at) && at < dayStartMs) continue;
+    const key = `${t.pair}|${Number.isFinite(at) ? at : t.closedAt}`;
+    const g = groups.get(key) ?? { net: 0, notional: 0 };
+    g.net += Number.isFinite(t.netPnl) ? t.netPnl : 0;
+    if (t.entryPrice != null && t.volume != null && t.entryPrice > 0 && t.volume > 0) g.notional += t.entryPrice * t.volume;
+    groups.set(key, g);
+  }
+  const eqFloor = Number.isFinite(equity) && equity > 0 ? 0.001 * equity : 0;
+  let n = 0;
+  for (const g of groups.values()) {
+    const riskUsd = stopFrac != null && Number.isFinite(stopFrac) && stopFrac > 0 ? g.notional * stopFrac : 0;
+    const scratch = Math.max(eqFloor, 0.25 * riskUsd);
+    if (g.net < -scratch) n++;
   }
   return n;
 }
@@ -157,4 +179,27 @@ export function parseDecayMultiplier(raw: string | null | undefined): number | n
 }
 
 /** What the guardian writes to kraken_margin_risk_state each run (display only). */
-export interface RiskState { at: string; peak: number; equity: number; dd: number; tier: DdTier; mult: number; losersToday: number | null }
+export interface RiskState { at: string; peak: number; equity: number; dd: number; tier: DdTier; mult: number; losersToday: number | null; tiersOn?: boolean; note?: string }
+
+// ---------- THE REFUSAL STRINGS, built in one place so the executor, the capacity ledger's
+// classifier and the tests all read the same words. ----------
+export const REFUSAL_RE = {
+  ddUnknown: /^entry refused: drawdown tier unknown/,
+  ddHalt: /^entry refused: drawdown [\d.]+% from peak .* halt/,
+  revenge: /^entry refused: \d+ losing trades today — no revenge trades/,
+  decay: /^entry refused: kraken_margin_decay_multiplier .* is outside 0\.25–1/,
+  liqBuffer: /^entry refused: liquidation buffer [\d.]+× the stop is under/,
+  chainZero: /^entry refused: risk chain sized to 0/,
+  eventWindow: /^entry refused: event window — /,
+  eventUnreadable: /^entry refused: could not read the event policy/,
+} as const;
+export const refusalNote = {
+  ddUnknown: (peakRaw: string | null, equity: number) => `entry refused: drawdown tier unknown — failing closed (kraken_margin_equity_peak=${peakRaw ?? "missing"}, equity $${equity.toFixed(0)})`,
+  ddHalt: (dd: number, peak: number, haltPct: number) => `entry refused: drawdown ${dd.toFixed(1)}% from peak $${peak.toFixed(0)} is at/over the ${haltPct}% halt — the breaker owns this, not a new entry`,
+  revenge: (losers: number, maxLosses: number) => `entry refused: ${losers} losing trades today — no revenge trades (max ${maxLosses})`,
+  decay: (raw: string | null) => `entry refused: kraken_margin_decay_multiplier "${raw}" is outside 0.25–1 — failing closed`,
+  liqBuffer: (stopFrac: number, leverage: number) => `entry refused: liquidation buffer ${liqBufferMultiple(stopFrac, leverage).toFixed(2)}× the stop is under ${LIQ_BUFFER_MULT.toFixed(2)}× (stop ${(stopFrac * 100).toFixed(2)}% at ${leverage}×) — the margin-level floor is disabled and nothing else holds this line`,
+  chainZero: (ddMult: number, eventMult: number, decayMult: number) => `entry refused: risk chain sized to 0 (dd ×${ddMult}, event ×${eventMult}, decay ×${decayMult}) — failing closed`,
+  eventWindow: (reason: string) => `entry refused: event window — ${reason}`,
+  eventUnreadable: (err: string) => `entry refused: could not read the event policy (${err.slice(0, 60)}) — failing closed`,
+} as const;

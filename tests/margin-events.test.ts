@@ -78,6 +78,9 @@ test("a tier-2 print only REDUCES, and only within ±30 min", () => {
   assert.equal(familyOf("Fed Interest Rate Decision"), "fomc");
   assert.equal(familyOf("Nonfarm Payrolls"), "nfp");
   assert.equal(familyOf("Retail Sales"), null);
+  assert.equal(familyOf("ADP Nonfarm Employment Change"), null, "ADP is not the NFP print");
+  assert.equal(familyOf("Nonfarm Productivity q/q"), null);
+  assert.equal(familyOf("Non-Farm Payrolls"), "nfp");
   assert.equal(eventPolicyNow(T("2026-09-16T18:00:00Z"), []).mode, "normal");
   assert.equal(eventPolicyNow(T("2026-09-16T18:00:00Z"), []).nextEvent, null);
 });
@@ -126,6 +129,26 @@ test("mergeCalendar: Finnhub wins on time, the static table survives an outage, 
   assert.equal(withExtra.find((e) => e.family === "pce")?.source, "finnhub");
   assert.ok(!withExtra.some((e) => e.atMs < now - 24 * 3600_000), "Sep 11 CPI is dropped");
   for (let i = 1; i < withExtra.length; i++) assert.ok(withExtra[i].atMs >= withExtra[i - 1].atMs, "sorted");
+});
+
+test("mergeCalendar keeps a decision + press-conference pair (same day, same family, two instants); the policy takes the nearer", () => {
+  const now = T("2026-09-15T12:00:00Z");
+  const fh = normalizeFinnhub([
+    { country: "US", event: "FOMC Press Conference", time: "2026-09-16 18:30:00", impact: "high" },
+    { country: "US", event: "FOMC Interest Rate Decision", time: "2026-09-16 18:00:00", impact: "high" },
+    { country: "US", event: "Fed Interest Rate Decision", time: "2026-09-16 18:00:00", impact: "high" },   // a duplicate row at the same instant
+    { country: "US", event: "FOMC Economic Projections", time: "2026-09-16 18:00:00", impact: "high" },
+  ]);
+  const merged = mergeCalendar(fh, staticCalendar(), now);
+  const fomcs = merged.filter((e) => e.family === "fomc" && new Date(e.atMs).toISOString().startsWith("2026-09-16"));
+  assert.deepEqual(fomcs.map((e) => [new Date(e.atMs).toISOString(), e.source]), [["2026-09-16T18:00:00.000Z", "finnhub+static"], ["2026-09-16T18:30:00.000Z", "finnhub+static"]]);
+  assert.match(fomcs[0].name, /Decision|Rate/, "when rows collide on one instant the decision-shaped name wins");
+  const at = (iso: string) => eventPolicyNow(T(iso), merged);
+  assert.equal(at("2026-09-16T17:45:00Z").mode, "paused");
+  assert.equal(at("2026-09-16T18:45:00Z").mode, "paused", "the presser keeps its own ±30 min window");
+  assert.match(at("2026-09-16T18:45:00Z").reason, /Press Conference at 18:30Z/);
+  assert.equal(at("2026-09-16T19:01:00Z").mode, "reduced");
+  assert.equal(at("2026-09-16T20:31:00Z").mode, "normal", "2h after the LAST instant");
 });
 
 // ---- the executor's read ----
