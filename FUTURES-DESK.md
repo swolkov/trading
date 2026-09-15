@@ -17,7 +17,7 @@ settles from the broker's fills.
 | key | rule | markets | evidence |
 |---|---|---|---|
 | `index_daily_mr` | daily RSI(14) < 30 & close > SMA200×0.92 → long; exit RSI ≥ 50 / 1.5×ATR(14) stop / 30 d | ES NQ YM (1D) | 15-yr: ES PF 3.14 · NQ 2.22 · YM 1.79, both halves, every 5-yr block |
-| `donchian_60m_long` | close > prior 100-bar high → long; exit close < prior 50-bar low; 4×ATR(20) stop | ES NQ YM GC SI HG (60m) | 10 mkts 2011-26: +0.101R, PF 1.17, t=2.93, 2nd half stronger; beta, not alpha |
+| `donchian_60m_long` | close > prior 100-bar high → long; exit close < prior 50-bar low; 4×ATR(20) stop | ES NQ YM GC SI HG (60m) | 10 mkts 2011-26: +0.101R, PF 1.17, t=2.93, 2nd half stronger; beta, not alpha. **Reproduced on main Sep 15** (`research/trend-portfolio-2026-09-15.txt`): identical; the six desk roots alone n=2,176, +0.173R, PF 1.30, t=3.83, HG marginal |
 
 Only registered edges trade. Adding one is a code change (registry + Pine script + PR), never an alert.
 
@@ -395,6 +395,193 @@ per root, stage, event mode/window, score promoted / minimum, and the regime chi
 **not shown** — Tradovate's cash-balance snapshot does not expose it. `/command`'s futures block gains
 the drawdown tier · open risk · daily loss left row, the event mode · feed row and the open anomaly
 (from `/api/health`, additive).
+
+## The prompt, mapped to code (E11)
+
+The TRADOVATE FUTURES prompt, clause by clause, against what the code does. **EXISTS** = on the desk
+before Sep 15. **BUILT NOW** = Workstream E, with the PR and the module. **MEASURE-FIRST** = stamped
+and counted, never a gate until it ranks at t ≥ 2 on this desk's own record. **REJECTED-WITH-EVIDENCE**
+= the prompt asked, the numbers said no. **NOT WIRED** = documented, no code reads it.
+
+| prompt clause | status | where |
+|---|---|---|
+| Primary markets ES/NQ/YM/GC/SI/HG | EXISTS | `EDGES[].roots`, `MICRO_FOR_ROOT` (RTY/M2K mapped, no edge trades it) |
+| CL/MCL, Treasuries, BTC futures | REJECTED-WITH-EVIDENCE | CL and NG are net-negative in the Donchian reproduction (CL −0.090R t −1.06, NG −0.102R t −1.03, `research/trend-portfolio-2026-09-15.txt`); no ZN/BTC archive in `data/tf15y`; no validated edge → not added. Research candidates only. |
+| Micro vs mini | BUILT NOW — E1, #169, `futures-desk-rules.ts` | `STAGE_UNIT` (A–C micro, D mini), `MINI_FOR_ROOT`; Stage D needs `futures_desk_stage_d_armed` and is unreachable from the stage route |
+| Contract $/tick before entry | EXISTS + card | `sizeEntry` → `riskPerContractUsd`; the watch card and the brief print it |
+| Demo rules, no resets | BUILT NOW — E4, #173, `futures-desk-journal.ts` | judged series = `pnl_after_slip_usd`; the desk never resets the demo |
+| Realistic execution / slippage | BUILT NOW — E4, #173 | `SLIP_PTS_PER_SIDE` (ES/NQ/GC measured, YM/SI/HG/RTY assumed and labelled), `entry_slip_pts` measured per fill; limit fills n/a (market entries) |
+| Validation period + regimes | BUILT NOW — E6/E7, #175/#178 | `futuresPromotionVerdict` span gates; `regimeLabel` stamps |
+| Performance gate + profit distribution | BUILT NOW — E6, #175, `futures-desk-review.ts` | `futuresPromotionVerdict`, `profitDistribution` |
+| Expectancy in $ / R / % | BUILT NOW — E6, #175 | `futures-desk-metrics.ts` (mirrors `sleeveMetrics`) |
+| Risk per trade ladder 0.5 / 0.75 / 1% | BUILT NOW — E1, #169 | `DEFAULT_LIMITS`, `budgetFor`, `gradeFor` (Normal until the score is promoted) |
+| Daily loss $750 counting open risk | BUILT NOW — E2, #169, `futures-desk-risk.ts` | `dailyLossRemaining`; refusal in the glossary below |
+| Max open risk 2%, correlation | BUILT NOW — E2, #169 | `openRisk`, `clusterRisk`, `CLUSTER_OF` (index / metals) |
+| Drawdown tiers | BUILT NOW — E2, #169 | `ddTier` 3/5/7/10% → ×0.75 / ×0.5 / ×0.25 / halt |
+| 20% disable | REJECTED-WITH-EVIDENCE | replaced by the 10% halt (`drawdownDisablePct` 10): at $50k a 20% hole is $10k of tuition before anyone looks |
+| Profit scaling | BUILT NOW — E1, #169 | stages A→B→C earned by `stageReadiness`; `POST /api/futures/desk/stage` |
+| Trading hours, no-trade windows | BUILT NOW — E3, #175, `futures-desk-calendar.ts` | `cmeOpenForEntry`, `CME_HOLIDAYS_2026`, `sessionOf` (a slice, never a gate) |
+| Economic calendar | BUILT NOW — E3, #175 | `deskEventPolicy` from the shared `event-calendar.ts` static table (Finnhub premium → never fetched, `source: "static"`) |
+| Regime engine | BUILT NOW — E7, #178, `futures-desk-score.ts` | `regimeLabel`, `futures_desk_regime`; a stamp |
+| Strategy families | MEASURE-FIRST — E10 (this branch) | eight families pre-registered and run: 0 of 102 cells pass; see "Research ledger" below |
+| Multi-timeframe | BUILT NOW — E4, #173, `pine/*.pine` | Pine v2 stamps `d1Up` / `h4Up`; scored, not gated |
+| Entry documentation | BUILT NOW — E5/E8, #173/#178 | `preTradeChecklist` → `checklist_json`; the brief's RECOMMENDED TRADE card |
+| Stops first, then size | EXISTS | `parseAlert` refuses an entry without a stop; `sizeEntry` sizes off the stop |
+| Mandated 2:1 R:R | REJECTED-WITH-EVIDENCE | R:R is **measured**, never mandated: the desk's second edge exits on a channel, not a target (the Donchian channel exits average +1.29R with a 65% hit rate against −1.01R stops — a fixed 2:1 target would cut the right tail that carries the whole result). The score's R:R part (15 pts) uses `2 × ATR ÷ stop` as a stated assumption, checked against MFE weekly. |
+| Trailing stops / partials | NOT WIRED | no intraday marks on Tradovate (no market data); the broker holds one stop. Would be tested in the E10 replay engine before any Pine change — E10 did not test it. |
+| Journal | BUILT NOW — E4, #173 | the columns in "Journal completeness" above |
+| Mistake tracking | BUILT NOW — E4, #173 | `error_class`, `classifyError` |
+| Daily / weekly review, leaderboard | BUILT NOW — E6, #175, `futures-desk-review-jobs.ts` | `Performance/futures-desk-daily.md`, `-weekly.md` |
+| Promotion + live stages + real-money validation | BUILT NOW (gate) / NOT WIRED (live) | `futuresPromotionVerdict` is a document; no live account; `futures_desk_live_risk_multiplier` below |
+| Dashboard | BUILT NOW — E8, #178 | `deskStatus().dashboard`, `/futures`, `/command` |
+| Pre-trade checklist | BUILT NOW — E5, #173, `futures-desk-safety.ts` | `preTradeChecklist`, first failure = the refusal |
+| Rollover by volume / open interest | REJECTED-WITH-EVIDENCE | unreadable here (no market data); the rule is the calendar: `rollDue` + `ACTIVE_MONTH_CODES` (E9, #169) |
+| Platform safety, kill switch | BUILT NOW — E5, #173 | `executionErrorsToday`, `detectAnomaly`, `feedStale`, the balance-read abort |
+| 0–100 scoring | MEASURE-FIRST — E7, #178 | `futuresOpportunityScore` stamped on every signal; `scorePromotionVerdict` unlocks it |
+| Live trade output | BUILT NOW — E8, #178, `futures-desk-brief.ts` | `renderFuturesBrief` → `Brain/futures-desk-brief.md`, `/api/futures/brief` |
+| No forced trading | EXISTS | alerts only; refusals are counted, never overridden |
+| Minis before Stage D | REJECTED-WITH-EVIDENCE | one ES mini at the A+ budget ($500) needs a ≤ 10-pt stop; the daily-MR stops are 1.5×ATR14 (tens of points). Stage D is typed, armed separately, and never reachable from the stage route. |
+| Live account | NOT WIRED | every broker call pins the demo (`DESK_MODE`); the checklist fails on any other host |
+
+### Stage ladder and the readiness rule
+
+`futures_desk_stage` (default **A**). Per-trade contracts = `min(floor(budget ÷ per-contract risk),
+STAGE_MAX_CONTRACTS[stage], maxContracts 20)`, refused below one. **A** 1 micro · **B** 2 · **C** 5 ·
+**D** 1 mini (`STAGE_UNIT`, `MINI_FOR_ROOT`, plus `futures_desk_stage_d_armed = true`). Readiness
+(`stageReadiness`, this stage's own closed rows, roll chains merged): ≥ 30 resolved · net > 0 · PF ≥
+1.2 · max drawdown ≤ 3% of basis; every failing reason is returned. Advance: `POST
+/api/futures/desk/stage` `{ "confirm": "STAGE", "to": "B" }` — `type STAGE to confirm` · `stage can
+only advance one step, from A to B or B to C` · `stage not earned` (with the readiness).
+
+### Promotion gate (`futuresPromotionVerdict`)
+
+One verdict per edge, a document never a switch: resolved ≥ 100 (`donchian_60m_long`) / ≥ 30
+(`index_daily_mr`, with the daily-bar exception stated on the gate) · span ≥ 56 / ≥ 84 days · net after
+slip > $0 · PF ≥ 1.4 (strong ≥ 1.6) · max drawdown ≤ 8% of basis (strong ≤ 6%) · t ≥ 2 · best trade ≤
+25% and best day ≤ 30% of gross profit · ≥ 3 regime labels seen · execution errors ≤ 2% · no open
+anomaly → **LIVE-CANDIDATE** / **GATHERING** (resolved or span short) / **FAILING**, with
+`failedGates[]`.
+
+### Live-stage multipliers — documented only
+
+`futures_desk_live_risk_multiplier` **0.25 / 0.5 / 0.75 / 1.0** is the intended ladder for a live or
+prop account: a LIVE-CANDIDATE starts at ×0.25 of the demo budget and earns each step on the same
+readiness rule as the stages. **No code reads this key** (grep the repo: it appears only in this
+document), no live Tradovate account is wired, and wiring one is a separate typed decision with its
+own Fable review. Until then the key is inert by construction — setting it changes nothing.
+
+### Operational calendar
+
+- **Sep 16 2026 — the September index roll.** `MESU6` / `MNQU6` / `MYMU6` expire Fri Sep 18 09:30 ET.
+  Index guard = 3 days (`DEFAULT_GUARD_DAYS`, `tradovate-desk.ts`), so `rollDue` (expiry − now <
+  2 days) turns true from **Sep 16 09:30 ET**, and the guardian rolls any September position on its
+  first run after that inside CME hours (`cmeOpenForDesk`), logging `roll plan: … → MESZ6` inside the
+  last 5 days and Slacking the day before. New entries have gone to December since Sep 15
+  (`deskContract` picks the nearest month with more than 3 days to go). The checklist refuses an
+  entry into the expiring month: `MESU6 expires in 1 day — inside the roll window; entry refused`.
+  Metals guard 21 days before first notice (`ROLL_GUARD_DAYS` MGC/SIL/MHG).
+- **Sep 16 2026 14:00 ET — FOMC** (static table, `macro-events.ts`): reduced from 02:00 ET (budget
+  ×0.5), **paused 13:30–14:30**, reduced until 16:00. The roll and the FOMC land on the same day;
+  rolls are never gated by the event policy. Next tier-1 prints: NFP Oct 2, CPI Oct 13, FOMC Oct 28,
+  NFP Nov 6, CPI Nov 12, NFP Dec 4, FOMC Dec 9, CPI Dec 10 (all `approx: true`).
+- **TradingView alert expiry.** Alerts on the Essential/Plus plans stop after ~2 months unless
+  created open-ended. The nine v1 alerts were created Sep 14 as open-ended; the E4/E5 re-paste (nine
+  recreated alerts + the tenth heartbeat chart) is a manual step — the proof it happened is a
+  `score_json` carrying `atr` in the inbox and `desk.feedSeenAt` moving on `/api/health`. Any alert
+  left on the default expiry dies ~2 months after creation (≈ **Nov 14** for a Sep 14 alert). The
+  feed heartbeat (`feedStale` after 180 CME-open minutes of silence) turns the health chip red and
+  Slacks every 6 h — that is the alarm, not a refusal. The chart data is delayed CME unless the
+  real-time add-on is bought; `entry_slip_pts` measures what that delay costs per fill.
+- **CME holidays 2026–27** (`CME_HOLIDAYS_2026`, entries only): Nov 26 early 13:00 ET · Nov 27
+  early 13:15 · Dec 24 early 13:15 · **Dec 25 closed** · **Jan 1 closed** · Jan 18 early 13:00 · Feb 15
+  early 13:00. Refresh when the 2027 schedule publishes.
+- **Next index roll after this one:** December contracts expire Fri Dec 18 09:30 ET → roll from
+  Dec 16 09:30 ET (also FOMC-minutes week: Dec 30 is tier 2).
+
+### Pine v2 re-paste checklist (the plan allows exactly two re-paste events: E4 and E5)
+
+On every chart the edited script runs on:
+1. Pine editor → replace the whole body with the file from `pine/` → Save. Re-check the "Desk
+   webhook secret" input (it usually survives; verify anyway).
+2. Delete the old alert (an edited script does **not** update a live alert) → create one: condition =
+   the indicator → *Any alert() function call* → webhook `https://<admin host>/api/webhook/tradingview-futures`
+   → message **empty** → expiration **open-ended**.
+3. Verify within the hour: `/futures` → inbox shows a `watch` (Donchian: close ≥ 0.995 × the 100-bar
+   high; MR: RSI < 33) or an entry whose `score_json` carries `atr`; for the heartbeat chart,
+   `/api/health` → `desk.feedSeenAt` moves and `feedStale` is false.
+4. Old v1 alert JSON (no `atr … h4Up`, no `watch`) stays parseable throughout — charts can be
+   re-pasted one at a time.
+
+### Refusal-reason glossary (exact strings, in the order the entry path checks them)
+
+**Webhook shape (`parseAlert`)** — the alert is logged and refused before any desk state is read:
+`not an object` · `desk is not 'futures'` · `unknown edge '<edge>' — only registered rules trade` ·
+`<edge> does not trade <ROOT>` · `action must be entry, exit or watch, got '<x>'` · `side must be long
+or short, got '<x>'` · `<edge> is long-only` · `price missing` · `entry without a stop is refused — the
+stop travels with the order` · `long stop <s> is not below price <p>` / `short stop <s> is not above
+price <p>` · `bar time missing — TradingView must send {{time}}`.
+
+**Receipt (`handleAlert`)**: `same rule, market, action and bar already received` (duplicate) ·
+`CME closed — sent at the reopen by the guardian` (queued; `queued for more than 12h` expires it,
+error class `queue_expired`) · `watch cap reached` (fourth watch on a root in one ET day) ·
+`another entry in flight — retried by the guardian` (queued).
+
+**Risk state (`deskContextOf`)**: `risk state not computed yet — waiting for the guardian`.
+
+**The container (`entryRefusal`)**, first hit wins: `desk is disabled` · `guardian has not run in the
+last 20 minutes` · `event calendar not checked in the last 20 minutes` · `event window: FOMC rate
+decision 14:00 ET — paused until 14:30` (the text is `eventWindowText`'s — `tier-1 print within 30
+minutes — paused until <hh:mm>` when the print is unnamed; when no text could be built the container
+falls back to `event window: tier-1 print within 30 minutes`) · `CME holiday: Christmas Day — closed; entry refused` / `CME early close
+13:00 ET (Thanksgiving) — entry refused for the rest of the day` · `already holding ES` · `6 positions
+already open` · `4 entries already today` · `day is down $780 — paused until tomorrow` · `equity is
+10% off its high — desk halted pending review` · `open risk $750 + $250 would use up the 2% cap
+($1,000)` · `index longs already risk $500 — adding $250 exceeds the $500 cluster cap` · `daily loss
+limit reached: −$620 realized and $250 open risk against $750`.
+
+**After the container**: `anomaly open: foreign position #123 — entries paused until cleared`
+(`anomalyRefusal`; details also read `ledger mismatch on MESZ6: broker long 2, ledger long 1` and
+`equity jumped 35% ($50,000 → $67,500) with no fills`) · `score 64 is below the desk minimum 70` /
+`score missing — the desk minimum is 70` (`minScoreRefusal`, only once `futures_desk_score_promoted`
+is `true` and `futures_desk_min_score` > 0).
+
+**Sizing (`sizeEntry`)**: `stage D (minis) is not armed — refused` · `no micro contract mapped for
+<ROOT>` · `zero-width stop` · `one MES risks $301.70 against a $250 budget (normal · stage A) —
+refused, never stretched` (a Strong/A+ budget prints its own grade; a tier- or event-reduced budget
+prints with cents, e.g. `$187.50`). `capped at 2 contracts (stage B)` is a note on an accepted size,
+not a refusal.
+
+**Contract**: `no MES contract on Tradovate` (status `error`, not `refused`).
+
+**Pre-trade checklist (`preTradeChecklist`)**, every failure listed, the first is the refusal:
+`account is not the demo (host must be demo.tradovateapi.com)` · `ES is not a root of index_daily_mr`
+· `contract month code V not in ACTIVE_MONTH_CODES for ES` · `MESU6 expires in 1 day — inside the roll
+window; entry refused` (`rollWindowRefusal`; plural `days` otherwise) · `micro symbol MES does not
+match MICRO_FOR_ROOT` (`mini symbol ES does not match MINI_FOR_ROOT` at stage D) · `qty 2 exceeds the
+stage A cap of 1` · `stop missing or on the wrong side of price` · `risk $301.70 exceeds the $250
+budget` · `already holding ES` · `event calendar not checked in the last 20 minutes`. Warning only:
+`feed heartbeat stale (last seen <iso|never>) — this alert is itself proof of the feed`.
+
+**Guardian disables (`disabledReason`)**: `3 execution errors today` (`EXECUTION_ERRORS_REASON`) ·
+`equity $44900 is 10% off its high $50000` (the halt, `toFixed(0)` — no thousands separator; entries
+then read `desk is disabled`).
+
+### Research ledger (E10)
+
+`research/edge-factory-trials.json` (formatVersion 2) is the pre-registration record: every family
+carries its hypothesis, markets, bar size, parameters, slippage source, the gate text and the
+**expectation written before the run** (`registeredAt` 2026-09-15T16:04:56Z), and `hypotheses` is
+the count the multiple-testing adjustment divides by (144 after E10). `SET=prompt npx tsx
+scripts/edge-factory.ts` refuses any candidate that is not in the ledger. The run record is
+`research/edge-factory-prompt-run-2026-09-15.txt`; the vault document with n / t / 95% CI on every
+row is `Performance/futures-research.md`. **Result: 17 candidates × 6 markets = 102 cells, 0 pass
+`validateCandidate`; 95 are significantly negative (t ≤ −2), 7 are indistinguishable from zero, none
+is positive.** Every stated expectation held (ORB, VWAP mean-reversion and the SMC sweep were already
+dead on this archive; the level breaks, range expansion and MA continuation join them). A survivor,
+had there been one, would have earned exactly one line here — "candidate for its own Pine + EDGES PR
+after Fable review" — and nothing else. The Donchian evidence was reproduced on main with
+`scripts/trend-portfolio.ts` (ported verbatim from `codex/trading-safety-parity`):
+`research/trend-portfolio-2026-09-15.txt`, figures now in `EDGES[1].evidence`.
 
 ## Proof
 
