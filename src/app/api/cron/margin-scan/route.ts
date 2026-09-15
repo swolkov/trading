@@ -7,7 +7,8 @@ import { autoShadowPlans, type Regime } from "@/lib/margin-auto-plans";
 import { isUsMarginSymbol } from "@/lib/kraken-pairs";
 import { executeAlert } from "@/lib/margin-executor";
 import { propEntry } from "@/lib/prop-desk";
-import { isSourceArmed } from "@/lib/margin-live-risk";
+import { isSourceArmed, liveContainerFor, LIVE_STOP_DEFAULT_PCT } from "@/lib/margin-live-risk";
+import { opportunityScore } from "@/lib/margin-opportunity-score";
 import { maybeDemote } from "@/lib/margin-synthesis";
 import { derivStamps, gatherIntel, stampSql } from "@/lib/margin-intel";
 import { snapshotDerivatives } from "@/lib/margin-derivatives";
@@ -232,10 +233,14 @@ export async function GET(request: Request) {
   // ("a refusal that exists only in an HTTP response nobody reads is not a finding, it is a
   // rumour"); the margin scan persisted nothing but a timestamp. Recording is pure addition:
   // nothing here changes what trades.
-  const look: { coin: string; tf: string; kind: string; tier?: string; outcome: string; detail?: string; mtf?: string; dataOk?: boolean }[] = [];
+  const look: { coin: string; tf: string; kind: string; tier?: string; outcome: string; detail?: string; mtf?: string; dataOk?: boolean; score?: number }[] = [];
+  // The 0–100 opportunity score per fresh directional signal (margin-opportunity-score.ts) — a
+  // PAPER RANKER stamped on the row and shown in look[]; nothing here gates on it.
+  const oppByKey: Record<string, number> = {};
   const note_ = (coin: string, tf: string, kind: string, outcome: string, tier?: string, detail?: string) => {
     const feat = scan.features[`${coin}:${tf}`];
-    if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}), mtf: intel.mtf[coin]?.text, ...(feat ? { dataOk: feat.dataOk } : {}) });
+    const score = oppByKey[`${coin}:${tf}:${kind}`];
+    if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}), mtf: intel.mtf[coin]?.text, ...(feat ? { dataOk: feat.dataOk } : {}), ...(score != null ? { score } : {}) });
   };
 
   // One read per run: the prop hand-off below is skipped entirely while the desk is off.
@@ -258,11 +263,21 @@ export async function GET(request: Request) {
         try { regime = { btcUp: await readBtcRegime() }; } catch (e) { errors.push(`btc regime: ${String(e).slice(0, 60)}`); }
         if (regime.btcUp == null) errors.push("btc regime unreadable — selective-btc and selective-short not opened this run");
       }
+      const btcRegimeStr = regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown";
       for (const s of fresh) {
         if (!(s.price > 0)) { note_(s.coin, s.timeframe, s.kind, "skipped", undefined, "no price"); continue; }
         if (s.kind !== "breakout" && s.kind !== "breakdown") { note_(s.coin, s.timeframe, s.kind, "watched", undefined, "not a directional signal — awareness only"); continue; }
         const conv = scoreConviction(s, signals);
         const plans = autoShadowPlans(s.kind, s.timeframe, conv, lev, regime, s.symbol);
+        // EVERY fresh breakout/breakdown is scored — refused ones too — so the ranker is measured
+        // on the whole population it would gate, not only on what the desk already liked.
+        const opp = opportunityScore({
+          coin: s.coin, side: s.kind === "breakout" ? "buy" : "sell",
+          signal: scan.features[`${s.coin}:${s.timeframe}`], h4: scan.features[`${s.coin}:4h`], mtf: intel.mtf[s.coin],
+          eventMode: intel.event?.mode ?? null, funding8hRel: intel.deriv?.[s.coin]?.funding ?? null, oiChg24h: intel.deriv?.[s.coin]?.oiChg24h ?? null,
+          btcRegime: btcRegimeStr, stopFrac: (liveContainerFor(plans[0]?.source)?.stopPct ?? LIVE_STOP_DEFAULT_PCT) / 100,
+        });
+        oppByKey[signalKey(s)] = opp.score;
         if (plans.length === 0) {
           // The commonest rejection by far, and the one worth seeing: autoPlansFor's first
           // line refuses anything below HIGH conviction, and swing-lev takes 4h only.
@@ -299,16 +314,15 @@ export async function GET(request: Request) {
           const chase = 0.001;
           const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
           // The intelligence stamps ride on the same INSERT (columns created by ensureShadowColumns).
-          const stamp = stampSql(intel, s.coin);
+          const stamp = stampSql(intel, s.coin, { opportunity: opp });
           // The BTC daily regime rides on the row too (A4's journal stamp; risk_pct is written by
           // snapshotShadowSizing beside the frozen size it belongs to).
-          const btcRegime = regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown";
           const stampCols = `, ${[...stamp.columns, "btc_regime"].join(", ")}`;
           const stampVals = `, ${[...stamp.columns, "btc_regime"].map((_, i) => `$${10 + i}`).join(",")}`;
           const inserted = await prisma.$queryRawUnsafe<{ id: number }[]>(
             `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version${stampCols})
              VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9${stampVals}) RETURNING id`,
-            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values, btcRegime,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values, btcRegimeStr,
           );
           const rowId = inserted[0]?.id ?? null;
           const frozenNotional = rowId != null ? await snapshotShadowSizing(rowId) : null;
@@ -355,8 +369,9 @@ export async function GET(request: Request) {
               // executor re-scan the coin 20-90s later over five timeframes, where a 5m
               // volume-spike flipping between the two reads silently halves the position.
               // The regime and the score ride along for the TRADE CARD only (margin-trade-card.ts):
-              // stamps, never sizing inputs. `score` is the scan's conviction score today; B5's
-              // 0–100 opportunity score replaces it once it exists.
+              // stamps, never sizing inputs. `score` stays the scan's conviction score — the card's
+              // confidence mapping is built on it; the 0–100 opportunity score is a PAPER RANKER
+              // and lives on the paper row (opportunity_score) and in look[] until promoted.
               const r = await executeAlert({ symbol: s.symbol, side, note, source: plan.source, leverage: plan.lev, scoredConviction: conv.tier, deadlineMs: routeDeadlineMs,
                 regime: regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown", score: conv.score });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);

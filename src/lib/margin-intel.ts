@@ -6,10 +6,12 @@
 //   event — the economic-calendar policy (B2)
 //   btc   — the BTC-shock state (B3)
 //   deriv — funding / open interest (B4)
+//   opportunity — the 0–100 paper ranker, per signal (B5, stampSql's third argument)
 // stampSql() keeps the scan route's INSERT thin: it hands back the column names and values
 // for whatever sections are present, so a section that is not built yet stamps nothing.
 import type { UniverseScan } from "@/lib/margin-scanner";
 import { mtfState, type MtfState } from "@/lib/margin-mtf";
+import type { OpportunityScore } from "@/lib/margin-opportunity-score";
 import { SCAN_COINS } from "@/lib/margin-scanner";
 
 /** Bumped whenever a stamp's MEANING changes, so slices never pool two definitions. */
@@ -43,13 +45,16 @@ export function gatherIntel(scan: Pick<UniverseScan, "features">, event: EventSt
 }
 
 export type StampValue = string | number | null;
+/** Per-SIGNAL stamps (they depend on side/timeframe, not just the coin): the 0–100 paper ranker (B5). */
+export interface SignalStamps { opportunity?: OpportunityScore | null }
 /** Columns + values to append to the paper row INSERT for `coin`. Always mtf_state and intel_version. */
-export function stampSql(intel: Intel, coin: string): { columns: string[]; values: StampValue[] } {
+export function stampSql(intel: Intel, coin: string, signal: SignalStamps = {}): { columns: string[]; values: StampValue[] } {
   const columns = ["mtf_state", "intel_version"];
   const values: StampValue[] = [intel.mtf[coin]?.text ?? null, intel.version];
   if (intel.event) { columns.push("event_mode"); values.push(intel.event.mode); }
   if (intel.btc) { columns.push("btc_state"); values.push(intel.btc.state); }
   const d = intel.deriv?.[coin];
   if (d) { columns.push("deriv_funding", "deriv_oi", "deriv_oi_chg_24h", "deriv_source"); values.push(d.funding, d.oi, d.oiChg24h, d.source); }
+  if (signal.opportunity) { columns.push("opportunity_score", "opportunity_json"); values.push(signal.opportunity.score, JSON.stringify({ components: signal.opportunity.components, missing: signal.opportunity.missing })); }
   return { columns, values };
 }
