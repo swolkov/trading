@@ -172,6 +172,45 @@ export function decodeOrderPayload(payload: Record<string, unknown>, bind: { ref
   return { ...order, refId: bind.refId, accountNumber: account, requestFingerprint: bind.fingerprint };
 }
 
+// ---- underlying quote / earnings decoders (Sep 15 2026) ------------------------------------------
+/** get_equity_quotes → data.results[].quote {symbol, last_trade_price, adjusted_previous_close, previous_close, venue_last_trade_time} (shape on file from Sep 10). */
+export interface UnderlyingQuote { symbol: string; last: number; previousClose: number; atMs: number }
+export function decodeUnderlyingQuote(payload: Record<string, unknown>, symbol: string): UnderlyingQuote | null {
+  const data = record(payload.data) ? payload.data : payload;
+  if (!Array.isArray(data.results)) return null;
+  const row = data.results.find((r) => record(r) && record(r.quote) && r.quote.symbol === symbol);
+  if (!record(row) || !record(row.quote)) return null;
+  const q = row.quote, last = num(q.last_trade_price), prev = num(q.adjusted_previous_close) ?? num(q.previous_close), at = Date.parse(str(q.venue_last_trade_time) ?? "");
+  if (last == null || !(last > 0) || prev == null || !(prev > 0) || !Number.isFinite(at)) return null;
+  return { symbol, last, previousClose: prev, atMs: at };
+}
+/** get_earnings_results {symbol} → data.results[] of {symbol, year, quarter, eps:{estimate, actual}, report:{date, timing, verified}},
+ *  up to 8 quarters ascending (captured live Sep 15 2026). An unresolvable symbol comes back with results:[] and the symbol in
+ *  `not_found`. Next earnings = the earliest report.date on or after today; a tentative (verified:false) date still counts.
+ *  Empty, not found, no upcoming date, or any other shape THROWS — the runner turns a throw into a refusal (fail closed). */
+export interface EarningsLookup { symbol: string; earningsAt: string; timing: "am" | "pm" | null; verified: boolean; via: string }
+const dayOf = (x: unknown): string | null => { const d = (str(x) ?? "").slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d) && Number.isFinite(Date.parse(d)) ? d : null; };
+const timingOf = (x: unknown): "am" | "pm" | null => (x === "am" || x === "pm" ? x : null);
+export function decodeEarningsResults(payload: Record<string, unknown>, symbol: string, fromDay: string): EarningsLookup {
+  const via = "get_earnings_results";
+  const data = record(payload.data) ? payload.data : payload;
+  if (Array.isArray(data.not_found) && data.not_found.includes(symbol)) throw new Error(`${via}: ${symbol} not found at the broker`);
+  if (!Array.isArray(data.results)) throw new Error(`${via}: unrecognized response shape (${Object.keys(data).slice(0, 12).join(",") || "empty"})`);
+  if (!data.results.length) throw new Error(`${via}: no earnings rows for ${symbol}`);
+  const upcoming: { day: string; timing: "am" | "pm" | null; verified: boolean }[] = [];
+  for (const row of data.results) {
+    if (!record(row) || !record(row.report)) throw new Error(`${via}: a row without a report object`);
+    if (str(row.symbol) !== symbol) throw new Error(`${via}: row for ${str(row.symbol) ?? "?"} answering a ${symbol} request`);
+    const day = dayOf(row.report.date);
+    if (!day) throw new Error(`${via}: a ${symbol} row carries no readable report.date (${Object.keys(row.report).join(",")})`);
+    if (day < fromDay && (!record(row.eps) || row.eps.actual == null)) throw new Error(`${symbol}: an unreported quarter dated ${day} is overdue`);   // the date moved and the broker has not caught up
+    if (day >= fromDay) upcoming.push({ day, timing: timingOf(row.report.timing), verified: row.report.verified === true });
+  }
+  const next = upcoming.sort((a, b) => a.day.localeCompare(b.day))[0];
+  if (!next) throw new Error(`${via}: no upcoming report date for ${symbol} — the next quarter is unscheduled`);
+  return { symbol, earningsAt: next.day, timing: next.timing, verified: next.verified, via };
+}
+
 // ---- the adapter --------------------------------------------------------------------------------
 export interface LiveBrokerClient { call(name: string, args: Record<string, unknown>): Promise<unknown> }
 export interface LiveBrokerIO {
@@ -269,6 +308,22 @@ export class RobinhoodLiveBroker implements OptionsLiveBroker {
       }
     }
     return out;
+  }
+  /** Underlying last/previous close for the shock check and the ex-dividend rule. Fail-soft: null (logged) — callers skip the rule, never trade blind on a guess. */
+  async underlyingQuote(symbol: string): Promise<UnderlyingQuote | null> {
+    try {
+      const q = decodeUnderlyingQuote(unwrapRobinhoodRead(await this.client.call("get_equity_quotes", { symbols: [symbol] })), symbol);
+      if (!q) this.io.log(`quote ${symbol}: unreadable response — rule skipped`);
+      return q;
+    } catch (e) { this.io.log(`quote ${symbol}: failed — ${String(e).slice(0, 160)}`); return null; }
+  }
+  /** Next earnings date for one name, straight from the broker (`get_earnings_results {symbol}`). THROWS on any failure; the entry path refuses on a throw. */
+  async nextEarnings(symbol: string): Promise<EarningsLookup> {
+    const fromDay = new Date(this.io.now()).toISOString().slice(0, 10);
+    const raw = unwrapRobinhoodRead(await this.client.call("get_earnings_results", { symbol }));
+    const shape = (x: unknown, d = 0): string[] => (record(x) && d < 3 ? Object.entries(x).flatMap(([k, v]) => [k, ...shape(Array.isArray(v) ? v[0] : v, d + 1).map((s) => `${k}.${s}`)]) : []);
+    try { return decodeEarningsResults(raw, symbol, fromDay); }
+    catch (e) { this.io.log(`earnings ${symbol} via get_earnings_results shape: ${shape(raw).slice(0, 40).join(" ")}`); throw e; }
   }
   async snapshot(optionIds: string[], refId: string): Promise<OptionsBrokerSnapshot> {
     const accounts = unwrapRobinhoodRead(await this.client.call("get_accounts", {}));

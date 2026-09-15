@@ -19,7 +19,7 @@ async function main(){
     if(block.type!=="tool_result"||typeof block.content!=="string"||!block.content.startsWith("Error: result"))continue;
     const path=block.content.match(/Output has been saved to (.+\.txt)\./)?.[1];
     const root=path?roots.find(r=>path.startsWith(r)):undefined;
-    if(!path||!root||!/^[-a-f0-9]{36}\/tool-results\/mcp-robinhood-trading-(run_scan|get_equity_historicals|create_scan|get_scans)-[0-9]+\.txt$/.test(path.slice(root.length)))continue;
+    if(!path||!root||!/^[-a-f0-9]{36}\/tool-results\/mcp-robinhood-trading-(run_scan|get_equity_historicals|create_scan|get_scans|get_earnings_calendar|get_equity_fundamentals)-[0-9]+\.txt$/.test(path.slice(root.length)))continue;
     if(realpathSync(path)!==path||statSync(path).size>5_000_000)continue;
     block.content=readFileSync(path,"utf8");block.is_error=false;
   }
@@ -37,6 +37,6 @@ async function main(){
   const [account,risk]=await Promise.all([readAccountSnapshot(),prisma.agentConfig.findUnique({where:{key:OPTIONS_MAX_LOSS_KEY}})]);
   await saveOptionsObservation(buildOptionsObservation(next,parseOptionsMaxLoss(risk?.value),account),rawCapture);
   await prisma.agentConfig.upsert({where:{key:OPTIONS_RESEARCH_KEY},create:{key:OPTIONS_RESEARCH_KEY,value:JSON.stringify(merged)},update:{value:JSON.stringify(merged)}});
-  console.log(JSON.stringify({stored:true,symbols:Object.keys(merged.bars),contracts:merged.contracts.length,scans:merged.scans.length,errors:merged.errors}));
+  console.log(JSON.stringify({stored:true,symbols:Object.keys(merged.bars),contracts:merged.contracts.length,scans:merged.scans.length,events:Object.keys(merged.events??{}).length,errors:merged.errors}));
 }
 main().finally(()=>prisma.$disconnect()).catch(e=>{console.error(e.message);process.exitCode=1});

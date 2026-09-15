@@ -9,6 +9,8 @@ import { executeAlert } from "@/lib/margin-executor";
 import { propEntry } from "@/lib/prop-desk";
 import { isSourceArmed } from "@/lib/margin-live-risk";
 import { maybeDemote } from "@/lib/margin-synthesis";
+import { gatherIntel, stampSql } from "@/lib/margin-intel";
+import { readEventPolicy } from "@/lib/margin-events";
 
 // The margin opportunity scanner — every 15 minutes (vercel.json), 24/7. Watches every
 // liquid margin coin across 15m/1h/4h/daily and pushes NEW notable technical events to
@@ -65,7 +67,14 @@ export async function GET(request: Request) {
   }).catch(() => {});
 
   const state = await loadState();
-  const { signals, errors } = await scanUniverse();
+  const scan = await scanUniverse();
+  const { signals, errors } = scan;
+  // What the scan knew, stamped on every paper row it opens (margin-intel.ts). Additive: it
+  // reads the features the scan already computed and never changes what trades.
+  // The event policy is stamped on paper rows for the byEventMode slice; paper is NEVER gated
+  // by it (the executor applies the veto). Fail-soft here: unreadable stamps nothing.
+  const eventStamp = await readEventPolicy().then((p) => ({ mode: p.mode })).catch(() => null);
+  const intel = gatherIntel(scan, eventStamp);
   const armedSources = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_live_sources" } }).then((r) => r?.value ?? "");
   let entryChecksPassed = errors.length === 0;
   // Resolve any tracked TradingView signals that hit their stop/target/time limit, and
@@ -207,9 +216,10 @@ export async function GET(request: Request) {
   // ("a refusal that exists only in an HTTP response nobody reads is not a finding, it is a
   // rumour"); the margin scan persisted nothing but a timestamp. Recording is pure addition:
   // nothing here changes what trades.
-  const look: { coin: string; tf: string; kind: string; tier?: string; outcome: string; detail?: string }[] = [];
+  const look: { coin: string; tf: string; kind: string; tier?: string; outcome: string; detail?: string; mtf?: string; dataOk?: boolean }[] = [];
   const note_ = (coin: string, tf: string, kind: string, outcome: string, tier?: string, detail?: string) => {
-    if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}) });
+    const feat = scan.features[`${coin}:${tf}`];
+    if (look.length < 80) look.push({ coin, tf, kind, ...(tier ? { tier } : {}), outcome, ...(detail ? { detail } : {}), mtf: intel.mtf[coin]?.text, ...(feat ? { dataOk: feat.dataOk } : {}) });
   };
 
   // One read per run: the prop hand-off below is skipped entirely while the desk is off.
@@ -272,10 +282,14 @@ export async function GET(request: Request) {
           // head-to-head comparison the scoreboard exists to make.
           const chase = 0.001;
           const entryPx = side === "buy" ? s.price * (1 + chase) : s.price * (1 - chase);
+          // The intelligence stamps ride on the same INSERT (columns created by ensureShadowColumns).
+          const stamp = stampSql(intel, s.coin);
+          const stampCols = stamp.columns.length ? `, ${stamp.columns.join(", ")}` : "";
+          const stampVals = stamp.columns.length ? `, ${stamp.columns.map((_, i) => `$${10 + i}`).join(",")}` : "";
           const inserted = await prisma.$queryRawUnsafe<{ id: number }[]>(
-            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version)
-             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9) RETURNING id`,
-            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION,
+            `INSERT INTO tradingview_alerts (symbol, side, leverage, note, mark_price, executed, validated, conviction, conviction_score, source, sim_version${stampCols})
+             VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9${stampVals}) RETURNING id`,
+            s.symbol, side, plan.lev, note, entryPx, conv.tier, conv.score, plan.source, SIM_VERSION, ...stamp.values,
           );
           const rowId = inserted[0]?.id ?? null;
           const frozenNotional = rowId != null ? await snapshotShadowSizing(rowId) : null;
@@ -284,7 +298,18 @@ export async function GET(request: Request) {
           // go-live plan's "arm ONE strategy"). The executor applies every guard (arm
           // switch, validate-only, breaker, guardian freshness, universe, netting, sizing);
           // the paper row above is unaffected either way — paper keeps measuring.
-          if (entryChecksPassed && frozenNotional != null && frozenNotional > 0 && armedSources && isSourceArmed(armedSources, plan.source)) {
+          // DATA QUALITY: a series with a hole in its last 20 bars, a duplicate, or a stale
+          // newest bar is not handed to the executor — a live order sized off it is sized off a
+          // chart that may not be real. The paper row above still opens (and is stamped), so the
+          // record keeps measuring; only the live hand-off waits for the next clean tick.
+          const feat = scan.features[`${s.coin}:${s.timeframe}`];
+          const dataProblem = !feat ? "features unavailable" : !feat.dataOk ? feat.dataReason : null;
+          if (dataProblem) {
+            note_(s.coin, s.timeframe, s.kind, "live skipped", conv.tier, `data quality: ${dataProblem}`);
+            if (rowId != null) {
+              await prisma.$executeRawUnsafe(`UPDATE tradingview_alerts SET live_exec_note=$1 WHERE id=$2`, `live skipped: data quality: ${dataProblem}`.slice(0, 300), rowId).catch(() => {});
+            }
+          } else if (entryChecksPassed && frozenNotional != null && frozenNotional > 0 && armedSources && isSourceArmed(armedSources, plan.source)) {
             try {
               // LEVERAGE MUST TRAVEL WITH THE PLAN. The executor takes
               // min(equity ladder, the pair's US-retail max, Math.max(2, alert.leverage ?? 2)) —
@@ -413,6 +438,14 @@ export async function GET(request: Request) {
     errors.push(`milestone: ${String(e).slice(0, 60)}`);
   }
 
+  // The latest intelligence snapshot for the admin page and /api/margin/intel (display only;
+  // those routes must never make a Kraken call of their own).
+  const dataIssues = Object.values(scan.features).filter((f) => !f.dataOk).length;
+  await prisma.agentConfig.upsert({
+    where: { key: "kraken_margin_intel_latest" },
+    update: { value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null }) },
+    create: { key: "kraken_margin_intel_latest", value: JSON.stringify({ at: new Date().toISOString(), version: intel.version, btcMtf: intel.mtf.BTC?.text ?? null, ethMtf: intel.mtf.ETH?.text ?? null, dataIssues, eventMode: intel.event?.mode ?? null }) },
+  }).catch(() => {});
   if (errors.length) console.error("[/api/cron/margin-scan]", errors.slice(0, 5));
   // PERSIST THE TICK. Same reasoning as the options book: what the desk REFUSED is at least
   // as informative as what it took, and it is the only way to answer "why hasn't it traded?"

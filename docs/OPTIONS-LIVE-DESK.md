@@ -102,3 +102,77 @@ structure worth nothing at that move is rejected outright — that is a lottery 
 
 **Exit.** Stop at half the premium. No fixed target: once a position has been worth 1.5× entry, a
 trail keeps half of the best gain seen. A spread worth its full width exits. Out 7 days before expiry.
+
+## Earnings and ex-dividend (Sep 15 2026)
+
+A 21–60 day single-name contract very often spans an earnings date, and the breakout rule says
+nothing about earnings — that is an **EARNINGS TRADE** the desk never asked for. So the research
+session now also reads the broker's earnings calendar (next 31 days, then the 29 after) and each
+name's fundamentals (dividend schedule, batches of 10); the ingest turns them into
+`events[symbol] = {earningsAt, earningsTiming, exDivAt, dividendAmount, at}` on the research
+snapshot (`src/lib/options-research-ingest.ts`), carried forward by the merge with its original
+clock. The rules live in `src/lib/options-events.ts` and are pure:
+
+- **`spansEarnings`** — refused when earnings fall on or before expiry; refused as **unknown** when
+  there is no row, the row is older than 36 hours, or the expiry lies past `calendarThrough` — the
+  last day the calendar was **proven** to cover (a page counts only when it is non-empty, not
+  paginated, and its `start_date`/`days` are known; pages are unioned contiguously from the capture
+  day). SPY/QQQ/IWM have no earnings and are exempt.
+  The screen drops refused structures and the empty-tick note names the date
+  (`signal on SOFI bullish but earnings 2026-10-28 falls before expiry 2026-11-20 (1 refused by the earnings rule)`).
+- **`exDivRisk`** — a call debit spread whose short call the market's expected move can put in the
+  money before an ex-dividend date inside the hold is refused (early assignment). Fundamentals never
+  read → every spread is refused (index ETFs included); single legs are unaffected.
+- **Live re-check** — `pickCandidate` re-runs `spansEarnings` on the desk's own clock and, for the
+  chosen name only, asks the broker once: `get_earnings_results {symbol}`, decoded by named fields.
+  **Any failure refuses — fail closed by design** (empty results, `not_found`, no upcoming
+  `report.date`, a foreign row, an unrecognized shape) and the entry log says why:
+  `refused: SOFI long_call: live earnings check failed — … (refused, fail closed)`. A decode
+  failure also logs the response's key shape.
+- **Guardian** — the owned record now carries `exDivAt` and `shortStrike` (stamped at fill);
+  `guardianExDivExit` closes a call debit spread whose short call is in the money with the ex-date
+  two days out or less, priced at the executable mark (no bid → `ex-dividend exit wanted but no bid —
+  will retry next tick`). The underlying quote (`broker.underlyingQuote`, `get_equity_quotes`) is
+  fail-soft: no quote, or one older than 15 minutes → rule skipped and logged.
+
+**The broker's shapes (captured live Sep 15 2026), which the ingest and the adapter are pinned to:**
+
+- `get_earnings_results {symbol}` and `get_earnings_calendar {days: 1..31, start_date?, filter?}` both
+  return `data.results[]` of `{symbol, year, quarter, eps: {estimate, actual}, report: {date: "YYYY-MM-DD",
+  timing: "am"|"pm"|null, verified}}`, ascending. Upcoming = `eps.actual === null`; `verified: false` is
+  tentative and still counts for the veto. Results for an unresolvable symbol come back empty with the
+  symbol in `not_found` → **unknown, refused** — never "none"; a past-dated row with `eps.actual` still
+  null is an **overdue** quarter and also refuses. The calendar has no end date: the research session
+  calls it with `days=31` from today and again with `start_date = today+31, days=31` (61 days ≥ the
+  60-day max DTE), without the `high_market_cap` filter (the affordable core is small caps). A
+  researched name absent from both pages = `earningsAt: null` through `calendarThrough`.
+- `get_equity_fundamentals {symbols: [≤10]}` → `data.results[]` of `{symbol, …, dividend_yield,
+  dividend_per_share, distribution_frequency, payable_date, ex_dividend_date, record_date}`; a
+  non-payer has every dividend field null. `ex_dividend_date` is the MOST RECENT scheduled ex-date —
+  past (F: 2026-08-11) or upcoming (SPY: 2026-09-18). `nextExDiv` (pure): all null → no dividend;
+  upcoming → `exDivAt` **scheduled**; past + Quarterly/Monthly/Semi-Annual/Annual → last + 91/30/182/365
+  days rolled forward past today, **projected**, which the spread rule and the guardian read as a
+  **±7-day window**; past + any other frequency, or a date too stale to roll forward past today →
+  key absent (unknown → spreads refused).
+
+Until the first research run after this ships stores `events`, every single-name candidate reads
+as unknown and is refused; index ETFs still trade. That is the rule working, not the desk broken.
+
+## Broad market first: alignment stamp and one pre-registered veto (Sep 15 2026)
+
+`src/lib/options-market-state.ts` (pure) reads SPY and QQQ from the research bars — close vs the
+20- and 50-day averages, the signal day's move, `above`/`below`/`unknown` — and VIX from Yahoo
+(`vixLevel`, **null on failure; never `cross-asset.ts`, which fabricates 20**). The screen stamps
+`market` on every candidate with `aligned` for its direction; the desk writes the same view into
+`options_live_state.market` on every entry tick (shown on the Live desk panel).
+
+Exactly one rule vetoes, registered before any trade was measured against it: a **bullish
+single-name** entry is refused when SPY closed **below its 20-day average AND −1.5% or worse** on
+the signal day (mirror for bearish: above and +1.5% or better). At the moment of entry a live SPY
+quote (`broker.underlyingQuote`) adds an **intraday shock** check: ≥1.5% against the trade refuses.
+Index ETFs are exempt from the day rule (an ETF breakout is the market). Missing or stale bars and
+a failed quote stamp `unknown` (a quote older than 15 minutes stamps `stale`) and never veto — this
+layer is fail-soft; the earnings rule is the fail-closed one. The VIX read is raced against an
+8-second timeout so the guard loop can never stall on Yahoo. Off switch: `options_live_market_veto="false"` (default on). Entry log lines:
+`refused: SOFI long_call: market veto — SPY below its 20-day (651.2 vs 660.4) and -2.1% on 2026-09-14 — bullish single-name entries refused`
+and `… market shock veto — SPY -1.7% intraday against a bullish entry`.
