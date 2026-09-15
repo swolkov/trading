@@ -20,6 +20,7 @@
 // enforces (inert unless the margin-level floor is disabled — a belt to that brace).
 //
 // Pure: no I/O, no config reads. The executor and guardian read the keys and call in.
+import type { ExposureSummary } from "@/lib/margin-exposure";
 import {
   LIVE_RISK_CEILING_PCT,
   LIQ_BUFFER_MULT,
@@ -178,8 +179,9 @@ export function parseDecayMultiplier(raw: string | null | undefined): number | n
   return v;
 }
 
-/** What the guardian writes to kraken_margin_risk_state each run (display only). */
-export interface RiskState { at: string; peak: number; equity: number; dd: number; tier: DdTier; mult: number; losersToday: number | null; tiersOn?: boolean; note?: string }
+/** What the guardian writes to kraken_margin_risk_state each run (display only). `exposure` is
+ *  A2's correlated-exposure summary (margin-exposure.ts), folded in by step 3 of the guardian. */
+export interface RiskState { at: string; peak: number; equity: number; dd: number; tier: DdTier; mult: number; losersToday: number | null; tiersOn?: boolean; note?: string; exposure?: ExposureSummary & { at: string } }
 
 // ---------- THE REFUSAL STRINGS, built in one place so the executor, the capacity ledger's
 // classifier and the tests all read the same words. ----------
@@ -192,6 +194,8 @@ export const REFUSAL_RE = {
   chainZero: /^entry refused: risk chain sized to 0/,
   eventWindow: /^entry refused: event window — /,
   eventUnreadable: /^entry refused: could not read the event policy/,
+  cluster: /^entry refused: all-stops risk \$[\d.]+ \+ \$[\d.]+ would exceed the cluster cap/,
+  clusterCapInvalid: /^entry refused: kraken_margin_cluster_risk_cap_pct .* is not a number/,
 } as const;
 export const refusalNote = {
   ddUnknown: (peakRaw: string | null, equity: number) => `entry refused: drawdown tier unknown — failing closed (kraken_margin_equity_peak=${peakRaw ?? "missing"}, equity $${equity.toFixed(0)})`,
@@ -202,4 +206,6 @@ export const refusalNote = {
   chainZero: (ddMult: number, eventMult: number, decayMult: number) => `entry refused: risk chain sized to 0 (dd ×${ddMult}, event ×${eventMult}, decay ×${decayMult}) — failing closed`,
   eventWindow: (reason: string) => `entry refused: event window — ${reason}`,
   eventUnreadable: (err: string) => `entry refused: could not read the event policy (${err.slice(0, 60)}) — failing closed`,
+  cluster: (existingUsd: number, newUsd: number, capPct: number, equity: number) => `entry refused: all-stops risk $${existingUsd.toFixed(0)} + $${newUsd.toFixed(0)} would exceed the cluster cap ${capPct.toFixed(1)}% of equity ($${equity.toFixed(0)}) — every open stop hit at once must stay inside the breaker's headroom`,
+  clusterCapInvalid: (raw: string | null) => `entry refused: kraken_margin_cluster_risk_cap_pct "${raw}" is not a number — failing closed`,
 } as const;

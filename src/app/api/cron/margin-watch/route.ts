@@ -22,6 +22,7 @@ import { advanceRoundTrip } from "@/lib/margin-round-trip";
 import { bookExposureMatches, recoveryBlocksPair, type PyramidRecovery } from "@/lib/margin-pyramid-recovery";
 import { maeR, mfeR, troughUpdate } from "@/lib/margin-shadow-excursion";
 import { upsertRoundTripOpen, type RoundTripOpen } from "@/lib/margin-round-trips";
+import { exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
 
 // The margin guardian — runs every 5 minutes (vercel.json), 24/7.
 //
@@ -399,6 +400,23 @@ export async function GET(request: Request) {
         }
       }
     }
+    // 3a) CORRELATED EXPOSURE (margin-exposure.ts): what the whole book loses if every stop is
+    //     hit at once, folded into kraken_margin_risk_state for the admin page and /api/margin/
+    //     status. Display only — the executor computes its own from fresh reads at entry time.
+    try {
+      const own = await botOwnership().catch(() => null);
+      const rsRow = await prisma.agentConfig.findUnique({ where: { key: "kraken_margin_risk_state" } }).catch(() => null);
+      const rs = rsRow?.value ? (JSON.parse(rsRow.value) as RiskState) : null;
+      if (rs) {
+        const haltPct = Math.max(1, await cfgNum("kraken_margin_max_drawdown_pct", 15));
+        const summary = exposureSummary(positions.map((p): ExposurePosition => {
+          const ours = own != null && !own.ledgerCorrupt && own.isOurs(p);
+          return { pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, leverage: p.leverage, ours, stopFrac: ours ? own!.stopFracOf(p.ordertxid) : null };
+        }), rs.equity, haltPct, rs.dd);
+        const next: RiskState = { ...rs, exposure: { ...summary, at: new Date().toISOString() } };
+        await prisma.agentConfig.upsert({ where: { key: "kraken_margin_risk_state" }, update: { value: JSON.stringify(next) }, create: { key: "kraken_margin_risk_state", value: JSON.stringify(next) } }).catch(() => {});
+      }
+    } catch (e) { errors.push(`exposure: ${String(e).slice(0, 80)}`); }
   } catch (e) {
     errors.push(`positions: ${e}`);
   }

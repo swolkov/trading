@@ -18,6 +18,8 @@ test("every refusal builder produces a string its own regex matches", () => {
     ["chainZero", refusalNote.chainZero(0.25, 0, 1)],
     ["eventWindow", refusalNote.eventWindow("FOMC rate decision at 18:00Z (in 15 min) — tier 1 within ±30 min")],
     ["eventUnreadable", refusalNote.eventUnreadable("connect ECONNREFUSED")],
+    ["cluster", refusalNote.cluster(800, 800, 15, 10_000)],
+    ["clusterCapInvalid", refusalNote.clusterCapInvalid("abc")],
   ];
   for (const [k, note] of cases) assert.match(note, REFUSAL_RE[k], k);
   // The exact words, pinned.
@@ -35,6 +37,7 @@ test("the capacity ledger files each new refusal under its own kind, never 'othe
   assert.equal(classifyRefusal(null, refusalNote.revenge(2, 2)), "revenge");
   assert.equal(classifyRefusal(null, refusalNote.ddUnknown(null, 5000)), "drawdown");
   assert.equal(classifyRefusal(null, refusalNote.ddHalt(15.3, 5140, 15)), "drawdown");
+  assert.equal(classifyRefusal(null, refusalNote.cluster(800, 800, 15, 10_000)), "cluster");
   // Not yet named kinds stay "other" — visibly, rather than mis-filed.
   assert.equal(classifyRefusal(null, refusalNote.decay("0.2")), "other");
   assert.equal(classifyRefusal(null, refusalNote.chainZero(1, 0.5, 0.5)), "other");

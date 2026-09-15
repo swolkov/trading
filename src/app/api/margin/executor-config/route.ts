@@ -32,6 +32,8 @@ export async function GET() {
       "kraken_margin_equity_peak", "kraken_margin_risk_state",
       // Event veto (B2): the guardian-written policy and the operator's off switch.
       "kraken_margin_event_policy", "kraken_margin_event_veto", "kraken_margin_calendar_feed",
+      // Cluster cap (A2): optional override of the breaker-headroom default.
+      "kraken_margin_cluster_risk_cap_pct",
     ];
     const rows = await prisma.agentConfig.findMany({ where: { key: { in: keys } } });
     const c: Record<string, string> = {};
@@ -82,6 +84,8 @@ export async function GET() {
       eventVeto: c.kraken_margin_event_veto !== "false",
       calendarFeed: c.kraken_margin_calendar_feed === "finnhub" ? "finnhub" : "static",   // Finnhub's economic calendar is premium; opt-in
       eventPolicy: resolveEventPolicy(c.kraken_margin_event_policy ?? null, c.kraken_margin_event_veto ?? null, Date.now()),
+      // null = the default (breaker headroom: halt − drawdown taken); a number = the operator's cap.
+      clusterRiskCapPct: c.kraken_margin_cluster_risk_cap_pct != null && c.kraken_margin_cluster_risk_cap_pct.trim() !== "" ? num("kraken_margin_cluster_risk_cap_pct", NaN) : null,
     };
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),

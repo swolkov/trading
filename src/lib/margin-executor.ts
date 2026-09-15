@@ -92,6 +92,7 @@ import {
 import { eventRiskMultiplier, readEventPolicy } from "@/lib/margin-events";
 import { DEFAULT_DD_HALT_PCT, DEFAULT_MAX_LOSSES_PER_DAY, drawdownTier, liqBufferOk, liveRiskPctChain, losersToday, parseDecayMultiplier, refusalNote, revengePauseHit, setupGradeFor } from "@/lib/margin-risk-tiers";
 import { announceTradeCard, buildTradeCard, persistTradeCard, type CardRegime, type TradeCard } from "@/lib/margin-trade-card";
+import { clusterEntryAllowed, exposureSummary, type ExposurePosition } from "@/lib/margin-exposure";
 
 // Distinct from the trend bot's 770077 so each system's orders are separable forever.
 export const MARGIN_USERREF = 770078;
@@ -1254,6 +1255,29 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // =0) or leverage ever arrives from a path that did not fit it to the stop.
     if (!liqBufferOk(stopPct, leverage)) {
       return refuse(refusalNote.liqBuffer(stopPct, leverage));
+    }
+    // Layer 6d: THE CLUSTER (margin-exposure.ts). What every open position loses if every stop
+    // is hit at once — bot positions at their ledgered stop, anything else at the liquidation
+    // cushion (fail closed) — plus this trade's risk, must stay inside the cap: the operator's
+    // kraken_margin_cluster_risk_cap_pct if set (STRICT read), else the breaker's headroom
+    // (halt − drawdown taken). Inert at one slot (8% < 15%); at three it refuses a second A+
+    // beside a first (8 + 8 > 15) and allows A+ beside Strong. A pyramid add measures its own
+    // book against the RESTING stop it is sized to, not the ledgered entry-relative one — by the
+    // time an add fires that stop is at or past breakeven, and the add's whole point is that the
+    // book's worst case stays one R.
+    {
+      const capRaw = await cfgStrict("kraken_margin_cluster_risk_cap_pct");
+      const capParsed = capRaw != null && capRaw.trim() !== "" ? Number(capRaw) : null;
+      if (capParsed != null && !Number.isFinite(capParsed)) return refuse(refusalNote.clusterCapInvalid(capRaw));
+      const capPct = capParsed ?? Math.max(0, ddHaltPct - Math.max(0, ddTier.dd));
+      const own = await botOwnership();
+      const exposure = exposureSummary(openPositions.map((p): ExposurePosition => {
+        const ours = own.isOurs(p);
+        const onThisBook = pyramid != null && pairMatchesSymbol(p.pair, alert.symbol) && p.side === (alert.side === "buy" ? "long" : "short");
+        return { pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, leverage: p.leverage, ours, stopFrac: ours ? own.stopFracOf(p.ordertxid) : null, ...(onThisBook ? { stopPrice: pyramid.stopLevel } : {}) };
+      }), equity, ddHaltPct, ddTier.dd);
+      const verdict = clusterEntryAllowed(exposure, notional * riskDist, equity, capPct);
+      if (!verdict.ok) return refuse(refusalNote.cluster(verdict.existingUsd, verdict.newUsd, verdict.capPct, equity));
     }
     const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;
