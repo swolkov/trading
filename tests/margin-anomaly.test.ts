@@ -59,15 +59,24 @@ test("the resting stop may only ratchet in the trade's favour: wider than the le
   assert.equal(bookMatchesCard(book({ leverage: 20, restingStop: 3700 }), null).findings.length, 1);
 });
 
-test("the orphan-sweep exception: our stop beside a position the ledger does not know, with nothing of ours on that pair+side", () => {
+test("the orphan-sweep exception: our stop beside a position the ledger does not know that PREDATES the stop; a position opened after our stop falls through to the sweep", () => {
   const same = (a: string, b: string) => a.replace(/:.*$/, "") === b.replace(/:.*$/, "");
   const ours = new Set(["OMINE"]);
   const isOurs = (p: { ordertxid: string; id: string }) => ours.has(p.ordertxid);
-  const stop = { pair: "XBTUSD:BTNL", side: "sell" };
-  const manualLong = { ordertxid: "OTHEIRS", id: "T1", pair: "XBTUSD:BTNL", side: "long" };
-  assert.deepEqual(unledgeredBesideOurStop(stop, [manualLong], isOurs, same), [{ ordertxid: "OTHEIRS", id: "T1" }], "flagged: never swept, paged with the adopt instruction");
+  const stopAt = 1_760_000_000;   // the stop's opentm (epoch s)
+  const stop = { pair: "XBTUSD:BTNL", side: "sell", opentm: stopAt };
+  const iso = (sec: number) => new Date(sec * 1000).toISOString();
+  // Bot-shaped: the position was open BEFORE our stop (an attached close[] is never older than its position).
+  const before = { ordertxid: "OTHEIRS", id: "T1", pair: "XBTUSD:BTNL", side: "long", openedAt: iso(stopAt - 30) };
+  assert.deepEqual(unledgeredBesideOurStop(stop, [before], isOurs, same), [{ ordertxid: "OTHEIRS", id: "T1" }], "flagged: never swept, paged with the adopt instruction");
+  assert.deepEqual(unledgeredBesideOurStop(stop, [{ ...before, openedAt: iso(stopAt + 10) }], isOurs, same), [{ ordertxid: "OTHEIRS", id: "T1" }], "the same +10s slack stopProtectsLive uses");
+  assert.deepEqual(unledgeredBesideOurStop(stop, [{ ...before, openedAt: "" }], isOurs, same), [{ ordertxid: "OTHEIRS", id: "T1" }], "unknown open time: cannot be proven manual, so flagged");
+  // Spencer's manual trade AFTER the bot's book was hand-closed: a stale stop beside it is an orphan → the sweep path as on main.
+  const after = { ...before, openedAt: iso(stopAt + 600) };
+  assert.deepEqual(unledgeredBesideOurStop(stop, [after], isOurs, same), [], "provably opened after our stop: not bot-shaped, falls through to the orphan sweep");
+  const manualLong = before;
   // A position of ours on the pair+side makes the stop that book's cover: the neighbour is the FIFO case, not this.
-  assert.deepEqual(unledgeredBesideOurStop(stop, [manualLong, { ordertxid: "OMINE", id: "T2", pair: "XBTUSD:BTNL", side: "long" }], isOurs, same), []);
+  assert.deepEqual(unledgeredBesideOurStop(stop, [manualLong, { ordertxid: "OMINE", id: "T2", pair: "XBTUSD:BTNL", side: "long", openedAt: iso(stopAt - 5) }], isOurs, same), []);
   // Wrong side (a sell-stop does not close a short) or another pair: nothing to judge.
   assert.deepEqual(unledgeredBesideOurStop(stop, [{ ...manualLong, side: "short" }], isOurs, same), []);
   assert.deepEqual(unledgeredBesideOurStop(stop, [{ ...manualLong, pair: "XETHZUSD" }], isOurs, same), []);
@@ -114,6 +123,9 @@ test("wiring, pinned on the source: the executor reads the key STRICTLY above th
   assert.ok(/kraken_margin_adopt_txids=\$\{ids\}/.test(orphanBlock), "the page carries the adopt instruction");
   assert.ok(/bookMatchesCard\(/.test(guardian) && /flagAnomaly\(findings, `anomaly-book-\$\{bookKey\}`/.test(guardian), "the per-book card check pages and sets the anomaly");
   assert.ok(/breachGuard: \(priorBreached\[stateKey\] \?\? 0\) > 0/.test(guardian), "the breach-guard state is passed through");
+  // closeBook's remainder guard cover records the level it placed, so the next run never reads it as "wider".
+  const remainder = guardian.split("remainder not re-covered")[1]?.split("if (left > 0) {")[0] ?? "";
+  assert.ok(/if \(out\.placed && plan\.place\) noteStopLevel\(null, parseFloat\(plan\.place\.level\)\)/.test(remainder), "the remainder re-cover calls noteStopLevel");
   // The executor-config route exposes the key and offers the clear action; nothing in the UI tree does.
   const cfgRoute = readFileSync(new URL("../src/app/api/margin/executor-config/route.ts", import.meta.url), "utf8");
   assert.ok(/ANOMALY_KEY,\s*\]/.test(cfgRoute) || /ANOMALY_KEY,\n/.test(cfgRoute), "the GET reads the key");

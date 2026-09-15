@@ -192,7 +192,10 @@ export interface LedgerEntry { txid: string; pair: string; ts: number; stopFrac?
 // ledger is backed up, then replaced. `stopFrac` is the entry's authorised 1R, stored so
 // the guardian's managed exit never has to re-derive it from a stop that may already
 // have been ratcheted.
-async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string; cardId?: number | null }): Promise<boolean> {
+// `quiet`: opt-in for a SECOND write onto an entry that is already ledgered (attaching the trade
+// card's id) — a transient failure there must not page an adopt instruction for a position the
+// ledger already holds. Never used for the first write.
+export async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: number; maxHoldH?: number; source?: string; trailR?: number; addOnOf?: string; cardId?: number | null }, opts: { quiet?: boolean } = {}): Promise<boolean> {
   try {
     const raw = await cfgStrict(BOT_TXIDS_KEY);
     const cutoff = Date.now() - BOT_TXID_TTL_MS;
@@ -217,6 +220,7 @@ async function recordBotEntry(txid: string, pair: string, meta?: { stopFrac?: nu
     // NOT best-effort in consequence: an unrecorded position is invisible to BOTH the close
     // path and the guardian's naked-position guard, so it is unclosable by alert AND
     // unprotected. Page immediately with the id needed to adopt it.
+    if (opts.quiet) return false;   // the caller already holds a ledgered entry and reports its own way
     await sendNotification(
       `🚨 Could not record bot position ${txid} on ${pair}. It will NOT be recognised by close alerts or the naked-position guard. Add it to kraken_margin_adopt_txids now. ${String(e).slice(0, 120)}`,
       "margin_urgent",
@@ -1358,7 +1362,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
       try {
         await writePyramidMarker({ parent: pyramid.parentTxid, ts: Date.now() });
       } catch (e) {
-        return { executed: false, validated: false, note: `pyramid add refused: could not write the pending-add marker (${String(e).slice(0, 60)}) — not sent` };
+        return refuse(`pyramid add refused: could not write the pending-add marker (${String(e).slice(0, 60)}) — not sent`);
       }
     }
     sentAtSec = Math.floor(Date.now() / 1000);
@@ -1419,7 +1423,9 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     catch (e) { await sendNotification(`⚠️ ${pair}: trade card not persisted after AddOrder (${String(e).slice(0, 80)}) — the entry is ledgered and stands.`, "margin_live").catch(() => {}); }
     if (cardId != null && ledgered && !validate && txid) {
       ledgerMeta = { ...ledgerMeta, cardId };
-      await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }).catch(() => {});
+      // quiet: the position IS ledgered; a blip here must not page "adopt it".
+      const attached = await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }, { quiet: true }).catch(() => false);
+      if (!attached) await sendNotification(`⚠️ ${pair}: trade card ${cardId} link not attached to ${txid}; ownership intact (ledgered before the card).`, "margin_live").catch(() => {});
     }
     // Announce AFTER the ledger write: Slack margin_live + vault Decisions/ (both best-effort,
     // 5s Slack timeout inside sendNotification).

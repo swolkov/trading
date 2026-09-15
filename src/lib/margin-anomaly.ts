@@ -80,14 +80,17 @@ export function bookMatchesCard(book: BookForCard, card: CardForCheck | null): B
 
 /**
  * A resting stop of ours beside a position that is NOT ours on the same pair+side, with no
- * position of ours there: a bot-shaped position the ledger does not know. Never swept as an
- * orphan; paged with the adopt instruction; the anomaly is set. `own` null = ownership was
- * unreadable this run — nothing can be judged, so nothing is flagged (the sweep is already
- * withheld in that state).
+ * position of ours there, that PREDATES the stop (or whose open time is unknown): a bot-shaped
+ * position the ledger does not know — an entry's attached close[] is never older than its
+ * position, so this is the guardian's own "plausibly ours" predicate (stopProtectsLive). Never
+ * swept as an orphan; paged with the adopt instruction; the anomaly is set. A position
+ * provably opened AFTER our stop is Spencer's manual trade beside a stale stop and falls
+ * through to the orphan sweep as before. `isOurs` null = ownership was unreadable this run —
+ * nothing can be judged, so nothing is flagged (the sweep is already withheld in that state).
  */
 export function unledgeredBesideOurStop(
-  stop: { pair: string; side: string },
-  positions: { ordertxid: string; id: string; pair: string; side: string }[],
+  stop: { pair: string; side: string; opentm: number },
+  positions: { ordertxid: string; id: string; pair: string; side: string; openedAt: string }[],
   isOurs: ((p: { ordertxid: string; id: string }) => boolean) | null,
   samePair: (a: string, b: string) => boolean,
 ): { ordertxid: string; id: string }[] {
@@ -95,7 +98,11 @@ export function unledgeredBesideOurStop(
   const closes = stop.side === "sell" ? "long" : "short";
   const onSide = positions.filter((p) => samePair(p.pair, stop.pair) && p.side === closes);
   if (!onSide.length || onSide.some((p) => isOurs(p))) return [];
-  return onSide.map((p) => ({ ordertxid: p.ordertxid, id: p.id }));
+  const predates = (p: { openedAt: string }) => {
+    const openedMs = new Date(p.openedAt || "").getTime();
+    return !Number.isFinite(openedMs) || openedMs / 1000 <= stop.opentm + 10;
+  };
+  return onSide.filter(predates).map((p) => ({ ordertxid: p.ordertxid, id: p.id }));
 }
 
 /** Merge new findings into the stored anomaly value: one line each, de-duplicated, capped. */

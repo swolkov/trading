@@ -149,7 +149,7 @@ test("regime and score are internal-only on AlertOrder: the TradingView webhook 
   // And the executor persists a card on every post-sizing refusal and after AddOrder.
   const exec = readFileSync(new URL("../src/lib/margin-executor.ts", import.meta.url), "utf8");
   assert.ok(/const refuse = async \(reason: string\)/.test(exec));
-  for (const gate of ["refusalNote.chainZero", "refusalNote.liqBuffer", "would leave margin level", "below Kraken minimum", "went stale during entry checks", "not enough route time left"]) {
+  for (const gate of ["refusalNote.chainZero", "refusalNote.liqBuffer", "would leave margin level", "below Kraken minimum", "went stale during entry checks", "not enough route time left", "could not write the pending-add marker"]) {
     assert.ok(new RegExp(`refuse\\((?:[^)]*)?${gate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(exec) || new RegExp(`return refuse\\([\\s\\S]{0,40}${gate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(exec), `${gate} goes through refuse()`);
   }
   // The LAST AddOrder in the file is the entry's (the close path sends its own earlier).
@@ -159,7 +159,7 @@ test("regime and score are internal-only on AlertOrder: the TradingView webhook 
   // id is attached with a second best-effort recordBotEntry — never between the order and the ledger.
   const firstLedger = afterOrder.indexOf("await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta })");
   const cardPersist = afterOrder.indexOf("persistTradeCard(card, txid ?? null)");
-  const attach = afterOrder.indexOf("await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }).catch(() => {})");
+  const attach = afterOrder.indexOf("await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }, { quiet: true }).catch(() => false)");
   assert.ok(firstLedger > 0 && cardPersist > firstLedger && attach > cardPersist, "AddOrder → recordBotEntry → card → attach cardId");
   assert.ok(!/persistTradeCard|buildTradeCard/.test(afterOrder.slice(0, firstLedger)), "nothing card-related between AddOrder and the ledger write");
   assert.ok(/announceTradeCard\(card, txid \?\? null\)\.catch/.test(afterOrder), "the announcement is after AddOrder and caught");
@@ -170,4 +170,30 @@ test("regime and score are internal-only on AlertOrder: the TradingView webhook 
   const withoutRefuse = beforeOrder.replace(/const refuse = async[\s\S]*?\n    };/, "");
   assert.ok(withoutRefuse.length < beforeOrder.length, "refuse() was found and excised");
   assert.ok(!/persistTradeCard|announceTradeCard/.test(withoutRefuse), "no card write before AddOrder outside refuse()");
+});
+
+test("recordBotEntry quiet mode: a failed SECOND write (attaching the card id) never pages the urgent 'adopt it' instruction; the first write still does", async () => {
+  const { prisma } = await import("../src/lib/db");
+  const { recordBotEntry } = await import("../src/lib/margin-executor");
+  const asked: string[] = [];
+  const prevFind = prisma.agentConfig.findUnique;
+  const prevUpsert = prisma.agentConfig.upsert;
+  // Every config read fails: the ledger read throws (→ the catch branch), and the pager's webhook lookup is visible in `asked`.
+  Reflect.set(prisma.agentConfig, "findUnique", async (args: { where: { key: string } }) => { asked.push(args.where.key); throw new Error("db offline"); });
+  Reflect.set(prisma.agentConfig, "upsert", async () => { throw new Error("db offline"); });
+  try {
+    assert.equal(await recordBotEntry("OX", "XETHZUSD", { stopFrac: 0.04, cardId: 7 }, { quiet: true }), false);
+    assert.deepEqual(asked, ["kraken_margin_bot_txids"], "quiet: only the ledger read — no webhook lookup, so no urgent page");
+    asked.length = 0;
+    assert.equal(await recordBotEntry("OX", "XETHZUSD", { stopFrac: 0.04 }), false);
+    assert.ok(asked.includes("webhook_margin_urgent"), "loud (the first write): the urgent pager was invoked");
+  } finally {
+    Reflect.set(prisma.agentConfig, "findUnique", prevFind);
+    Reflect.set(prisma.agentConfig, "upsert", prevUpsert);
+  }
+  // And the executor uses quiet mode ONLY for the attach, with its own margin_live note on failure.
+  const exec = readFileSync(new URL("../src/lib/margin-executor.ts", import.meta.url), "utf8");
+  assert.equal((exec.match(/\{ quiet: true \}/g) ?? []).length, 1, "exactly one quiet call");
+  assert.ok(/recordBotEntry\(txid, pair, \{ stopFrac: stopPct, \.\.\.ledgerMeta \}, \{ quiet: true \}\)/.test(exec));
+  assert.ok(/link not attached to \$\{txid\}; ownership intact/.test(exec));
 });

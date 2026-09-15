@@ -1006,7 +1006,7 @@ export async function GET(request: Request) {
           }
           let covered = false;
           if (plan.blocked) errors.push(`${why} ${pairRaw}: remainder not re-covered — ${plan.blocked}`);
-          else if (!plan.place && !plan.cancel.length) covered = plan.covered;
+          else if (!plan.place && !plan.cancel.length) { covered = plan.covered; noteStopLevel(plan.keeper); }
           else if (left > 0 && leftRead?.fifoHit) {
             await sendNotification(`🚨 ${why} on ${pairRaw}: ${left} remains behind a manual position OLDER than it — cover NOT changed; a stop of ours would reduce YOUR position first (FIFO). Close it by hand.`, "margin_urgent").catch(() => {});
             errors.push(`${why} ${pairRaw}: remainder fifo-blocked, cover left as is`);
@@ -1014,6 +1014,9 @@ export async function GET(request: Request) {
           else {
             const out = await applyReconcile(plan, io);
             covered = out.covered && out.failedCancels.length === 0;
+            // The guard cover just placed IS the ledgered level now — else the next run reads it as "wider".
+            if (out.placed && plan.place) noteStopLevel(null, parseFloat(plan.place.level));
+            else if (out.covered) noteStopLevel(plan.keeper);
             if (out.failedCancels.length) await sendNotification(`🚨 ${pairRaw}: could NOT cancel stop(s) ${out.failedCancels.join(", ")} after ${why}. Cancel them on Kraken now.`, "margin_urgent").catch(() => {});
           }
           if (left > 0) {
