@@ -95,15 +95,18 @@ failing reasons are returned. Ceremony: `POST /api/futures/desk/stage` `{ confir
 Checked on every entry, after the container above, in this order — each with its exact reason:
 
 - **Open-risk cap 2% of basis ($1,000)**: Σ `risk_usd` of the open ledger + the new budget must stay
-  UNDER the cap → `open risk $750 + $250 would exceed the 2% cap ($1,000)`.
+  UNDER the cap → `open risk $750 + $250 would use up the 2% cap ($1,000)`. Plainly: at Stage A the
+  book maxes out at **three** $250 positions; the fourth is refused.
 - **Cluster cap** = the A+ budget ($500) per cluster × side; ES/NQ/YM/RTY are one `index` cluster,
   GC/SI/HG `metals`. ES $250 + NQ $250 long is allowed; a YM third is
   `index longs already risk $500 — adding $250 exceeds the $500 cluster cap`.
 - **Daily loss $750 counting open risk**: remaining = $750 + (balance − day-start balance) − open
   risk; an entry needs its whole budget to fit →
-  `daily loss limit reached: −$620 realized and $250 open risk against $750`. Realized comes from
-  Tradovate's cash balance; if the demo only settles it at end of day, intraday realized reads 0 and
-  the equity-based "day is down" pause (net liq) stays the intraday backstop.
+  `daily loss limit reached: −$620 realized and $250 open risk against $750`. The realized term is
+  `totalCashValue − dayStartBalance` (Tradovate's cash snapshot). **Verify after deploy** on the demo
+  whether cash moves intraday on a close; if it only settles at end of day, switch the guardian to
+  `bal.realizedPnl` (already returned by `deskBalance`) — until then the equity-based "day is down"
+  pause (net liq) is the intraday backstop. `futures_desk_sizing_basis` is clamped to 1,000–50,000.
 - **Drawdown tiers** from the equity high: −3% budget ×0.75 · −5% ×0.5 · −7% ×0.25 (micros only +
   investigate; one Slack a day) · −10% `equity is 10% off its high — desk halted pending review`
   (the guardian sets `disabledReason`; a person re-enables). The multiplier shrinks the budget, so

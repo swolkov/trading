@@ -1,5 +1,5 @@
 import { STAGES, stageReadiness, type Stage } from "@/lib/futures-desk-rules";
-import { deskLimits, rawRows, setDeskStage } from "@/lib/futures-desk";
+import { deskLimits, ensureDeskTables, rawRows, setDeskStage } from "@/lib/futures-desk";
 import { deskStatus, mergeRollChains } from "@/lib/futures-desk-status";
 
 // ADVANCE the sizing stage: A (one micro) → B (two) → C (five). Requires the typed word STAGE and
@@ -14,6 +14,7 @@ export async function POST(request: Request) {
   let body: { confirm?: string; to?: string } = {};
   try { body = await request.json(); } catch { /* empty */ }
   if (String(body.confirm ?? "") !== "STAGE") return Response.json({ error: "type STAGE to confirm" }, { status: 400 });
+  await ensureDeskTables();
   const limits = await deskLimits();
   const current = limits.stage;
   const next = STAGES[STAGES.indexOf(current) + 1] as Stage | undefined;

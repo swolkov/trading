@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DEFAULT_LIMITS, STAGE_MAX_CONTRACTS, budgetFor, cmeOpen, dedupeKey, deskVerdict, entryRefusal, etDayKey, etShortDate, gradeFor, maxDrawdown, parseAlert,
-  profitFactor, rollDue, rollPreview, roundToTick, sizeEntry, stageReadiness, tStatOf, tradePnlUsd, usd,
+  DEFAULT_LIMITS, FEE_PER_SIDE_MICRO, FEE_PER_SIDE_MINI, STAGE_MAX_CONTRACTS, budgetFor, cmeOpen, dedupeKey, deskVerdict, entryRefusal, etDayKey, etShortDate, feePerSide, gradeFor,
+  limitsFromConfig, maxDrawdown, parseAlert, profitFactor, rollDue, rollPreview, roundToTick, sizeEntry, stageReadiness, tStatOf, tradePnlUsd, usd,
   type AlertPayload, type DeskContext, type SizeOpts,
 } from "../src/lib/futures-desk-rules";
 
@@ -70,6 +70,7 @@ test("sizing: MES with a 60-point stop ($301.70) is REFUSED at Normal/A with the
 test("sizing: A+ ($500) fits one MES at 60 points; MNQ 300-pt ($601.70) is refused even at A+", () => {
   const s = sizeEntry(alertOf({}), DEFAULT_LIMITS, { ...opts, grade: "aplus" });
   assert.equal(s.ok, true); assert.equal(s.contracts, 1); assert.equal(s.grade, "aplus"); assert.equal(s.unit, "micro"); assert.equal(s.stage, "A");
+  assert.equal(s.pointValue, 5);   // MES
   assert.ok(s.riskUsd <= s.riskBudgetUsd);
   const nq = sizeEntry(alertOf({ symbol: "NQ", price: 24000, stop: 23700 }), DEFAULT_LIMITS, { ...opts, grade: "aplus" });
   assert.equal(nq.ok, false); assert.match(nq.reason, /\$601\.70 against a \$500/);
@@ -92,7 +93,9 @@ test("sizing: stage D trades one MINI and only when armed", () => {
   assert.equal(off.ok, false); assert.match(off.reason, /not armed/);
   const on = sizeEntry(es, DEFAULT_LIMITS, { grade: "aplus", stage: "D", budgetMult: 1, stageDArmed: true });
   assert.equal(on.ok, true); assert.equal(on.contracts, 1); assert.equal(on.unit, "mini"); assert.equal(on.micro, "ES");
-  assert.ok(Math.abs(on.riskPerContractUsd - 201.7) < 1e-9);
+  assert.equal(on.pointValue, 50);   // the MINI's point value goes to the ledger, never the micro's
+  assert.ok(Math.abs(on.riskPerContractUsd - (4 * 50 + 2 * FEE_PER_SIDE_MINI)) < 1e-9);
+  assert.equal(feePerSide("ES", "ES"), FEE_PER_SIDE_MINI); assert.equal(feePerSide("MES", "ES"), FEE_PER_SIDE_MICRO); assert.equal(feePerSide("MGC", "GC"), FEE_PER_SIDE_MICRO);
 });
 
 test("sizing: the drawdown multiplier shrinks the budget", () => {
@@ -150,7 +153,8 @@ test("entryRefusal: the container refuses in the right order", () => {
   assert.match(entryRefusal(a, { ...okCtx, entriesToday: 4 }, DEFAULT_LIMITS)!, /entries already today/);
   assert.match(entryRefusal(a, { ...okCtx, dayPnlUsd: -3000 }, DEFAULT_LIMITS)!, /paused/);
   assert.match(entryRefusal(a, { ...okCtx, equityUsd: 39_000 }, DEFAULT_LIMITS)!, /halted/);
-  assert.match(entryRefusal(a, { ...okCtx, openRiskUsd: 750 }, DEFAULT_LIMITS)!, /exceed the 2% cap/);
+  assert.match(entryRefusal(a, { ...okCtx, openRiskUsd: 750 }, DEFAULT_LIMITS)!, /use up the 2% cap/);
+  assert.equal(entryRefusal(a, { ...okCtx, openRiskUsd: 500 }, DEFAULT_LIMITS), null);   // three $250 positions fit; the fourth does not
   assert.match(entryRefusal(a, { ...okCtx, sameClusterSameSideRiskUsd: 500 }, DEFAULT_LIMITS)!, /cluster cap/);
   assert.match(entryRefusal(a, { ...okCtx, dailyLossRemainingUsd: 200 }, DEFAULT_LIMITS)!, /daily loss limit reached/);
   assert.equal(entryRefusal(a, { ...okCtx, dailyLossRemainingUsd: 250 }, DEFAULT_LIMITS), null);   // exactly enough is enough
@@ -165,9 +169,21 @@ test("CME hours: closed Saturday, closed in the 17:00–18:00 ET break, open Sun
   assert.equal(etDayKey(new Date("2026-09-14T03:00:00Z")), "2026-09-13"); // 23:00 ET the day before
 });
 
-test("P&L uses the micro point value and charges both sides", () => {
+test("P&L uses the row's point value and charges both sides at the unit's fee", () => {
   assert.equal(tradePnlUsd("long", 6500, 6520, 2, 5), 20 * 5 * 2 - 4 * 0.85);
   assert.equal(tradePnlUsd("short", 6500, 6520, 1, 5), -100 - 1.7);
+  assert.equal(tradePnlUsd("long", 6500, 6504, 1, 50, FEE_PER_SIDE_MINI), 200 - 2 * FEE_PER_SIDE_MINI);   // one ES mini, 4 points
+});
+
+test("limitsFromConfig clamps every override so a bad key can only shrink risk", () => {
+  assert.deepEqual(limitsFromConfig({}), DEFAULT_LIMITS);
+  const hi = limitsFromConfig({ basis: "250000", risk: "3", strong: "9", aplus: "6", stage: "Z" });
+  assert.equal(hi.sizingBasisUsd, 50_000); assert.equal(hi.riskPct, 1); assert.equal(hi.riskPctStrong, 1); assert.equal(hi.riskPctAplus, 1); assert.equal(hi.stage, "A");
+  const lo = limitsFromConfig({ basis: "10", risk: "0.01", stage: "B" });
+  assert.equal(lo.sizingBasisUsd, 1_000); assert.equal(lo.riskPct, 0.25); assert.equal(lo.stage, "B");
+  const junk = limitsFromConfig({ basis: "abc", risk: null, strong: "", aplus: "NaN", stage: null });
+  assert.deepEqual(junk, DEFAULT_LIMITS);
+  assert.equal(limitsFromConfig({ basis: "25000", risk: "0.75" }).sizingBasisUsd, 25_000);
 });
 
 test("verdict wording matches the other desks", () => {

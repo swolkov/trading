@@ -78,6 +78,12 @@ export const MICRO_FOR_ROOT: Record<string, { micro: string; pointValue: number 
 
 /** Modeled commission + exchange + clearing per contract per side on a micro. The demo reports none. */
 export const FEE_PER_SIDE_MICRO = 0.85;
+/** Per side on a MINI (stage D). ASSUMED at the micro figure — verify on the first mini fill. */
+export const FEE_PER_SIDE_MINI = 0.85;
+/** The fee model for a ledger row: a row whose symbol is the root's mini pays the mini fee. */
+export function feePerSide(symbol: string, root: string): number {
+  return MINI_FOR_ROOT[root]?.mini === symbol ? FEE_PER_SIDE_MINI : FEE_PER_SIDE_MICRO;
+}
 
 /** Modeled fee per side on a MINI too — no separate mini fee is invented; Stage D is documented as
  *  unreachable in practice (one ES mini at a $500 budget needs a ≤10-pt stop). */
@@ -137,6 +143,19 @@ export const DEFAULT_LIMITS: DeskLimits = {
   drawdownDisablePct: 10,
   stage: "A",
 };
+
+/** Overrides from AgentConfig, every one clamped so a bad key can only shrink risk: basis 1,000–50,000,
+ *  each pct 0.25–1.0, an unreadable stage reads as "A". Pure so the clamps are tested. */
+export function limitsFromConfig(v: { basis?: string | null; risk?: string | null; strong?: string | null; aplus?: string | null; stage?: string | null }): DeskLimits {
+  const num = (x: string | null | undefined, fb: number) => { const n = x == null ? NaN : parseFloat(x); return Number.isFinite(n) ? n : fb; };
+  const pct = (x: string | null | undefined, fb: number) => Math.min(1.0, Math.max(0.25, num(x, fb)));
+  return {
+    ...DEFAULT_LIMITS,
+    sizingBasisUsd: Math.min(50_000, Math.max(1_000, num(v.basis, DEFAULT_LIMITS.sizingBasisUsd))),
+    riskPct: pct(v.risk, DEFAULT_LIMITS.riskPct), riskPctStrong: pct(v.strong, DEFAULT_LIMITS.riskPctStrong), riskPctAplus: pct(v.aplus, DEFAULT_LIMITS.riskPctAplus),
+    stage: STAGES.includes(v.stage as Stage) ? (v.stage as Stage) : "A",
+  };
+}
 
 export function budgetFor(grade: Grade, limits: DeskLimits): number {
   const pct = grade === "aplus" ? limits.riskPctAplus : grade === "strong" ? limits.riskPctStrong : limits.riskPct;
@@ -230,6 +249,8 @@ export interface SizeResult {
   stage: Stage;
   unit: "micro" | "mini";
   budgetMult: number;
+  /** Dollar value per 1.00 of price for the contract actually sized (mini at stage D) — written to the ledger's point_value. */
+  pointValue: number;
 }
 
 export interface SizeOpts { grade: Grade; stage: Stage; budgetMult: number; stageDArmed?: boolean }
@@ -244,12 +265,12 @@ export function sizeEntry(a: AlertPayload, limits: DeskLimits, opts: SizeOpts): 
   const spec = unit === "mini" ? MINI_FOR_ROOT[a.root] : MICRO_FOR_ROOT[a.root];
   const symbol = spec ? ("micro" in spec ? spec.micro : spec.mini) : "";
   const budget = budgetFor(grade, limits) * budgetMult;
-  const base = { micro: symbol, contracts: 0, stopPoints: 0, riskPerContractUsd: 0, riskUsd: 0, riskBudgetUsd: budget, grade, stage, unit, budgetMult };
+  const base = { micro: symbol, contracts: 0, stopPoints: 0, riskPerContractUsd: 0, riskUsd: 0, riskBudgetUsd: budget, grade, stage, unit, budgetMult, pointValue: spec?.pointValue ?? 0 };
   if (stage === "D" && !opts.stageDArmed) return { ...base, ok: false, reason: "stage D (minis) is not armed — refused" };
   if (!spec) return { ...base, ok: false, reason: `no ${unit} contract mapped for ${a.root}` };
   const stopPoints = Math.abs(a.price - (a.stop ?? a.price));
   if (!(stopPoints > 0)) return { ...base, ok: false, reason: "zero-width stop", stopPoints };
-  const perContract = stopPoints * spec.pointValue + 2 * FEE_PER_SIDE_MICRO;   // minis reuse the micro fee model (D is unreachable in practice)
+  const perContract = stopPoints * spec.pointValue + 2 * (unit === "mini" ? FEE_PER_SIDE_MINI : FEE_PER_SIDE_MICRO);
   const raw = Math.floor(budget / perContract);
   const cap = Math.min(STAGE_MAX_CONTRACTS[stage], limits.maxContracts);
   const contracts = Math.min(raw, cap);
@@ -333,9 +354,9 @@ export function entryRefusal(a: AlertPayload, ctx: DeskContext, limits: DeskLimi
   if (ctx.entriesToday >= limits.maxEntriesPerDay) return `${limits.maxEntriesPerDay} entries already today`;
   if (ctx.dayPnlUsd <= -limits.sizingBasisUsd * (limits.dailyLossPausePct / 100)) return `day is down $${Math.abs(ctx.dayPnlUsd).toFixed(0)} — paused until tomorrow`;
   if (ctx.equityHighUsd > 0 && ctx.equityUsd <= ctx.equityHighUsd * (1 - limits.drawdownDisablePct / 100)) return `equity is ${limits.drawdownDisablePct}% off its high — desk halted pending review`;
-  // The 2% cap is a ceiling the book stays UNDER: $750 open + a $250 entry = $1,000 is refused.
+  // The 2% cap is a ceiling the book stays UNDER: $750 open + a $250 entry = $1,000 is refused (three $250 positions at stage A).
   const cap = limits.sizingBasisUsd * (limits.maxOpenRiskPct / 100);
-  if (ctx.openRiskUsd + ctx.newRiskUsd >= cap) return `open risk ${usd(ctx.openRiskUsd)} + ${usd(ctx.newRiskUsd)} would exceed the ${limits.maxOpenRiskPct}% cap (${usd(cap)})`;
+  if (ctx.openRiskUsd + ctx.newRiskUsd >= cap) return `open risk ${usd(ctx.openRiskUsd)} + ${usd(ctx.newRiskUsd)} would use up the ${limits.maxOpenRiskPct}% cap (${usd(cap)})`;
   const cluster = clusterOf(a.root);
   const clusterCap = budgetFor("aplus", limits);
   if (cluster && ctx.sameClusterSameSideRiskUsd + ctx.newRiskUsd > clusterCap) return `${cluster} ${a.side}s already risk ${usd(ctx.sameClusterSameSideRiskUsd)} — adding ${usd(ctx.newRiskUsd)} exceeds the ${usd(clusterCap)} cluster cap`;
@@ -404,9 +425,9 @@ export function etShortDate(iso: string): string {
 }
 
 // ---- P&L and the verdict -----------------------------------------------------------------------
-export function tradePnlUsd(side: Side, entry: number, exit: number, qty: number, pointValue: number): number {
+export function tradePnlUsd(side: Side, entry: number, exit: number, qty: number, pointValue: number, feePerSideUsd = FEE_PER_SIDE_MICRO): number {
   const pts = side === "long" ? exit - entry : entry - exit;
-  return pts * pointValue * qty - 2 * qty * FEE_PER_SIDE_MICRO;
+  return pts * pointValue * qty - 2 * qty * feePerSideUsd;
 }
 
 export function tStatOf(values: number[]): number | null {

@@ -37,7 +37,7 @@ test("open risk sums the book; cluster risk slices it by cluster × side", () =>
 });
 
 test("refusal strings, exactly", () => {
-  assert.equal(entryRefusal(es(), { ...okCtx, openRiskUsd: 750, newRiskUsd: 250 }, DEFAULT_LIMITS), "open risk $750 + $250 would exceed the 2% cap ($1,000)");
+  assert.equal(entryRefusal(es(), { ...okCtx, openRiskUsd: 750, newRiskUsd: 250 }, DEFAULT_LIMITS), "open risk $750 + $250 would use up the 2% cap ($1,000)");
   // ES $250 + NQ $250 already long → a YM third would take the index cluster past the $500 (A+) cap.
   const two = [book[0], book[1]];
   const ctx = deskContextOf({ enabled: true, state: { equity: 50_000, equityHigh: 50_000, dayKey: "2026-09-15", dayStartEquity: 50_000, balance: 50_000, dayStartBalance: 50_000, guardianAt: "2026-09-15T15:59:00Z" }, open: two, entriesToday: 2, limits: DEFAULT_LIMITS, alert: { root: "YM", side: "long" }, newRiskUsd: 250, now: new Date("2026-09-15T16:00:00Z"), dayKey: "2026-09-15" });

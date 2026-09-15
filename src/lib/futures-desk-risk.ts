@@ -36,6 +36,9 @@ export function ddTier(equity: number, high: number): DdTier {
 /** What the day may still lose: the budget, plus what is realized so far (negative when down), minus
  *  the open risk already at stake. Negative = spent. */
 export function dailyLossRemaining(balance: number, dayStartBalance: number, openRiskUsd: number, limits: Pick<DeskLimits, "sizingBasisUsd" | "dailyLossPausePct">): number {
+  // TODO(verify on the demo after deploy): the realized term is totalCashValue − day-start cash. If Tradovate's
+  // cash only settles at end of day, this reads 0 intraday — switch the guardian to bal.realizedPnl (deskBalance
+  // already returns it) and pass that here as (balance − dayStartBalance).
   return limits.sizingBasisUsd * (limits.dailyLossPausePct / 100) + (balance - dayStartBalance) - openRiskUsd;
 }
 

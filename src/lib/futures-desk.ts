@@ -17,7 +17,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import {
-  DEFAULT_LIMITS, EDGES, FEE_PER_SIDE_MICRO, MICRO_FOR_ROOT, STAGES, budgetFor, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate, gradeFor,
+  DEFAULT_LIMITS, EDGES, budgetFor, cmeOpen, dedupeKey, edgeByKey, entryRefusal, etDayKey, etShortDate, feePerSide, gradeFor, limitsFromConfig,
   rollDue, rollPreview, roundToTick, sizeEntry, tradePnlUsd, type AlertPayload, type DeskContext, type DeskLimits, type Side, type Stage,
 } from "@/lib/futures-desk-rules";
 import { ddTier, deskContextOf, riskStateOf } from "@/lib/futures-desk-risk";
@@ -82,16 +82,11 @@ async function cfg(key: string): Promise<string | null> {
 async function setKey(key: string, value: string): Promise<void> {
   await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
 }
-function num(v: string | null, fallback: number): number { const n = v == null ? NaN : parseFloat(v); return Number.isFinite(n) ? n : fallback; }
 
-/** Overrides are clamped to the ladder (0.25–1.0%); an unreadable stage reads as "A" — a bad key can only shrink risk. */
+/** Overrides clamped by `limitsFromConfig` (basis 1,000–50,000, pcts 0.25–1.0, unreadable stage → A). */
 export async function deskLimits(): Promise<DeskLimits> {
   const [basis, risk, strong, aplus, stage] = await Promise.all(["sizing_basis", "risk_pct", "risk_pct_strong", "risk_pct_aplus", "stage"].map((k) => cfg(`futures_desk_${k}`)));
-  const pct = (v: string | null, fb: number) => Math.min(1.0, Math.max(0.25, num(v, fb)));
-  return {
-    ...DEFAULT_LIMITS, sizingBasisUsd: num(basis, DEFAULT_LIMITS.sizingBasisUsd), stage: STAGES.includes(stage as Stage) ? (stage as Stage) : "A",
-    riskPct: pct(risk, DEFAULT_LIMITS.riskPct), riskPctStrong: pct(strong, DEFAULT_LIMITS.riskPctStrong), riskPctAplus: pct(aplus, DEFAULT_LIMITS.riskPctAplus),
-  };
+  return limitsFromConfig({ basis, risk, strong, aplus, stage });
 }
 
 export async function deskEnabled(): Promise<boolean> {
@@ -318,13 +313,12 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
     // The ledger row exists the moment the fill is confirmed — BEFORE protection work that can throw —
     // so the guardian manages this position whatever happens next.
     const stopPx = roundToTick(a.side === "long" ? fill.price - stopDist : fill.price + stopDist, contract.tickSize);
-    const spec = MICRO_FOR_ROOT[a.root];
     const riskUsd = fill.qty * size.riskPerContractUsd;
     const rows = await prisma.$queryRawUnsafe<{ id: number }[]>(
       `INSERT INTO futures_desk_trades (edge, root, micro, contract, contract_id, side, qty, entry_price, stop_price, entry_order_id, stop_order_id, cl_ord_id, signal_id, status, risk_usd, point_value, note, contract_month, stage)
        VALUES ($1,$2,$3,$4,$5::int,$6,$7::int,$8::float8,$9::float8,$10::bigint,$11::bigint,$12,$13::int,'open',$14::float8,$15::float8,$16,$17,$18) RETURNING id`,
       a.edge, a.root, size.micro, contract.name, contract.id, a.side, fill.qty, fill.price, stopPx, orderId, stopOrderId, clOrdId, signalId,
-      riskUsd, spec.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note, contract.name.slice(-2), limits.stage);
+      riskUsd, size.pointValue, fill.qty < size.contracts ? `partial fill ${fill.qty}/${size.contracts}` : a.note, contract.name.slice(-2), limits.stage);
     const tradeId = rows[0].id;
 
     // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
@@ -448,8 +442,7 @@ async function guardBody(): Promise<GuardReport> {
   if (rs.tier === 3) await alertOnce(fresh, `dd-tier3-${day}`, `⚠️ FUTURES DESK drawdown ${rs.dd.toFixed(1)}% from the high — tier 3: budget ×0.25, micros only; investigate before the −10% halt.`, 24 * 60 * 60_000);
   // Roll planning: inside the last 5 days of a month, say when it rolls and into what; one Slack the day before.
   for (const plan of rollPreview(open.filter((t) => expiries[t.id] !== undefined), expiries, new Date(), rollGuardDays)) {
-    forgetContract(plan.micro);
-    const next = await deskContract(plan.micro).catch(() => null);
+    const next = await deskContract(plan.micro).catch(() => null);   // the cached month is fine for a preview; rollTrade refreshes it
     const t = open.find((x) => x.id === plan.id)!;
     const target = next && next.id !== t.contract_id ? next.name : "next month";   // outside the guard, deskContract still resolves the current month
     const line = `roll plan: ${plan.contract} #${plan.id} → ${target} on ~${etShortDate(plan.rollOn)}`;
@@ -499,8 +492,9 @@ async function settle(t: TradeRow, orders: DxOrder[]): Promise<boolean> {
     await sendNotification(`⚠️ FUTURES DESK ${t.contract}: broker is flat but no exit fill was found — marked unknown, P&L not booked.`, LANE).catch(() => {});
     return true;
   }
-  const pnl = tradePnlUsd(t.side, t.entry_price, fill.price, t.qty, t.point_value);
-  const fees = 2 * t.qty * FEE_PER_SIDE_MICRO;
+  const fee = feePerSide(t.micro, t.root);   // a stage-D mini row pays the mini fee
+  const pnl = tradePnlUsd(t.side, t.entry_price, fill.price, t.qty, t.point_value, fee);
+  const fees = 2 * t.qty * fee;
   await prisma.$executeRawUnsafe(`UPDATE futures_desk_trades SET status = 'closed', exit_price = $2::float8, closed_at = now(), exit_reason = $3::text, pnl_usd = $4::float8, fees_usd = $5::float8 WHERE id = $1 AND status = 'open'`, t.id, fill.price, via, pnl, fees);
   const r = t.risk_usd > 0 ? (pnl / t.risk_usd).toFixed(2) : "?";
   await sendNotification(`${pnl >= 0 ? "🟢" : "🔴"} FUTURES DESK ${t.contract} closed (${via}) @ ${fill.price} · ${pnl >= 0 ? "+" : "−"}$${Math.abs(pnl).toFixed(0)} (${r}R, after modeled fees) · ${t.edge}`, LANE).catch(() => {});
