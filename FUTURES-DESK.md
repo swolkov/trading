@@ -122,6 +122,61 @@ guardian` — closes, rolls and re-protection are never gated by any of this.
 `DEFAULT_LIMITS` (0.5% / $750 daily pause / 10% halt / stage A) apply on deploy. Positions opened at
 the old $1,500 budget keep their stops and `risk_usd` — nothing is resized. Deploy after 4 PM ET.
 
+## Journal completeness and demo realism (E4, `src/lib/futures-desk-journal.ts`)
+
+**The judged series is `pnl_after_slip_usd`, not `pnl_usd`.** The demo fills at the touch and reports
+no slippage, so every row also carries a per-market slippage model: `slip_model_pts` per side
+(`SLIP_PTS_PER_SIDE` — ES 0.89 · NQ 11.74 · GC 0.50 **measured** in the edge factory; YM 4 · SI 0.01
+· HG 0.0025 · RTY 0.5 **assumed** and labelled so) and `slip_model_usd` = 2 × slip × point value ×
+contracts (an MNQ 1-lot round trip = $46.96). `settle` writes `pnl_after_slip_usd = pnl_usd −
+slip_model_usd`; `pnl_usd` stays the demo's own number. Entry slip is also **measured** per trade:
+`signal_price` is the alert's close, `entry_slip_pts` = fill − signal (long; sign flipped for a
+short), positive = paid. TradingView's alert arrives on a delayed bar close, so a non-zero figure is
+the expected cost, recorded rather than hidden.
+
+**Every ledger row** (entry and roll leg alike) carries: `stop_points`, `atr_at_entry` (Pine v2),
+`session` (ET slice at entry — overnight 18–02 · european 02–07 · premarket 07–09:30 · open 09:30–10
+· morning 10–11:30 · midday 11:30–14 · power 14–15:30 · close 15:30–17 · break 17–18; a stamp, never a
+gate), `grade`, `regime` / `event_mode` (null until E7 / E3 stamp them), `error_class` and the
+excursion columns. **`error_class`** (mistake tracking): `partial_fill` (entry filled short),
+`unprotected` (no stop could be placed — the position was closed), `roll_failed` (old month closed,
+new month did not open), `close_refused` (the broker refused a liquidation), `queue_expired` (a
+queued alert aged out — on the SIGNAL row), `auth_backoff`, `foreign_position`. `classifyError`
+reads the class off a stamped row, or from the text of a row written before the column existed.
+
+**MFE / MAE** (`mfe_pts`, `mae_pts`, `mfe_r`, `mae_r`, `bars_held`, `mfe_source`, `mfe_to`): the desk
+has no price feed, so the guardian folds **delayed Yahoo 1-hour bars** (`ES=F`, `NQ=F`, `YM=F`,
+`GC=F`, `SI=F`, `HG=F`) into every open row and every row closed that day, **once per ET day after
+17:05 ET** (`futures_desk_state.excursionDayKey`). `mfe_source = yahoo_1h_delayed`; a row first seen
+more than 5 days old is backfilled from daily bars and stays `yahoo_1d`. `mfe_to` is the last bar
+folded, so bars are never counted twice. Fail-soft: a Yahoo problem is a guardian note and the day's
+`lastError`, never an exception. Roll week caveat: Yahoo's symbol is the continuous front month, so a
+position still in the old month carries the calendar spread in its excursion — labelled, not corrected.
+
+**Signals** carry `score`, `score_json` (the Pine v2 context: `atr, rsi, volRatio, dist20h, d1Up,
+h4Up`), `grade` (stamped by the entry path), `session`, `regime` / `event_mode` (E7 / E3),
+`checklist_json` (E5) and `error_class`.
+
+### Pine v2 (one re-paste)
+
+Both scripts now write six optional context fields into every message and a third action, **`watch`**:
+Donchian fires it when the close is within 0.5% of the prior 100-bar high with no position on; daily
+MR when RSI(14) < 33 with no position on. A watch row is logged with a **dry-run sizing card** as its
+reason (`dry run: 1× MES · stop 40 pts · risk $201.70 of $250 (normal · stage A)`), never queued and
+never executed, capped at **three per market per ET day** (the fourth reads `watch cap reached`), and
+expired by the guardian after 24 h. A v1 message (no new fields) parses exactly as before, so the
+re-paste can happen chart by chart.
+
+**Manual re-paste (E4 and, later, E5's heartbeat chart — the only two re-paste events):**
+1. On each of the 9 charts: Pine editor → replace the script body with the file from `pine/` → Save →
+   the "Desk webhook secret" input keeps its value; re-check it.
+2. Recreate the alert on each chart (an edited script does NOT update a live alert): delete the old
+   one, add → condition = the indicator → *Any alert() function call* → webhook URL → message empty →
+   expiration open-ended.
+3. Verify: the next row on `/futures` → alert inbox shows a `watch` or an entry whose `score_json`
+   carries `atr` (the desk page's inbox; or `SELECT score_json FROM futures_desk_signals ORDER BY id
+   DESC LIMIT 1`).
+
 ## Proof
 
 `scripts/futures-desk-round-trip.ts` — 1× MES on the demo: OSO placed, fill confirmed, bracket stop
@@ -130,7 +185,8 @@ with the Railway env: `PROBE_PRICE=<MES last> node --env-file=<railway kv> --imp
 
 ## Tables and keys
 
-`futures_desk_signals` (inbox), `futures_desk_trades` (ledger) — raw SQL, never prisma-managed.
+`futures_desk_signals` (inbox), `futures_desk_trades` (ledger) — raw SQL, never prisma-managed; the
+E4 columns are added with `ADD COLUMN IF NOT EXISTS` on first use (`ensureDeskTables`, `futures-desk-store.ts`).
 `futures_desk_state` (JSON), `futures_desk_enabled`, `futures_desk_risk_pct` (Normal %),
 `futures_desk_risk_pct_strong`, `futures_desk_risk_pct_aplus`, `futures_desk_sizing_basis`,
 `futures_desk_stage`, `futures_desk_stage_d_armed`, `futures_desk_score_promoted`, `futures_desk_risk_state` (JSON),
