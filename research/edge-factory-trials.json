@@ -1,6 +1,16 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "hypotheses": [
+    "ES|15m|liquidity_sweep_reversal_b20|1.0.0",
+    "ES|15m|liquidity_sweep_reversal_b50|1.0.0",
+    "ES|15m|overnight_range_break_t2|1.0.0",
+    "ES|15m|overnight_range_break_t3|1.0.0",
+    "ES|15m|pdh_pdl_break_t2|1.0.0",
+    "ES|15m|pdh_pdl_break_t3|1.0.0",
+    "ES|1h|ma_continuation_t25|1.0.0",
+    "ES|1h|ma_continuation_t35|1.0.0",
+    "ES|1h|range_expansion_momentum_k2_t25|1.0.0",
+    "ES|1h|range_expansion_momentum_k3_t25|1.0.0",
     "ES|1h|slow_trend_b100_t25|1.0.0",
     "ES|1h|slow_trend_b100_t35|1.0.0",
     "ES|1h|slow_trend_b100_t3|1.0.0",
@@ -15,6 +25,23 @@
     "ES|5m|compression_breakout_c09_t3|1.0.0",
     "ES|5m|opening_drive_d035_t25|1.0.0",
     "ES|5m|opening_drive_d05_t3|1.0.0",
+    "ES|5m|orb_continuation_or15_t2|1.0.0",
+    "ES|5m|orb_continuation_or30_t2|1.0.0",
+    "ES|5m|orb_continuation_or5_t2|1.0.0",
+    "ES|5m|vwap_deviation_mr_z2|1.0.0",
+    "ES|5m|vwap_deviation_mr_z3|1.0.0",
+    "ES|5m|vwap_reclaim_k3_t15|1.0.0",
+    "ES|5m|vwap_reclaim_k3_t25|1.0.0",
+    "GC|15m|liquidity_sweep_reversal_b20|1.0.0",
+    "GC|15m|liquidity_sweep_reversal_b50|1.0.0",
+    "GC|15m|overnight_range_break_t2|1.0.0",
+    "GC|15m|overnight_range_break_t3|1.0.0",
+    "GC|15m|pdh_pdl_break_t2|1.0.0",
+    "GC|15m|pdh_pdl_break_t3|1.0.0",
+    "GC|1h|ma_continuation_t25|1.0.0",
+    "GC|1h|ma_continuation_t35|1.0.0",
+    "GC|1h|range_expansion_momentum_k2_t25|1.0.0",
+    "GC|1h|range_expansion_momentum_k3_t25|1.0.0",
     "GC|1h|slow_trend_b100_t25|1.0.0",
     "GC|1h|slow_trend_b100_t35|1.0.0",
     "GC|1h|slow_trend_b100_t3|1.0.0",
@@ -29,6 +56,40 @@
     "GC|5m|compression_breakout_c09_t3|1.0.0",
     "GC|5m|opening_drive_d035_t25|1.0.0",
     "GC|5m|opening_drive_d05_t3|1.0.0",
+    "GC|5m|orb_continuation_or15_t2|1.0.0",
+    "GC|5m|orb_continuation_or30_t2|1.0.0",
+    "GC|5m|orb_continuation_or5_t2|1.0.0",
+    "GC|5m|vwap_deviation_mr_z2|1.0.0",
+    "GC|5m|vwap_deviation_mr_z3|1.0.0",
+    "GC|5m|vwap_reclaim_k3_t15|1.0.0",
+    "GC|5m|vwap_reclaim_k3_t25|1.0.0",
+    "HG|15m|liquidity_sweep_reversal_b20|1.0.0",
+    "HG|15m|liquidity_sweep_reversal_b50|1.0.0",
+    "HG|15m|overnight_range_break_t2|1.0.0",
+    "HG|15m|overnight_range_break_t3|1.0.0",
+    "HG|15m|pdh_pdl_break_t2|1.0.0",
+    "HG|15m|pdh_pdl_break_t3|1.0.0",
+    "HG|1h|ma_continuation_t25|1.0.0",
+    "HG|1h|ma_continuation_t35|1.0.0",
+    "HG|1h|range_expansion_momentum_k2_t25|1.0.0",
+    "HG|1h|range_expansion_momentum_k3_t25|1.0.0",
+    "HG|5m|orb_continuation_or15_t2|1.0.0",
+    "HG|5m|orb_continuation_or30_t2|1.0.0",
+    "HG|5m|orb_continuation_or5_t2|1.0.0",
+    "HG|5m|vwap_deviation_mr_z2|1.0.0",
+    "HG|5m|vwap_deviation_mr_z3|1.0.0",
+    "HG|5m|vwap_reclaim_k3_t15|1.0.0",
+    "HG|5m|vwap_reclaim_k3_t25|1.0.0",
+    "NQ|15m|liquidity_sweep_reversal_b20|1.0.0",
+    "NQ|15m|liquidity_sweep_reversal_b50|1.0.0",
+    "NQ|15m|overnight_range_break_t2|1.0.0",
+    "NQ|15m|overnight_range_break_t3|1.0.0",
+    "NQ|15m|pdh_pdl_break_t2|1.0.0",
+    "NQ|15m|pdh_pdl_break_t3|1.0.0",
+    "NQ|1h|ma_continuation_t25|1.0.0",
+    "NQ|1h|ma_continuation_t35|1.0.0",
+    "NQ|1h|range_expansion_momentum_k2_t25|1.0.0",
+    "NQ|1h|range_expansion_momentum_k3_t25|1.0.0",
     "NQ|1h|slow_trend_b100_t25|1.0.0",
     "NQ|1h|slow_trend_b100_t35|1.0.0",
     "NQ|1h|slow_trend_b100_t3|1.0.0",
@@ -42,6 +103,298 @@
     "NQ|5m|compression_breakout_c07_t25|1.0.0",
     "NQ|5m|compression_breakout_c09_t3|1.0.0",
     "NQ|5m|opening_drive_d035_t25|1.0.0",
-    "NQ|5m|opening_drive_d05_t3|1.0.0"
+    "NQ|5m|opening_drive_d05_t3|1.0.0",
+    "NQ|5m|orb_continuation_or15_t2|1.0.0",
+    "NQ|5m|orb_continuation_or30_t2|1.0.0",
+    "NQ|5m|orb_continuation_or5_t2|1.0.0",
+    "NQ|5m|vwap_deviation_mr_z2|1.0.0",
+    "NQ|5m|vwap_deviation_mr_z3|1.0.0",
+    "NQ|5m|vwap_reclaim_k3_t15|1.0.0",
+    "NQ|5m|vwap_reclaim_k3_t25|1.0.0",
+    "SI|15m|liquidity_sweep_reversal_b20|1.0.0",
+    "SI|15m|liquidity_sweep_reversal_b50|1.0.0",
+    "SI|15m|overnight_range_break_t2|1.0.0",
+    "SI|15m|overnight_range_break_t3|1.0.0",
+    "SI|15m|pdh_pdl_break_t2|1.0.0",
+    "SI|15m|pdh_pdl_break_t3|1.0.0",
+    "SI|1h|ma_continuation_t25|1.0.0",
+    "SI|1h|ma_continuation_t35|1.0.0",
+    "SI|1h|range_expansion_momentum_k2_t25|1.0.0",
+    "SI|1h|range_expansion_momentum_k3_t25|1.0.0",
+    "SI|5m|orb_continuation_or15_t2|1.0.0",
+    "SI|5m|orb_continuation_or30_t2|1.0.0",
+    "SI|5m|orb_continuation_or5_t2|1.0.0",
+    "SI|5m|vwap_deviation_mr_z2|1.0.0",
+    "SI|5m|vwap_deviation_mr_z3|1.0.0",
+    "SI|5m|vwap_reclaim_k3_t15|1.0.0",
+    "SI|5m|vwap_reclaim_k3_t25|1.0.0",
+    "YM|15m|liquidity_sweep_reversal_b20|1.0.0",
+    "YM|15m|liquidity_sweep_reversal_b50|1.0.0",
+    "YM|15m|overnight_range_break_t2|1.0.0",
+    "YM|15m|overnight_range_break_t3|1.0.0",
+    "YM|15m|pdh_pdl_break_t2|1.0.0",
+    "YM|15m|pdh_pdl_break_t3|1.0.0",
+    "YM|1h|ma_continuation_t25|1.0.0",
+    "YM|1h|ma_continuation_t35|1.0.0",
+    "YM|1h|range_expansion_momentum_k2_t25|1.0.0",
+    "YM|1h|range_expansion_momentum_k3_t25|1.0.0",
+    "YM|5m|orb_continuation_or15_t2|1.0.0",
+    "YM|5m|orb_continuation_or30_t2|1.0.0",
+    "YM|5m|orb_continuation_or5_t2|1.0.0",
+    "YM|5m|vwap_deviation_mr_z2|1.0.0",
+    "YM|5m|vwap_deviation_mr_z3|1.0.0",
+    "YM|5m|vwap_reclaim_k3_t15|1.0.0",
+    "YM|5m|vwap_reclaim_k3_t25|1.0.0"
+  ],
+  "preRegistered": [
+    {
+      "family": "orb_continuation",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 5,
+      "candidates": [
+        "orb_continuation_or5_t2",
+        "orb_continuation_or15_t2",
+        "orb_continuation_or30_t2"
+      ],
+      "params": {
+        "openingRangeMinutes": [
+          5,
+          15,
+          30
+        ],
+        "targetR": 2,
+        "stop": "opening-range height, floored at 0.5×ATR20",
+        "window": "first break only, before 11:30 ET",
+        "exit": "target / stop / 16:00 ET"
+      },
+      "hypothesis": "The first close beyond the 5/15/30-minute opening range continues in the direction of the break through the session.",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "FAIL. Opening-range breakouts were a strategy of the retired 5-minute engine (system PF 0.97, Jun 9 audit) and the Aug 23 timeframe study found 5-minute bars a cost machine; re-run only because the ledger makes it cheap. A 5-minute bar is the only way to build a 5-minute range."
+    },
+    {
+      "family": "vwap_reclaim",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 5,
+      "candidates": [
+        "vwap_reclaim_k3_t15",
+        "vwap_reclaim_k3_t25"
+      ],
+      "params": {
+        "belowBars": 3,
+        "targetR": [
+          1.5,
+          2.5
+        ],
+        "stop": "1.5×ATR20",
+        "window": "10:00–15:00 ET",
+        "exit": "target / stop / 16:00 ET"
+      },
+      "hypothesis": "After three consecutive closes on one side of the 09:30-anchored session VWAP, the first close back across it continues (a reclaim is a trend resumption).",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "FAIL or NOISE. Untested on this archive; a VWAP cross is a two-sided intraday signal on 5-minute bars, the class the Aug 23 study found at PF ≤ 1 before costs. No prior evidence for it in this repo."
+    },
+    {
+      "family": "vwap_deviation_mr",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 5,
+      "candidates": [
+        "vwap_deviation_mr_z2",
+        "vwap_deviation_mr_z3"
+      ],
+      "params": {
+        "z": [
+          2,
+          3
+        ],
+        "stop": "1.5×ATR20",
+        "target": "the distance back to VWAP, floored at 0.5 stops",
+        "window": "10:00–15:30 ET",
+        "exit": "target / stop / 16:00 ET"
+      },
+      "hypothesis": "A close more than z volume-weighted standard deviations from the session VWAP reverts toward it.",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "FAIL. Intraday index mean-reversion is dead on this archive at every bar size (Aug 23: index overbought-short never exceeds PF 1.0 full-sample); the VWAP band is the same mechanism with a different anchor."
+    },
+    {
+      "family": "pdh_pdl_break",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 15,
+      "candidates": [
+        "pdh_pdl_break_t2",
+        "pdh_pdl_break_t3"
+      ],
+      "params": {
+        "targetR": [
+          2,
+          3
+        ],
+        "stop": "1.5×ATR20 on 15-minute bars",
+        "window": "first break only, RTH before 15:45 ET",
+        "exit": "target / stop / 16:00 ET"
+      },
+      "hypothesis": "The first RTH close of the day beyond the prior RTH day's high (low) continues.",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "FAIL or NOISE. A level-break continuation with no prior evidence here; the 15-minute bar avoids the sub-15-minute cost trap but the mechanism is the ORB's on a wider range."
+    },
+    {
+      "family": "overnight_range_break",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 15,
+      "candidates": [
+        "overnight_range_break_t2",
+        "overnight_range_break_t3"
+      ],
+      "params": {
+        "targetR": [
+          2,
+          3
+        ],
+        "stop": "1.5×ATR20 on 15-minute bars",
+        "window": "first break only, RTH before 12:00 ET",
+        "exit": "target / stop / 16:00 ET"
+      },
+      "hypothesis": "The first RTH close beyond the 18:00→09:30 ET overnight range continues in that direction.",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "FAIL or NOISE. The overnight-session drift itself is real but arbitraged to transaction cost (Aug 24 overnight-effect study); a break of the overnight range is a different claim with no evidence yet."
+    },
+    {
+      "family": "liquidity_sweep_reversal",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 15,
+      "candidates": [
+        "liquidity_sweep_reversal_b20",
+        "liquidity_sweep_reversal_b50"
+      ],
+      "params": {
+        "lookback": [
+          20,
+          50
+        ],
+        "stop": "1.5×ATR20",
+        "targetR": 2,
+        "maxHoldBars": 16,
+        "window": "any session"
+      },
+      "hypothesis": "A bar that trades through the prior N-bar high (low) and closes back inside it reverses (the SMC liquidity sweep, faded).",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "FAIL. The Aug 24 SMC study measured the faded liquidity sweep on this archive at −0.026R to −0.051R with t −5 to −11 on ES/NQ/GC over 1.4M trades — a coin flip minus costs. Re-run under the stricter gate only."
+    },
+    {
+      "family": "range_expansion_momentum",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 60,
+      "candidates": [
+        "range_expansion_momentum_k2_t25",
+        "range_expansion_momentum_k3_t25"
+      ],
+      "params": {
+        "k": [
+          2,
+          3
+        ],
+        "targetR": 2.5,
+        "closeLocation": "top/bottom quarter of the bar",
+        "volume": "≥ 1.2× the prior 20-bar average",
+        "stop": "1.5×ATR20",
+        "maxHoldBars": 24
+      },
+      "hypothesis": "A 60-minute bar at least k×ATR20 tall that closes in its extreme quarter on expanding volume continues over the next day.",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "NOISE. Closest relative is the compression-breakout family (rejected Sep 5); the 60-minute bar is the right size per the Aug 23 study but one-bar momentum has no evidence here."
+    },
+    {
+      "family": "ma_continuation",
+      "registeredAt": "2026-09-15T16:04:56Z",
+      "markets": [
+        "ES",
+        "NQ",
+        "GC",
+        "YM",
+        "SI",
+        "HG"
+      ],
+      "barMinutes": 60,
+      "candidates": [
+        "ma_continuation_t25",
+        "ma_continuation_t35"
+      ],
+      "params": {
+        "trend": "close and SMA50 on the same side of SMA200",
+        "entry": "first close back across SMA20 after a pullback through it",
+        "targetR": [
+          2.5,
+          3.5
+        ],
+        "stop": "2×ATR20",
+        "maxHoldBars": 40
+      },
+      "hypothesis": "In an SMA50/SMA200 trend, the first close back across SMA20 after a pullback continues the trend.",
+      "slippage": "entry and exit slippage per side from SLIP_PTS_PER_SIDE (futures-desk-journal.ts): ES 0.89 · NQ 11.74 · GC 0.50 measured; YM 4 · SI 0.01 · HG 0.0025 assumed and labelled; commission $2.02 round turn",
+      "gate": "validateCandidate unchanged: dev ≥ 100 / eval ≥ 30 trades, both dev halves and every fold positive, eval PF ≥ 1.15, one-winner share ≤ 25%, one-sided t p × (every hypothesis ever declared) < 0.05, no unpriceable entry, no roll-interrupted trade",
+      "expectation": "NOISE, possibly long-side positive. The only survivor on this archive is long-only 60-minute trend (Donchian 100/50, t=2.93) and it is risk-managed beta; a two-sided pullback entry with a fixed target and a 40-bar time stop is a weaker form of the same exposure and the short side is expected negative."
+    }
   ]
 }

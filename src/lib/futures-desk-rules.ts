@@ -54,6 +54,9 @@ export const EDGES: readonly EdgeSpec[] = [
     evidence:
       "Close above the prior 100-bar high on 60-minute bars → long at the next open; exit on a close below the prior 50-bar low; 4×ATR(20) stop. "
       + "10 markets 2011-2026: n=3,607, +0.101R/trade, PF 1.17, t=2.93, second half STRONGER than the first (scripts/trend-portfolio.ts). "
+      + "REPRODUCED ON MAIN Sep 15 2026 (same script, data/tf15y, research/trend-portfolio-2026-09-15.txt): identical figures; "
+      + "the desk's six roots alone (ES NQ YM GC SI HG): n=2,176, +0.173R/trade, PF 1.30, t=3.83, halves +0.164R (t 2.55) / +0.182R (t 2.86), 6/6 net-positive — "
+      + "YM +0.224R · GC +0.229R · NQ +0.198R · SI +0.220R · ES +0.167R · HG +0.010R (t 0.10, marginal). Cost model 0.05 ATR/round turn, no separate slippage. "
       + "Caveats stated as measured: it captured ~57% of buy-and-hold's return (risk-managed beta, not alpha); the SHORT side is significantly negative; "
       + "the 30-minute version ruins the account. CL and NG were net-negative and are excluded.",
     maxHoldDays: null,
