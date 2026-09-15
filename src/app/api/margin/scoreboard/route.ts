@@ -1,6 +1,8 @@
 import { computeMarginScoreboard, listRoundTrips } from "@/lib/kraken-margin";
 import { shadowScore, strategyBreakdown, recentPaperTrades, edgeBreakdowns, candidateDetail } from "@/lib/margin-shadow";
 import { capacityReport } from "@/lib/margin-capacity";
+import { leaderboard } from "@/lib/margin-leaderboard";
+import { DECAY_MULT_KEY, readDecayState } from "@/lib/margin-decay";
 import { prisma } from "@/lib/db";
 
 // The "was I winning" scoreboard: Spencer's real margin round trips, hit rate,
@@ -20,7 +22,7 @@ export async function GET() {
     const degraded: string[] = [];
     const soft = <T,>(name: string, p: Promise<T>, fallback: T): Promise<T> =>
       p.catch((e) => { degraded.push(`${name}: ${String(e?.message ?? e).slice(0, 80)}`); return fallback; });
-    const [scoreboard, trips, shadow, strategies, log, edges, candidate, capacity] = await Promise.all([
+    const [scoreboard, trips, shadow, strategies, log, edges, candidate, capacity, board] = await Promise.all([
       computeMarginScoreboard(),
       listRoundTrips(),
       soft("shadow", shadowScore(), null),
@@ -29,8 +31,14 @@ export async function GET() {
       soft("edges", edgeBreakdowns(), { byDirection: [], byCoin: [] }),
       soft("candidate", candidateDetail(candSource), null),
       soft("capacity", capacityReport(candSource), null),
+      soft("leaderboard", leaderboard(), []),
     ]);
     const scanRaw = await prisma.agentConfig.findUnique({ where: { key: "margin_scan_last_result" } }).then((r) => r?.value ?? null).catch(() => null);
+    // Strategy decay (C3): the live risk multiplier the executor reads and the rolling read behind it.
+    const [decayMultiplier, decayState] = await Promise.all([
+      prisma.agentConfig.findUnique({ where: { key: DECAY_MULT_KEY } }).then((r) => r?.value ?? null).catch(() => null),
+      readDecayState().catch(() => null),
+    ]);
     let scanLook: unknown = null;
     try { scanLook = scanRaw ? JSON.parse(scanRaw) : null; } catch { scanLook = null; }
     return Response.json({ scanLook,
@@ -51,6 +59,10 @@ export async function GET() {
       candidate,
       // Cost of capacity: what the setups the executor refused since arming went on to do, and a slot replay.
       capacity,
+      // The leaderboard: every sleeve's row with Sharpe/Sortino/PF/maxDD/R/MAE, the rolling decay read and the explicit live gate.
+      leaderboard: board,
+      // kraken_margin_decay_multiplier (raw; missing = 1×) and the decay state the rule last wrote.
+      decay: { multiplier: decayMultiplier, state: decayState },
     });
   } catch (error) {
     console.error("[/api/margin/scoreboard]", error);

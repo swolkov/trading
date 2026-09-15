@@ -17,6 +17,9 @@ import { sendNotification } from "@/lib/notifications";
 import { vaultWrite, vaultAppend, vaultRead, logObservation } from "@/lib/vault";
 import { strategyBreakdown, shadowScore, edgeBreakdowns, ensureShadowColumns, candidateDetail, policyCutFor, EXPERIMENT_SOURCES, SLICES_PREREGISTERED_AT, SLICE_MIN_RESOLVED, type StrategyStat, type ShadowScore, type EdgeBreakdowns, type CandidateDetail } from "@/lib/margin-shadow";
 import { capacityReport, type CapacityReport } from "@/lib/margin-capacity";
+import { leaderboard, type LeaderboardRow } from "@/lib/margin-leaderboard";
+import { DECAY_FULL_MULT, DECAY_MULT_KEY, applyDecay, readDecay, type DecayRead } from "@/lib/margin-decay";
+import type { RollingState } from "@/lib/margin-metrics";
 import { pairBase } from "@/lib/kraken-pairs";
 import { botOwnership } from "@/lib/margin-executor";
 
@@ -131,7 +134,7 @@ export function divergenceSummary(fills: LiveFill[]): Divergence {
 const money = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(0)}`;
 const pct = (n: number | null) => (n == null ? "—" : `${(n * 100).toFixed(0)}%`);
 
-export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null; capacity?: CapacityReport | null }): string {
+export function renderStatistics(input: { at: string; strategies: StrategyStat[]; shadow: ShadowScore | null; edges: EdgeBreakdowns; fills: LiveFill[]; div: Divergence; live: { armed: boolean; sources: string[]; equity: number | null }; candidate?: CandidateDetail | null; capacity?: CapacityReport | null; leaderboard?: LeaderboardRow[] }): string {
   const s = input.strategies.filter((x) => x.resolved > 0 || x.open > 0);
   const lines: string[] = [];
   lines.push("---", `last_updated: "${input.at.slice(0, 10)}"`, 'updated_by: "margin-synthesis"', "tags: [performance, margin, paper, live]", "---", "");
@@ -149,9 +152,16 @@ export function renderStatistics(input: { at: string; strategies: StrategyStat[]
     lines.push("");
   }
   lines.push("## Paper scoreboard (the record that earns arming)", "");
-  lines.push("| sleeve | resolved | hit | net (live-sized) | t | days-independent verdict |", "|---|---|---|---|---|---|");
-  for (const x of s) lines.push(`| ${x.label} | ${x.resolved} (${x.open} open) | ${pct(x.hitRate)} | ${money(x.liveNet)} | ${x.tStat?.toFixed(2) ?? "—"} | ${x.verdict} |`);
-  lines.push("", "Verdict ladder: gathering → not paying → promising (could be luck) → **REAL EDGE** (30+ resolved, net>0 at live sizing, t≥2, 7+ distinct days). Arm nothing below REAL EDGE.", "");
+  lines.push("| sleeve | resolved | hit | net (live-sized) | t | days-independent verdict | Sharpe | Sortino | PF | max DD | avg R | MAE (R) | rolling 30 | gate |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+  const pfText = (pf: number | null | undefined) => (pf == null ? "—" : pf === Infinity ? "∞" : pf.toFixed(2));
+  for (const x of s) {
+    const b = input.leaderboard?.find((r) => r.key === x.key); const m = b?.metrics;
+    const cols = m
+      ? `${m.sharpe?.toFixed(2) ?? "—"} | ${m.sortino?.toFixed(2) ?? "—"} | ${pfText(m.profitFactor)} | ${m.maxDDPct != null ? `${(m.maxDDPct * 100).toFixed(1)}% (${m.maxDDTrades} tr)` : "—"} | ${m.avgR != null ? `${m.avgR.toFixed(2)}R` : "—"} | ${m.maeR != null ? `${m.maeR.toFixed(2)}R` : "—"} | ${b!.rolling.state} | ${b!.promotion.stage} (${b!.promotion.gates.filter((g) => g.ok).length}/${b!.promotion.gates.length})`
+      : "— | — | — | — | — | — | — | —";
+    lines.push(`| ${x.label} | ${x.resolved} (${x.open} open) | ${pct(x.hitRate)} | ${money(x.liveNet)} | ${x.tStat?.toFixed(2) ?? "—"} | ${x.verdict} | ${cols} |`);
+  }
+  lines.push("", "Verdict ladder: gathering → not paying → promising (could be luck) → **REAL EDGE** (30+ resolved, net>0 at live sizing, t≥2, 7+ distinct days). Arm nothing below REAL EDGE. The **gate** column is the full promotion gate (margin-leaderboard.ts): those four plus max DD inside the breaker, PF ≥ 1.2, rolling-30 not DECAYING, and a guardian-mirrored container — PROMOTE-READY only when all eight are green. Sharpe/Sortino rank and gate nothing: overlapping crypto trades inflate them. R is fee-inclusive (a clean stop ≈ −1.05R).", "");
   if (input.shadow) lines.push(`Shadow totals (current cohort, US universe, experiment twins excluded): ${input.shadow.resolved} resolved · ${pct(input.shadow.hitRate)} hit · net ${money(input.shadow.totalPnl)} · ${input.shadow.open} open (${money(input.shadow.openUnrealized)} unrealized).`, "");
   const c = input.candidate;
   if (c && (c.byTimeframe.length > 0 || c.recent.length > 0)) {
@@ -309,8 +319,13 @@ export async function maybeGraduateStage3(): Promise<Stage3 | null> {
 //   2. Live diverges from paper (divergenceSummary's DIVERGES verdict) after at least
 //      DEMOTION_MIN_CLOSED_LIVE closed live trades → the record does not describe what live
 //      earns; stop and recalibrate before more money tests the gap.
+//   3. (C3, Sep 15 2026) The rolling read is DECAYING (the last 30 resolved are significantly
+//      worse than the trades before them, Welch t ≤ −2) AND those last 30 are net ≤ 0 → the
+//      rule has stopped paying, whatever the pooled record still says. A DECAYING sleeve whose
+//      last 30 are still positive is only REDUCED to half risk (maybeDecayReduce), not demoted.
 // Demotion = kraken_margin_auto=false FIRST (risk off before anything else), then the reason
-// is stored under DEMOTION_KEY, logged to the arm log and paged to margin_live + margin_urgent.
+// is stored under DEMOTION_KEY, the decay multiplier is reset to 1 (the next sleeve armed
+// starts at full size), logged to the arm log and paged to margin_live + margin_urgent.
 // Re-arming needs a human to acknowledge the demotion (the arm switch refuses while the key
 // exists) — a demoted sleeve never re-arms by itself.
 export const DEMOTION_KEY = "kraken_margin_demoted";
@@ -318,10 +333,13 @@ export const DEMOTION_MIN_RESOLVED = 30;
 export const DEMOTION_MIN_CLOSED_LIVE = 5;
 export interface Demotion { at: string; source: string; reason: string }
 
-/** The pure rule. null = keep running. */
+export interface RollingForDemotion { state: RollingState; welchT: number | null; lastNet: number; window?: number }
+
+/** The pure rule. null = keep running. `rolling` is optional: callers without the decay read judge on rules 1 and 2 as before. */
 export function demotionVerdict(
   forward: { resolved: number; net: number } | null,
   div: { closed: number; verdict: string },
+  rolling: RollingForDemotion | null = null,
   minResolved = DEMOTION_MIN_RESOLVED,
   minClosed = DEMOTION_MIN_CLOSED_LIVE,
 ): string | null {
@@ -330,6 +348,9 @@ export function demotionVerdict(
   }
   if (div.closed >= minClosed && /DIVERGES/.test(div.verdict)) {
     return `live diverges from paper after ${div.closed} closed live trades: ${div.verdict}`;
+  }
+  if (rolling && rolling.state === "DECAYING" && rolling.lastNet <= 0) {
+    return `the rolling-${rolling.window ?? 30} record has decayed (Welch t=${rolling.welchT?.toFixed(2) ?? "—"}) and is not paying: last ${rolling.window ?? 30} net ${rolling.lastNet < 0 ? "−" : ""}$${Math.abs(rolling.lastNet).toFixed(0)} (rule: DECAYING and ≤ $0)`;
   }
   return null;
 }
@@ -346,13 +367,25 @@ export async function maybeDemote(): Promise<Demotion | null> {
   if (!(auto === "true" && validate === "false")) return null;   // only an ARMED executor can be demoted
   const source = (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0];
   if (!source) throw new Error("Armed source unavailable");
+  // REDUCE before demote. The decay READ comes first and on its own try/catch: a failure there
+  // (a slow row load, a bad state JSON) must never stop rules 1–2 from running — it just means
+  // the third rule has nothing to judge this tick. The WRITE (0.5×) happens after the verdict
+  // and is skipped when the sleeve is being demoted anyway: one page, not two.
+  let decay: DecayRead | null = null;
+  try { decay = await readDecay(source); } catch (e) { console.error("[maybeDemote] decay read failed", e); decay = null; }
   const [detail, fills] = await Promise.all([candidateDetail(source), loadLiveFills()]);
   const forward = detail?.forward ? { resolved: detail.forward.resolved, net: detail.forward.net } : null;
-  const reason = demotionVerdict(forward, divergenceSummary(fills));
+  const rolling = decay ? { state: decay.rolling.state, welchT: decay.rolling.welchT, lastNet: decay.rolling.last.net, window: decay.rolling.window } : null;
+  const reason = demotionVerdict(forward, divergenceSummary(fills), rolling);
+  if (decay) {
+    try { await applyDecay(decay, { suppressReduce: reason != null }); } catch (e) { console.error("[maybeDemote] decay write failed", e); }
+  }
   if (!reason) return null;
   const d: Demotion = { at: new Date().toISOString(), source, reason };
   await cfgSet("kraken_margin_auto", "false");        // risk off FIRST
   await cfgSet(DEMOTION_KEY, JSON.stringify(d));
+  // The reduction belonged to this sleeve's record; the next sleeve armed starts at full size.
+  await cfgSet(DECAY_MULT_KEY, DECAY_FULL_MULT).catch(() => {});
   try {
     const logRaw = await cfgGet("kraken_margin_arm_log"); const log: string[] = logRaw ? JSON.parse(logRaw) : [];
     log.push(`${d.at} DEMOTED ${source} → paper (kraken_margin_auto=false): ${reason}. Re-arming needs the demotion acknowledged on Live Desk.`);
@@ -373,20 +406,21 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
 
   // The candidate whose detail is reported = the armed sleeve if one is armed, else selective.
   const candSource = ((await cfgGet("kraken_margin_live_sources")) ?? "").split(",").map((x) => x.trim()).filter(Boolean)[0] || "selective";
-  const [strategies, shadow, edges, fills, candidate, capacity] = await Promise.all([
+  const [strategies, shadow, edges, fills, candidate, capacity, board] = await Promise.all([
     strategyBreakdown().catch(() => [] as StrategyStat[]),
     shadowScore().catch(() => null),
     edgeBreakdowns().catch(() => ({ byDirection: [], byCoin: [] }) as EdgeBreakdowns),
     loadLiveFills().catch(() => [] as LiveFill[]),
     candidateDetail(candSource).catch(() => null),
     capacityReport(candSource).catch(() => null),
+    leaderboard().catch(() => [] as LeaderboardRow[]),
   ]);
   const div = divergenceSummary(fills);
   const [auto, validate, sources, watchState] = await Promise.all([cfgGet("kraken_margin_auto"), cfgGet("kraken_margin_validate_only"), cfgGet("kraken_margin_live_sources"), cfgGet("margin_watch_state")]);
   let equity: number | null = null;
   try { const p = watchState ? (JSON.parse(watchState) as { lastEquity?: number }) : null; equity = p?.lastEquity && p.lastEquity > 0 ? p.lastEquity : null; } catch { equity = null; }
   const at = new Date().toISOString();
-  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, capacity, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
+  const stats = renderStatistics({ at, strategies, shadow, edges, fills, div, candidate, capacity, leaderboard: board, live: { armed: auto === "true" && validate === "false", sources: (sources ?? "").split(",").map((x) => x.trim()).filter(Boolean), equity } });
   await vaultWrite("Performance/margin-statistics.md", stats, "margin-synthesis");
 
   // Journal each closed live round trip once.

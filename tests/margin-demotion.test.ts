@@ -28,3 +28,11 @@ test("live diverging from paper demotes only after enough closed live trades", (
 test("today's desk (Sep 7 2026) is not demoted", () => {
   assert.equal(demotionVerdict({ resolved: 15, net: 2349 }, { closed: 2, verdict: "live tracking paper so far (2/20 closed trades reconciled)" }), null);
 });
+
+test("the optional rolling argument (C3) changes nothing for the two original rules", () => {
+  const stable = { state: "stable" as const, welchT: 0.2, lastNet: 400 };
+  assert.equal(demotionVerdict({ resolved: 29, net: -500 }, tracking, stable), null);
+  assert.match(demotionVerdict({ resolved: 30, net: 0 }, tracking, stable) ?? "", /forward-only paper record is not paying/);
+  assert.match(demotionVerdict({ resolved: 15, net: 2349 }, diverges(5), stable) ?? "", /live diverges from paper after 5 closed live trades/);
+  assert.equal(demotionVerdict({ resolved: 15, net: 2349 }, { closed: 2, verdict: "live tracking paper so far (2/20 closed trades reconciled)" }, stable), null);
+});

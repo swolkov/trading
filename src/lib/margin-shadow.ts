@@ -11,6 +11,7 @@ import { prisma } from "@/lib/db";
 import { pairBase, isUsMarginSymbol, US_MARGIN_SYMBOLS_SQL } from "@/lib/kraken-pairs";
 import { getKrakenOHLC } from "@/lib/kraken-margin";
 import {
+  LIVE_RISK_CEILING_PCT,
   LIVE_RISK_DEFAULT_PCT,
   liveRiskFraction,
   parseLiveRiskBasePct,
@@ -104,6 +105,8 @@ export async function ensureShadowColumns(): Promise<void> {
     "sim_version text",                    // measurement-model cohort (see SIM_VERSION)
     "live_txid text",                      // the Kraken ORDER txid when this row was also traded LIVE
     "live_exec_note text",                 // the executor's note for that attempt (sent / refused why)
+    "shadow_stop_frac double precision",   // the initial stop as a fraction of entry (C5's ATR twin fills it; null = exitParams' fixed stop)
+    "shadow_trough double precision",      // worst ADVERSE price reached (MAE) — A4 fills it; null until then
     ...INTEL_STAMP_COLUMNS,
   ]) {
     await prisma.$executeRawUnsafe(`ALTER TABLE tradingview_alerts ADD COLUMN IF NOT EXISTS ${col}`);
@@ -150,6 +153,18 @@ export const SIM_COHORT_SQL = `sim_version='${SIM_VERSION}'`;
 // strategy cannot earn REAL EDGE on coins the executor would refuse. Found Sep 5 2026:
 // 19 of 37 scanned coins were untradeable and carried every dollar of the loss.
 export const RECORD_SQL = `${SIM_COHORT_SQL} AND ${US_MARGIN_SYMBOLS_SQL}`;
+
+// PAPER → LIVE RESCALE, as one SQL factor. Each row's paper P&L is re-priced from the risk
+// the PAPER sizer used to the risk the LIVE executor would use; both scale by conviction
+// (high 2×, low 0.5×) under the same ceiling — LIVE_RISK_CEILING_PCT, the executor's own
+// clamp (it was a literal 6 here from Sep 6 to Sep 15 while the executor's ceiling was 8,
+// which under-scaled every high-conviction row above 6%) — so with equal base rates the
+// factor is 1. Binds $1 = live base risk % and $2 = paper base risk % — every query that
+// interpolates it must pass those two parameters first, in that order. Used by
+// strategyBreakdown (net, mean, sd of the live-priced series, which the verdict is judged
+// on) and by the leaderboard's row loader (margin-leaderboard.ts), so the two never drift.
+export const LIVE_RESCALE_SQL = `(LEAST(${LIVE_RISK_CEILING_PCT}::float, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
+         / LEAST(${LIVE_RISK_CEILING_PCT}::float, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END))`;
 
 // When the universe fix shipped. The exclusion above is exogenous (Kraken's list, not
 // P&L), so the surviving pre-fix trades are valid — but they were re-qualified after the
@@ -812,13 +827,12 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        count(DISTINCT date_trunc('day', shadow_resolved_at)) FILTER (WHERE shadow_status='resolved')::bigint AS days,
        count(*) FILTER (WHERE shadow_status='resolved' AND time > '${UNIVERSE_FIX_AT}'::timestamptz)::bigint AS fwd,
        -- Each trade re-priced from the risk the PAPER sizer used to the risk the LIVE
-       -- executor would use. Both scale by conviction (high 2x, low 0.5x, 6% ceiling), so
+       -- executor would use. Both scale by conviction (high 2x, low 0.5x, LIVE_RISK_CEILING_PCT), so
        -- with the two base rates equal this ratio is 1 and live == paper — which is the
        -- point: the columns agreeing is the evidence that live now sizes like paper.
        -- They diverge the moment kraken_margin_live_max_risk_pct differs from the paper
        -- base, which is exactly when the distinction matters again.
-       COALESCE(sum(shadow_pnl * (LEAST(6.0, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
-         / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+       COALESCE(sum(shadow_pnl * ${LIVE_RESCALE_SQL})
          FILTER (WHERE shadow_status='resolved'),0)::float AS livenet,
        COALESCE(sum(shadow_pnl) FILTER (WHERE shadow_status='resolved'),0)::float AS total,
        avg(shadow_pnl) FILTER (WHERE shadow_status='resolved' AND shadow_pnl > 0) AS avgwin,
@@ -832,11 +846,9 @@ export async function strategyBreakdown(): Promise<StrategyStat[]> {
        -- (all-v2 t went -0.72 -> -2.51); now that live is conviction-scaled they coincide.
        -- Keep the separate computation: it is what will catch the next divergence between
        -- what the record measures and what the executor would actually do.
-       avg(shadow_pnl * (LEAST(6.0, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
-         / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+       avg(shadow_pnl * ${LIVE_RESCALE_SQL})
          FILTER (WHERE shadow_status='resolved') AS livemean,
-       stddev_samp(shadow_pnl * (LEAST(6.0, $1::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)
-         / LEAST(6.0, $2::float * CASE conviction WHEN 'high' THEN 2.0 WHEN 'low' THEN 0.5 ELSE 1.0 END)))
+       stddev_samp(shadow_pnl * ${LIVE_RESCALE_SQL})
          FILTER (WHERE shadow_status='resolved') AS livestd
      FROM tradingview_alerts
      WHERE ${RECORD_SQL}
