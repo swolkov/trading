@@ -27,6 +27,7 @@ export interface OwnedPositionRecord extends OwnedOptionsPosition {
   peakNet?: number;
   /** Next ex-dividend date (YYYY-MM-DD) and the short leg's strike, stamped at fill for the ex-dividend exit rule (Sep 15 2026). */
   exDivAt?: string | null;
+  exDivSource?: "scheduled" | "projected";
   shortStrike?: number | null;
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodeBrokerOrder, decodeEarningsPayload, decodeOrderPayload, decodeReviewPayload, decodeUnderlyingQuote, earningsRequestFor, groupPositions, mapOrderState, optionIdOf, orderMatchesCanonical, regularSessionFor } from "../src/lib/options-live-broker";
+import { decodeBrokerOrder, decodeEarningsResults, decodeOrderPayload, decodeReviewPayload, decodeUnderlyingQuote, groupPositions, mapOrderState, optionIdOf, orderMatchesCanonical, regularSessionFor } from "../src/lib/options-live-broker";
 import { OPTIONS_LIVE_ACCOUNT, optionsRequestFingerprint, type OptionOrderParams } from "../src/lib/options-live-policy";
 
 const params: OptionOrderParams = { account_number: OPTIONS_LIVE_ACCOUNT, legs: [{ option_id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", side: "buy", position_effect: "open", ratio_quantity: 1 }], quantity: "1", direction: "debit", type: "limit", price: "0.55", time_in_force: "gfd", market_hours: "regular_hours" };
@@ -80,19 +80,20 @@ test("underlying quote decodes the broker's quote row by name and by symbol; any
   assert.equal(decodeUnderlyingQuote({ data: {} }, "SPY"), null);
 });
 
-test("earnings: the request is built from the live catalog so 'no row' can be trusted; the response is read by named fields or throws", () => {
-  const catalog = (calendar: string[], results: string[] = []) => ({ tools: [
-    { name: "get_earnings_calendar", inputSchema: { properties: Object.fromEntries(calendar.map((k) => [k, {}])) } },
-    { name: "get_earnings_results", inputSchema: { properties: Object.fromEntries(results.map((k) => [k, {}])) } },
-  ] });
-  assert.deepEqual(earningsRequestFor(catalog(["symbols", "start_date", "end_date"]), "SOFI", "2026-09-15", "2026-10-16"), { name: "get_earnings_calendar", args: { symbols: ["SOFI"], start_date: "2026-09-15", end_date: "2026-10-16" } });
-  assert.deepEqual(earningsRequestFor(catalog(["days"]), "SOFI", "2026-09-15", "2026-10-16"), { name: "get_earnings_calendar", args: { days: 32 } });
-  assert.deepEqual(earningsRequestFor(catalog(["symbols"], ["symbol"]), "SOFI", "2026-09-15", "2026-10-16"), { name: "get_earnings_results", args: { symbol: "SOFI" } });   // a symbol-only calendar has no window → results by symbol
-  assert.throws(() => earningsRequestFor(catalog(["symbols"], ["page"]), "SOFI", "2026-09-15", "2026-10-16"), /no earnings tool in the catalog/);
-  assert.throws(() => earningsRequestFor({ tools: [] }, "SOFI", "2026-09-15", "2026-10-16"), /no earnings tool/);
-  const rows = [{ symbol: "SOFI", report: { date: "2026-10-28", timing: "pm" } }, { symbol: "SOFI", report: { date: "2026-07-29", timing: "pm" } }, { symbol: "AAL", date: "2026-10-01" }];
-  assert.deepEqual(decodeEarningsPayload({ data: { results: rows } }, "SOFI", "2026-09-15", "get_earnings_calendar"), { symbol: "SOFI", earningsAt: "2026-10-28", timing: "pm", via: "get_earnings_calendar" });
-  assert.deepEqual(decodeEarningsPayload({ data: { results: rows } }, "PFE", "2026-09-15", "get_earnings_calendar").earningsAt, null);        // asked across the window, not listed → none
-  assert.throws(() => decodeEarningsPayload({ data: { results: [{ symbol: "SOFI", when: "later" }] } }, "SOFI", "2026-09-15", "x"), /no readable date/);
-  assert.throws(() => decodeEarningsPayload({ data: { stuff: 1 } }, "SOFI", "2026-09-15", "x"), /unrecognized response shape/);
+test("earnings results (real shape, Sep 15 2026): the earliest report.date on or after today, tentative included; empty, not-found, foreign or unscheduled rows throw", () => {
+  // Captured live: get_earnings_results {symbol:"SOFI"} — up to 8 quarters ascending, the upcoming one with eps.actual null and verified false.
+  const results = (rows: unknown[], extra: Record<string, unknown> = {}) => ({ data: { results: rows, ...extra } });
+  const sofi = [
+    { symbol: "SOFI", year: 2026, quarter: 2, eps: { estimate: "0.150000", actual: "0.160000" }, report: { date: "2026-07-29", timing: "am", verified: true } },
+    { symbol: "SOFI", year: 2026, quarter: 3, eps: { estimate: "0.170000", actual: null }, report: { date: "2026-10-27", timing: "am", verified: false } },
+    { symbol: "SOFI", year: 2026, quarter: 4, eps: { estimate: null, actual: null }, report: { date: "2027-01-26", timing: null, verified: false } },
+  ];
+  assert.deepEqual(decodeEarningsResults(results(sofi), "SOFI", "2026-09-15"), { symbol: "SOFI", earningsAt: "2026-10-27", timing: "am", verified: false, via: "get_earnings_results" });
+  assert.equal(decodeEarningsResults(results(sofi), "SOFI", "2026-10-28").earningsAt, "2027-01-26");      // the one after it, timing null
+  assert.throws(() => decodeEarningsResults(results([], { not_found: ["SOFI"] }), "SOFI", "2026-09-15"), /SOFI not found at the broker/);
+  assert.throws(() => decodeEarningsResults(results([]), "SOFI", "2026-09-15"), /no earnings rows for SOFI/);
+  assert.throws(() => decodeEarningsResults(results(sofi.slice(0, 1)), "SOFI", "2026-09-15"), /no upcoming report date for SOFI/);   // only past quarters → unscheduled → refuse
+  assert.throws(() => decodeEarningsResults(results(sofi), "AAL", "2026-09-15"), /row for SOFI answering a AAL request/);
+  assert.throws(() => decodeEarningsResults(results([{ symbol: "SOFI", date: "2026-10-27" }]), "SOFI", "2026-09-15"), /without a report object/);
+  assert.throws(() => decodeEarningsResults({ data: { stuff: 1 } }, "SOFI", "2026-09-15"), /unrecognized response shape/);
 });

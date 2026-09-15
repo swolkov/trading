@@ -143,7 +143,7 @@ export function screenResearchContracts(data: OptionsResearch, cap: number, buyi
       const payoff=em==null?null:Math.round(payoffAtUsd(kind,long,short,signal.close*(1+(bull?em:-em)),price,fee)*100)/100;
       if(payoff!=null&&payoff<=0)return;
       const emPct=em==null?null:Math.round(em*10000)/100;
-      const exDiv=exDivRisk(kind,short?.strike??null,short?.type??null,signal.close,emPct,data.events?.[signal.symbol]?.exDivAt,long.expiry,now);
+      const exDiv=exDivRisk(kind,short?.strike??null,short?.type??null,signal.close,emPct,data.events?.[signal.symbol]?.exDivAt,long.expiry,now,data.events?.[signal.symbol]?.exDivSource);
       if(!exDiv.permitted)return;
       const iv=atmImpliedVol(cs,long.expiry,signal.close);
       const ivToRealized=iv!=null&&rv!=null?Math.round(iv/rv*100)/100:null;
@@ -194,7 +194,7 @@ export function isResearchEvents(value:unknown):value is ResearchEvents{
     if(!e||typeof e!=="object")return false;
     const r=e as Record<string,unknown>;
     return dayOrNull(r.earningsAt)&&(r.earningsTiming===null||r.earningsTiming==="am"||r.earningsTiming==="pm")
-      &&(r.exDivAt===undefined||dayOrNull(r.exDivAt))&&(r.dividendAmount===undefined||r.dividendAmount===null||typeof r.dividendAmount==="number"&&Number.isFinite(r.dividendAmount))
+      &&(r.exDivAt===undefined||dayOrNull(r.exDivAt))&&(r.exDivSource===undefined||r.exDivSource==="scheduled"||r.exDivSource==="projected")&&(r.dividendAmount===undefined||r.dividendAmount===null||typeof r.dividendAmount==="number"&&Number.isFinite(r.dividendAmount))
       &&typeof r.at==="string"&&Number.isFinite(Date.parse(r.at));
   });
 }

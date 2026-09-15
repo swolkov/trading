@@ -184,52 +184,34 @@ export function decodeUnderlyingQuote(payload: Record<string, unknown>, symbol: 
   if (last == null || !(last > 0) || prev == null || !(prev > 0) || !Number.isFinite(at)) return null;
   return { symbol, last, previousClose: prev, atMs: at };
 }
-/** The earnings tools' shapes are NOT on file. The request is built from the live tool catalog and the response read by
- *  named fields; anything else throws, and the runner turns a throw into a refusal (fail closed by design). */
-export interface EarningsLookup { symbol: string; earningsAt: string | null; timing: "am" | "pm" | null; via: string }
+/** get_earnings_results {symbol} → data.results[] of {symbol, year, quarter, eps:{estimate, actual}, report:{date, timing, verified}},
+ *  up to 8 quarters ascending (captured live Sep 15 2026). An unresolvable symbol comes back with results:[] and the symbol in
+ *  `not_found`. Next earnings = the earliest report.date on or after today; a tentative (verified:false) date still counts.
+ *  Empty, not found, no upcoming date, or any other shape THROWS — the runner turns a throw into a refusal (fail closed). */
+export interface EarningsLookup { symbol: string; earningsAt: string; timing: "am" | "pm" | null; verified: boolean; via: string }
 const dayOf = (x: unknown): string | null => { const d = (str(x) ?? "").slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d) && Number.isFinite(Date.parse(d)) ? d : null; };
-const timingOf = (x: unknown): "am" | "pm" | null => { const t = (str(x) ?? "").toLowerCase(); return /^(am|bmo|before|pre)/.test(t) ? "am" : /^(pm|amc|after|post)/.test(t) ? "pm" : null; };
-export function toolProperties(catalog: unknown, name: string): Record<string, unknown> | null {
-  const tools = record(catalog) && Array.isArray(catalog.tools) ? catalog.tools : [];
-  const tool = tools.find((t) => record(t) && t.name === name);
-  return record(tool) && record(tool.inputSchema) && record(tool.inputSchema.properties) ? tool.inputSchema.properties : null;
-}
-/** Which tool to ask and how, so that "no row" can be trusted as "none before `toDay`": a calendar with an explicit window, else results by symbol. */
-export function earningsRequestFor(catalog: unknown, symbol: string, fromDay: string, toDay: string): { name: string; args: Record<string, unknown> } {
-  const cal = toolProperties(catalog, "get_earnings_calendar");
-  if (cal) {
-    const args: Record<string, unknown> = {};
-    if ("symbols" in cal) args.symbols = [symbol]; else if ("symbol" in cal) args.symbol = symbol;
-    if ("start_date" in cal && "end_date" in cal) { args.start_date = fromDay; args.end_date = toDay; }
-    else if ("start_time" in cal && "end_time" in cal) { args.start_time = `${fromDay}T00:00:00Z`; args.end_time = `${toDay}T23:59:59Z`; }
-    else if ("from" in cal && "to" in cal) { args.from = fromDay; args.to = toDay; }
-    else if ("days" in cal) args.days = Math.ceil((Date.parse(toDay) - Date.parse(fromDay)) / 86_400_000) + 1;
-    if (Object.keys(args).some((k) => k !== "symbols" && k !== "symbol")) return { name: "get_earnings_calendar", args };
-  }
-  const res = toolProperties(catalog, "get_earnings_results");
-  if (res && ("symbol" in res || "symbols" in res)) return { name: "get_earnings_results", args: "symbols" in res ? { symbols: [symbol] } : { symbol } };
-  throw new Error(`no earnings tool in the catalog can be asked for ${symbol} across ${fromDay}..${toDay}`);
-}
-export function decodeEarningsPayload(payload: Record<string, unknown>, symbol: string, fromDay: string, via: string): EarningsLookup {
+const timingOf = (x: unknown): "am" | "pm" | null => (x === "am" || x === "pm" ? x : null);
+export function decodeEarningsResults(payload: Record<string, unknown>, symbol: string, fromDay: string): EarningsLookup {
+  const via = "get_earnings_results";
   const data = record(payload.data) ? payload.data : payload;
-  const entries = ["results", "earnings", "calendar", "events"].map((k) => data[k]).find(Array.isArray) ?? (Array.isArray(payload.data) ? payload.data : null);
-  if (!entries) throw new Error(`${via}: unrecognized response shape (${Object.keys(data).slice(0, 12).join(",") || "empty"})`);
-  const days: { day: string; timing: "am" | "pm" | null }[] = [];
-  for (const row of entries) {
-    if (!record(row)) throw new Error(`${via}: non-object row`);
-    const sym = str(row.symbol) ?? str(row.ticker) ?? (record(row.instrument) ? str(row.instrument.symbol) : null);
-    if (sym !== symbol) continue;
-    const report = record(row.report) ? row.report : {};
-    const day = [report.date, row.report_date, row.date, row.earnings_date, row.next_earnings_date, row.datetime].map(dayOf).find(Boolean) ?? null;
-    if (!day) throw new Error(`${via}: a ${symbol} row carries no readable date (${Object.keys(row).slice(0, 12).join(",")})`);
-    days.push({ day, timing: [report.timing, row.timing, row.time, row.time_of_day, row.session].map(timingOf).find(Boolean) ?? null });
+  if (Array.isArray(data.not_found) && data.not_found.includes(symbol)) throw new Error(`${via}: ${symbol} not found at the broker`);
+  if (!Array.isArray(data.results)) throw new Error(`${via}: unrecognized response shape (${Object.keys(data).slice(0, 12).join(",") || "empty"})`);
+  if (!data.results.length) throw new Error(`${via}: no earnings rows for ${symbol}`);
+  const upcoming: { day: string; timing: "am" | "pm" | null; verified: boolean }[] = [];
+  for (const row of data.results) {
+    if (!record(row) || !record(row.report)) throw new Error(`${via}: a row without a report object`);
+    if (str(row.symbol) !== symbol) throw new Error(`${via}: row for ${str(row.symbol) ?? "?"} answering a ${symbol} request`);
+    const day = dayOf(row.report.date);
+    if (!day) throw new Error(`${via}: a ${symbol} row carries no readable report.date (${Object.keys(row.report).join(",")})`);
+    if (day >= fromDay) upcoming.push({ day, timing: timingOf(row.report.timing), verified: row.report.verified === true });
   }
-  const next = days.filter((d) => d.day >= fromDay).sort((a, b) => a.day.localeCompare(b.day))[0];
-  return { symbol, earningsAt: next?.day ?? null, timing: next?.timing ?? null, via };
+  const next = upcoming.sort((a, b) => a.day.localeCompare(b.day))[0];
+  if (!next) throw new Error(`${via}: no upcoming report date for ${symbol} — the next quarter is unscheduled`);
+  return { symbol, earningsAt: next.day, timing: next.timing, verified: next.verified, via };
 }
 
 // ---- the adapter --------------------------------------------------------------------------------
-export interface LiveBrokerClient { call(name: string, args: Record<string, unknown>): Promise<unknown>; listTools?(): Promise<unknown> }
+export interface LiveBrokerClient { call(name: string, args: Record<string, unknown>): Promise<unknown> }
 export interface LiveBrokerIO {
   verified: boolean;
   now(): number;
@@ -334,15 +316,13 @@ export class RobinhoodLiveBroker implements OptionsLiveBroker {
       return q;
     } catch (e) { this.io.log(`quote ${symbol}: failed — ${String(e).slice(0, 160)}`); return null; }
   }
-  /** Next earnings date for one name, straight from the broker. THROWS on any failure; the entry path refuses on a throw. */
-  async nextEarnings(symbol: string, throughDay: string): Promise<EarningsLookup> {
-    if (!this.client.listTools) throw new Error("broker client cannot list tools");
+  /** Next earnings date for one name, straight from the broker (`get_earnings_results {symbol}`). THROWS on any failure; the entry path refuses on a throw. */
+  async nextEarnings(symbol: string): Promise<EarningsLookup> {
     const fromDay = new Date(this.io.now()).toISOString().slice(0, 10);
-    const req = earningsRequestFor(await this.client.listTools(), symbol, fromDay, throughDay);
-    const raw = unwrapRobinhoodRead(await this.client.call(req.name, req.args));
+    const raw = unwrapRobinhoodRead(await this.client.call("get_earnings_results", { symbol }));
     const shape = (x: unknown, d = 0): string[] => (record(x) && d < 3 ? Object.entries(x).flatMap(([k, v]) => [k, ...shape(Array.isArray(v) ? v[0] : v, d + 1).map((s) => `${k}.${s}`)]) : []);
-    try { return decodeEarningsPayload(raw, symbol, fromDay, req.name); }
-    catch (e) { this.io.log(`earnings ${symbol} via ${req.name} shape: ${shape(raw).slice(0, 40).join(" ")}`); throw e; }
+    try { return decodeEarningsResults(raw, symbol, fromDay); }
+    catch (e) { this.io.log(`earnings ${symbol} via get_earnings_results shape: ${shape(raw).slice(0, 40).join(" ")}`); throw e; }
   }
   async snapshot(optionIds: string[], refId: string): Promise<OptionsBrokerSnapshot> {
     const accounts = unwrapRobinhoodRead(await this.client.call("get_accounts", {}));

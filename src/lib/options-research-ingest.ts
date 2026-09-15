@@ -1,5 +1,5 @@
 import { OPTIONS_WATCHLIST, type OptionsResearch, type ResearchBar, type ResearchContract, type NativeScan } from "./options-desk-model";
-import type { ResearchEvent, ResearchEvents } from "./options-events";
+import { nextExDiv, type ResearchEvent, type ResearchEvents } from "./options-events";
 const obj=(x:unknown):Record<string,unknown>=>x&&typeof x==="object"&&!Array.isArray(x)?x as Record<string,unknown>:{};
 const num=(x:unknown):number=>typeof x==="number"||typeof x==="string"&&x.trim()!==""?Number(x):NaN;
 const text=(x:unknown):string=>typeof x==="string"?x:"";
@@ -11,25 +11,17 @@ const list=(x:unknown,...keys:string[]):Record<string,unknown>[]|null=>{
 };
 const dayOf=(x:unknown):string|null=>{const t=text(x);const d=t.slice(0,10);return /^\d{4}-\d{2}-\d{2}$/.test(d)&&Number.isFinite(Date.parse(d))?d:null;};
 const timingOf=(x:unknown):"am"|"pm"|null=>{const t=text(x).toLowerCase();return /^(am|bmo|before|pre)/.test(t)?"am":/^(pm|amc|after|post)/.test(t)?"pm":null;};
-const symbolOf=(row:Record<string,unknown>)=>text(row.symbol)||text(row.ticker)||text(obj(row.instrument).symbol);
-// The broker's earnings and fundamentals shapes are not on file (Sep 15 2026): read the named fields we would expect,
-// at a shallow depth, and treat anything else as "not read" — which the desk turns into a refusal, never a pass.
-const EARNINGS_DATE_KEYS=["report_date","date","earnings_date","next_earnings_date","datetime"],EARNINGS_TIMING_KEYS=["timing","time","time_of_day","session","hour"];
-const EX_DIV_KEYS=["next_ex_dividend_date","ex_dividend_date","ex_date","exDividendDate","next_ex_date"],DIV_AMOUNT_KEYS=["dividend_amount","next_dividend_amount","amount","cash_amount","dividend_per_share"];
+const symbolOf=(row:Record<string,unknown>)=>text(row.symbol);
+// Broker shapes captured live Sep 15 2026. Earnings rows (calendar and results alike):
+//   {symbol, year, quarter, eps:{estimate, actual}, report:{date:"YYYY-MM-DD", timing:"am"|"pm"|null, verified}} — `verified:false` is
+//   tentative and still counts. Fundamentals rows: {symbol, dividend_yield, dividend_per_share, distribution_frequency, payable_date,
+//   ex_dividend_date, record_date, …} where ex_dividend_date is the MOST RECENT scheduled ex-date (past or upcoming) and a non-payer
+//   has every dividend field null. A row must carry a `report` object to be an earnings row at all.
 function earningsOf(row:Record<string,unknown>):{day:string|null;timing:"am"|"pm"|null}{
   const report=obj(row.report);
-  const day=[report.date,...EARNINGS_DATE_KEYS.map(k=>row[k])].map(dayOf).find(Boolean)??null;
-  const timing=[report.timing,...EARNINGS_TIMING_KEYS.map(k=>row[k])].map(timingOf).find(Boolean)??null;
-  return {day,timing};
+  return {day:dayOf(report.date),timing:timingOf(report.timing)};
 }
-/** Ex-dividend from a fundamentals row: the named keys on the row, then one level down (`dividend`, `dividends[]`, `dividend_info`). */
-function dividendOf(row:Record<string,unknown>):{known:boolean;exDivAt:string|null;amount:number|null}{
-  const nests=[row,obj(row.dividend),obj(row.dividend_info),obj(row.dividends),...rows(row.dividends)];
-  const hits=nests.flatMap(n=>{const d=EX_DIV_KEYS.map(k=>dayOf(n[k])).find(Boolean);return d?[{d,amount:DIV_AMOUNT_KEYS.map(k=>num(n[k])).find(Number.isFinite)??null}]:[];}).sort((a,b)=>a.d.localeCompare(b.d));
-  if(hits.length)return {known:true,exDivAt:hits[0].d,amount:hits[0].amount};
-  const dividendKeyed=nests.some(n=>Object.keys(n).some(k=>/dividend/i.test(k)));
-  return {known:dividendKeyed,exDivAt:null,amount:null};
-}
+const DIVIDEND_FIELDS=["dividend_yield","dividend_per_share","distribution_frequency","payable_date","ex_dividend_date","record_date"];
 function response(content:unknown):Record<string,unknown>{
   if(typeof content==="string")return obj(JSON.parse(content));
   if(Array.isArray(content)){
@@ -44,7 +36,7 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   const uses=new Map<string,{name:string;input:Record<string,unknown>}>();
   const requestedQuotes=new Set<string>();
   const instruments=new Map<string,Record<string,unknown>>(),quotes=new Map<string,Record<string,unknown>>(),scans=new Map<string,NativeScan>();
-  const earnings=new Map<string,{day:string;timing:"am"|"pm"|null}>(),dividends=new Map<string,{exDivAt:string|null;amount:number|null}>();
+  const earnings=new Map<string,{day:string;timing:"am"|"pm"|null}>(),dividends=new Map<string,{exDivAt:string|null;source:"scheduled"|"projected"|null;amount:number|null}>();
   let calendarRead=false;
   for(const line of jsonl.split("\n").filter(Boolean)){
     const event=obj(JSON.parse(line));
@@ -62,10 +54,10 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
       let data:Record<string,unknown>,rawData:unknown;
       try {const envelope=response(block.content);if(envelope.error)throw Error("Broker error");rawData=envelope.data;data=obj(envelope.data);}catch{result.errors.push(`${use.name}: unreadable response`);continue;}
       const name=use.name.replace("mcp__robinhood-trading__","");
-      if(name==="get_earnings_calendar"){
-        const entries=list(rawData,"results","earnings","calendar","events");
-        if(!entries){result.errors.push("get_earnings_calendar: unrecognized shape");continue;}
-        calendarRead=true;
+      if(name==="get_earnings_calendar"||name==="get_earnings_results"){
+        const entries=list(rawData,"results");
+        if(!entries||!entries.every(row=>row.report!==undefined)){result.errors.push(`${name}: unrecognized shape`);continue;}
+        if(name==="get_earnings_calendar")calendarRead=true;   // only the market-wide calendar can vouch for "none"
         for(const row of entries){
           const symbol=symbolOf(row),{day,timing}=earningsOf(row);
           if(!/^[A-Z.]{1,10}$/.test(symbol)||!day||day<capturedAt.slice(0,10))continue;
@@ -73,13 +65,13 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
         }
       }
       if(name==="get_equity_fundamentals"){
-        const entries=list(rawData,"results","fundamentals");
-        if(!entries){result.errors.push("get_equity_fundamentals: unrecognized shape");continue;}
+        const entries=list(rawData,"results");
+        if(!entries||!entries.every(row=>DIVIDEND_FIELDS.some(k=>k in row))){result.errors.push("get_equity_fundamentals: unrecognized shape");continue;}
         for(const row of entries){
           const symbol=symbolOf(row);if(!/^[A-Z.]{1,10}$/.test(symbol))continue;
-          const d=dividendOf(row);
-          if(!d.known){result.errors.push(`${symbol}: fundamentals carry no dividend fields`);continue;}
-          dividends.set(symbol,{exDivAt:d.exDivAt,amount:d.amount});
+          const d=nextExDiv(row,capturedAt.slice(0,10));
+          if(!d.known){result.errors.push(`${symbol}: next ex-dividend cannot be placed (last ${text(row.ex_dividend_date)||"?"}, ${text(row.distribution_frequency)||"unknown frequency"}) — spreads refused`);continue;}
+          dividends.set(symbol,{exDivAt:d.exDivAt,source:d.source,amount:d.amount});
         }
       }
       if(name==="get_equity_historicals")for(const history of rows(data.results)){
@@ -129,7 +121,7 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
     for(const symbol of new Set([...Object.keys(result.bars),...result.contracts.map(c=>c.symbol)])){
       const e=earnings.get(symbol),d=dividends.get(symbol);
       const row:ResearchEvent={earningsAt:e?.day??null,earningsTiming:e?.timing??null,at:capturedAt};
-      if(d){row.exDivAt=d.exDivAt;row.dividendAmount=d.amount;}
+      if(d){row.exDivAt=d.exDivAt;if(d.source)row.exDivSource=d.source;row.dividendAmount=d.amount;}
       events[symbol]=row;
     }
     result.events=events;

@@ -96,9 +96,10 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
               const width = strikes.length === 2 ? Math.abs(strikes[0] - strikes[1]) : 0;
               const shortLeg = legs.find((l) => l.side === "short");
               const shortStrike = shortLeg ? contracts.find((c) => c.optionId === shortLeg.optionId)?.strike ?? null : null;
-              const exDivAt = (await research())?.events?.[contracts[0]?.underlying ?? ""]?.exDivAt ?? null;
+              const event = (await research())?.events?.[contracts[0]?.underlying ?? ""];
               const owned: OwnedPositionRecord = { id: rec.refId, accountNumber: ACCOUNT, openingRefId: rec.refId, legs, kind: rec.intent!.kind, direction: rec.canonicalOrder!.direction,
-                entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "", exDivAt, shortStrike };
+                entryPrice: Number(rec.canonicalOrder!.price), width, openedAtMs: rec.createdAtMs ?? Date.now(), expiry: contracts[0]?.expiry ?? "", underlying: contracts[0]?.underlying ?? "",
+                exDivAt: event?.exDivAt ?? null, ...(event?.exDivSource ? { exDivSource: event.exDivSource } : {}), shortStrike };
               await store.putOwnedPosition(owned);
               await store.putIntent({ ...rec, state: "settled" });
               await page(`✅ Options FILLED: ${owned.kind} ${owned.underlying} ${owned.expiry} × ${rec.intent!.quantity} at ${owned.entryPrice.toFixed(2)} (order ${rec.order!.id}). The guardian now manages it: stop at half the premium, a trail once it has been worth 1.5× (keeps half the best gain), out 7 days before expiry.`);
@@ -253,10 +254,10 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     // an unconfirmed earnings date is an earnings trade the desk did not ask for. Index ETFs have none to confirm.
     if (!OPTIONS_EVENT_RULES.indexEtfs.includes(c.symbol)) {
       let live: Awaited<ReturnType<typeof broker.nextEarnings>>;
-      try { live = await broker.nextEarnings(c.symbol, c.expiry); }
+      try { live = await broker.nextEarnings(c.symbol); }
       catch (e) { refusals.push(`${c.symbol} ${c.kind}: live earnings check failed — ${String(e).slice(0, 160)} (refused, fail closed)`); continue; }
-      if (live.earningsAt != null && live.earningsAt <= c.expiry) { refusals.push(`${c.symbol} ${c.kind}: broker says earnings ${live.earningsAt}${live.timing ? ` (${live.timing})` : ""} falls before expiry ${c.expiry} (via ${live.via})`); continue; }
-      log(`earnings ${c.symbol}: ${live.earningsAt ? `next ${live.earningsAt} after expiry ${c.expiry}` : `none before ${c.expiry}`} (via ${live.via}); research row ${earnings.note}`);
+      if (live.earningsAt <= c.expiry) { refusals.push(`${c.symbol} ${c.kind}: broker says earnings ${live.earningsAt}${live.timing ? ` (${live.timing})` : ""}${live.verified ? "" : ", tentative"} falls before expiry ${c.expiry} (via ${live.via})`); continue; }
+      log(`earnings ${c.symbol}: next ${live.earningsAt}${live.verified ? "" : " (tentative)"} after expiry ${c.expiry} (via ${live.via}); research row ${earnings.note}`);
     }
     return { intent: { refId: randomUUID(), action: "open", kind: c.kind as StructureKind, quantity: 1, limitPrice: net, legs }, note: `${c.kind} ${c.symbol} ${c.expiry} @ ${net.toFixed(2)} (${c.reason})`, maxLossUsd, underlying: c.symbol, expiry: c.expiry, market };
   }

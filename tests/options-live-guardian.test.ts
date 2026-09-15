@@ -60,4 +60,9 @@ test("ex-dividend exit: a call debit spread with its short call in the money clo
   assert.match(guardianExDivExit(pos, null, now).reason, /quote unavailable/);
   assert.equal(guardianExDivExit({ ...pos, kind: "long_call" }, 101.5, now).exit, false);
   assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10" }, 101.5, now).exit, false);   // already past
+  // A projected date is a ±7-day window: act from its earliest plausible day.
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-22", exDivSource: "projected" }, 101.5, now).exit, true);    // window opens Sep 15 → 0.9 days out
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-25", exDivSource: "projected" }, 101.5, now).exit, false);   // window opens Sep 18 → 3.9 days out
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10", exDivSource: "projected" }, 101.5, now).exit, true);    // window runs to Sep 17 — still live
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-05", exDivSource: "projected" }, 101.5, now).exit, false);   // window closed Sep 12
 });

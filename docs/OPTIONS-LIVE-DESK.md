@@ -121,14 +121,33 @@ clock. The rules live in `src/lib/options-events.ts` and are pure:
   money before an ex-dividend date inside the hold is refused (early assignment). Fundamentals never
   read → every spread is refused (index ETFs included); single legs are unaffected.
 - **Live re-check** — `pickCandidate` re-runs `spansEarnings` on the desk's own clock and, for the
-  chosen name only, asks the broker once (`broker.nextEarnings`, built from the live tool catalog,
-  decoded by named fields). **Any failure refuses — fail closed by design** — and the entry log says
-  why: `refused: SOFI long_call: live earnings check failed — … (refused, fail closed)`. The first
-  failure also logs the response's key shape so the decoder can be pinned to the real schema.
+  chosen name only, asks the broker once: `get_earnings_results {symbol}`, decoded by named fields.
+  **Any failure refuses — fail closed by design** (empty results, `not_found`, no upcoming
+  `report.date`, a foreign row, an unrecognized shape) and the entry log says why:
+  `refused: SOFI long_call: live earnings check failed — … (refused, fail closed)`. A decode
+  failure also logs the response's key shape.
 - **Guardian** — the owned record now carries `exDivAt` and `shortStrike` (stamped at fill);
   `guardianExDivExit` closes a call debit spread whose short call is in the money with the ex-date
   two days out or less, priced at the executable mark. The underlying quote
   (`broker.underlyingQuote`, `get_equity_quotes`) is fail-soft: no quote → rule skipped and logged.
+
+**The broker's shapes (captured live Sep 15 2026), which the ingest and the adapter are pinned to:**
+
+- `get_earnings_results {symbol}` and `get_earnings_calendar {days: 1..31, start_date?, filter?}` both
+  return `data.results[]` of `{symbol, year, quarter, eps: {estimate, actual}, report: {date: "YYYY-MM-DD",
+  timing: "am"|"pm"|null, verified}}`, ascending. Upcoming = `eps.actual === null`; `verified: false` is
+  tentative and still counts for the veto. Results for an unresolvable symbol come back empty with the
+  symbol in `not_found` → **unknown, refused** — never "none". The calendar has no end date: the research
+  session calls it with `days=31` from today and again with `start_date = today+31, days=29`, without
+  the `high_market_cap` filter (the affordable core is small caps). A researched name absent from both
+  pages with the calendar read = `earningsAt: null` (none within 60 days).
+- `get_equity_fundamentals {symbols: [≤10]}` → `data.results[]` of `{symbol, …, dividend_yield,
+  dividend_per_share, distribution_frequency, payable_date, ex_dividend_date, record_date}`; a
+  non-payer has every dividend field null. `ex_dividend_date` is the MOST RECENT scheduled ex-date —
+  past (F: 2026-08-11) or upcoming (SPY: 2026-09-18). `nextExDiv` (pure): all null → no dividend;
+  upcoming → `exDivAt` **scheduled**; past + Quarterly/Monthly/Semi-Annual/Annual → last + 91/30/182/365
+  days rolled forward past today, **projected**, which the spread rule and the guardian read as a
+  **±7-day window**; past + any other frequency → key absent (unknown → spreads refused).
 
 Until the first research run after this ships stores `events`, every single-name candidate reads
 as unknown and is refused; index ETFs still trade. That is the rule working, not the desk broken.
