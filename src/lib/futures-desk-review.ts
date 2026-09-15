@@ -4,6 +4,7 @@
 // a switch; going live is a separate, typed decision on a separate account.
 import { EDGES, etDayKey, usd, type EdgeKey, type Readiness } from "@/lib/futures-desk-rules";
 import { EMPTY_METRICS, sleeveMetrics, type SeriesMetrics } from "@/lib/futures-desk-metrics";
+import type { ScorePromotionVerdict } from "@/lib/futures-desk-score";
 
 // ---- roll chains ---------------------------------------------------------------------------------
 /** A rolled position is ONE trade: fold each leg that ended in a roll into its successor, so the
@@ -267,7 +268,11 @@ export function renderDailyReview(i: DailyInput): { markdown: string; slack: str
 }
 
 // ---- weekly review ------------------------------------------------------------------------------------
-export interface WeeklyInput { weekKey: string; board: Leaderboard; distribution: Distribution; verdicts: PromotionVerdict[]; readiness: { stage: string; readiness: Readiness } | null; generatedAt: string }
+export interface WeeklyInput {
+  weekKey: string; board: Leaderboard; distribution: Distribution; verdicts: PromotionVerdict[]; readiness: { stage: string; readiness: Readiness } | null; generatedAt: string;
+  /** E7: the score buckets (≥ 80 / 70–79 / < 70) by mean R and PF, and whether the score may be promoted. Absent = not measured. */
+  scoreBuckets?: (ScorePromotionVerdict & { unscored: number; promoted: boolean }) | null;
+}
 
 function table(rows: LeaderRow[]): string[] {
   if (!rows.length) return ["_no resolved trades_"];
@@ -296,6 +301,14 @@ export function renderWeeklyReview(i: WeeklyInput): string {
     for (const g of v.gates) lines.push(`| ${g.gate} | ${g.ok ? "✓" : "✗"} | ${g.value} | ${g.target} |`);
     if (v.exception) lines.push(`_${v.exception}_`);
   }
+  lines.push(``, `## Score buckets`);
+  if (i.scoreBuckets) {
+    const sb = i.scoreBuckets;
+    lines.push(`| Bucket | n | mean R | PF |`, `|---|---:|---:|---:|`);
+    for (const b of sb.buckets) lines.push(`| ${b.label} | ${b.n} | ${f2(b.meanR)} | ${b.pf == null ? (b.n ? "∞" : "—") : b.pf === Infinity ? "∞" : f2(b.pf)} |`);
+    lines.push(`- Welch t (≥ 80 vs < 70): ${f2(sb.tStat)} · unscored resolved: ${sb.unscored} · score ${sb.promoted ? "PROMOTED — Strong/A+ unlocked, the minimum applies" : "not promoted — a stamp, never a size"}`);
+    lines.push(`- Promotion verdict: ${sb.ok ? "GREEN — promote from /futures (type PROMOTE)" : sb.reasons.join(" · ")}`);
+  } else lines.push(`- n/a`);
   lines.push(``, `## Stage readiness`);
   if (i.readiness) {
     const r = i.readiness.readiness;

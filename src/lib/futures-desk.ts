@@ -26,6 +26,8 @@ import { dailyReviewDue, isoWeekKey, weeklyReviewDue } from "@/lib/futures-desk-
 import { runDailyReview, runWeeklyReview } from "@/lib/futures-desk-review-jobs";
 import { entrySlipPts, excursionJobDue, insertTrade, pnlAfterSlip, sessionOf, slipModelUsd, slipPtsPerSide, toR, updateExcursions, watchCapReached, watchCard } from "@/lib/futures-desk-journal";
 import { EXECUTION_ERRORS_DISABLE_AT, EXECUTION_ERRORS_REASON, anomalyRefusal, detectAnomaly, executionErrorsToday, feedStale, hostForMode, parseAnomaly, preTradeChecklist } from "@/lib/futures-desk-safety";
+import { MIN_SCORE_KEY, REGIME_KEY, SCORE_PROMOTED_KEY, minScoreRefusal, parseMinScore, parseRegime, pineContextOf, regimeStamp } from "@/lib/futures-desk-score";
+import { refreshRegime, scoreSignal } from "@/lib/futures-desk-score-jobs";
 import {
   ANOMALY_KEY, ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS, FEED_SEEN_KEY, GUARD_LOCK_KEY, GUARD_LOCK_TTL_MS, LANE, acquireLock, alertOnce, cfg, deskEnabled, deskLimits, entriesToday,
   executionErrorEvents, expireOldWatches, ledgerChangesSince, loadState, lockHeld, markSignal, openTrades, patchState, rawRows, recordSignal, releaseLock, saveState, setKey, stampSignal,
@@ -49,9 +51,12 @@ export type AlertOutcome = { status: string; reason: string; signalId: number; t
 /** The webhook's one call. Dedupes, then either executes now, queues for the reopen, or refuses.
  *  An exception never strands a signal in `received`: exits re-queue (a lost exit rides to the
  *  stop), entries are marked error. */
-export async function handleAlert(a: AlertPayload): Promise<AlertOutcome> {
-  const rec = await recordSignal(a, "received", "");
+export async function handleAlert(raw: AlertPayload): Promise<AlertOutcome> {
+  const rec = await recordSignal(raw, "received", "");
   if (rec.duplicate) return { status: "duplicate", reason: "same rule, market, action and bar already received", signalId: rec.id };
+  // E7: every entry and watch is scored and regime-stamped at receipt — refused ones too — so the weekly review can
+  // measure the score against outcomes. A scoring failure leaves the row unscored; it never blocks the alert.
+  const a = (await scoreSignal(rec.id, raw, (await deskLimits()).sizingBasisUsd)).alert;
   // A watch never executes, so it never queues either: it is sized on paper and logged, CME open or not.
   if (a.action === "watch") { try { return await watchSignal(rec.id, a); } catch (e) { const msg = String(e).slice(0, 200); await markSignal(rec.id, "error", msg).catch(() => {}); return { status: "error", reason: msg, signalId: rec.id }; } }
   // Exits queue too: a daily bar closes at 17:00 ET, inside the break, and a liquidation then is refused.
@@ -73,7 +78,7 @@ export async function handleAlert(a: AlertPayload): Promise<AlertOutcome> {
 async function watchSignal(signalId: number, a: AlertPayload): Promise<AlertOutcome> {
   if (watchCapReached(await watchesToday(a.root, signalId))) { await markSignal(signalId, "watch", "watch cap reached"); return { status: "watch", reason: "watch cap reached", signalId }; }
   const now = new Date();
-  const [state, limits, promoted, policyRaw] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted"), cfg(EVENT_POLICY_KEY)]);
+  const [state, limits, promoted, policyRaw] = await Promise.all([loadState(), deskLimits(), cfg(SCORE_PROMOTED_KEY), cfg(EVENT_POLICY_KEY)]);
   const grade = gradeFor(a, promoted === "true");
   // The dry run is sized the way an entry would be: the drawdown tier × the event window (0.5 while reduced).
   const budgetMult = ddTier(state.equity ?? 0, state.equityHigh ?? 0).mult * eventContextOf(policyRaw, now.getTime(), deskEventPolicy(now)).budgetMult;
@@ -146,13 +151,16 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
   const lock = await acquireLock(ENTRY_LOCK_KEY, ENTRY_LOCK_TTL_MS);
   if (!lock) { await markSignal(signalId, "queued", "another entry in flight — retried by the guardian"); return { status: "queued", reason: "entry lock busy", signalId }; }
   try {
-    const [state, limits, promoted] = await Promise.all([loadState(), deskLimits(), cfg("futures_desk_score_promoted")]);
-    const grade = gradeFor(a, promoted === "true");
+    const [state, limits, promotedRaw, minScoreRaw, regimeRaw] = await Promise.all([loadState(), deskLimits(), cfg(SCORE_PROMOTED_KEY), cfg(MIN_SCORE_KEY), cfg(REGIME_KEY)]);
+    const promoted = promotedRaw === "true";   // strict: anything but the literal "true" is "not promoted" (Normal grade, no minimum)
+    const grade = gradeFor(a, promoted);
+    const regime = regimeStamp(parseRegime(regimeRaw), a.root);
     const tier = ddTier(state.equity ?? 0, state.equityHigh ?? 0);
     const { ctx, policyRaw } = await contextNow(state, limits, a, budgetFor(grade, limits), tier.mult);   // worst case: the whole budget × tier × event
     const [eventMode, budgetMult] = "refusal" in ctx ? [null, tier.mult] : [ctx.eventMode, ctx.budgetMult];
     await stampSignal(signalId, { grade, eventMode });   // stamped before the verdict, so a refused row still says what it met
-    const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits) ?? anomalyRefusal(await cfg(ANOMALY_KEY));
+    // The minimum score (E7) is consulted ONLY once the score is promoted; before that it is a stamp and this is null.
+    const refusal = "refusal" in ctx ? ctx.refusal : entryRefusal(a, ctx, limits) ?? anomalyRefusal(await cfg(ANOMALY_KEY)) ?? minScoreRefusal(a.score, parseMinScore(minScoreRaw), promoted);
     if (refusal) { await markSignal(signalId, "refused", refusal); return { status: "refused", reason: refusal, signalId }; }
     const stageDArmed = limits.stage === "D" && (await cfg("futures_desk_stage_d_armed")) === "true";
     const size = sizeEntry(a, limits, { grade, stage: limits.stage, budgetMult, stageDArmed });
@@ -228,7 +236,7 @@ export async function enterFromSignal(signalId: number, a: AlertPayload): Promis
       edge: a.edge, root: a.root, micro: size.micro, contract: contract.name, contractId: contract.id, side: a.side, qty: fill.qty, entryPrice: fill.price, stopPrice: stopPx,
       entryOrderId: orderId, stopOrderId, clOrdId, signalId, riskUsd, pointValue: size.pointValue, rolledFrom: null, note: partial ? `partial fill ${fill.qty}/${size.contracts}` : a.note,
       contractMonth: contract.name.slice(-2), stage: limits.stage, signalPrice: a.price, entrySlipPts: entrySlipPts(a.side, a.price, fill.price), stopPoints: stopDist, atrAtEntry: a.atr ?? null,
-      session: sessionOf(new Date()), regime: null, eventMode, grade: size.grade, errorClass: partial ? "partial_fill" : null, slipModelPts: slipPtsPerSide(a.root), slipModelUsd: slipModelUsd(a.root, fill.qty, size.pointValue),
+      session: sessionOf(new Date()), regime, eventMode, grade: size.grade, errorClass: partial ? "partial_fill" : null, slipModelPts: slipPtsPerSide(a.root), slipModelUsd: slipModelUsd(a.root, fill.qty, size.pointValue),
     });
 
     // Re-anchor the stop to the ACTUAL fill: the chart may be on a different month (basis) and the
@@ -376,8 +384,7 @@ async function guardBody(): Promise<GuardReport> {
       `SELECT * FROM futures_desk_signals WHERE status = 'queued' ORDER BY id`);
     for (const q of queued) {
       if (Date.now() - Date.parse(q.received_at) > QUEUE_MAX_AGE_MS) { await markSignal(q.id, "expired", "queued for more than 12h", null, "queue_expired"); continue; }
-      let v2: Partial<AlertPayload> = {};   // the Pine v2 stamps ride along from the row so a replayed entry journals its ATR too
-      try { v2 = q.score_json ? JSON.parse(q.score_json) : {}; } catch { v2 = {}; }
+      const v2 = pineContextOf(q.score_json);   // the Pine v2 stamps ride along from the row so a replayed entry journals its ATR too (never the score object)
       const a: AlertPayload = { ...v2, edge: q.edge as AlertPayload["edge"], root: q.root, action: q.action as "entry" | "exit", side: q.side, price: q.price, stop: q.stop, bar: q.bar, timeframe: q.timeframe, note: q.note ?? "", ...(q.score != null ? { score: q.score } : {}) };
       try {
         const out = a.action === "exit" ? await exitByRule(q.id, a) : await enterFromSignal(q.id, a);
@@ -396,9 +403,11 @@ async function guardBody(): Promise<GuardReport> {
   // The reviews (E6) follow the same once-per-key discipline: keys stamped with guardianAt, work done after.
   const dailyDue = dailyReviewDue(fresh.reviewDayKey, new Date());
   const weeklyDue = weeklyReviewDue(fresh.weeklyReviewKey, new Date());
+  // The regime refresh (E7): the first run of each ET day, Yahoo daily bars per root — a stamp, never a gate.
+  const regimeDue = fresh.regimeDayKey !== day;
   await patchState((s) => {
     s.guardianAt = new Date().toISOString(); s.lastError = undefined; if (foldDue) s.excursionDayKey = day;
-    if (dailyDue) s.reviewDayKey = day; if (weeklyDue) s.weeklyReviewKey = isoWeekKey(new Date());
+    if (dailyDue) s.reviewDayKey = day; if (weeklyDue) s.weeklyReviewKey = isoWeekKey(new Date()); if (regimeDue) s.regimeDayKey = day;
     // Merge this run's once-only stamps — except `anomaly-*` stamps a clear-anomaly removed meanwhile (the DB copy is the truth for those).
     for (const [k, v] of Object.entries(fresh.alerts)) if (!(k.startsWith("anomaly-") && !(k in s.alerts))) s.alerts[k] = v;
   });
@@ -407,6 +416,7 @@ async function guardBody(): Promise<GuardReport> {
     try { notes.push(...(await updateExcursions())); } catch (e) { excursionError = `excursions: ${String(e).slice(0, 160)}`; notes.push(excursionError); }
     if (excursionError) await patchState((s) => { s.lastError = excursionError; }).catch(() => notes.push("excursions: lastError not saved"));
   }
+  if (regimeDue) { try { notes.push(...(await refreshRegime())); } catch (e) { notes.push(`regime: ${String(e).slice(0, 160)}`); } }
   // Daily after the fold (so today's MFE/MAE are on the rows); weekly on Monday's first run. Both fail-soft.
   if (dailyDue) { try { notes.push(...(await runDailyReview(day, limits))); } catch (e) { notes.push(`daily review: ${String(e).slice(0, 160)}`); } }
   if (weeklyDue) { try { notes.push(...(await runWeeklyReview(limits))); } catch (e) { notes.push(`weekly review: ${String(e).slice(0, 160)}`); } }
@@ -555,6 +565,13 @@ export async function clearAnomaly(who: string): Promise<void> {
   await setKey(ANOMALY_KEY, "");
   await patchState((s) => { for (const k of Object.keys(s.alerts)) if (k.startsWith("anomaly-")) delete s.alerts[k]; });
   await sendNotification(`✅ FUTURES DESK anomaly cleared by ${who}${open ? ` (${open.detail})` : ""} — entries resume.`, LANE).catch(() => {});
+}
+
+/** Promote the 0–100 score from a stamp to a size (E7): Strong/A+ budgets unlock and `futures_desk_min_score`
+ *  starts refusing. The route has already required a GREEN `scorePromotionVerdict`; this only records and announces. */
+export async function promoteScore(who: string): Promise<void> {
+  await setKey(SCORE_PROMOTED_KEY, "true");
+  await sendNotification(`🎯 FUTURES DESK score PROMOTED by ${who}: Strong (≥ 80) and A+ (≥ 90) budgets unlock; the desk minimum score now refuses.`, LANE).catch(() => {});
 }
 
 /** Advance the sizing stage (A→B→C) — the route checks readiness first; this only records and announces. */

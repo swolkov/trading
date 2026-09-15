@@ -33,6 +33,9 @@ export interface DeskState {
   /** ET day key of the last daily review (first guardian run after 17:05 ET) and ISO week key of the last weekly review (first Monday run) — E6. */
   reviewDayKey?: string;
   weeklyReviewKey?: string;
+  /** ET day key of the last regime refresh (E7: Yahoo daily bars per root, once a day) and of the last desk brief (E8, after the daily review). */
+  regimeDayKey?: string;
+  briefDayKey?: string;
 }
 
 export interface TradeRow {
@@ -174,9 +177,14 @@ export async function markSignal(id: number, status: string, reason: string, tra
     `UPDATE futures_desk_signals SET status = $2::text, reason = $3::text, executed_at = CASE WHEN $2::text IN ('executed','refused','error','expired','watch') THEN now() ELSE executed_at END,
      trade_id = COALESCE($4::int, trade_id), error_class = COALESCE($5::text, error_class) WHERE id = $1`, id, status, reason.slice(0, 400), tradeId, errorClass);
 }
-/** The entry path's stamps on the signal row: the grade it was sized at, the event mode it met (E3) and the pre-trade checklist. */
-export async function stampSignal(id: number, v: { grade?: string; eventMode?: string | null; checklistJson?: string }): Promise<void> {
-  await prisma.$executeRawUnsafe(`UPDATE futures_desk_signals SET grade = COALESCE($2::text, grade), event_mode = COALESCE($3::text, event_mode), checklist_json = COALESCE($4::text, checklist_json) WHERE id = $1`, id, v.grade ?? null, v.eventMode ?? null, v.checklistJson ?? null);
+/** The stamps on the signal row: the grade it was sized at, the event mode it met (E3), the pre-trade
+ *  checklist (E5), and — from the scoring pass at receipt (E7) — the score, the score JSON (Pine context +
+ *  components) and the regime label. Every field is COALESCE'd, so a stamp never blanks another. */
+export async function stampSignal(id: number, v: { grade?: string; eventMode?: string | null; checklistJson?: string; score?: number | null; scoreJson?: string | null; regime?: string | null }): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    `UPDATE futures_desk_signals SET grade = COALESCE($2::text, grade), event_mode = COALESCE($3::text, event_mode), checklist_json = COALESCE($4::text, checklist_json),
+     score = COALESCE($5::int, score), score_json = COALESCE($6::text, score_json), regime = COALESCE($7::text, regime) WHERE id = $1`,
+    id, v.grade ?? null, v.eventMode ?? null, v.checklistJson ?? null, v.score ?? null, v.scoreJson ?? null, v.regime ?? null);
 }
 /** Watch rows are a day's context, not an inbox item: after 24 h they expire. */
 export async function expireOldWatches(): Promise<number> {
