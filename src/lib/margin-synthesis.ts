@@ -23,7 +23,7 @@ import type { RollingState } from "@/lib/margin-metrics";
 import { pairBase } from "@/lib/kraken-pairs";
 import { botOwnership } from "@/lib/margin-executor";
 import { EXPECTED_SLIP_PCT } from "@/lib/margin-trade-card";
-import { loadRoundTripJournal, upsertRoundTripClose } from "@/lib/margin-round-trips";
+import { loadClosedRoundTripTxids, loadRoundTripJournal, upsertRoundTripClose } from "@/lib/margin-round-trips";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -315,8 +315,12 @@ export async function loadLiveFills(): Promise<LiveFill[]> {
 /** Phase B of the journal: every CLOSED live fill's exit, fees, net, hold and paper-at-live-size. Best-effort. */
 export async function journalClosedFills(fills: LiveFill[]): Promise<number> {
   let n = 0;
-  for (const f of fills) {
-    if (!f.closed || f.source === "roundtrip") continue;
+  const candidates = fills.filter((f) => f.closed && f.source !== "roundtrip");
+  if (!candidates.length) return 0;
+  // One SELECT of what is already closed in the journal, so the daily run touches only new trips.
+  const done = await loadClosedRoundTripTxids(candidates.map((f) => f.liveTxid)).catch(() => new Set<string>());
+  for (const f of candidates) {
+    if (done.has(f.liveTxid)) continue;
     try {
       await upsertRoundTripClose(
         {

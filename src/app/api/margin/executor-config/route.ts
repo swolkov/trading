@@ -91,7 +91,9 @@ export async function GET() {
       // null = the default (breaker headroom: halt − drawdown taken); a number = the operator's cap.
       clusterRiskCapPct: c.kraken_margin_cluster_risk_cap_pct != null && c.kraken_margin_cluster_risk_cap_pct.trim() !== "" ? num("kraken_margin_cluster_risk_cap_pct", NaN) : null,
       // The guardian's findings, one per line; null = clear. While set, the executor refuses entries.
+      // STICKY BY DESIGN: the guardian never clears it — POST {action:"clear-anomaly", confirm:"CLEAR"} does.
       anomaly: anomalyActive(c[ANOMALY_KEY]) ? c[ANOMALY_KEY] : null,
+      anomalyNote: "sticky by design — cleared only by an operator: POST /api/margin/executor-config {action:\"clear-anomaly\", confirm:\"CLEAR\"}",
     };
     const paper = {
       refEquity: num("kraken_shadow_ref_equity", 5000),

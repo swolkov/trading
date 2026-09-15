@@ -239,5 +239,9 @@ export async function recordRefusal(symbol: string, side: string, source: string
 export async function announceTradeCard(card: TradeCard, txid: string | null = null): Promise<void> {
   const type = card.action === "ENTER" ? "ENTRY" : card.action === "VALIDATE" ? "PAPER" : "SKIP";
   await sendNotification(`${renderTradeCard(card)}${txid ? `\ntxid ${txid}` : ""}`, "margin_live").catch(() => {});
-  await logDecision("kraken-margin", type, card.symbol, tradeCardOneLiner(card), card.score ?? 0.5).catch(() => {});
+  // The vault's confidence is 0–1. Today `score` is the scanner's conviction score (an integer
+  // count of confluence factors, typically −2..8), mapped as clamp((score + 2) / 10, 0, 1); an
+  // unscored card is 0.5. When B5's 0–100 score replaces it, this mapping changes with it.
+  const confidence = card.score == null ? 0.5 : Math.max(0, Math.min(1, (card.score + 2) / 10));
+  await logDecision("kraken-margin", type, card.symbol, tradeCardOneLiner(card), confidence).catch(() => {});
 }

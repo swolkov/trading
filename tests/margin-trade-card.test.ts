@@ -145,6 +145,7 @@ test("regime and score are internal-only on AlertOrder: the TradingView webhook 
   assert.ok(/regime:\s*regime\.btcUp === true \? "up"/.test(scan), "the scan route passes the regime it read");
   assert.ok(/score:\s*conv\.score/.test(scan), "the scan route passes its score");
   assert.ok(/recordRefusal\(/.test(scan), "the scan route records card-less refusals");
+  assert.ok(/!r\.note\.startsWith\("tracked only"\)/.test(scan), "a disarmed desk's 'tracked only' is not a refusal row");
   // And the executor persists a card on every post-sizing refusal and after AddOrder.
   const exec = readFileSync(new URL("../src/lib/margin-executor.ts", import.meta.url), "utf8");
   assert.ok(/const refuse = async \(reason: string\)/.test(exec));
@@ -154,6 +155,13 @@ test("regime and score are internal-only on AlertOrder: the TradingView webhook 
   // The LAST AddOrder in the file is the entry's (the close path sends its own earlier).
   const afterOrder = exec.split('res = await krakenPrivate("AddOrder", params)').pop() ?? "";
   assert.ok(/persistTradeCard\(card, txid \?\? null\)/.test(afterOrder), "the card is persisted only after AddOrder");
+  // LEDGER FIRST: ownership is recorded immediately after AddOrder; the card comes after, and its
+  // id is attached with a second best-effort recordBotEntry — never between the order and the ledger.
+  const firstLedger = afterOrder.indexOf("await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta })");
+  const cardPersist = afterOrder.indexOf("persistTradeCard(card, txid ?? null)");
+  const attach = afterOrder.indexOf("await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }).catch(() => {})");
+  assert.ok(firstLedger > 0 && cardPersist > firstLedger && attach > cardPersist, "AddOrder → recordBotEntry → card → attach cardId");
+  assert.ok(!/persistTradeCard|buildTradeCard/.test(afterOrder.slice(0, firstLedger)), "nothing card-related between AddOrder and the ledger write");
   assert.ok(/announceTradeCard\(card, txid \?\? null\)\.catch/.test(afterOrder), "the announcement is after AddOrder and caught");
   // Nothing card-related sits between a decision and AddOrder: inside executeAlert, before the
   // order is sent, the only persist is the one inside refuse() (a refusal has no order to block).

@@ -91,11 +91,15 @@ test("non-finite inputs never allow an entry", () => {
   assert.equal(clusterEntryAllowed(s, -1, EQ, 15).ok, false, "negative new risk is a bug, not a free pass");
 });
 
-test("the refusal string is built in one place, matched by REFUSAL_RE and filed as 'cluster' by the capacity ledger", () => {
-  const note = refusalNote.cluster(800, 800, 15, 10_000);
-  assert.equal(note, "entry refused: all-stops risk $800 + $800 would exceed the cluster cap 15.0% of equity ($10000) — every open stop hit at once must stay inside the breaker's headroom");
+test("the refusal string is built in one place, names the breaker headroom, is matched by REFUSAL_RE and filed as 'cluster' by the capacity ledger", () => {
+  const note = refusalNote.cluster(800, 800, 4, 10_000, { haltPct: 15, dd: 11 });
+  assert.equal(note, "entry refused: all-stops risk $800 + $800 would exceed the cluster cap 4.0% of equity ($10000) (= 15% breaker − 11.0% drawdown; the cap is breaker headroom, not a slot count) — every open stop hit at once must stay inside it");
   assert.match(note, REFUSAL_RE.cluster);
   assert.equal(classifyRefusal(null, note), "cluster");
+  const operator = refusalNote.cluster(800, 800, 12, 10_000, null);
+  assert.match(operator, /cluster cap 12\.0% of equity \(\$10000\) \(operator cap kraken_margin_cluster_risk_cap_pct\)/);
+  assert.match(operator, REFUSAL_RE.cluster);
+  assert.equal(classifyRefusal(null, operator), "cluster");
   assert.match(refusalNote.clusterCapInvalid("abc"), REFUSAL_RE.clusterCapInvalid);
   assert.equal(classifyRefusal("OTXID", note), "taken");
 });
@@ -109,5 +113,6 @@ test("the executor's cluster gate sits after the liquidation buffer and before t
   assert.ok(liq > 0 && cluster > liq && minOrder > cluster, "gate order: liq buffer → cluster → min order");
   assert.ok(/cfgStrict\("kraken_margin_cluster_risk_cap_pct"\)/.test(entry), "the cap is a STRICT read");
   assert.ok(/return refuse\(refusalNote\.cluster\(/.test(entry), "the refusal persists a card");
+  assert.ok(/capParsed == null \? \{ haltPct: ddHaltPct, dd: ddTier\.dd \} : null/.test(entry), "the note says which cap applied");
   assert.ok(/Math\.max\(0, ddHaltPct - Math\.max\(0, ddTier\.dd\)\)/.test(entry), "default cap = breaker headroom");
 });

@@ -1290,7 +1290,7 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
         return { pair: p.pair, side: p.side, vol: p.vol, entryPrice: p.entryPrice, leverage: p.leverage, ours, stopFrac: ours ? own.stopFracOf(p.ordertxid) : null, ...(onThisBook ? { stopPrice: pyramid.stopLevel } : {}) };
       }), equity, ddHaltPct, ddTier.dd);
       const verdict = clusterEntryAllowed(exposure, notional * riskDist, equity, capPct);
-      if (!verdict.ok) return refuse(refusalNote.cluster(verdict.existingUsd, verdict.newUsd, verdict.capPct, equity));
+      if (!verdict.ok) return refuse(refusalNote.cluster(verdict.existingUsd, verdict.newUsd, verdict.capPct, equity, capParsed == null ? { haltPct: ddHaltPct, dd: ddTier.dd } : null));
     }
     const marginClamped = notional < unclamped * 0.999;
     const rawVol = notional / entryPx;
@@ -1380,20 +1380,11 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
     // the add absent (the catch below) or the operator clears kraken_margin_pyramid_pending.
     if (pyramid && !validate && txid) await writePyramidMarker({ parent: pyramid.parentTxid, ts: sentAtSec * 1000, txid, ledgered: false }).catch(() => {});
 
-    // THE TRADE CARD, persisted now that the order is accepted (never between the decision and
-    // AddOrder). Its id rides on the ledger entry so the guardian can verify the live book
-    // against what was authorised. A failed write pages and the entry proceeds — the ledger
-    // write below is the one that matters, and it does not depend on this.
-    const card: TradeCard = buildTradeCard({ ...cardBase(), notional, action: validate ? "VALIDATE" : "ENTER" });
-    let cardId: number | null = null;
-    try { cardId = await persistTradeCard(card, txid ?? null); }
-    catch (e) { await sendNotification(`⚠️ ${pair}: trade card not persisted after AddOrder (${String(e).slice(0, 80)}) — the entry stands; ledger write follows.`, "margin_live").catch(() => {}); }
-    ledgerMeta = { ...ledgerMeta, ...(cardId != null ? { cardId } : {}) };
-
     // Record ownership BEFORE anything else can fail: this txid is how the close path and
     // the guardian's naked-position check know the resulting position is ours rather than
     // Spencer's. A missing entry here makes a close skip that position (safe); it can
-    // never cause us to close one that is not ours.
+    // never cause us to close one that is not ours. Nothing — not the trade card, not the
+    // announcement — sits between AddOrder and this write.
     let ledgered = !validate && txid ? await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }) : true;
     // AN UNLEDGERED PYRAMID ADD IS RECOVERED, NEVER "UNWOUND". A tranche cannot be targeted on
     // Kraken (it nets FIFO on the pair+side — a reduce-only sell of the add's volume would close
@@ -1417,6 +1408,19 @@ export async function executeAlert(alert: AlertOrder): Promise<ExecResult> {
 
     // This acceptance already owns a durable daily reservation made before AddOrder.
 
+    // THE TRADE CARD, persisted only now — after the order is accepted AND ownership is
+    // ledgered. Its id is then attached to the ledger entry with a second, best-effort
+    // recordBotEntry (idempotent: it drops the same txid and re-pushes it with the meta), so
+    // the guardian can verify the live book against what was authorised. A failed card write
+    // pages and changes nothing about ownership; a failed attach leaves a card without a link.
+    const card: TradeCard = buildTradeCard({ ...cardBase(), notional, action: validate ? "VALIDATE" : "ENTER" });
+    let cardId: number | null = null;
+    try { cardId = await persistTradeCard(card, txid ?? null); }
+    catch (e) { await sendNotification(`⚠️ ${pair}: trade card not persisted after AddOrder (${String(e).slice(0, 80)}) — the entry is ledgered and stands.`, "margin_live").catch(() => {}); }
+    if (cardId != null && ledgered && !validate && txid) {
+      ledgerMeta = { ...ledgerMeta, cardId };
+      await recordBotEntry(txid, pair, { stopFrac: stopPct, ...ledgerMeta }).catch(() => {});
+    }
     // Announce AFTER the ledger write: Slack margin_live + vault Decisions/ (both best-effort,
     // 5s Slack timeout inside sendNotification).
     await announceTradeCard(card, txid ?? null).catch(() => {});

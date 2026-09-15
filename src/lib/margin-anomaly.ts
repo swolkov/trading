@@ -11,13 +11,26 @@
 //
 // The response to either is the same and deliberately blunt: page margin_urgent, write the
 // finding to kraken_margin_anomaly, and let the executor refuse every NEW entry (STRICT read)
-// until an operator has looked and cleared the key. Closes are never affected; the guardian
-// keeps protecting. Pure module — the guardian supplies the book and the card.
+// until an operator has looked and cleared the key. THE FLAG IS STICKY BY DESIGN: the guardian
+// never clears it, a book that later looks fine does not clear it — only a human does, through
+// the executor-config route with {action:"clear-anomaly", confirm:"CLEAR"}. Closes are never
+// affected; the guardian keeps protecting. Pure module — the guardian supplies the book and
+// the card.
+//
+// Two rules are deliberately one-sided so a normal life event never trips them:
+//   • notional fires only when the book is LARGER than the card (× 1.10). Kraken reports the
+//     REMAINING volume, so a partial close (our own closeBook, a partial liquidation, a manual
+//     reduce) shrinks it — and a smaller position never carries more risk than authorised.
+//   • the stop-wider rule is skipped by the guardian while a book is in its breach-guard state
+//     or when the resting stop is a guard cover hugging the market (the executor's close path
+//     re-covers a remainder 0.3% beyond the market and does not update the ledgered level).
 import { LIVE_STOP_RATCHET_MIN_FRAC } from "@/lib/margin-live-risk";
 
 export const ANOMALY_KEY = "kraken_margin_anomaly";
-/** Notional may differ from the card by the entry chase and a partial fill; beyond this it is not the same trade. */
+/** A book more than this much LARGER than its card is not the trade that was authorised. Smaller is never flagged. */
 export const NOTIONAL_TOLERANCE = 0.10;
+/** A resting stop within this fraction of the current price (protective side) is a guard cover, not a widened stop. */
+export const GUARD_COVER_FRAC = 0.005;
 
 export interface BookForCard {
   txid: string;                 // the tranche's opening order txid
@@ -26,7 +39,8 @@ export interface BookForCard {
   side: "long" | "short";
   restingStop: number | null;   // the best fixed stop of ours resting on the pair+side (null = none)
   ledgeredStop: number | null;  // the level the guardian last knew to be resting (managed.lastStopLevel)
-  px: number;                   // current price, for the ratchet tolerance
+  px: number;                   // current price, for the ratchet tolerance and the guard-cover exemption
+  breachGuard?: boolean;        // the book is in its breach-guard state (a guard cover is expected) — skip the stop rule
 }
 export interface CardForCheck { leverageUsed: number; notional: number; side: "buy" | "sell" }
 
@@ -34,11 +48,13 @@ export interface BookCheck { ok: boolean; findings: string[] }
 
 /**
  * Does the live tranche match its trade card? Leverage equal (Kraken reports cost ÷ margin,
- * rounded to the rung), notional within ±10% of the card's, side the card's, and the resting
- * stop no WORSE than the ledgered level by more than the ratchet tolerance (better is fine —
- * a stop only ever ratchets in the trade's favour; a stop that moved the other way was widened
- * by a hand or a bug, and "never widen a stop" is the one exit rule this desk has never broken).
- * A missing resting stop is NOT judged here — the naked-position guard owns that.
+ * rounded to the rung), notional no more than 10% LARGER than the card's (smaller is a partial
+ * close, never more risk), side the card's, and the resting stop no WORSE than the ledgered
+ * level by more than the ratchet tolerance (better is fine — a stop only ever ratchets in the
+ * trade's favour; a stop that moved the other way was widened by a hand or a bug, and "never
+ * widen a stop" is the one exit rule this desk has never broken). The stop rule is skipped in
+ * the breach-guard state and for a guard cover hugging the market (GUARD_COVER_FRAC). A missing
+ * resting stop is NOT judged here — the naked-position guard owns that.
  */
 export function bookMatchesCard(book: BookForCard, card: CardForCheck | null): BookCheck {
   const findings: string[] = [];
@@ -47,16 +63,17 @@ export function bookMatchesCard(book: BookForCard, card: CardForCheck | null): B
     if (Number.isFinite(book.leverage) && Number.isFinite(card.leverageUsed) && lev !== Math.round(card.leverageUsed)) {
       findings.push(`${book.txid}: leverage ${lev} vs authorised ${Math.round(card.leverageUsed)}`);
     }
-    if (Number.isFinite(book.notional) && Number.isFinite(card.notional) && card.notional > 0 && Math.abs(book.notional - card.notional) > NOTIONAL_TOLERANCE * card.notional) {
-      findings.push(`${book.txid}: notional $${book.notional.toFixed(0)} vs authorised $${card.notional.toFixed(0)} (±${(NOTIONAL_TOLERANCE * 100).toFixed(0)}%)`);
+    if (Number.isFinite(book.notional) && Number.isFinite(card.notional) && card.notional > 0 && book.notional > card.notional * (1 + NOTIONAL_TOLERANCE)) {
+      findings.push(`${book.txid}: notional $${book.notional.toFixed(0)} is LARGER than the authorised $${card.notional.toFixed(0)} (+${(NOTIONAL_TOLERANCE * 100).toFixed(0)}% allowed)`);
     }
     const cardSide = card.side === "buy" ? "long" : "short";
     if (book.side !== cardSide) findings.push(`${book.txid}: side ${book.side} vs authorised ${cardSide}`);
   }
-  if (book.restingStop != null && book.ledgeredStop != null && book.restingStop > 0 && book.ledgeredStop > 0) {
+  if (!book.breachGuard && book.restingStop != null && book.ledgeredStop != null && book.restingStop > 0 && book.ledgeredStop > 0) {
     const tol = book.px > 0 ? book.px * LIVE_STOP_RATCHET_MIN_FRAC : 0;
+    const guardCover = book.px > 0 && (book.side === "long" ? book.restingStop <= book.px && book.px - book.restingStop <= book.px * GUARD_COVER_FRAC : book.restingStop >= book.px && book.restingStop - book.px <= book.px * GUARD_COVER_FRAC);
     const worse = book.side === "long" ? book.restingStop < book.ledgeredStop - tol : book.restingStop > book.ledgeredStop + tol;
-    if (worse) findings.push(`${book.txid}: resting stop ${book.restingStop} is WIDER than the ledgered ${book.ledgeredStop} (a stop only ratchets in the trade's favour)`);
+    if (worse && !guardCover) findings.push(`${book.txid}: resting stop ${book.restingStop} is WIDER than the ledgered ${book.ledgeredStop} (a stop only ratchets in the trade's favour)`);
   }
   return { ok: findings.length === 0, findings };
 }

@@ -337,9 +337,10 @@ export async function GET(request: Request) {
                 regime: regime.btcUp === true ? "up" : regime.btcUp === false ? "down" : "unknown", score: conv.score });
               live.push(`${s.symbol} ${plan.source}: ${r.executed ? "EXECUTED" : r.validated ? "validated" : "not sent"} — ${r.note.slice(0, 140)}`);
               note_(s.coin, s.timeframe, s.kind, r.executed ? "TRADED LIVE" : "live refused", conv.tier, r.note.slice(0, 160));
-              // A refusal the executor reached before it could build a card (armed? breaker?
-              // cooldown? slots?) gets a card-less row here, so every live decision has a row.
-              if (!r.executed && !r.validated && r.cardId == null) await recordRefusal(s.symbol, side, plan.source, r.note).catch(() => {});
+              // A refusal the executor reached before it could build a card (breaker? cooldown?
+              // slots?) gets a card-less row here, so every live decision has a row. "tracked
+              // only" (the desk is disarmed) is not a decision — it would be a row every 15 min.
+              if (!r.executed && !r.validated && r.cardId == null && !r.note.startsWith("tracked only")) await recordRefusal(s.symbol, side, plan.source, r.note).catch(() => {});
               // Link the paper row to its live attempt: this is what the daily synthesis uses
               // to compare REAL fills against the paper model, trade by trade.
               if (rowId != null) {

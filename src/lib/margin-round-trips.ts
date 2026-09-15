@@ -71,6 +71,14 @@ export async function upsertRoundTripClose(c: RoundTripClose, seed: { pair: stri
   );
 }
 
+/** Txids among `txids` whose journal row is already closed (phase B done). */
+export async function loadClosedRoundTripTxids(txids: string[]): Promise<Set<string>> {
+  if (!txids.length) return new Set();
+  await ensureMarginTables();
+  const rows = await prisma.$queryRawUnsafe<{ txid: string }[]>(`SELECT txid FROM margin_round_trips WHERE closed = true AND txid = ANY($1::text[])`, txids);
+  return new Set(rows.map((r) => r.txid));
+}
+
 export interface RoundTripJournal { txid: string; cardId: number | null; lastStopLevel: number | null; mfeR: number | null; maeR: number | null; exitReason: string | null }
 
 /** What the synthesis needs per live txid: the ledgered stop level and the excursions. */

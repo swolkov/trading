@@ -744,7 +744,7 @@ export async function GET(request: Request) {
           grp.forEach((g, i) => {
             const cid = ownership.cardIdOf(g.ordertxid);
             const check = bookMatchesCard(
-              { txid: g.ordertxid, leverage: g.leverage, notional: g.vol * g.entryPrice, side, restingStop: i === 0 ? bestResting : null, ledgeredStop: i === 0 ? (prev?.lastStopLevel ?? null) : null, px },
+              { txid: g.ordertxid, leverage: g.leverage, notional: g.vol * g.entryPrice, side, restingStop: i === 0 ? bestResting : null, ledgeredStop: i === 0 ? (prev?.lastStopLevel ?? null) : null, px, breachGuard: (priorBreached[stateKey] ?? 0) > 0 },
               cid != null ? cards.get(cid) ?? null : null,
             );
             findings.push(...check.findings);

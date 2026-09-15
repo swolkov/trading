@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { ANOMALY_KEY, NOTIONAL_TOLERANCE, anomalyActive, bookMatchesCard, mergeAnomaly, unledgeredBesideOurStop, type BookForCard, type CardForCheck } from "../src/lib/margin-anomaly";
+import { ANOMALY_KEY, GUARD_COVER_FRAC, NOTIONAL_TOLERANCE, anomalyActive, bookMatchesCard, mergeAnomaly, unledgeredBesideOurStop, type BookForCard, type CardForCheck } from "../src/lib/margin-anomaly";
 import { REFUSAL_RE, refusalNote } from "../src/lib/margin-risk-tiers";
 import { LIVE_STOP_RATCHET_MIN_FRAC } from "../src/lib/margin-live-risk";
 
@@ -11,8 +11,11 @@ const book = (over: Partial<BookForCard> = {}): BookForCard => ({ txid: "OABC", 
 
 test("a book that matches its card — leverage rounds to the rung, notional within the chase, stop at the ledgered level — is clean", () => {
   assert.deepEqual(bookMatchesCard(book(), card), { ok: true, findings: [] });
-  assert.equal(bookMatchesCard(book({ notional: 20_000 * (1 + NOTIONAL_TOLERANCE) }), card).ok, true, "exactly ±10% passes");
-  assert.equal(bookMatchesCard(book({ notional: 20_000 * (1 - NOTIONAL_TOLERANCE) }), card).ok, true);
+  assert.equal(bookMatchesCard(book({ notional: 20_000 * (1 + NOTIONAL_TOLERANCE) }), card).ok, true, "exactly +10% passes");
+  // SMALLER is never a finding: Kraken reports the REMAINING volume, so a partial close by our own
+  // closeBook, a partial liquidation or a manual reduce shrinks it — and less size is never more risk.
+  assert.equal(bookMatchesCard(book({ notional: 17_000 }), card).ok, true, "15% short of the card = a partial close, not an anomaly");
+  assert.equal(bookMatchesCard(book({ notional: 1_000 }), card).ok, true);
 });
 
 test("leverage 20 vs authorised 9 is the canonical finding; size and side mismatches are named per tranche", () => {
@@ -21,8 +24,8 @@ test("leverage 20 vs authorised 9 is the canonical finding; size and side mismat
   assert.deepEqual(lev.findings, ["OABC: leverage 20 vs authorised 9"]);
   const size = bookMatchesCard(book({ notional: 30_000 }), card);
   assert.equal(size.ok, false);
-  assert.match(size.findings[0], /^OABC: notional \$30000 vs authorised \$20000 \(±10%\)$/);
-  assert.equal(bookMatchesCard(book({ notional: 17_000 }), card).ok, false, "a fill 15% short of the card is not the same trade");
+  assert.match(size.findings[0], /^OABC: notional \$30000 is LARGER than the authorised \$20000 \(\+10% allowed\)$/);
+  assert.equal(bookMatchesCard(book({ notional: 22_001 }), card).ok, false, "a hair over +10% is a finding");
   const side = bookMatchesCard(book({ side: "short", restingStop: null }), card);
   assert.deepEqual(side.findings, ["OABC: side short vs authorised long"]);
   // Several findings accumulate.
@@ -41,6 +44,13 @@ test("the resting stop may only ratchet in the trade's favour: wider than the le
   assert.equal(bookMatchesCard(book({ side: "short", restingStop: 4160, ledgeredStop: 4160 }), shortCard).ok, true);
   assert.equal(bookMatchesCard(book({ side: "short", restingStop: 4200, ledgeredStop: 4160 }), shortCard).ok, false);
   assert.equal(bookMatchesCard(book({ side: "short", restingStop: 4100, ledgeredStop: 4160 }), shortCard).ok, true);
+  // The breach-guard state and a guard cover hugging the market are NOT widened stops: the guardian
+  // (breach) and the executor's close path (0.3% re-cover of a remainder) both place them by design.
+  assert.equal(bookMatchesCard(book({ restingStop: 3800, breachGuard: true }), card).ok, true, "breach-guard state: the stop rule is skipped");
+  assert.equal(bookMatchesCard(book({ restingStop: 4050 * (1 - 0.003), px: 4050 }), card).ok, true, "a 0.3% guard cover below the market is exempt");
+  assert.equal(bookMatchesCard(book({ restingStop: 4050 * (1 - 0.003), ledgeredStop: 4045, px: 4050 }), card).ok, true, "even against a tighter ledgered level, a guard cover is exempt");
+  assert.equal(bookMatchesCard(book({ restingStop: 4050 * (1 - GUARD_COVER_FRAC * 1.5), ledgeredStop: 4045, px: 4050 }), card).ok, false, "past the guard band it is a widened stop again");
+  assert.equal(bookMatchesCard(book({ side: "short", restingStop: 4050 * (1 + 0.003), ledgeredStop: 3950, px: 4050 }), { ...card, side: "sell" }).ok, true, "short: a guard cover just above the market is exempt");
   // No resting stop / no ledgered level: the naked-position guard owns that, not this check.
   assert.equal(bookMatchesCard(book({ restingStop: null }), card).ok, true);
   assert.equal(bookMatchesCard(book({ ledgeredStop: null }), card).ok, true);
@@ -103,8 +113,12 @@ test("wiring, pinned on the source: the executor reads the key STRICTLY above th
   assert.ok(/if \(unledgered\.length\) \{[\s\S]*?continue;\s*\}/.test(orphanBlock), "a flagged stop is never cancelled (continue before the sweep)");
   assert.ok(/kraken_margin_adopt_txids=\$\{ids\}/.test(orphanBlock), "the page carries the adopt instruction");
   assert.ok(/bookMatchesCard\(/.test(guardian) && /flagAnomaly\(findings, `anomaly-book-\$\{bookKey\}`/.test(guardian), "the per-book card check pages and sets the anomaly");
+  assert.ok(/breachGuard: \(priorBreached\[stateKey\] \?\? 0\) > 0/.test(guardian), "the breach-guard state is passed through");
   // The executor-config route exposes the key and offers the clear action; nothing in the UI tree does.
   const cfgRoute = readFileSync(new URL("../src/app/api/margin/executor-config/route.ts", import.meta.url), "utf8");
   assert.ok(/ANOMALY_KEY,\s*\]/.test(cfgRoute) || /ANOMALY_KEY,\n/.test(cfgRoute), "the GET reads the key");
   assert.ok(/action \?\? ""\) !== "clear-anomaly"/.test(cfgRoute) && /"CLEAR"/.test(cfgRoute), "clear-anomaly needs the typed word");
+  assert.ok(/anomalyNote: "sticky by design/.test(cfgRoute), "the panel text says the flag is sticky and how to clear it");
+  const anomalySrc = readFileSync(new URL("../src/lib/margin-anomaly.ts", import.meta.url), "utf8");
+  assert.ok(/STICKY BY DESIGN/.test(anomalySrc));
 });
