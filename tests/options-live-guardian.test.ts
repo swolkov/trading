@@ -52,17 +52,21 @@ test("trail: no fixed target — armed at 1.5× entry, exits when half the best 
 
 test("ex-dividend exit: a call debit spread with its short call in the money closes when the ex-date is two days out, not three, and never out of the money", () => {
   const pos = { ...spread, exDivAt: "2026-09-16", shortStrike: 101 };                       // now = Sep 14 15:00Z → ex-date open is 1.9 days out
-  assert.equal(guardianExDivExit(pos, 101.5, now).exit, true);
-  assert.match(guardianExDivExit(pos, 101.5, now).reason, /ex-dividend exit: short call 101 is in the money \(spot 101.5\) with ex-dividend 2026-09-16/);
-  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-17" }, 101.5, now).exit, false);   // 2.9 days out
-  assert.equal(guardianExDivExit(pos, 100.5, now).exit, false);                                   // out of the money
-  assert.equal(guardianExDivExit(pos, null, now).exit, false);                                    // no quote → rule skipped, said so
+  const q = (last: number, ageMin = 1) => ({ last, atMs: now - ageMin * 60_000 });
+  assert.equal(guardianExDivExit(pos, q(101.5), now).exit, true);
+  assert.match(guardianExDivExit(pos, q(101.5), now).reason, /ex-dividend exit: short call 101 is in the money \(spot 101.5\) with ex-dividend 2026-09-16/);
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-17" }, q(101.5), now).exit, false);   // 2.9 days out
+  assert.equal(guardianExDivExit(pos, q(100.5), now).exit, false);                                   // out of the money
+  assert.equal(guardianExDivExit(pos, null, now).exit, false);                                       // no quote → rule skipped, said so
   assert.match(guardianExDivExit(pos, null, now).reason, /quote unavailable/);
-  assert.equal(guardianExDivExit({ ...pos, kind: "long_call" }, 101.5, now).exit, false);
-  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10" }, 101.5, now).exit, false);   // already past
+  assert.equal(guardianExDivExit(pos, q(101.5, 16), now).exit, false);                               // a 16-minute-old quote is no quote
+  assert.match(guardianExDivExit(pos, q(101.5, 16), now).reason, /quote is 16 min old — treated as unavailable/);
+  assert.equal(guardianExDivExit(pos, q(101.5, 15), now).exit, true);
+  assert.equal(guardianExDivExit({ ...pos, kind: "long_call" }, q(101.5), now).exit, false);
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10" }, q(101.5), now).exit, false);   // already past
   // A projected date is a ±7-day window: act from its earliest plausible day.
-  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-22", exDivSource: "projected" }, 101.5, now).exit, true);    // window opens Sep 15 → 0.9 days out
-  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-25", exDivSource: "projected" }, 101.5, now).exit, false);   // window opens Sep 18 → 3.9 days out
-  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10", exDivSource: "projected" }, 101.5, now).exit, true);    // window runs to Sep 17 — still live
-  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-05", exDivSource: "projected" }, 101.5, now).exit, false);   // window closed Sep 12
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-22", exDivSource: "projected" }, q(101.5), now).exit, true);    // window opens Sep 15 → 0.9 days out
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-25", exDivSource: "projected" }, q(101.5), now).exit, false);   // window opens Sep 18 → 3.9 days out
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-10", exDivSource: "projected" }, q(101.5), now).exit, true);    // window runs to Sep 17 — still live
+  assert.equal(guardianExDivExit({ ...pos, exDivAt: "2026-09-05", exDivSource: "projected" }, q(101.5), now).exit, false);   // window closed Sep 12
 });

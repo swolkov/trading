@@ -89,10 +89,14 @@ test("earnings results (real shape, Sep 15 2026): the earliest report.date on or
     { symbol: "SOFI", year: 2026, quarter: 4, eps: { estimate: null, actual: null }, report: { date: "2027-01-26", timing: null, verified: false } },
   ];
   assert.deepEqual(decodeEarningsResults(results(sofi), "SOFI", "2026-09-15"), { symbol: "SOFI", earningsAt: "2026-10-27", timing: "am", verified: false, via: "get_earnings_results" });
-  assert.equal(decodeEarningsResults(results(sofi), "SOFI", "2026-10-28").earningsAt, "2027-01-26");      // the one after it, timing null
+  const reported = [sofi[0], { ...sofi[1], eps: { estimate: "0.170000", actual: "0.180000" } }, sofi[2]];
+  assert.equal(decodeEarningsResults(results(reported), "SOFI", "2026-10-28").earningsAt, "2027-01-26");  // once Q3 is reported, the one after it (timing null)
+  assert.throws(() => decodeEarningsResults(results(sofi), "SOFI", "2026-10-28"), /SOFI: an unreported quarter dated 2026-10-27 is overdue/);   // asked the day after with no actual yet
   assert.throws(() => decodeEarningsResults(results([], { not_found: ["SOFI"] }), "SOFI", "2026-09-15"), /SOFI not found at the broker/);
   assert.throws(() => decodeEarningsResults(results([]), "SOFI", "2026-09-15"), /no earnings rows for SOFI/);
   assert.throws(() => decodeEarningsResults(results(sofi.slice(0, 1)), "SOFI", "2026-09-15"), /no upcoming report date for SOFI/);   // only past quarters → unscheduled → refuse
+  const overdue = [{ ...sofi[0], eps: { estimate: "0.150000", actual: null }, report: { date: "2026-09-10", timing: "am", verified: false } }, sofi[1]];
+  assert.throws(() => decodeEarningsResults(results(overdue), "SOFI", "2026-09-15"), /SOFI: an unreported quarter dated 2026-09-10 is overdue/);   // the date slipped and the broker has not caught up
   assert.throws(() => decodeEarningsResults(results(sofi), "AAL", "2026-09-15"), /row for SOFI answering a AAL request/);
   assert.throws(() => decodeEarningsResults(results([{ symbol: "SOFI", date: "2026-10-27" }]), "SOFI", "2026-09-15"), /without a report object/);
   assert.throws(() => decodeEarningsResults({ data: { stuff: 1 } }, "SOFI", "2026-09-15"), /unrecognized response shape/);

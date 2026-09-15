@@ -14,6 +14,8 @@ export const OPTIONS_MARKET_RULES = {
   shockPct: 1.5,            // intraday SPY move against the trade at the moment of entry
   indexEtfs: ["SPY", "QQQ", "IWM"],   // the veto is for single names; an ETF breakout IS the market
   staleDays: 4,
+  maxQuoteAgeMs: 15 * 60_000,   // an intraday quote older than this is "unavailable": stamped stale, never a veto
+  vixTimeoutMs: 8_000,          // the guard loop must never stall on Yahoo
 };
 export type Direction = "bullish" | "bearish";
 export interface IndexState { day: string | null; close: number | null; sma20: number | null; sma50: number | null; dayPct: number | null; regime: "above" | "below" | "unknown" }
@@ -46,19 +48,23 @@ export function marketState(bars: { SPY?: ResearchBar[]; QQQ?: ResearchBar[] }, 
   return { ...stamp, alignedFor: (direction) => marketVeto(stamp, direction, "", rules) };
 }
 /** Intraday shock at the moment of entry: SPY's move from its previous close, against the trade. No quote → no veto, said so. */
-export function intradayShock(quote: { last: number; previousClose: number } | null, direction: Direction, rules = OPTIONS_MARKET_RULES): { vetoed: boolean; movePct: number | null; reason: string } {
-  if (!quote || !(quote.last > 0) || !(quote.previousClose > 0)) return { vetoed: false, movePct: null, reason: "SPY quote unavailable — shock check skipped (stamped unknown)" };
+export function intradayShock(quote: { last: number; previousClose: number; atMs: number } | null, direction: Direction, now: number, rules = OPTIONS_MARKET_RULES): { vetoed: boolean; movePct: number | null; stale: boolean; reason: string } {
+  if (!quote || !(quote.last > 0) || !(quote.previousClose > 0)) return { vetoed: false, movePct: null, stale: false, reason: "SPY quote unavailable — shock check skipped (stamped unknown)" };
+  if (!(now - quote.atMs <= rules.maxQuoteAgeMs)) return { vetoed: false, movePct: null, stale: true, reason: `SPY quote is ${((now - quote.atMs) / 60_000).toFixed(0)} min old — shock check skipped (stamped stale)` };
   const movePct = round((quote.last / quote.previousClose - 1) * 100);
   const against = direction === "bullish" ? movePct <= -rules.shockPct : movePct >= rules.shockPct;
-  return { vetoed: against, movePct, reason: against ? `SPY ${movePct >= 0 ? "+" : ""}${movePct}% intraday against a ${direction} entry` : `SPY ${movePct >= 0 ? "+" : ""}${movePct}% intraday` };
+  return { vetoed: against, movePct, stale: false, reason: against ? `SPY ${movePct >= 0 ? "+" : ""}${movePct}% intraday against a ${direction} entry` : `SPY ${movePct >= 0 ? "+" : ""}${movePct}% intraday` };
 }
 export const directionOfKind = (kind: string): Direction => (kind === "long_call" || kind === "call_debit" || kind === "put_credit" ? "bullish" : "bearish");
 
 /** VIX close from Yahoo, stamped only. null on any failure. NEVER cross-asset.ts, which fabricates VIX=20 when the read fails. */
-export async function vixLevel(fetchBars?: (symbol: string, days: number) => Promise<{ c: number }[]>): Promise<number | null> {
+export async function vixLevel(fetchBars?: (symbol: string, days: number) => Promise<{ c: number }[]>, timeoutMs = OPTIONS_MARKET_RULES.vixTimeoutMs): Promise<number | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const bars = await (fetchBars ?? (await import("./yahoo")).getHistoricalBars)("^VIX", 10);
-    const last = bars.at(-1)?.c;
+    const read = (async () => { const fetch = fetchBars ?? (await import("./yahoo")).getHistoricalBars; return fetch("^VIX", 10); })();
+    const bars = await Promise.race([read, new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); })]);
+    const last = bars?.at(-1)?.c;
     return typeof last === "number" && Number.isFinite(last) && last > 0 ? round(last) : null;
   } catch { return null; }
+  finally { if (timer) clearTimeout(timer); }
 }

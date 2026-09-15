@@ -9,6 +9,8 @@
 export interface ResearchEvent {
   earningsAt: string | null;          // YYYY-MM-DD of the next report inside the calendar window; null = calendar read, none inside it
   earningsTiming: "am" | "pm" | null;
+  /** Last day (YYYY-MM-DD) the earnings calendar was proven to cover, contiguously from the capture day. An expiry past it is unknown. */
+  calendarThrough: string;
   /** YYYY-MM-DD of the next ex-dividend date. null = fundamentals read, no dividend. The key is ABSENT when fundamentals were not read or the next date cannot be placed. */
   exDivAt?: string | null;
   /** "scheduled" = the broker's own upcoming ex-date; "projected" = last ex-date + the distribution period, read as a ±7-day window. */
@@ -20,6 +22,7 @@ export type ResearchEvents = Record<string, ResearchEvent>;
 export const OPTIONS_EVENT_RULES = {
   indexEtfs: ["SPY", "QQQ", "IWM"],
   maxEventAgeHours: 36,
+  maxQuoteAgeMs: 15 * 60_000,   // an underlying quote older than this is "unavailable" to every rule that reads one
   exDivExitDays: 2,
   projectedWindowDays: 7,   // a projected ex-date is the last one plus the period — right to about a week either side
   periodDays: { Quarterly: 91, Monthly: 30, "Semi-Annual": 182, Annual: 365 } as Record<string, number>,
@@ -39,6 +42,7 @@ export function nextExDiv(fund: { ex_dividend_date?: unknown; distribution_frequ
   if (!period) return { known: false, exDivAt: null, source: null, amount };
   let next = shiftDay(last, period);
   for (let i = 0; i < 24 && next < today; i++) next = shiftDay(next, period);
+  if (next < today) return { known: false, exDivAt: null, source: null, amount };   // too stale to project honestly
   return { known: true, exDivAt: next, source: "projected", amount };
 }
 export type ExDivSource = "scheduled" | "projected";
@@ -54,6 +58,7 @@ export function spansEarnings(symbol: string, expiry: string, events: ResearchEv
   if (!row || !validDay(row.at)) return { permitted: false, earningsClass: "unknown", earningsAt: null, note: `earnings unknown — no calendar read for ${symbol}` };
   const ageH = (now - Date.parse(row.at)) / 3_600_000;
   if (!(ageH <= rules.maxEventAgeHours)) return { permitted: false, earningsClass: "unknown", earningsAt: row.earningsAt, note: `earnings data for ${symbol} is ${ageH.toFixed(0)}h old (limit ${rules.maxEventAgeHours}h)` };
+  if (!validDay(row.calendarThrough) || day(expiry) > day(row.calendarThrough)) return { permitted: false, earningsClass: "unknown", earningsAt: row.earningsAt, note: `earnings calendar for ${symbol} is proven only through ${validDay(row.calendarThrough) ? day(row.calendarThrough) : "nothing"}; expiry ${day(expiry)} is beyond it` };
   if (row.earningsAt != null && validDay(row.earningsAt) && day(row.earningsAt) <= day(expiry) && day(row.earningsAt) >= new Date(now).toISOString().slice(0, 10))
     return { permitted: false, earningsClass: "EARNINGS TRADE", earningsAt: day(row.earningsAt), note: `earnings ${day(row.earningsAt)}${row.earningsTiming ? ` (${row.earningsTiming})` : ""} falls before expiry ${day(expiry)}` };
   return { permitted: true, earningsClass: "none", earningsAt: row.earningsAt ? day(row.earningsAt) : null, note: row.earningsAt ? `next earnings ${day(row.earningsAt)} is after expiry ${day(expiry)}` : "no earnings before expiry" };
@@ -81,11 +86,13 @@ export function exDivRisk(kind: string, shortStrike: number | null, shortType: "
 }
 
 /** Guardian rule: close a call debit spread whose short call is in the money with the ex-dividend date two days out or less. */
-export function guardianExDivExit(pos: { kind: string; exDivAt?: string | null; exDivSource?: ExDivSource; shortStrike?: number | null }, spot: number | null, nowMs: number, rules = OPTIONS_EVENT_RULES): { exit: boolean; reason: string } {
+export function guardianExDivExit(pos: { kind: string; exDivAt?: string | null; exDivSource?: ExDivSource; shortStrike?: number | null }, quote: { last: number; atMs: number } | null, nowMs: number, rules = OPTIONS_EVENT_RULES): { exit: boolean; reason: string } {
   if (pos.kind !== "call_debit") return { exit: false, reason: "not a call debit spread" };
   if (pos.exDivAt == null || !validDay(pos.exDivAt)) return { exit: false, reason: "no ex-dividend date on the record" };
   if (pos.shortStrike == null || !Number.isFinite(pos.shortStrike)) return { exit: false, reason: "no short strike on the record" };
-  if (spot == null || !(spot > 0)) return { exit: false, reason: "underlying quote unavailable — ex-dividend rule skipped" };
+  if (quote == null || !(quote.last > 0)) return { exit: false, reason: "underlying quote unavailable — ex-dividend rule skipped" };
+  if (!(nowMs - quote.atMs <= rules.maxQuoteAgeMs)) return { exit: false, reason: `underlying quote is ${((nowMs - quote.atMs) / 60_000).toFixed(0)} min old — treated as unavailable, ex-dividend rule skipped` };
+  const spot = quote.last;
   // A projected date is a window: act from its earliest plausible day, and until its latest has passed.
   const projected = pos.exDivSource === "projected", w = projected ? rules.projectedWindowDays : 0;
   const label = projected ? `projected ex-dividend ${day(pos.exDivAt)} (±${w}d)` : `ex-dividend ${day(pos.exDivAt)}`;

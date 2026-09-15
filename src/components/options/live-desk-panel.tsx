@@ -16,8 +16,8 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 interface Intent { refId: string; action: string; state: string; orderId: string | null; updatedAt: string }
 interface Owned { id: string; kind: string; underlying: string; expiry: string; entryPrice: number; width: number }
 interface IndexView { day: string | null; close: number | null; sma20: number | null; dayPct: number | null; regime: "above" | "below" | "unknown" }
-interface MarketView { spy: IndexView; qqq: IndexView; vix: number | null; veto: "on" | "off"; spyIntradayPct: number | "unknown"; at: string }
-const pct = (x: number | null | "unknown" | undefined) => (typeof x === "number" ? `${x >= 0 ? "+" : ""}${x}%` : "unknown");
+interface MarketView { spy: IndexView; qqq: IndexView; vix: number | null; veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
+const pct = (x: number | null | "unknown" | "stale" | undefined) => (typeof x === "number" ? `${x >= 0 ? "+" : ""}${x}%` : x === "stale" ? "stale" : "unknown");
 const marketLine = (m: MarketView) => `SPY ${m.spy.regime} 20d ${pct(m.spy.dayPct)} · QQQ ${m.qqq.regime} 20d ${pct(m.qqq.dayPct)} · VIX ${m.vix ?? "unknown"} · SPY intraday ${pct(m.spyIntradayPct)} · veto ${m.veto}`;
 interface Data {
   armed: boolean; verified: boolean; maxLossUsd: number | null; feeReserveUsd: number | null;

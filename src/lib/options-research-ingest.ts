@@ -37,7 +37,8 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   const requestedQuotes=new Set<string>();
   const instruments=new Map<string,Record<string,unknown>>(),quotes=new Map<string,Record<string,unknown>>(),scans=new Map<string,NativeScan>();
   const earnings=new Map<string,{day:string;timing:"am"|"pm"|null}>(),dividends=new Map<string,{exDivAt:string|null;source:"scheduled"|"projected"|null;amount:number|null}>();
-  let calendarRead=false;
+  const covered:{from:string;through:string}[]=[];   // calendar pages that PROVE coverage: non-empty, unpaginated, with a known window
+  const shift=(d:string,days:number)=>new Date(Date.parse(`${d}T00:00:00Z`)+days*86400000).toISOString().slice(0,10);
   for(const line of jsonl.split("\n").filter(Boolean)){
     const event=obj(JSON.parse(line));
     for(const block of rows(obj(event.message).content)){
@@ -57,7 +58,14 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
       if(name==="get_earnings_calendar"||name==="get_earnings_results"){
         const entries=list(rawData,"results");
         if(!entries||!entries.every(row=>row.report!==undefined)){result.errors.push(`${name}: unrecognized shape`);continue;}
-        if(name==="get_earnings_calendar")calendarRead=true;   // only the market-wide calendar can vouch for "none"
+        // Only a market-wide calendar page can vouch for "none" — and only for the window it was asked for, only when it is
+        // non-empty (an empty page proves nothing) and not paginated (a cursor means the page is not the whole window).
+        if(name==="get_earnings_calendar"){
+          const start=dayOf(use.input.start_date)??capturedAt.slice(0,10),days=num(use.input.days);
+          const paged=data.next!=null||data.next_cursor!=null;
+          if(entries.length&&!paged&&Number.isSafeInteger(days)&&days>0)covered.push({from:start,through:shift(start,days-1)});
+          else result.errors.push(`get_earnings_calendar: page from ${start} proves no coverage (${!entries.length?"empty":paged?"paginated":"no day count"})`);
+        }
         for(const row of entries){
           const symbol=symbolOf(row),{day,timing}=earningsOf(row);
           if(!/^[A-Z.]{1,10}$/.test(symbol)||!day||day<capturedAt.slice(0,10))continue;
@@ -116,11 +124,18 @@ export function parseRobinhoodResearchEvents(jsonl:string,capturedAt=new Date().
   for(const symbol of Object.keys(result.bars))if(!result.contracts.some(c=>c.symbol===symbol))result.errors.push(`${symbol}: no matched option quotes in this collection`);
   // One event row per researched symbol, only once the calendar itself was read: "no earnings" is a statement the
   // broker made, never one this parser infers from silence. The ex-dividend key is present only when fundamentals came back.
-  if(calendarRead){
+  // Coverage = the contiguous run of proven windows starting on the capture day. A gap ends it; a run that starts later proves nothing.
+  let calendarThrough="";
+  for(const w of [...covered].sort((a,b)=>a.from.localeCompare(b.from))){
+    if(!calendarThrough){if(w.from<=capturedAt.slice(0,10))calendarThrough=w.through;else break;}
+    else if(w.from<=shift(calendarThrough,1))calendarThrough=w.through>calendarThrough?w.through:calendarThrough;
+    else break;
+  }
+  if(calendarThrough){
     const events:ResearchEvents={};
     for(const symbol of new Set([...Object.keys(result.bars),...result.contracts.map(c=>c.symbol)])){
       const e=earnings.get(symbol),d=dividends.get(symbol);
-      const row:ResearchEvent={earningsAt:e?.day??null,earningsTiming:e?.timing??null,at:capturedAt};
+      const row:ResearchEvent={earningsAt:e?.day??null,earningsTiming:e?.timing??null,calendarThrough,at:capturedAt};
       if(d){row.exDivAt=d.exDivAt;if(d.source)row.exDivSource=d.source;row.dividendAmount=d.amount;}
       events[symbol]=row;
     }

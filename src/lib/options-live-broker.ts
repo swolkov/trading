@@ -203,6 +203,7 @@ export function decodeEarningsResults(payload: Record<string, unknown>, symbol: 
     if (str(row.symbol) !== symbol) throw new Error(`${via}: row for ${str(row.symbol) ?? "?"} answering a ${symbol} request`);
     const day = dayOf(row.report.date);
     if (!day) throw new Error(`${via}: a ${symbol} row carries no readable report.date (${Object.keys(row.report).join(",")})`);
+    if (day < fromDay && (!record(row.eps) || row.eps.actual == null)) throw new Error(`${symbol}: an unreported quarter dated ${day} is overdue`);   // the date moved and the broker has not caught up
     if (day >= fromDay) upcoming.push({ day, timing: timingOf(row.report.timing), verified: row.report.verified === true });
   }
   const next = upcoming.sort((a, b) => a.day.localeCompare(b.day))[0];

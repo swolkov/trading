@@ -141,9 +141,10 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
           // its executable mark. The underlying quote is fail-soft — no quote, rule skipped and said so.
           if (!decision.exit && pos.kind === "call_debit" && pos.exDivAt) {
             const q = await broker.underlyingQuote(pos.underlying);
-            const ex = guardianExDivExit(pos, q?.last ?? null, Date.now());
+            const ex = guardianExDivExit(pos, q, Date.now());
             log(`${pos.underlying} ${pos.kind}: ${ex.reason}`);
             if (ex.exit && decision.markNet != null && decision.markNet > 0) { decision.exit = true; decision.reason = ex.reason; decision.limitPrice = Math.min(decision.markNet, pos.width > 0 ? pos.width : decision.markNet); }
+            else if (ex.exit) log(`${pos.underlying} ${pos.kind}: ex-dividend exit wanted but no bid — will retry next tick`);
           }
           if (!decision.exit || decision.limitPrice == null) continue;
           const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity: pos.legs[0].quantity, limitPrice: decision.limitPrice,
@@ -213,7 +214,7 @@ async function research(): Promise<OptionsResearch | null> {
   try { const r = JSON.parse((await cfg(OPTIONS_RESEARCH_KEY)) ?? "null"); return isOptionsResearch(r) ? r : null; } catch { return null; }
 }
 /** What the desk saw of the market on this tick — stamped into options_live_state.market beside the candidate note. */
-interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: number | "unknown"; at: string }
+interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
 /** Top debit candidate from the research screen, re-priced on quotes fetched THIS second. */
 async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePolicy, buyingPower: number): Promise<{ intent: OptionsLiveIntent | null; note: string; maxLossUsd: number; underlying: string; expiry: string; market?: MarketView }> {
   const data = await research();
@@ -225,8 +226,8 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
   const vix = await vixLevel();
   const stamp = marketState({ SPY: data.bars.SPY, QQQ: data.bars.QQQ }, vix, Date.now());
   const spyQuote = vetoOn ? await broker.underlyingQuote("SPY") : null;
-  const shockNow = intradayShock(spyQuote, "bullish");
-  const market: MarketView = { spy: stamp.spy, qqq: stamp.qqq, vix: stamp.vix, veto: vetoOn ? "on" : "off", spyIntradayPct: shockNow.movePct ?? "unknown", at: new Date().toISOString() };
+  const shockNow = intradayShock(spyQuote, "bullish", Date.now());
+  const market: MarketView = { spy: stamp.spy, qqq: stamp.qqq, vix: stamp.vix, veto: vetoOn ? "on" : "off", spyIntradayPct: shockNow.movePct ?? (shockNow.stale ? "stale" : "unknown"), at: new Date().toISOString() };
   log(`market: SPY ${stamp.spy.regime} 20d${stamp.spy.dayPct != null ? ` ${stamp.spy.dayPct >= 0 ? "+" : ""}${stamp.spy.dayPct}% on ${stamp.spy.day}` : ""} · QQQ ${stamp.qqq.regime} 20d${stamp.qqq.dayPct != null ? ` ${stamp.qqq.dayPct >= 0 ? "+" : ""}${stamp.qqq.dayPct}%` : ""} · VIX ${stamp.vix ?? "unknown"} · SPY intraday ${market.spyIntradayPct === "unknown" ? "unknown" : `${market.spyIntradayPct >= 0 ? "+" : ""}${market.spyIntradayPct}%`} · veto ${market.veto}`);
   const candidates = screenResearchContracts(data, cap, buyingPower, Date.now(), { vix }).filter((c) => OPTIONS_LIVE_RULES.entryKinds.includes(c.kind as StructureKind));
   if (!candidates.length) return { intent: null, note: noCandidateNote(data, cap), maxLossUsd: 0, underlying: "", expiry: "", market };
@@ -239,7 +240,7 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
       const direction = directionOfKind(c.kind);
       const veto = marketVeto(stamp, direction, c.symbol);
       if (veto.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market veto — ${veto.reason}`); continue; }
-      const shock = intradayShock(spyQuote, direction);
+      const shock = intradayShock(spyQuote, direction, Date.now());
       if (shock.vetoed) { refusals.push(`${c.symbol} ${c.kind}: market shock veto — ${shock.reason}`); continue; }
     }
     const legs = c.legs.map((id, i) => ({ optionId: id, side: i === 0 ? "buy" as const : "sell" as const }));

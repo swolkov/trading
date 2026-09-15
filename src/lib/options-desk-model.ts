@@ -193,7 +193,7 @@ export function isResearchEvents(value:unknown):value is ResearchEvents{
   return Object.values(value as Record<string,unknown>).every(e=>{
     if(!e||typeof e!=="object")return false;
     const r=e as Record<string,unknown>;
-    return dayOrNull(r.earningsAt)&&(r.earningsTiming===null||r.earningsTiming==="am"||r.earningsTiming==="pm")
+    return dayOrNull(r.earningsAt)&&(r.earningsTiming===null||r.earningsTiming==="am"||r.earningsTiming==="pm")&&typeof r.calendarThrough==="string"&&dayOrNull(r.calendarThrough)
       &&(r.exDivAt===undefined||dayOrNull(r.exDivAt))&&(r.exDivSource===undefined||r.exDivSource==="scheduled"||r.exDivSource==="projected")&&(r.dividendAmount===undefined||r.dividendAmount===null||typeof r.dividendAmount==="number"&&Number.isFinite(r.dividendAmount))
       &&typeof r.at==="string"&&Number.isFinite(Date.parse(r.at));
   });

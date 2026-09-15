@@ -36,29 +36,36 @@ test("the pre-registered veto: SPY below its 20-day AND −1.5% or worse refuses
   assert.equal(down2.vix, 17.4); assert.equal(marketState({}, Number.NaN, now).vix, null); assert.equal(down2.qqq.regime, "below");
 });
 
-test("intraday shock: a 1.5% SPY move against the trade refuses; smaller passes; no quote stamps unknown and never vetoes", () => {
-  assert.equal(intradayShock({ last: 98.4, previousClose: 100 }, "bullish").vetoed, true);
-  assert.match(intradayShock({ last: 98.4, previousClose: 100 }, "bullish").reason, /SPY -1.6% intraday against a bullish entry/);
-  assert.equal(intradayShock({ last: 98.4, previousClose: 100 }, "bearish").vetoed, false);
-  assert.equal(intradayShock({ last: 98.6, previousClose: 100 }, "bullish").vetoed, false);
-  assert.equal(intradayShock({ last: 101.5, previousClose: 100 }, "bearish").vetoed, true);
-  const none = intradayShock(null, "bullish");
-  assert.deepEqual([none.vetoed, none.movePct], [false, null]); assert.match(none.reason, /quote unavailable/);
-  assert.equal(intradayShock({ last: 0, previousClose: 100 }, "bullish").vetoed, false);
+test("intraday shock: a 1.5% SPY move against the trade refuses; smaller passes; no quote or a stale one stamps unknown/stale and never vetoes", () => {
+  const q = (last: number, ageMin = 1) => ({ last, previousClose: 100, atMs: now - ageMin * 60_000 });
+  assert.equal(intradayShock(q(98.4), "bullish", now).vetoed, true);
+  assert.match(intradayShock(q(98.4), "bullish", now).reason, /SPY -1.6% intraday against a bullish entry/);
+  assert.equal(intradayShock(q(98.4), "bearish", now).vetoed, false);
+  assert.equal(intradayShock(q(98.6), "bullish", now).vetoed, false);
+  assert.equal(intradayShock(q(101.5), "bearish", now).vetoed, true);
+  const none = intradayShock(null, "bullish", now);
+  assert.deepEqual([none.vetoed, none.movePct, none.stale], [false, null, false]); assert.match(none.reason, /quote unavailable/);
+  const stale = intradayShock(q(98.4, 16), "bullish", now);                        // a 1.6% shock on a 16-minute-old quote is no shock
+  assert.deepEqual([stale.vetoed, stale.movePct, stale.stale], [false, null, true]); assert.match(stale.reason, /quote is 16 min old — shock check skipped \(stamped stale\)/);
+  assert.equal(intradayShock(q(98.4, 15), "bullish", now).vetoed, true);
+  assert.equal(intradayShock(q(0), "bullish", now).vetoed, false);
 });
 
-test("VIX: the last Yahoo close, or null on an empty read or a throw — never a made-up 20", async () => {
+test("VIX: the last Yahoo close, or null on an empty read, a throw or a hung read — never a made-up 20, never a stalled guard loop", async () => {
   assert.equal(await vixLevel(async () => [{ c: 15.1 }, { c: 18.27 }]), 18.27);
   assert.equal(await vixLevel(async () => []), null);
   assert.equal(await vixLevel(async () => { throw new Error("offline"); }), null);
   assert.equal(await vixLevel(async () => [{ c: 0 }]), null);
+  const started = Date.now();
+  assert.equal(await vixLevel(() => new Promise(() => {}), 25), null);   // never resolves → the timeout answers null
+  assert.ok(Date.now() - started < 1000);
 });
 
 test("the screen stamps every candidate with the market state and its alignment, and stamps unknown when SPY bars are absent", () => {
   const bars = Array.from({ length: 201 }, (_, i) => ({ day: new Date(now - (201 - i) * 86400000).toISOString().slice(0, 10), open: 100, high: i === 200 ? 106 : 101, low: 99, close: i === 200 ? 105 : 100, volume: 1000000 }));
   const c: ResearchContract = { id: "a", symbol: "TEST", type: "call", strike: 105, expiry: "2026-10-16", multiplier: 100, bid: 0.85, ask: 0.9, bidSize: 10, askSize: 10, at: new Date(now).toISOString(), delta: 0.5, iv: 0.25, theta: -0.01, volume: 500, openInterest: 1000, selloutAt: null };
   const r: OptionsResearch = { source: "Robinhood MCP", capturedAt: new Date(now).toISOString(), bars: { TEST: bars, SPY: spy(98), QQQ: spy(101) }, contracts: [c], scans: [], errors: [],
-    events: { TEST: { earningsAt: null, earningsTiming: null, exDivAt: null, dividendAmount: null, at: new Date(now).toISOString() } } };
+    events: { TEST: { earningsAt: null, earningsTiming: null, calendarThrough: "2026-11-11", exDivAt: null, dividendAmount: null, at: new Date(now).toISOString() } } };
   const [cand] = screenResearchContracts(r, 100, 500, now, { vix: 19 });
   assert.equal(cand.market.spy.regime, "below"); assert.equal(cand.market.spy.dayPct, -2); assert.equal(cand.market.qqq.regime, "above"); assert.equal(cand.market.vix, 19); assert.equal(cand.market.aligned, false);
   delete r.bars.SPY;
