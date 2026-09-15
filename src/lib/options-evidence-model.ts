@@ -4,6 +4,7 @@ import {
 } from "./options-desk-model";
 import type { AccountSnapshot, LiveSnapshot } from "./options-quote-store";
 import { OPTIONS_ACCOUNT_NUMBER } from "./options-snapshot-validation";
+import { scoreResearchCandidates, type ScoredCandidate } from "./options-score-ledger";
 
 export const OPTIONS_OBSERVATION_PREFIX = "options_observation_v1:";
 export const OPTIONS_RESEARCH_VERSION = "daily-range-20-sma-50-200-v1";
@@ -17,6 +18,8 @@ export interface OptionsObservation {
   schema: 1; ruleVersion: string; capturedAt: string; screenedAt: string;
   lossCeiling: number | null; buyingPower: number | null; accountAt: string | null;
   ruleSettings: typeof OPTIONS_DESK_RULES; symbols: SymbolEvidence[]; quotes: ResearchContract[]; errors: string[];
+  /** D7 (Sep 15 2026): every structure the run scored — breakouts and Trend-watch names — for the settlement ledger. Absent on older records. */
+  candidates?: ScoredCandidate[];
 }
 const cents = (n: number) => Math.round(n * 100) / 100;
 const positive = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
@@ -26,11 +29,13 @@ export function validEvidenceAccount(account: AccountSnapshot | null): account i
 }
 export function buildOptionsObservation(
   data: OptionsResearch, lossCeiling: number | null, account: AccountSnapshot | null, now = Date.now(),
+  opts: { ivRanks?: Record<string, number | null> } = {},
 ): OptionsObservation {
   const signals = researchSignals(data.bars, now);
   const buyingPower = validEvidenceAccount(account) ? account.buyingPower : null;
   const cap = positive(lossCeiling) ? lossCeiling : null;
   const candidates = cap && buyingPower != null ? screenResearchContracts(data, cap, buyingPower, now) : [];
+  const scored = cap && buyingPower != null ? scoreResearchCandidates(data, cap, buyingPower, now, opts.ivRanks ?? {}).rows : [];
   const symbols = [...new Set([...Object.keys(data.bars), ...data.contracts.map(c => c.symbol)])].sort();
   return {
     ruleSettings: { ...OPTIONS_DESK_RULES }, schema: 1, ruleVersion: OPTIONS_RESEARCH_VERSION, capturedAt: data.capturedAt,
@@ -64,7 +69,16 @@ export function buildOptionsObservation(
     }),
     // Preserve observed bid/ask and source timestamps. Never infer option fills or returns.
     quotes: structuredClone(data.contracts), errors: [...data.errors],
+    ...(scored.length ? { candidates: scored } : {}),
   };
+}
+/** Tolerant read of the D7 ledger rows: a malformed row is dropped, never the whole record. */
+export function validScoredCandidates(value: unknown): ScoredCandidate[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ok = value.filter((c): c is ScoredCandidate => !!c && typeof c === "object" && typeof c.key === "string" && typeof c.symbol === "string" && typeof c.kind === "string"
+    && typeof c.expiry === "string" && Array.isArray(c.strikes) && c.strikes.every(Number.isFinite) && typeof c.signalDay === "string"
+    && Number.isFinite(c.debit) && Number.isFinite(c.feeReserve) && Number.isFinite(c.score) && (c.refusedBy === null || typeof c.refusedBy === "string"));
+  return ok;
 }
 export function optionsRiskView(account: AccountSnapshot | null, ceiling: number | null, now = Date.now()) {
   const valid = validEvidenceAccount(account);
@@ -103,7 +117,8 @@ export function parseOptionsObservation(value: string): OptionsObservation | nul
       && (s.minimumPremium === null || positive(s.minimumPremium)) && Array.isArray(s.exclusions)
       && s.exclusions.every(e => typeof e.reason === "string" && Number.isSafeInteger(e.contracts) && e.contracts >= 0))) return null;
     if (!isOptionsResearch({ source: "Robinhood MCP", capturedAt: o.capturedAt, bars: {}, contracts: o.quotes, scans: [], errors: o.errors })) return null;
-    return o;
+    const candidates = validScoredCandidates(o.candidates);
+    return candidates ? { ...o, candidates } : { ...o, candidates: undefined };
   } catch { return null; }
 }
 

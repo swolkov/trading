@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { RobinhoodReadClient, withCredentialLock } from "./client";
 import { prisma } from "../../src/lib/db";
 import { collectRobinhoodAccount, inspectRobinhoodCapabilities, OPTIONS_DIRECT_STATUS_KEY } from "../../src/lib/options-direct-collector";
+import { refreshOptionsBrief } from "../../src/lib/options-brief-store";
 
 /** One account snapshot: read the broker, validate, save all three keys atomically. Throws on any failure. */
 export async function collectAndSave() {
@@ -21,6 +22,8 @@ export async function collectAndSave() {
     ]);
     console.log(JSON.stringify({at: status.at, account: "••••8705", accountValue: snapshot.account.totalValue, buyingPower: snapshot.account.buyingPower,
       optionLevel: snapshot.account.optionLevel, positions: snapshot.live.positions.length, orders: snapshot.live.orders.length, capabilities, canPlaceOrders: false}));
+    // D8: re-render the desk brief with the fresh account snapshot (after the collect has committed; a failure here never fails the collect).
+    await refreshOptionsBrief("collect").then((b) => console.log(`brief: ${b.action.action}${b.bestSymbol ? ` · ${b.bestSymbol}` : ""}`)).catch((e) => console.error(`brief not rendered: ${String(e).slice(0, 160)}`));
   });
 }
 export async function recordCollectionFailure() {

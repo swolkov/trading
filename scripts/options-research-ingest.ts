@@ -7,7 +7,12 @@ import { OPTIONS_RESEARCH_KEY, isOptionsResearch, type OptionsResearch } from ".
 import { readAccountSnapshot } from "../src/lib/options-quote-store";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../src/lib/options-operation";
 import { buildOptionsObservation } from "../src/lib/options-evidence-model";
-import { saveOptionsObservation } from "../src/lib/options-evidence-store";
+import { readOptionsIvHistory, saveOptionsObservation } from "../src/lib/options-evidence-store";
+import { liveEnterableKinds, screenResearchContracts } from "../src/lib/options-desk-model";
+import { researchTradeCards } from "../src/lib/options-trade-card";
+import { saveOptionsTradeCards } from "../src/lib/options-trade-card-store";
+import { ivRanksFor, scoreResearchCandidates } from "../src/lib/options-score-ledger";
+import { refreshOptionsBrief } from "../src/lib/options-brief-store";
 async function main(){
   const file=process.argv[2];if(!file)throw Error("Supply a captured broker stream JSONL file");
   const rawCapture=readFileSync(file,"utf8");
@@ -34,9 +39,20 @@ async function main(){
   try { const parsed=previous?JSON.parse(previous.value):null; if(isOptionsResearch(parsed))prior=parsed; } catch {}
   const merged=mergeResearchSnapshot(prior,next);
   if(!isOptionsResearch(merged))throw Error("Invalid combined broker research");
-  const [account,risk]=await Promise.all([readAccountSnapshot(),prisma.agentConfig.findUnique({where:{key:OPTIONS_MAX_LOSS_KEY}})]);
-  await saveOptionsObservation(buildOptionsObservation(next,parseOptionsMaxLoss(risk?.value),account),rawCapture);
+  const [account,risk,ivHistory]=await Promise.all([readAccountSnapshot(),prisma.agentConfig.findUnique({where:{key:OPTIONS_MAX_LOSS_KEY}}),readOptionsIvHistory().catch(()=>[])]);
+  // D7: the run's structures are scored (IV-rank from the archive once it holds 30 days) and archived with the observation for the settlement ledger.
+  await saveOptionsObservation(buildOptionsObservation(next,parseOptionsMaxLoss(risk?.value),account,Date.now(),{ivRanks:ivRanksFor(next,ivHistory)}),rawCapture);
   await prisma.agentConfig.upsert({where:{key:OPTIONS_RESEARCH_KEY},create:{key:OPTIONS_RESEARCH_KEY,value:JSON.stringify(merged)},update:{value:JSON.stringify(merged)}});
-  console.log(JSON.stringify({stored:true,slice:process.env.RESEARCH_SLICE??null,runSymbols:Object.keys(next.bars),runContracts:next.contracts.length,unmatchedQuotes:unmatchedQuoteCount(next.errors),symbols:Object.keys(merged.bars),contracts:merged.contracts.length,scans:merged.scans.length,events:Object.keys(merged.events??{}).length,errors:merged.errors}));
+  // Trade cards (D5): the top five research structures per run, from the merged snapshot the live desk screens, at the armed ceiling.
+  // Research only, no Slack; a failed write is logged and the run still counts.
+  const cap=parseOptionsMaxLoss(risk?.value);
+  let cards=0;
+  if(cap&&account){
+    const scores=new Map([...scoreResearchCandidates(merged,cap,account.buyingPower,Date.now(),ivRanksFor(merged,ivHistory)).scores].map(([k,s])=>[k,s.score]));
+    cards=await saveOptionsTradeCards(researchTradeCards(liveEnterableKinds(screenResearchContracts(merged,cap,account.buyingPower)),merged.contracts,{equity:account.totalValue,scores})).catch(e=>{console.error(`trade cards not written: ${String(e).slice(0,160)}`);return 0;});
+  }
+  // Desk brief (D8): rendered from the merged snapshot and the last account snapshot; Slack only when the action or best name changed.
+  const brief=await refreshOptionsBrief("ingest").then(b=>b.action.action).catch(e=>{console.error(`brief not rendered: ${String(e).slice(0,160)}`);return null;});
+  console.log(JSON.stringify({stored:true,brief,slice:process.env.RESEARCH_SLICE??null,runSymbols:Object.keys(next.bars),runContracts:next.contracts.length,unmatchedQuotes:unmatchedQuoteCount(next.errors),symbols:Object.keys(merged.bars),contracts:merged.contracts.length,scans:merged.scans.length,events:Object.keys(merged.events??{}).length,cards,errors:merged.errors}));
 }
 main().finally(()=>prisma.$disconnect()).catch(e=>{console.error(e.message);process.exitCode=1});
