@@ -104,10 +104,11 @@ test("gatherIntel + stampSql: every scanned coin gets an MTF stamp; every stampe
   assert.equal(intel.mtf.ETH.text, "F/F/F");
   assert.equal(intel.mtf.BTC.text, "F/U/F");
   const s = stampSql(intel, "BTC");
-  assert.deepEqual(s, { columns: ["mtf_state", "intel_version"], values: ["F/U/F", INTEL_VERSION] });
+  // regime_label (B6) rides on every universe coin's row — "unknown" without a 1d series.
+  assert.deepEqual(s, { columns: ["mtf_state", "intel_version", "regime_label"], values: ["F/U/F", INTEL_VERSION, "unknown"] });
   assert.deepEqual(stampSql(intel, "NOPE"), { columns: ["mtf_state", "intel_version"], values: [null, INTEL_VERSION] });
   const withEvent = stampSql(gatherIntel({ features }, { mode: "reduced" }), "BTC");
-  assert.deepEqual(withEvent.columns, ["mtf_state", "intel_version", "event_mode"]);
+  assert.deepEqual(withEvent.columns, ["mtf_state", "intel_version", "event_mode", "regime_label"]);
   assert.equal(withEvent.values[2], "reduced");
   for (const c of [...s.columns, ...withEvent.columns]) assert.ok(created.has(c), `${c} is created by ensureShadowColumns`);
 });

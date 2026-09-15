@@ -7,6 +7,7 @@ import { Chip, verdictTone } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Explainer, Label, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { GoLivePanel, type CapacityView, type LeaderboardRowView, type MetricsView, type StrategyStat } from "@/components/margin/go-live-panel";
+import { OpportunityPanel, type OpportunityView } from "@/components/margin/opportunity-panel";
 import { money, pct, pnl2, tone } from "@/lib/format";
 
 // ============ LIVE DESK ============
@@ -63,7 +64,7 @@ const rollingTone = (state: LeaderboardRowView["rolling"]["state"]): "grey" | "g
   state === "DECAYING" ? "red" : state === "cooling" ? "amber" : state === "stable" ? "green" : "grey";
 
 export default function PaperTradesPage() {
-  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; leaderboard?: LeaderboardRowView[]; decay?: DecayView; degraded?: string[] }>(
+  const { data: score } = useSWR<{ shadow: ShadowScore | null; strategies: StrategyStat[]; edges: EdgeBreakdowns; candidate?: CandidateDetail | null; capacity?: CapacityView | null; leaderboard?: LeaderboardRowView[]; decay?: DecayView; opportunity?: OpportunityView | null; degraded?: string[] }>(
     "/api/margin/scoreboard", fetcher, { refreshInterval: 60_000 },
   );
   const board = new Map((score?.leaderboard ?? []).map((r) => [r.key, r]));
@@ -179,6 +180,7 @@ export default function PaperTradesPage() {
                 <Note className="mt-2">Auto paper now opens the quality long cut only (high, 5m/15m, not stretched). This table still includes historical shorts, stretched names, and retired sleeves — that drag is why pooled high is not the live candidate.</Note>
               </div>
             )}
+            {score?.opportunity && <OpportunityPanel opp={score.opportunity} />}
             <Note>
               The ×5-size and twin experiments (selective-x5 and the six twins: selective-tight, -launch, -btc, -majors, swing-wide, swing-lock) are left out of these totals — they are the same trades again at a different size or exit, so counting them would count one signal several times; each has its own row in the scoreboard below. Estimate — each trade followed to a stop/target/48h outcome, net of fees: trade fee (0.25% taker in + 0.25% taker out — live enters at market, and the first real fills paid 0.215–0.223%/side); 4h rollover (BTC 0.015% verified, ETH ~0.02%, alts ~0.03%) on notional. Kraken&apos;s live rollover fluctuates — real fills are exact, these are conservative estimates. Spot swings pay no rollover.
             </Note>

@@ -24,6 +24,7 @@ import { pairBase } from "@/lib/kraken-pairs";
 import { botOwnership } from "@/lib/margin-executor";
 import { EXPECTED_SLIP_PCT } from "@/lib/margin-trade-card";
 import { loadClosedRoundTripTxids, loadRoundTripJournal, upsertRoundTripClose } from "@/lib/margin-round-trips";
+import { refreshCryptoRegime } from "@/lib/margin-crypto-regime";
 
 export const SYNTH_LAST_RUN = "margin_synthesis_last_run";
 export const SYNTH_JOURNALED = "margin_synthesis_journaled";
@@ -554,6 +555,8 @@ export async function runMarginSynthesis(force = false): Promise<SynthesisRun> {
 
   await maybeGraduateStage3().catch(() => null);
   await maybeDemote().catch(() => null);
+  // Brain/crypto-regime.md — refreshed daily here as well as by the desk brief (soft).
+  await refreshCryptoRegime().catch(() => null);
   await cfgSet(SYNTH_LAST_RUN, at);
   const armedLine = auto === "true" && validate === "false" ? "ARMED" : "disarmed";
   const best = [...strategies].filter((s) => s.resolved > 0).sort((a, b) => (b.tStat ?? -9) - (a.tStat ?? -9))[0];
