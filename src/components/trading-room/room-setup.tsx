@@ -70,8 +70,8 @@ export function SetupPanel({ webhookUrl }: { webhookUrl: string }) {
         <ol className="list-decimal space-y-1 pl-5">
           <li>Open MES1!, MNQ1! and MGC1! on the <strong>5-minute</strong> chart.</li>
           <li><button onClick={copyPine} className="rounded-md border border-border px-2 py-0.5 text-xs font-semibold hover:bg-accent">Copy the Pine script</button> → Pine Editor → paste → <em>Add to chart</em>. {copied && <span className="text-muted-foreground">{copied}</span>}</li>
-          <li>Study settings: paste the <strong>webhook secret</strong> (same one the futures desk uses); RTH session <code>0930-1600</code> for MES/MNQ, <code>0820-1330</code> for MGC.</li>
-          <li>Create <strong>one alert per chart</strong>: condition <em>Trading Room — levels → Any alert() function call</em>, expiration open-ended, notifications → Webhook URL <code>{webhookUrl}</code>, message left empty.</li>
+          <li>Nothing to configure: the room&apos;s own webhook secret is built into the study, and the session picks itself by symbol (gold 08:20–13:30, indices 09:30–16:00).</li>
+          <li>Create <strong>one alert per symbol</strong>: condition <em>Trading Room — levels → Any alert() function call</em>, expiration open-ended, notifications → Webhook URL <code>{webhookUrl}</code>, message left empty.</li>
         </ol>
         <Explainer title="What the study draws and posts">
           Prior exchange-day high/low/close (orange), overnight high/low (aqua, frozen at the RTH open), the running week&apos;s high/low (purple), the 15-minute opening range (yellow, once formed), session VWAP (white). At each 5-minute close inside RTH it posts a level break to this room — at most one per kind every 30 minutes. The admin card uses the same definitions, built from Yahoo bars (about 10 minutes delayed), so the chart is the real-time source and this page is the reference copy.
