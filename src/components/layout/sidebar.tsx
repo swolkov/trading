@@ -7,6 +7,7 @@ import { useState } from "react";
 import {
   LayoutDashboard,
   ClipboardList,
+  Crosshair,
   Activity,
   Wallet,
   Menu,
@@ -36,6 +37,16 @@ const sections = [
     label: "Orders · every platform",
     links: [
       { href: "/orders", label: "Orders", icon: ClipboardList },
+    ],
+  },
+  {
+    // Spencer's own futures trading on the LIVE Tradovate account, by hand. The room is his analyst:
+    // the level set his chart draws, the size his rule allows, the news clock, the tape of level
+    // breaks. Read-only by construction — it has no order path (Sep 19 2026).
+    label: "Tradovate · futures · live, by hand",
+    tone: "live" as const,
+    links: [
+      { href: "/trade", label: "Trading Room", icon: Crosshair },
     ],
   },
   {
@@ -91,7 +102,7 @@ export function Sidebar() {
           <div key={section.label} className="mb-4">
             <p className={cn(
               "px-4 pb-1 text-[11px] font-medium uppercase tracking-wide",
-              "tone" in section && section.tone === "paper" ? "text-paper/80" : "text-muted-foreground/70",
+              "tone" in section && section.tone === "live" ? "text-down/80" : "tone" in section && section.tone === "paper" ? "text-paper/80" : "text-muted-foreground/70",
             )}>
               {section.label}
             </p>
