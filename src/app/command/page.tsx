@@ -4,18 +4,11 @@ import useSWR from "swr";
 import { Chip, type ChipTone } from "@/components/ui/chip";
 import { Note, PageHeader, Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import type { FuturesHealth } from "@/lib/futures-health";
-import { ago, minutesSince } from "@/lib/format";
+import { ago } from "@/lib/format";
 
 interface CommandData {
   futures: FuturesHealth;
-  heartbeats: {
-    marginScan: string | null;
-    marginWatch: string | null;
-    tradeSync: string | null;
-    tradingViewAlert: string | null;
-  };
-  config: { marginAuto: boolean; marginValidateOnly: boolean; shadowAutotrack: boolean; drawdownDisarmed: boolean };
-  execLock: { held: boolean; since: string | null };
+  heartbeats: { tradingViewAlert: string | null };
   paper: {
     optionsScan: string | null;
     stockScan: string | null;
@@ -68,7 +61,7 @@ export default function SystemHealthPage() {
   if (data.error) {
     return (
       <div className="space-y-5">
-        <PageHeader title="System Health" sub="Kraken machinery heartbeats — refreshes every 30s" />
+        <PageHeader title="System Health" sub="Desk heartbeats — refreshes every 30s" />
         <Panel tone="red"><PanelBody>
           <p className="text-[13px] font-semibold text-down">Health check failed to read state</p>
           <p className="mt-1 break-words text-xs text-down/80">{data.error}</p>
@@ -78,63 +71,21 @@ export default function SystemHealthPage() {
   }
 
   const hb = data.heartbeats;
-  // Thresholds follow each job's real cadence: scan/watch */5 → amber 20m/red 60m.
-  const rows = [
-    { label: "Margin scanner", sub: "runs every 5 min", at: hb.marginScan, tone: ageTone(hb.marginScan, 20, 60) },
-    { label: "Margin guardian", sub: "runs every 5 min", at: hb.marginWatch, tone: ageTone(hb.marginWatch, 20, 60) },
-    { label: "Trade sync", sub: "fills from Kraken ledger", at: hb.tradeSync, tone: ageTone(hb.tradeSync, 90, 360) },
-  ];
-
-  // The margin exec lock is only held while placing a real order; alarming if it outlives 330s TTL.
-  const lockAgeMin = minutesSince(data.execLock.since);
-  const lockStuck = data.execLock.held && lockAgeMin > 6;
-  const armed = data.config.marginAuto && !data.config.marginValidateOnly;
-
-  const switches: { label: string; on: boolean; onText: string; offText: string; onTone: ChipTone; offTone: ChipTone }[] = [
-    { label: "Margin auto-trade", on: data.config.marginAuto, onText: "armed", offText: "tracked only", onTone: "red", offTone: "green" },
-    { label: "Real orders", on: !data.config.marginValidateOnly, onText: "live", offText: "validate-only", onTone: "red", offTone: "green" },
-    { label: "Shadow auto-track", on: data.config.shadowAutotrack, onText: "on", offText: "off", onTone: "green", offTone: "grey" },
-    { label: "Drawdown breaker", on: data.config.drawdownDisarmed, onText: "tripped", offText: "clear", onTone: "red", offTone: "green" },
-  ];
-
   const rh = data.paper.robinhood;
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="System Health"
-        sub="Kraken, Robinhood and futures paper readiness. Refreshes every 30s"
-        right={<Chip tone={armed ? "red" : "grey"} dot={armed} size="md">{armed ? "Kraken armed: real orders" : "Kraken entries disarmed"}</Chip>}
+        sub="Robinhood options and the futures demo desk. Refreshes every 30s"
       />
 
-      {lockStuck && (
-        <Panel tone="red"><PanelBody>
-          <p className="text-[13px] font-semibold text-down">Exec lock stuck</p>
-          <Note className="mt-1">Held since {data.execLock.since} ({lockAgeMin.toFixed(0)}m — TTL is 5.5m). A real-order run likely died mid-flight; the next call recovers it, but check Vercel logs if this persists.</Note>
-        </PanelBody></Panel>
-      )}
-
-      <div className="grid gap-3 lg:grid-cols-2">
-        <Panel>
-          <PanelHeader title="Heartbeats" />
-          <PanelBody className="divide-y divide-border">
-            {rows.map((r) => (
-              <HealthRow key={r.label} label={r.label} sub={r.sub} chip={<Chip tone={r.tone} dot={r.tone === "red"}>{r.at ? ago(r.at) : "never"}</Chip>} />
-            ))}
-            <HealthRow label="TradingView alert" sub="last webhook received" chip={<Chip tone={hb.tradingViewAlert ? "green" : "grey"}>{hb.tradingViewAlert ? ago(hb.tradingViewAlert) : "none yet"}</Chip>} />
-          </PanelBody>
-        </Panel>
-
-        <Panel>
-          <PanelHeader title="Switches" />
-          <PanelBody className="divide-y divide-border">
-            {switches.map((s) => (
-              <HealthRow key={s.label} label={s.label} chip={<Chip tone={s.on ? s.onTone : s.offTone} dot={s.on && s.onTone === "red"}>{s.on ? s.onText : s.offText}</Chip>} />
-            ))}
-            <HealthRow label="Margin exec lock" chip={<Chip tone={lockStuck ? "red" : data.execLock.held ? "amber" : "grey"}>{data.execLock.held ? `held ${lockAgeMin.toFixed(0)}m` : "released"}</Chip>} />
-          </PanelBody>
-        </Panel>
-      </div>
+      <Panel>
+        <PanelHeader title="Heartbeats" />
+        <PanelBody className="divide-y divide-border">
+          <HealthRow label="TradingView alert" sub="last webhook received" chip={<Chip tone={hb.tradingViewAlert ? "green" : "grey"}>{hb.tradingViewAlert ? ago(hb.tradingViewAlert) : "none yet"}</Chip>} />
+        </PanelBody>
+      </Panel>
 
       <Panel>
         <PanelHeader title="Robinhood options · live desk" aside={<Chip tone={rh.liveDesk?.armed && rh.liveDesk.verified ? "red" : rh.liveDesk?.armed ? "amber" : "grey"} dot={!!(rh.liveDesk?.armed && rh.liveDesk.verified)}>{rh.liveDesk?.armed && rh.liveDesk.verified ? "Live: armed and verified" : rh.liveDesk?.armed ? "Armed, adapter unverified" : "Live execution inactive"}</Chip>} />
@@ -192,7 +143,7 @@ export default function SystemHealthPage() {
         </PanelBody>
       </Panel>
 
-      <Note>The spot trend bot and the stock paper book were both retired; their machinery is no longer monitored here.</Note>
+      <Note>The Kraken margin desk, the spot trend bot and the stock paper book were all retired (Sep 2026); their machinery is no longer monitored here.</Note>
     </div>
   );
 }

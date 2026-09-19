@@ -6,28 +6,23 @@ import { cn } from "@/lib/utils";
 import { useState } from "react";
 import {
   LayoutDashboard,
-  CandlestickChart,
   ClipboardList,
-  Route,
   Activity,
   Wallet,
   Menu,
   X,
 } from "lucide-react";
 
-// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. The desks Spencer actually
-// wants: Kraken (crypto margin, REAL money), Robinhood (US equity options, REAL account — the
-// live desk armed Sep 13 2026, one contract, $100 max loss), and futures on the Tradovate DEMO — the
-// edge lab (TradingView alerts → demo fills with the stop attached, Sep 11 2026), paper only
-// by design. Futures prop firms were researched and DROPPED (capped payouts); Tradovate LIVE is
-// closed for good. The Tradeify 247 DXtrade CRYPTO prop account (bought Sep 11 2026 by
-// mistake — Spencer wanted futures) is RETIRED as of Sep 12: unlinked here, /prop redirected
-// home by proxy.ts, its guardian cron removed, and the scanner no longer hands plans to it. The
-// code stays in the repo, disarmed, for reversibility only. The old Tradovate retail ENGINES
-// are RETIRED the same way (Aug 2026), along with the spot trend bot and the futures-era
-// research pages. A page belongs
-// to exactly one section and its section says which, so "is this real money?" is answered by
-// the sidebar before the page loads. Page titles match these labels one-to-one.
+// IA BY PLATFORM, WITH THE MONEY STATE IN THE SECTION NAME. Two desks (Sep 19 2026):
+// Robinhood (US equity options, REAL account — the live desk armed Sep 13 2026, one contract,
+// $150 max loss) and futures on the Tradovate DEMO — the edge lab (TradingView alerts → demo
+// fills with the stop attached, Sep 11 2026), paper only by design; Spencer trades futures by
+// hand and the desk is his analyst. The Kraken crypto margin desk was RETIRED and its code
+// DELETED Sep 19 2026 (−79% from peak; the pivot is options + futures); the Tradeify 247
+// DXtrade crypto prop and the spot trend bot went with it. The old Tradovate retail ENGINES
+// are retired the same way (Aug 2026), along with the futures-era research pages. A page
+// belongs to exactly one section and its section says which, so "is this real money?" is
+// answered by the sidebar before the page loads. Page titles match these labels one-to-one.
 const sections = [
   {
     label: "Overview",
@@ -36,20 +31,11 @@ const sections = [
     ],
   },
   {
-    // Orders is cross-platform by construction (Kraken fills and round trips, the Tradovate demo
-    // ledger, the Robinhood account's positions and orders), so it is its own tab, not a Kraken
-    // page (Sep 14 2026). Sitting under one platform's heading told the reader the wrong thing.
+    // Orders is cross-platform by construction (the Tradovate demo ledger, the Robinhood
+    // account's positions and orders), so it is its own tab, not a platform page (Sep 14 2026).
     label: "Orders · every platform",
     links: [
       { href: "/orders", label: "Orders", icon: ClipboardList },
-    ],
-  },
-  {
-    label: "Kraken · crypto margin · real money",
-    tone: "live" as const,
-    links: [
-      { href: "/margin", label: "Live Account", icon: CandlestickChart },
-      { href: "/margin/paper", label: "Live Desk", icon: Route },
     ],
   },
   {
@@ -80,8 +66,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // The active link is the one whose href is the longest prefix of the current path, so
-  // "/margin" does not light up while on "/margin/paper".
+  // The active link is the one whose href is the longest prefix of the current path, so a
+  // parent page does not light up while on one of its children.
   const bestMatch = sections
     .flatMap((s) => s.links.map((l) => l.href))
     .filter((href) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/"))
@@ -105,7 +91,7 @@ export function Sidebar() {
           <div key={section.label} className="mb-4">
             <p className={cn(
               "px-4 pb-1 text-[11px] font-medium uppercase tracking-wide",
-              "tone" in section && section.tone === "live" ? "text-down/80" : "tone" in section && section.tone === "paper" ? "text-paper/80" : "text-muted-foreground/70",
+              "tone" in section && section.tone === "paper" ? "text-paper/80" : "text-muted-foreground/70",
             )}>
               {section.label}
             </p>

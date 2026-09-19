@@ -7,8 +7,11 @@ import { isPublicPath } from "@/lib/route-access";
 // reversibility, but they are unlinked from the nav and redirect home. /futures itself is live
 // again since Sep 11 2026 as the Futures Desk (Tradovate demo, TradingView alerts).
 const RETIRED_PREFIXES = [
-  "/kraken",          // old BTC/ETH trend bot — disabled Aug 31 2026, capital parked in coins
-  "/prop",            // Tradeify 247 crypto prop — bought in error, retired Sep 12 2026, never armed
+  // The Kraken crypto desk (margin, spot bot) and the Tradeify crypto prop were retired and
+  // their code DELETED Sep 19 2026. Old bookmarks land home instead of on a 404.
+  "/kraken",
+  "/margin",
+  "/prop",
   "/demo-vs-live",
   "/connect",
   "/performance",

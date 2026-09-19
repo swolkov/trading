@@ -3,7 +3,6 @@ import { ASSET_CLASSES, assetClassFor, type AssetClass } from "@/lib/asset-class
 import Link from "next/link";
 import { Brain, ArrowRight, Activity, Eye, PowerOff, Info } from "lucide-react";
 import { StrategyRowCompact } from "./strategy-row-compact";
-import { AccountsPanel } from "./accounts-panel";
 import { getEdgePerformance, getEdgeSwitchboard } from "@/lib/edge-performance";
 import { EdgeControlBoard } from "./edge-control-board";
 
@@ -156,7 +155,6 @@ export default async function StrategiesAdminPage() {
       <EdgeControlBoard edges={edgeControlVMs} />
 
       {/* Accounts + master mode panel */}
-      <AccountsPanel />
 
       {/* Layer explainer — the 3-layer truth that's been confusing */}
       <details className="text-xs">

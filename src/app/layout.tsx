@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Esbueno Trades",
-  description: "Kraken margin desk — live account, paper record, orders, system health",
+  description: "Options and futures desks — live account, paper record, orders, system health",
 };
 
 export default function RootLayout({
