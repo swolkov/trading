@@ -14,8 +14,11 @@ import { buildCard, loadFeed, recordChartLevels, recordFeed } from "@/lib/tradin
 export const maxDuration = 30;
 export const dynamic = "force-dynamic";
 
+// The room has its OWN secret (TRADING_ROOM_WEBHOOK_SECRET, generated Sep 19 2026 and baked into
+// the Pine study's default input) — a leak of it can post level breaks to the tape and nothing
+// else. It never shares the desk's secret, so the demo executor's alerts stay unreachable from here.
 function secretMatches(provided: unknown): boolean {
-  const secret = process.env.TRADINGVIEW_WEBHOOK_SECRET;
+  const secret = process.env.TRADING_ROOM_WEBHOOK_SECRET;
   if (!secret || typeof provided !== "string") return false;
   const a = Buffer.from(provided), b = Buffer.from(secret);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
