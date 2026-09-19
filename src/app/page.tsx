@@ -3,37 +3,31 @@
 import Link from "next/link";
 import useSWR from "swr";
 import { Chip, type ChipTone } from "@/components/ui/chip";
-import { PageHeader, Panel, PanelBody, PanelHeader, Stat, Label, Note } from "@/components/ui/panel";
-import { ago, coinOf, money, pct, pnl0, pnl2, splitLogLine, tone, usd, when } from "@/lib/format";
+import { PageHeader, Panel, PanelBody, PanelHeader, Stat, Note } from "@/components/ui/panel";
+import { ago, money, pnl0, tone } from "@/lib/format";
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
 // ============ DASHBOARD ============
-// One job: "how is the desk right now?" — four numbers, the executor's state, the open live
-// position, and the parked spot book labelled as what it is. No analytics here; the paper
-// record lives on Live Desk, the trade list on Orders, machinery on System Health. The
-// Robinhood real account gets its own panel so the dashboard covers BOTH platforms.
+// One job: "how are the desks right now?" — the real Robinhood options account and the
+// Tradovate futures DEMO, each with its money state named. No analytics here; the paper
+// records live on the desk pages, the trade lists on Orders, machinery on System Health.
 // Every read is an existing read-only endpoint; nothing on this page can place an order.
+// The Kraken margin desk that used to headline this page was retired Sep 19 2026.
 
-interface Holding { coin: string; amount: number; price: number; value: number }
-interface KrakenStatus {
-  connected: boolean; usd: number; holdings: Holding[]; totalValue: number;
-  strategyValue: number; strategyCapital: number; strategyPnl: number; otherValue: number;
+interface OptionsLive {
+  account?: { totalValue: number; optionLevel: string; buyingPower: number; at: string } | null;
+  live?: { positions: unknown[]; orders: unknown[]; at: string } | null;
+  execution?: { canPlaceOrders: boolean; armed?: boolean; verified?: boolean; maxLossUsd: number | null; why: string };
 }
-interface MarginHealth { equity: number; marginUsed: number; freeMargin: number; unrealized: number; marginLevel: number | null }
-interface MarginPosition { pair: string; side: string; vol: number; entryPrice: number; currentPrice: number | null; liqPctAway: number | null; openedAt: string; leverage: number }
-interface LiveNow { pair: string; side: string; vol: number; entry: number; net: number | null; openedAt: string }
-interface ArmStatus {
-  armed: boolean; auto: boolean; validateOnly: boolean; sources: string[]; riskPct: number; maxPositions: number;
-  ddTripped: boolean; liveNow?: LiveNow[]; log: string[];
-  stage3?: { status: string; target: number; done: number; fromBase: number; toBase: number; note?: string } | null;
+interface FuturesDesk {
+  enabled: boolean; disabledReason: string | null; entriesToday: number;
+  limits: { sizingBasisUsd: number; riskPct: number; maxPositions: number; maxEntriesPerDay: number };
+  guardian: { at: string | null; fresh: boolean; lastError: string | null };
+  broker: { netLiq: number; positions: unknown[]; workingOrders: number } | null; brokerError: string | null;
+  open: { contract: string; side: string; qty: number; entry_price: number; stop_price: number; edge: string }[];
+  record: { trades: number; wins: number; pnl: number }; error?: string;
 }
-interface Trip { closedAt: string; netPnl: number; pair: string }
-interface StrategyStat { key: string; resolved: number; liveNet: number; tStat: number | null; days?: number; verdict: string }
-interface Command { heartbeats: { marginScan: string | null; marginWatch: string | null }; error?: string }
-
-
-function startOfToday(): number { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
 
 function heartbeatTone(iso: string | null | undefined, warnMin: number, critMin: number): ChipTone {
   if (!iso) return "grey";
@@ -42,77 +36,27 @@ function heartbeatTone(iso: string | null | undefined, warnMin: number, critMin:
 }
 
 export default function DashboardPage() {
-  const { data: krk } = useSWR<KrakenStatus>("/api/kraken-agent", fetcher, { refreshInterval: 60_000 });
-  const { data: status, error: statusErr } = useSWR<{ connected: boolean; health: MarginHealth | null; positions: MarginPosition[]; error?: string }>("/api/margin/status", fetcher, { refreshInterval: 60_000 });
-  const krakenDown = !!statusErr || (status != null && (status.connected === false || !!status.error));
-  const { data: arm } = useSWR<ArmStatus>("/api/margin/arm", fetcher, { refreshInterval: 60_000 });
-  const { data: score } = useSWR<{ recentTrips: Trip[]; strategies: StrategyStat[]; candidate?: { source: string } | null }>("/api/margin/scoreboard", fetcher, { refreshInterval: 120_000 });
-  const { data: cmd } = useSWR<Command>("/api/command", fetcher, { refreshInterval: 60_000 });
-  const { data: opt } = useSWR<{
-    account?: { totalValue: number; optionLevel: string; buyingPower: number; at: string } | null;
-    live?: { positions: unknown[]; orders: unknown[]; at: string } | null;
-    execution?: { canPlaceOrders: boolean; armed?: boolean; verified?: boolean; maxLossUsd: number | null; why: string };
-  }>("/api/options/live", fetcher, { refreshInterval: 120_000 });
-  // The third desk: Tradovate futures on the DEMO account — paper by design, sized as a $50k basis.
-  const { data: fut } = useSWR<{
-    enabled: boolean; disabledReason: string | null; entriesToday: number;
-    limits: { sizingBasisUsd: number; riskPct: number; maxPositions: number; maxEntriesPerDay: number };
-    guardian: { at: string | null; fresh: boolean; lastError: string | null };
-    broker: { netLiq: number; positions: unknown[]; workingOrders: number } | null; brokerError: string | null;
-    open: { contract: string; side: string; qty: number; entry_price: number; stop_price: number; edge: string }[];
-    record: { trades: number; wins: number; pnl: number }; error?: string;
-  }>("/api/futures/desk", fetcher, { refreshInterval: 120_000 });
+  const { data: opt } = useSWR<OptionsLive>("/api/options/live", fetcher, { refreshInterval: 120_000 });
+  // The futures desk: Tradovate DEMO, paper by design, sized off a fixed $50k basis.
+  const { data: fut } = useSWR<FuturesDesk>("/api/futures/desk", fetcher, { refreshInterval: 120_000 });
 
-  const health = status?.health ?? null;
-  const equity = health?.equity ?? (krk?.connected ? krk.totalValue : null);
-
-  // Today = closed round trips since local midnight (Kraken's own ledger) + the float on the
-  // bot's open positions. Balance-based, not a sum of app-side logs.
-  const t0 = startOfToday();
-  const closedToday = (score?.recentTrips ?? []).filter((t) => Date.parse(t.closedAt) >= t0);
-  const realizedToday = closedToday.reduce((s, t) => s + t.netPnl, 0);
-  const liveNow = arm?.liveNow ?? [];
-  const floating = liveNow.reduce((s, p) => s + (p.net ?? 0), 0);
-  const today = realizedToday + floating;
-
-  // The open live position, enriched with the cockpit's liquidation distance when it matches.
-  const open = liveNow[0] ?? null;
-  const openDetail = open ? (status?.positions ?? []).find((p) => p.pair === open.pair && p.side === open.side && Math.abs(p.vol - open.vol) < 1e-9) ?? null : null;
-
-  const s3 = arm?.stage3 ?? null;
-  const s3Pct = s3 && s3.target > 0 ? Math.min(100, (s3.done / s3.target) * 100) : 0;
-
-  // The edge scorecard, same four checks as Live Desk — for the sleeve that is ACTUALLY armed.
-  // The scoreboard API reads kraken_margin_live_sources; a hardcoded "selective" here kept
-  // scoring the Sep 6 sleeve for three days after live moved to swing-lev on Sep 8.
-  const liveSource = score?.candidate?.source ?? arm?.sources?.[0] ?? null;
-  const cand = liveSource ? score?.strategies?.find((s) => s.key === liveSource) ?? null : null;
-  const gateGreen = cand ? [cand.resolved >= 30, cand.resolved > 0 && cand.liveNet > 0, cand.tStat != null && cand.tStat >= 2, (cand.days ?? 0) >= 7].filter(Boolean).length : null;
-  const gateOpen = gateGreen === 4;
-
-  const scanTone = heartbeatTone(cmd?.heartbeats?.marginScan, 20, 60);
-  const watchTone = heartbeatTone(cmd?.heartbeats?.marginWatch, 20, 60);
-  const machineryTone: ChipTone = [scanTone, watchTone].includes("red") ? "red" : [scanTone, watchTone].includes("amber") ? "amber" : [scanTone, watchTone].includes("grey") ? "grey" : "green";
-
-  const lastEvent = arm?.log?.[0] ?? null;
-  const { at: lastEventAt, text: lastEventText } = lastEvent ? splitLogLine(lastEvent) : { at: null, text: null };
-
-  const loading = !arm && !status && !krk;
+  const loading = !opt && !fut;
+  const optionsArmed = Boolean(opt?.execution?.canPlaceOrders);
+  const guardianTone = fut && !fut.error ? heartbeatTone(fut.guardian.at, 20, 60) : "grey";
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Dashboard"
-        sub="Every desk, right now: Kraken real money · Tradovate futures demo · Robinhood options."
-        right={arm && (
+        sub="Both desks, right now: Robinhood options (real account) · Tradovate futures (demo, paper only)."
+        right={(opt || fut) && (
           <>
-            <Chip tone={arm.armed ? "red" : "grey"} dot={arm.armed} size="md">{arm.armed ? `Armed · ${arm.sources.join(", ") || "?"}` : "Disarmed"}</Chip>
-            {arm.ddTripped && <Chip tone="red" size="md">Drawdown breaker tripped</Chip>}
-            <Chip tone={gateOpen ? "green" : cand ? "amber" : "grey"} size="md" title="The live candidate's paper gate: 30+ resolved, net > 0 at live sizing, t ≥ 2, 7+ days">
-              {gateOpen ? "Paper gate open" : cand ? `Paper gate ${gateGreen} of 4` : "Paper gate — no data"}
+            <Chip tone={optionsArmed ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={optionsArmed} size="md">
+              {optionsArmed ? "Options desk armed" : opt?.execution?.armed ? "Options armed · unverified" : "Options desk disarmed"}
             </Chip>
-            <Chip tone={machineryTone} size="md" title={`Scanner ${ago(cmd?.heartbeats?.marginScan)} · guardian ${ago(cmd?.heartbeats?.marginWatch)}`}>
-              {machineryTone === "green" ? "Machinery healthy" : machineryTone === "grey" ? "Machinery unknown" : "Machinery stale"}
+            <Chip tone={fut && !fut.error ? (fut.enabled ? "paper" : "grey") : "grey"} dot={!!fut?.enabled} size="md">{fut?.enabled ? "Futures demo enabled" : "Futures demo disabled"}</Chip>
+            <Chip tone={guardianTone} size="md" title={`futures guardian ${ago(fut?.guardian?.at)}`}>
+              {guardianTone === "green" ? "Guardian healthy" : guardianTone === "grey" ? "Guardian unknown" : "Guardian stale"}
             </Chip>
           </>
         )}
@@ -122,76 +66,32 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
-            <Stat size="lg" label="Equity" value={equity != null ? money(equity) : "—"} title="Kraken margin equity — the number the executor sizes every trade off"
-              sub={health ? <>margin level <span className={health.marginLevel == null ? "" : health.marginLevel < 100 ? "text-down font-semibold" : health.marginLevel < 150 ? "text-warn font-semibold" : "text-foreground/80"}>{health.marginLevel != null ? `${health.marginLevel.toFixed(0)}%` : "n/a"}</span> · free {money(health.freeMargin)}</> : krakenDown ? <span className="text-down">Kraken did not answer — retrying</span> : "loading…"} />
+            <Stat size="lg" label="Robinhood account" value={opt?.account ? money(opt.account.totalValue) : "—"} title="The real options account, as the desk session last saw it"
+              sub={opt?.account ? <>buying power {money(opt.account.buyingPower)} · snapshot {ago(opt.live?.at ?? opt.account.at)}</> : "no snapshot yet"} />
           )}
         </PanelBody></Panel>
 
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
-            <Stat size="lg" label="Today" value={pnl0(today)} valueCls={tone(today)} title="Round trips closed since midnight (Kraken ledger) plus the float on the bot's open positions"
-              sub={<>{closedToday.length} closed{closedToday.length > 0 && <> ({pnl2(realizedToday)})</>} · floating <span className={tone(floating)}>{pnl2(floating)}</span></>} />
+            <Stat size="lg" label="Options positions" value={opt?.live ? String(opt.live.positions.length) : "—"} title="Open positions in the real account"
+              sub={opt?.execution?.maxLossUsd != null ? `max loss per trade ${money(opt.execution.maxLossUsd)} incl. fees · one contract` : "max loss not set"} />
           )}
         </PanelBody></Panel>
 
         <Panel><PanelBody>
-          {loading ? <Skeleton /> : krakenDown && !open ? (
-            <Stat size="lg" label="Open live position" value={<span className="text-down">Unknown</span>} sub="Kraken did not answer — an empty read during an outage is not a flat book. Retrying every 30s." />
-          ) : open ? (
-            <Stat size="lg" label="Open live position" value={<>{coinOf(open.pair)} <span className={`text-base font-medium ${open.side === "long" ? "text-up" : "text-down"}`}>{open.side}</span></>}
-              sub={<>entry {usd(open.entry)} · <span className={`font-semibold ${tone(open.net)}`}>{open.net != null ? pnl2(open.net) : "P&L pending"}</span>{openDetail?.liqPctAway != null && <> · {pct(openDetail.liqPctAway, 1)} from liquidation</>} · since {when(open.openedAt)}</> } />
-          ) : (
-            <Stat size="lg" label="Open live position" value={<span className="text-muted-foreground">None</span>}
-              sub={arm?.armed ? "waiting for the next high-conviction breakout" : "executor disarmed — nothing will open"} />
+          {loading ? <Skeleton /> : (
+            <Stat size="lg" label="Futures demo equity" value={fut?.broker ? money(fut.broker.netLiq) : "—"} title="Tradovate DEMO net liquidation — paper only"
+              sub={fut?.brokerError ? <span className="text-down">broker not read</span> : fut && !fut.error ? `sized off a fixed ${money(fut.limits.sizingBasisUsd)} at ${fut.limits.riskPct}% a trade` : "loading…"} />
           )}
         </PanelBody></Panel>
 
         <Panel><PanelBody>
-          {loading ? <Skeleton /> : s3 ? (
-            <div>
-              <Label>Stage 3 · first live trades</Label>
-              <p className="mt-0.5 text-[28px] font-semibold tabular-nums leading-none">{s3.done}<span className="text-base text-muted-foreground"> / {s3.target}</span></p>
-              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div className={`h-full rounded-full ${s3.status === "held" ? "bg-down" : s3.status === "graduated" ? "bg-up" : "bg-primary"}`} style={{ width: `${s3.status === "graduated" ? 100 : s3Pct}%` }} />
-              </div>
-              <div className="mt-1.5 text-xs text-muted-foreground">
-                {s3.status === "running" && <>{s3.fromBase}% risk until live matches paper, then {s3.toBase}%</>}
-                {s3.status === "graduated" && <span className="text-up">graduated — paper&apos;s full sizing is on</span>}
-                {s3.status === "held" && <span className="text-down">held at {arm?.riskPct ?? s3.fromBase}% base — {s3.note ?? "live diverged from paper"}</span>}
-              </div>
-            </div>
-          ) : (
-            <Stat size="lg" label="Stage 3 · first live trades" value={<span className="text-muted-foreground">—</span>} sub="starts on the first arm" />
+          {loading ? <Skeleton /> : (
+            <Stat size="lg" label="Futures open" value={fut && !fut.error ? `${fut.open.length} of ${fut.limits.maxPositions}` : "—"} title="Open demo positions against the desk's slot limit"
+              sub={fut?.open?.length ? fut.open.map((o) => `${o.side === "long" ? "▲" : "▼"} ${o.contract} × ${o.qty}`).join(" · ") : fut?.enabled ? "waiting for a TradingView alert" : "nothing opens while disabled"} />
           )}
         </PanelBody></Panel>
       </div>
-
-      {/* ── Last executor event ── */}
-      {lastEvent && (
-        <Panel>
-          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5">
-            <Label>Last executor event</Label>
-            <span className="text-xs text-muted-foreground tabular-nums">{lastEventAt ? `${when(lastEventAt)} · ${ago(lastEventAt)}` : ""}</span>
-            <span className="min-w-0 flex-1 truncate text-[13px]" title={lastEventText ?? ""}>{lastEventText}</span>
-            <Link href="/margin/paper" className="text-xs text-primary hover:underline">Live Desk</Link>
-          </div>
-        </Panel>
-      )}
-
-      {/* ── Parked coins: not the desk ── */}
-      <Panel>
-        <PanelHeader title="Parked coins" aside={<span>hand-held BTC/ETH from the retired bot · not traded by the desk</span>} />
-        <PanelBody>
-          {!krk ? <Skeleton /> : !krk.connected ? <Note>Kraken not reachable.</Note> : (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <Stat label="Coins held" value={money(krk.strategyValue)} sub={krk.holdings.map((h) => `${h.coin} ${money(h.value)}`).join(" · ") || "none"} />
-              <Stat label="vs deposits" value={pnl0(krk.strategyPnl)} valueCls={tone(krk.strategyPnl)} sub={krk.strategyCapital > 0 ? `${(krk.strategyPnl / krk.strategyCapital * 100).toFixed(1)}% on ${money(krk.strategyCapital)} deposited` : undefined} />
-              <Stat label="Cash" value={money(krk.usd)} sub={krk.totalValue > 0 ? `${((krk.usd / krk.totalValue) * 100).toFixed(0)}% of account` : undefined} />
-              <Stat label="Own book" value={money(krk.otherValue)} sub="hand-bought, untouched" />
-            </div>
-          )}
-        </PanelBody>
-      </Panel>
 
       <Panel>
         <PanelHeader title="Tradovate futures · demo" aside={fut && !fut.error ? (
@@ -202,25 +102,25 @@ export default function DashboardPage() {
         ) : <Chip tone="grey">loading…</Chip>} />
         <PanelBody>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-            <Stat label="Demo equity" value={fut?.broker ? money(fut.broker.netLiq) : "—"} sub={fut?.brokerError ? <span className="text-down">broker not read</span> : fut ? `sized off a fixed ${money(fut.limits.sizingBasisUsd)} at ${fut.limits.riskPct}% a trade` : undefined} />
-            <Stat label="Open positions" value={fut ? `${fut.open.length} of ${fut.limits.maxPositions}` : "—"} sub={fut?.open.length ? fut.open.map((o) => `${o.side === "long" ? "▲" : "▼"} ${o.contract} × ${o.qty}`).join(" · ") : fut?.enabled ? "waiting for a TradingView alert" : "nothing opens while disabled"} />
-            <Stat label="Entries today" value={fut ? `${fut.entriesToday} of ${fut.limits.maxEntriesPerDay}` : "—"} />
-            <Stat label="Record" value={fut ? `${fut.record.trades} closed` : "—"} sub={fut && fut.record.trades ? <>{fut.record.wins} wins · <span className={tone(fut.record.pnl)}>{pnl0(fut.record.pnl)}</span> after modeled fees</> : "no desk trades yet"} />
+            <Stat label="Entries today" value={fut && !fut.error ? `${fut.entriesToday} of ${fut.limits.maxEntriesPerDay}` : "—"} />
+            <Stat label="Working orders" value={fut?.broker ? String(fut.broker.workingOrders) : "—"} sub="stops resting on the demo" />
+            <Stat label="Record" value={fut && !fut.error ? `${fut.record.trades} closed` : "—"} sub={fut && fut.record.trades ? <>{fut.record.wins} wins · <span className={tone(fut.record.pnl)}>{pnl0(fut.record.pnl)}</span> after modeled fees</> : "no desk trades yet"} />
+            <Stat label="Last desk error" value={fut?.guardian?.lastError ? <span className="text-warn text-base">see Futures Desk</span> : <span className="text-muted-foreground">none</span>} />
           </div>
-          <Note className="mt-3">{fut?.disabledReason ? `Disabled: ${fut.disabledReason}. ` : ""}Paper only, by design: two registered rules evaluated on TradingView, executed on the demo with the stop attached. The edges&apos; verdicts and the enable switch are on the Futures Desk.</Note>
+          <Note className="mt-3">{fut?.disabledReason ? `Disabled: ${fut.disabledReason}. ` : ""}Paper only, by design: registered rules evaluated on TradingView, executed on the demo with the stop attached. Spencer trades futures by hand; this desk is the analyst and the record. The edges&apos; verdicts and the enable switch are on the Futures Desk.</Note>
         </PanelBody>
       </Panel>
 
       <Panel>
         <PanelHeader title="Robinhood options" aside={
-          <Chip tone={opt?.execution?.canPlaceOrders ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={!!opt?.execution?.canPlaceOrders}>
-            {opt?.execution?.canPlaceOrders ? "Live desk armed · verified" : opt?.execution?.armed ? "Armed · adapter unverified" : "Live execution inactive"}
+          <Chip tone={optionsArmed ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={optionsArmed}>
+            {optionsArmed ? "Live desk armed · verified" : opt?.execution?.armed ? "Armed · adapter unverified" : "Live execution inactive"}
           </Chip>} />
         <PanelBody>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Account value" value={opt?.account ? money(opt.account.totalValue) : "—"} />
             <Stat label="Buying power" value={opt?.account ? money(opt.account.buyingPower) : "—"} />
-            <Stat label="Open positions" value={opt?.live ? String(opt.live.positions.length) : "—"} />
+            <Stat label="Open orders" value={opt?.live ? String(opt.live.orders.length) : "—"} />
             <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="including fees · one contract · one position" />
           </div>
           <Note className="mt-3">{opt?.execution?.why ?? "Loading account status..."} {opt?.account ? `Account snapshot ${ago(opt.account.at)}.` : ""}</Note>
@@ -228,14 +128,12 @@ export default function DashboardPage() {
       </Panel>
 
       {/* ── Where to go ── */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { href: "/margin", title: "Live Account · Kraken", sub: "Real money: positions, margin level, signals, ledger track record" },
-          { href: "/margin/paper", title: "Live Desk", sub: "Kraken: is the edge real yet, the arm switch, every sleeve on paper" },
-          { href: "/orders", title: "Orders", sub: "Every platform, broken down: Kraken fills and paper, futures demo ledger and alerts, Robinhood account orders" },
-          { href: "/futures", title: "Futures Desk · Tradovate demo", sub: "Two registered rules, their verdicts, the enable switch, the TradingView setup" },
+          { href: "/futures", title: "Futures Desk · Tradovate demo", sub: "Registered rules, their verdicts, the enable switch, the TradingView setup" },
           { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: positions, orders, the research screen, the live desk switch" },
-          { href: "/command", title: "System Health", sub: "Heartbeats, switches, locks — all three desks" },
+          { href: "/orders", title: "Orders", sub: "Every platform, broken down: futures demo ledger and alerts, Robinhood account orders" },
+          { href: "/command", title: "System Health", sub: "Heartbeats, switches, credentials — both desks" },
         ].map((l) => (
           <Link key={l.href} href={l.href} className="rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/20 hover:bg-accent/40">
             <p className="text-[13px] font-semibold">{l.title}</p>

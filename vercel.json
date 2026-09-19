@@ -1,26 +1,6 @@
 {
   "crons": [
     {
-      "path": "/api/cron/kraken",
-      "schedule": "*/30 * * * *"
-    },
-    {
-      "path": "/api/cron/margin-watch",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/margin-scan",
-      "schedule": "2-57/5 * * * *"
-    },
-    {
-      "path": "/api/cron/margin-synthesis",
-      "schedule": "20 0 * * *"
-    },
-    {
-      "path": "/api/cron/margin-weekly",
-      "schedule": "0 13 * * 1"
-    },
-    {
       "path": "/api/cron/futures-desk-watch",
       "schedule": "*/5 * * * *"
     }

@@ -1,5 +1,3 @@
-import { pairBase } from "@/lib/kraken-pairs";
-
 // One set of number/time formatters for every admin page. Before this, each page carried
 // its own copy of money()/money2()/usd()/col() with slightly different sign conventions.
 
@@ -14,10 +12,7 @@ export const pnl0 = (n: number) =>
 /** Signed cents for P&L: +$12.34 · −$0.56. */
 export const pnl2 = (n: number) => `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
 
-/**
- * Price with precision scaled to magnitude. Crypto spans PEPE at $0.0000094 to BTC at
- * $100k; a fixed 2-decimal format renders every sub-cent coin as "$0".
- */
+/** Price with precision scaled to magnitude, so sub-dollar prices do not render as "$0". */
 export const usd = (n: number) => {
   const a = Math.abs(n);
   const digits = a === 0 ? 2 : a >= 1 ? 2 : a >= 0.01 ? 4 : a >= 0.0001 ? 6 : 8;
@@ -53,9 +48,6 @@ export const when = (iso: string | number | Date) => {
 
 export const timeOnly = (iso: string | number | Date) =>
   new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-
-/** Kraken pair → coin, via the one canonical normaliser: XBTUSD:BTNL → BTC · SOL/USD → SOL · XXBTZUSD → BTC */
-export const coinOf = (pair: string) => pairBase(pair.replace("/", ""));
 
 /** Minutes elapsed since an ISO timestamp (0 when missing/invalid). */
 export const minutesSince = (iso: string | null | undefined) => {

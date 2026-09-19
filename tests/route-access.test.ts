@@ -6,9 +6,7 @@ import { isPublicPath } from "../src/lib/route-access";
 test("only sign-in, cron, and webhook paths are public", () => {
   for (const pathname of [
     "/sign-in",
-    "/api/cron/kraken",
-    "/api/cron/margin-watch",
-    "/api/cron/margin-scan",
+    "/api/cron/futures-desk-watch",
     "/api/cron/stock-scan",
     "/api/webhook/tradingview",
   ]) {
@@ -17,9 +15,9 @@ test("only sign-in, cron, and webhook paths are public", () => {
 });
 
 test("paper scoreboard and the paper page are owner-only", () => {
-  assert.equal(isPublicPath("/margin/paper"), false);
-  assert.equal(isPublicPath("/api/margin/scoreboard"), false);
-  assert.equal(isPublicPath("/api/margin/mode"), false);
+  assert.equal(isPublicPath("/futures"), false);
+  assert.equal(isPublicPath("/api/futures/desk"), false);
+  assert.equal(isPublicPath("/api/options/live"), false);
   assert.equal(isPublicPath("/options/paper"), false);
   assert.equal(isPublicPath("/api/options/paper"), false);
 });

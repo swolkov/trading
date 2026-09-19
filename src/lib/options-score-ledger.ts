@@ -7,7 +7,7 @@
 // stop, no trail. It ranks the score, it does not estimate the desk's P&L. Buckets ≥80 / 70–79 / <70;
 // the promotion verdict is green only with ≥30 resolved in every bucket, the top bucket's mean above
 // the bottom's, and Welch t ≥ 2 between them. Pre-registered here before the first row was scored.
-import { welchT } from "./margin-metrics";
+import { welchT } from "./stats";
 import { liveEnterableKinds, screenResearchContracts, type OptionsResearch, type ResearchBar, type ResearchCandidate } from "./options-desk-model";
 import { directionOfKind } from "./options-market-state";
 import { optionsOpportunityScore, scoreInputsFor, ivRank, OPTIONS_SCORE_RULES, type OptionsScore } from "./options-score";

@@ -1,19 +1,17 @@
 import { prisma } from "@/lib/db";
-import { execLockHeldSince } from "@/lib/margin-live-risk";
 import { quoteStoreFreshness, readAccountSnapshot, readLiveSnapshot } from "@/lib/options-quote-store";
 import { barsStoreFreshness } from "@/lib/options-bars-store";
 import { futuresHealth } from "@/lib/futures-health";
 import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
 
-// Read-only telemetry for Kraken, Robinhood and the paper-only futures requirement.
+// Read-only telemetry for Robinhood options and the paper-only futures desk. The Kraken
+// margin desk was retired Sep 19 2026; its heartbeats and switches are gone with it.
 // Missing or stale engine telemetry must not appear ready.
 export const dynamic = "force-dynamic";
 
 const EMPTY = {
   futures: futuresHealth({}),
-  heartbeats: { marginScan: null, marginWatch: null, tradeSync: null, tradingViewAlert: null },
-  config: { marginAuto: false, marginValidateOnly: true, shadowAutotrack: true, drawdownDisarmed: false },
-  execLock: { held: false, since: null as string | null },
+  heartbeats: { tradingViewAlert: null as string | null },
   paper: {
     optionsScan: null as string | null, stockScan: null as string | null,
     optionsAutotrack: false, stockAutotrack: true,
@@ -33,14 +31,8 @@ export async function GET() {
     const c: Record<string, string> = {};
     for (const row of configs) c[row.key] = row.value;
 
-    // Margin executor lock: "" = released; `${iso}#token` = held. Older than 330s TTL
-    // means a run died mid-flight (webhook maxDuration is 300s; lock must outlive it).
-    const lock = c["kraken_margin_exec_lock"];
-    const lockSince = execLockHeldSince(lock);
-    const lockHeld = Boolean(lock && lock !== "");
-
-    // Paper-desk health. Each read is independently caught: a paper book being unreachable
-    // must never blank out the Kraken heartbeats, which are the ones tied to real money.
+    // Each read is independently caught: one store being unreachable must never blank out
+    // the others.
     const [quotes, account, bars, live] = await Promise.all([
       quoteStoreFreshness().catch(() => null),
       readAccountSnapshot().catch(() => null),
@@ -51,19 +43,8 @@ export async function GET() {
     return Response.json({
       futures: futuresHealth(c, Date.now(), Boolean(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET)),
       heartbeats: {
-        marginScan: c["margin_scan_last_run"] || null,
-        marginWatch: c["margin_watch_last_run"] || null,
-        tradeSync: c["margin_trades_synced_at"] || null,
         tradingViewAlert: c["tradingview_last_alert"] || null,
       },
-      config: {
-        // Fail-closed reads, matching the executor's own gating (unset/garbage → safe).
-        marginAuto: c["kraken_margin_auto"] === "true",
-        marginValidateOnly: c["kraken_margin_validate_only"] !== "false", // default ON (safe)
-        shadowAutotrack: c["kraken_shadow_autotrack"] !== "false",        // default ON
-        drawdownDisarmed: c["kraken_margin_disarmed_dd"] === "true",
-      },
-      execLock: { held: lockHeld, since: lockHeld ? lockSince : null },
       paper: {
         optionsScan: c["options_scan_last_run"] || null,
         stockScan: c["stock_scan_last_run"] || null,

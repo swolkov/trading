@@ -1,10 +1,9 @@
 // FUTURES DESK — trade-series metrics, pure (E6).
 //
-// MIRRORS `src/lib/margin-metrics.ts` (`sleeveMetrics`, the shared module landing with the crypto
-// PR) in what it measures — PF, drawdown, Sharpe/Sortino, R, expectancy, streaks — on THIS desk's
-// row shape (`MetricInput`: judged P&L, risk_usd, close instant, MFE/MAE in R), which differs from
-// the margin rows. The shared file is not on this branch; once both are on main an adapter from the
-// futures rows to the shared input may replace the arithmetic here. Nothing here is a gate — the
+// The desk's own metrics — PF, drawdown, Sharpe/Sortino, R, expectancy, streaks — on THIS desk's
+// row shape (`MetricInput`: judged P&L, risk_usd, close instant, MFE/MAE in R). It used to mirror
+// the crypto desk's `margin-metrics.ts`, deleted with that desk on Sep 19 2026; this is now the
+// only copy of the arithmetic. Nothing here is a gate — the
 // promotion verdict in futures-desk-review.ts reads these.
 import { maxDrawdown, tStatOf } from "@/lib/futures-desk-rules";
 

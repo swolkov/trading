@@ -10,7 +10,7 @@ import { Chip } from "@/components/ui/chip";
 import { Empty, Note, PageHeader, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { ago, money } from "@/lib/format";
 
-// ROBINHOOD · LIVE ACCOUNT. The counterpart of the Kraken Live Account page: what the
+// ROBINHOOD · LIVE ACCOUNT. The real-money page: what the
 // BROKER says — cash, buying power, option level, open option positions, recent orders —
 // as the desk session last pushed it. Everything on this page is a snapshot with an age.
 // Nothing on this page can place, cancel or modify an order, and the page says so.
