@@ -1,0 +1,155 @@
+//@version=6
+// TRADING ROOM — the level set (Sep 2026). Apply to MES1!, MNQ1! and MGC1! on the 5-MINUTE chart. Draws the same
+// numbers the admin page's Trading Room shows — prior exchange-day high/low/close, overnight high/low, the running
+// week's high/low, the opening range, session VWAP — and posts ONE message per level break at the 5-minute close to
+// the room's webhook, where it lands on the tape and in Slack. These are REFERENCE lines, not signals: on 15 years of
+// our own 1-minute data no opening-range breakout rule survives (Research/orb-study-sep19.md). The tape exists so the
+// journal can later say which breaks Spencer took, and whether they paid.
+//
+// Setup, once per chart: paste the webhook secret into the study's settings; RTH session 0930-1600 for MES/MNQ and
+// 0820-1330 for MGC; ONE alert per chart → condition "Any alert() function call" → webhook URL
+// https://trading-eta-snowy.vercel.app/api/webhook/trading-room, message left empty. Breaks post inside RTH only,
+// at most one per kind every 30 minutes.
+indicator("Trading Room — levels", overlay = true, max_labels_count = 50)
+
+secret     = input.string("", "Room webhook secret")
+rthSess    = input.session("0930-1600", "RTH session, ET (MGC: 0820-1330)")
+orMin      = input.int(15, "Opening range minutes", minval = 5, maxval = 60)
+showVwap   = input.bool(true, "Show session VWAP")
+sendAlerts = input.bool(true, "Post level breaks to the room")
+cooldown   = input.int(6, "Bars between repeat posts of the same break", minval = 1)
+tz = "America/New_York"
+
+inRth    = not na(time(timeframe.period, rthSess, tz))
+rthStart = inRth and not inRth[1]
+rthEnd   = not inRth and inRth[1]
+
+// Prior EXCHANGE day — the daily bar's [1], the standard non-repainting read.
+[pdh, pdl, pdc] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+// The running week: reset when the weekly bar rolls (Sunday 18:00 ET on CME), then track.
+var float wkH = na
+var float wkL = na
+newWeek = ta.change(time("W")) != 0
+wkHprev = wkH
+wkLprev = wkL
+if newWeek or na(wkH)
+    wkH := high
+    wkL := low
+else
+    wkH := math.max(wkH, high)
+    wkL := math.min(wkL, low)
+
+// Overnight: from the RTH close to the next RTH open; frozen once RTH starts.
+var float onH = na
+var float onL = na
+var bool onActive = false
+if rthEnd
+    onH := high
+    onL := low
+    onActive := true
+else if onActive and not inRth
+    onH := math.max(onH, high)
+    onL := math.min(onL, low)
+if rthStart
+    onActive := false
+
+// Opening range: the first orMin minutes of RTH.
+var float orH = na
+var float orL = na
+var int orStart = na
+var bool orDone = false
+if rthStart
+    orH := high
+    orL := low
+    orStart := time
+    orDone := false
+else if inRth and not orDone
+    if time - orStart < orMin * 60000
+        orH := math.max(orH, high)
+        orL := math.min(orL, low)
+    else
+        orDone := true
+
+vwap = ta.vwap(hlc3)
+atr = ta.atr(14)
+atrD = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+volRatio = volume / ta.sma(volume, 20)
+
+// ---- draw ----
+plot(pdh, "Prior-day high", color = color.new(color.orange, 0), style = plot.style_linebr, linewidth = 1)
+plot(pdl, "Prior-day low", color = color.new(color.orange, 0), style = plot.style_linebr, linewidth = 1)
+plot(pdc, "Prior-day close", color = color.new(color.orange, 50), style = plot.style_linebr, linewidth = 1)
+plot(onActive ? na : onH, "Overnight high", color = color.new(color.aqua, 0), style = plot.style_linebr)
+plot(onActive ? na : onL, "Overnight low", color = color.new(color.aqua, 0), style = plot.style_linebr)
+plot(wkH, "Week high", color = color.new(color.purple, 30), style = plot.style_linebr)
+plot(wkL, "Week low", color = color.new(color.purple, 30), style = plot.style_linebr)
+plot(orDone and inRth ? orH : na, "OR high", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 2)
+plot(orDone and inRth ? orL : na, "OR low", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 2)
+plot(showVwap ? vwap : na, "VWAP", color = color.new(color.white, 30))
+bgcolor(inRth and not orDone ? color.new(color.yellow, 92) : na)
+
+var table t = table.new(position.top_right, 2, 9, border_width = 1)
+fmt(float x) => na(x) ? "—" : str.tostring(x, format.mintick)
+if barstate.islast
+    table.cell(t, 0, 0, "Level", text_color = color.gray, text_size = size.small)
+    table.cell(t, 1, 0, syminfo.root, text_color = color.gray, text_size = size.small)
+    table.cell(t, 0, 1, "PDH / PDL", text_size = size.small)
+    table.cell(t, 1, 1, fmt(pdh) + " / " + fmt(pdl), text_size = size.small)
+    table.cell(t, 0, 2, "PDC", text_size = size.small)
+    table.cell(t, 1, 2, fmt(pdc), text_size = size.small)
+    table.cell(t, 0, 3, "ON H / L", text_size = size.small)
+    table.cell(t, 1, 3, fmt(onH) + " / " + fmt(onL), text_size = size.small)
+    table.cell(t, 0, 4, "Week H / L", text_size = size.small)
+    table.cell(t, 1, 4, fmt(wkH) + " / " + fmt(wkL), text_size = size.small)
+    table.cell(t, 0, 5, "OR H / L", text_size = size.small)
+    table.cell(t, 1, 5, orDone ? fmt(orH) + " / " + fmt(orL) : "forming", text_size = size.small)
+    table.cell(t, 0, 6, "VWAP", text_size = size.small)
+    table.cell(t, 1, 6, fmt(vwap), text_size = size.small)
+    table.cell(t, 0, 7, "ATR(14) " + timeframe.period + "m", text_size = size.small)
+    table.cell(t, 1, 7, fmt(atr), text_size = size.small)
+    table.cell(t, 0, 8, "Vol ÷ 20-bar avg", text_size = size.small)
+    table.cell(t, 1, 8, na(volRatio) ? "—" : str.tostring(volRatio, "#.0") + "×", text_size = size.small)
+
+// ---- the tape: one message per level break at the 5-minute close, inside RTH, with a cooldown per kind ----
+var kinds = array.from("or_up", "or_down", "pdh_up", "pdl_down", "onh_up", "onl_down", "wh_up", "wl_down", "vwap_up", "vwap_down")
+var lastFired = array.new_int(10, -1000)
+num(float x) => na(x) ? "null" : str.tostring(x)
+post(string kind, float level) =>
+    i = array.indexof(kinds, kind)
+    if bar_index - array.get(lastFired, i) >= cooldown
+        array.set(lastFired, i, bar_index)
+        alert('{"secret":"' + secret + '","room":"trading","symbol":"' + syminfo.root + '","kind":"' + kind + '","price":' + str.tostring(close) + ',"level":' + num(level) + ',"atr":' + num(atr) + ',"volRatio":' + num(volRatio) + ',"bar":' + str.tostring(time) + ',"tf":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+crossedUp(float lvl) => not na(lvl) and close > lvl and close[1] <= lvl
+crossedDn(float lvl) => not na(lvl) and close < lvl and close[1] >= lvl
+
+// The whole level set, once per confirmed bar, 24/5 — the room uses it as the card while it is fresh,
+// so the admin page shows these exact numbers instead of a delayed Yahoo copy.
+if barstate.isconfirmed and sendAlerts
+    alert('{"secret":"' + secret + '","room":"trading","kind":"levels","symbol":"' + syminfo.root + '","price":' + str.tostring(close) + ',"pdh":' + num(pdh) + ',"pdl":' + num(pdl) + ',"pdc":' + num(pdc) + ',"onh":' + num(onActive ? na : onH) + ',"onl":' + num(onActive ? na : onL) + ',"wh":' + num(wkH) + ',"wl":' + num(wkL) + ',"orh":' + num(orH) + ',"orl":' + num(orL) + ',"orDone":' + (orDone ? "true" : "false") + ',"vwap":' + num(vwap) + ',"atr":' + num(atr) + ',"atrD":' + num(atrD) + ',"bar":' + str.tostring(time) + ',"tf":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and inRth and sendAlerts
+    if orDone
+        if crossedUp(orH)
+            post("or_up", orH)
+        if crossedDn(orL)
+            post("or_down", orL)
+    if crossedUp(pdh)
+        post("pdh_up", pdh)
+    if crossedDn(pdl)
+        post("pdl_down", pdl)
+    if not onActive
+        if crossedUp(onH)
+            post("onh_up", onH)
+        if crossedDn(onL)
+            post("onl_down", onL)
+    if crossedUp(wkHprev)
+        post("wh_up", wkHprev)
+    if crossedDn(wkLprev)
+        post("wl_down", wkLprev)
+    if showVwap
+        if crossedUp(vwap)
+            post("vwap_up", vwap)
+        if crossedDn(vwap)
+            post("vwap_down", vwap)

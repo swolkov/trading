@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/futures-desk-watch",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/trading-room",
+      "schedule": "*/5 11-22 * * 1-5"
     }
   ]
 }
