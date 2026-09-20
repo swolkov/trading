@@ -10,6 +10,7 @@ import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
 export const dynamic = "force-dynamic";
 
 const EMPTY = {
+  room: { lastTickAt: null as string | null, lastError: null as string | null, liveOk: false, liveAt: null as string | null, levelsAt: null as string | null, breakAt: null as string | null, ledgerAt: null as string | null },
   futures: futuresHealth({}),
   heartbeats: { tradingViewAlert: null as string | null },
   paper: {
@@ -40,7 +41,20 @@ export async function GET() {
       readLiveSnapshot().catch(() => null),
     ]);
 
+    // The Trading Room (his live account, read-only): the tick, the live read, the chart's last level post, the last break.
+    const j = (k: string) => { try { return JSON.parse(c[k] ?? "null"); } catch { return null; } };
+    const roomState = j("trading_room_state") as { lastTickAt?: string; lastError?: string } | null;
+    const roomLive = j("trading_room_live") as { at?: string; ok?: boolean } | null;
+    const roomLevels = j("trading_room_chart_levels") as Record<string, { receivedAt?: string }> | null;
+    const roomFeed = j("trading_room_feed") as { receivedAt?: string }[] | null;
+    const levelsAt = roomLevels ? Object.values(roomLevels).map((x) => x?.receivedAt ?? "").filter(Boolean).sort().pop() ?? null : null;
+    const room = {
+      lastTickAt: roomState?.lastTickAt ?? null, lastError: roomState?.lastError ?? null,
+      liveOk: roomLive?.ok === true, liveAt: roomLive?.at ?? null, levelsAt, breakAt: roomFeed?.[0]?.receivedAt ?? null, ledgerAt: null as string | null,
+    };
+
     return Response.json({
+      room,
       futures: futuresHealth(c, Date.now(), Boolean(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET)),
       heartbeats: {
         tradingViewAlert: c["tradingview_last_alert"] || null,

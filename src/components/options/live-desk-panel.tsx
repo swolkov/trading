@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
+import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Chip } from "@/components/ui/chip";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { ago, money, when } from "@/lib/format";
@@ -14,7 +15,7 @@ import { ago, money, when } from "@/lib/format";
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 interface Intent { refId: string; action: string; state: string; orderId: string | null; updatedAt: string }
-interface Owned { id: string; kind: string; underlying: string; expiry: string; entryPrice: number; width: number; cluster?: string | null; legs?: { quantity: number }[] }
+interface Owned { id: string; kind: string; underlying: string; expiry: string; entryPrice: number; width: number; cluster?: string | null; legs?: { quantity: number }[]; openedAtMs?: number; peakNet?: number; invalidationPx?: number | null; invalidationTicks?: number }
 interface Ladder { rungs: Record<string, { usd: number; pct: number }>; promoted: boolean; ceilingOnArm: number; reserveMaxFrac: number; ddTierPcts: number[]; ddTierMults: number[]; slotUnlockClosedTrades: number }
 interface DdTier { tier: number; mult: number; label: string; ddPct: number; ddUsd?: number; haltAtUsd?: number; at?: string }
 interface IndexView { day: string | null; close: number | null; sma20: number | null; dayPct: number | null; regime: "above" | "below" | "unknown" }
@@ -22,6 +23,7 @@ interface MarketView { spy: IndexView; qqq: IndexView; vix: number | null; veto:
 const pct = (x: number | null | "unknown" | "stale" | undefined) => (typeof x === "number" ? `${x >= 0 ? "+" : ""}${x}%` : x === "stale" ? "stale" : "unknown");
 const marketLine = (m: MarketView) => `SPY ${m.spy.regime} 20d ${pct(m.spy.dayPct)} · QQQ ${m.qqq.regime} 20d ${pct(m.qqq.dayPct)} · VIX ${m.vix ?? "unknown"} · SPY intraday ${pct(m.spyIntradayPct)} · veto ${m.veto}`;
 interface Data {
+  at?: string;
   armed: boolean; verified: boolean; maxLossUsd: number | null; feeReserveUsd: number | null;
   ladder: Ladder; ddTier: DdTier | null;
   guardian: { at: string | null; fresh: boolean };
@@ -46,6 +48,7 @@ export function OptionsLiveDeskPanel() {
     catch (e) { setMsg(String(e)); } finally { setBusy(false); setConfirm(""); }
   };
   if (!data) return <Panel><PanelHeader title="Live desk" /><PanelBody><Empty>Loading…</Empty></PanelBody></Panel>;
+  const nowMs = Date.parse(data.at ?? "") || 0;   // the server's clock at read time, so render stays pure
   const canTrade = data.armed && data.verified;
   return (
     <>
@@ -92,7 +95,28 @@ export function OptionsLiveDeskPanel() {
         <PanelHeader title="Desk positions and intents" aside={<span>{data.owned.length} owned · {data.intents.filter((i) => i.state !== "settled").length} unsettled intent(s)</span>} />
         <PanelBody className="space-y-3">
           {data.owned.length === 0 ? <Empty>The desk owns no position.</Empty> : (
-            <ul className="text-[13px]">{data.owned.map((o) => <li key={o.id}>{o.kind} {o.underlying} {o.expiry}{o.legs?.[0]?.quantity ? ` × ${o.legs[0].quantity}` : ""} · entry {o.entryPrice.toFixed(2)}{o.width ? ` · ${o.width}-wide` : ""} · cluster {o.cluster ?? "none"}</li>)}</ul>
+            <DataTable dense>
+              <thead><tr><Th>Name</Th><Th>Structure</Th><Th num>Qty</Th><Th num>Entry</Th><Th num>Max loss</Th><Th num>Peak</Th><Th num>Stop at</Th><Th num>Invalidates</Th><Th num>DTE</Th><Th>Cluster</Th><Th>Opened</Th></tr></thead>
+              <tbody>{data.owned.map((o) => {
+                const qty = o.legs?.[0]?.quantity ?? 1;
+                const dte = Math.max(0, Math.round((Date.parse(`${o.expiry}T20:00:00Z`) - nowMs) / 86_400_000));
+                return (
+                  <Row key={o.id}>
+                    <Td strong>{o.underlying}</Td>
+                    <Td muted>{o.kind.replace(/_/g, " ")}{o.width ? ` · ${o.width}-wide` : ""}</Td>
+                    <Td num>{qty}</Td>
+                    <Td num>{o.entryPrice.toFixed(2)}</Td>
+                    <Td num className="text-down">{money(o.entryPrice * 100 * qty)}</Td>
+                    <Td num muted>{o.peakNet != null ? o.peakNet.toFixed(2) : "—"}</Td>
+                    <Td num muted title="the guardian sells at half the premium">{(o.entryPrice / 2).toFixed(2)}</Td>
+                    <Td num muted title={o.invalidationTicks ? `${o.invalidationTicks} tick(s) beyond the level` : "the underlying back inside the range it broke, two ticks in a row"}>{o.invalidationPx != null ? o.invalidationPx.toFixed(2) : "—"}</Td>
+                    <Td num className={dte <= 7 ? "text-warn" : undefined}>{dte}</Td>
+                    <Td muted>{o.cluster ?? "—"}</Td>
+                    <Td muted>{o.openedAtMs ? ago(new Date(o.openedAtMs).toISOString()) : "—"}</Td>
+                  </Row>
+                );
+              })}</tbody>
+            </DataTable>
           )}
           {data.intents.length > 0 && (
             <ul className="space-y-1 text-xs">{data.intents.map((i) => (

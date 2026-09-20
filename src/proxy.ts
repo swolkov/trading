@@ -42,6 +42,14 @@ export default async function proxy(request: NextRequest, event: NextFetchEvent)
     return NextResponse.next();
   }
 
+  // LOCAL DESIGN PREVIEW ONLY: `ADMIN_LOCAL_PREVIEW=true npm run dev` lets the pages render on localhost
+  // without a Clerk session so the UI can be looked at against real data. Two gates, both required: the
+  // env var (never set on Vercel) and a loopback host. Every other path still fails closed below.
+  if (process.env.ADMIN_LOCAL_PREVIEW === "true" && process.env.VERCEL !== "1"
+    && (request.nextUrl.hostname === "localhost" || request.nextUrl.hostname === "127.0.0.1")) {
+    return NextResponse.next();
+  }
+
   // Private routes fail closed. Missing or broken auth must never expose trading controls.
   if (
     !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY

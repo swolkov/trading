@@ -7,6 +7,7 @@ import type { FuturesHealth } from "@/lib/futures-health";
 import { ago } from "@/lib/format";
 
 interface CommandData {
+  room?: { lastTickAt: string | null; lastError: string | null; liveOk: boolean; liveAt: string | null; levelsAt: string | null; breakAt: string | null };
   futures: FuturesHealth;
   heartbeats: { tradingViewAlert: string | null };
   paper: {
@@ -77,8 +78,24 @@ export default function SystemHealthPage() {
     <div className="space-y-5">
       <PageHeader
         title="System Health"
-        sub="Robinhood options and the futures demo desk. Refreshes every 30s"
+        sub="The Trading Room (your live account, read-only), Robinhood options and the futures demo desk. Refreshes every 30s"
       />
+
+      <Panel>
+        <PanelHeader title="Trading Room · your live Tradovate account" aside={<Chip tone={data.room?.liveOk ? "green" : "red"} dot={data.room?.liveOk}>{data.room?.liveOk ? "Account readable" : "Account not read"}</Chip>} />
+        <PanelBody className="divide-y divide-border">
+          <HealthRow label="Room tick" sub="Every 5 minutes, Sunday evening through Friday: card, live read, ledger, journal. Red after two missed ticks."
+            chip={<Chip tone={ageTone(data.room?.lastTickAt ?? null, 12, 30)}>{data.room?.lastTickAt ? ago(data.room.lastTickAt) : "never"}</Chip>}>
+            {data.room?.lastError && <span className="text-down">last error: {data.room.lastError}</span>}
+          </HealthRow>
+          <HealthRow label="Live account read" sub="Balance, positions and fills from Tradovate. The room has no order path."
+            chip={<Chip tone={data.room?.liveOk ? ageTone(data.room.liveAt, 12, 30) : "red"}>{data.room?.liveAt ? ago(data.room.liveAt) : "never"}</Chip>} />
+          <HealthRow label="Chart levels from TradingView" sub="The Pine study posts its level set every confirmed 5-minute bar inside RTH. Quiet outside RTH and on weekends is normal."
+            chip={<Chip tone={data.room?.levelsAt ? ageTone(data.room.levelsAt, 15, 60 * 24 * 3) : "grey"}>{data.room?.levelsAt ? ago(data.room.levelsAt) : "never"}</Chip>} />
+          <HealthRow label="Last level break on the tape" sub="Posted by the chart when price closes through a level inside RTH."
+            chip={<Chip tone={data.room?.breakAt ? "green" : "grey"}>{data.room?.breakAt ? ago(data.room.breakAt) : "none yet"}</Chip>} />
+        </PanelBody>
+      </Panel>
 
       <Panel>
         <PanelHeader title="Heartbeats" />
