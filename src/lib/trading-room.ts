@@ -186,13 +186,21 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
   try { const j = await foldJournal(nowMs); notes.push(`journal: ${j.trips} trips (${j.open} open) · ${j.updated} written`); }
   catch (e) { notes.push(`journal failed: ${String(e).slice(0, 160)}`); }
   const settings = parseSettings(await cfg(SETTINGS_KEY));
-  // The morning card: once per weekday, at or after CARD_POST_ET, before the RTH open.
-  if (card && now.weekday >= 1 && now.weekday <= 5 && now.hhmm >= CARD_POST_ET && now.hourFrac < 9.5 && state.cardPostedDay !== now.dayKey) {
+  // The morning card: once per weekday, at or after CARD_POST_ET, before the RTH open. And the SUNDAY card at 17:40 ET,
+  // twenty minutes before the week reopens: the same levels (Friday's close is the prior day), with the reopen's own
+  // numbers on top — measured on ES/NQ/GC 1-minute data 2024-26 (scratchpad sunday.py, Sep 20 2026).
+  const sundayCard = now.weekday === 0 && now.hhmm >= "17:40" && now.hourFrac < 18;
+  if (card && ((now.weekday >= 1 && now.weekday <= 5 && now.hhmm >= CARD_POST_ET && now.hourFrac < 9.5) || sundayCard) && state.cardPostedDay !== now.dayKey) {
     const sizing: Record<string, SizingLine | null> = {};
     for (const sym of ROOM_SYMBOLS) sizing[sym] = card.levels[sym] ? sizingFor(INSTRUMENTS[sym], card.levels[sym], settings) : null;
-    await sendNotification(cardText(card, sizing, live), LANE).catch((e) => notes.push(`slack: ${String(e).slice(0, 100)}`));
+    const text = sundayCard
+      ? `🌙 Sunday reopen at 18:00 ET — the map, not a forecast. Nobody knows the direction; the weekend's news sets it in the first 30 minutes.\n` +
+        `Typical first half hour (2024-26): ES 13 pts (1 in 4 nights 20+) · NQ 67 pts (1 in 4 nights 92+) · gold ~20 pts at today's price. After 18:30 it goes quiet: ES ~5, NQ ~30, gold ~10.\n` +
+        cardText(card, sizing, live)
+      : cardText(card, sizing, live);
+    await sendNotification(text, LANE).catch((e) => notes.push(`slack: ${String(e).slice(0, 100)}`));
     state.cardPostedDay = now.dayKey;
-    notes.push("morning card posted");
+    notes.push(sundayCard ? "sunday card posted" : "morning card posted");
   }
   // Heads-up 15 minutes before a tier-1 or tier-2 print, once per event.
   if (card) {
