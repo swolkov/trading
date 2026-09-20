@@ -64,7 +64,7 @@ function LiveFuturesOrders() {
         Your real account, read-only. The site never places, changes or cancels an order here. Levels, the card and the scoreboard are on <Link href="/trade" className="text-primary hover:underline">Trading Room</Link>.
       </Note>
       <LiveAccountPanel live={room?.live ?? null} />
-      {data.ledger && <LedgerPanel byDay={data.ledger.byDay} />}
+      {data.ledger && <LedgerPanel byDay={data.ledger.byDay} trades={data.ledger.trades} />}
       <JournalTable rows={data.rows} onSaved={() => mutate()} />
     </div>
   );
