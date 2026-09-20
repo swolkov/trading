@@ -1,6 +1,6 @@
 import { roomTick } from "@/lib/trading-room";
 
-// THE TRADING ROOM TICK — every 5 minutes on weekdays (vercel.json): rebuild the level card from
+// THE TRADING ROOM TICK — every 5 minutes, Sunday evening through Friday (vercel.json): rebuild the level card from
 // Yahoo, read Spencer's LIVE Tradovate account (read-only: balance, positions, the day's fills),
 // post the morning card to Slack at 08:55 ET, and the 15-minute heads-up before a scheduled print.
 // It never places an order — there is no code path from this route to any order endpoint.
