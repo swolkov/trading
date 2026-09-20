@@ -7,6 +7,8 @@
 // opening-range breakout rule survives (Research/orb-study-sep19.md). The tape exists so the
 // journal can later say which breaks Spencer took, and whether they paid.
 //
+// The permission panel (bottom right) is five checks - window, level, volume, VWAP side, day range - and a
+// verdict: "OK to look" only when the first three are green. It is not a signal and never names a direction.
 // Setup, once: paste the webhook secret into the study's settings (the session picks itself: gold
 // 08:20-13:30, indices 09:30-16:00); then ONE alert per symbol -> condition "Any alert() function
 // call" -> webhook URL https://trading-eta-snowy.vercel.app/api/webhook/trading-room, message left
@@ -114,6 +116,51 @@ if barstate.islast
     table.cell(t, 1, 7, fmt(atr), text_size = size.small, text_color = chart.fg_color)
     table.cell(t, 0, 8, "Vol / 20-bar avg", text_size = size.small, text_color = chart.fg_color)
     table.cell(t, 1, 8, na(volRatio) ? "-" : str.tostring(volRatio, "#.0") + "x", text_size = size.small, text_color = chart.fg_color)
+
+// ---- the permission panel (Sep 20 2026): five checks, never a signal. Green means this is a moment where a
+// trade has a definable stop (near a level), a market that is actually moving (volume), and the time of day
+// that pays in our data (the first hour); red means sit on hands. Direction is not judged - VWAP only says
+// which side the day's average buyer allows. On 15 years of data no entry indicator survives costs; what
+// decides the month is how often the button gets pressed. This panel exists to make that number smaller.
+var float rthH = na
+var float rthL = na
+if rthStart
+    rthH := high
+    rthL := low
+else if inRth
+    rthH := math.max(rthH, high)
+    rthL := math.min(rthL, low)
+// The panel reads the 5-MINUTE ATR and volume whatever timeframe the chart is on (a 1-minute chart would
+// otherwise make every stop look tiny and every bar look quiet).
+[atr5, vr5] = request.security(syminfo.tickerid, "5", [ta.atr(14), volRatio[1]])
+dist(float x) => na(x) ? 1e10 : math.abs(close - x)
+nearest = math.min(dist(pdh), dist(pdl), dist(pdc), dist(onActive ? na : onH), dist(onActive ? na : onL), dist(wkH), dist(wkL), dist(orDone ? orH : na), dist(orDone ? orL : na), dist(vwap))
+hNow = hour(timenow, tz) + minute(timenow, tz) / 60.0
+dow = dayofweek(timenow, tz)
+weekday = dow >= dayofweek.monday and dow <= dayofweek.friday
+openH = isGold ? 8.0 + 20.0 / 60.0 : 9.5
+winState = not weekday ? 0 : hNow >= openH and hNow < 10.5 ? 2 : hNow >= 10.5 and hNow < 11.5 ? 1 : 0
+lvlState = na(atr5) or atr5 <= 0 ? 0 : nearest <= 0.5 * atr5 ? 2 : nearest <= 1.0 * atr5 ? 1 : 0
+vr = vr5
+volState = na(vr) ? 0 : vr >= 1.5 ? 2 : vr >= 0.8 ? 1 : 0
+rangeRatio = inRth and not na(atrD) and atrD > 0 ? (rthH - rthL) / atrD : na
+rngState = na(rangeRatio) ? 0 : rangeRatio < 0.8 ? 2 : rangeRatio <= 1.2 ? 1 : 0
+col(int s) => s == 2 ? color.new(color.green, 60) : s == 1 ? color.new(color.orange, 60) : color.new(color.red, 60)
+okToLook = winState == 2 and lvlState == 2 and volState == 2
+var table p = table.new(position.bottom_right, 2, 6, bgcolor = chart.bg_color, border_width = 1)
+if barstate.islast
+    table.cell(p, 0, 0, "Window", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 0, winState == 2 ? "open window" : winState == 1 ? "late morning" : weekday ? "outside the window" : "weekend", text_size = size.small, text_color = chart.fg_color, bgcolor = col(winState))
+    table.cell(p, 0, 1, "Level", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 1, na(atr5) or atr5 <= 0 ? "-" : str.tostring(nearest / atr5, "0.0") + " x 5m ATR away", text_size = size.small, text_color = chart.fg_color, bgcolor = col(lvlState))
+    table.cell(p, 0, 2, "Volume", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 2, na(vr) ? "-" : "last 5m bar " + str.tostring(vr, "0.0") + "x avg", text_size = size.small, text_color = chart.fg_color, bgcolor = col(volState))
+    table.cell(p, 0, 3, "VWAP side", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 3, na(vwap) ? "-" : close > vwap ? "longs only" : close < vwap ? "shorts only" : "at VWAP", text_size = size.small, text_color = chart.fg_color, bgcolor = color.new(color.blue, 70))
+    table.cell(p, 0, 4, "Day range", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 4, na(rangeRatio) ? "-" : str.tostring(rangeRatio, "0.0") + "x daily ATR", text_size = size.small, text_color = chart.fg_color, bgcolor = col(rngState))
+    table.cell(p, 0, 5, "Verdict", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 5, okToLook ? "OK to look" : "sit on hands", text_size = size.small, text_color = chart.fg_color, bgcolor = okToLook ? color.new(color.green, 40) : color.new(color.red, 40))
 
 // ---- the tape: one message per level break at the 5-minute close, inside RTH, with a cooldown per kind ----
 var kinds = array.from("or_up", "or_down", "pdh_up", "pdl_down", "onh_up", "onl_down", "wh_up", "wl_down", "vwap_up", "vwap_down")
