@@ -7,6 +7,7 @@ import { ago } from "@/lib/format";
 import { ROOM_SYMBOLS, etParts, type FeedEvent, type LevelSet, type RoomEvent, type RoomSettings, type SizingLine } from "@/lib/trading-room-rules";
 import { EventsPanel, HonestyLine, InstrumentCard, LiveAccountPanel, TapePanel, type LiveView } from "@/components/trading-room/room-panels";
 import { SettingsPanel, SetupPanel } from "@/components/trading-room/room-setup";
+import { JournalSection } from "@/components/trading-room/journal-panels";
 
 // THE TRADING ROOM — Spencer trades MES / MNQ / MGC by hand on his live Tradovate account; this page
 // shows him what the chart shows (the level set), what his own rule allows (size), what is on the
@@ -67,6 +68,7 @@ export default function TradingRoomPage() {
         <TapePanel feed={data.feed} />
       </div>
 
+      <JournalSection />
       <LiveAccountPanel live={data.live} />
       <SetupPanel webhookUrl={webhookUrl} />
     </div>

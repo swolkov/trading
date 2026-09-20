@@ -815,6 +815,30 @@ export async function getOpenOrders(modeOverride?: TradingMode): Promise<{ id: n
     .map((o) => ({ ...o, orderStatus: o.ordStatus }));
 }
 
+// Stop orders with their prices — READ ONLY. /order/list carries the order's status and side; its
+// stop price lives on the order VERSION (/orderVersion/list), joined by orderId. The Trading Room's
+// journal uses this to learn the stop Spencer actually placed on a position (never to place one).
+export interface TradovateStopOrder { orderId: number; contractId: number; action: string; ordStatus: string; orderType: string; stopPrice: number | null; timestamp: string }
+export async function getTradovateStopOrders(modeOverride?: TradingMode): Promise<TradovateStopOrder[]> {
+  try {
+    const mode = await resolveMode(modeOverride);
+    const [orders, versions] = await Promise.all([
+      tvFetch("/order/list", undefined, mode) as Promise<{ id: number; contractId: number; action: string; ordStatus: string; timestamp: string }[]>,
+      tvFetch("/orderVersion/list", undefined, mode) as Promise<{ id: number; orderId: number; orderType: string; stopPrice?: number; price?: number }[]>,
+    ]);
+    if (!Array.isArray(orders) || !Array.isArray(versions)) return [];
+    const latest = new Map<number, { orderType: string; stopPrice?: number }>();
+    for (const v of [...versions].sort((a, b) => a.id - b.id)) latest.set(v.orderId, { orderType: v.orderType, stopPrice: v.stopPrice });
+    return orders.flatMap((o) => {
+      const v = latest.get(o.id);
+      if (!v || !/stop/i.test(v.orderType)) return [];
+      return [{ orderId: o.id, contractId: o.contractId, action: o.action, ordStatus: o.ordStatus, orderType: v.orderType, stopPrice: typeof v.stopPrice === "number" ? v.stopPrice : null, timestamp: o.timestamp }];
+    });
+  } catch {
+    return [];
+  }
+}
+
 // Get fill history from Tradovate (actual executed trades)
 export interface TradovateFill {
   id: number;

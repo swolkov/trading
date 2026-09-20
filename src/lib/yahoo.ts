@@ -33,12 +33,14 @@ export async function getHistoricalBars(
 
 export async function getIntradayBars(
   symbol: string,
-  interval: "5m" | "15m" | "1h" = "5m",
-  range: "1d" | "5d" = "1d"
+  interval: "1m" | "5m" | "15m" | "1h" = "5m",
+  range: "1d" | "5d" | "7d" = "1d"
 ): Promise<{ t: number; o: number; h: number; l: number; c: number; v: number }[]> {
   try {
+    // Yahoo serves 1-minute bars for the last 7 days only; the Trading Room journal reads them for MFE/MAE.
+    const days = range === "1d" ? 1 : range === "5d" ? 5 : 7;
     const result = await yahooFinance.chart(symbol, {
-      period1: range === "1d" ? new Date(Date.now() - 24 * 60 * 60 * 1000) : new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+      period1: new Date(Date.now() - days * 24 * 60 * 60 * 1000),
       period2: new Date(),
       interval,
     });
