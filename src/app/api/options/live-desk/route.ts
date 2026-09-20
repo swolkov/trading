@@ -44,6 +44,7 @@ async function view() {
   } catch { /* tables appear on the desk's first run */ }
   const promoted = c[PROMOTED_KEY] === "true";
   return {
+    at: new Date().toISOString(),
     armed: c.options_live_armed === "true",
     verified: c.options_live_integration_verified === "true",
     maxLossUsd: parseOptionsMaxLoss(c[OPTIONS_MAX_LOSS_KEY]),

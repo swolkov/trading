@@ -26,6 +26,7 @@ interface RoomView {
   card: { at: string; events: { name: string; atMs: number; tier: number }[] } | null;
   settings: { contracts: number; dailyLossUsd: number | null };
 }
+interface DeskView { owned: { underlying: string; kind: string; entryPrice: number; legs?: { quantity: number }[] }[]; state?: { slots?: number; candidate?: string; at?: string } | null; ladder: { reserveMaxFrac: number }; guardian: { at: string | null; fresh: boolean } }
 interface LedgerData { ledger?: { byDay: { day: string; trades: number; netUsd: number; cumNetUsd: number }[] } }
 interface FuturesDesk {
   enabled: boolean; disabledReason: string | null; entriesToday: number;
@@ -47,6 +48,8 @@ export default function DashboardPage() {
   // The live account he trades by hand: read by the Trading Room every 5 minutes, never written.
   const { data: room } = useSWR<RoomView>("/api/trade", fetcher, { refreshInterval: 60_000 });
   const { data: jr } = useSWR<LedgerData>("/api/trade/journal", fetcher, { refreshInterval: 120_000 });
+  // The options desk's own state (what it holds, its slots) — live, unlike the after-close account snapshot.
+  const { data: desk } = useSWR<DeskView>("/api/options/live-desk", fetcher, { refreshInterval: 60_000 });
   // The futures desk: Tradovate DEMO, paper by design, sized off a fixed $50k basis.
   const { data: fut } = useSWR<FuturesDesk>("/api/futures/desk", fetcher, { refreshInterval: 120_000 });
 
@@ -91,7 +94,7 @@ export default function DashboardPage() {
             <Stat label="Today" value={live ? pnl0(live.realizedPnl ?? 0) : "—"} valueCls={tone(live?.realizedPnl ?? 0)} sub={live?.unrealizedPnl ? `open ${pnl0(live.unrealizedPnl)}` : lossLine != null ? `loss line ${money(lossLine)}` : "no daily loss line set"} />
             <Stat label="Open" value={live ? (live.positions.length ? live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos}`).join(" · ") : "flat") : "—"} sub={live ? `${live.fillsToday} fills seen today` : undefined} />
             <Stat label="Last trading day" value={lastDay ? pnl0(lastDay.netUsd) : "—"} valueCls={tone(lastDay?.netUsd ?? 0)} sub={lastDay ? `${lastDay.day} · ${lastDay.trades} paired trades · running ${pnl0(lastDay.cumNetUsd)}` : "no ledger yet"} />
-            <Stat label="Next print" value={nextPrint ? nextPrint.name : "none scheduled"} sub={nextPrint ? new Date(nextPrint.atMs).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", hour: "numeric", minute: "2-digit" }) + " ET" + (nextPrint.tier === 1 ? " · tier 1" : "") : undefined} />
+            <Stat label="Next print" value={nextPrint ? new Date(nextPrint.atMs).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", hour: "numeric", minute: "2-digit" }) : "none"} sub={nextPrint ? `${nextPrint.name}${nextPrint.tier === 1 ? " · tier 1 · lockout ±30 min" : ""}` : "nothing scheduled this week"} />
           </div>
           <Note className="mt-3">Read-only. You trade this account yourself at {room?.settings.contracts ?? "—"} micros; the room shows levels, the tape, the ledger and the 40-trade scoreboard. Nothing on this site places, changes or cancels an order here.</Note>
         </PanelBody>
@@ -108,8 +111,8 @@ export default function DashboardPage() {
 
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
-            <Stat size="lg" label="Options positions" value={opt?.live ? String(opt.live.positions.length) : "—"} title="Open positions in the real account"
-              sub={opt?.execution?.maxLossUsd != null ? `max loss per trade ${money(opt.execution.maxLossUsd)} incl. fees · up to 3 names` : "max loss not set"} />
+            <Stat size="lg" label="Options desk" value={desk ? `${desk.owned.length} of ${desk.state?.slots ?? 3}` : "—"} title="Names the desk holds right now, against its slots"
+              sub={desk ? <>{money(desk.owned.reduce((a, o) => a + o.entryPrice * 100 * (o.legs?.[0]?.quantity ?? 1), 0))} at risk{opt?.account ? ` of ${money(desk.ladder.reserveMaxFrac * opt.account.totalValue)} allowed` : ""}{desk.owned.length ? ` · ${desk.owned.map((o) => o.underlying).join(", ")}` : ""}</> : "desk state not read"} />
           )}
         </PanelBody></Panel>
 
@@ -155,7 +158,7 @@ export default function DashboardPage() {
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Account value" value={opt?.account ? money(opt.account.totalValue) : "—"} />
             <Stat label="Buying power" value={opt?.account ? money(opt.account.buyingPower) : "—"} />
-            <Stat label="Open orders" value={opt?.live ? String(opt.live.orders.length) : "—"} />
+            <Stat label="Desk holds" value={desk ? String(desk.owned.length) : "—"} sub={desk?.state?.candidate ? `last tick: ${desk.state.candidate.slice(0, 60)}` : desk?.guardian.at ? `guardian ${ago(desk.guardian.at)}` : undefined} />
             <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="including fees · 1 contract (2 on a Strong grade that fits twice) · up to 3 names at once" />
           </div>
           <Note className="mt-3">{opt?.execution?.why ?? "Loading account status..."} {opt?.account ? `Account snapshot ${ago(opt.account.at)}.` : ""}</Note>

@@ -18,7 +18,7 @@ export function DataTable({ children, className, sticky = false, maxH, dense = f
       <table
         className={cn(
           "w-full border-collapse text-xs tabular-nums",
-          "[&_thead_th]:text-[11px] [&_thead_th]:font-medium [&_thead_th]:uppercase [&_thead_th]:tracking-wide [&_thead_th]:text-muted-foreground",
+          "[&_thead_th]:num [&_thead_th]:text-[10px] [&_thead_th]:font-medium [&_thead_th]:uppercase [&_thead_th]:tracking-[0.1em] [&_thead_th]:text-muted-foreground",
           "[&_thead_tr]:border-b [&_thead_tr]:border-border",
           "[&_tbody_tr]:border-b [&_tbody_tr]:border-border/60 [&_tbody_tr:last-child]:border-0",
           dense ? "[&_th]:py-1 [&_td]:py-1" : "[&_th]:py-2 [&_td]:py-2",
@@ -39,7 +39,7 @@ export function Th({ num = false, className, children, ...rest }: ThHTMLAttribut
 
 export function Td({ num = false, muted = false, strong = false, className, children, ...rest }: TdHTMLAttributes<HTMLTableCellElement> & { num?: boolean; muted?: boolean; strong?: boolean }) {
   return (
-    <td className={cn("whitespace-nowrap align-middle", num && "text-right", muted && "text-muted-foreground", strong && "font-semibold", className)} {...rest}>
+    <td className={cn("whitespace-nowrap align-middle", num && "num text-right text-[11.5px]", muted && "text-muted-foreground", strong && "font-semibold", className)} {...rest}>
       {children}
     </td>
   );

@@ -86,9 +86,9 @@ export default function RobinhoodLiveAccountPage() {
       <OptionPositionsTable positions={positions} at={live?.at ?? null} />
       <OptionOrdersTable orders={orders} at={live?.at ?? null} />
 
-      <OptionsResearchDesk />
       <OptionsLiveDeskPanel />
       <OptionsBriefPanel />
+      <OptionsResearchDesk />
       <OptionsScorePanel />
     </div>
   );

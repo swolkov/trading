@@ -23,8 +23,8 @@ export function Chip({ tone = "grey", children, dot = false, size = "sm", classN
     <span
       title={title}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border text-left font-semibold tabular-nums leading-tight",
-        size === "sm" ? "min-h-5 px-2 py-0.5 text-[11px]" : "min-h-6 px-2.5 py-0.5 text-xs",
+        "num inline-flex items-center gap-1.5 rounded-md border text-left font-medium uppercase leading-tight tracking-[0.06em]",
+        size === "sm" ? "min-h-5 px-1.5 py-0.5 text-[10px]" : "min-h-6 px-2 py-0.5 text-[11px]",
         TONES[tone],
         className,
       )}
