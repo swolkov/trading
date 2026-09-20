@@ -6,7 +6,8 @@ import { ago, money } from "@/lib/format";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-// Top bar: the two desks' money state at a glance. Robinhood is the REAL account (its
+// Top bar: the money at a glance. Tradovate LIVE is the account Spencer trades by hand (read by the
+// room every 5 minutes); Robinhood is the REAL options account (its
 // snapshot is pushed by the collector after each close, shown with its age); the futures
 // desk is the Tradovate DEMO, paper by design. Every read is an existing read-only endpoint
 // and each fails safe to "unknown" — nothing here can place an order. The Kraken account
@@ -14,7 +15,9 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 export function TopBar() {
   const { data: opt, isLoading } = useSWR<{ account?: { totalValue: number; optionLevel: string; at: string } | null; live?: { at: string } | null; execution?: { canPlaceOrders: boolean; armed?: boolean } }>("/api/options/live", fetcher, { refreshInterval: 120000 });
   const { data: fut } = useSWR<{ enabled?: boolean; broker?: { netLiq: number } | null; open?: unknown[]; error?: string }>("/api/futures/desk", fetcher, { refreshInterval: 120000 });
+  const { data: room } = useSWR<{ live?: { ok: boolean; netLiq: number | null; realizedPnl: number | null; positions: { contract: string; netPos: number }[] } | null }>("/api/trade", fetcher, { refreshInterval: 60000 });
   const optionsArmed = Boolean(opt?.execution?.canPlaceOrders);
+  const live = room?.live?.ok ? room.live : null;
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-sidebar pl-14 pr-4 md:px-5">
@@ -26,6 +29,11 @@ export function TopBar() {
           </>
         ) : (
           <>
+            <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="Your live Tradovate account — the one you trade by hand. Read-only; nothing here places orders.">
+              <span className="text-[11px] uppercase tracking-wide text-down/90">Tradovate live</span>
+              <span className="text-[13px] font-semibold tabular-nums">{live?.netLiq != null ? money(live.netLiq) : "—"}</span>
+              {live && <span className="text-[11px] text-muted-foreground">{live.positions.length ? live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos}`).join(" · ") : "flat"}{live.realizedPnl ? ` · today ${live.realizedPnl > 0 ? "+" : "−"}$${Math.abs(Math.round(live.realizedPnl))}` : ""}</span>}
+            </div>
             <div className="flex items-baseline gap-1.5 whitespace-nowrap" title="Robinhood options account, as the desk session last saw it. This is the real-money account.">
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Robinhood</span>
               <span className="text-[13px] font-semibold tabular-nums">{opt?.account ? money(opt.account.totalValue) : "—"}</span>

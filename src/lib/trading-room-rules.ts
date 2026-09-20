@@ -217,46 +217,41 @@ export function levelsFromChart(spec: InstrumentSpec, cl: ChartLevels, nowMs: nu
 }
 
 // ---- sizing ------------------------------------------------------------------------------------
+// Spencer sets his own size (he trades 20+ micros by hand). The room does not size him; it turns HIS
+// number into dollars per point and dollars at each stop width, so the card reads as fact, not advice.
 export interface RoomSettings {
-  accountUsd: number | null;   // null = use the live account's net liquidation
-  riskPct: number;             // per trade, of the account
-  dailyLossUsd: number | null; // null = 2 × the per-trade risk
+  contracts: number;           // what he trades, per market
+  dailyLossUsd: number | null; // his own line in the sand; null = not set (no default is invented)
 }
-export const DEFAULT_SETTINGS: RoomSettings = { accountUsd: null, riskPct: 1, dailyLossUsd: null };
+export const DEFAULT_SETTINGS: RoomSettings = { contracts: 20, dailyLossUsd: null };
 export function parseSettings(raw: string | null): RoomSettings {
   if (!raw) return DEFAULT_SETTINGS;
   try {
     const o = JSON.parse(raw) as Partial<RoomSettings>;
     const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : null);
-    return { accountUsd: num(o.accountUsd), riskPct: Math.min(5, Math.max(0.1, num(o.riskPct) ?? 1)), dailyLossUsd: num(o.dailyLossUsd) };
+    return { contracts: Math.min(500, Math.max(1, Math.round(num(o.contracts) ?? DEFAULT_SETTINGS.contracts))), dailyLossUsd: num(o.dailyLossUsd) };
   } catch { return DEFAULT_SETTINGS; }
 }
 
-export interface StopChoice { name: "tight" | "normal" | "wide"; stopPts: number; riskPerContract: number; contracts: number }
-export interface SizingLine { symbol: RoomSymbol; accountUsd: number; riskUsd: number; choices: StopChoice[]; twentyMicrosRiskUsd: number | null; twentyMicrosPct: number | null }
+export interface StopChoice { name: "tight" | "normal" | "wide"; stopPts: number; riskPerContract: number; riskUsd: number }
+export interface SizingLine { symbol: RoomSymbol; contracts: number; perPointUsd: number; choices: StopChoice[] }
 
 // Round to the tick and then to the tick's own decimals, so 19 × 0.1 reads 1.9, not 1.9000000000000001.
 const roundToTick = (x: number, tick: number) => { const d = Math.max(0, Math.ceil(-Math.log10(tick)) + 1); return Number((Math.round(x / tick) * tick).toFixed(d)); };
-/** Three stop widths from the level set's own volatility: tight = 1× 5m ATR, normal = 2× 5m ATR, wide = ¼ daily ATR. */
-export function stopChoices(spec: InstrumentSpec, lv: Pick<LevelSet, "atr5m" | "atrDaily">, riskUsd: number): StopChoice[] {
+/** Three stop widths from the level set's own volatility: tight = 1× 5m ATR, normal = 2× 5m ATR, wide = ¼ daily ATR — each priced at his size. */
+export function stopChoices(spec: InstrumentSpec, lv: Pick<LevelSet, "atr5m" | "atrDaily">, contracts: number): StopChoice[] {
   const defs: [StopChoice["name"], number | null][] = [["tight", lv.atr5m], ["normal", lv.atr5m != null ? lv.atr5m * 2 : null], ["wide", lv.atrDaily != null ? lv.atrDaily / 4 : null]];
   const out: StopChoice[] = [];
   for (const [name, raw] of defs) {
     if (raw == null || !(raw > 0)) continue;
     const stopPts = Math.max(spec.tick, roundToTick(raw, spec.tick));
     const riskPerContract = stopPts * spec.pointValue;
-    out.push({ name, stopPts, riskPerContract, contracts: Math.max(0, Math.floor(riskUsd / riskPerContract)) });
+    out.push({ name, stopPts, riskPerContract, riskUsd: riskPerContract * contracts });
   }
   return out;
 }
-export function sizingFor(spec: InstrumentSpec, lv: LevelSet, settings: RoomSettings, liveNetLiq: number | null): SizingLine | null {
-  const accountUsd = settings.accountUsd ?? liveNetLiq;
-  if (accountUsd == null || !(accountUsd > 0)) return null;
-  const riskUsd = accountUsd * settings.riskPct / 100;
-  const choices = stopChoices(spec, lv, riskUsd);
-  const normal = choices.find((c) => c.name === "normal") ?? null;
-  const twenty = normal ? normal.riskPerContract * 20 : null;
-  return { symbol: spec.symbol, accountUsd, riskUsd, choices, twentyMicrosRiskUsd: twenty, twentyMicrosPct: twenty != null ? twenty / accountUsd * 100 : null };
+export function sizingFor(spec: InstrumentSpec, lv: LevelSet, settings: RoomSettings): SizingLine {
+  return { symbol: spec.symbol, contracts: settings.contracts, perPointUsd: spec.pointValue * settings.contracts, choices: stopChoices(spec, lv, settings.contracts) };
 }
 
 // ---- the tape: level-break events from the chart ---------------------------------------------------

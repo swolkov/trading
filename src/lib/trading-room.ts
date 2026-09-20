@@ -147,7 +147,7 @@ export async function recordFeed(e: FeedEvent): Promise<{ duplicate: boolean }> 
 }
 
 // ---- the tick (cron, every 5 minutes on weekdays) ------------------------------------------------
-interface RoomState { cardPostedDay?: string; headsUp?: Record<string, string>; lastTickAt?: string; lastError?: string }
+interface RoomState { cardPostedDay?: string; headsUp?: Record<string, string>; lossLineDay?: string; flattenWarnDay?: string; lastTickAt?: string; lastError?: string }
 
 function cardText(card: RoomCard, sizing: Record<string, SizingLine | null>, live: LiveSnapshot): string {
   const lines: string[] = [`☀️ Trading Room · ${etParts(Date.parse(card.at)).dayKey}`];
@@ -159,8 +159,8 @@ function cardText(card: RoomCard, sizing: Record<string, SizingLine | null>, liv
     const wk = lv.week ? `week ${f(lv.week.low)}–${f(lv.week.high)}` : "";
     const a = lv.atrDaily != null ? `ATR(d) ${f(lv.atrDaily)}` : "";
     const s = sizing[sym];
-    const size = s ? `${s.choices.map((c) => `${c.name} ${c.stopPts}pt → ${c.contracts}`).join(" · ")}` : "size: set the account on /trade";
-    lines.push(`• ${sym} ${f(lv.last)} · ${pd} · ${on} · ${wk} · ${a}\n   ${s ? `$${Math.round(s.accountUsd).toLocaleString()} @ ${(s.riskUsd / s.accountUsd * 100).toFixed(1)}% = $${Math.round(s.riskUsd)}: ` : ""}${size}`);
+    const size = s ? `${s.contracts} ${sym} = $${s.perPointUsd}/pt · ${s.choices.map((c) => `${c.name} ${c.stopPts}pt = $${Math.round(c.riskUsd).toLocaleString()}`).join(" · ")}` : "";
+    lines.push(`• ${sym} ${f(lv.last)} · ${pd} · ${on} · ${wk} · ${a}\n   ${size}`);
   }
   const today = etParts(Date.parse(card.at)).dayKey;
   const ev = card.events.filter((e) => etParts(e.atMs).dayKey === today);
@@ -188,7 +188,7 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
   // The morning card: once per weekday, at or after CARD_POST_ET, before the RTH open.
   if (card && now.weekday >= 1 && now.weekday <= 5 && now.hhmm >= CARD_POST_ET && now.hourFrac < 9.5 && state.cardPostedDay !== now.dayKey) {
     const sizing: Record<string, SizingLine | null> = {};
-    for (const sym of ROOM_SYMBOLS) sizing[sym] = card.levels[sym] ? sizingFor(INSTRUMENTS[sym], card.levels[sym], settings, live.netLiq) : null;
+    for (const sym of ROOM_SYMBOLS) sizing[sym] = card.levels[sym] ? sizingFor(INSTRUMENTS[sym], card.levels[sym], settings) : null;
     await sendNotification(cardText(card, sizing, live), LANE).catch((e) => notes.push(`slack: ${String(e).slice(0, 100)}`));
     state.cardPostedDay = now.dayKey;
     notes.push("morning card posted");
@@ -207,6 +207,18 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
       }
     }
     for (const k of Object.keys(state.headsUp)) if (nowMs - Date.parse(state.headsUp[k]) > 3 * 24 * 3_600_000) delete state.headsUp[k];
+  }
+  // His own daily loss line: one message the moment the day's realized loss crosses it. His number, his call — the room only says it.
+  if (live.ok && settings.dailyLossUsd != null && live.realizedPnl != null && -live.realizedPnl >= settings.dailyLossUsd && state.lossLineDay !== now.dayKey) {
+    await sendNotification(`🛑 Past your daily loss line: realized ${Math.round(live.realizedPnl)} today vs. your line of −$${Math.round(settings.dailyLossUsd)}${live.positions.length ? ` · still open: ${live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos}`).join(", ")}` : ""}`, LANE).catch(() => {});
+    state.lossLineDay = now.dayKey;
+    notes.push("loss line crossed");
+  }
+  // The broker flattens intraday positions at ~4:45 PM ET and charges a liquidation fee. One nudge at 4:30 if anything is open.
+  if (live.ok && live.positions.length && now.weekday >= 1 && now.weekday <= 5 && now.hourFrac >= 16.5 && now.hourFrac < 16.75 && state.flattenWarnDay !== now.dayKey) {
+    await sendNotification(`⏳ 4:30 PM ET — still open: ${live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos}`).join(", ")}. Tradovate auto-flattens intraday positions around 4:45 PM and charges a $50 liquidation fee (it did on Sep 18).`, LANE).catch(() => {});
+    state.flattenWarnDay = now.dayKey;
+    notes.push("flatten warning");
   }
   state.lastTickAt = new Date(nowMs).toISOString();
   await setKey(STATE_KEY, JSON.stringify(state));
@@ -229,7 +241,7 @@ export async function roomView(): Promise<RoomView> {
   const card = parseJson<RoomCard | null>(cardRaw, null);
   const live = parseJson<LiveSnapshot | null>(liveRaw, null);
   const sizing: Record<string, SizingLine | null> = {};
-  for (const sym of ROOM_SYMBOLS) sizing[sym] = card?.levels[sym] ? sizingFor(INSTRUMENTS[sym], card.levels[sym], settings, live?.netLiq ?? null) : null;
+  for (const sym of ROOM_SYMBOLS) sizing[sym] = card?.levels[sym] ? sizingFor(INSTRUMENTS[sym], card.levels[sym], settings) : null;
   return { at: new Date().toISOString(), settings, card, sizing, live, feed: feed.slice(0, 60), state: parseJson<RoomState>(stateRaw, {}) };
 }
 export async function saveSettings(patch: Partial<RoomSettings>): Promise<RoomSettings> {

@@ -32,20 +32,21 @@ export function JournalSection() {
 }
 
 export function LedgerPanel({ byDay }: { byDay: LedgerDay[] }) {
-  const total = byDay.reduce((a, d) => ({ trades: a.trades + d.trades, gross: a.gross + d.grossUsd, fees: a.fees + d.feesUsd, other: a.other + d.otherUsd, net: a.net + d.netUsd }), { trades: 0, gross: 0, fees: 0, other: 0, net: 0 });
+  const total = byDay.reduce((a, d) => ({ trades: a.trades + d.trades, gross: a.gross + d.grossUsd, win: a.win + d.winUsd, fees: a.fees + d.feesUsd, other: a.other + d.otherUsd, net: a.net + d.netUsd }), { trades: 0, gross: 0, win: 0, fees: 0, other: 0, net: 0 });
+  const tradingDays = byDay.filter((d) => d.trades > 0).length;
   const recent = [...byDay].reverse().slice(0, 30);
   return (
     <Panel>
       <PanelHeader title="Broker ledger · what Tradovate says you made" aside={<span>realized P&amp;L and fees per trade, from the broker&apos;s own cash log · by trade date</span>} />
       <PanelBody>
         <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
-          <Stat label="Net after fees" value={pnl0(total.net)} valueCls={tone(total.net)} sub={`${byDay.length} trading day${byDay.length === 1 ? "" : "s"}`} />
+          <Stat label="Net after fees" value={pnl0(total.net)} valueCls={tone(total.net)} sub={`${tradingDays} trading day${tradingDays === 1 ? "" : "s"}`} />
           <Stat label="Gross on trades" value={pnl0(total.gross)} valueCls={tone(total.gross)} sub={`${total.trades} paired trades`} />
           <Stat label="Fees" value={pnl0(total.fees)} valueCls={tone(total.fees)} sub={total.trades ? `${(Math.abs(total.fees) / total.trades).toFixed(2)} per paired trade` : undefined} />
           <Stat label="Other" value={pnl0(total.other)} valueCls={tone(total.other)} sub="liquidations · subscriptions" />
-          <Stat label="Fees as % of gross wins" value={total.gross > 0 || byDay.some((d) => d.bestUsd > 0) ? `${Math.round(100 * Math.abs(total.fees) / Math.max(1, byDay.reduce((a, d) => a + Math.max(0, d.grossUsd), 0)))}%` : "—"} />
+          <Stat label="Fees vs. what you won" value={total.win > 0 ? `${Math.round(100 * Math.abs(total.fees) / total.win)}%` : "—"} sub={total.win > 0 ? `${pnl0(total.fees)} of ${pnl0(total.win)} in winning trades` : undefined} />
         </div>
-        {recent.length === 0 ? <Empty>No ledger rows yet. The room reads the broker&apos;s cash log every 5 minutes on weekdays.</Empty> : (
+        {recent.length === 0 ? <Empty>No ledger rows yet. The room reads the broker&apos;s cash log every 5 minutes.</Empty> : (
           <DataTable dense maxH="260px" className="mt-3">
             <thead><tr><Th>Trade date</Th><Th num>Trades</Th><Th num>W / L</Th><Th num>Gross</Th><Th num>Fees</Th><Th num>Other</Th><Th num>Net</Th><Th num>Best / worst</Th><Th num>Running</Th></tr></thead>
             <tbody>{recent.map((d) => (
@@ -116,7 +117,7 @@ export function JournalTable({ rows, onSaved }: { rows: JournalRow[]; onSaved: (
   return (
     <Panel>
       <PanelHeader title="Journal" aside={<span>every round trip from your Tradovate fills · newest first</span>} />
-      {rows.length === 0 ? <PanelBody><Empty>No trades yet. Fills are read every 5 minutes on weekdays; a round trip appears here the moment it closes (open positions show as open).</Empty></PanelBody> : (
+      {rows.length === 0 ? <PanelBody><Empty>No trades yet. Fills are read every 5 minutes, round the clock; a round trip appears here the moment it closes (open positions show as open).</Empty></PanelBody> : (
         <DataTable dense maxH="520px">
           <thead><tr><Th>Entry</Th><Th>Market</Th><Th num>Qty</Th><Th num>Entry → exit</Th><Th num>Net</Th><Th num>R</Th><Th num>MFE / MAE</Th><Th num>Hold</Th><Th>Session</Th><Th>Near</Th><Th>Tag · why</Th></tr></thead>
           <tbody>{rows.map((r) => <JournalRowView key={r.id} r={r} onSaved={onSaved} />)}</tbody>

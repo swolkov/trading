@@ -23,8 +23,7 @@ export async function GET(){
   if(!verified)blockers.push("Broker adapter not yet verified on a real review response (the desk's first session tick does this)");
   if(!guardianFresh)blockers.push("Desk guardian has not reported in the last 10 minutes (it runs every 5 minutes in the regular session)");
   if(!connection.lastCheckOk)blockers.unshift("Direct account collection is not currently verified");
-  if(!context.earningsAvailable)blockers.push("Earnings calendar unavailable");
-  if(!context.macroAvailable)blockers.push("Economic calendar unavailable");
+  // The calendars never gate an order (canPlaceOrders below ignores them); they show on the research panel as news.error.
   if(!research)blockers.push("Waiting for broker research collection");
   else if(!research.contracts.some(c=>Date.now()-Date.parse(c.at)<=15000&&Date.parse(c.at)<=Date.now()))blockers.push("No executable option quotes within 15 seconds");
   return Response.json({at:new Date().toISOString(),connection,execution:{armed,verified,canPlaceOrders:armed&&verified&&guardianFresh,blockers},maxLoss,riskPct:account&&maxLoss?maxLoss/account.totalValue*100:null,rules:OPTIONS_DESK_RULES,watchlist,
