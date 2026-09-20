@@ -61,7 +61,9 @@ async function getWebhook(channel: NotifyChannel): Promise<string | null> {
     const gen = await webhookFor("webhook_general");
     if (gen) return gen;
   }
-  if (channel === "stocks") {
+  // The futures lane carries the Trading Room (Spencer's own trading: morning card, level breaks,
+  // event heads-ups) — never dropped: without its own channel it goes to general (Sep 19 2026).
+  if (channel === "stocks" || channel === "futures") {
     const gen = await webhookFor("webhook_general");
     if (gen) return gen;
   }
