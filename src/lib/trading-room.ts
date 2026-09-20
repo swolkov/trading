@@ -9,7 +9,8 @@ import { sendNotification } from "@/lib/notifications";
 import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
 import { getTradovateAccountSummary, getTradovateFills, getTradovatePositions, resolveContractSymbol } from "@/lib/tradovate";
 import { deskCalendar } from "@/lib/futures-desk-calendar";
-import { foldJournal } from "@/lib/trading-room-journal-store";
+import { foldJournal, journalView } from "@/lib/trading-room-journal-store";
+import { dayTally } from "@/lib/trading-room-journal";
 import { syncLedger } from "@/lib/trading-room-ledger";
 import {
   CARD_POST_ET, CHART_LEVELS_FRESH_MS, EVENT_HEADS_UP_MIN, FEED_LABEL, INSTRUMENTS, ROOM_SYMBOLS, appendFeed, buildLevels, etParts, eventNote, levelsFromChart, parseSettings, sizingFor, weeklyPrints,
@@ -147,7 +148,7 @@ export async function recordFeed(e: FeedEvent): Promise<{ duplicate: boolean }> 
 }
 
 // ---- the tick (cron, every 5 minutes on weekdays) ------------------------------------------------
-interface RoomState { cardPostedDay?: string; headsUp?: Record<string, string>; lossLineDay?: string; flattenWarnDay?: string; lastTickAt?: string; lastError?: string }
+interface RoomState { cardPostedDay?: string; headsUp?: Record<string, string>; lossLineDay?: string; flattenWarnDay?: string; tradeCountDay?: string; announced?: string[]; lastTickAt?: string; lastError?: string }
 
 function cardText(card: RoomCard, sizing: Record<string, SizingLine | null>, live: LiveSnapshot): string {
   const lines: string[] = [`☀️ Trading Room · ${etParts(Date.parse(card.at)).dayKey}`];
@@ -208,6 +209,27 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
     }
     for (const k of Object.keys(state.headsUp)) if (nowMs - Date.parse(state.headsUp[k]) > 3 * 24 * 3_600_000) delete state.headsUp[k];
   }
+  // THE TRADE METER: one line per closed round trip — the trade, then the day so far with the fee total in it. On Sep 18 he
+  // was gross +$14.50 and paid $643 without seeing either number until Saturday; now he sees both after every trade.
+  try {
+    const rows = (await journalView(60)).rows;
+    state.announced ??= [];
+    const fresh = rows.filter((r) => !r.open && !state.announced!.includes(r.id) && nowMs - Date.parse(r.exitTs) < 6 * 3_600_000).sort((a, b) => Date.parse(a.exitTs) - Date.parse(b.exitTs));
+    for (const r of fresh) {
+      const t = dayTally(rows, (ms) => etParts(ms).dayKey, etParts(Date.parse(r.exitTs)).dayKey);
+      const money = (x: number) => `${x < 0 ? "−" : "+"}$${Math.abs(Math.round(x)).toLocaleString()}`;
+      const rr = r.netR == null ? "" : ` · ${r.netR >= 0 ? "+" : "−"}${Math.abs(r.netR).toFixed(1)}R${r.riskSource === "atr-proxy" ? "*" : ""}`;
+      await sendNotification(`${r.netUsd >= 0 ? "✅" : "❌"} ${r.symbol} ${r.side} ×${r.qty} · ${money(r.netUsd)} net${rr} · ${Math.round(r.holdMin)} min · ${r.session}${r.nearestLevel ? ` · near ${r.nearestLevel}` : ""}\n   today: trade ${t.n} · ${money(t.netUsd)} net · fees $${Math.round(t.feesUsd)} · ${t.wins}W/${t.losses}L${settings.maxTradesPerDay ? ` · your line ${settings.maxTradesPerDay}` : ""}`, LANE).catch(() => {});
+      state.announced.push(r.id);
+      if (settings.maxTradesPerDay != null && t.n >= settings.maxTradesPerDay && state.tradeCountDay !== now.dayKey) {
+        await sendNotification(`🛑 That is trade ${t.n} today — your own line is ${settings.maxTradesPerDay}. Fees so far $${Math.round(t.feesUsd)}. Sep 18 was 22 trades and $643 in fees for +$14.50 gross.`, LANE).catch(() => {});
+        state.tradeCountDay = now.dayKey;
+        notes.push("trade count line crossed");
+      }
+    }
+    if (fresh.length) notes.push(`announced ${fresh.length} closed trade(s)`);
+    if (state.announced.length > 300) state.announced = state.announced.slice(-300);
+  } catch (e) { notes.push(`trade meter failed: ${String(e).slice(0, 120)}`); }
   // His own daily loss line: one message the moment the day's realized loss crosses it. His number, his call — the room only says it.
   if (live.ok && settings.dailyLossUsd != null && live.realizedPnl != null && -live.realizedPnl >= settings.dailyLossUsd && state.lossLineDay !== now.dayKey) {
     await sendNotification(`🛑 Past your daily loss line: realized ${Math.round(live.realizedPnl)} today vs. your line of −$${Math.round(settings.dailyLossUsd)}${live.positions.length ? ` · still open: ${live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos}`).join(", ")}` : ""}`, LANE).catch(() => {});

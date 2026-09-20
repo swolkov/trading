@@ -196,3 +196,16 @@ export function scoreboard(rows: JournalRow[], eventWindowMs = 30 * 60_000, even
     verdict: { status, checks },
   };
 }
+
+// THE DAY'S TALLY (pure). What the room says after every closed round trip: count, net, fees, wins/losses so
+// far this exchange day. The fee line is the whole point — on Sep 18 he made $14.50 gross and paid $643.
+export interface DayTally { n: number; netUsd: number; grossUsd: number; feesUsd: number; wins: number; losses: number; contracts: number }
+export function dayTally(rows: JournalRow[], dayKeyOf: (ms: number) => string, dayKey: string): DayTally {
+  const t: DayTally = { n: 0, netUsd: 0, grossUsd: 0, feesUsd: 0, wins: 0, losses: 0, contracts: 0 };
+  for (const r of rows) {
+    if (r.open || dayKeyOf(Date.parse(r.exitTs)) !== dayKey) continue;
+    t.n++; t.netUsd += r.netUsd; t.grossUsd += r.grossUsd; t.feesUsd += r.feesUsd; t.contracts += r.qty;
+    if (r.netUsd > 0) t.wins++; else if (r.netUsd < 0) t.losses++;
+  }
+  return t;
+}
