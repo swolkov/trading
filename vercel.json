@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/cron/trading-room",
-      "schedule": "*/5 11-22 * * 1-5"
+      "schedule": "*/5 * * * 0-5"
     }
   ]
 }

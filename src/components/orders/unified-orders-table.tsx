@@ -4,6 +4,8 @@ import useSWR from "swr";
 import { useState } from "react";
 import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
 import { OptionOrdersTable, OptionPositionsTable, type LiveOrder, type LivePosition } from "@/components/options/account-tables";
+import { JournalTable, LedgerPanel, type JournalData } from "@/components/trading-room/journal-panels";
+import { LiveAccountPanel, type LiveView } from "@/components/trading-room/room-panels";
 import { Empty, Note, Panel, PanelBody } from "@/components/ui/panel";
 import { ago, usd0 } from "@/lib/format";
 import Link from "next/link";
@@ -27,20 +29,43 @@ function Segmented<T extends string>({ value, onChange, options }: { value: T; o
 }
 
 // THE ONE PLACE FOR EVERY TRADE, BROKEN DOWN BY PLATFORM. Each platform is its own segment
-// with its own money state in the label — the Tradovate futures DEMO (paper, by design) and
-// the real Robinhood account (a broker snapshot). The tables are the same components the
-// platform pages render, so this page and those pages can never disagree about a row. The
-// Kraken segment was retired with the crypto desk (Sep 19 2026).
-type Platform = "futures" | "robinhood";
+// with its own money state in the label — Spencer's LIVE Tradovate account (his hand trades,
+// read by the Trading Room), the Tradovate futures DEMO (paper, by design) and the real
+// Robinhood account (a broker snapshot). The tables are the same components the platform
+// pages render, so this page and those pages can never disagree about a row. The Kraken
+// segment was retired with the crypto desk (Sep 19 2026).
+type Platform = "live" | "futures" | "robinhood";
 export function UnifiedOrdersTable() {
-  const [platform, setPlatform] = useState<Platform>("futures");
+  const [platform, setPlatform] = useState<Platform>("live");
   return (
     <div className="space-y-4">
       <Segmented value={platform} onChange={setPlatform} options={[
+        { k: "live", label: "Tradovate · futures · live, by hand", tone: "red" },
         { k: "futures", label: "Tradovate · futures · demo", tone: "paper" },
         { k: "robinhood", label: "Robinhood · options · real account" },
       ]} />
-      {platform === "futures" ? <FuturesOrders /> : <RobinhoodOrders />}
+      {platform === "live" ? <LiveFuturesOrders /> : platform === "futures" ? <FuturesOrders /> : <RobinhoodOrders />}
+    </div>
+  );
+}
+
+// Tradovate LIVE — the account Spencer trades by hand. Nothing on this site places orders there;
+// the room only reads: balance and positions, the broker's own cash ledger (realized P&L and fees
+// per trade date) and every round trip rebuilt from fills, the same rows the Trading Room shows.
+interface RoomLite { live: LiveView | null }
+function LiveFuturesOrders() {
+  const { data: room } = useSWR<RoomLite>("/api/trade", fetcher, { refreshInterval: 60_000 });
+  const { data, mutate } = useSWR<JournalData>("/api/trade/journal", fetcher, { refreshInterval: 60_000 });
+  if (data === undefined || room === undefined) return <Panel><PanelBody><Empty>Loading the live account…</Empty></PanelBody></Panel>;
+  if (!data || data.error) return <Panel><PanelBody><Empty>The live account did not answer{data?.error ? `: ${data.error}` : ""}.</Empty></PanelBody></Panel>;
+  return (
+    <div className="space-y-4">
+      <Note>
+        Your real account, read-only. The site never places, changes or cancels an order here. Levels, the card and the scoreboard are on <Link href="/trade" className="text-primary hover:underline">Trading Room</Link>.
+      </Note>
+      <LiveAccountPanel live={room?.live ?? null} />
+      {data.ledger && <LedgerPanel byDay={data.ledger.byDay} />}
+      <JournalTable rows={data.rows} onSaved={() => mutate()} />
     </div>
   );
 }
