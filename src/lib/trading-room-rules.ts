@@ -222,14 +222,16 @@ export function levelsFromChart(spec: InstrumentSpec, cl: ChartLevels, nowMs: nu
 export interface RoomSettings {
   contracts: number;           // what he trades, per market
   dailyLossUsd: number | null; // his own line in the sand; null = not set (no default is invented)
+  maxTradesPerDay: number | null; // his own count; null = not set. The room says it once when crossed, nothing more.
 }
-export const DEFAULT_SETTINGS: RoomSettings = { contracts: 20, dailyLossUsd: null };
+export const DEFAULT_SETTINGS: RoomSettings = { contracts: 20, dailyLossUsd: null, maxTradesPerDay: null };
 export function parseSettings(raw: string | null): RoomSettings {
   if (!raw) return DEFAULT_SETTINGS;
   try {
     const o = JSON.parse(raw) as Partial<RoomSettings>;
     const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : null);
-    return { contracts: Math.min(500, Math.max(1, Math.round(num(o.contracts) ?? DEFAULT_SETTINGS.contracts))), dailyLossUsd: num(o.dailyLossUsd) };
+    const mt = num(o.maxTradesPerDay);
+    return { contracts: Math.min(500, Math.max(1, Math.round(num(o.contracts) ?? DEFAULT_SETTINGS.contracts))), dailyLossUsd: num(o.dailyLossUsd), maxTradesPerDay: mt == null ? null : Math.max(1, Math.round(mt)) };
   } catch { return DEFAULT_SETTINGS; }
 }
 

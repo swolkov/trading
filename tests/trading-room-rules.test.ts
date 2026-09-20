@@ -96,10 +96,10 @@ test("sizing: his size, priced at three stop widths — never a percentage of th
 });
 
 test("settings parse clamps and ignores garbage", () => {
-  assert.deepEqual(parseSettings(null), { contracts: 20, dailyLossUsd: null });
-  assert.deepEqual(parseSettings("{bad"), { contracts: 20, dailyLossUsd: null });
-  assert.deepEqual(parseSettings(JSON.stringify({ contracts: -5, dailyLossUsd: "x" })), { contracts: 20, dailyLossUsd: null });
-  assert.deepEqual(parseSettings(JSON.stringify({ contracts: 25.4, dailyLossUsd: 500, accountUsd: 3000, riskPct: 1 })), { contracts: 25, dailyLossUsd: 500 });
+  assert.deepEqual(parseSettings(null), { contracts: 20, dailyLossUsd: null, maxTradesPerDay: null });
+  assert.deepEqual(parseSettings("{bad"), { contracts: 20, dailyLossUsd: null, maxTradesPerDay: null });
+  assert.deepEqual(parseSettings(JSON.stringify({ contracts: -5, dailyLossUsd: "x" })), { contracts: 20, dailyLossUsd: null, maxTradesPerDay: null });
+  assert.deepEqual(parseSettings(JSON.stringify({ contracts: 25.4, dailyLossUsd: 500, maxTradesPerDay: 6.2, accountUsd: 3000 })), { contracts: 25, dailyLossUsd: 500, maxTradesPerDay: 6 });
 });
 
 test("the tape: the chart's JSON is parsed strictly, micro and full-size roots map to the room's symbol, retries dedupe", () => {

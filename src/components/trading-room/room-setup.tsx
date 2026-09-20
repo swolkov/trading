@@ -10,13 +10,14 @@ import type { RoomSettings } from "@/lib/trading-room-rules";
 export function SettingsPanel({ settings, onSaved }: { settings: RoomSettings; onSaved: () => void }) {
   const [contracts, setContracts] = useState(String(settings.contracts));
   const [daily, setDaily] = useState(settings.dailyLossUsd != null ? String(settings.dailyLossUsd) : "");
+  const [maxTrades, setMaxTrades] = useState(settings.maxTradesPerDay != null ? String(settings.maxTradesPerDay) : "");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   async function save() {
     setBusy(true); setMsg(null);
     try {
-      const r = await fetch("/api/trade", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "settings", contracts: Number(contracts) || settings.contracts, dailyLossUsd: daily.trim() ? Number(daily) : null }) });
+      const r = await fetch("/api/trade", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "settings", contracts: Number(contracts) || settings.contracts, dailyLossUsd: daily.trim() ? Number(daily) : null, maxTradesPerDay: maxTrades.trim() ? Number(maxTrades) : null }) });
       const j = await r.json();
       setMsg(r.ok ? "Saved." : j.error ?? "not saved");
       if (r.ok) onSaved();
@@ -26,7 +27,7 @@ export function SettingsPanel({ settings, onSaved }: { settings: RoomSettings; o
     <Panel>
       <PanelHeader title="Your size" aside={<span>what you trade · the cards above price every stop at this size</span>} />
       <PanelBody>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
           <label className="text-xs text-muted-foreground">Contracts per market
             <input value={contracts} onChange={(e) => setContracts(e.target.value)} inputMode="numeric" className="mt-1 h-8 w-full rounded-md border border-border bg-background px-2 text-[13px] text-foreground" />
             <span className="mt-0.5 block text-[11px]">micros — MES, MNQ, MGC</span>
@@ -34,6 +35,10 @@ export function SettingsPanel({ settings, onSaved }: { settings: RoomSettings; o
           <label className="text-xs text-muted-foreground">Daily loss line ($) · optional
             <input value={daily} onChange={(e) => setDaily(e.target.value)} placeholder="your own number" inputMode="decimal" className="mt-1 h-8 w-full rounded-md border border-border bg-background px-2 text-[13px] text-foreground" />
             <span className="mt-0.5 block text-[11px]">when set, the room tells you the moment the day&apos;s realized loss crosses it</span>
+          </label>
+          <label className="text-xs text-muted-foreground">Max trades per day · optional
+            <input value={maxTrades} onChange={(e) => setMaxTrades(e.target.value)} placeholder="your own number" inputMode="numeric" className="mt-1 h-8 w-full rounded-md border border-border bg-background px-2 text-[13px] text-foreground" />
+            <span className="mt-0.5 block text-[11px]">after every closed trade the room posts the day&apos;s count, net and fees; when set, it says so once when you reach it</span>
           </label>
           <div className="flex items-end gap-2">
             <button onClick={save} disabled={busy} className="h-8 rounded-md bg-primary px-3 text-[13px] font-semibold text-primary-foreground disabled:opacity-50">{busy ? "Saving…" : "Save"}</button>

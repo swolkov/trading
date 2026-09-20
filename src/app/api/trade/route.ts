@@ -12,7 +12,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  let body: { action?: string; contracts?: number; dailyLossUsd?: number | null } = {};
+  let body: { action?: string; contracts?: number; dailyLossUsd?: number | null; maxTradesPerDay?: number | null } = {};
   try { body = await request.json(); } catch { /* empty */ }
   try {
     if (body.action === "refresh") { await buildCard(); await refreshLive(); return Response.json(await roomView()); }
@@ -20,6 +20,7 @@ export async function POST(request: Request) {
       const patch: Record<string, unknown> = {};
       if ("contracts" in body) patch.contracts = body.contracts;
       if ("dailyLossUsd" in body) patch.dailyLossUsd = body.dailyLossUsd;
+      if ("maxTradesPerDay" in body) patch.maxTradesPerDay = body.maxTradesPerDay;
       await saveSettings(patch);
       return Response.json({ ok: true, ...(await roomView()) });
     }

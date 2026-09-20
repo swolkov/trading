@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  FEES_RT_PER_CONTRACT_USD, TEST_RULES, bootstrapPMeanPositive, excursion, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket,
+  FEES_RT_PER_CONTRACT_USD, TEST_RULES, bootstrapPMeanPositive, dayTally, excursion, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket,
   type JournalFill, type JournalRow,
 } from "../src/lib/trading-room-journal";
 import { INSTRUMENTS, type Bar } from "../src/lib/trading-room-rules";
@@ -93,4 +93,12 @@ test("splits: sessions, markets and the print window are reported from the close
   assert.equal(sb.bySession.find((s) => s.session === "open")?.n, 2);
   assert.equal(sb.bySymbol.find((s) => s.symbol === "MGC")?.netUsd, 2000);
   assert.equal(sb.avgContracts, 20);
+});
+
+test("the day's tally counts only closed trips that exited on that exchange day", () => {
+  const key = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const rows = [row(0, 1, 1000), row(1, -1, -1000), row(2, 0.5, 500, { open: true }), { ...row(3, 2, 2000), exitTs: "2026-09-22T15:00:00.000Z" }];
+  const t = dayTally(rows, key, "2026-09-21");
+  assert.deepEqual([t.n, t.netUsd, t.feesUsd, t.wins, t.losses, t.contracts], [2, 0, 60, 1, 1, 40]);
+  assert.equal(dayTally(rows, key, "2026-09-22").n, 1);
 });
