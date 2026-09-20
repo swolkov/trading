@@ -114,11 +114,12 @@ test("round trips pair a filled open with every close that names it; closed only
   assert.deepEqual([t3.openQuantity, t3.closedQuantity, t3.closed], [1, 1, true]);
 });
 
-test("slot unlock: 10 closed trips all green open the second slot; 10 with one unknown intent (or a wide fill, or a fee over the reserve) do not", () => {
+test("slots: three by default from the first trade; the divergence check, once it has 10 closed trips and is red, throttles to one", () => {
   const green = ledger(10);
   assert.equal(divergenceVerdict(roundTrips(green), green, 2).green, true);
-  assert.equal(slotsFor(divergenceVerdict(roundTrips(green), green, 2).closedTrades, true), 2);
-  assert.equal(slotsFor(9, true), 1); assert.equal(slotsFor(10, false), 1); assert.equal(slotsFor(50, true), 2);
+  assert.equal(slotsFor(divergenceVerdict(roundTrips(green), green, 2).closedTrades, true), 3);
+  assert.equal(slotsFor(0, true), 3); assert.equal(slotsFor(9, false), 3, "no verdict before 10 closed trades"); assert.equal(slotsFor(10, false), 1); assert.equal(slotsFor(50, true), 3);
+  assert.equal(slotsFor(0, true, 2), 2); assert.equal(slotsFor(0, true, 9), 4, "never past the ladder's max"); assert.equal(slotsFor(0, true, 0), 1); assert.equal(slotsFor(0, true, NaN), 3);
   const withUnknown = ledger(10, [rec(99, "open", { state: "unknown" })]);
   const v = divergenceVerdict(roundTrips(withUnknown), withUnknown, 2);
   assert.equal(v.green, false); assert.match(v.reasons[0], /1 unknown intent/);

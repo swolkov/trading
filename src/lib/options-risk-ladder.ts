@@ -24,8 +24,14 @@ export const OPTIONS_LADDER_RULES = {
   ddHaltFloorUsd: 300,            // the halt is never tighter than this many dollars under the high
   ddHaltPct: 0.20,
   reserveMaxFrac: 0.25,           // open max loss + the new trade's max loss ≤ this share of equity
-  slotUnlockClosedTrades: 10,     // the second slot needs this many closed live trades with the divergence check green
-  maxSlots: 2,
+  // SLOTS (Sep 20 2026, Spencer's call): the desk takes every name that clears the screen, up to `defaultSlots`
+  // at once (AgentConfig options_live_slots can lower or raise it, never past maxSlots). The reserve rule above
+  // is the real ceiling — at $1,500 that is $375 at risk, i.e. three Normal trades or two Strong — and the
+  // cluster rule keeps them from being one bet. The divergence check, once it has `slotUnlockClosedTrades`
+  // closed live trades to read, throttles the desk back to one slot while it is red.
+  slotUnlockClosedTrades: 10,
+  defaultSlots: 3,
+  maxSlots: 4,
 };
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
@@ -101,7 +107,9 @@ export function reserveRefusal(openMaxLossUsd: number, newMaxLossUsd: number, eq
   if (reserveOk(openMaxLossUsd + newMaxLossUsd, equity, rules)) return null;
   return `reserve: $${Math.round(openMaxLossUsd)} already at risk + $${Math.round(newMaxLossUsd)} would exceed ${rules.reserveMaxFrac * 100}% of $${Math.round(equity).toLocaleString("en-US")}`;
 }
-/** One slot; a second after ten closed live trades with the divergence check green. Never more than two. */
-export function slotsFor(closedLiveTrades: number, divergenceGreen: boolean, rules = OPTIONS_LADDER_RULES): number {
-  return Math.min(rules.maxSlots, 1 + (closedLiveTrades >= rules.slotUnlockClosedTrades && divergenceGreen ? 1 : 0));
+/** The wanted slot count (default 3, capped at maxSlots) — cut to one while the divergence check is red with enough closed trades to mean it. */
+export function slotsFor(closedLiveTrades: number, divergenceGreen: boolean, wanted = OPTIONS_LADDER_RULES.defaultSlots, rules = OPTIONS_LADDER_RULES): number {
+  const cap = Math.min(rules.maxSlots, Math.max(1, Number.isFinite(wanted) ? Math.round(wanted) : rules.defaultSlots));
+  if (closedLiveTrades >= rules.slotUnlockClosedTrades && !divergenceGreen) return 1;
+  return cap;
 }

@@ -11,11 +11,11 @@ export interface OptionsLivePolicy {
   maxLossUsd: number | null; // No default. Includes the complete fee reserve.
   feeBudgetUsd: number | null; // Explicit reserve for ONE contract's round trip; scaled by quantity.
   guardianHealthyAtMs: number | null;
-  maxOpenPositions?: number; // Default 1. The ladder (options-risk-ladder.ts) may raise it to the hard limit, never past.
+  maxOpenPositions?: number; // Default 1. The ladder (options-risk-ladder.ts) sets it per tick, never past the hard limit.
   maxQuantity?: number;      // Default 1 contract per leg on an entry. Same ceiling.
 }
-/** What no policy override can exceed: the second slot and the second contract are the ladder's whole range. */
-export const OPTIONS_LIVE_HARD_LIMITS = { maxOpenPositions: 2, maxQuantity: 2 };
+/** What no policy override can exceed: four slots (the ladder's maxSlots) and the second contract are the whole range. */
+export const OPTIONS_LIVE_HARD_LIMITS = { maxOpenPositions: 4, maxQuantity: 2 };
 export interface LiveContract {
   optionId: string; underlying: string; kind: "call" | "put"; strike: number;
   expiry: string; multiplier: number; bid: number; ask: number; quoteAtMs: number;

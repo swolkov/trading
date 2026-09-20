@@ -31,7 +31,7 @@ export function OptionsResearchDesk(){
         <Stat label="Approved loss ceiling" value={data.maxLoss==null?"Unset":money(data.maxLoss)} sub={data.riskPct==null?"Includes fees":`${data.riskPct.toFixed(1)}% of account, including fees`}/>
         <Stat label="Initial quantity" value="1" sub="One contract, or one contract per spread leg"/>
         <Stat label="Expiration window" value={`${data.rules.minDte}–${data.rules.maxDte} days`} sub={`Exit review before ${data.rules.exitBeforeDte} days remain`}/>
-        <Stat label="Open positions" value="1 maximum" sub="No averaging down or automatic size increases"/>
+        <Stat label="Open positions" value="3 at once" sub="every name that clears the screen, one entry per tick · no averaging down; the reserve (25% of the account) and the cluster rule are the ceiling"/>
       </div>
       <Note className="mt-4">Use the account-based risk illustration below as a starting point only when a liquid contract fits. The approved dollar ceiling is not a spending target. Skip trades that cannot meet the budget without weak liquidity or far-out-of-the-money contracts. Screening reserves $1 per contract for round-trip fees; the actual broker fee review must still pass.</Note>
       <Note className="mt-2">At least {data.rules.minOpenInterest} open contracts, {data.rules.minVolume} daily volume and bid/ask spread no wider than {data.rules.maxSpreadPct}% of the midpoint. No naked shorts, expiry-day entries or separate-leg spread orders.</Note>

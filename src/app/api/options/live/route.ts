@@ -31,7 +31,7 @@ export async function GET() {
       maxLossUsd: maxLoss,
       paperEnabled: false,
       why: armed && verified
-        ? "The live desk is armed and its broker adapter is verified: it may place one contract at a time, debit structures only, inside the approved maximum loss including fees. It runs on the Mac every 5 minutes during the session."
+        ? "The live desk is armed and its broker adapter is verified: it takes every name that clears the screen — one contract each, up to three at once, debit structures only — inside the approved maximum loss including fees and a quarter of the account at risk in total. It runs every 5 minutes during the session."
         : armed
           ? "The live desk is armed but its broker adapter has not yet been verified on a real review response. The first session tick sends a review only; entries follow once that verifies."
           : "The live desk is disarmed. Direct account reads continue; no order can be placed.",

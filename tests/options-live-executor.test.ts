@@ -302,7 +302,7 @@ test("initial live entries cannot increase to multiple contracts unless the poli
   assert.throws(() => prepareOptionsOrder({ ...order, quantity: 3 }, f.policy, f.snapshot, null, NOW), /at most 2 contracts per leg/);
   f.policy.maxQuantity = 3;
   assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /outside the hard limits/);
-  f.policy.maxQuantity = 2; f.policy.maxOpenPositions = 3;
+  f.policy.maxQuantity = 2; f.policy.maxOpenPositions = 5;   // the ladder tops out at 4 slots
   assert.throws(() => prepareOptionsOrder(order, f.policy, f.snapshot, null, NOW), /outside the hard limits/);
 });
 

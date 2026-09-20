@@ -156,7 +156,7 @@ export default function DashboardPage() {
             <Stat label="Account value" value={opt?.account ? money(opt.account.totalValue) : "—"} />
             <Stat label="Buying power" value={opt?.account ? money(opt.account.buyingPower) : "—"} />
             <Stat label="Open orders" value={opt?.live ? String(opt.live.orders.length) : "—"} />
-            <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="including fees · one contract · one position" />
+            <Stat label="Maximum loss per trade" value={opt?.execution?.maxLossUsd != null ? money(opt.execution.maxLossUsd) : "Not set"} sub="including fees · one contract per name · up to three names at once" />
           </div>
           <Note className="mt-3">{opt?.execution?.why ?? "Loading account status..."} {opt?.account ? `Account snapshot ${ago(opt.account.at)}.` : ""}</Note>
         </PanelBody>

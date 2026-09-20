@@ -42,6 +42,7 @@ const ARMED_KEY = "options_live_armed";
 const LOG_KEY = "options_live_log";
 const MARKET_VETO_KEY = "options_live_market_veto";   // "false" switches the pre-registered SPY veto off; anything else = on
 const PROMOTED_KEY = "options_score_promoted";         // "true" only once the 0–100 score has proven it ranks (D7); unlocks the A+ rung
+const SLOTS_KEY = "options_live_slots";                // how many names the desk may hold at once (default 3, hard-capped by the ladder at 4)
 const DD_TIER_KEY = "options_live_dd_tier";            // state only: the drawdown tier the last guard tick computed
 
 let lines: string[] = [];
@@ -237,9 +238,12 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         const today = etDay(Date.now());
         const ledger = await store.withAccountLock(ACCOUNT, () => store.intentsSince(0));
         const todays = ledger.filter((r) => r.action === "open" && etDay(r.createdAtMs ?? 0) === today);
-        // Slots: one, a second after ten closed live trades with the divergence check green (no unknowns, fees inside the reserve, fills near the limit).
+        // Slots: every name that clears the screen, up to options_live_slots (default 3) at once — one entry per tick, so the next
+        // tick takes the next name; the reserve and cluster rules inside pickCandidate are the real ceiling. The divergence check
+        // (no unknowns, fees inside the reserve, fills near the limit) throttles back to one slot once it has ten closed trades and is red.
         const trips = roundTrips(ledger), divergence = divergenceVerdict(trips, ledger, policy.feeBudgetUsd);
-        const slots = slotsFor(divergence.closedTrades, divergence.green);
+        const wantedSlots = Number(await cfg(SLOTS_KEY));
+        const slots = slotsFor(divergence.closedTrades, divergence.green, Number.isFinite(wantedSlots) && wantedSlots > 0 ? wantedSlots : undefined);
         const promoted = (await cfg(PROMOTED_KEY)) === "true";
         state.slots = slots; state.promoted = promoted; state.ledger = { closedTrades: divergence.closedTrades, divergenceGreen: divergence.green, reasons: divergence.reasons.slice(0, 5) };
         if (!policy.armed) log("entry: desk is not armed");
