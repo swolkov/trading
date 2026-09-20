@@ -43,29 +43,18 @@ export function InstrumentCard({ sym, lv, sizing }: { sym: RoomSymbol; lv: Level
           <Stat label="Overnight" value={lv.overnight ? `${px(sym, lv.overnight.low)}–${px(sym, lv.overnight.high)}` : "—"} sub={lv.overnight?.complete ? "complete" : "still forming"} />
           <Stat label="RTH" value={`${fmtHour(spec.rthOpen)}–${fmtHour(spec.rthClose)}`} sub={sym === "MGC" ? "COMEX open, not 9:30" : "cash open"} />
         </div>
-        {sizing ? (
+        {sizing && (
           <div className="mt-3 rounded-lg border border-border bg-muted/30 px-3 py-2 text-[13px]">
-            <span className="text-muted-foreground">Your rule: </span>{money(sizing.accountUsd)} × {(sizing.riskUsd / sizing.accountUsd * 100).toFixed(1)}% = <strong>{money(sizing.riskUsd)}</strong> a trade →{" "}
-            {sizing.choices.map((c, i) => <span key={c.name}>{i > 0 && " · "}<strong>{c.contracts}</strong> {sym} at a {c.name} stop ({px(sym, c.stopPts)} pts, {money(c.riskPerContract)} each)</span>)}
+            <span className="text-muted-foreground">Your size: </span><strong>{sizing.contracts} {sym}</strong> = <strong>{money(sizing.perPointUsd)}</strong> a point →{" "}
+            {sizing.choices.map((c, i) => <span key={c.name}>{i > 0 && " · "}{c.name} stop {px(sym, c.stopPts)} pts = <strong>{money(c.riskUsd)}</strong></span>)}
           </div>
-        ) : <Note className="mt-3">Set the account and risk % below to see the contract count your rule allows.</Note>}
+        )}
         {lv.note && <Note className="mt-2">{lv.note}</Note>}
       </PanelBody>
     </Panel>
   );
 }
 const fmtHour = (h: number) => `${Math.floor(h)}:${String(Math.round((h % 1) * 60)).padStart(2, "0")}`;
-
-export function HonestyLine({ sizing }: { sizing: Record<string, SizingLine | null> }) {
-  const lines = Object.values(sizing).filter((s): s is SizingLine => !!s && s.twentyMicrosRiskUsd != null);
-  if (!lines.length) return null;
-  return (
-    <Note>
-      Twenty micros at a normal stop risks {lines.map((s, i) => <span key={s.symbol}>{i > 0 && " · "}<strong>{money(s.twentyMicrosRiskUsd!)}</strong> on {s.symbol} ({s.twentyMicrosPct!.toFixed(0)}% of the account)</span>)}.
-      Margin is not the constraint (Tradovate asks ~{money(INSTRUMENTS.MES.dayMarginUsd)}/MES intraday); the question is what that number is a percentage of. The count above grows as the account compounds.
-    </Note>
-  );
-}
 
 export function EventsPanel({ events, nowMs }: { events: RoomEvent[]; nowMs: number }) {
   const today = etParts(nowMs).dayKey;

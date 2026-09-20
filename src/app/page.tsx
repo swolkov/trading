@@ -9,17 +9,24 @@ import { ago, money, pnl0, tone } from "@/lib/format";
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
 // ============ DASHBOARD ============
-// One job: "how are the desks right now?" — the real Robinhood options account and the
-// Tradovate futures DEMO, each with its money state named. No analytics here; the paper
-// records live on the desk pages, the trade lists on Orders, machinery on System Health.
-// Every read is an existing read-only endpoint; nothing on this page can place an order.
-// The Kraken margin desk that used to headline this page was retired Sep 19 2026.
+// One job: "how is the money right now?" — Spencer's LIVE Tradovate account (his hand trades,
+// headlined), the real Robinhood options account and the Tradovate futures DEMO, each with its
+// money state named. No analytics here; the records live on the desk pages, the trade lists on
+// Orders, machinery on System Health. Every read is an existing read-only endpoint; nothing on
+// this page can place an order. The Kraken margin desk that used to headline it was retired Sep 19 2026.
 
 interface OptionsLive {
   account?: { totalValue: number; optionLevel: string; buyingPower: number; at: string } | null;
   live?: { positions: unknown[]; orders: unknown[]; at: string } | null;
   execution?: { canPlaceOrders: boolean; armed?: boolean; verified?: boolean; maxLossUsd: number | null; why: string };
 }
+interface RoomView {
+  at: string;
+  live: { at: string; ok: boolean; error?: string; netLiq: number | null; realizedPnl: number | null; unrealizedPnl: number | null; positions: { contract: string; netPos: number; netPrice: number }[]; fillsToday: number } | null;
+  card: { at: string; events: { name: string; atMs: number; tier: number }[] } | null;
+  settings: { contracts: number; dailyLossUsd: number | null };
+}
+interface LedgerData { ledger?: { byDay: { day: string; trades: number; netUsd: number; cumNetUsd: number }[] } }
 interface FuturesDesk {
   enabled: boolean; disabledReason: string | null; entriesToday: number;
   limits: { sizingBasisUsd: number; riskPct: number; maxPositions: number; maxEntriesPerDay: number };
@@ -37,10 +44,20 @@ function heartbeatTone(iso: string | null | undefined, warnMin: number, critMin:
 
 export default function DashboardPage() {
   const { data: opt } = useSWR<OptionsLive>("/api/options/live", fetcher, { refreshInterval: 120_000 });
+  // The live account he trades by hand: read by the Trading Room every 5 minutes, never written.
+  const { data: room } = useSWR<RoomView>("/api/trade", fetcher, { refreshInterval: 60_000 });
+  const { data: jr } = useSWR<LedgerData>("/api/trade/journal", fetcher, { refreshInterval: 120_000 });
   // The futures desk: Tradovate DEMO, paper by design, sized off a fixed $50k basis.
   const { data: fut } = useSWR<FuturesDesk>("/api/futures/desk", fetcher, { refreshInterval: 120_000 });
 
-  const loading = !opt && !fut;
+  const loading = !opt && !fut && !room;
+  const live = room?.live?.ok ? room.live : null;
+  const days = jr?.ledger?.byDay ?? [];
+  const lastDay = [...days].reverse().find((d) => d.trades > 0) ?? null;
+  const nowMs = Date.parse(room?.at ?? "") || 0;   // the server's clock at read time, so render stays pure
+  const nextPrint = room?.card ? room.card.events.filter((e) => e.atMs > nowMs).sort((a, b) => a.atMs - b.atMs)[0] ?? null : null;
+  const todayLoss = live?.realizedPnl != null && live.realizedPnl < 0 ? -live.realizedPnl : 0;
+  const lossLine = room?.settings.dailyLossUsd ?? null;
   const optionsArmed = Boolean(opt?.execution?.canPlaceOrders);
   const guardianTone = fut && !fut.error ? heartbeatTone(fut.guardian.at, 20, 60) : "grey";
 
@@ -48,9 +65,12 @@ export default function DashboardPage() {
     <div className="space-y-5">
       <PageHeader
         title="Dashboard"
-        sub="Both desks, right now: Robinhood options (real account) · Tradovate futures (demo, paper only)."
-        right={(opt || fut) && (
+        sub="The money right now: your live Tradovate account (by hand) · Robinhood options (real account) · Tradovate futures (demo, paper only)."
+        right={(opt || fut || room) && (
           <>
+            {live && <Chip tone={lossLine != null && todayLoss >= lossLine ? "red" : live.positions.length ? "amber" : "green"} dot={!!live.positions.length} size="md" title="Your live Tradovate account, read every 5 minutes">
+              {lossLine != null && todayLoss >= lossLine ? "Past your daily loss line" : live.positions.length ? `Live · ${live.positions.length} open` : "Live · flat"}
+            </Chip>}
             <Chip tone={optionsArmed ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={optionsArmed} size="md">
               {optionsArmed ? "Options desk armed" : opt?.execution?.armed ? "Options armed · unverified" : "Options desk disarmed"}
             </Chip>
@@ -61,6 +81,21 @@ export default function DashboardPage() {
           </>
         )}
       />
+
+      {/* ── The live account, first ── */}
+      <Panel tone={lossLine != null && todayLoss >= lossLine ? "red" : undefined}>
+        <PanelHeader title="Tradovate · live · by hand" aside={<Link href="/trade" className="text-primary hover:underline">Trading Room →</Link>} />
+        <PanelBody>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+            <Stat size="lg" label="Net liquidation" value={live?.netLiq != null ? money(live.netLiq) : "—"} sub={room?.live ? `read ${ago(room.live.at)}` : "not read yet"} title="Your real account, from the broker" />
+            <Stat label="Today" value={live ? pnl0(live.realizedPnl ?? 0) : "—"} valueCls={tone(live?.realizedPnl ?? 0)} sub={live?.unrealizedPnl ? `open ${pnl0(live.unrealizedPnl)}` : lossLine != null ? `loss line ${money(lossLine)}` : "no daily loss line set"} />
+            <Stat label="Open" value={live ? (live.positions.length ? live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos}`).join(" · ") : "flat") : "—"} sub={live ? `${live.fillsToday} fills seen today` : undefined} />
+            <Stat label="Last trading day" value={lastDay ? pnl0(lastDay.netUsd) : "—"} valueCls={tone(lastDay?.netUsd ?? 0)} sub={lastDay ? `${lastDay.day} · ${lastDay.trades} paired trades · running ${pnl0(lastDay.cumNetUsd)}` : "no ledger yet"} />
+            <Stat label="Next print" value={nextPrint ? nextPrint.name : "none scheduled"} sub={nextPrint ? new Date(nextPrint.atMs).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", hour: "numeric", minute: "2-digit" }) + " ET" + (nextPrint.tier === 1 ? " · tier 1" : "") : undefined} />
+          </div>
+          <Note className="mt-3">Read-only. You trade this account yourself at {room?.settings.contracts ?? "—"} micros; the room shows levels, the tape, the ledger and the 40-trade scoreboard. Nothing on this site places, changes or cancels an order here.</Note>
+        </PanelBody>
+      </Panel>
 
       {/* ── The four numbers ── */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -128,11 +163,12 @@ export default function DashboardPage() {
       </Panel>
 
       {/* ── Where to go ── */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {[
+          { href: "/trade", title: "Trading Room · Tradovate live", sub: "Levels for MES · MNQ · MGC, the news clock, the tape, your ledger and the 40-trade scoreboard" },
           { href: "/futures", title: "Futures Desk · Tradovate demo", sub: "Registered rules, their verdicts, the enable switch, the TradingView setup" },
           { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: positions, orders, the research screen, the live desk switch" },
-          { href: "/orders", title: "Orders", sub: "Every platform, broken down: futures demo ledger and alerts, Robinhood account orders" },
+          { href: "/orders", title: "Orders", sub: "Every platform, broken down: your live trades, the futures demo ledger, Robinhood account orders" },
           { href: "/command", title: "System Health", sub: "Heartbeats, switches, credentials — both desks" },
         ].map((l) => (
           <Link key={l.href} href={l.href} className="rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/20 hover:bg-accent/40">

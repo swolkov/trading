@@ -75,33 +75,31 @@ test("gold's opening range anchors at 08:20, not 09:30", () => {
   assert.equal(lv.openingRange!.low, Math.min(...orBars.map((b) => b.l)));
 });
 
-test("ATR and the three stop widths turn a risk budget into a contract count", () => {
+test("ATR and the three stop widths, tick-rounded and priced at his size", () => {
   const daily: Bar[] = Array.from({ length: 20 }, (_, i) => ({ t: i, o: 100, h: 110, l: 90, c: 100, v: 1 }));
   assert.equal(atr(daily), 20);
-  const choices = stopChoices(INSTRUMENTS.MES, { atr5m: 2.1, atrDaily: 40 }, 250);
-  assert.deepEqual(choices.map((c) => [c.name, c.stopPts, c.contracts]), [["tight", 2, 25], ["normal", 4.25, 11], ["wide", 10, 5]]);
-  const mgc = stopChoices(INSTRUMENTS.MGC, { atr5m: 1.94, atrDaily: 40 }, 250);
-  assert.deepEqual(mgc.map((c) => [c.name, c.stopPts, c.contracts]), [["tight", 1.9, 13], ["normal", 3.9, 6], ["wide", 10, 2]]);
-  assert.deepEqual(stopChoices(INSTRUMENTS.MES, { atr5m: null, atrDaily: null }, 250), []);
+  const choices = stopChoices(INSTRUMENTS.MES, { atr5m: 2.1, atrDaily: 40 }, 20);
+  assert.deepEqual(choices.map((c) => [c.name, c.stopPts, c.riskUsd]), [["tight", 2, 200], ["normal", 4.25, 425], ["wide", 10, 1000]]);
+  const mgc = stopChoices(INSTRUMENTS.MGC, { atr5m: 1.94, atrDaily: 40 }, 20);
+  assert.deepEqual(mgc.map((c) => [c.name, c.stopPts, c.riskUsd]), [["tight", 1.9, 380], ["normal", 3.9, 780], ["wide", 10, 2000]]);
+  assert.deepEqual(stopChoices(INSTRUMENTS.MES, { atr5m: null, atrDaily: null }, 20), []);
 });
 
-test("sizing: the settings' account wins over the live read; blank uses the live net liq; 20 micros is stated honestly", () => {
+test("sizing: his size, priced at three stop widths — never a percentage of the account", () => {
   const lv = { atr5m: 2, atrDaily: 40 } as Parameters<typeof sizingFor>[1];
-  const s1 = sizingFor(INSTRUMENTS.MES, lv, parseSettings(JSON.stringify({ accountUsd: 25000, riskPct: 1 })), 3306);
-  assert.equal(s1?.accountUsd, 25000);
-  assert.equal(s1?.riskUsd, 250);
-  assert.equal(s1?.twentyMicrosRiskUsd, 20 * 4 * 5);   // normal stop 4 pts × $5 × 20
-  assert.equal(Math.round(s1!.twentyMicrosPct!), 2);
-  const s2 = sizingFor(INSTRUMENTS.MES, lv, parseSettings(null), 3306);
-  assert.equal(s2?.accountUsd, 3306);
-  assert.equal(Math.round(s2!.twentyMicrosPct!), 12);
-  assert.equal(sizingFor(INSTRUMENTS.MES, lv, parseSettings(null), null), null);
+  const s1 = sizingFor(INSTRUMENTS.MES, lv, parseSettings(JSON.stringify({ contracts: 20 })));
+  assert.equal(s1.contracts, 20); assert.equal(s1.perPointUsd, 100);
+  assert.deepEqual(s1.choices.map((c) => [c.name, c.stopPts, c.riskUsd]), [["tight", 2, 200], ["normal", 4, 400], ["wide", 10, 1000]]);
+  const s2 = sizingFor(INSTRUMENTS.MGC, { atr5m: 3.6, atrDaily: 111.5 } as Parameters<typeof sizingFor>[1], parseSettings(null));
+  assert.equal(s2.perPointUsd, 200); assert.equal(s2.choices[0].stopPts, 3.6); assert.equal(s2.choices[0].riskUsd, 720);
+  assert.equal(stopChoices(INSTRUMENTS.MES, { atr5m: null, atrDaily: null }, 20).length, 0);
 });
 
 test("settings parse clamps and ignores garbage", () => {
-  assert.deepEqual(parseSettings(null), { accountUsd: null, riskPct: 1, dailyLossUsd: null });
-  assert.deepEqual(parseSettings("{bad"), { accountUsd: null, riskPct: 1, dailyLossUsd: null });
-  assert.deepEqual(parseSettings(JSON.stringify({ accountUsd: -5, riskPct: 50, dailyLossUsd: "x" })), { accountUsd: null, riskPct: 5, dailyLossUsd: null });
+  assert.deepEqual(parseSettings(null), { contracts: 20, dailyLossUsd: null });
+  assert.deepEqual(parseSettings("{bad"), { contracts: 20, dailyLossUsd: null });
+  assert.deepEqual(parseSettings(JSON.stringify({ contracts: -5, dailyLossUsd: "x" })), { contracts: 20, dailyLossUsd: null });
+  assert.deepEqual(parseSettings(JSON.stringify({ contracts: 25.4, dailyLossUsd: 500, accountUsd: 3000, riskPct: 1 })), { contracts: 25, dailyLossUsd: 500 });
 });
 
 test("the tape: the chart's JSON is parsed strictly, micro and full-size roots map to the room's symbol, retries dedupe", () => {

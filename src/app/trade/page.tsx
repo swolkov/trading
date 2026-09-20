@@ -5,7 +5,7 @@ import { Chip } from "@/components/ui/chip";
 import { PageHeader } from "@/components/ui/panel";
 import { ago } from "@/lib/format";
 import { ROOM_SYMBOLS, etParts, type FeedEvent, type LevelSet, type RoomEvent, type RoomSettings, type SizingLine } from "@/lib/trading-room-rules";
-import { EventsPanel, HonestyLine, InstrumentCard, LiveAccountPanel, TapePanel, type LiveView } from "@/components/trading-room/room-panels";
+import { EventsPanel, InstrumentCard, LiveAccountPanel, TapePanel, type LiveView } from "@/components/trading-room/room-panels";
 import { SettingsPanel, SetupPanel } from "@/components/trading-room/room-setup";
 import { JournalSection } from "@/components/trading-room/journal-panels";
 
@@ -60,8 +60,7 @@ export default function TradingRoomPage() {
         {ROOM_SYMBOLS.map((sym) => <InstrumentCard key={sym} sym={sym} lv={data.card?.levels[sym] ?? null} sizing={data.sizing[sym] ?? null} />)}
       </div>
 
-      <HonestyLine sizing={data.sizing} />
-      <SettingsPanel key={JSON.stringify(data.settings)} settings={data.settings} liveNetLiq={data.live?.netLiq ?? null} onSaved={() => mutate()} />
+      <SettingsPanel key={JSON.stringify(data.settings)} settings={data.settings} onSaved={() => mutate()} />
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <EventsPanel events={data.card?.events ?? []} nowMs={nowMs} />
