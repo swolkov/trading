@@ -15,7 +15,7 @@ const pts = (sym: RoomSymbol, x: number) => `${x >= 0 ? "+" : "−"}${Math.abs(x
 
 export function InstrumentCard({ sym, lv, sizing }: { sym: RoomSymbol; lv: LevelSet | null; sizing: SizingLine | null }) {
   const spec = INSTRUMENTS[sym];
-  if (!lv) return <Panel><PanelHeader title={`${sym} · ${spec.label}`} /><PanelBody><Empty>No card yet — the room builds it every 5 minutes on weekdays.</Empty></PanelBody></Panel>;
+  if (!lv) return <Panel><PanelHeader title={`${sym} · ${spec.label}`} /><PanelBody><Empty>No card yet — the room builds it every 5 minutes, round the clock Sunday evening through Friday.</Empty></PanelBody></Panel>;
   const chg = lv.last != null && lv.priorDay ? lv.last - lv.priorDay.close : null;
   const rows = [...lv.distances].sort((a, b) => b.price - a.price);
   return (
@@ -120,7 +120,7 @@ export function LiveAccountPanel({ live }: { live: LiveView | null }) {
           <Stat label="Open positions" value={live ? String(live.positions.length) : "—"} sub={live?.positions.length ? live.positions.map((p) => `${p.contract} ${p.netPos > 0 ? "+" : ""}${p.netPos} @ ${p.netPrice}`).join(" · ") : "flat"} />
           <Stat label="Fills seen today" value={live ? String(live.fillsToday) : "—"} sub="stored for the journal" />
         </div>
-        <Note className="mt-3">Read-only. The room reads this account every 5 minutes on weekdays and keeps every fill; it has no order path. {live?.error ? `Last error: ${live.error}` : ""}</Note>
+        <Note className="mt-3">Read-only. The room reads this account every 5 minutes, round the clock, and keeps every fill; it has no order path. {live?.error ? `Last error: ${live.error}` : ""}</Note>
       </PanelBody>
     </Panel>
   );
