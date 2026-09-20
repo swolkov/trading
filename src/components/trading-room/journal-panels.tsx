@@ -13,7 +13,7 @@ import type { RoomSymbol } from "@/lib/trading-room-rules";
 // THE JOURNAL ON THE PAGE. Spencer's real round trips from his Tradovate fills, stamped by the room,
 // and the pre-registered 40-trade scoreboard. The only input is his: a one-word tag and a one-line why.
 
-interface JournalData { rows: JournalRow[]; scoreboard: Scoreboard; rules: { minTrades: number; recheckAt: number }; ledger?: { rows: number; byDay: LedgerDay[]; since: string | null }; error?: string }
+export interface JournalData { rows: JournalRow[]; scoreboard: Scoreboard; rules: { minTrades: number; recheckAt: number }; ledger?: { rows: number; byDay: LedgerDay[]; since: string | null }; error?: string }
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 const px = (sym: RoomSymbol, x: number) => (sym === "MGC" ? x.toFixed(1) : x.toFixed(2));
 const r1 = (x: number | null) => (x == null ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(2)}R`);
@@ -31,7 +31,7 @@ export function JournalSection() {
   );
 }
 
-function LedgerPanel({ byDay }: { byDay: LedgerDay[] }) {
+export function LedgerPanel({ byDay }: { byDay: LedgerDay[] }) {
   const total = byDay.reduce((a, d) => ({ trades: a.trades + d.trades, gross: a.gross + d.grossUsd, fees: a.fees + d.feesUsd, other: a.other + d.otherUsd, net: a.net + d.netUsd }), { trades: 0, gross: 0, fees: 0, other: 0, net: 0 });
   const recent = [...byDay].reverse().slice(0, 30);
   return (
@@ -106,13 +106,13 @@ function ScoreboardPanel({ sb, minTrades }: { sb: Scoreboard; minTrades: number 
             </ul>
           </div>
         </div>
-        <Note className="mt-3">Pre-registered Sep 19 2026, re-checked at 50. R = your stop when the room saw a stop order on the position; otherwise a proxy of 2× the 5-minute ATR at entry (the row says which). Fees modeled at $1.50 per contract round trip.</Note>
+        <Note className="mt-3">Pre-registered Sep 19 2026, re-checked at 50. R = your stop when the room saw a stop order on the position; otherwise a proxy of 2× the 5-minute ATR at entry (the row says which). Fees modeled at $2.06 per contract round trip (measured on your account: $1.03 a side).</Note>
       </PanelBody>
     </Panel>
   );
 }
 
-function JournalTable({ rows, onSaved }: { rows: JournalRow[]; onSaved: () => void }) {
+export function JournalTable({ rows, onSaved }: { rows: JournalRow[]; onSaved: () => void }) {
   return (
     <Panel>
       <PanelHeader title="Journal" aside={<span>every round trip from your Tradovate fills · newest first</span>} />

@@ -10,7 +10,7 @@
 // the row says so (`riskSource`), so the scoreboard can report "trades with a real stop".
 import { INSTRUMENTS, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
 
-export const FEES_RT_PER_CONTRACT_USD = 1.5;   // Tradovate micro: ~$0.35 commission + ~$0.37 exchange + NFA, each side
+export const FEES_RT_PER_CONTRACT_USD = 2.06;  // MEASURED on his account, Sep 18 2026: 624 contract-sides → commission $0.39 + exchange $0.44 + clearing $0.19 + NFA $0.01 per side
 export const TEST_RULES = {
   registeredAt: "2026-09-19",
   minTrades: 40, recheckAt: 50,
