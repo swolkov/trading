@@ -43,9 +43,9 @@ export default function RobinhoodLiveAccountPage() {
     <div className="space-y-5">
       <PageHeader
         title="Live Account"
-        sub={`Your real Robinhood account: positions, orders and buying power from the latest broker snapshot. ${data?.execution.canPlaceOrders ? "The live desk is armed: it takes every name that clears the screen, one contract each, up to three at once, inside the approved cap." : "Live order placement is not active."}`}
+        sub={`Your real Robinhood account: positions, orders and buying power from the latest broker snapshot. ${data?.execution.canPlaceOrders ? "The live desk is armed: it takes every name that clears the screen — one contract each (two on a Strong grade that fits twice), up to three at once — inside the approved cap." : "Live order placement is not active."}`}
         right={<>
-          <Chip tone={data?.execution.canPlaceOrders ? "red" : "grey"} size="md" dot={!!data?.execution.canPlaceOrders} title="Robinhood holds the money; orders come only from the live desk on the Mac, never from this page">{data?.execution.canPlaceOrders ? "Real account · live desk armed" : "Real account · read only"}</Chip>
+          <Chip tone={data?.execution.canPlaceOrders ? "red" : "grey"} size="md" dot={!!data?.execution.canPlaceOrders} title="Robinhood holds the money; orders come only from the live desk on Railway, never from this page">{data?.execution.canPlaceOrders ? "Real account · live desk armed" : "Real account · read only"}</Chip>
           {acct && <Chip tone={acct.optionLevel === "option_level_3" ? "green" : "amber"} size="md">{levelLabel(acct.optionLevel)}</Chip>}
           <Chip tone={snapshotStale ? "red" : "green"} size="md" dot={snapshotStale} title="Pushed by the scheduled desk session after each close">
             {live ? `Snapshot ${ago(live.at)}` : acct ? `Account ${ago(acct.at)} · positions not pushed yet` : "Nothing pushed yet"}

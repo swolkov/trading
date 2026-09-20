@@ -14,7 +14,7 @@ export async function GET() {
     prisma.agentConfig.findUnique({ where: { key: OPTIONS_MAX_LOSS_KEY } }).then((r) => parseOptionsMaxLoss(r?.value)).catch(() => null),
     prisma.agentConfig.findMany({ where: { key: { in: ["options_live_armed", "options_live_integration_verified"] } } }).then((rows) => Object.fromEntries(rows.map((r) => [r.key, r.value]))).catch(() => ({} as Record<string, string>)),
   ]);
-  // The live desk (scripts/robinhood/live-desk.ts on the Mac) records every order it sends as a
+  // The live desk (scripts/robinhood/live-desk.ts on Railway since Sep 14 2026) records every order it sends as a
   // durable intent. A non-"user" order the desk does not recognise is the one thing on this page
   // that should never appear: it means another session was given an order tool.
   let ours = new Set<string>();
@@ -31,7 +31,7 @@ export async function GET() {
       maxLossUsd: maxLoss,
       paperEnabled: false,
       why: armed && verified
-        ? "The live desk is armed and its broker adapter is verified: it takes every name that clears the screen — one contract each, up to three at once, debit structures only — inside the approved maximum loss including fees and a quarter of the account at risk in total. It runs every 5 minutes during the session."
+        ? "The live desk is armed and its broker adapter is verified: it takes every name that clears the screen — one contract each (two on a Strong grade that fits twice), up to three at once, debit structures only — inside the approved maximum loss including fees and a quarter of the account at risk in total. It runs every 5 minutes during the session."
         : armed
           ? "The live desk is armed but its broker adapter has not yet been verified on a real review response. The first session tick sends a review only; entries follow once that verifies."
           : "The live desk is disarmed. Direct account reads continue; no order can be placed.",

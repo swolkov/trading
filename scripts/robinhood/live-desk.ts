@@ -190,7 +190,7 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
           const quantity = Math.min(decision.quantity ?? pos.legs[0].quantity, pos.legs[0].quantity);
           const closeIntent: OptionsLiveIntent = { refId: randomUUID(), action: "close", kind: pos.kind, positionId: pos.id, quantity, limitPrice: decision.limitPrice,
             legs: pos.legs.map((l) => ({ optionId: l.optionId, side: l.side === "long" ? "sell" as const : "buy" as const })) };
-          // With two slots an entry order may be live while a close is wanted; the policy refuses any order beside an outstanding one, so
+          // With several slots an entry order may be live while a close is wanted; the policy refuses any order beside an outstanding one, so
           // cancel the entry first. If the cancel confirms on an immediate reconcile the close goes now, otherwise next tick.
           const blocker = closeBlockedBy(pending);
           if (blocker) {
@@ -206,7 +206,8 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
           const res = await executeOptionsIntent(closeIntent, deps);
           log(`close ${pos.id} × ${quantity}: ${res.status}${res.reason ? ` — ${res.reason}` : ""}`);
           if (res.status === "accepted") await page(`📤 Options CLOSE sent for ${pos.underlying} ${pos.kind} × ${quantity}${quantity < pos.legs[0].quantity ? ` of ${pos.legs[0].quantity}` : ""} at ${decision.limitPrice.toFixed(2)} (${decision.reason}).`);
-          else if (res.status !== "refused") { clean = false; await page(`🚨 Options close for ${pos.id} ended ${res.status}: ${res.reason}`); }
+          else if (res.status === "refused") await page(`⚠️ Options close for ${pos.underlying} ${pos.kind} refused this tick: ${res.reason}. It goes again next tick.`);
+          else { clean = false; await page(`🚨 Options close for ${pos.id} ended ${res.status}: ${res.reason}`); }
         }
         // 4) Drawdown tier on account value: sizing scales down through the tiers; tier 4 disarms entries.
         if (totalValue != null) {
@@ -243,7 +244,16 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         // (no unknowns, fees inside the reserve, fills near the limit) throttles back to one slot once it has ten closed trades and is red.
         const trips = roundTrips(ledger), divergence = divergenceVerdict(trips, ledger, policy.feeBudgetUsd);
         const wantedSlots = Number(await cfg(SLOTS_KEY));
-        const slots = slotsFor(divergence.closedTrades, divergence.green, Number.isFinite(wantedSlots) && wantedSlots > 0 ? wantedSlots : undefined);
+        const slots = slotsFor(divergence.closedTrades, divergence.green, Number.isFinite(wantedSlots) && wantedSlots >= 0 ? wantedSlots : undefined);
+        // No second bite at a name the same day (Fable, Sep 20 2026): with several entries a day, a name stopped out at 10:05 would
+        // still read "breakout" on the research row and be bought back at 10:35. Opened today, or closed today → not again today.
+        const tradedToday = new Set<string>();
+        for (const r of ledger) {
+          if (etDay(r.createdAtMs ?? 0) !== today) continue;
+          const open = r.action === "open" ? r : ledger.find((o) => o.action === "open" && o.refId === r.positionId);
+          const sym = (open?.candidate as { symbol?: unknown } | undefined)?.symbol;
+          if (typeof sym === "string") tradedToday.add(sym);
+        }
         const promoted = (await cfg(PROMOTED_KEY)) === "true";
         state.slots = slots; state.promoted = promoted; state.ledger = { closedTrades: divergence.closedTrades, divergenceGreen: divergence.green, reasons: divergence.reasons.slice(0, 5) };
         if (!policy.armed) log("entry: desk is not armed");
@@ -252,7 +262,7 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         else if (todays.length >= OPTIONS_LIVE_RULES.maxEntriesPerDay) log(`entry: ${todays.length} entry attempt(s) already today`);
         else if (tier && tier.mult === 0) log(`entry: drawdown tier ${tier.tier} (${tier.label}) — entries halted`);
         else {
-          const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0, { equity: totalValue, tier, promoted, owned });
+          const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0, { equity: totalValue, tier, promoted, owned, tradedToday });
           state.candidate = pick.note; state.market = pick.market; state.grade = pick.grade; state.cap = pick.cap;
           let res: Awaited<ReturnType<typeof executeOptionsIntent>> | null = null;
           if (!pick.intent) log(`entry: ${pick.note}`);
@@ -298,7 +308,7 @@ async function accountValue(): Promise<number | null> {
 /** What the desk saw of the market on this tick — stamped into options_live_state.market beside the candidate note. */
 interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
 /** What the ladder sizes against: account value, the drawdown tier, the A+ switch and what is already owned. */
-interface SizingContext { equity: number | null; tier: DrawdownTier | null; promoted: boolean; owned: OwnedPositionRecord[] }
+interface SizingContext { equity: number | null; tier: DrawdownTier | null; promoted: boolean; owned: OwnedPositionRecord[]; tradedToday: Set<string> }
 /** What the runner remembers about the setup beside the canonical intent — written on the reservation record after acceptance. */
 interface CandidateStash { symbol: string; kind: string; setup: string; direction: "bullish" | "bearish"; rangeLow: number; rangeHigh: number; grade: OptionsGrade; cap: number; spreadPct: number | null; quantity: number }
 interface Pick {
@@ -335,6 +345,7 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     // The screen ran on the snapshot's clock; the desk runs on its own. A row that aged past 36h since then refuses here.
     const earnings = spansEarnings(c.symbol, c.expiry, data.events, Date.now());
     if (!earnings.permitted) { refuse(c, earnings.note); continue; }
+    if (ctx.tradedToday.has(c.symbol)) { refuse(c, "already traded today — no re-entry on a name until tomorrow"); continue; }
     if (vetoOn) {
       const direction = directionOfKind(c.kind);
       const veto = marketVeto(stamp, direction, c.symbol);
