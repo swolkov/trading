@@ -48,7 +48,7 @@ export function TopBar() {
         )}
       </div>
       <Chip tone={optionsArmed ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={optionsArmed}
-        title={optionsArmed ? "The options live desk can place real orders (one contract, inside the approved cap)" : opt?.execution?.armed ? "Armed, but the broker adapter is unverified — the desk refuses to place" : "The options live desk is not placing real orders"}>
+        title={optionsArmed ? "The options live desk can place real orders: every name that clears the screen, up to three at once, inside the approved cap" : opt?.execution?.armed ? "Armed, but the broker adapter is unverified — the desk refuses to place" : "The options live desk is not placing real orders"}>
         {optionsArmed ? "Options desk armed" : opt?.execution?.armed ? "Armed · unverified" : "Options desk disarmed"}
       </Chip>
     </header>

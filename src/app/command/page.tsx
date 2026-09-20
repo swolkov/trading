@@ -95,11 +95,11 @@ export default function SystemHealthPage() {
             {rh.liveAt && <span>{rh.livePositions} positions · {rh.liveOrders} orders</span>}
           </HealthRow>
           <HealthRow label="Options permission" chip={<Chip tone={rh.optionLevel === "option_level_3" ? "green" : "grey"}>{rh.optionLevel === "option_level_3" ? "Level 3" : rh.optionLevel ?? "unknown"}</Chip>} />
-          <HealthRow label="Live desk switch" sub="Typed ARM on the Live Account page. Real money: one contract, inside the approved cap."
+          <HealthRow label="Live desk switch" sub="Typed ARM on the Live Account page. Real money: every name that clears the screen, up to three at once, inside the approved cap."
             chip={<Chip tone={rh.liveDesk?.armed ? "red" : "grey"}>{rh.liveDesk?.armed ? "Armed" : "Disarmed"}</Chip>} />
           <HealthRow label="Broker adapter" sub="Verified only after a real broker review decoded fees and buying power. Unverified = the desk refuses to place."
             chip={<Chip tone={rh.liveDesk?.verified ? "green" : "amber"}>{rh.liveDesk?.verified ? "Verified" : "Unverified"}</Chip>} />
-          <HealthRow label="Desk guardian" sub="Every 5 minutes in the regular session, on the Mac. Silence outside the session is normal."
+          <HealthRow label="Desk guardian" sub="Every 5 minutes in the regular session, on Railway. Silence outside the session is normal."
             chip={<Chip tone={rh.liveDesk?.guardianFresh ? "green" : "grey"}>{rh.liveDesk?.guardianFresh ? "Reporting" : "Not reporting"}</Chip>}>
             <span>{rh.liveDesk?.guardianAt ? ago(rh.liveDesk.guardianAt) : "has not run"}</span>
           </HealthRow>

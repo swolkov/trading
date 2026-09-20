@@ -13,7 +13,7 @@ import { OPTIONS_DESK_RULES, liveEnterableKinds, researchSignals, screenResearch
 import { OPTIONS_EVENT_RULES, spansEarnings } from "./options-events";
 import { dteOf } from "./options-live-guardian";
 import { OPTIONS_MARKET_RULES, chaseCheck, directionOfKind, marketState, marketVeto, type IndexState, type MarketStamp } from "./options-market-state";
-import { clusterRisk, ddTier, gradeFor, maxLossFor, reserveRefusal, type ClusterLeg, type DrawdownTier } from "./options-risk-ladder";
+import { OPTIONS_LADDER_RULES, clusterRisk, ddTier, gradeFor, maxLossFor, reserveRefusal, type ClusterLeg, type DrawdownTier } from "./options-risk-ladder";
 import { optionsOpportunityScore, scoreInputsFor } from "./options-score";
 import { buildOptionsTradeCard, candidateKey, structureComparison, type OptionsTradeCard } from "./options-trade-card";
 
@@ -39,6 +39,8 @@ export interface BriefContext {
   ceiling: number | null; feeReserveUsd: number; promoted: boolean; armed: boolean; verified: boolean; vetoOn: boolean;
   owned: (ClusterLeg & { atRiskUsd: number })[]; equityHigh: number | null; vix: number | null;
   ivRanks?: Record<string, number | null>; now: number;
+  /** Open slots the desk would grant this tick (slotsFor); absent → the ladder's default. */
+  slots?: number;
 }
 const r2 = (x: number) => Math.round(x * 100) / 100;
 const usd = (x: number | null | undefined, d = 0) => (x == null ? "unknown" : `$${x.toFixed(d)}`);
@@ -88,10 +90,11 @@ export function buildOptionsBrief(ctx: BriefContext): OptionsBriefInput {
     // The tick's own chaseCheck on the signal-day bar (close vs the prior close, timestamped now so it is not "stale"); the tick re-runs it on a live quote.
     const rows = data.bars[c.symbol] ?? [], prev = rows.at(-2)?.close;
     const chase = chaseCheck(prev != null && prev > 0 ? { last: c.spot, previousClose: prev, atMs: ctx.now } : null, c.atmIv, c.symbol, ctx.now);
+    const slots = ctx.slots ?? OPTIONS_LADDER_RULES.defaultSlots;
     return [
       { name: "armed", pass: ctx.armed && ctx.verified, note: ctx.armed ? (ctx.verified ? "armed and verified" : "armed, adapter unverified") : "desk disarmed" },
       { name: "drawdown tier", pass: mult > 0, note: tier ? `${tier.label} ×${tier.mult}` : "no account value on file — tier unknown, sizing ×1" },
-      { name: "slot", pass: ctx.owned.length === 0, note: ctx.owned.length === 0 ? "no position open" : `${ctx.owned.length} position${ctx.owned.length === 1 ? "" : "s"} held — WAIT, the tick's slot count (slotsFor) decides` },
+      { name: "slot", pass: ctx.owned.length < slots, note: ctx.owned.length < slots ? `${ctx.owned.length} of ${slots} slots used` : `${ctx.owned.length} of ${slots} slots used — WAIT, the tick's slot count (slotsFor) decides` },
       { name: "earnings", pass: earnings.permitted, note: earnings.note },
       { name: "market veto", pass: !ctx.vetoOn || !veto.vetoed, note: ctx.vetoOn ? veto.reason : "veto switched off" },
       { name: "chase", pass: !chase.vetoed, note: `${chase.reason} (signal-day bar; re-checked live at the tick)` },

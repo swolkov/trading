@@ -49,7 +49,7 @@ export function OptionPositionsTable({ positions, at }: { positions: LivePositio
 export function OptionOrdersTable({ orders, at }: { orders: LiveOrder[]; at: string | null }) {
   return (
     <Panel>
-      <PanelHeader title="Orders in the latest broker snapshot" aside={<span>newest first · placed by you in the Robinhood app, or by nothing</span>} />
+      <PanelHeader title="Orders in the latest broker snapshot" aside={<span>newest first · placed by the live desk, or by you in the Robinhood app</span>} />
       {orders.length === 0 ? (
         <PanelBody><Empty>{at ? "No orders returned in the latest broker snapshot." : "Orders have not been pushed yet."}</Empty></PanelBody>
       ) : (

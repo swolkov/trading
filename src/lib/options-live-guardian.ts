@@ -21,7 +21,7 @@ export const OPTIONS_LIVE_RULES = {
   exitBeforeDte: 7,         // close inside the last week regardless (gamma/assignment window)
   staleEntryMinutes: 15,    // an unfilled entry is cancelled after this
   drawdownHaltUsd: 300,     // the halt's dollar floor: entries disarm at the larger of this and 20% under the high (options-risk-ladder.ts ddTier)
-  maxEntriesPerDay: 1,      // open slots come from the ladder (slotsFor): one, a second after ten closed live trades with the divergence check green
+  maxEntriesPerDay: 4,      // one entry per tick; open slots come from the ladder (slotsFor), default three, inside the reserve and cluster rules
   entryKinds: ["long_call", "long_put", "call_debit", "put_debit"] as StructureKind[],   // debit only: max loss = what we paid
 };
 
