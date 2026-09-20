@@ -7,13 +7,14 @@ import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { hold, pnl0, tone, when } from "@/lib/format";
 import type { JournalRow, Scoreboard } from "@/lib/trading-room-journal";
-import type { LedgerDay } from "@/lib/trading-room-ledger";
+import type { LedgerDay, LedgerTrade } from "@/lib/trading-room-ledger";
+import { sessionBucket } from "@/lib/trading-room-journal";
 import type { RoomSymbol } from "@/lib/trading-room-rules";
 
 // THE JOURNAL ON THE PAGE. Spencer's real round trips from his Tradovate fills, stamped by the room,
 // and the pre-registered 40-trade scoreboard. The only input is his: a one-word tag and a one-line why.
 
-export interface JournalData { rows: JournalRow[]; scoreboard: Scoreboard; rules: { minTrades: number; recheckAt: number }; ledger?: { rows: number; byDay: LedgerDay[]; since: string | null }; error?: string }
+export interface JournalData { rows: JournalRow[]; scoreboard: Scoreboard; rules: { minTrades: number; recheckAt: number }; ledger?: { rows: number; byDay: LedgerDay[]; trades: LedgerTrade[]; since: string | null }; error?: string }
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 const px = (sym: RoomSymbol, x: number) => (sym === "MGC" ? x.toFixed(1) : x.toFixed(2));
 const r1 = (x: number | null) => (x == null ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(2)}R`);
@@ -24,14 +25,14 @@ export function JournalSection() {
   if (data.error) return <Panel tone="amber"><PanelBody><Note>Journal did not load: {data.error}</Note></PanelBody></Panel>;
   return (
     <div className="space-y-3">
-      {data.ledger && <LedgerPanel byDay={data.ledger.byDay} />}
+      {data.ledger && <LedgerPanel byDay={data.ledger.byDay} trades={data.ledger.trades} />}
       <ScoreboardPanel sb={data.scoreboard} minTrades={data.rules.minTrades} />
       <JournalTable rows={data.rows} onSaved={() => mutate()} />
     </div>
   );
 }
 
-export function LedgerPanel({ byDay }: { byDay: LedgerDay[] }) {
+export function LedgerPanel({ byDay, trades }: { byDay: LedgerDay[]; trades: LedgerTrade[] }) {
   const total = byDay.reduce((a, d) => ({ trades: a.trades + d.trades, gross: a.gross + d.grossUsd, win: a.win + d.winUsd, fees: a.fees + d.feesUsd, other: a.other + d.otherUsd, net: a.net + d.netUsd }), { trades: 0, gross: 0, win: 0, fees: 0, other: 0, net: 0 });
   const tradingDays = byDay.filter((d) => d.trades > 0).length;
   const recent = [...byDay].reverse().slice(0, 30);
@@ -59,8 +60,34 @@ export function LedgerPanel({ byDay }: { byDay: LedgerDay[] }) {
           </DataTable>
         )}
         <Note className="mt-3">A &quot;paired trade&quot; is the broker&apos;s own match of an entry fill to an exit fill, so one round trip at 20 contracts can show as several pairs. The journal below rebuilds full round trips from fills the room has seen; fills from before the room existed are gone from the broker&apos;s API, so those days show here only.</Note>
+        <LedgerTradesTable trades={trades} />
       </PanelBody>
     </Panel>
+  );
+}
+
+// Every trade the broker recorded, newest first — the only per-trade record for days before the room existed.
+function LedgerTradesTable({ trades }: { trades: LedgerTrade[] }) {
+  if (!trades.length) return null;
+  const rows = [...trades].reverse();
+  return (
+    <div className="mt-4">
+      <p className="mb-1 text-[11px] uppercase tracking-wide text-muted-foreground">Every trade · {trades.length} · newest first</p>
+      <DataTable dense maxH="420px">
+        <thead><tr><Th>Closed (ET)</Th><Th>Session</Th><Th num>Pairs</Th><Th num>Trade P&amp;L</Th><Th num>Best / worst pair</Th><Th num>Running</Th></tr></thead>
+        <tbody>{rows.map((t) => (
+          <Row key={t.id}>
+            <Td muted title={t.exitTs}>{when(t.exitTs)}</Td>
+            <Td muted>{sessionBucket(Date.parse(t.exitTs))}</Td>
+            <Td num muted>{t.pairs}</Td>
+            <Td num className={tone(t.grossUsd)} strong>{pnl0(t.grossUsd)}</Td>
+            <Td num muted>{t.pairs > 1 ? `${pnl0(t.bestPairUsd)} / ${pnl0(t.worstPairUsd)}` : "—"}</Td>
+            <Td num className={tone(t.runningGrossUsd)}>{pnl0(t.runningGrossUsd)}</Td>
+          </Row>
+        ))}</tbody>
+      </DataTable>
+      <Note className="mt-2">Gross, before fees (fees post per fill, not per trade: ~$2.06 a contract round trip). Market, size and entry price are not in the broker&apos;s ledger — those come from fills, which the journal keeps from the first trade it sees live.</Note>
+    </div>
   );
 }
 

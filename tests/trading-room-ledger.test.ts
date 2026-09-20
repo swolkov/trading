@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ledgerByDay, type LedgerRow } from "../src/lib/trading-room-ledger-rules";
+import { ledgerByDay, ledgerTrades, type LedgerRow } from "../src/lib/trading-room-ledger-rules";
 
 const row = (id: number, tradeDate: string, type: string, delta: number): LedgerRow => ({ id, ts: `${tradeDate}T14:00:00.000Z`, tradeDate, type, delta, realizedPnl: null, fillId: null, fillPairId: null });
 
@@ -18,4 +18,15 @@ test("ledger by day: paired trades are gross, four fee types are fees, the rest 
   assert.deepEqual([b.trades, b.grossUsd, b.otherUsd, b.netUsd], [1, 20, -50, -30]);
   assert.ok(Math.abs(b.cumNetUsd - 21.9) < 1e-9);
   assert.deepEqual(ledgerByDay([]), []);
+});
+
+test("every trade: paired rows within 90s of each other are one trade, with a running gross", () => {
+  const t = (id: number, iso: string, delta: number, type = "TradePaired"): LedgerRow => ({ id, ts: iso, tradeDate: "2026-09-18", type, delta, realizedPnl: null, fillId: null, fillPairId: null });
+  const trades = ledgerTrades([
+    t(1, "2026-09-18T18:54:39.000Z", 506.25), t(2, "2026-09-18T18:54:39.100Z", 56.25), t(3, "2026-09-18T18:54:39.200Z", 562.5),
+    t(4, "2026-09-18T19:07:21.000Z", -125), t(5, "2026-09-18T19:07:21.000Z", -3, "Commission"),
+    t(6, "2026-09-18T19:49:07.000Z", -275), t(7, "2026-09-18T19:50:03.000Z", -275),
+  ]);
+  assert.deepEqual(trades.map((x) => [x.pairs, x.grossUsd, x.runningGrossUsd, x.bestPairUsd, x.worstPairUsd]), [[3, 1125, 1125, 562.5, 56.25], [1, -125, 1000, -125, -125], [2, -550, 450, -275, -275]]);
+  assert.equal(trades[0].id, 1);
 });

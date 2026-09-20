@@ -5,8 +5,8 @@
 // Read-only: one GET, no order path.
 import { prisma } from "@/lib/db";
 import { tradovateRequest } from "@/lib/tradovate";
-import { ledgerByDay, type LedgerDay, type LedgerRow } from "@/lib/trading-room-ledger-rules";
-export type { LedgerDay, LedgerRow } from "@/lib/trading-room-ledger-rules";
+import { ledgerByDay, ledgerTrades, type LedgerDay, type LedgerRow, type LedgerTrade } from "@/lib/trading-room-ledger-rules";
+export type { LedgerDay, LedgerRow, LedgerTrade } from "@/lib/trading-room-ledger-rules";
 
 export async function ensureLedgerTable(): Promise<void> {
   await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS trading_room_ledger (
@@ -36,12 +36,12 @@ export async function syncLedger(): Promise<{ seen: number; stored: number }> {
 }
 
 interface DbRow { id: number; ts: Date; trade_date: Date | null; type: string; delta: number; realized_pnl: number | null; fill_id: number | null; fill_pair_id: number | null }
-export async function ledgerView(days = 60): Promise<{ rows: number; byDay: LedgerDay[]; since: string | null }> {
+export async function ledgerView(days = 60): Promise<{ rows: number; byDay: LedgerDay[]; trades: LedgerTrade[]; since: string | null }> {
   await ensureLedgerTable();
   const since = new Date(Date.now() - days * 24 * 3_600_000);
   const rows = (await prisma.$queryRawUnsafe<DbRow[]>(`SELECT * FROM trading_room_ledger WHERE ts >= $1 ORDER BY ts`, since)).map((r): LedgerRow => ({
     id: Number(r.id), ts: new Date(r.ts).toISOString(), tradeDate: r.trade_date ? new Date(r.trade_date).toISOString().slice(0, 10) : null, type: r.type, delta: Number(r.delta),
     realizedPnl: r.realized_pnl == null ? null : Number(r.realized_pnl), fillId: r.fill_id == null ? null : Number(r.fill_id), fillPairId: r.fill_pair_id == null ? null : Number(r.fill_pair_id),
   }));
-  return { rows: rows.length, byDay: ledgerByDay(rows), since: rows[0]?.ts ?? null };
+  return { rows: rows.length, byDay: ledgerByDay(rows), trades: ledgerTrades(rows), since: rows[0]?.ts ?? null };
 }
