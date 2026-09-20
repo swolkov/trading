@@ -10,6 +10,7 @@ import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
 import { getTradovateAccountSummary, getTradovateFills, getTradovatePositions, resolveContractSymbol } from "@/lib/tradovate";
 import { deskCalendar } from "@/lib/futures-desk-calendar";
 import { foldJournal } from "@/lib/trading-room-journal-store";
+import { syncLedger } from "@/lib/trading-room-ledger";
 import {
   CARD_POST_ET, CHART_LEVELS_FRESH_MS, EVENT_HEADS_UP_MIN, FEED_LABEL, INSTRUMENTS, ROOM_SYMBOLS, appendFeed, buildLevels, etParts, eventNote, levelsFromChart, parseSettings, sizingFor, weeklyPrints,
   type Bar, type ChartLevels, type FeedEvent, type LevelSet, type RoomEvent, type RoomSettings, type SizingLine,
@@ -177,6 +178,9 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
   catch (e) { notes.push(`card failed: ${String(e).slice(0, 160)}`); state.lastError = String(e).slice(0, 200); }
   const live = await refreshLive(nowMs);
   notes.push(live.ok ? `live: net liq ${live.netLiq} · ${live.positions.length} open · ${live.fillsToday} fills seen` : `live read failed: ${live.error}`);
+  // The broker's own ledger (realized P&L and fees per trade) — the money truth, kept even when fills expire.
+  try { const l = await syncLedger(); notes.push(`ledger: ${l.seen} rows seen · ${l.stored} new`); }
+  catch (e) { notes.push(`ledger failed: ${String(e).slice(0, 160)}`); }
   // The journal: fills → round trips, stamped and scored. Its failure never blocks the card.
   try { const j = await foldJournal(nowMs); notes.push(`journal: ${j.trips} trips (${j.open} open) · ${j.updated} written`); }
   catch (e) { notes.push(`journal failed: ${String(e).slice(0, 160)}`); }

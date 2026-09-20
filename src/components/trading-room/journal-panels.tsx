@@ -7,12 +7,13 @@ import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { hold, pnl0, tone, when } from "@/lib/format";
 import type { JournalRow, Scoreboard } from "@/lib/trading-room-journal";
+import type { LedgerDay } from "@/lib/trading-room-ledger";
 import type { RoomSymbol } from "@/lib/trading-room-rules";
 
 // THE JOURNAL ON THE PAGE. Spencer's real round trips from his Tradovate fills, stamped by the room,
 // and the pre-registered 40-trade scoreboard. The only input is his: a one-word tag and a one-line why.
 
-interface JournalData { rows: JournalRow[]; scoreboard: Scoreboard; rules: { minTrades: number; recheckAt: number }; error?: string }
+interface JournalData { rows: JournalRow[]; scoreboard: Scoreboard; rules: { minTrades: number; recheckAt: number }; ledger?: { rows: number; byDay: LedgerDay[]; since: string | null }; error?: string }
 const fetcher = (u: string) => fetch(u).then((r) => r.json());
 const px = (sym: RoomSymbol, x: number) => (sym === "MGC" ? x.toFixed(1) : x.toFixed(2));
 const r1 = (x: number | null) => (x == null ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(2)}R`);
@@ -23,9 +24,42 @@ export function JournalSection() {
   if (data.error) return <Panel tone="amber"><PanelBody><Note>Journal did not load: {data.error}</Note></PanelBody></Panel>;
   return (
     <div className="space-y-3">
+      {data.ledger && <LedgerPanel byDay={data.ledger.byDay} />}
       <ScoreboardPanel sb={data.scoreboard} minTrades={data.rules.minTrades} />
       <JournalTable rows={data.rows} onSaved={() => mutate()} />
     </div>
+  );
+}
+
+function LedgerPanel({ byDay }: { byDay: LedgerDay[] }) {
+  const total = byDay.reduce((a, d) => ({ trades: a.trades + d.trades, gross: a.gross + d.grossUsd, fees: a.fees + d.feesUsd, other: a.other + d.otherUsd, net: a.net + d.netUsd }), { trades: 0, gross: 0, fees: 0, other: 0, net: 0 });
+  const recent = [...byDay].reverse().slice(0, 30);
+  return (
+    <Panel>
+      <PanelHeader title="Broker ledger · what Tradovate says you made" aside={<span>realized P&amp;L and fees per trade, from the broker&apos;s own cash log · by trade date</span>} />
+      <PanelBody>
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+          <Stat label="Net after fees" value={pnl0(total.net)} valueCls={tone(total.net)} sub={`${byDay.length} trading day${byDay.length === 1 ? "" : "s"}`} />
+          <Stat label="Gross on trades" value={pnl0(total.gross)} valueCls={tone(total.gross)} sub={`${total.trades} paired trades`} />
+          <Stat label="Fees" value={pnl0(total.fees)} valueCls={tone(total.fees)} sub={total.trades ? `${(Math.abs(total.fees) / total.trades).toFixed(2)} per paired trade` : undefined} />
+          <Stat label="Other" value={pnl0(total.other)} valueCls={tone(total.other)} sub="liquidations · subscriptions" />
+          <Stat label="Fees as % of gross wins" value={total.gross > 0 || byDay.some((d) => d.bestUsd > 0) ? `${Math.round(100 * Math.abs(total.fees) / Math.max(1, byDay.reduce((a, d) => a + Math.max(0, d.grossUsd), 0)))}%` : "—"} />
+        </div>
+        {recent.length === 0 ? <Empty>No ledger rows yet. The room reads the broker&apos;s cash log every 5 minutes on weekdays.</Empty> : (
+          <DataTable dense maxH="260px" className="mt-3">
+            <thead><tr><Th>Trade date</Th><Th num>Trades</Th><Th num>W / L</Th><Th num>Gross</Th><Th num>Fees</Th><Th num>Other</Th><Th num>Net</Th><Th num>Best / worst</Th><Th num>Running</Th></tr></thead>
+            <tbody>{recent.map((d) => (
+              <Row key={d.day}>
+                <Td strong>{d.day}</Td><Td num>{d.trades}</Td><Td num muted>{d.wins} / {d.losses}</Td>
+                <Td num className={tone(d.grossUsd)}>{pnl0(d.grossUsd)}</Td><Td num className={tone(d.feesUsd)}>{pnl0(d.feesUsd)}</Td><Td num muted>{d.otherUsd ? pnl0(d.otherUsd) : "—"}</Td>
+                <Td num className={tone(d.netUsd)}>{pnl0(d.netUsd)}</Td><Td num muted>{pnl0(d.bestUsd)} / {pnl0(d.worstUsd)}</Td><Td num className={tone(d.cumNetUsd)}>{pnl0(d.cumNetUsd)}</Td>
+              </Row>
+            ))}</tbody>
+          </DataTable>
+        )}
+        <Note className="mt-3">A &quot;paired trade&quot; is the broker&apos;s own match of an entry fill to an exit fill, so one round trip at 20 contracts can show as several pairs. The journal below rebuilds full round trips from fills the room has seen; fills from before the room existed are gone from the broker&apos;s API, so those days show here only.</Note>
+      </PanelBody>
+    </Panel>
   );
 }
 

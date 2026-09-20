@@ -146,7 +146,7 @@ const mean = (a: number[]) => (a.length ? a.reduce((s, x) => s + x, 0) / a.lengt
 const sd = (a: number[]) => { if (a.length < 2) return NaN; const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / (a.length - 1)); };
 /** mulberry32 — a tiny seeded PRNG so the bootstrap is reproducible in tests. */
 function prng(seed: number) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
-export function bootstrapPMeanPositive(rs: number[], draws = TEST_RULES.bootstrapDraws, seed = 20260919): number | null {
+export function bootstrapPMeanPositive(rs: number[], draws: number = TEST_RULES.bootstrapDraws, seed = 20260919): number | null {
   if (rs.length < 5) return null;
   const rnd = prng(seed); let pos = 0;
   for (let d = 0; d < draws; d++) { let s = 0; for (let i = 0; i < rs.length; i++) s += rs[Math.floor(rnd() * rs.length)]; if (s > 0) pos++; }
