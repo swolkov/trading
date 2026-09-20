@@ -12,10 +12,10 @@ import { cn } from "@/lib/utils";
 
 export function PageHeader({ title, sub, right }: { title: string; sub?: ReactNode; right?: ReactNode }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border pb-4">
       <div className="min-w-0">
-        <h1 className="text-xl font-semibold leading-tight">{title}</h1>
-        {sub && <p className="mt-1 text-[13px] text-muted-foreground">{sub}</p>}
+        <h1 className="text-[26px] font-semibold leading-none tracking-[-0.02em]">{title}</h1>
+        {sub && <p className="mt-2 max-w-3xl text-[13px] leading-relaxed text-muted-foreground">{sub}</p>}
       </div>
       {right && <div className="flex flex-wrap items-center gap-2">{right}</div>}
     </div>
@@ -29,13 +29,13 @@ export function Panel({ children, className, tone }: { children: ReactNode; clas
     : tone === "amber" ? "border-warn/35 bg-warn/[0.06]"
     : tone === "green" ? "border-up/30 bg-up/[0.05]"
     : "border-border bg-card";
-  return <section className={cn("overflow-hidden rounded-xl border", toneCls, className)}>{children}</section>;
+  return <section className={cn("panel overflow-hidden rounded-xl border", toneCls, className)}>{children}</section>;
 }
 
 export function PanelHeader({ title, aside, className }: { title: ReactNode; aside?: ReactNode; className?: string }) {
   return (
-    <div className={cn("flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-4 py-2.5", className)}>
-      <h2 className="text-[13px] font-semibold">{title}</h2>
+    <div className={cn("flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border bg-foreground/[0.015] px-4 py-2.5", className)}>
+      <h2 className="text-[13px] font-semibold tracking-[-0.01em]">{title}</h2>
       {aside && <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{aside}</div>}
     </div>
   );
@@ -46,7 +46,7 @@ export function PanelBody({ children, className }: { children: ReactNode; classN
 }
 
 export function Label({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
-  return <p title={title} className={cn("text-[11px] font-medium uppercase tracking-wide text-muted-foreground", className)}>{children}</p>;
+  return <p title={title} className={cn("num text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground", className)}>{children}</p>;
 }
 
 export function Stat({ label, value, sub, valueCls, size = "md", title }: {
@@ -55,7 +55,7 @@ export function Stat({ label, value, sub, valueCls, size = "md", title }: {
   return (
     <div title={title} className="min-w-0">
       <Label>{label}</Label>
-      <p className={cn("mt-0.5 font-semibold tabular-nums leading-none", size === "lg" ? "text-[28px]" : "text-lg", valueCls)}>{value}</p>
+      <p className={cn("num mt-1 font-medium leading-none", size === "lg" ? "text-[30px] tracking-[-0.03em]" : "text-[19px] tracking-[-0.02em]", valueCls)}>{value}</p>
       {sub && <div className="mt-1.5 text-xs text-muted-foreground">{sub}</div>}
     </div>
   );

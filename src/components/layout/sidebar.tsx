@@ -90,10 +90,13 @@ export function Sidebar() {
     <>
       <div className="flex h-12 items-center border-b border-sidebar-border px-4">
         <Link href="/" className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+          <div className="num flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-[0_0_0_1px_oklch(1_0_0/8%),0_4px_12px_-4px_oklch(0.84_0.13_88/60%)]">
             <span className="text-[13px] font-bold">E</span>
           </div>
-          <span className="text-[13px] font-semibold tracking-tight">Esbueno Trades</span>
+          <div className="leading-none">
+            <span className="block text-[13px] font-semibold tracking-tight">Esbueno Trades</span>
+            <span className="num mt-1 block text-[9px] uppercase tracking-[0.18em] text-muted-foreground/70">options · futures</span>
+          </div>
         </Link>
       </div>
 
@@ -101,7 +104,7 @@ export function Sidebar() {
         {sections.map((section) => (
           <div key={section.label} className="mb-4">
             <p className={cn(
-              "px-4 pb-1 text-[11px] font-medium uppercase tracking-wide",
+              "num px-4 pb-1.5 text-[9.5px] font-medium uppercase tracking-[0.14em]",
               "tone" in section && section.tone === "live" ? "text-down/80" : "tone" in section && section.tone === "paper" ? "text-paper/80" : "text-muted-foreground/70",
             )}>
               {section.label}
@@ -116,9 +119,9 @@ export function Sidebar() {
                     href={link.href}
                     onClick={() => setMobileOpen(false)}
                     className={cn(
-                      "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                      "relative flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
                       active
-                        ? "bg-sidebar-accent text-foreground"
+                        ? "bg-sidebar-accent text-foreground before:absolute before:-left-2 before:top-1.5 before:h-[calc(100%-12px)] before:w-0.5 before:rounded-full before:bg-primary"
                         : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
                     )}
                   >
