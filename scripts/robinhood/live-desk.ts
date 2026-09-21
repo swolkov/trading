@@ -243,8 +243,10 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         // tick takes the next name; the reserve and cluster rules inside pickCandidate are the real ceiling. The divergence check
         // (no unknowns, fees inside the reserve, fills near the limit) throttles back to one slot once it has ten closed trades and is red.
         const trips = roundTrips(ledger), divergence = divergenceVerdict(trips, ledger, policy.feeBudgetUsd);
-        const wantedSlots = Number(await cfg(SLOTS_KEY));
-        const slots = slotsFor(divergence.closedTrades, divergence.green, Number.isFinite(wantedSlots) && wantedSlots >= 0 ? wantedSlots : undefined);
+        // options_live_slots unset → the ladder's default (3). Set to "0" or "1" → one slot. (A missing key was being read as 0 → 1 slot; Sep 21 2026.)
+        const slotsRaw = await cfg(SLOTS_KEY);
+        const wantedSlots = slotsRaw == null || slotsRaw.trim() === "" ? undefined : Number(slotsRaw);
+        const slots = slotsFor(divergence.closedTrades, divergence.green, wantedSlots != null && Number.isFinite(wantedSlots) && wantedSlots >= 0 ? wantedSlots : undefined);
         // No second bite at a name the same day (Fable, Sep 20 2026): with several entries a day, a name stopped out at 10:05 would
         // still read "breakout" on the research row and be bought back at 10:35. Opened today, or closed today → not again today.
         const tradedToday = new Set<string>();
