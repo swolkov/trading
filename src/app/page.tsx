@@ -10,8 +10,8 @@ const fetcher = (u: string) => fetch(u).then((r) => r.json());
 
 // ============ DASHBOARD ============
 // One job: "how is the money right now?" — Spencer's LIVE Tradovate account (his hand trades,
-// headlined), the real Robinhood options account and the Tradovate futures DEMO, each with its
-// money state named. No analytics here; the records live on the desk pages, the trade lists on
+// headlined) and the real Robinhood options account, each with its money state named. The paper
+// futures desk was retired Sep 21 2026. No analytics here; the records live on the desk pages, the trade lists on
 // Orders, machinery on System Health. Every read is an existing read-only endpoint; nothing on
 // this page can place an order. The Kraken margin desk that used to headline it was retired Sep 19 2026.
 
@@ -27,14 +27,10 @@ interface RoomView {
   settings: { contracts: number; dailyLossUsd: number | null };
 }
 interface DeskView { owned: { underlying: string; kind: string; entryPrice: number; legs?: { quantity: number }[] }[]; state?: { slots?: number; candidate?: string; at?: string } | null; ladder: { reserveMaxFrac: number }; guardian: { at: string | null; fresh: boolean } }
-interface LedgerData { ledger?: { byDay: { day: string; trades: number; netUsd: number; cumNetUsd: number }[] } }
-interface FuturesDesk {
-  enabled: boolean; disabledReason: string | null; entriesToday: number;
-  limits: { sizingBasisUsd: number; riskPct: number; maxPositions: number; maxEntriesPerDay: number };
-  guardian: { at: string | null; fresh: boolean; lastError: string | null };
-  broker: { netLiq: number; positions: unknown[]; workingOrders: number } | null; brokerError: string | null;
-  open: { contract: string; side: string; qty: number; entry_price: number; stop_price: number; edge: string }[];
-  record: { trades: number; wins: number; pnl: number }; error?: string;
+interface JournalData {
+  ledger?: { byDay: { day: string; trades: number; netUsd: number; cumNetUsd: number }[] };
+  rows?: { exitTs: string; netUsd: number; feesUsd: number; open: boolean }[];
+  scoreboard?: { closed: number; winRate: number | null; meanR: number | null; profitFactor: number | null; verdict: { status: string } };
 }
 
 function heartbeatTone(iso: string | null | undefined, warnMin: number, critMin: number): ChipTone {
@@ -47,13 +43,11 @@ export default function DashboardPage() {
   const { data: opt } = useSWR<OptionsLive>("/api/options/live", fetcher, { refreshInterval: 120_000 });
   // The live account he trades by hand: read by the Trading Room every 5 minutes, never written.
   const { data: room } = useSWR<RoomView>("/api/trade", fetcher, { refreshInterval: 60_000 });
-  const { data: jr } = useSWR<LedgerData>("/api/trade/journal", fetcher, { refreshInterval: 120_000 });
+  const { data: jr } = useSWR<JournalData>("/api/trade/journal", fetcher, { refreshInterval: 120_000 });
   // The options desk's own state (what it holds, its slots) — live, unlike the after-close account snapshot.
   const { data: desk } = useSWR<DeskView>("/api/options/live-desk", fetcher, { refreshInterval: 60_000 });
-  // The futures desk: Tradovate DEMO, paper by design, sized off a fixed $50k basis.
-  const { data: fut } = useSWR<FuturesDesk>("/api/futures/desk", fetcher, { refreshInterval: 120_000 });
 
-  const loading = !opt && !fut && !room;
+  const loading = !opt && !room;
   const live = room?.live?.ok ? room.live : null;
   const days = jr?.ledger?.byDay ?? [];
   const lastDay = [...days].reverse().find((d) => d.trades > 0) ?? null;
@@ -62,14 +56,18 @@ export default function DashboardPage() {
   const todayLoss = live?.realizedPnl != null && live.realizedPnl < 0 ? -live.realizedPnl : 0;
   const lossLine = room?.settings.dailyLossUsd ?? null;
   const optionsArmed = Boolean(opt?.execution?.canPlaceOrders);
-  const guardianTone = fut && !fut.error ? heartbeatTone(fut.guardian.at, 20, 60) : "grey";
+  // Today's closed trades on the live account (exchange day = the room's ledger day), for the two live cards.
+  const todayKey = lastDay?.day ?? null;
+  const todayRows = (jr?.rows ?? []).filter((r) => !r.open && todayKey != null && r.exitTs.slice(0, 10) === todayKey);
+  const todayFees = todayRows.reduce((a, r) => a + r.feesUsd, 0), todayWins = todayRows.filter((r) => r.netUsd > 0).length;
+  const sb = jr?.scoreboard ?? null;
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Dashboard"
-        sub="The money right now: your live Tradovate account (by hand) · Robinhood options (real account) · Tradovate futures (demo, paper only)."
-        right={(opt || fut || room) && (
+        sub="The money right now: your live Tradovate account (by hand) · Robinhood options (real account)."
+        right={(opt || room) && (
           <>
             {live && <Chip tone={lossLine != null && todayLoss >= lossLine ? "red" : live.positions.length ? "amber" : "green"} dot={!!live.positions.length} size="md" title="Your live Tradovate account, read every 5 minutes">
               {lossLine != null && todayLoss >= lossLine ? "Past your daily loss line" : live.positions.length ? `Live · ${live.positions.length} open` : "Live · flat"}
@@ -77,9 +75,8 @@ export default function DashboardPage() {
             <Chip tone={optionsArmed ? "red" : opt?.execution?.armed ? "amber" : "grey"} dot={optionsArmed} size="md">
               {optionsArmed ? "Options desk armed" : opt?.execution?.armed ? "Options armed · unverified" : "Options desk disarmed"}
             </Chip>
-            <Chip tone={fut && !fut.error ? (fut.enabled ? "paper" : "grey") : "grey"} dot={!!fut?.enabled} size="md">{fut?.enabled ? "Futures demo enabled" : "Futures demo disabled"}</Chip>
-            <Chip tone={guardianTone} size="md" title={`futures guardian ${ago(fut?.guardian?.at)}`}>
-              {guardianTone === "green" ? "Guardian healthy" : guardianTone === "grey" ? "Guardian unknown" : "Guardian stale"}
+            <Chip tone={heartbeatTone(room?.live?.at, 10, 30)} size="md" title={`the room last read your account ${ago(room?.live?.at)}`}>
+              {heartbeatTone(room?.live?.at, 10, 30) === "green" ? "Room reporting" : heartbeatTone(room?.live?.at, 10, 30) === "grey" ? "Room not read" : "Room stale"}
             </Chip>
           </>
         )}
@@ -118,36 +115,18 @@ export default function DashboardPage() {
 
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
-            <Stat size="lg" label="Futures demo equity" value={fut?.broker ? money(fut.broker.netLiq) : "—"} title="Tradovate DEMO net liquidation — paper only"
-              sub={fut?.brokerError ? <span className="text-down">broker not read</span> : fut && !fut.error ? `sized off a fixed ${money(fut.limits.sizingBasisUsd)} at ${fut.limits.riskPct}% a trade` : "loading…"} />
+            <Stat size="lg" label={`${lastDay ? lastDay.day.slice(5).replace("-", "/") : "Latest day"} · live`} value={todayRows.length ? `${todayRows.length} trade${todayRows.length === 1 ? "" : "s"}` : "no closed trades"} title="Closed trades on your live account on the latest exchange day (Tradovate's day rolls at 5 PM ET), from the journal"
+              sub={todayRows.length ? <>{todayWins}W / {todayRows.length - todayWins}L · fees {money(todayFees)} · net <span className={tone(todayRows.reduce((a, r) => a + r.netUsd, 0))}>{pnl0(todayRows.reduce((a, r) => a + r.netUsd, 0))}</span></> : "no ledger yet"} />
           )}
         </PanelBody></Panel>
 
         <Panel><PanelBody>
           {loading ? <Skeleton /> : (
-            <Stat size="lg" label="Futures open" value={fut && !fut.error ? `${fut.open.length} of ${fut.limits.maxPositions}` : "—"} title="Open demo positions against the desk's slot limit"
-              sub={fut?.open?.length ? fut.open.map((o) => `${o.side === "long" ? "▲" : "▼"} ${o.contract} × ${o.qty}`).join(" · ") : fut?.enabled ? "waiting for a TradingView alert" : "nothing opens while disabled"} />
+            <Stat size="lg" label="40-trade test" value={sb ? `${Math.min(sb.closed, 40)} of 40` : "—"} title="The pre-registered test on your live trades — see the Trading Room scoreboard"
+              sub={sb ? <>{sb.verdict.status}{sb.winRate != null ? ` · win ${Math.round(sb.winRate * 100)}%` : ""}{sb.meanR != null ? ` · mean ${sb.meanR >= 0 ? "+" : ""}${sb.meanR.toFixed(2)}R` : ""}{sb.profitFactor != null ? ` · PF ${sb.profitFactor.toFixed(2)}` : ""}</> : "no trades yet"} />
           )}
         </PanelBody></Panel>
       </div>
-
-      <Panel>
-        <PanelHeader title="Tradovate futures · demo" aside={fut && !fut.error ? (
-          <div className="flex items-center gap-2">
-            <Chip tone={fut.enabled ? "paper" : "grey"} dot={fut.enabled}>{fut.enabled ? "Desk enabled" : "Desk disabled"}</Chip>
-            <Chip tone={fut.guardian.fresh ? "green" : "grey"} title={fut.guardian.at ? `guardian ${ago(fut.guardian.at)}` : "guardian has not run"}>{fut.guardian.fresh ? "Guardian reporting" : "Guardian quiet"}</Chip>
-          </div>
-        ) : <Chip tone="grey">loading…</Chip>} />
-        <PanelBody>
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-            <Stat label="Entries today" value={fut && !fut.error ? `${fut.entriesToday} of ${fut.limits.maxEntriesPerDay}` : "—"} />
-            <Stat label="Working orders" value={fut?.broker ? String(fut.broker.workingOrders) : "—"} sub="stops resting on the demo" />
-            <Stat label="Record" value={fut && !fut.error ? `${fut.record.trades} closed` : "—"} sub={fut && fut.record.trades ? <>{fut.record.wins} wins · <span className={tone(fut.record.pnl)}>{pnl0(fut.record.pnl)}</span> after modeled fees</> : "no desk trades yet"} />
-            <Stat label="Last desk error" value={fut?.guardian?.lastError ? <span className="text-warn text-base">see Futures Desk</span> : <span className="text-muted-foreground">none</span>} />
-          </div>
-          <Note className="mt-3">{fut?.disabledReason ? `Disabled: ${fut.disabledReason}. ` : ""}Paper only, by design: registered rules evaluated on TradingView, executed on the demo with the stop attached. Spencer trades futures by hand; this desk is the analyst and the record. The edges&apos; verdicts and the enable switch are on the Futures Desk.</Note>
-        </PanelBody>
-      </Panel>
 
       <Panel>
         <PanelHeader title="Robinhood options" aside={
@@ -169,10 +148,10 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {[
           { href: "/trade", title: "Trading Room · Tradovate live", sub: "Levels for MES · MNQ · MGC, the news clock, the tape, your ledger and the 40-trade scoreboard" },
-          { href: "/futures", title: "Futures Desk · Tradovate demo", sub: "Registered rules, their verdicts, the enable switch, the TradingView setup" },
+          { href: "/trade/library", title: "Trade Library", sub: "Every trade replayed: stats, equity curve, tags, grades, and the Slack replay button" },
           { href: "/options", title: "Live Account · Robinhood", sub: "The real options account: positions, orders, the research screen, the live desk switch" },
-          { href: "/orders", title: "Orders", sub: "Every platform, broken down: your live trades, the futures demo ledger, Robinhood account orders" },
-          { href: "/command", title: "System Health", sub: "Heartbeats, switches, credentials — both desks" },
+          { href: "/orders", title: "Orders", sub: "Every platform, broken down: your live trades and the Robinhood account's orders" },
+          { href: "/command", title: "System Health", sub: "Heartbeats, switches, credentials, Slack lanes — both desks" },
         ].map((l) => (
           <Link key={l.href} href={l.href} className="rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/20 hover:bg-accent/40">
             <p className="text-[13px] font-semibold">{l.title}</p>

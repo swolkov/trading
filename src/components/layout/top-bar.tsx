@@ -8,13 +8,12 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 // Top bar: the money at a glance. Tradovate LIVE is the account Spencer trades by hand (read by the
 // room every 5 minutes); Robinhood is the REAL options account (its
-// snapshot is pushed by the collector after each close, shown with its age); the futures
-// desk is the Tradovate DEMO, paper by design. Every read is an existing read-only endpoint
+// snapshot is pushed by the collector after each close, shown with its age). The paper futures
+// desk left the bar Sep 21 2026. Every read is an existing read-only endpoint
 // and each fails safe to "unknown" — nothing here can place an order. The Kraken account
 // value and the margin executor's arm chip were removed with the crypto desk (Sep 19 2026).
 export function TopBar() {
   const { data: opt, isLoading } = useSWR<{ account?: { totalValue: number; optionLevel: string; at: string } | null; live?: { at: string } | null; execution?: { canPlaceOrders: boolean; armed?: boolean } }>("/api/options/live", fetcher, { refreshInterval: 120000 });
-  const { data: fut } = useSWR<{ enabled?: boolean; broker?: { netLiq: number } | null; open?: unknown[]; error?: string }>("/api/futures/desk", fetcher, { refreshInterval: 120000 });
   const { data: room } = useSWR<{ live?: { ok: boolean; netLiq: number | null; realizedPnl: number | null; positions: { contract: string; netPos: number }[] } | null }>("/api/trade", fetcher, { refreshInterval: 60000 });
   const optionsArmed = Boolean(opt?.execution?.canPlaceOrders);
   const live = room?.live?.ok ? room.live : null;
@@ -38,11 +37,6 @@ export function TopBar() {
               <span className="num text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Robinhood</span>
               <span className="num text-[13px] font-medium">{opt?.account ? money(opt.account.totalValue) : "—"}</span>
               {opt?.account && <span className="text-[11px] text-muted-foreground" title="Age of the saved broker snapshot">{ago(opt.live?.at ?? opt.account.at)}</span>}
-            </div>
-            <div className="hidden items-baseline gap-1.5 whitespace-nowrap md:flex" title="Tradovate DEMO equity, from the guardian's last read. Paper only — sizing uses a fixed $50k basis, not this number.">
-              <span className="num text-[10px] uppercase tracking-[0.12em] text-paper/80">Futures demo</span>
-              <span className="num text-[13px] font-medium">{fut?.broker ? money(fut.broker.netLiq) : "—"}</span>
-              {fut && !fut.error && <span className="text-[11px] text-muted-foreground">{fut.open?.length ?? 0} open · {fut.enabled ? "desk enabled" : "desk disabled"}</span>}
             </div>
           </>
         )}
