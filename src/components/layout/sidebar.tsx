@@ -52,14 +52,6 @@ const sections = [
     ],
   },
   {
-    // The futures edge lab: TradingView evaluates the registered rules on real-time CME data and
-    // the desk executes on the Tradovate DEMO with the stop attached. Paper only, by design.
-    label: "Tradovate · futures · demo, paper only",
-    tone: "paper" as const,
-    links: [
-    ],
-  },
-  {
     // The real account remains visible while live execution is completed.
     label: "Robinhood · options · real account",
     links: [
