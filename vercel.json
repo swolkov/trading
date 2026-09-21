@@ -1,10 +1,6 @@
 {
   "crons": [
     {
-      "path": "/api/cron/futures-desk-watch",
-      "schedule": "*/5 * * * *"
-    },
-    {
       "path": "/api/cron/trading-room",
       "schedule": "*/5 * * * 0-5"
     }

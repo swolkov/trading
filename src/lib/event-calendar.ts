@@ -133,3 +133,9 @@ export function eventPolicyNow(nowMs: number, events: CalendarEvent[]): EventPol
   }
   return { mode: "normal", reason: nextEvent ? `next: ${nextEvent.name} ${utcDay(nextEvent.atMs)} ${fmtUtc(nextEvent.atMs)}` : "no high-impact event on the calendar", nextEvent, at };
 }
+
+/** The macro prints in play right now — the static table, with anything more than 24h past dropped. The
+ *  Trading Room uses this for the 15-minute heads-up and the print-window split in the scoreboard. */
+export function macroCalendar(now: Date): CalendarEvent[] {
+  return mergeCalendar([], staticCalendar(), now.getTime());
+}

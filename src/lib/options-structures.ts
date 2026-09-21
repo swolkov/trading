@@ -23,7 +23,7 @@
 import {
   MAX_DELTA, MIN_DELTA, type Contract,
   entryCostUsd, spreadCreditUsd, spreadDebitUsd, tradeable,
-} from "@/lib/options-paper-model";
+} from "@/lib/options-model";
 
 /** Every structure this book can express. Bearish shapes are BUILT but gated off at the
  *  caller (see `BULLISH_KINDS`): the only entry signal this desk has validated is a long
@@ -336,6 +336,6 @@ export function selectStructure(
   };
 }
 
-// The payoff grid moved to options-paper-model.ts alongside settleAtExpiry: it is built from
+// The payoff grid moved to options-model.ts alongside settleAtExpiry: it is built from
 // STORED positions, not from selection candidates, so it belongs with the settlement math.
-export { SCENARIO_MOVES } from "@/lib/options-paper-model";
+export { SCENARIO_MOVES } from "@/lib/options-model";

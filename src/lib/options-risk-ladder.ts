@@ -4,7 +4,7 @@
 // it must enforce. Grades are RULE-BASED — "Strong" is a breakout with the market aligned, a tight
 // market and a payoff at the expected move worth 1.5× the risk; "A+" stays locked until the 0–100
 // score has proven it ranks (options_score_promoted="true"). Nothing here places an order.
-import { groupOf } from "./options-paper-model";
+import { groupOf } from "./options-model";
 import { directionOfKind, type Direction } from "./options-market-state";
 
 export type OptionsGrade = "Normal" | "Strong" | "A+";

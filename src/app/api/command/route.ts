@@ -1,23 +1,18 @@
 import { prisma } from "@/lib/db";
 import { quoteStoreFreshness, readAccountSnapshot, readLiveSnapshot } from "@/lib/options-quote-store";
 import { barsStoreFreshness } from "@/lib/options-bars-store";
-import { futuresHealth } from "@/lib/futures-health";
-import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
+import { OPTIONS_SYMBOLS } from "@/lib/options-model";
 import { laneStatus } from "@/lib/notifications";
 
-// Read-only telemetry for Robinhood options and the paper-only futures desk. The Kraken
-// margin desk was retired Sep 19 2026; its heartbeats and switches are gone with it.
+// Read-only telemetry for the Trading Room and the Robinhood options desk. The Kraken margin
+// desk (Sep 19 2026) and the paper futures/options books (Sep 21 2026) are gone with their switches.
 // Missing or stale engine telemetry must not appear ready.
 export const dynamic = "force-dynamic";
 
 const EMPTY = {
   slack: [] as { channel: string; own: boolean; delivers: boolean }[],
   room: { lastTickAt: null as string | null, lastError: null as string | null, liveOk: false, liveAt: null as string | null, levelsAt: null as string | null, breakAt: null as string | null, ledgerAt: null as string | null },
-  futures: futuresHealth({}),
-  heartbeats: { tradingViewAlert: null as string | null },
   paper: {
-    optionsScan: null as string | null, stockScan: null as string | null,
-    optionsAutotrack: false, stockAutotrack: true,
     robinhood: {
       newestQuoteTs: null as string | null, quoteAgeMinutes: null as number | null,
       quotesStale: true, quoteRows: 0, openPositions: 0,
@@ -61,15 +56,7 @@ export async function GET() {
     return Response.json({
       slack, notifyFail,
       room,
-      futures: futuresHealth(c, Date.now(), Boolean(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET)),
-      heartbeats: {
-        tradingViewAlert: c["tradingview_last_alert"] || null,
-      },
       paper: {
-        optionsScan: c["options_scan_last_run"] || null,
-        stockScan: c["stock_scan_last_run"] || null,
-        optionsAutotrack: false,
-        stockAutotrack: c["stock_paper_autotrack"] !== "false",
         robinhood: {
           newestQuoteTs: quotes?.newestQuoteTs ?? null,
           quoteAgeMinutes: quotes?.ageMinutes ?? null,

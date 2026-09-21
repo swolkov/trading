@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Contract } from "../src/lib/options-paper-model";
+import type { Contract } from "../src/lib/options-model";
 import {
   BEARISH_KINDS, BULLISH_KINDS, MAX_CREDIT_FRAC_OF_WIDTH, type Candidate,
   SCENARIO_MOVES, atmOf, buildCandidates, expectedMove, legsQuotedTogether, pnlAtExpiry,

@@ -8,7 +8,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
 import { getTradovateAccountSummary, getTradovateFills, getTradovatePositions, resolveContractSymbol } from "@/lib/tradovate";
-import { deskCalendar } from "@/lib/futures-desk-calendar";
+import { macroCalendar } from "@/lib/event-calendar";
 import { foldJournal, journalView } from "@/lib/trading-room-journal-store";
 import { dayTally } from "@/lib/trading-room-journal";
 import { replayImageUrl } from "@/lib/trading-room-replay";
@@ -57,7 +57,7 @@ async function yahooBars(symbol: string): Promise<{ bars5m: Bar[]; daily: Bar[] 
 
 export function roomEvents(nowMs: number, days = 7): RoomEvent[] {
   const horizon = nowMs + days * 24 * 3_600_000;
-  const macro: RoomEvent[] = deskCalendar(new Date(nowMs))
+  const macro: RoomEvent[] = macroCalendar(new Date(nowMs))
     .filter((e) => e.atMs >= nowMs - 2 * 3_600_000 && e.atMs <= horizon)
     .map((e) => ({ name: e.name, atMs: e.atMs, tier: e.tier, note: eventNote(e.tier), approx: e.approx }));
   const weekly = weeklyPrints(nowMs, days).filter((e) => e.atMs >= nowMs - 2 * 3_600_000 && e.atMs <= horizon);

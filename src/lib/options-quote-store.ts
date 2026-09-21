@@ -21,7 +21,7 @@
 // not returned at all — an absent quote is handled everywhere (the position is left alone,
 // the entry is refused); a silently stale one would mark a position at last week's price.
 import { prisma } from "@/lib/db";
-import { MAX_QUOTE_AGE_MS } from "@/lib/options-paper-model";
+import { MAX_QUOTE_AGE_MS } from "@/lib/options-model";
 
 export interface OptionQuote {
   occ: string; strike: number; expiry: string; type: "call" | "put";

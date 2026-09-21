@@ -4,7 +4,6 @@
  * Webhook URLs are SECRETS — pass them as env vars, never hardcode:
  *   WEBHOOK_FUTURES=https://hooks.slack.com/services/...   (his live futures room)
  *   WEBHOOK_OPTIONS=https://hooks.slack.com/services/...   (the Robinhood live desk)
- *   WEBHOOK_FUTURES_DEMO=...                                (paper desk, optional)
  *   WEBHOOK_GENERAL=...                                     (fallback for futures + options, health/system)
  *   railway run --service futures-engine -- npx tsx scripts/wire-lanes.ts
  * Any lane not given keeps its current value. Futures and options fall back to webhook_general.
@@ -14,7 +13,6 @@ import { laneStatus, sendNotification, type NotifyChannel } from "../src/lib/not
 const LANES: { key: string; env: string; channel: NotifyChannel; test: string }[] = [
   { key: "webhook_futures", env: "WEBHOOK_FUTURES", channel: "futures", test: "🧭 TEST — futures lane: your Trading Room posts here (cards, level breaks, trade meter, loss line, 4:30 flatten)." },
   { key: "webhook_options", env: "WEBHOOK_OPTIONS", channel: "options", test: "📈 TEST — options lane: the Robinhood live desk posts here (arm/disarm, entries, closes, the brief)." },
-  { key: "webhook_futures_demo", env: "WEBHOOK_FUTURES_DEMO", channel: "futures_demo", test: "🧪 TEST — futures DEMO lane (paper only)." },
   { key: "webhook_general", env: "WEBHOOK_GENERAL", channel: "general", test: "🔔 TEST — general lane: system/health notes, and the fallback when a desk lane has no webhook." },
 ];
 async function main() {
