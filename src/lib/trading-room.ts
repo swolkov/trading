@@ -11,6 +11,7 @@ import { getTradovateAccountSummary, getTradovateFills, getTradovatePositions, r
 import { deskCalendar } from "@/lib/futures-desk-calendar";
 import { foldJournal, journalView } from "@/lib/trading-room-journal-store";
 import { dayTally } from "@/lib/trading-room-journal";
+import { replayImageUrl } from "@/lib/trading-room-replay";
 import { syncLedger } from "@/lib/trading-room-ledger";
 import {
   CARD_POST_ET, CHART_LEVELS_FRESH_MS, EVENT_HEADS_UP_MIN, FEED_LABEL, INSTRUMENTS, ROOM_SYMBOLS, appendFeed, buildLevels, etParts, eventNote, levelsFromChart, parseSettings, sizingFor, weeklyPrints,
@@ -227,7 +228,11 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
       const t = dayTally(rows, (ms) => etParts(ms).dayKey, etParts(Date.parse(r.exitTs)).dayKey);
       const money = (x: number) => `${x < 0 ? "−" : "+"}$${Math.abs(Math.round(x)).toLocaleString()}`;
       const rr = r.netR == null ? "" : ` · ${r.netR >= 0 ? "+" : "−"}${Math.abs(r.netR).toFixed(1)}R${r.riskSource === "atr-proxy" ? "*" : ""}`;
-      await sendNotification(`${r.netUsd >= 0 ? "✅" : "❌"} ${r.symbol} ${r.side} ×${r.qty} · ${money(r.netUsd)} net${rr} · ${Math.round(r.holdMin)} min · ${r.session}${r.nearestLevel ? ` · near ${r.nearestLevel}` : ""}\n   today: trade ${t.n} · ${money(t.netUsd)} net · fees $${Math.round(t.feesUsd)} · ${t.wins}W/${t.losses}L${settings.maxTradesPerDay ? ` · your line ${settings.maxTradesPerDay}` : ""}`, LANE).catch(() => {});
+      const text = `${r.netUsd >= 0 ? "✅" : "❌"} ${r.symbol} ${r.side} ×${r.qty} · ${money(r.netUsd)} net${rr} · ${Math.round(r.holdMin)} min · ${r.session}${r.nearestLevel ? ` · near ${r.nearestLevel}` : ""}\n   today: trade ${t.n} · ${money(t.netUsd)} net · fees $${Math.round(t.feesUsd)} · ${t.wins}W/${t.losses}L${settings.maxTradesPerDay ? ` · your line ${settings.maxTradesPerDay}` : ""}`;
+      // The replay image rides along: the 1-minute chart with his fills, the levels at entry, entry / exit / stop.
+      const img = replayImageUrl(r.id);
+      const blocks = img ? [{ type: "section", text: { type: "mrkdwn", text } }, { type: "image", image_url: img, alt_text: `${r.symbol} ${r.side} replay` }] : undefined;
+      await sendNotification(text, LANE, blocks).catch(() => {});
       state.announced.push(r.id);
       if (settings.maxTradesPerDay != null && t.n >= settings.maxTradesPerDay && state.tradeCountDay !== now.dayKey) {
         await sendNotification(`🛑 That is trade ${t.n} today — your own line is ${settings.maxTradesPerDay}. Fees so far $${Math.round(t.feesUsd)}. Sep 18 was 22 trades and $643 in fees for +$14.50 gross.`, LANE).catch(() => {});

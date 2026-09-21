@@ -7,6 +7,8 @@ import type { FuturesHealth } from "@/lib/futures-health";
 import { ago } from "@/lib/format";
 
 interface CommandData {
+  slack?: { channel: string; own: boolean; delivers: boolean }[];
+  notifyFail?: { at: string; channel: string; why: string } | null;
   room?: { lastTickAt: string | null; lastError: string | null; liveOk: boolean; liveAt: string | null; levelsAt: string | null; breakAt: string | null };
   futures: FuturesHealth;
   heartbeats: { tradingViewAlert: string | null };
@@ -94,6 +96,18 @@ export default function SystemHealthPage() {
             chip={<Chip tone={data.room?.levelsAt ? ageTone(data.room.levelsAt, 15, 60 * 24 * 3) : "grey"}>{data.room?.levelsAt ? ago(data.room.levelsAt) : "never"}</Chip>} />
           <HealthRow label="Last level break on the tape" sub="Posted by the chart when price closes through a level inside RTH."
             chip={<Chip tone={data.room?.breakAt ? "green" : "grey"}>{data.room?.breakAt ? ago(data.room.breakAt) : "none yet"}</Chip>} />
+        </PanelBody>
+      </Panel>
+
+      <Panel>
+        <PanelHeader title="Slack lanes" aside={<span>where each desk posts · a lane without its own channel falls back to general</span>} />
+        <PanelBody className="divide-y divide-border">
+          {(data.slack ?? []).map((l) => (
+            <HealthRow key={l.channel} label={l.channel === "futures" ? "futures · your Trading Room (cards, breaks, trade meter, alarms)" : l.channel === "options" ? "options · the Robinhood live desk (arm, entries, closes, brief)" : l.channel === "futures_demo" ? "futures_demo · the paper desk" : "general · the catch-all"}
+              sub={l.own ? "own channel" : l.delivers ? "no own channel — posts to general" : "no channel — messages are DROPPED"}
+              chip={<Chip tone={l.own ? "green" : l.delivers ? "amber" : l.channel === "futures_demo" ? "grey" : "red"}>{l.own ? "Own channel" : l.delivers ? "Falls back" : "Not delivered"}</Chip>} />
+          ))}
+          {data.notifyFail && <HealthRow label="Last delivery failure" sub={`${data.notifyFail.channel} · ${data.notifyFail.why}`} chip={<Chip tone="red">{ago(data.notifyFail.at)}</Chip>} />}
         </PanelBody>
       </Panel>
 

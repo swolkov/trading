@@ -3,6 +3,7 @@ import { quoteStoreFreshness, readAccountSnapshot, readLiveSnapshot } from "@/li
 import { barsStoreFreshness } from "@/lib/options-bars-store";
 import { futuresHealth } from "@/lib/futures-health";
 import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
+import { laneStatus } from "@/lib/notifications";
 
 // Read-only telemetry for Robinhood options and the paper-only futures desk. The Kraken
 // margin desk was retired Sep 19 2026; its heartbeats and switches are gone with it.
@@ -10,6 +11,7 @@ import { OPTIONS_SYMBOLS } from "@/lib/options-paper-model";
 export const dynamic = "force-dynamic";
 
 const EMPTY = {
+  slack: [] as { channel: string; own: boolean; delivers: boolean }[],
   room: { lastTickAt: null as string | null, lastError: null as string | null, liveOk: false, liveAt: null as string | null, levelsAt: null as string | null, breakAt: null as string | null, ledgerAt: null as string | null },
   futures: futuresHealth({}),
   heartbeats: { tradingViewAlert: null as string | null },
@@ -53,7 +55,11 @@ export async function GET() {
       liveOk: roomLive?.ok === true, liveAt: roomLive?.at ?? null, levelsAt, breakAt: roomFeed?.[0]?.receivedAt ?? null, ledgerAt: null as string | null,
     };
 
+    const slack = await laneStatus().catch(() => []);
+    const notifyFail = (() => { try { return c["notify_last_failure"] ? JSON.parse(c["notify_last_failure"]) as { at: string; channel: string; why: string } : null; } catch { return null; } })();
+
     return Response.json({
+      slack, notifyFail,
       room,
       futures: futuresHealth(c, Date.now(), Boolean(process.env.TRADOVATE_USERNAME && process.env.TRADINGVIEW_WEBHOOK_SECRET)),
       heartbeats: {

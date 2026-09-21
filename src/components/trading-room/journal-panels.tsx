@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { ReplayPanel } from "@/components/trading-room/replay-panel";
 import useSWR from "swr";
 import { Chip, type ChipTone } from "@/components/ui/chip";
 import { DataTable, Row, Td, Th } from "@/components/ui/data-table";
@@ -141,20 +142,24 @@ function ScoreboardPanel({ sb, minTrades }: { sb: Scoreboard; minTrades: number 
 }
 
 export function JournalTable({ rows, onSaved }: { rows: JournalRow[]; onSaved: () => void }) {
+  const [replayId, setReplayId] = useState<string | null>(null);
   return (
+    <div className="space-y-3">
+    {replayId && <ReplayPanel id={replayId} onClose={() => setReplayId(null)} />}
     <Panel>
-      <PanelHeader title="Journal" aside={<span>every round trip from your Tradovate fills · newest first</span>} />
+      <PanelHeader title="Journal" aside={<span>every round trip from your Tradovate fills · newest first · click a row to replay it</span>} />
       {rows.length === 0 ? <PanelBody><Empty>No trades yet. Fills are read every 5 minutes, round the clock; a round trip appears here the moment it closes (open positions show as open).</Empty></PanelBody> : (
         <DataTable dense maxH="520px">
           <thead><tr><Th>Entry</Th><Th>Market</Th><Th num>Qty</Th><Th num>Entry → exit</Th><Th num>Net</Th><Th num>R</Th><Th num>MFE / MAE</Th><Th num>Hold</Th><Th>Session</Th><Th>Near</Th><Th>Tag · why</Th></tr></thead>
-          <tbody>{rows.map((r) => <JournalRowView key={r.id} r={r} onSaved={onSaved} />)}</tbody>
+          <tbody>{rows.map((r) => <JournalRowView key={r.id} r={r} onSaved={onSaved} selected={r.id === replayId} onReplay={() => setReplayId(r.id === replayId ? null : r.id)} />)}</tbody>
         </DataTable>
       )}
     </Panel>
+    </div>
   );
 }
 
-function JournalRowView({ r, onSaved }: { r: JournalRow; onSaved: () => void }) {
+function JournalRowView({ r, onSaved, selected, onReplay }: { r: JournalRow; onSaved: () => void; selected: boolean; onReplay: () => void }) {
   const [tag, setTag] = useState(r.setupTag ?? "");
   const [why, setWhy] = useState(r.why ?? "");
   const [busy, setBusy] = useState(false);
@@ -165,8 +170,8 @@ function JournalRowView({ r, onSaved }: { r: JournalRow; onSaved: () => void }) 
     finally { setBusy(false); }
   }
   return (
-    <Row>
-      <Td muted title={r.entryTs}>{when(r.entryTs)}{r.eventFlag && <Chip tone="amber" className="ml-1.5" title={`entered within 30 min of ${r.eventFlag}`}>print</Chip>}</Td>
+    <Row className={selected ? "bg-primary/10" : undefined}>
+      <Td muted title={r.entryTs}><button onClick={onReplay} className="text-left text-primary hover:underline">{when(r.entryTs)}</button>{r.eventFlag && <Chip tone="amber" className="ml-1.5" title={`entered within 30 min of ${r.eventFlag}`}>print</Chip>}</Td>
       <Td strong>{r.symbol} <span className={`font-medium ${r.side === "long" ? "text-up" : "text-down"}`}>{r.side}</span>{r.open && <Chip tone="blue" className="ml-1.5">open</Chip>}</Td>
       <Td num>{r.qty}</Td>
       <Td num>{px(r.symbol, r.entryPx)} → {px(r.symbol, r.exitPx)}{r.stopPx != null && <span className="ml-1 text-[11px] text-muted-foreground" title="stop the room saw on the position">stop {px(r.symbol, r.stopPx)}</span>}</Td>
