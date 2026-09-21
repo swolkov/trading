@@ -57,7 +57,6 @@ const sections = [
     label: "Tradovate · futures · demo, paper only",
     tone: "paper" as const,
     links: [
-      { href: "/futures", label: "Futures Desk", icon: Activity },
     ],
   },
   {

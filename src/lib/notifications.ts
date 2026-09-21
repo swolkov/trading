@@ -1,21 +1,18 @@
 import { prisma } from "./db";
 
-// SLACK LANES for the two desks that exist (Sep 20 2026). The Kraken/margin/stock/prop lanes went with
+// SLACK LANES for the two desks that exist (Sep 21 2026). The Kraken/margin/stock/prop/paper lanes went with
 // their desks; their AgentConfig keys may linger in the database but nothing reads them.
 //   futures      — Spencer's OWN live futures trading: the morning and Sunday cards, level breaks from the
 //                  chart, event heads-ups, the trade meter (one line per closed trade + replay image),
 //                  the loss line and the 4:30 flatten nudge. Falls back to general — never dropped.
-//   futures_demo — the Tradovate DEMO desk (paper). Never falls back: a paper 🚨 in a real-money lane
-//                  trains alert fatigue.
 //   options      — the Robinhood live desk: ARM/DISARM, adapter verification, entries, closes, the brief.
 //                  Real money. Falls back to general — never dropped. (Until Sep 20 2026 it had no
 //                  fallback and every options page was silently lost.)
 //   general      — the catch-all channel.
-export type NotifyChannel = "futures" | "futures_demo" | "options" | "general";
+export type NotifyChannel = "futures" | "options" | "general";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
-  futures_demo: "webhook_futures_demo",
   options: "webhook_options",
   general: "webhook_general",
 };
@@ -28,7 +25,6 @@ async function webhookFor(key: string): Promise<string | null> {
 export async function getWebhook(channel: NotifyChannel): Promise<string | null> {
   const own = await webhookFor(CHANNEL_KEYS[channel]);
   if (own) return own;
-  if (channel === "futures_demo") return null;
   const gen = await webhookFor("webhook_general");
   if (gen) return gen;
   return webhookFor("notification_webhook");
@@ -37,7 +33,7 @@ export async function getWebhook(channel: NotifyChannel): Promise<string | null>
 /** Which lane resolves to which webhook — for System Health, so a missing channel is visible, not silent. */
 export async function laneStatus(): Promise<{ channel: NotifyChannel; own: boolean; delivers: boolean }[]> {
   const out: { channel: NotifyChannel; own: boolean; delivers: boolean }[] = [];
-  for (const channel of ["futures", "options", "futures_demo", "general"] as NotifyChannel[]) {
+  for (const channel of ["futures", "options", "general"] as NotifyChannel[]) {
     const own = !!(await webhookFor(CHANNEL_KEYS[channel]));
     out.push({ channel, own, delivers: own || !!(await getWebhook(channel)) });
   }

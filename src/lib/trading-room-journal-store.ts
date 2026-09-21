@@ -5,7 +5,7 @@
 import { prisma } from "@/lib/db";
 import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
 import { getTradovateStopOrders, resolveContractSymbol } from "@/lib/tradovate";
-import { deskCalendar } from "@/lib/futures-desk-calendar";
+import { macroCalendar } from "@/lib/event-calendar";
 import { INSTRUMENTS, ROOM_SYMBOLS, buildLevels, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
 import { TEST_RULES, excursion, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket, type JournalFill, type JournalRow, type RoundTrip, type Scoreboard } from "@/lib/trading-room-journal";
 
@@ -76,7 +76,7 @@ export async function foldJournal(nowMs = Date.now(), force = false): Promise<{ 
   const existing = await prisma.$queryRawUnsafe<{ id: string; stop_px: number | null; open: boolean; exit_ts: Date; mfe_r: number | null }[]>(`SELECT id, stop_px, open, exit_ts, mfe_r FROM trading_room_trades WHERE entry_ts >= $1`, new Date(nowMs - LOOKBACK_DAYS * 24 * 3_600_000));
   const known = new Map(existing.map((e) => [e.id, e]));
   const stops = await getTradovateStopOrders("live");
-  const events = deskCalendar(new Date(nowMs));
+  const events = macroCalendar(new Date(nowMs));
   const barsCache = new Map<RoomSymbol, Awaited<ReturnType<typeof barsFor>>>();
   let updated = 0;
   for (const trip of trips) {
@@ -156,7 +156,7 @@ export interface JournalView { rows: JournalRow[]; scoreboard: Scoreboard; rules
 export async function journalView(limit = 200): Promise<JournalView> {
   await ensureJournalTable();
   const rows = (await prisma.$queryRawUnsafe<TradeRow[]>(`SELECT * FROM trading_room_trades ORDER BY entry_ts DESC LIMIT $1`, limit)).map(toRow);
-  const eventTimes = deskCalendar(new Date(Date.now() - 90 * 24 * 3_600_000)).map((e) => e.atMs);
+  const eventTimes = macroCalendar(new Date(Date.now() - 90 * 24 * 3_600_000)).map((e) => e.atMs);
   return { rows, scoreboard: scoreboard(rows, EVENT_WINDOW_MS, eventTimes), rules: TEST_RULES };
 }
 

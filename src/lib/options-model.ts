@@ -1,38 +1,19 @@
-// OPTIONS PAPER BOOK — the model. PURE: no database, no network, no imports. Everything a
-// unit test needs to pin down lives here; options-shadow.ts does the I/O.
+// OPTIONS MODEL — pricing, quotes, structures and settlement. PURE: no database, no network,
+// no imports. The live Robinhood desk (structure engine, quote store, risk ladder) and its
+// money-invariant tests import from here.
 //
-// WHY THIS EXISTS (Sep 8 2026). Spencer asked whether a $1k options account could be grown
-// "super high" alongside the Kraken margin desk, and named WULF and CRWV. A screen of 63
-// symbols against real Alpaca quotes, greeks and 90-day realized vol produced three facts
-// that shape every rule below:
-//
-//   1. FRICTION, NOT STRATEGY, IS THE BINDING COST. Round-trip quoted spread on the liquid
-//      in-the-money contracts is 2.2-2.9%; Kraken's is 0.34%. At 4-6 round trips a month
-//      that is 12-17% of the account per month in spread alone — unrecoverable. At 1-2
-//      trades a month on 60-120 day holds it is 3-6%. So this book is deliberately
-//      LOW-FREQUENCY and LONG-HOLD, and the entry cap is enforced in code (MAX_ENTRIES_PER_MONTH).
-//
-//   2. THE GOOD NAMES ARE UNAFFORDABLE AT $1k. Ranked by expected 90-day move ÷ spread, the
-//      top of the screen was CRWV ($3,139/contract, 0.1% spread, 98% realized vol), PLTR
-//      ($3,534), IREN ($1,744), MRVL ($7,518), INTC ($3,157). $1k cannot buy CRWV at ANY
-//      delta — even the 0.50-delta at-the-money Dec call was $1,457. That is arithmetic,
-//      not judgement, and it is the whole reason this book runs TWO sleeves at different
-//      reference equity: the gap between them measures what account size is actually worth
-//      in this strategy, instead of anyone asserting it.
-//
-//   3. CORRELATION IS NOT WHERE IT LOOKS. Measured over 90 days, the miners have DECOUPLED
-//      from bitcoin — WULF 0.09 to BTC, CRWV 0.01, HUT 0.07, CIFR 0.11, IREN 0.17. They now
-//      trade as an AI-datacenter/power complex, so they ARE a genuine diversifier against
-//      the Kraken crypto book. But MSTR (0.76) and COIN (0.73) still ARE bitcoin, and MARA
-//      is half of one (0.44) — those are excluded outright, because a sleeve whose purpose
-//      is to be uncorrelated with the crypto desk must not quietly re-buy the crypto desk.
-//      Within the datacenter complex the names are 0.55-0.84 correlated with EACH OTHER
-//      (WULF-CIFR 0.84, CRWV-NBIS 0.82), so only ONE position per group may be open at once.
-//
-// This book touches NOTHING in the Kraken margin system: separate tables, separate config
-// keys, separate cron, separate page, separate Slack lane, and no import from any margin-*
-// module. It is a measurement record, not an executor — no order is ever placed anywhere.
-
+// HISTORY. This began (Sep 8 2026) as the model behind a paper options book that measured
+// whether a small account could grow on 60–120 DTE stock-replacement calls. Three findings
+// from that screen still shape the rules kept below:
+//   1. FRICTION IS THE BINDING COST — quoted round-trip spread 2.2–2.9% on liquid ITM legs,
+//      so a wide spread is a hard reject and a quote with no size behind it is not a price.
+//   2. IN-THE-MONEY LEGS (0.70–0.85 delta) hold most of their premium as intrinsic value: the
+//      premium itself is the floor, and those strikes carry the tightest spreads.
+//   3. CORRELATION IS NOT WHERE IT LOOKS — the miners decoupled from bitcoin and trade as an
+//      AI-datacenter/power complex, 0.55–0.84 correlated with EACH OTHER, so the risk ladder
+//      allows one position per group.
+// The paper book itself (sleeves, Donchian signal, book caps, verdict ladder) was retired on
+// Sep 21 2026; the live desk had already replaced every one of those rules with its own.
 // ---------- Universe + correlation groups ----------
 // Groups come from the measured 90-day correlation matrix, not from sector labels. Only one
 // position per group may be open at a time: holding WULF + IREN + APLD is one bet in
@@ -42,8 +23,8 @@ export type CorrGroup = "ai-datacenter" | "semis" | "megacap" | "fintech" | "con
 
 export interface OptionName { symbol: string; group: CorrGroup }
 
-// Excluded on purpose, with the measured reason — see fact 3 above. Kept as data (not
-// deleted) so the exclusion is visible on the page and cannot be silently undone.
+// Excluded on purpose, with the measured reason — see finding 3 above. Kept as data so the
+// exclusion stays visible and cannot be silently undone.
 export const CRYPTO_PROXY_EXCLUDED: Record<string, string> = {
   MSTR: "0.76 correlation to BTC — this is the Kraken book with extra leverage",
   COIN: "0.73 correlation to BTC — same bet as the Kraken book",
@@ -84,112 +65,14 @@ export function groupOf(symbol: string): CorrGroup | null {
   return OPTIONS_UNIVERSE.find((n) => n.symbol === symbol)?.group ?? null;
 }
 
-// Measurement cohort stamp — bump when contract selection, costs or exits change
-// materially. Aggregates fail CLOSED to this exact value, exactly as the other books do.
-// o2 (Sep 10 2026): Level 3 approval landed, so the book can now build VERTICAL DEBIT
-// SPREADS when a naked call does not fit the budget, and the $1,000 sleeve was retired in
-// favour of $3,500. Both change what gets traded, so the sample restarts rather than
-// blending two rule sets. The o1 rows stay in the table as history; open o1 positions are
-// still managed to their natural exit (see evaluateOptionsPaper) — a rule change is not a
-// reason to abandon a live position.
-export const OPTIONS_SIM_VERSION = "o2";
-export const OPTIONS_COHORT_SQL = `sim_version='${OPTIONS_SIM_VERSION}'`;
-
-// ---------- Sleeves ----------
-// Two sleeves, IDENTICAL rules, different reference equity. Everything is expressed as a
-// percentage of reference equity, so the only thing that differs is which contracts the
-// sleeve can afford — and that difference IS the experiment. Do not "fix" one sleeve's
-// parameters without the other; the comparison is the point.
-// The $1,000 sleeve was RETIRED on Sep 10 2026. It had done its job: the screen proved a
-// $1k book can almost never open a position, which measures the wall rather than the
-// strategy. $3,500 replaces it because that is the size actually under consideration, and
-// it still brackets $5,000 so the size comparison survives.
-// BEARISH SLEEVES ARE SEPARATE SLEEVES, not a flag on the existing ones. Long and short are
-// different strategies with different evidence, and every per-sleeve mechanism this book
-// already has — the monthly entry cap, the correlation-group rule, the book premium cap, the
-// verdict — keys on `source`. Separate sources therefore give complete separation for free,
-// and make it impossible for a bearish result to be pooled into the bullish record.
-//
-// The bearish rule is the exact mirror, deliberately: a new 50-session LOW while BELOW the
-// 200-day average, exited on a 25-session high. Same numbers, opposite sign — so if it fails
-// it fails as a fair test of the mirror rather than of a differently-tuned rule.
-export type OptionSource = "opt-3.5k" | "opt-5k" | "opt-3.5k-bear" | "opt-5k-bear";
-export const OPTION_SOURCES: readonly OptionSource[] = ["opt-3.5k", "opt-5k", "opt-3.5k-bear", "opt-5k-bear"];
-export const OPTION_SOURCE_LABELS: Record<OptionSource, string> = {
-  "opt-3.5k": "$3,500 long book — ITM calls, call debit or put credit spreads, 60-120 DTE",
-  "opt-5k": "$5,000 long book — same rules, more equity",
-  "opt-3.5k-bear": "$3,500 short book — ITM puts, put debit or call credit spreads, the mirrored signal",
-  "opt-5k-bear": "$5,000 short book — same rules, more equity",
-};
-export const OPTION_SOURCE_EQUITY: Record<OptionSource, number> = {
-  "opt-3.5k": 3500, "opt-5k": 5000, "opt-3.5k-bear": 3500, "opt-5k-bear": 5000,
-};
-/** Bearish sleeves are suffixed, so direction is derivable anywhere a source string reaches. */
-export function isBearishSource(source: string | null | undefined): boolean {
-  return typeof source === "string" && source.endsWith("-bear");
-}
-
-// ---------- Contract selection ----------
-// In-the-money "stock replacement" legs, NOT out-of-the-money lottery tickets. Rationale from
-// the screen: in the 0.70-0.85 delta band most of the premium is intrinsic, so time decay is a
-// small fraction of the position; ITM strikes carry the tightest quoted spreads; and no
-// stop-loss order is needed because the premium itself is the floor. Out-of-the-money
-// contracts have the opposite of every one of those properties and are how small options
-// accounts die.
-//
+// ---------- The long-leg delta band ----------
 // It is a BAND, not a target. Selection used to take the leg nearest 0.78; since Sep 10 2026
 // the structure engine takes the best return at the market's own expected move from among the
 // legs inside the band, so there is no longer a single delta being aimed at. The old
 // TARGET_DELTA constant was removed rather than left to imply a rule that no longer runs.
 export const MIN_DELTA = 0.70;
 export const MAX_DELTA = 0.85;
-export const MIN_DTE = 60;
-export const MAX_DTE = 120;
 
-/**
- * EARNINGS BLACKOUT (added 2026-09-09). Do not OPEN a position in the run-up to a scheduled
- * earnings report.
- *
- * FOR A BOUGHT STRUCTURE the reason is implied volatility. Into a print, IV inflates — the
- * market prices the coming jump — and after it, IV collapses whether or not the stock moved
- * your way. Buying in that window pays a premium that is engineered to evaporate. With
- * 60–120 DTE the report will usually fall INSIDE the hold; that is fine and expected, because
- * an option bought at post-print IV carries the next print at a fair price. The thing to
- * avoid is the ENTRY landing in the inflated window.
- *
- * FOR A SOLD STRUCTURE that argument inverts — inflated IV is what a seller wants — so the
- * blackout is NOT justified by vol there, and pretending otherwise would be a comment that
- * lies. It still applies, for a different and blunter reason: a credit spread's loss is
- * capped at the width, and an earnings gap is the single most reliable way to travel the
- * whole width overnight with no chance to react. This desk also found in July 2026 that
- * premium selling is not durable, so it does not get the benefit of the doubt on a coin flip
- * it cannot exit. One rule for both, with the honest reason stated for each.
- *
- * Fourteen days is where the run-up measurably begins for names at this vol level.
- *
- * The one position in the book when this was added — IREN, entered at 97.6% IV — is the
- * shape of trade this exists to stop from becoming a pattern in the record.
- */
-export const EARNINGS_BLACKOUT_DAYS = 14;
-
-/** True when `symbol` has a scheduled report within the blackout window from `now`. Pure. */
-export function inEarningsBlackout(
-  symbol: string,
-  calendar: readonly { symbol: string; date: string }[],
-  now: Date,
-  days = EARNINGS_BLACKOUT_DAYS,
-): { blocked: boolean; date?: string } {
-  const start = now.getTime();
-  const end = start + days * 86_400_000;
-  const hit = calendar
-    .filter((e) => e.symbol.toUpperCase() === symbol.toUpperCase())
-    .map((e) => ({ date: e.date, t: Date.parse(e.date + "T12:00:00Z") }))
-    .filter((e) => Number.isFinite(e.t) && e.t >= start - 86_400_000 && e.t <= end)   // a report dated today still counts
-    .sort((a, b) => a.t - b.t)[0];
-  return hit ? { blocked: true, date: hit.date } : { blocked: false };
-}
-/** Hard reject above this quoted round-trip spread. The screen's cheap names (F 8.2%,
- *  CCL 5.8-28%, CHPT 21.8%, OPEN 27.1%) all fail here — cheap contract ≠ cheap trade. */
 export const MAX_SPREAD_PCT = 3.0;
 /** A quote with no size behind it is not a price. Enforced on BOTH sides: at entry when
  *  choosing a contract, and again at exit — a bid of $6.00 with zero size behind it would
@@ -434,121 +317,7 @@ export function settleAtExpiry(p: {
 // diversified options book at all, and the cap says so out loud instead of hiding it behind
 // a sleeve that never trades. MAX_BOOK_PCT still binds at 80%, so in practice this is one
 // full-size position plus a small one, never three at 55%.
-export const MAX_POSITION_PCT = 0.55;
-export const MAX_BOOK_PCT = 0.80;
-export const MAX_CONCURRENT = 3;
-/** LOW-FREQUENCY BY CONSTRUCTION — see fact 1. Two entries per calendar month, per sleeve. */
-export const MAX_ENTRIES_PER_MONTH = 2;
 
-export function positionBudget(refEquity: number): number {
-  return refEquity * MAX_POSITION_PCT;
-}
-export interface BookState { openCount: number; openPremium: number; entriesThisMonth: number; openGroups: readonly string[] }
-export type EntryRefusal =
-  | "max concurrent positions" | "book premium cap" | "monthly entry cap"
-  | "correlated position already open" | "already open" | "no contract passes filters";
-
-/** Every book-level gate in one pure function, so the tests pin the exact refusal reason. */
-export function entryRefusal(book: BookState, group: string | null, refEquity: number, costUsd: number): EntryRefusal | null {
-  if (book.entriesThisMonth >= MAX_ENTRIES_PER_MONTH) return "monthly entry cap";
-  if (book.openCount >= MAX_CONCURRENT) return "max concurrent positions";
-  if (group && book.openGroups.includes(group)) return "correlated position already open";
-  if (costUsd > positionBudget(refEquity) + 1e-9) return "no contract passes filters";
-  if (book.openPremium + costUsd > refEquity * MAX_BOOK_PCT + 1e-9) return "book premium cap";
-  return null;
-}
-
-// ---------- The signal ----------
-// Donchian breakout on DAILY bars, long only. This is the daily analogue of the ONE rule
-// that ever survived out-of-sample testing in this project (long-only Donchian 100/50 on
-// 60-minute bars, t = 2.93 — see the trend-survivor research). Parameters are
-// PRE-REGISTERED at the conventional 50/25 and must not be tuned on this book's own
-// results; that is how the earlier options work talked itself into a curve fit.
-export const DONCHIAN_ENTRY = 50;
-export const DONCHIAN_EXIT = 25;
-export const TREND_FILTER = 200;
-
-export interface Bar { t: string; c: number; h: number; l: number }
-/** Entry: today's close is the highest close of the last DONCHIAN_ENTRY sessions AND above
- *  the 200-day average. The trend filter is what keeps the rule from buying breakouts
- *  inside a downtrend, which is where long-only Donchian does its losing. */
-export function isEntrySignal(bars: Bar[]): boolean {
-  if (bars.length < TREND_FILTER + 1) return false;
-  const closes = bars.map((b) => b.c);
-  const last = closes[closes.length - 1];
-  const window = closes.slice(-DONCHIAN_ENTRY);
-  const sma = closes.slice(-TREND_FILTER).reduce((s, c) => s + c, 0) / TREND_FILTER;
-  return last >= Math.max(...window) && last > sma;
-}
-/** Exit: today's close is the lowest close of the last DONCHIAN_EXIT sessions. */
-export function isExitSignal(bars: Bar[]): boolean {
-  if (bars.length < DONCHIAN_EXIT) return false;
-  const closes = bars.map((b) => b.c);
-  return closes[closes.length - 1] <= Math.min(...closes.slice(-DONCHIAN_EXIT));
-}
-
-/** The mirror of isEntrySignal: a new DONCHIAN_ENTRY-session LOW while BELOW the 200-day
- *  average. The trend filter does the same job in reverse — it keeps the rule from shorting
- *  a dip inside an uptrend, which is where short Donchian does its losing. */
-export function isBearishEntrySignal(bars: Bar[]): boolean {
-  if (bars.length < TREND_FILTER + 1) return false;
-  const closes = bars.map((b) => b.c);
-  const last = closes[closes.length - 1];
-  const window = closes.slice(-DONCHIAN_ENTRY);
-  const sma = closes.slice(-TREND_FILTER).reduce((s, c) => s + c, 0) / TREND_FILTER;
-  return last <= Math.min(...window) && last < sma;
-}
-
-/** The mirror of isExitSignal: a DONCHIAN_EXIT-session HIGH ends a bearish position. */
-export function isBearishExitSignal(bars: Bar[]): boolean {
-  if (bars.length < DONCHIAN_EXIT) return false;
-  const closes = bars.map((b) => b.c);
-  return closes[closes.length - 1] >= Math.max(...closes.slice(-DONCHIAN_EXIT));
-}
-
-/** The exit rule that applies to a position, chosen by its sleeve's direction. */
-export function trendExitFor(source: string | null | undefined, bars: Bar[]): boolean {
-  return isBearishSource(source) ? isBearishExitSignal(bars) : isExitSignal(bars);
-}
-
-// ---------- Exits ----------
-// Three of them, checked in this order. There is deliberately NO profit target: the rule
-// being tested is trend-following, and capping the winners is what turns a trend rule
-// negative. The premium stop exists only to stop a dead position bleeding to zero, and
-// the DTE floor exists because time decay accelerates sharply in the last few weeks —
-// the single structural fact that makes short-dated options a bad instrument.
-export const DTE_FLOOR = 21;
-export const PREMIUM_STOP_FRAC = 0.50;
-export type ExitReason = "trend exit" | "dte floor" | "premium stop" | "assignment risk" | null;
-
-export function exitReason(p: { trendExit: boolean; dte: number; markUsd: number; costUsd: number }): ExitReason {
-  if (p.trendExit) return "trend exit";
-  if (p.dte <= DTE_FLOOR) return "dte floor";
-  if (p.costUsd > 0 && p.markUsd <= p.costUsd * PREMIUM_STOP_FRAC) return "premium stop";
-  return null;
-}
-
-// ---------- Verdict ladder ----------
-// Identical wording and thresholds to the crypto and stock books, so "REAL EDGE" means the
-// same thing on every desk. 30 resolved, positive net, t >= 2, spanning 7+ distinct days.
-// NOTE the honest arithmetic: at 2 entries per sleeve per month, 30 resolved trades is
-// roughly 15 months. This book is a slow instrument by design and the page says so.
-export function optionsVerdict(resolved: number, net: number, tStat: number | null, days: number): string {
-  if (resolved < 30) return `gathering (${resolved}/30)`;
-  if (net <= 0) return "not paying";
-  if (tStat != null && tStat >= 2) {
-    if (days < 7) return `promising — significant, needs ${7 - days} more day${7 - days === 1 ? "" : "s"} of data`;
-    return "REAL EDGE — significant";
-  }
-  return "promising (could be luck)";
-}
-export function tStatOf(mean: number | null, std: number | null, n: number): number | null {
-  return n > 1 && mean != null && std != null && std > 0 ? (mean * Math.sqrt(n)) / std : null;
-}
-
-/** Days to expiry from an OCC-style YYYY-MM-DD expiry string, at a given instant. */
-/** The ET calendar date at an instant, as YYYY-MM-DD. Expiries are calendar dates, so every
- *  comparison against one has to be done in calendar terms or it drifts by a day. */
 export function etDateOf(at: Date): string {
   const p = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(at);
   const g = (t: string) => p.find((x) => x.type === t)?.value ?? "";

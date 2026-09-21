@@ -1086,7 +1086,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     futuresPositions = await getTradovatePositions();
   } catch (err) {
     details.push(`CRITICAL: Failed to fetch positions from Tradovate: ${err}`);
-    try { await sendNotification(`FUTURES AGENT: Cannot fetch positions — ${err}. Position management skipped.`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
+    try { await sendNotification(`FUTURES AGENT: Cannot fetch positions — ${err}. Position management skipped.`, "general"); } catch {}
     return { trades, managed, details };
   }
   details.push(`POSITIONS: ${futuresPositions.length} futures open`);
@@ -1193,7 +1193,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
     try {
       await sendNotification(
         `🚨 AGGREGATE DRAWDOWN KILL: Closed ${closedCount}/${killablePositions.length} position(s)${failedCount > 0 ? ` — ${failedCount} FAILED TO CLOSE, CHECK BROKER NOW` : ""}. Combined P&L: $${aggregateDrawdown.toFixed(0)}`,
-        tradingMode === "live" ? "futures" : "futures_demo"
+        "general"
       );
     } catch {}
     return { trades, managed, details };
@@ -1376,7 +1376,7 @@ export async function runFuturesAgent(opts: { registryOnly?: boolean } = {}): Pr
               details.push(`    Placed breakeven stop for remaining ${remainingQty}x at $${avgPrice.toFixed(2)}`);
             } catch (stopErr) {
               details.push(`    WARNING: Failed to place breakeven stop for remaining: ${stopErr}`);
-              try { await sendNotification(`Scale-out stop FAILED for ${pos.contractName}. ${remainingQty}x UNPROTECTED.`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
+              try { await sendNotification(`Scale-out stop FAILED for ${pos.contractName}. ${remainingQty}x UNPROTECTED.`, "general"); } catch {}
             }
             await prisma.autoTradeLog.create({ data: {
               symbol: `FUT:${symbolMatch || pos.contractName}`, action: `${tradeActionPrefix}_scale_out`,
@@ -1958,7 +1958,7 @@ Reply ONLY with JSON: {"agree": true/false, "conviction": "A+"|"A"|"B"|"C", "rea
         for (const w of order.warnings) {
           details.push(`  WARNING: ${w}`);
         }
-        try { await sendNotification(`Bracket warning for ${symbol}: ${order.warnings.join("; ")}`, tradingMode === "live" ? "futures" : "futures_demo"); } catch {}
+        try { await sendNotification(`Bracket warning for ${symbol}: ${order.warnings.join("; ")}`, "general"); } catch {}
       }
 
       details.push(`  ORDER PLACED with bracket (stop + target). Order ID: ${order.orderId}`);

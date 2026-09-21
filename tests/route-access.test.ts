@@ -6,7 +6,7 @@ import { isPublicPath } from "../src/lib/route-access";
 test("only sign-in, cron, and webhook paths are public", () => {
   for (const pathname of [
     "/sign-in",
-    "/api/cron/futures-desk-watch",
+    "/api/cron/trading-room",
     "/api/cron/stock-scan",
     "/api/webhook/tradingview",
   ]) {
@@ -14,12 +14,12 @@ test("only sign-in, cron, and webhook paths are public", () => {
   }
 });
 
-test("paper scoreboard and the paper page are owner-only", () => {
-  assert.equal(isPublicPath("/futures"), false);
-  assert.equal(isPublicPath("/api/futures/desk"), false);
+test("the desk pages and their APIs are owner-only", () => {
+  assert.equal(isPublicPath("/trade"), false);
+  assert.equal(isPublicPath("/trade/library"), false);
+  assert.equal(isPublicPath("/api/trade/journal"), false);
   assert.equal(isPublicPath("/api/options/live"), false);
-  assert.equal(isPublicPath("/options/paper"), false);
-  assert.equal(isPublicPath("/api/options/paper"), false);
+  assert.equal(isPublicPath("/api/options/live-desk"), false);
 });
 
 test("the retired public futures track record is no longer public", () => {

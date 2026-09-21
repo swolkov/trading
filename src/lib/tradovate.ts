@@ -187,7 +187,7 @@ async function rememberSharedAccountId(mode: TradingMode, accountId: number): Pr
 }
 
 /** Authenticated request against the mode's REST base — exported for the futures desk client
- *  (src/lib/tradovate-desk.ts), which passes mode "paper" on every call. */
+ *  (retired Sep 21 2026 with the paper desk). */
 export async function tradovateRequest<T = unknown>(path: string, options?: RequestInit, modeOverride?: TradingMode): Promise<T> {
   return tvFetch(path, options, modeOverride) as Promise<T>;
 }

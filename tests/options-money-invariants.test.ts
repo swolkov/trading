@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Contract } from "../src/lib/options-paper-model";
-import { positionMarkUsd, settleAtExpiry } from "../src/lib/options-paper-model";
+import type { Contract } from "../src/lib/options-model";
+import { positionMarkUsd, settleAtExpiry } from "../src/lib/options-model";
 import { type Candidate, buildCandidates, pnlAtExpiry } from "../src/lib/options-structures";
 
 // ============ MONEY INVARIANTS, RANDOMISED ============

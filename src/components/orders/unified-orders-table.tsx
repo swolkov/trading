@@ -2,7 +2,6 @@
 
 import useSWR from "swr";
 import { useState } from "react";
-import { FuturesAlertInbox, FuturesLedgerTable, FuturesOpenTable, type FuturesSignal, type FuturesTrade } from "@/components/futures/desk-tables";
 import { OptionOrdersTable, OptionPositionsTable, type LiveOrder, type LivePosition } from "@/components/options/account-tables";
 import { JournalTable, LedgerPanel, type JournalData } from "@/components/trading-room/journal-panels";
 import { LiveAccountPanel, type LiveView } from "@/components/trading-room/room-panels";
@@ -30,21 +29,20 @@ function Segmented<T extends string>({ value, onChange, options }: { value: T; o
 
 // THE ONE PLACE FOR EVERY TRADE, BROKEN DOWN BY PLATFORM. Each platform is its own segment
 // with its own money state in the label — Spencer's LIVE Tradovate account (his hand trades,
-// read by the Trading Room), the Tradovate futures DEMO (paper, by design) and the real
-// Robinhood account (a broker snapshot). The tables are the same components the platform
+// read by the Trading Room) and the real Robinhood account (a broker snapshot). The paper
+// futures desk was retired Sep 21 2026. The tables are the same components the platform
 // pages render, so this page and those pages can never disagree about a row. The Kraken
 // segment was retired with the crypto desk (Sep 19 2026).
-type Platform = "live" | "futures" | "robinhood";
+type Platform = "live" | "robinhood";
 export function UnifiedOrdersTable() {
   const [platform, setPlatform] = useState<Platform>("live");
   return (
     <div className="space-y-4">
       <Segmented value={platform} onChange={setPlatform} options={[
         { k: "live", label: "Tradovate · futures · live, by hand", tone: "red" },
-        { k: "futures", label: "Tradovate · futures · demo", tone: "paper" },
         { k: "robinhood", label: "Robinhood · options · real account" },
       ]} />
-      {platform === "live" ? <LiveFuturesOrders /> : platform === "futures" ? <FuturesOrders /> : <RobinhoodOrders />}
+      {platform === "live" ? <LiveFuturesOrders /> : <RobinhoodOrders />}
     </div>
   );
 }
@@ -66,30 +64,6 @@ function LiveFuturesOrders() {
       <LiveAccountPanel live={room?.live ?? null} />
       {data.ledger && <LedgerPanel byDay={data.ledger.byDay} trades={data.ledger.trades} />}
       <JournalTable rows={data.rows} onSaved={() => mutate()} />
-    </div>
-  );
-}
-
-// Tradovate futures DEMO — the desk's own ledger and inbox, from the same route the Futures
-// Desk page reads. Paper only, by design: nothing here can reach a live account.
-interface FuturesDeskData {
-  enabled: boolean; open: FuturesTrade[]; ledger: FuturesTrade[]; signals: FuturesSignal[];
-  record: { trades: number; wins: number; pnl: number }; limits: { maxPositions: number };
-  guardian: { at: string | null; fresh: boolean }; error?: string;
-}
-function FuturesOrders() {
-  const { data } = useSWR<FuturesDeskData>("/api/futures/desk", fetcher, { refreshInterval: 30000 });
-  if (data === undefined) return <Panel><PanelBody><Empty>Loading the futures desk…</Empty></PanelBody></Panel>;
-  if (!data || data.error) return <Panel><PanelBody><Empty>The futures desk did not answer{data?.error ? `: ${data.error}` : ""}.</Empty></PanelBody></Panel>;
-  return (
-    <div className="space-y-4">
-      <Note>
-        Demo account, paper only — sized off a fixed $50,000 basis. Desk is <strong>{data.enabled ? "enabled" : "disabled"}</strong>
-        {data.guardian.at ? `; guardian ran ${ago(data.guardian.at)}` : "; guardian has not run yet"}. Edges, the switch and the TradingView setup are on <Link href="/futures" className="text-primary hover:underline">Futures Desk</Link>.
-      </Note>
-      <FuturesOpenTable open={data.open} maxPositions={data.limits.maxPositions} />
-      <FuturesLedgerTable ledger={data.ledger} record={data.record} />
-      <FuturesAlertInbox signals={data.signals} emptyHint="No alerts received yet — the desk trades only when TradingView sends one." />
     </div>
   );
 }

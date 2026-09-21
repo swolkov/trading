@@ -3,7 +3,7 @@
 // Kept separate from the data adapter on purpose. OCC is an exchange standard, not a vendor
 // format, so it survived the move off Alpaca untouched — and the paper-book test suite
 // exercises it without needing a database or a market-data dependency, exactly as it does
-// for options-paper-model.ts.
+// for options-model.ts.
 
 /** Parse an OCC symbol from the RIGHT — the root is variable length, so left-anchored
  *  parsing breaks on any root that is not the plain ticker (which is why the first version

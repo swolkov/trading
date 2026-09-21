@@ -3,20 +3,13 @@
 import useSWR from "swr";
 import { Chip, type ChipTone } from "@/components/ui/chip";
 import { Note, PageHeader, Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
-import type { FuturesHealth } from "@/lib/futures-health";
 import { ago } from "@/lib/format";
 
 interface CommandData {
   slack?: { channel: string; own: boolean; delivers: boolean }[];
   notifyFail?: { at: string; channel: string; why: string } | null;
   room?: { lastTickAt: string | null; lastError: string | null; liveOk: boolean; liveAt: string | null; levelsAt: string | null; breakAt: string | null };
-  futures: FuturesHealth;
-  heartbeats: { tradingViewAlert: string | null };
   paper: {
-    optionsScan: string | null;
-    stockScan: string | null;
-    optionsAutotrack: boolean;
-    stockAutotrack: boolean;
     robinhood: {
       liveDesk?: { armed: boolean; verified: boolean; guardianAt: string | null; guardianFresh: boolean };
       newestQuoteTs: string | null; quoteAgeMinutes: number | null; quotesStale: boolean;
@@ -73,14 +66,13 @@ export default function SystemHealthPage() {
     );
   }
 
-  const hb = data.heartbeats;
   const rh = data.paper.robinhood;
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="System Health"
-        sub="The Trading Room (your live account, read-only), Robinhood options and the futures demo desk. Refreshes every 30s"
+        sub="The Trading Room (your live account, read-only) and the Robinhood options desk. Refreshes every 30s"
       />
 
       <Panel>
@@ -103,18 +95,11 @@ export default function SystemHealthPage() {
         <PanelHeader title="Slack lanes" aside={<span>where each desk posts · a lane without its own channel falls back to general</span>} />
         <PanelBody className="divide-y divide-border">
           {(data.slack ?? []).map((l) => (
-            <HealthRow key={l.channel} label={l.channel === "futures" ? "futures · your Trading Room (cards, breaks, trade meter, alarms)" : l.channel === "options" ? "options · the Robinhood live desk (arm, entries, closes, brief)" : l.channel === "futures_demo" ? "futures_demo · the paper desk" : "general · the catch-all"}
+            <HealthRow key={l.channel} label={l.channel === "futures" ? "futures · your Trading Room (cards, breaks, trade meter, alarms)" : l.channel === "options" ? "options · the Robinhood live desk (arm, entries, closes, brief)" : "general · the catch-all"}
               sub={l.own ? "own channel" : l.delivers ? "no own channel — posts to general" : "no channel — messages are DROPPED"}
-              chip={<Chip tone={l.own ? "green" : l.delivers ? "amber" : l.channel === "futures_demo" ? "grey" : "red"}>{l.own ? "Own channel" : l.delivers ? "Falls back" : "Not delivered"}</Chip>} />
+              chip={<Chip tone={l.own ? "green" : l.delivers ? "amber" : "red"}>{l.own ? "Own channel" : l.delivers ? "Falls back" : "Not delivered"}</Chip>} />
           ))}
           {data.notifyFail && <HealthRow label="Last delivery failure" sub={`${data.notifyFail.channel} · ${data.notifyFail.why}`} chip={<Chip tone="red">{ago(data.notifyFail.at)}</Chip>} />}
-        </PanelBody>
-      </Panel>
-
-      <Panel>
-        <PanelHeader title="Heartbeats" />
-        <PanelBody className="divide-y divide-border">
-          <HealthRow label="TradingView alert" sub="last webhook received" chip={<Chip tone={hb.tradingViewAlert ? "green" : "grey"}>{hb.tradingViewAlert ? ago(hb.tradingViewAlert) : "none yet"}</Chip>} />
         </PanelBody>
       </Panel>
 
@@ -137,44 +122,7 @@ export default function SystemHealthPage() {
         </PanelBody>
       </Panel>
 
-      <Panel>
-        <PanelHeader title="Tradovate futures · demo desk" aside={<Chip tone="paper">Paper only, by design</Chip>} />
-        <PanelBody className="divide-y divide-border">
-          <HealthRow label="Desk switch" sub="Typed ENABLE on the Futures Desk page. Off = alerts are recorded, nothing is sent to the demo."
-            chip={<Chip tone={data.futures.desk.enabled ? "green" : "grey"}>{data.futures.desk.enabled ? "Enabled" : "Disabled"}</Chip>}>
-            {data.futures.desk.disabledReason && <span>{data.futures.desk.disabledReason}</span>}
-          </HealthRow>
-          <HealthRow label="Desk guardian" sub="Every 5 minutes. The desk refuses entries when it has not run in 20 minutes."
-            chip={<Chip tone={data.futures.desk.guardianFresh ? "green" : "red"}>{data.futures.desk.guardianFresh ? "Reporting" : "Not reporting"}</Chip>}>
-            <span>{data.futures.desk.guardianAt ? ago(data.futures.desk.guardianAt) : "No valid timestamp"}</span>
-          </HealthRow>
-          <HealthRow label="Broker and webhook credentials" sub="Tradovate demo login and the TradingView webhook secret on this server."
-            chip={<Chip tone={data.futures.desk.configured ? "green" : "red"}>{data.futures.desk.configured ? "Present" : "Missing"}</Chip>} />
-          <HealthRow label="CME session" sub="Sun 18:00 → Fri 17:00 ET with a daily 17:00–18:00 break. Alerts that land in a break are queued for the reopen."
-            chip={<Chip tone={data.futures.desk.cmeOpen ? "blue" : "grey"}>{data.futures.desk.cmeOpen ? "Open" : "Closed"}</Chip>} />
-          <HealthRow label="Demo equity (guardian's last read)" sub="Sizing uses the fixed $50k basis, not this number."
-            chip={<Chip tone="grey">{data.futures.desk.equity != null ? `$${Math.round(data.futures.desk.equity).toLocaleString()}` : "—"}</Chip>} />
-          <HealthRow label="Drawdown tier · open risk · daily loss left" sub="From the guardian's risk snapshot. Tier 1–3 shrink the budget (×0.75 / ×0.5 / ×0.25); tier 4 halts the desk."
-            chip={<Chip tone={data.futures.desk.ddTier == null ? "grey" : data.futures.desk.ddTier >= 2 ? "red" : data.futures.desk.ddTier === 1 ? "amber" : "green"}>{data.futures.desk.ddTier == null ? "—" : `tier ${data.futures.desk.ddTier}`}</Chip>}>
-            <span>open risk {data.futures.desk.openRisk != null ? `$${Math.round(data.futures.desk.openRisk).toLocaleString()}` : "—"} · daily loss left {data.futures.desk.dailyLossRemaining != null ? `$${Math.round(data.futures.desk.dailyLossRemaining).toLocaleString()}` : "—"}</span>
-          </HealthRow>
-          <HealthRow label="Event mode · feed heartbeat" sub="Paused refuses entries; reduced halves the budget. A stale TradingView heartbeat (180 CME-open minutes) reads NO TRADE but does not refuse."
-            chip={<Chip tone={data.futures.desk.eventMode === "paused" ? "red" : data.futures.desk.eventMode === "reduced" ? "amber" : data.futures.desk.eventMode ? "green" : "grey"}>{data.futures.desk.eventMode ?? "no policy"}</Chip>}>
-            <span>feed {data.futures.desk.feedStale ? "STALE" : "live"} · last seen {data.futures.desk.feedSeenAt ? ago(data.futures.desk.feedSeenAt) : "never"}</span>
-          </HealthRow>
-          {data.futures.desk.anomaly && (
-            <HealthRow label="Anomaly — entries paused" chip={<Chip tone="red">Clear on /futures</Chip>}><span>{data.futures.desk.anomaly}</span></HealthRow>
-          )}
-          {data.futures.desk.lastError && (
-            <HealthRow label="Last desk error" chip={<Chip tone="amber">Inspect</Chip>}><span>{data.futures.desk.lastError}</span></HealthRow>
-          )}
-          <HealthRow label="Retired Railway engines" sub="Closed for good (Sep 2026). Any heartbeat here means a process that should be dead is running."
-            chip={<Chip tone={data.futures.paper.fresh || data.futures.live.fresh ? "red" : "grey"}>{data.futures.paper.fresh || data.futures.live.fresh ? "Reporting: shut it down" : "Silent"}</Chip>} />
-          <Note className="pt-3">The desk trades only when TradingView sends it an alert: the two Pine rules must be loaded on real-time CME data with alerts pointed at the webhook. A green guardian with no alerts is a desk waiting, not a desk broken.</Note>
-        </PanelBody>
-      </Panel>
-
-      <Note>The Kraken margin desk, the spot trend bot and the stock paper book were all retired (Sep 2026); their machinery is no longer monitored here.</Note>
+      <Note>The Kraken margin desk, the spot trend bot, the stock paper book and the paper futures/options desks were all retired (Sep 2026); the old Railway engines are closed for good. None of that machinery is monitored here.</Note>
     </div>
   );
 }
