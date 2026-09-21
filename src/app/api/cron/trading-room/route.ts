@@ -1,4 +1,5 @@
 import { roomTick } from "@/lib/trading-room";
+import { pageCronCrash } from "@/lib/notifications";
 
 // THE TRADING ROOM TICK — every 5 minutes, Sunday evening through Friday (vercel.json): rebuild the level card from
 // Yahoo, read Spencer's LIVE Tradovate account (read-only: balance, positions, the day's fills),
@@ -12,5 +13,5 @@ export async function GET(request: Request) {
   if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) return Response.json({ error: "unauthorized" }, { status: 401 });
   const started = Date.now();
   try { const r = await roomTick(); return Response.json({ ...r, ms: Date.now() - started }); }
-  catch (e) { return Response.json({ ok: false, notes: [String(e).slice(0, 300)], ms: Date.now() - started }, { status: 500 }); }
+  catch (e) { await pageCronCrash("trading-room", e); return Response.json({ ok: false, notes: [String(e).slice(0, 300)], ms: Date.now() - started }, { status: 500 }); }
 }

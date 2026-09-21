@@ -84,3 +84,18 @@ async function clearNotifyFailure(channel: NotifyChannel): Promise<void> {
     if (last.channel === channel) await prisma.agentConfig.deleteMany({ where: { key: NOTIFY_FAIL_KEY } });
   } catch { /* best effort */ }
 }
+
+/**
+ * One page to #general when a scheduled job throws — at most once an hour per job, so a job that keeps failing
+ * every 5 minutes does not turn the general lane into a siren. System Health still shows every failure.
+ */
+export async function pageCronCrash(job: string, err: unknown): Promise<void> {
+  const key = `cron_crash_paged_${job}`;
+  try {
+    const last = await prisma.agentConfig.findUnique({ where: { key } });
+    if (last && Date.now() - Date.parse(last.value) < 60 * 60_000) return;
+    const value = new Date().toISOString();
+    await prisma.agentConfig.upsert({ where: { key }, update: { value }, create: { key, value } });
+  } catch { /* the page still goes out */ }
+  await sendNotification(`🚨 CRON CRASH: ${job} — ${String(err).slice(0, 200)}. Check System Health.`, "general");
+}
