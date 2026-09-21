@@ -1,50 +1,27 @@
 /**
- * Wire the three margin Slack lanes into agentConfig and fire one test into each.
+ * Wire the Slack lanes for the two desks and fire one test into each.
  *
- * Webhook URLs are SECRETS — never hardcode them (this repo is public). Pass them as
- * env vars so nothing sensitive is committed:
- *
- *   WEBHOOK_MARGIN_URGENT=https://hooks.slack.com/services/... \
- *   WEBHOOK_MARGIN_SIGNALS=https://hooks.slack.com/services/... \
- *   WEBHOOK_MARGIN_RESULTS=https://hooks.slack.com/services/... \
- *   railway run npx tsx scripts/wire-lanes.ts
- *
- * Each falls back to the main kraken channel if unset (see src/lib/notifications.ts),
- * so the lanes work even before dedicated channels exist.
+ * Webhook URLs are SECRETS — pass them as env vars, never hardcode:
+ *   WEBHOOK_FUTURES=https://hooks.slack.com/services/...   (his live futures room)
+ *   WEBHOOK_OPTIONS=https://hooks.slack.com/services/...   (the Robinhood live desk)
+ *   WEBHOOK_FUTURES_DEMO=...                                (paper desk, optional)
+ *   railway run --service futures-engine -- npx tsx scripts/wire-lanes.ts
+ * Any lane not given keeps its current value. Futures and options fall back to webhook_general.
  */
-import { PrismaClient } from "../src/generated/prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { sendNotification } from "../src/lib/notifications";
-
-const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) } as never);
-
-const LANES: { key: string; env: string; test: string; channel: "margin_urgent" | "margin_signals" | "margin_results" }[] = [
-  { key: "webhook_margin_urgent", env: "WEBHOOK_MARGIN_URGENT", channel: "margin_urgent",
-    test: "🚨 #margin-urgent is LIVE — liquidation, margin-level, and drawdown alerts land here. Never mute this one." },
-  { key: "webhook_margin_signals", env: "WEBHOOK_MARGIN_SIGNALS", channel: "margin_signals",
-    test: "🔎 #margin-signals is LIVE — scanner breakouts/RSI/volume + fast moves land here." },
-  { key: "webhook_margin_results", env: "WEBHOOK_MARGIN_RESULTS", channel: "margin_results",
-    test: "📊 #margin-results is LIVE — shadow would-be P&L + TradingView alert receipts land here." },
+import { prisma } from "../src/lib/db";
+import { laneStatus, sendNotification, type NotifyChannel } from "../src/lib/notifications";
+const LANES: { key: string; env: string; channel: NotifyChannel; test: string }[] = [
+  { key: "webhook_futures", env: "WEBHOOK_FUTURES", channel: "futures", test: "🧭 TEST — futures lane: your Trading Room posts here (cards, level breaks, trade meter, loss line, 4:30 flatten)." },
+  { key: "webhook_options", env: "WEBHOOK_OPTIONS", channel: "options", test: "📈 TEST — options lane: the Robinhood live desk posts here (arm/disarm, entries, closes, the brief)." },
+  { key: "webhook_futures_demo", env: "WEBHOOK_FUTURES_DEMO", channel: "futures_demo", test: "🧪 TEST — futures DEMO lane (paper only)." },
 ];
-
 async function main() {
-  let wired = 0;
-  for (const lane of LANES) {
-    const url = process.env[lane.env];
-    if (!url) { console.log(`skip ${lane.key} — ${lane.env} not set`); continue; }
-    await prisma.agentConfig.upsert({ where: { key: lane.key }, update: { value: url }, create: { key: lane.key, value: url } });
-    console.log(`set ${lane.key}`);
-    wired++;
+  for (const l of LANES) {
+    const url = process.env[l.env];
+    if (url) { await prisma.agentConfig.upsert({ where: { key: l.key }, update: { value: url }, create: { key: l.key, value: url } }); console.log(`${l.key} set`); }
   }
-  if (wired) {
-    console.log("firing a test into each configured lane...");
-    for (const lane of LANES) {
-      if (process.env[lane.env]) await sendNotification(lane.test, lane.channel);
-    }
-    console.log("done — check the channels for one message each");
-  } else {
-    console.log("no lane env vars set — nothing to wire");
-  }
+  for (const s of await laneStatus()) console.log(`${s.channel.padEnd(13)} own webhook: ${s.own ? "yes" : "no "}  delivers: ${s.delivers ? "yes" : "NO"}`);
+  for (const l of LANES) if (process.env[l.env]) await sendNotification(l.test, l.channel);
   await prisma.$disconnect();
 }
-main().catch((e) => { console.error(String(e).slice(0, 150)); process.exit(1); });
+main().catch((e) => { console.error(String(e).slice(0, 200)); process.exit(1); });

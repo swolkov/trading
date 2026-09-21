@@ -10,6 +10,7 @@ import {
   Crosshair,
   Activity,
   Wallet,
+  Film,
   Menu,
   X,
 } from "lucide-react";
@@ -47,6 +48,7 @@ const sections = [
     tone: "live" as const,
     links: [
       { href: "/trade", label: "Trading Room", icon: Crosshair },
+      { href: "/trade/library", label: "Trade Library", icon: Film },
     ],
   },
   {
