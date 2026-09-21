@@ -58,8 +58,17 @@ const nonnegative = (n: unknown): n is number => typeof n === "number" && Number
 const fresh = (at: number | null, now: number, maxAge: number) => at != null && Number.isFinite(at) && at <= now && now - at <= maxAge;
 const fail = (reason: string): never => { throw new Error(`Options live refused: ${reason}`); };
 
+/** Canonical JSON — keys sorted at every depth — so the fingerprint does not depend on key order. The durable intent
+ *  is stored as Postgres JSONB, which REORDERS keys; hashing the raw JSON.stringify meant every record failed its own
+ *  consistency check the moment it was read back, and the desk's first real order (Sep 21 2026) jammed reconciliation
+ *  for good. Tests run on in-memory stores, which is why they never saw it. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value as Record<string, unknown>).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
 export function optionsRequestFingerprint(params: OptionOrderParams): string {
-  return createHash("sha256").update(JSON.stringify(params)).digest("hex");
+  return createHash("sha256").update(canonicalJson(params)).digest("hex");
 }
 export function validateOptionsSnapshot(snapshot: OptionsBrokerSnapshot, now: number): void {
   if (snapshot.accountNumber !== OPTIONS_LIVE_ACCOUNT || !snapshot.active || !snapshot.agenticAllowed

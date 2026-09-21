@@ -360,3 +360,16 @@ test("a partial close: one contract of an owned 2-lot is accepted; a close for m
   assert.throws(() => prepareOptionsOrder({ ...partial, refId: REF2, quantity: 2 }, f.policy, f.snapshot, f.owned.get(position.id)!, NOW), /not exceed their quantity/);
   assert.equal(prepareOptionsOrder({ ...partial, refId: REF2, quantity: 1 }, f.policy, f.snapshot, f.owned.get(position.id)!, NOW).params.quantity, "1");
 });
+
+test("REGRESSION (Sep 21 2026): the request fingerprint survives a JSONB round trip — key order must not matter", () => {
+  const params = { account_number: OPTIONS_LIVE_ACCOUNT, legs: [{ option_id: "a", side: "buy", position_effect: "open", ratio_quantity: 1 }, { option_id: "b", side: "sell", position_effect: "open", ratio_quantity: 1 }],
+    quantity: "1", direction: "debit", type: "limit", price: "0.48", time_in_force: "gfd", market_hours: "regular_hours" } as unknown as OptionOrderParams;
+  // Postgres JSONB stores keys shortest-first, then alphabetically — this is what the record looked like when read back.
+  const roundTripped = { legs: params.legs.map((l) => ({ side: l.side, option_id: l.option_id, ratio_quantity: l.ratio_quantity, position_effect: l.position_effect })), type: "limit", price: "0.48", quantity: "1", direction: "debit",
+    market_hours: "regular_hours", time_in_force: "gfd", account_number: OPTIONS_LIVE_ACCOUNT } as unknown as OptionOrderParams;
+  assert.equal(optionsRequestFingerprint(roundTripped), optionsRequestFingerprint(params));
+  // Still a real fingerprint: a changed price or leg is a different order.
+  assert.notEqual(optionsRequestFingerprint({ ...params, price: "0.49" }), optionsRequestFingerprint(params));
+  assert.notEqual(optionsRequestFingerprint({ ...params, legs: [params.legs[1], params.legs[0]] }), optionsRequestFingerprint(params), "leg order is part of the order");
+});
+
