@@ -18,10 +18,13 @@ const LANES: { key: string; env: string; channel: NotifyChannel; test: string }[
 async function main() {
   for (const l of LANES) {
     const url = process.env[l.env];
-    if (url) { await prisma.agentConfig.upsert({ where: { key: l.key }, update: { value: url }, create: { key: l.key, value: url } }); console.log(`${l.key} set`); }
+    if (!url) continue;
+    // Only a real Slack webhook is ever written: a placeholder or a typo here would silently kill the lane it names.
+    if (!/^https:\/\/hooks\.slack\.com\/services\/[A-Z0-9]+\/[A-Z0-9]+\/[A-Za-z0-9]+$/.test(url)) { console.log(`${l.key} NOT set — "${url.slice(0, 40)}" is not a Slack webhook URL (expected https://hooks.slack.com/services/T…/B…/…)`); continue; }
+    await prisma.agentConfig.upsert({ where: { key: l.key }, update: { value: url }, create: { key: l.key, value: url } }); console.log(`${l.key} set`);
   }
   for (const s of await laneStatus()) console.log(`${s.channel.padEnd(13)} own webhook: ${s.own ? "yes" : "no "}  delivers: ${s.delivers ? "yes" : "NO"}`);
-  for (const l of LANES) if (process.env[l.env]) await sendNotification(l.test, l.channel);
+  for (const l of LANES) if (process.env[l.env] && /^https:\/\/hooks\.slack\.com\//.test(process.env[l.env]!)) await sendNotification(l.test, l.channel);
   await prisma.$disconnect();
 }
 main().catch((e) => { console.error(String(e).slice(0, 200)); process.exit(1); });
