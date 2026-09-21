@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OPTIONS_LADDER, clusterOf, clusterRisk, contractsFor, ddTier, gradeFor, maxLossFor, reserveOk, reserveRefusal, slotsFor, type GradeCandidate } from "../src/lib/options-risk-ladder";
+import { OPTIONS_CONTRACT_RULES, OPTIONS_LADDER, clusterOf, clusterRisk, contractsFor, ddTier, gradeFor, maxLossFor, reserveOk, reserveRefusal, slotsFor, type GradeCandidate } from "../src/lib/options-risk-ladder";
 import { drawdownHalt } from "../src/lib/options-live-guardian";
 import { divergenceVerdict, roundTrips } from "../src/lib/options-live-ledger";
-import { OPTIONS_LIVE_ACCOUNT, optionsRequestFingerprint, type OptionOrderParams } from "../src/lib/options-live-policy";
+import { OPTIONS_LIVE_ACCOUNT, OPTIONS_LIVE_HARD_LIMITS, optionsRequestFingerprint, type OptionOrderParams } from "../src/lib/options-live-policy";
 import type { OptionsIntentRecord } from "../src/lib/options-live-executor";
 
 const strong: GradeCandidate = { setup: "20-session breakout", kind: "long_call", market: { aligned: true }, spreadPct: 4, payoffAtMoveUsd: 150, plannedLoss: 90 };
@@ -148,12 +148,15 @@ test("contracts per structure: the cap is the risk, the count is how much of it 
   assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, ...fresh }), 2);
   assert.equal(contractsFor({ grade: "Strong", perContractUsd: 90, capUsd: 150, ...fresh }), 1, "two would breach the cap");
   assert.equal(contractsFor({ grade: "A+", perContractUsd: 49, capUsd: 225, ...fresh }), 2);
-  // Earned (ten closed live trades, divergence green): Normal two, Strong/A+ three — never past the cap, never past three.
+  // Earned (ten closed live trades, divergence green): Normal two as well — never past the cap, never past the core's hard limit.
   const earned = { closedLiveTrades: 10, divergenceGreen: true };
   assert.equal(contractsFor({ grade: "Normal", perContractUsd: 30, capUsd: 100, ...earned }), 2);
-  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, ...earned }), 3);
-  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 60, capUsd: 150, ...earned }), 2, "three would breach the cap");
-  assert.equal(contractsFor({ grade: "A+", perContractUsd: 10, capUsd: 225, ...earned }), 3, "hard ceiling of three");
+  assert.equal(contractsFor({ grade: "Normal", perContractUsd: 60, capUsd: 100, ...earned }), 1, "two would breach the cap");
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, ...earned }), 2);
+  assert.equal(contractsFor({ grade: "A+", perContractUsd: 10, capUsd: 225, ...earned }), OPTIONS_LIVE_HARD_LIMITS.maxQuantity, "bound to the core's hard limit");
+  // The ladder can never hand the core a quantity it refuses: the largest count the ladder can produce is inside the hard limit.
+  assert.ok(OPTIONS_CONTRACT_RULES.maxContracts <= OPTIONS_LIVE_HARD_LIMITS.maxQuantity);
+  for (const g of ["Normal", "Strong", "A+"] as const) assert.ok(OPTIONS_CONTRACT_RULES.earned[g] <= OPTIONS_LIVE_HARD_LIMITS.maxQuantity && OPTIONS_CONTRACT_RULES.before[g] <= OPTIONS_LIVE_HARD_LIMITS.maxQuantity, g);
   // Red divergence keeps the first-weeks table even with the trades; a structure over the cap is zero (the caller refused it already).
   assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, closedLiveTrades: 25, divergenceGreen: false }), 2);
   assert.equal(contractsFor({ grade: "Normal", perContractUsd: 120, capUsd: 100, ...fresh }), 0);

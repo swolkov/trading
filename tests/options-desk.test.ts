@@ -316,6 +316,6 @@ test("earnings freshness is measured in market hours: a Friday 17:45 ET read sti
   const row = { TEST: { earningsAt: "2026-11-05", earningsTiming: null, calendarThrough: "2026-11-11", at: new Date(fri).toISOString() } };
   assert.equal(spansEarnings("TEST", "2026-10-16", row, mon935).permitted, true);
   assert.equal(spansEarnings("TEST", "2026-10-16", row, mon1035).permitted, true);
-  assert.equal(spansEarnings("TEST", "2026-10-16", row, Date.parse("2026-09-22T14:00:00Z")).permitted, false, "Tuesday: 38 market hours — stale");
+  assert.equal(spansEarnings("TEST", "2026-10-16", row, Date.parse("2026-09-22T14:00:00Z")).permitted, false, "Tuesday: ~40 market hours (Fri 6 + Mon 24 + Tue 10) — stale");
 });
 

@@ -5,6 +5,7 @@
 // market and a payoff at the expected move worth 1.5× the risk; "A+" stays locked until the 0–100
 // score has proven it ranks (options_score_promoted="true"). Nothing here places an order.
 import { groupOf } from "./options-model";
+import { OPTIONS_LIVE_HARD_LIMITS } from "./options-live-policy";
 import { directionOfKind, type Direction } from "./options-market-state";
 
 export type OptionsGrade = "Normal" | "Strong" | "A+";
@@ -111,11 +112,12 @@ export function reserveRefusal(openMaxLossUsd: number, newMaxLossUsd: number, eq
 /** CONTRACTS PER STRUCTURE (Sep 21 2026). The count never sets the risk — the grade's cap does — it only decides how much of
  *  that cap a cheap structure may use. Until the desk has `slotUnlockClosedTrades` closed live trades with the divergence check
  *  green, a Normal trade is one contract and a Strong/A+ trade at most two (the first live weeks prove the order path, not size).
- *  Once earned, Normal may take two and Strong/A+ three — always inside the cap, never past `maxContracts`. */
+ *  Once earned, Normal may take two as well — always inside the cap, never past the core's hard limit (`OPTIONS_LIVE_HARD_LIMITS.maxQuantity`,
+ *  two): the core refuses any policy above it, so the ladder is bound to that constant rather than allowed to drift past it. */
 export const OPTIONS_CONTRACT_RULES = {
-  maxContracts: 3,
+  maxContracts: OPTIONS_LIVE_HARD_LIMITS.maxQuantity,
   before: { Normal: 1, Strong: 2, "A+": 2 } as Record<OptionsGrade, number>,
-  earned: { Normal: 2, Strong: 3, "A+": 3 } as Record<OptionsGrade, number>,
+  earned: { Normal: 2, Strong: 2, "A+": 2 } as Record<OptionsGrade, number>,
 };
 export function contractsFor(p: { grade: OptionsGrade; perContractUsd: number; capUsd: number; closedLiveTrades: number; divergenceGreen: boolean }, rules = OPTIONS_LADDER_RULES, cr = OPTIONS_CONTRACT_RULES): number {
   if (!(p.perContractUsd > 0) || !(p.capUsd >= p.perContractUsd)) return 0;
