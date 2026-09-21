@@ -22,6 +22,7 @@ export async function ensureJournalTable(): Promise<void> {
     session text NOT NULL, dow int NOT NULL, nearest_level text, nearest_level_px float8, dist_atr float8, event_flag text,
     setup_tag text, why text, open boolean NOT NULL DEFAULT false, fill_ids text NOT NULL DEFAULT '[]',
     updated_at timestamptz NOT NULL DEFAULT now())`);
+  await prisma.$executeRawUnsafe(`ALTER TABLE trading_room_trades ADD COLUMN IF NOT EXISTS grade text`);
   await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS trading_room_trades_entry ON trading_room_trades (entry_ts)`);
 }
 
@@ -66,12 +67,13 @@ async function stopFor(trip: RoundTrip, stops: { contractId: number; action: str
   return null;
 }
 
-export async function foldJournal(nowMs = Date.now()): Promise<{ trips: number; open: number; updated: number }> {
+/** `force` recomputes every trip in the lookback (fees, excursion, levels) — tags, whys, grades and stops are kept. */
+export async function foldJournal(nowMs = Date.now(), force = false): Promise<{ trips: number; open: number; updated: number }> {
   await ensureJournalTable();
   const fills = await loadFills(nowMs);
   const trips = roundTripsFromFills(fills);
   if (!trips.length) return { trips: 0, open: 0, updated: 0 };
-  const existing = await prisma.$queryRawUnsafe<{ id: string; stop_px: number | null; open: boolean; exit_ts: Date }[]>(`SELECT id, stop_px, open, exit_ts FROM trading_room_trades WHERE entry_ts >= $1`, new Date(nowMs - LOOKBACK_DAYS * 24 * 3_600_000));
+  const existing = await prisma.$queryRawUnsafe<{ id: string; stop_px: number | null; open: boolean; exit_ts: Date; mfe_r: number | null }[]>(`SELECT id, stop_px, open, exit_ts, mfe_r FROM trading_room_trades WHERE entry_ts >= $1`, new Date(nowMs - LOOKBACK_DAYS * 24 * 3_600_000));
   const known = new Map(existing.map((e) => [e.id, e]));
   const stops = await getTradovateStopOrders("live");
   const events = deskCalendar(new Date(nowMs));
@@ -80,8 +82,9 @@ export async function foldJournal(nowMs = Date.now()): Promise<{ trips: number; 
   for (const trip of trips) {
     const id = tripId(trip);
     const prev = known.get(id);
-    // A closed trip already folded with the same exit is final — nothing to recompute, and the tag/why stay.
-    if (prev && !prev.open && !trip.open && new Date(prev.exit_ts).getTime() === trip.exitTs) continue;
+    // A closed trip already folded with the same exit AND a measured excursion is final — nothing to recompute, and the
+    // tag/why stay. (Yahoo's bars run ~10 minutes behind, so a trip folded right after it closed waits for its bars.)
+    if (!force && prev && !prev.open && !trip.open && new Date(prev.exit_ts).getTime() === trip.exitTs && prev.mfe_r != null) continue;
     const spec = INSTRUMENTS[trip.symbol];
     if (!barsCache.has(trip.symbol)) barsCache.set(trip.symbol, await barsFor(trip.symbol).catch(() => ({ bars5m: [], bars1m: [], daily: [] })));
     const { bars5m, bars1m, daily } = barsCache.get(trip.symbol)!;
@@ -90,7 +93,12 @@ export async function foldJournal(nowMs = Date.now()): Promise<{ trips: number; 
     const stopPx = prev?.stop_px ?? (await stopFor(trip, stops));
     const risk = riskPerContract(spec, trip.entryPx, stopPx, lv?.atr5m ?? null);
     const riskUsd = risk ? risk.usd * trip.qty : null;
-    const exc = bars1m.length ? excursion(bars1m, trip.side, trip.entryPx, trip.entryTs, trip.exitTs) : null;
+    // Excursion only once the 1-minute bars reach the exit; until then it is left null and measured on a later tick.
+    const covered = bars1m.length > 0 && bars1m[bars1m.length - 1].t >= (trip.open ? trip.entryTs : trip.exitTs);
+    const excRaw = covered ? excursion(bars1m, trip.side, trip.entryPx, trip.entryTs, trip.exitTs) : null;
+    // The exit itself is an excursion the bars may have missed (a fill between prints): MFE is at least the exit's gain, MAE at least its loss.
+    const exitFav = (trip.side === "long" ? 1 : -1) * (trip.exitPx - trip.entryPx);
+    const exc = excRaw && !trip.open ? { mfePts: Math.max(excRaw.mfePts, exitFav), maePts: Math.max(excRaw.maePts, -exitFav) } : excRaw;
     const perContractR = risk?.usd ?? null;
     const ev = events.find((e) => Math.abs(e.atMs - trip.entryTs) <= EVENT_WINDOW_MS);
     const row = {
@@ -129,7 +137,7 @@ interface TradeRow {
   gross_usd: number; fees_usd: number; net_usd: number; stop_px: number | null; risk_usd: number | null; risk_source: string;
   net_r: number | null; mfe_r: number | null; mae_r: number | null; hold_min: number; session: string; dow: number;
   nearest_level: string | null; nearest_level_px: number | null; dist_atr: number | null; event_flag: string | null;
-  setup_tag: string | null; why: string | null; open: boolean; fill_ids: string;
+  setup_tag: string | null; why: string | null; grade: string | null; open: boolean; fill_ids: string;
 }
 function toRow(r: TradeRow): JournalRow {
   return {
@@ -140,7 +148,7 @@ function toRow(r: TradeRow): JournalRow {
     netR: r.net_r == null ? null : Number(r.net_r), mfeR: r.mfe_r == null ? null : Number(r.mfe_r), maeR: r.mae_r == null ? null : Number(r.mae_r),
     holdMin: Number(r.hold_min), session: r.session as JournalRow["session"], dow: Number(r.dow),
     nearestLevel: r.nearest_level, nearestLevelPx: r.nearest_level_px == null ? null : Number(r.nearest_level_px), distAtr: r.dist_atr == null ? null : Number(r.dist_atr),
-    eventFlag: r.event_flag, setupTag: r.setup_tag, why: r.why, open: r.open, fillIds: JSON.parse(r.fill_ids || "[]"),
+    eventFlag: r.event_flag, setupTag: r.setup_tag, why: r.why, grade: r.grade ?? null, open: r.open, fillIds: JSON.parse(r.fill_ids || "[]"),
   };
 }
 
@@ -152,11 +160,16 @@ export async function journalView(limit = 200): Promise<JournalView> {
   return { rows, scoreboard: scoreboard(rows, EVENT_WINDOW_MS, eventTimes), rules: TEST_RULES };
 }
 
-/** Spencer's words on a trade — a one-word setup tag and a one-line why. The only write the journal accepts. */
-export async function setJournalNote(id: string, note: { setupTag?: string | null; why?: string | null }): Promise<boolean> {
+/** Spencer's words on a trade — a one-word setup tag, a one-line why, a grade A–F. The only write the journal accepts.
+ *  A field left undefined is kept; an empty string clears it. */
+export async function setJournalNote(id: string, note: { setupTag?: string | null; why?: string | null; grade?: string | null }): Promise<boolean> {
   await ensureJournalTable();
-  const tag = note.setupTag == null ? null : String(note.setupTag).trim().slice(0, 24) || null;
-  const why = note.why == null ? null : String(note.why).trim().slice(0, 240) || null;
-  const n = await prisma.$executeRawUnsafe(`UPDATE trading_room_trades SET setup_tag = COALESCE($2, setup_tag), why = COALESCE($3, why), updated_at = now() WHERE id = $1`, id, tag, why);
+  const sets: string[] = [], vals: unknown[] = [id];
+  const put = (col: string, v: string | null) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
+  if (note.setupTag !== undefined) put("setup_tag", note.setupTag == null ? null : String(note.setupTag).trim().slice(0, 24) || null);
+  if (note.why !== undefined) put("why", note.why == null ? null : String(note.why).trim().slice(0, 240) || null);
+  if (note.grade !== undefined) { const g = note.grade == null ? "" : String(note.grade).trim().toUpperCase().slice(0, 1); put("grade", ["A", "B", "C", "D", "F"].includes(g) ? g : null); }
+  if (!sets.length) return false;
+  const n = await prisma.$executeRawUnsafe(`UPDATE trading_room_trades SET ${sets.join(", ")}, updated_at = now() WHERE id = $1`, ...vals);
   return Number(n) > 0;
 }
