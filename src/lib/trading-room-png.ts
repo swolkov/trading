@@ -79,3 +79,66 @@ const FONT: Record<string, string[]> = {
   "U": ["#.#", "#.#", "#.#", "#.#", "###"], "V": ["#.#", "#.#", "#.#", "#.#", ".#."], "W": ["#.#", "#.#", "###", "###", "#.#"], "Y": ["#.#", "#.#", ".#.", ".#.", ".#."],
   "Z": ["###", "..#", ".#.", "#..", "###"],
 };
+
+// ---- GIF89a, animated, with a fixed palette — the "video" of a trade for Slack ----
+export function encodeGif(w: number, h: number, frames: { indices: Uint8Array; delayCs: number }[], palette: RGBA[]): Buffer {
+  const parts: Buffer[] = [];
+  parts.push(Buffer.from("GIF89a", "ascii"));
+  const lsd = Buffer.alloc(7); lsd.writeUInt16LE(w, 0); lsd.writeUInt16LE(h, 2); lsd[4] = 0xf7; lsd[5] = 0; lsd[6] = 0;   // global color table, 256 entries
+  parts.push(lsd);
+  const pal = Buffer.alloc(256 * 3);
+  for (let i = 0; i < 256; i++) { const c = palette[i] ?? palette[0]; pal[i * 3] = c[0]; pal[i * 3 + 1] = c[1]; pal[i * 3 + 2] = c[2]; }
+  parts.push(pal);
+  parts.push(Buffer.from([0x21, 0xff, 0x0b, ...Buffer.from("NETSCAPE2.0", "ascii"), 0x03, 0x01, 0x00, 0x00, 0x00]));   // loop forever
+  for (const f of frames) {
+    const gce = Buffer.alloc(8); gce[0] = 0x21; gce[1] = 0xf9; gce[2] = 4; gce[3] = 0; gce.writeUInt16LE(f.delayCs, 4); gce[6] = 0; gce[7] = 0;
+    parts.push(gce);
+    const desc = Buffer.alloc(10); desc[0] = 0x2c; desc.writeUInt16LE(0, 1); desc.writeUInt16LE(0, 3); desc.writeUInt16LE(w, 5); desc.writeUInt16LE(h, 7); desc[9] = 0;
+    parts.push(desc);
+    parts.push(Buffer.from([8]));
+    parts.push(lzw(f.indices, 8));
+    parts.push(Buffer.from([0]));
+  }
+  parts.push(Buffer.from([0x3b]));
+  return Buffer.concat(parts);
+}
+
+/** LZW as GIF wants it: variable code width, clear at 4096, output cut into ≤255-byte sub-blocks. */
+function lzw(px: Uint8Array, minCode: number): Buffer {
+  const CLEAR = 1 << minCode, EOI = CLEAR + 1;
+  let dict = new Map<number, number>(), next = EOI + 1, width = minCode + 1;
+  const out: number[] = []; let acc = 0, nbits = 0;
+  const emit = (code: number) => { acc |= code << nbits; nbits += width; while (nbits >= 8) { out.push(acc & 0xff); acc >>>= 8; nbits -= 8; } };
+  emit(CLEAR);
+  let prefix = px[0];
+  for (let i = 1; i < px.length; i++) {
+    const k = px[i], key = (prefix << 8) | k, found = dict.get(key);
+    if (found !== undefined) { prefix = found; continue; }
+    emit(prefix);
+    if (next < 4096) { dict.set(key, next++); if (next - 1 === 1 << width && width < 12) width++; }
+    else { emit(CLEAR); dict = new Map(); next = EOI + 1; width = minCode + 1; }
+    prefix = k;
+  }
+  emit(prefix); emit(EOI);
+  if (nbits > 0) out.push(acc & 0xff);
+  const blocks: Buffer[] = [];
+  for (let i = 0; i < out.length; i += 255) { const slice = out.slice(i, i + 255); blocks.push(Buffer.from([slice.length, ...slice])); }
+  return Buffer.concat(blocks);
+}
+
+/** Map every pixel of a raster to the nearest palette entry (exact for the solid colors the GIF frames use). */
+export function indexRaster(r: Raster, palette: RGBA[]): Uint8Array {
+  const out = new Uint8Array(r.w * r.h);
+  const cache = new Map<number, number>();
+  for (let i = 0; i < r.w * r.h; i++) {
+    const key = (r.px[i * 4] << 16) | (r.px[i * 4 + 1] << 8) | r.px[i * 4 + 2];
+    let idx = cache.get(key);
+    if (idx === undefined) {
+      let best = 0, bd = Infinity;
+      for (let p = 0; p < palette.length; p++) { const c = palette[p]; const d = (c[0] - r.px[i * 4]) ** 2 + (c[1] - r.px[i * 4 + 1]) ** 2 + (c[2] - r.px[i * 4 + 2]) ** 2; if (d < bd) { bd = d; best = p; } }
+      idx = best; cache.set(key, idx);
+    }
+    out[i] = idx;
+  }
+  return out;
+}

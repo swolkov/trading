@@ -65,7 +65,7 @@ export async function replayView(id: string): Promise<ReplayView | null> {
 }
 
 // ---- the replay as a PNG for Slack: candles, fills, levels, entry / exit / stop ----
-import { Raster, type RGBA } from "@/lib/trading-room-png";
+import { Raster, encodeGif, indexRaster, type RGBA } from "@/lib/trading-room-png";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 const C = {
@@ -74,47 +74,61 @@ const C = {
 };
 
 export function renderReplayPng(v: ReplayView): Buffer {
-  const W = 960, H = 480, L = 12, R = 88, T = 34, B = 26;
   const r = new Raster(W, H, C.bg);
+  drawFrame(r, v, v.bars.length, false);
+  return r.png();
+}
+
+/** The replay as an animated GIF: the bars arrive a few at a time, fills appear as they happened, then the finished trade holds. */
+export function renderReplayGif(v: ReplayView): Buffer {
+  const solid = { ...C, grid: [30, 32, 38, 255] as RGBA, level: [120, 124, 134, 255] as RGBA };
+  const palette: RGBA[] = [solid.bg, solid.grid, solid.fg, solid.muted, solid.up, solid.down, solid.gold, solid.level, solid.stop];
+  const frames: { indices: Uint8Array; delayCs: number }[] = [];
+  const n = v.bars.length;
+  const step = Math.max(1, Math.ceil(n / 45));
+  for (let upto = step; upto < n; upto += step) { const r = new Raster(W, H, solid.bg); drawFrame(r, v, upto, true, solid); frames.push({ indices: indexRaster(r, palette), delayCs: 10 }); }
+  const last = new Raster(W, H, solid.bg); drawFrame(last, v, n, true, solid); frames.push({ indices: indexRaster(last, palette), delayCs: 300 });
+  return encodeGif(W, H, frames, palette);
+}
+
+const W = 960, H = 480, L = 12, R = 88, T = 34, B = 26;
+function drawFrame(r: Raster, v: ReplayView, upto: number, solid: boolean, col = C) {
   const bars = v.bars;
-  const title = `${v.trip.symbol} ${v.trip.side.toUpperCase()} X${v.trip.qty}  ${v.trip.entryPx} TO ${v.trip.exitPx}  NET ${v.trip.netUsd >= 0 ? "+" : "-"}$${Math.abs(Math.round(v.trip.netUsd))}${v.trip.netR != null ? `  ${v.trip.netR >= 0 ? "+" : "-"}${Math.abs(v.trip.netR).toFixed(2)}R` : ""}`;
-  r.text(L, 10, title, C.fg, 2);
-  if (!bars.length) { r.text(L, T + 20, "NO 1-MINUTE BARS FOR THIS TRADE", C.muted, 2); return r.png(); }
+  const title = `${v.trip.symbol} ${v.trip.side.toUpperCase()} X${v.trip.qty}  ${v.trip.entryPx} TO ${Math.round(v.trip.exitPx * 100) / 100}  NET ${v.trip.netUsd >= 0 ? "+" : "-"}$${Math.abs(Math.round(v.trip.netUsd))}${v.trip.netR != null ? `  ${v.trip.netR >= 0 ? "+" : "-"}${Math.abs(v.trip.netR).toFixed(2)}R` : ""}`;
+  r.text(L, 10, title, col.fg, 2);
+  if (!bars.length) { r.text(L, T + 20, "NO 1-MINUTE BARS FOR THIS TRADE", col.muted, 2); return; }
+  // The scale is fixed on the whole trade so the frames do not jump.
   const prices = [...bars.flatMap((b) => [b.h, b.l]), v.trip.entryPx, v.trip.exitPx, ...(v.trip.stopPx != null ? [v.trip.stopPx] : [])];
   let lo = Math.min(...prices), hi = Math.max(...prices);
-  const near = v.levels.filter((l) => l.price >= lo - (hi - lo) * 0.6 && l.price <= hi + (hi - lo) * 0.6);   // levels close to the action only
+  const near = v.levels.filter((l) => l.price >= lo - (hi - lo) * 0.6 && l.price <= hi + (hi - lo) * 0.6);
   for (const l of near) { lo = Math.min(lo, l.price); hi = Math.max(hi, l.price); }
   const pad = (hi - lo) * 0.06 || 1; lo -= pad; hi += pad;
   const t0 = bars[0].t, t1 = bars[bars.length - 1].t + 60_000;
   const X = (t: number) => L + ((t - t0) / (t1 - t0)) * (W - L - R);
   const Y = (p: number) => T + ((hi - p) / (hi - lo)) * (H - T - B);
-  // grid + price labels
   const steps = 6;
-  for (let i = 0; i <= steps; i++) { const p = lo + ((hi - lo) * i) / steps, y = Y(p); r.line(L, y, W - R, y, C.grid); r.text(W - R + 6, y - 3, fmtPx(v.trip.symbol, p), C.muted, 1); }
-  // time labels every ~15 minutes
+  for (let i = 0; i <= steps; i++) { const p = lo + ((hi - lo) * i) / steps, y = Y(p); r.line(L, y, W - R, y, col.grid); r.text(W - R + 6, y - 3, fmtPx(v.trip.symbol, p), col.muted, 1); }
   const span = t1 - t0, step = span > 4 * 3_600_000 ? 60 * 60_000 : span > 90 * 60_000 ? 15 * 60_000 : 5 * 60_000;
-  for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) { const x = X(t); r.line(x, T, x, H - B, C.grid); r.text(x - 10, H - B + 8, etHm(t), C.muted, 1); }
-  // levels at entry
-  for (const l of near) { const y = Y(l.price); r.line(L, y, W - R, y, C.level, 4); r.text(L + 4, y - 7, l.name.toUpperCase(), C.muted, 1); }
-  // candles
+  for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) { const x = X(t); r.line(x, T, x, H - B, col.grid); r.text(x - 10, H - B + 8, etHm(t), col.muted, 1); }
+  for (const l of near) { const y = Y(l.price); r.line(L, y, W - R, y, col.level, solid ? 0 : 4); r.text(L + 4, y - 7, l.name.toUpperCase(), col.muted, 1); }
   const bw = Math.max(1, Math.floor((W - L - R) / bars.length) - 1);
-  for (const b of bars) {
-    const x = X(b.t), c = b.c >= b.o ? C.up : C.down;
+  const shown = bars.slice(0, upto);
+  for (const b of shown) {
+    const x = X(b.t), c = b.c >= b.o ? col.up : col.down;
     r.line(x + bw / 2, Y(b.h), x + bw / 2, Y(b.l), c);
     const yo = Y(b.o), yc = Y(b.c);
     r.rect(x, Math.min(yo, yc), bw, Math.max(1, Math.abs(yc - yo)), c);
   }
-  // entry / exit / stop
-  r.line(L, Y(v.trip.entryPx), W - R, Y(v.trip.entryPx), C.gold); r.text(W - R - 40, Y(v.trip.entryPx) - 7, "ENTRY", C.gold, 1);
-  if (!v.trip.open) { r.line(L, Y(v.trip.exitPx), W - R, Y(v.trip.exitPx), C.gold); r.text(W - R - 36, Y(v.trip.exitPx) - 7, "EXIT", C.gold, 1); }
-  if (v.trip.stopPx != null) { r.line(L, Y(v.trip.stopPx), W - R, Y(v.trip.stopPx), C.stop); r.text(W - R - 36, Y(v.trip.stopPx) - 7, "STOP", C.stop, 1); }
-  // fills
+  const untilMs = shown.length ? shown[shown.length - 1].t + 60_000 : t0;
+  r.line(L, Y(v.trip.entryPx), W - R, Y(v.trip.entryPx), col.gold); r.text(W - R - 40, Y(v.trip.entryPx) - 7, "ENTRY", col.gold, 1);
+  if (!v.trip.open && Date.parse(v.trip.exitTs) < untilMs) { r.line(L, Y(v.trip.exitPx), W - R, Y(v.trip.exitPx), col.gold); r.text(W - R - 36, Y(v.trip.exitPx) - 7, "EXIT", col.gold, 1); }
+  if (v.trip.stopPx != null) { r.line(L, Y(v.trip.stopPx), W - R, Y(v.trip.stopPx), col.stop); r.text(W - R - 36, Y(v.trip.stopPx) - 7, "STOP", col.stop, 1); }
   for (const f of v.fills) {
+    if (Date.parse(f.ts) >= untilMs) continue;
     const x = X(Date.parse(f.ts)) + bw / 2, y = Y(f.price);
-    if (f.action === "Buy") { r.triangle(x, y + 10, 6, true, C.up); r.text(x - 8, y + 18, `B${f.qty}`, C.up, 1); }
-    else { r.triangle(x, y - 10, 6, false, C.down); r.text(x - 8, y - 24, `S${f.qty}`, C.down, 1); }
+    if (f.action === "Buy") { r.triangle(x, y + 10, 6, true, col.up); r.text(x - 8, y + 18, `B${f.qty}`, col.up, 1); }
+    else { r.triangle(x, y - 10, 6, false, col.down); r.text(x - 8, y - 24, `S${f.qty}`, col.down, 1); }
   }
-  return r.png();
 }
 const fmtPx = (sym: string, p: number) => (sym === "MGC" ? p.toFixed(1) : p.toFixed(2));
 const etHm = (ms: number) => new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });
@@ -130,9 +144,9 @@ export function replaySignatureOk(id: string, sig: string): boolean {
   if (!want || sig.length !== want.length) return false;
   return timingSafeEqual(Buffer.from(want), Buffer.from(sig));
 }
-export function replayImageUrl(id: string): string | null {
+export function replayImageUrl(id: string, fmt: "png" | "gif" = "gif"): string | null {
   const sig = replaySignature(id);
   if (!sig) return null;
   const base = (process.env.PUBLIC_APP_URL ?? "https://trading-eta-snowy.vercel.app").replace(/\/$/, "");
-  return `${base}/api/webhook/trading-room/replay?id=${encodeURIComponent(id)}&sig=${sig}`;
+  return `${base}/api/webhook/trading-room/replay?id=${encodeURIComponent(id)}&sig=${sig}&fmt=${fmt}`;
 }
