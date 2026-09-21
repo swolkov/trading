@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  FEES_RT_PER_CONTRACT_USD, TEST_RULES, bootstrapPMeanPositive, dayTally, excursion, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket,
+  FEES_RT_PER_CONTRACT_USD, STOP_LOOKBACK_MS, TEST_RULES, bootstrapPMeanPositive, dayTally, excursion, initialStopOf, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket,
   type JournalFill, type JournalRow,
 } from "../src/lib/trading-room-journal";
 import { INSTRUMENTS, type Bar } from "../src/lib/trading-room-rules";
@@ -29,6 +29,24 @@ test("round trips: a plain long, a scale-in with two exits, a flip, and an open 
   assert.deepEqual([mgcShort.side, mgcShort.qty, mgcShort.grossUsd], ["short", 2, 60]);
   const open = trips.find((t) => t.open)!;
   assert.deepEqual([open.symbol, open.qty, open.grossUsd], ["MES", 25, 0]);
+  // The first fill's price is kept beside the volume-weighted average: it is what the initial stop was set against.
+  assert.deepEqual([mnq.firstPx, mnq.entryPx], [29900, 29905]);
+});
+
+test("initial risk: the earliest loss-side stop set up to 15 minutes before the first fill, at its first price — the Sep 21 MES case", () => {
+  // 20 MES bought 12:39 at 7817.25 with a resting stop set 12:33 at 7812.25; an add at 13:25 brought a new stop at 7819.75 (later trailed).
+  const trip = { side: "long" as const, entryTs: Date.parse("2026-09-21T16:39:27Z"), exitTs: Date.parse("2026-09-21T18:53:39Z"), firstPx: 7817.25 };
+  const stop = (timestamp: string, action: string, stopPrice: number, root = "MES") => ({ timestamp, action, stopPrice, root });
+  const stops = [stop("2026-09-21T17:25:13Z", "Sell", 7819.75), stop("2026-09-21T16:33:33Z", "Sell", 7812.25), stop("2026-09-21T16:34:19Z", "Buy", 7834.25), stop("2026-09-21T16:33:00Z", "Sell", 7810, "MNQ")];
+  assert.equal(initialStopOf(trip, stops, "MES"), 7812.25);
+  // Outside the lookback the resting stop is gone, and the add's stop (7819.75) sits ABOVE the first fill — profit side, a trail not
+  // risk — so there is no initial stop and the journal falls back to the ATR proxy. Nothing on the loss side → null.
+  assert.equal(initialStopOf({ ...trip, entryTs: trip.entryTs + STOP_LOOKBACK_MS + 60_000 }, stops, "MES"), null);
+  assert.equal(initialStopOf({ ...trip, entryTs: trip.entryTs + STOP_LOOKBACK_MS + 60_000, firstPx: 7823 }, stops, "MES"), 7819.75);
+  assert.equal(initialStopOf(trip, [stop("2026-09-21T16:40:00Z", "Sell", 7825)], "MES"), null);
+  assert.equal(initialStopOf({ ...trip, side: "short", firstPx: 7817.25 }, [stop("2026-09-21T16:40:00Z", "Buy", 7822), stop("2026-09-21T16:41:00Z", "Buy", 7810)], "MES"), 7822);
+  // Risk is measured from that first fill, not the scaled-in average: 5 pts × $5 × 25 peak = $625 → +$2,299 is 3.7R, not 49R.
+  assert.deepEqual(riskPerContract(INSTRUMENTS.MES, 7817.25, 7812.25, null), { usd: 25, source: "stop" });
 });
 
 test("session buckets and R sources", () => {

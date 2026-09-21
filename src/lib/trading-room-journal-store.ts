@@ -7,7 +7,7 @@ import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
 import { getTradovateStopOrders, resolveContractSymbol } from "@/lib/tradovate";
 import { macroCalendar } from "@/lib/event-calendar";
 import { INSTRUMENTS, ROOM_SYMBOLS, buildLevels, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
-import { TEST_RULES, excursion, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket, type JournalFill, type JournalRow, type RoundTrip, type Scoreboard } from "@/lib/trading-room-journal";
+import { TEST_RULES, excursion, initialStopOf, riskPerContract, roundTripsFromFills, scoreboard, sessionBucket, type JournalFill, type JournalRow, type RoundTrip, type Scoreboard } from "@/lib/trading-room-journal";
 
 const EVENT_WINDOW_MS = 30 * 60_000;
 const LOOKBACK_DAYS = 14;
@@ -54,17 +54,10 @@ async function rootOf(contractId: number): Promise<string | null> {
   return contractRoots.get(contractId) ?? null;
 }
 
-/** The stop Spencer placed for a trip: a stop order on the same root, opposite side, placed at or after entry. First one seen wins. */
 async function stopFor(trip: RoundTrip, stops: { contractId: number; action: string; ordStatus: string; stopPrice: number | null; timestamp: string }[]): Promise<number | null> {
-  const want = trip.side === "long" ? "Sell" : "Buy";
-  for (const s of stops) {
-    if (s.action !== want || s.stopPrice == null) continue;
-    const t = Date.parse(s.timestamp);
-    if (!Number.isFinite(t) || t < trip.entryTs - 5 * 60_000 || t > trip.exitTs + 5 * 60_000) continue;
-    if ((await rootOf(s.contractId)) !== trip.symbol) continue;
-    return s.stopPrice;
-  }
-  return null;
+  const withRoot = [];
+  for (const s of stops) withRoot.push({ ...s, root: await rootOf(s.contractId) });
+  return initialStopOf(trip, withRoot, trip.symbol);
 }
 
 /** `force` recomputes every trip in the lookback (fees, excursion, levels) — tags, whys, grades and stops are kept. */
@@ -91,7 +84,8 @@ export async function foldJournal(nowMs = Date.now(), force = false): Promise<{ 
     const lv = bars5m.length ? buildLevels(spec, bars5m, daily, trip.entryTs) : null;
     const nearest = lv?.distances.length ? [...lv.distances].sort((a, b) => Math.abs(a.pts) - Math.abs(b.pts))[0] : null;
     const stopPx = prev?.stop_px ?? (await stopFor(trip, stops));
-    const risk = riskPerContract(spec, trip.entryPx, stopPx, lv?.atr5m ?? null);
+    // Risk per contract is measured from the FIRST fill — the price the initial stop was set against — not the scaled-in average.
+    const risk = riskPerContract(spec, trip.firstPx, stopPx, lv?.atr5m ?? null);
     const riskUsd = risk ? risk.usd * trip.qty : null;
     // Excursion only once the 1-minute bars reach the exit; until then it is left null and measured on a later tick.
     const covered = bars1m.length > 0 && bars1m[bars1m.length - 1].t >= (trip.open ? trip.entryTs : trip.exitTs);
