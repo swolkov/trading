@@ -29,6 +29,7 @@ export interface RoundTrip {
   qty: number;                 // peak contracts held during the trip
   entryTs: number; exitTs: number;
   entryPx: number; exitPx: number;     // volume-weighted
+  firstPx: number;                     // the FIRST entry fill — the price the initial stop was set against
   grossUsd: number; feesUsd: number; netUsd: number;
   fillIds: number[];
   open: boolean;               // true while the position is still on (exitTs / exitPx = last fill so far)
@@ -43,7 +44,7 @@ export function roundTripsFromFills(fills: JournalFill[]): RoundTrip[] {
   for (const [symbol, list] of bySymbol) {
     const spec = INSTRUMENTS[symbol];
     let pos = 0;                                   // signed contracts
-    let cur: { side: "long" | "short"; qty: number; entryTs: number; openNotional: number; openQty: number; closeNotional: number; closeQty: number; ids: number[]; lastTs: number } | null = null;
+    let cur: { side: "long" | "short"; qty: number; entryTs: number; firstPx: number; openNotional: number; openQty: number; closeNotional: number; closeQty: number; ids: number[]; lastTs: number } | null = null;
     const finish = (exitTs: number) => {
       if (!cur) return;
       const entryPx = cur.openNotional / cur.openQty, exitPx = cur.closeQty ? cur.closeNotional / cur.closeQty : entryPx;
@@ -51,7 +52,7 @@ export function roundTripsFromFills(fills: JournalFill[]): RoundTrip[] {
       const gross = dir * (exitPx - entryPx) * spec.pointValue * cur.closeQty;
       // Fees are per contract that made the round trip (a scale-in and back is 60 contracts, not the 40 peak).
       const fees = FEES_RT_PER_CONTRACT_USD * cur.closeQty;
-      out.push({ symbol, side: cur.side, qty: cur.qty, entryTs: cur.entryTs, exitTs, entryPx, exitPx, grossUsd: gross, feesUsd: fees, netUsd: gross - fees, fillIds: cur.ids, open: false });
+      out.push({ symbol, side: cur.side, qty: cur.qty, entryTs: cur.entryTs, exitTs, entryPx, exitPx, firstPx: cur.firstPx, grossUsd: gross, feesUsd: fees, netUsd: gross - fees, fillIds: cur.ids, open: false });
       cur = null;
     };
     for (const f of list) {
@@ -60,7 +61,7 @@ export function roundTripsFromFills(fills: JournalFill[]): RoundTrip[] {
       while (remaining > 0) {
         if (pos === 0 || Math.sign(pos) === signed) {
           // opening or adding
-          if (!cur) cur = { side: signed > 0 ? "long" : "short", qty: 0, entryTs: f.ts, openNotional: 0, openQty: 0, closeNotional: 0, closeQty: 0, ids: [], lastTs: f.ts };
+          if (!cur) cur = { side: signed > 0 ? "long" : "short", qty: 0, entryTs: f.ts, firstPx: f.price, openNotional: 0, openQty: 0, closeNotional: 0, closeQty: 0, ids: [], lastTs: f.ts };
           cur.openNotional += f.price * remaining; cur.openQty += remaining; cur.ids.push(f.id); cur.lastTs = f.ts;
           pos += signed * remaining; cur.qty = Math.max(cur.qty, Math.abs(pos)); remaining = 0;
         } else {
@@ -79,10 +80,31 @@ export function roundTripsFromFills(fills: JournalFill[]): RoundTrip[] {
       const dir = c.side === "long" ? 1 : -1;
       const gross = dir * (exitPx - entryPx) * spec.pointValue * c.closeQty;
       const fees = FEES_RT_PER_CONTRACT_USD * c.openQty;
-      out.push({ symbol, side: c.side, qty: c.qty, entryTs: c.entryTs, exitTs: c.lastTs, entryPx, exitPx, grossUsd: gross, feesUsd: fees, netUsd: gross - fees, fillIds: c.ids, open: true });
+      out.push({ symbol, side: c.side, qty: c.qty, entryTs: c.entryTs, exitTs: c.lastTs, entryPx, exitPx, firstPx: c.firstPx, grossUsd: gross, feesUsd: fees, netUsd: gross - fees, fillIds: c.ids, open: true });
     }
   }
   return out.sort((a, b) => a.entryTs - b.entryTs);
+}
+
+/** INITIAL RISK — the stop Spencer set for the trip when he opened it: a stop order on the same root, opposite side, on
+ *  the loss side of the FIRST entry fill, placed up to 15 minutes before that fill (a resting stop set ahead of the buy)
+ *  or any time before the exit. The EARLIEST such order wins, at its FIRST price (tradovate.ts hands back the initial
+ *  version). Sep 21 2026: the old rule (5 minutes before entry, first order in list order, latest version) missed a
+ *  stop set six minutes ahead of a 20-lot MES entry, took the stop from a later add instead, and printed +49R for a
+ *  trade whose real initial risk was $500 (≈4.6R). */
+export const STOP_LOOKBACK_MS = 15 * 60_000;
+export function initialStopOf(trip: { side: "long" | "short"; entryTs: number; exitTs: number; firstPx: number }, stops: { action: string; stopPrice: number | null; timestamp: string; root: string | null }[], symbol: string): number | null {
+  const want = trip.side === "long" ? "Sell" : "Buy";
+  const dir = trip.side === "long" ? 1 : -1;
+  let best: { t: number; px: number } | null = null;
+  for (const s of stops) {
+    if (s.action !== want || s.stopPrice == null || s.root !== symbol) continue;
+    const t = Date.parse(s.timestamp);
+    if (!Number.isFinite(t) || t < trip.entryTs - STOP_LOOKBACK_MS || t > trip.exitTs + 5 * 60_000) continue;
+    if (dir * (trip.firstPx - s.stopPrice) <= 0) continue;   // a stop on the profit side is a target or a trail, not the initial risk
+    if (!best || t < best.t) best = { t, px: s.stopPrice };
+  }
+  return best?.px ?? null;
 }
 
 // ---- stamps -----------------------------------------------------------------------------------

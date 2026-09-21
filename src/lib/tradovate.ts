@@ -818,7 +818,10 @@ export async function getOpenOrders(modeOverride?: TradingMode): Promise<{ id: n
 // Stop orders with their prices — READ ONLY. /order/list carries the order's status and side; its
 // stop price lives on the order VERSION (/orderVersion/list), joined by orderId. The Trading Room's
 // journal uses this to learn the stop Spencer actually placed on a position (never to place one).
-export interface TradovateStopOrder { orderId: number; contractId: number; action: string; ordStatus: string; orderType: string; stopPrice: number | null; timestamp: string }
+// `stopPrice` is the INITIAL stop — the first version that carried one — because R is measured against
+// the risk taken at entry. Reading the latest version instead (until Sep 21 2026) turned a stop moved
+// to breakeven into a $47 "risk" on 25 MES and printed a +49R trade. `latestStopPrice` is where it ended.
+export interface TradovateStopOrder { orderId: number; contractId: number; action: string; ordStatus: string; orderType: string; stopPrice: number | null; latestStopPrice: number | null; timestamp: string }
 export async function getTradovateStopOrders(modeOverride?: TradingMode): Promise<TradovateStopOrder[]> {
   try {
     const mode = await resolveMode(modeOverride);
@@ -828,11 +831,16 @@ export async function getTradovateStopOrders(modeOverride?: TradingMode): Promis
     ]);
     if (!Array.isArray(orders) || !Array.isArray(versions)) return [];
     const latest = new Map<number, { orderType: string; stopPrice?: number }>();
-    for (const v of [...versions].sort((a, b) => a.id - b.id)) latest.set(v.orderId, { orderType: v.orderType, stopPrice: v.stopPrice });
+    const initial = new Map<number, number>();
+    for (const v of [...versions].sort((a, b) => a.id - b.id)) {
+      latest.set(v.orderId, { orderType: v.orderType, stopPrice: v.stopPrice });
+      if (!initial.has(v.orderId) && typeof v.stopPrice === "number") initial.set(v.orderId, v.stopPrice);
+    }
     return orders.flatMap((o) => {
       const v = latest.get(o.id);
       if (!v || !/stop/i.test(v.orderType)) return [];
-      return [{ orderId: o.id, contractId: o.contractId, action: o.action, ordStatus: o.ordStatus, orderType: v.orderType, stopPrice: typeof v.stopPrice === "number" ? v.stopPrice : null, timestamp: o.timestamp }];
+      const latestStopPrice = typeof v.stopPrice === "number" ? v.stopPrice : null;
+      return [{ orderId: o.id, contractId: o.contractId, action: o.action, ordStatus: o.ordStatus, orderType: v.orderType, stopPrice: initial.get(o.id) ?? latestStopPrice, latestStopPrice, timestamp: o.timestamp }];
     });
   } catch {
     return [];
