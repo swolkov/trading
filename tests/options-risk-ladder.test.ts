@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OPTIONS_LADDER, clusterOf, clusterRisk, ddTier, gradeFor, maxLossFor, reserveOk, reserveRefusal, slotsFor, type GradeCandidate } from "../src/lib/options-risk-ladder";
+import { OPTIONS_LADDER, clusterOf, clusterRisk, contractsFor, ddTier, gradeFor, maxLossFor, reserveOk, reserveRefusal, slotsFor, type GradeCandidate } from "../src/lib/options-risk-ladder";
 import { drawdownHalt } from "../src/lib/options-live-guardian";
 import { divergenceVerdict, roundTrips } from "../src/lib/options-live-ledger";
 import { OPTIONS_LIVE_ACCOUNT, optionsRequestFingerprint, type OptionOrderParams } from "../src/lib/options-live-policy";
@@ -140,3 +140,24 @@ test("slots: three by default from the first trade; the divergence check, once i
   const old = [rec(1, "open", { avg: 2 }), rec(2, "close", { positionId: uuid(1) }), ...ledger(10).map((r, i) => ({ ...r, refId: uuid(100 + i), createdAtMs: (100 + i) * 1000, intent: { ...r.intent!, refId: uuid(100 + i), positionId: r.action === "close" ? uuid(100 + i - 1) : undefined }, positionId: r.action === "close" ? uuid(100 + i - 1) : undefined }))];
   assert.equal(divergenceVerdict(roundTrips(old), old, 2).green, true);
 });
+
+test("contracts per structure: the cap is the risk, the count is how much of it a cheap structure may use — and it steps up only on evidence", () => {
+  const fresh = { closedLiveTrades: 0, divergenceGreen: true };
+  // First live weeks: Normal is one contract whatever the cap leaves over; Strong/A+ at most two.
+  assert.equal(contractsFor({ grade: "Normal", perContractUsd: 30, capUsd: 100, ...fresh }), 1);
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, ...fresh }), 2);
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 90, capUsd: 150, ...fresh }), 1, "two would breach the cap");
+  assert.equal(contractsFor({ grade: "A+", perContractUsd: 49, capUsd: 225, ...fresh }), 2);
+  // Earned (ten closed live trades, divergence green): Normal two, Strong/A+ three — never past the cap, never past three.
+  const earned = { closedLiveTrades: 10, divergenceGreen: true };
+  assert.equal(contractsFor({ grade: "Normal", perContractUsd: 30, capUsd: 100, ...earned }), 2);
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, ...earned }), 3);
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 60, capUsd: 150, ...earned }), 2, "three would breach the cap");
+  assert.equal(contractsFor({ grade: "A+", perContractUsd: 10, capUsd: 225, ...earned }), 3, "hard ceiling of three");
+  // Red divergence keeps the first-weeks table even with the trades; a structure over the cap is zero (the caller refused it already).
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 30, capUsd: 150, closedLiveTrades: 25, divergenceGreen: false }), 2);
+  assert.equal(contractsFor({ grade: "Normal", perContractUsd: 120, capUsd: 100, ...fresh }), 0);
+  // The exact-fit case: $75 × 2 = $150 fits a $150 cap.
+  assert.equal(contractsFor({ grade: "Strong", perContractUsd: 75, capUsd: 150, ...fresh }), 2);
+});
+

@@ -24,7 +24,7 @@ import { OPTIONS_RESEARCH_KEY, OPTIONS_DESK_RULES, contractQualityFailures, isOp
 import { OPTIONS_EVENT_RULES, guardianExDivExit, spansEarnings } from "../../src/lib/options-events";
 import { chaseCheck, directionOfKind, intradayShock, marketState, marketVeto, vixLevel, type MarketStamp } from "../../src/lib/options-market-state";
 import { OPTIONS_MAX_LOSS_KEY, parseOptionsMaxLoss } from "../../src/lib/options-operation";
-import { OPTIONS_LADDER_RULES, clusterOf, clusterRisk, ddTier, gradeFor, maxLossFor, reserveRefusal, slotsFor, type DrawdownTier, type OptionsGrade } from "../../src/lib/options-risk-ladder";
+import { OPTIONS_LADDER_RULES, clusterOf, clusterRisk, contractsFor, ddTier, gradeFor, maxLossFor, reserveRefusal, slotsFor, type DrawdownTier, type OptionsGrade } from "../../src/lib/options-risk-ladder";
 import { divergenceVerdict, roundTrips } from "../../src/lib/options-live-ledger";
 import { legSpreadPct, type ResearchCandidate } from "../../src/lib/options-desk-model";
 import type { StructureKind } from "../../src/lib/options-structures";
@@ -264,7 +264,7 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         else if (todays.length >= OPTIONS_LIVE_RULES.maxEntriesPerDay) log(`entry: ${todays.length} entry attempt(s) already today`);
         else if (tier && tier.mult === 0) log(`entry: drawdown tier ${tier.tier} (${tier.label}) — entries halted`);
         else {
-          const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0, { equity: totalValue, tier, promoted, owned, tradedToday });
+          const pick = await pickCandidate(broker, policy, snapshot?.buyingPowerUsd ?? 0, { equity: totalValue, tier, promoted, owned, tradedToday, ledger: { closedTrades: divergence.closedTrades, divergenceGreen: divergence.green } });
           state.candidate = pick.note; state.market = pick.market; state.grade = pick.grade; state.cap = pick.cap;
           let res: Awaited<ReturnType<typeof executeOptionsIntent>> | null = null;
           if (!pick.intent) log(`entry: ${pick.note}`);
@@ -310,7 +310,7 @@ async function accountValue(): Promise<number | null> {
 /** What the desk saw of the market on this tick — stamped into options_live_state.market beside the candidate note. */
 interface MarketView extends MarketStamp { veto: "on" | "off"; spyIntradayPct: number | "unknown" | "stale"; at: string }
 /** What the ladder sizes against: account value, the drawdown tier, the A+ switch and what is already owned. */
-interface SizingContext { equity: number | null; tier: DrawdownTier | null; promoted: boolean; owned: OwnedPositionRecord[]; tradedToday: Set<string> }
+interface SizingContext { equity: number | null; tier: DrawdownTier | null; promoted: boolean; owned: OwnedPositionRecord[]; tradedToday: Set<string>; ledger: { closedTrades: number; divergenceGreen: boolean } }
 /** What the runner remembers about the setup beside the canonical intent — written on the reservation record after acceptance. */
 interface CandidateStash { symbol: string; kind: string; setup: string; direction: "bullish" | "bearish"; rangeLow: number; rangeHigh: number; grade: OptionsGrade; cap: number; spreadPct: number | null; quantity: number }
 interface Pick {
@@ -375,7 +375,8 @@ async function pickCandidate(broker: RobinhoodLiveBroker, policy: OptionsLivePol
     const gradeCap = Math.round(maxLossFor(verdict.grade, ctx.equity, ceiling) * mult * 100) / 100;
     const perContract = net * 100 + fee;
     if (perContract > gradeCap) { refuse(c, `$${perContract.toFixed(0)} max loss over the $${gradeCap} ${verdict.grade} cap (${verdict.reasons[0]})`); continue; }
-    const quantity = verdict.grade !== "Normal" && perContract * 2 <= gradeCap ? 2 : 1;
+    // Contracts: the cap is the risk; the count is how much of it a cheap structure may use (options-risk-ladder.ts contractsFor).
+    const quantity = contractsFor({ grade: verdict.grade, perContractUsd: perContract, capUsd: gradeCap, closedLiveTrades: ctx.ledger.closedTrades, divergenceGreen: ctx.ledger.divergenceGreen });
     const maxLossUsd = net * 100 * quantity;
     const reserve = reserveRefusal(openAtRiskUsd, maxLossUsd + fee * quantity, ctx.equity);
     if (reserve) { refuse(c, reserve); continue; }
@@ -435,7 +436,7 @@ async function probe(broker: RobinhoodLiveBroker, snapshot: Awaited<ReturnType<t
   const maxLoss = parseOptionsMaxLoss(await cfg(OPTIONS_MAX_LOSS_KEY)) ?? 0;
   const fee = parseOptionsMaxLoss(await cfg("options_live_verified_fee_reserve_usd")) ?? 0;
   const probePolicy: OptionsLivePolicy = { armed: true, maxLossUsd: maxLoss, feeBudgetUsd: fee, guardianHealthyAtMs: Date.now() };
-  let pick = await pickCandidate(broker, probePolicy, snapshot.buyingPowerUsd, { equity: await accountValue(), tier: null, promoted: false, owned: [] });
+  let pick = await pickCandidate(broker, probePolicy, snapshot.buyingPowerUsd, { equity: await accountValue(), tier: null, promoted: false, owned: [], tradedToday: new Set(), ledger: { closedTrades: 0, divergenceGreen: true } });
   // No signal today is the normal case for a rule that fires a few times a month. The probe only
   // needs a real, cap-sized debit structure to REVIEW (never place), so fall back to the cheapest
   // quality-passing adjacent-strike debit spread on the watchlist.

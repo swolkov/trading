@@ -69,8 +69,10 @@ test("action truth table: ENTER NOW only when every gate passes; chase or a watc
   assert.equal(buildOptionsBrief(ctx({ research: research({ spyBelowAndDown: true }), vetoOn: false })).gates.find((g) => g.name === "market veto")!.pass, true);
   const cluster = buildOptionsBrief(ctx({ owned: [{ symbol: "SOFI", kind: "long_call", atRiskUsd: 87 }] }));
   assert.equal(cluster.gates.find((g) => g.name === "cluster")!.pass, false); assert.equal(cluster.account.atRiskUsd, 87);
-  // Any held position fails the slot gate — the tick's slotsFor decides whether a second slot exists; the brief never claims it.
-  assert.equal(cluster.gates.find((g) => g.name === "slot")!.pass, false); assert.match(cluster.gates.find((g) => g.name === "slot")!.note, /1 position held — WAIT, the tick's slot count/);
+  // Slots (Sep 20 2026): one held position of the ladder's three leaves a slot; a full book fails the gate and defers to the tick's slotsFor.
+  assert.equal(cluster.gates.find((g) => g.name === "slot")!.pass, true); assert.match(cluster.gates.find((g) => g.name === "slot")!.note, /^1 of 3 slots used$/);
+  const full = buildOptionsBrief(ctx({ owned: [{ symbol: "SOFI", kind: "long_call", atRiskUsd: 87 }], slots: 1 }));
+  assert.equal(full.gates.find((g) => g.name === "slot")!.pass, false); assert.match(full.gates.find((g) => g.name === "slot")!.note, /1 of 1 slots used — WAIT, the tick's slot count/);
   // A chasing breakout (a +10% day on a 40% IV name = 4×) fails the chase gate through chaseCheck and turns the action into WAIT FOR TRIGGER.
   const chased = research(); chased.bars.SOFI[199].close = 11;
   const chase = buildOptionsBrief(ctx({ research: chased }));

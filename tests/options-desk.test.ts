@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseRobinhoodResearchEvents } from "../src/lib/options-research-ingest";
 import { OPTIONS_DESK_RULES, OPTIONS_WATCHLIST, OPTIONS_WATCHLIST_SLICES, contractQualityFailures, deltaBandOf, dteBucketOf, isOptionsResearch, noCandidateNote, screenResearchContracts, realizedVol20, impliedMoveFrac, payoffAtUsd, type OptionsResearch, type ResearchContract } from "../src/lib/options-desk-model";
 import { mergeResearchSnapshot, unmatchedQuoteCount } from "../src/lib/options-research-ingest";
-import { exDivRisk, nextExDiv, spansEarnings } from "../src/lib/options-events";
+import { exDivRisk, marketAgeHours, nextExDiv, spansEarnings } from "../src/lib/options-events";
 import { loadOptionsNews } from "../src/lib/options-news";
 import { parseRpcResponse, validOAuthState, RobinhoodReadClient } from "../scripts/robinhood/client";
 import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
@@ -170,9 +170,10 @@ test("earnings on or before expiry is an EARNINGS TRADE: zero candidates and the
  assert.equal(screenResearchContracts(after,100,500,now)[0].earningsAt,"2026-10-17"); assert.equal(screenResearchContracts(after,100,500,now)[0].earningsClass,"none");
  const none=research(); delete none.events;
  assert.equal(screenResearchContracts(none,100,500,now).length,0); assert.match(noCandidateNote(none,100,now),/earnings unknown — no calendar read for TEST/);
- const stale=research(); stale.events!.TEST.at=new Date(now-37*3600_000).toISOString();
- assert.equal(screenResearchContracts(stale,100,500,now).length,0); assert.match(noCandidateNote(stale,100,now),/earnings data for TEST is 37h old/);
- assert.equal(screenResearchContracts({...research(),events:{TEST:{...research().events!.TEST,at:new Date(now-35*3600_000).toISOString()}}},100,500,now).length,1);
+ // `now` is a Saturday 11:00 ET: its 11 weekend hours do not age a row, so 48 clock hours back = 37 market hours (stale), 46 = 35 (fresh).
+ const stale=research(); stale.events!.TEST.at=new Date(now-48*3600_000).toISOString();
+ assert.equal(screenResearchContracts(stale,100,500,now).length,0); assert.match(noCandidateNote(stale,100,now),/earnings data for TEST is 37 market hours old/);
+ assert.equal(screenResearchContracts({...research(),events:{TEST:{...research().events!.TEST,at:new Date(now-46*3600_000).toISOString()}}},100,500,now).length,1);
  const etf=research(); etf.bars={SPY:etf.bars.TEST}; etf.contracts=[{...etf.contracts[0],symbol:"SPY"}]; delete etf.events;
  const spy=screenResearchContracts(etf,100,500,now); assert.equal(spy.length,1); assert.equal(spy[0].earningsClass,"none"); assert.equal(spy[0].exDivAt,null);
  assert.deepEqual(spansEarnings("QQQ","2026-10-16",undefined,now).permitted,true);
@@ -306,3 +307,15 @@ test("a slice-B run keeps slice A's bars, contracts and events; a slice-A run ke
  const parsed=parseRobinhoodResearchEvents([{message:{content:[use("q","get_option_quotes",{instrument_ids:["i1","i2"]})]}},{message:{content:[res("q",{results:[]})]}}].map(l=>JSON.stringify(l)).join("\n"),at);
  assert.equal(unmatchedQuoteCount(parsed.errors),2);
 });
+
+test("earnings freshness is measured in market hours: a Friday 17:45 ET read still covers Monday's open (Sep 21 2026)", () => {
+  const fri = Date.parse("2026-09-18T21:45:00Z"), mon935 = Date.parse("2026-09-21T13:35:00Z"), mon1035 = Date.parse("2026-09-21T14:35:00Z");
+  assert.equal(Math.round(marketAgeHours(fri, mon935)), 16, "Fri 17:45 → Mon 09:35 is 15.8 market hours, not 63.8");
+  assert.equal(marketAgeHours(fri, fri), 0); assert.equal(marketAgeHours(mon935, fri), 0);
+  assert.equal(Math.round(marketAgeHours(Date.parse("2026-09-15T14:00:00Z"), Date.parse("2026-09-16T14:00:00Z"))), 24, "a weekday is a weekday");
+  const row = { TEST: { earningsAt: "2026-11-05", earningsTiming: null, calendarThrough: "2026-11-11", at: new Date(fri).toISOString() } };
+  assert.equal(spansEarnings("TEST", "2026-10-16", row, mon935).permitted, true);
+  assert.equal(spansEarnings("TEST", "2026-10-16", row, mon1035).permitted, true);
+  assert.equal(spansEarnings("TEST", "2026-10-16", row, Date.parse("2026-09-22T14:00:00Z")).permitted, false, "Tuesday: 38 market hours — stale");
+});
+
