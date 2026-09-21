@@ -1,4 +1,5 @@
 import { deskGuard } from "@/lib/futures-desk";
+import { pageCronCrash } from "@/lib/notifications";
 
 // THE FUTURES DESK GUARDIAN — every 5 minutes (vercel.json), 24/7, on the Tradovate DEMO account:
 // equity + drawdown disable, a working stop on every open position, time stops, contract rolls,
@@ -11,5 +12,5 @@ export async function GET(request: Request) {
   if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) return Response.json({ error: "unauthorized" }, { status: 401 });
   const started = Date.now();
   try { const r = await deskGuard(); return Response.json({ ...r, ms: Date.now() - started }); }
-  catch (e) { return Response.json({ ok: false, notes: [String(e).slice(0, 300)], ms: Date.now() - started }, { status: 500 }); }
+  catch (e) { await pageCronCrash("futures-desk-watch", e); return Response.json({ ok: false, notes: [String(e).slice(0, 300)], ms: Date.now() - started }, { status: 500 }); }
 }
