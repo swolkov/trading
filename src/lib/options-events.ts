@@ -3,7 +3,8 @@
 // A 21–60 DTE single-name contract very often spans an earnings date, and the desk's breakout rule
 // says nothing about earnings: that is an EARNINGS TRADE the rule never asked for. So every
 // candidate carries the research snapshot's event row and is refused when earnings fall on or before
-// expiry, or when the desk simply does not know (no row, or a row older than 36 hours). Index ETFs
+// expiry, or when the desk simply does not know (no row, or a row older than 36 MARKET hours — the
+// clock stops over the weekend, so Friday's 17:45 read still covers Monday's open; Sep 21 2026). Index ETFs
 // have no earnings. Ex-dividend matters to one structure only: a call debit spread whose short call
 // could be in the money before the ex-date is the one that gets assigned early.
 export interface ResearchEvent {
@@ -27,6 +28,16 @@ export const OPTIONS_EVENT_RULES = {
   projectedWindowDays: 7,   // a projected ex-date is the last one plus the period — right to about a week either side
   periodDays: { Quarterly: 91, Monthly: 30, "Semi-Annual": 182, Annual: 365 } as Record<string, number>,
 };
+const ET_WEEKDAY = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" });
+const isWeekendEt = (ms: number) => { const w = ET_WEEKDAY.format(new Date(ms)); return w === "Sat" || w === "Sun"; };
+/** Hours from `fromMs` to `nowMs` with Saturday and Sunday (ET) not counted — the age of a research row in market time.
+ *  Whole-hour buckets, keyed on the bucket's start; a partial hour at the end counts in full only on a weekday. */
+export function marketAgeHours(fromMs: number, nowMs: number): number {
+  if (!(nowMs > fromMs)) return 0;
+  let hours = 0;
+  for (let t = fromMs; t < nowMs; t += 3_600_000) if (!isWeekendEt(t)) hours += Math.min(1, (nowMs - t) / 3_600_000);
+  return hours;
+}
 const shiftDay = (d: string, days: number) => new Date(Date.parse(`${d}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 
 /** The next ex-dividend date from a broker fundamentals row (`ex_dividend_date` is the MOST RECENT scheduled ex-date, past or
@@ -56,8 +67,8 @@ export function spansEarnings(symbol: string, expiry: string, events: ResearchEv
   if (rules.indexEtfs.includes(symbol)) return { permitted: true, earningsClass: "none", earningsAt: null, note: "index ETF — no earnings" };
   const row = events?.[symbol];
   if (!row || !validDay(row.at)) return { permitted: false, earningsClass: "unknown", earningsAt: null, note: `earnings unknown — no calendar read for ${symbol}` };
-  const ageH = (now - Date.parse(row.at)) / 3_600_000;
-  if (!(ageH <= rules.maxEventAgeHours)) return { permitted: false, earningsClass: "unknown", earningsAt: row.earningsAt, note: `earnings data for ${symbol} is ${ageH.toFixed(0)}h old (limit ${rules.maxEventAgeHours}h)` };
+  const ageH = marketAgeHours(Date.parse(row.at), now);
+  if (!(ageH <= rules.maxEventAgeHours)) return { permitted: false, earningsClass: "unknown", earningsAt: row.earningsAt, note: `earnings data for ${symbol} is ${ageH.toFixed(0)} market hours old (limit ${rules.maxEventAgeHours}h)` };
   if (!validDay(row.calendarThrough) || day(expiry) > day(row.calendarThrough)) return { permitted: false, earningsClass: "unknown", earningsAt: row.earningsAt, note: `earnings calendar for ${symbol} is proven only through ${validDay(row.calendarThrough) ? day(row.calendarThrough) : "nothing"}; expiry ${day(expiry)} is beyond it` };
   if (row.earningsAt != null && validDay(row.earningsAt) && day(row.earningsAt) <= day(expiry) && day(row.earningsAt) >= new Date(now).toISOString().slice(0, 10))
     return { permitted: false, earningsClass: "EARNINGS TRADE", earningsAt: day(row.earningsAt), note: `earnings ${day(row.earningsAt)}${row.earningsTiming ? ` (${row.earningsTiming})` : ""} falls before expiry ${day(expiry)}` };
