@@ -49,7 +49,8 @@ export function roundTripsFromFills(fills: JournalFill[]): RoundTrip[] {
       const entryPx = cur.openNotional / cur.openQty, exitPx = cur.closeQty ? cur.closeNotional / cur.closeQty : entryPx;
       const dir = cur.side === "long" ? 1 : -1;
       const gross = dir * (exitPx - entryPx) * spec.pointValue * cur.closeQty;
-      const fees = FEES_RT_PER_CONTRACT_USD * cur.qty;
+      // Fees are per contract that made the round trip (a scale-in and back is 60 contracts, not the 40 peak).
+      const fees = FEES_RT_PER_CONTRACT_USD * cur.closeQty;
       out.push({ symbol, side: cur.side, qty: cur.qty, entryTs: cur.entryTs, exitTs, entryPx, exitPx, grossUsd: gross, feesUsd: fees, netUsd: gross - fees, fillIds: cur.ids, open: false });
       cur = null;
     };
@@ -77,7 +78,8 @@ export function roundTripsFromFills(fills: JournalFill[]): RoundTrip[] {
       const exitPx = c.closeQty ? c.closeNotional / c.closeQty : entryPx;
       const dir = c.side === "long" ? 1 : -1;
       const gross = dir * (exitPx - entryPx) * spec.pointValue * c.closeQty;
-      out.push({ symbol, side: c.side, qty: c.qty, entryTs: c.entryTs, exitTs: c.lastTs, entryPx, exitPx, grossUsd: gross, feesUsd: FEES_RT_PER_CONTRACT_USD * c.qty, netUsd: gross - FEES_RT_PER_CONTRACT_USD * c.qty, fillIds: c.ids, open: true });
+      const fees = FEES_RT_PER_CONTRACT_USD * c.openQty;
+      out.push({ symbol, side: c.side, qty: c.qty, entryTs: c.entryTs, exitTs: c.lastTs, entryPx, exitPx, grossUsd: gross, feesUsd: fees, netUsd: gross - fees, fillIds: c.ids, open: true });
     }
   }
   return out.sort((a, b) => a.entryTs - b.entryTs);
@@ -118,6 +120,7 @@ export interface JournalRow {
   nearestLevel: string | null; nearestLevelPx: number | null; distAtr: number | null;
   eventFlag: string | null;
   setupTag: string | null; why: string | null;   // Spencer's own words, from the page
+  grade: string | null;                          // his own grade of the trade, A–F: "did I follow my rules?"
   open: boolean;
   fillIds: number[];
 }

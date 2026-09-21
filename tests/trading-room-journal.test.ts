@@ -52,7 +52,7 @@ test("excursions come from the bars inside the trade only", () => {
 function row(i: number, netR: number, netUsd: number, extra: Partial<JournalRow> = {}): JournalRow {
   return { id: `MES-${i}`, symbol: "MES", side: "long", qty: 20, entryTs: new Date(T0 + i * 3_600_000).toISOString(), exitTs: new Date(T0 + i * 3_600_000 + 600_000).toISOString(), entryPx: 7700, exitPx: 7701,
     grossUsd: netUsd + 30, feesUsd: 30, netUsd, stopPx: 7690, riskUsd: 1000, riskSource: "stop", netR, mfeR: 1, maeR: 0.5, holdMin: 10, session: "open", dow: 1,
-    nearestLevel: "VWAP", nearestLevelPx: 7699, distAtr: 0.01, eventFlag: null, setupTag: null, why: null, open: false, fillIds: [i], ...extra };
+    nearestLevel: "VWAP", nearestLevelPx: 7699, distAtr: 0.01, eventFlag: null, setupTag: null, why: null, grade: null, open: false, fillIds: [i], ...extra };
 }
 
 test("the 40-trade test: collecting below 40, then pass / fail on the pre-registered checks", () => {
