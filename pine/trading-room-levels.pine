@@ -7,6 +7,10 @@
 // opening-range breakout rule survives (Research/orb-study-sep19.md). The tape exists so the
 // journal can later say which breaks Spencer took, and whether they paid.
 //
+// The permission panel (bottom right) is five checks - window, level, volume, VWAP side, day range - and a
+// verdict: "OK to look" only when the first three are green. It is not a signal and never names a direction.
+// The setup feed marks a 5-minute higher low above VWAP after an opening-range break (lower high below, for
+// shorts) and posts it to #futures-copilot with the stop and the dollar risk - information for his read, scored.
 // Setup, once: paste the webhook secret into the study's settings (the session picks itself: gold
 // 08:20-13:30, indices 09:30-16:00); then ONE alert per symbol -> condition "Any alert() function
 // call" -> webhook URL https://trading-eta-snowy.vercel.app/api/webhook/trading-room, message left
@@ -19,6 +23,7 @@ rthSess    = input.session("0930-1600", "RTH session, ET - used only when the sw
 orMin      = input.int(15, "Opening range minutes", minval = 5, maxval = 60)
 showVwap   = input.bool(true, "Show session VWAP")
 sendAlerts = input.bool(true, "Post level breaks to the room")
+sendSetups = input.bool(true, "Post higher-low / lower-high setups (5-minute structure)")
 cooldown   = input.int(6, "Bars between repeat posts of the same break", minval = 1)
 tz = "America/New_York"
 
@@ -115,10 +120,174 @@ if barstate.islast
     table.cell(t, 0, 8, "Vol / 20-bar avg", text_size = size.small, text_color = chart.fg_color)
     table.cell(t, 1, 8, na(volRatio) ? "-" : str.tostring(volRatio, "#.0") + "x", text_size = size.small, text_color = chart.fg_color)
 
+// ---- the permission panel (Sep 20 2026): five checks, never a signal. Green means this is a moment where a
+// trade has a definable stop (near a level), a market that is actually moving (volume), and the time of day
+// that pays in our data (the first hour); red means sit on hands. Direction is not judged - VWAP only says
+// which side the day's average buyer allows. On 15 years of data no entry indicator survives costs; what
+// decides the month is how often the button gets pressed. This panel exists to make that number smaller.
+var float rthH = na
+var float rthL = na
+if rthStart
+    rthH := high
+    rthL := low
+else if inRth
+    rthH := math.max(rthH, high)
+    rthL := math.min(rthL, low)
+// The panel reads the 5-MINUTE ATR and volume whatever timeframe the chart is on (a 1-minute chart would
+// otherwise make every stop look tiny and every bar look quiet).
+[atr5, vr5] = request.security(syminfo.tickerid, "5", [ta.atr(14), volRatio[1]])
+dist(float x) => na(x) ? 1e10 : math.abs(close - x)
+nearest = math.min(dist(pdh), dist(pdl), dist(pdc), dist(onActive ? na : onH), dist(onActive ? na : onL), dist(wkH), dist(wkL), dist(orDone ? orH : na), dist(orDone ? orL : na), dist(vwap))
+hNow = hour(timenow, tz) + minute(timenow, tz) / 60.0
+dow = dayofweek(timenow, tz)
+weekday = dow >= dayofweek.monday and dow <= dayofweek.friday
+openH = isGold ? 8.0 + 20.0 / 60.0 : 9.5
+winState = not weekday ? 0 : hNow >= openH and hNow < 10.5 ? 2 : hNow >= 10.5 and hNow < 11.5 ? 1 : 0
+lvlState = na(atr5) or atr5 <= 0 ? 0 : nearest <= 0.5 * atr5 ? 2 : nearest <= 1.0 * atr5 ? 1 : 0
+vr = vr5
+volState = na(vr) ? 0 : vr >= 1.5 ? 2 : vr >= 0.8 ? 1 : 0
+rangeRatio = inRth and not na(atrD) and atrD > 0 ? (rthH - rthL) / atrD : na
+rngState = na(rangeRatio) ? 0 : rangeRatio < 0.8 ? 2 : rangeRatio <= 1.2 ? 1 : 0
+col(int s) => s == 2 ? color.new(color.green, 60) : s == 1 ? color.new(color.orange, 60) : color.new(color.red, 60)
+okToLook = winState == 2 and lvlState == 2 and volState == 2
+var table p = table.new(position.bottom_right, 2, 6, bgcolor = chart.bg_color, border_width = 1)
+if barstate.islast
+    table.cell(p, 0, 0, "Window", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 0, winState == 2 ? "open window" : winState == 1 ? "late morning" : weekday ? "outside the window" : "weekend", text_size = size.small, text_color = chart.fg_color, bgcolor = col(winState))
+    table.cell(p, 0, 1, "Level", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 1, na(atr5) or atr5 <= 0 ? "-" : str.tostring(nearest / atr5, "0.0") + " x 5m ATR away", text_size = size.small, text_color = chart.fg_color, bgcolor = col(lvlState))
+    table.cell(p, 0, 2, "Volume", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 2, na(vr) ? "-" : "last 5m bar " + str.tostring(vr, "0.0") + "x avg", text_size = size.small, text_color = chart.fg_color, bgcolor = col(volState))
+    table.cell(p, 0, 3, "VWAP side", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 3, na(vwap) ? "-" : close > vwap ? "longs only" : close < vwap ? "shorts only" : "at VWAP", text_size = size.small, text_color = chart.fg_color, bgcolor = color.new(color.blue, 70))
+    table.cell(p, 0, 4, "Day range", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 4, na(rangeRatio) ? "-" : str.tostring(rangeRatio, "0.0") + "x daily ATR", text_size = size.small, text_color = chart.fg_color, bgcolor = col(rngState))
+    table.cell(p, 0, 5, "Verdict", text_size = size.small, text_color = chart.fg_color)
+    table.cell(p, 1, 5, okToLook ? "OK to look" : "sit on hands", text_size = size.small, text_color = chart.fg_color, bgcolor = okToLook ? color.new(color.green, 40) : color.new(color.red, 40))
+
+num(float x) => na(x) ? "null" : str.tostring(x)
+
+// ---- the setup feed (Sep 22 2026): Spencer's own entry, as information - never a signal to any executor ----
+// On 5-MINUTE bars whatever the chart is on, exactly the rules of scripts/pullback-study.ts (pre-registered):
+// long side once a 5m bar closes above the OR high AND VWAP (a close back under VWAP ends longs for the day);
+// a pullback starts on a bar undercutting the prior bar's low; the setup is the bar that closes above the prior
+// bar's high while the pullback held above the last one (a HIGHER LOW); stop = pullback low - 1 tick. Short = mirror.
+// At most 2 per symbol per day, none in the last hour. 15 years: about break-even BEFORE costs, negative after -
+// the room scores every one against real bars so his read on top of it can be measured, not assumed.
+setupCalc(string s, int orMins, float endH) =>
+    inS = not na(time(timeframe.period, s, "America/New_York"))
+    st = inS and not inS[1]
+    var float oH = na
+    var float oL = na
+    var int oStart = na
+    var bool oDone = false
+    var bool bL = false
+    var bool dL = false
+    var bool pL = false
+    var float xL = na
+    var float prevL = na
+    var bool bS = false
+    var bool dS = false
+    var bool pS = false
+    var float xS = na
+    var float prevS = na
+    var int nSig = 0
+    vw = ta.vwap(hlc3)
+    int sigT = na
+    int side = 0
+    float stopPx = na
+    if st
+        oH := high
+        oL := low
+        oStart := time
+        oDone := false
+        bL := false
+        dL := false
+        pL := false
+        xL := na
+        prevL := na
+        bS := false
+        dS := false
+        pS := false
+        xS := na
+        prevS := na
+        nSig := 0
+    else if inS and not oDone
+        if time - oStart < orMins * 60000
+            oH := math.max(oH, high)
+            oL := math.min(oL, low)
+        else
+            oDone := true
+    if inS and oDone and not st
+        closeH = hour(time_close, "America/New_York") + minute(time_close, "America/New_York") / 60.0
+        canEnter = closeH < endH - 1.0 and nSig < 2
+        bool firedL = false
+        if not dL
+            if not bL
+                if close > oH and close > vw
+                    bL := true
+            else if close < vw
+                dL := true
+            else if not pL
+                if low < low[1]
+                    pL := true
+                    xL := low
+                    if not na(prevL) and xL <= prevL
+                        dL := true
+            else
+                xL := math.min(xL, low)
+                if not na(prevL) and xL <= prevL
+                    dL := true
+                else if close > high[1]
+                    prevL := xL
+                    pL := false
+                    if canEnter
+                        firedL := true
+                        sigT := time
+                        side := 1
+                        stopPx := xL - syminfo.mintick
+                        nSig += 1
+        if not dS
+            if not bS
+                if close < oL and close < vw
+                    bS := true
+            else if close > vw
+                dS := true
+            else if not pS
+                if high > high[1]
+                    pS := true
+                    xS := high
+                    if not na(prevS) and xS >= prevS
+                        dS := true
+            else
+                xS := math.max(xS, high)
+                if not na(prevS) and xS >= prevS
+                    dS := true
+                else if close < low[1]
+                    prevS := xS
+                    pS := false
+                    if canEnter and not firedL and nSig < 2
+                        sigT := time
+                        side := -1
+                        stopPx := xS + syminfo.mintick
+                        nSig += 1
+    [sigT, side, close, stopPx, oH, oL, vw]
+
+// The LAST CONFIRMED 5-minute bar only ([1] with lookahead_on - the standard non-repainting read).
+setupEndH = isGold ? 13.5 : 16.0
+setupPrev(string s, int orMins, float endH) =>
+    [a, b, c, d, e, f, g] = setupCalc(s, orMins, endH)
+    [a[1], b[1], c[1], d[1], e[1], f[1], g[1]]
+[suT, suSide, suPx, suStop, suOrH, suOrL, suVw] = request.security(syminfo.tickerid, "5", setupPrev(sess, orMin, setupEndH), lookahead = barmerge.lookahead_on)
+newSetup = not na(suT) and suSide != 0 and (na(suT[1]) or suT != suT[1])
+plotshape(newSetup and suSide == 1, "Higher low (setup)", shape.triangleup, location.belowbar, color.new(color.teal, 0), size = size.tiny)
+plotshape(newSetup and suSide == -1, "Lower high (setup)", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+if newSetup and sendSetups and barstate.isrealtime
+    alert('{"secret":"' + secret + '","room":"trading","kind":"setup","symbol":"' + syminfo.root + '","side":"' + (suSide == 1 ? "long" : "short") + '","price":' + str.tostring(suPx) + ',"stop":' + str.tostring(suStop) + ',"orh":' + num(suOrH) + ',"orl":' + num(suOrL) + ',"vwap":' + num(suVw) + ',"bar":' + str.tostring(suT) + ',"tf":"5"}', alert.freq_once_per_bar)
+
 // ---- the tape: one message per level break at the 5-minute close, inside RTH, with a cooldown per kind ----
 var kinds = array.from("or_up", "or_down", "pdh_up", "pdl_down", "onh_up", "onl_down", "wh_up", "wl_down", "vwap_up", "vwap_down")
 var lastFired = array.new_int(10, -1000)
-num(float x) => na(x) ? "null" : str.tostring(x)
 post(string kind, float level) =>
     i = array.indexof(kinds, kind)
     if bar_index - array.get(lastFired, i) >= cooldown
