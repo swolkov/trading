@@ -5,13 +5,16 @@
 //   • first sale inside 2 minutes: 23 trades, −$5,441 · first sale after 10+ minutes: 15 trades, +$6,007.
 //   • sold off in pieces: 8 trades, 8 winners, +$7,031 — his template is "sell half at +1R, stop to breakeven".
 // Pure: state + one snapshot of the account in → next state + the lines to post out. Unit-tested.
-import { INSTRUMENTS, ROOM_SYMBOLS, type RoomSymbol } from "@/lib/trading-room-rules";
+import { INSTRUMENTS, ROOM_SYMBOLS, etParts, type RoomSymbol } from "@/lib/trading-room-rules";
 
 export const ENTRY_STOP_GRACE_MS = 45_000;   // an entry with no stop gets its card (with the warning) after this long
 export const STOP_SETTLE_MS = 10_000;        // a moved stop is announced once it has held still this long (he drags stops)
 export const QUICK_EXIT_MS = 120_000;
 export const GIVEBACK_FROM_R = 1;
 export const GIVEBACK_TO_R = 0.25;
+export const REENTRY_MS = 180_000;           // Sep 20–22: 23 entries inside 3 min of the last exit = −$3,918; the other 48 = +$4,222
+export const COST_SHARE_FLAG = 0.2;          // fees + slip at ≥ 20% of the stop: the 15-year test's losing tight-stop third
+const FEE_RT_PER_CONTRACT = 2.06;            // measured on his account, Sep 18
 
 export interface CopilotPosition { symbol: RoomSymbol; netPos: number; netPrice: number }
 /** `trailing`: a trailing stop — its price is the STARTING level (the broker trails it server-side), so it is never announced as current. */
@@ -26,6 +29,8 @@ export interface CopilotSnapshot {
   prices: Partial<Record<RoomSymbol, number>>;
   /** Fills since the previous poll — read only when a position's size changed. */
   fills: CopilotFill[];
+  /** His own journal record for this market at this time of day — read only when a new position appears. */
+  records?: Partial<Record<RoomSymbol, { label: string; n: number; netUsd: number; since: string }>>;
 }
 
 export interface Trip {
@@ -50,8 +55,10 @@ export interface Trip {
   peakR: number;
   reduced: boolean;
   lastPrice: number | null;
+  reentrySec: number | null;   // seconds since the previous exit, when it was inside REENTRY_MS
+  record: { label: string; n: number; netUsd: number; since: string } | null;
 }
-export interface CopilotState { trips: Partial<Record<RoomSymbol, Trip>> }
+export interface CopilotState { trips: Partial<Record<RoomSymbol, Trip>>; lastCloseMs?: number }
 
 // ---- formatting ---------------------------------------------------------------------------------
 const dp = (s: RoomSymbol) => (s === "MGC" ? 1 : 2);
@@ -92,6 +99,7 @@ function newTrip(p: CopilotPosition, nowMs: number): Trip {
     side, qty: Math.abs(p.netPos), maxQty: Math.abs(p.netPos), entryPx: p.netPrice, avg: p.netPrice, openedMs: nowMs,
     initialStop: null, riskPts: null, stop: null, trailing: false, pendingStop: null, target: null,
     announced: false, noStopWarned: false, stopGoneWarned: false, hit1R: false, hit2R: false, giveBackWarned: false, peakR: 0, reduced: false, lastPrice: null,
+    reentrySec: null, record: null,
   };
 }
 
@@ -104,14 +112,32 @@ function riskUsd(sym: RoomSymbol, t: Trip, stopPx: number, qty: number): number 
   return (t.avg - stopPx) * t.side * INSTRUMENTS[sym].pointValue * qty;   // > 0 = at risk, < 0 = locked in
 }
 
+/** The time-of-day bucket his record is kept in (ET). Sep 20–22: MES open→2 PM +$5,745 · MNQ after 2 PM −$2,666. */
+export function timeBucket(ms: number): string {
+  const h = etParts(ms).hourFrac;
+  return h >= 18 || h < 8 ? "overnight (6 PM–8 AM ET)" : h < 9.5 ? "pre-open (8–9:30 AM ET)" : h < 11.5 ? "open to 11:30 AM ET" : h < 14 ? "11:30 AM–2 PM ET" : "2–5 PM ET";
+}
+
+/** Fees (measured) + one tick of slippage each way, as a share of the risk per contract. */
+export function costShare(sym: RoomSymbol, riskPts: number): number {
+  const spec = INSTRUMENTS[sym];
+  return (FEE_RT_PER_CONTRACT + 2 * spec.tick * spec.pointValue) / (riskPts * spec.pointValue);
+}
+
 function entryCard(sym: RoomSymbol, t: Trip): string {
   const head = `🟢 ${sym} ${sideWord(t.side)} ${t.qty} @ ${px(sym, t.avg)}`;
-  if (t.stop == null) return `${head}\n   ⚠️ NO STOP on ${t.qty} ${sym}. Nothing limits this trade.`;
+  const extra: string[] = [];
+  if (t.reentrySec != null) extra.push(`   ⏱ back in ${t.reentrySec}s after your last exit. Sep 20–22: 23 re-entries inside 3 min = −$3,918; the other 48 trades = +$4,222.`);
+  if (t.record && t.record.n >= 3) extra.push(`   📒 your record, ${sym} ${t.record.label}: ${t.record.n} trades · ${signedUsd(t.record.netUsd)} (since ${t.record.since})`);
+  const tail = extra.length ? `\n${extra.join("\n")}` : "";
+  if (t.stop == null) return `${head}\n   ⚠️ NO STOP on ${t.qty} ${sym}. Nothing limits this trade.${tail}`;
   const risk = riskUsd(sym, t, t.stop, t.qty);
-  if (!(t.riskPts && t.riskPts > 0)) return `${head} · stop ${px(sym, t.stop)} is already past entry — locks ${usd(-risk)}`;
+  if (!(t.riskPts && t.riskPts > 0)) return `${head} · stop ${px(sym, t.stop)} is already past entry — locks ${usd(-risk)}${tail}`;
   const r1 = t.entryPx + t.side * t.riskPts, r2 = t.entryPx + 2 * t.side * t.riskPts;
   const tgt = t.target != null ? ` · your target ${px(sym, t.target)} (${signedR(rAt(t, t.target)!)})` : "";
-  return `${head} · ${t.trailing ? "trailing stop from" : "stop"} ${px(sym, t.stop)} = ${usd(risk)} (1R)\n   +1R ${px(sym, r1)} · +2R ${px(sym, r2)}${tgt} · plan: hold to the stop or +2R`;
+  const cs = costShare(sym, t.riskPts);
+  const cost = cs >= COST_SHARE_FLAG ? `\n   💸 fees + 1-tick slip = ${Math.round(cs * 100)}% of this stop. Tight stops lost in your trades (≤ $20/contract: −$2,227) and over 15 years.` : "";
+  return `${head} · ${t.trailing ? "trailing stop from" : "stop"} ${px(sym, t.stop)} = ${usd(risk)} (1R)\n   +1R ${px(sym, r1)} · +2R ${px(sym, r2)}${tgt} · plan: hold to the stop or +2R${cost}${tail}`;
 }
 
 function exitPrice(fills: CopilotFill[], sym: RoomSymbol, side: 1 | -1): number | null {
@@ -142,6 +168,7 @@ function closeLine(sym: RoomSymbol, t: Trip, exitPx: number | null, nowMs: numbe
 export function step(prev: CopilotState, snap: CopilotSnapshot): { state: CopilotState; messages: string[] } {
   const trips: Partial<Record<RoomSymbol, Trip>> = { ...prev.trips };
   const messages: string[] = [];
+  let lastCloseMs = prev.lastCloseMs;
   for (const sym of ROOM_SYMBOLS) {
     const lines: string[] = [];
     const pos = snap.positions.find((p) => p.symbol === sym && p.netPos !== 0) ?? null;
@@ -150,9 +177,14 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     // ---- position lifecycle ----
     if (t && (!pos || Math.sign(pos.netPos) !== t.side)) {
       if (t.announced || snap.nowMs - t.openedMs >= 5_000) lines.push(closeLine(sym, t, exitPrice(snap.fills, sym, t.side) ?? t.lastPrice, snap.nowMs));
+      lastCloseMs = snap.nowMs;
       t = null;
     }
-    if (!t && pos) t = newTrip(pos, snap.nowMs);
+    if (!t && pos) {
+      t = newTrip(pos, snap.nowMs);
+      if (lastCloseMs != null && snap.nowMs - lastCloseMs < REENTRY_MS) t.reentrySec = Math.max(1, Math.round((snap.nowMs - lastCloseMs) / 1000));
+      t.record = snap.records?.[sym] ?? null;
+    }
     if (!t) { delete trips[sym]; if (lines.length) messages.push(lines.join("\n")); continue; }
     const p = pos!;
     const cardAt = lines.length;   // a flip's close line stays ahead of the new entry card
@@ -237,7 +269,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     trips[sym] = t;
     if (lines.length) messages.push(lines.join("\n"));
   }
-  return { state: { trips }, messages };
+  return { state: { trips, lastCloseMs }, messages };
 }
 
 /** The price implied by the account's open P&L — exact when ONE room symbol is open (the P&L is account-wide). */

@@ -10,7 +10,7 @@ import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { CHART_KEY } from "@/lib/trading-room";
 import { ROOM_SYMBOLS, type ChartLevels, type RoomSymbol } from "@/lib/trading-room-rules";
-import { priceFromOpenPnl, step, type CopilotFill, type CopilotOrder, type CopilotPosition, type CopilotState } from "@/lib/copilot-rules";
+import { priceFromOpenPnl, step, timeBucket, type CopilotFill, type CopilotOrder, type CopilotPosition, type CopilotState } from "@/lib/copilot-rules";
 
 export const COPILOT_STATE_KEY = "copilot_state";
 export const COPILOT_ENABLED_KEY = "copilot_enabled";     // "false" silences it; anything else (or missing) = on
@@ -195,6 +195,17 @@ async function chartPrices(nowMs: number): Promise<Partial<Record<RoomSymbol, nu
   } catch { return {}; }
 }
 
+/** His own closed trips for this market in this time-of-day bucket (the journal the room folds), last 30 days. */
+async function recordFor(sym: RoomSymbol, nowMs: number): Promise<{ label: string; n: number; netUsd: number; since: string } | null> {
+  const rows = await prisma.$queryRawUnsafe<{ entry_ts: Date; net_usd: number }[]>(
+    `SELECT entry_ts, net_usd FROM trading_room_trades WHERE symbol = $1 AND open = false AND entry_ts >= $2`, sym, new Date(nowMs - 30 * 86_400_000));
+  const label = timeBucket(nowMs);
+  const mine = rows.filter((r) => timeBucket(new Date(r.entry_ts).getTime()) === label);
+  if (!mine.length) return null;
+  const first = mine.reduce((a, r) => Math.min(a, new Date(r.entry_ts).getTime()), Infinity);
+  return { label, n: mine.length, netUsd: mine.reduce((a, r) => a + Number(r.net_usd), 0), since: new Date(first).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" }) };
+}
+
 // ---- one poll ---------------------------------------------------------------------------------------
 async function loadState(): Promise<Stored> {
   const r = await cfg(COPILOT_STATE_KEY);
@@ -222,8 +233,10 @@ export async function copilotPoll(nowMs = Date.now(), readOrdersThisPoll = true)
     });
     // Fills since the last GOOD poll (a close during a blind stretch still finds its exit fills).
     const fills = sizeChanged ? await readFillsSince((state.lastOkMs ?? nowMs - 60_000) - 5_000).catch(() => []) : [];
+    const records: Partial<Record<RoomSymbol, { label: string; n: number; netUsd: number; since: string }>> = {};
+    for (const p of room) if (!state.trips[p.symbol]) { const r = await recordFor(p.symbol, nowMs).catch(() => null); if (r) records[p.symbol] = r; }
     const prices = { ...(await chartPrices(nowMs)), ...(openCount === 1 ? priceFromOpenPnl(room, pnl.openPnl) : {}) };
-    const { state: next, messages } = step(state, { nowMs, positions: room, orders: tracking ? orders : null, prices, fills });
+    const { state: next, messages } = step(state, { nowMs, positions: room, orders: tracking ? orders : null, prices, fills, records });
     // State first, then Slack: a failed save must not make the next poll say it all again (at most once > twice).
     const out: Stored = { ...next, accountId, lastPollMs: nowMs, lastOkMs: nowMs, polls: (state.polls ?? 0) + 1, snapshotFields: pnl.fields, auditError: state.auditError };
     await setKey(COPILOT_STATE_KEY, JSON.stringify(out));

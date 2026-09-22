@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ENTRY_STOP_GRACE_MS, STOP_SETTLE_MS, duration, priceFromOpenPnl, protectiveStop, step, type CopilotOrder, type CopilotSnapshot, type CopilotState } from "../src/lib/copilot-rules";
+import { ENTRY_STOP_GRACE_MS, STOP_SETTLE_MS, costShare, duration, timeBucket, priceFromOpenPnl, protectiveStop, step, type CopilotOrder, type CopilotSnapshot, type CopilotState } from "../src/lib/copilot-rules";
 
 const T0 = Date.parse("2026-09-23T14:00:00Z");
 const stop = (price: number, action: "Buy" | "Sell" = "Sell", qty = 20, symbol: CopilotOrder["symbol"] = "MES"): CopilotOrder => ({ orderId: 1, symbol, action, kind: "stop", price, qty });
@@ -184,6 +184,34 @@ test("after adding, the +1R line shows the real open P&L on the size held", () =
     snap(30_000, 40, 7832.25, null, 7834.75),
   ]);
   assert.match(out[2][0], /\+1R at 7834\.75 \(\+\$500 open\)/);   // (7834.75 − 7832.25) × $5 × 40
+});
+
+test("re-entry inside 3 minutes of the last exit is flagged on the new card; later entries are not", () => {
+  const fillsOut = { fills: [{ symbol: "MES" as const, action: "Sell" as const, qty: 20, price: 7830, ms: T0 + 59_000 }] };
+  const quick = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(60_000, 0, 0, [], undefined, fillsOut), snap(105_000, 20, 7829, [stop(7826)])]);
+  assert.match(quick.out[2][0], /back in 45s after your last exit/);
+  const later = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(60_000, 0, 0, [], undefined, fillsOut), snap(60_000 + 181_000, 20, 7829, [stop(7826)])]);
+  assert.doesNotMatch(later.out[2][0], /back in/);
+});
+
+test("his record for this market and time of day rides on the entry card (3+ trades only)", () => {
+  const rec = { MES: { label: "2–5 PM ET", n: 4, netUsd: -485, since: "Sep 21" } };
+  const { out } = run([snap(0, 20, 7831.25, [stop(7827.75)], undefined, { records: rec })]);
+  assert.match(out[0][0], /your record, MES 2–5 PM ET: 4 trades · −\$485 \(since Sep 21\)/);
+  const thin = run([snap(0, 20, 7831.25, [stop(7827.75)], undefined, { records: { MES: { ...rec.MES, n: 2 } } })]);
+  assert.doesNotMatch(thin.out[0][0], /your record/);
+});
+
+test("fees + slip share of the stop: flagged on tight stops, quiet on wide ones", () => {
+  assert.equal(Math.round(costShare("MES", 3.5) * 100), 26);      // ($2.06 + $2.50) / $17.50
+  assert.match(run([snap(0, 20, 7831.25, [stop(7827.75)])]).out[0][0], /fees \+ 1-tick slip = 26% of this stop/);
+  assert.doesNotMatch(run([snap(0, 20, 7831.25, [stop(7821.25)])]).out[0][0], /fees \+ 1-tick slip/);   // 10 pts: 9%
+});
+
+test("time-of-day buckets in ET", () => {
+  assert.equal(timeBucket(Date.parse("2026-09-22T14:00:00Z")), "open to 11:30 AM ET");     // 10:00 ET
+  assert.equal(timeBucket(Date.parse("2026-09-22T19:30:00Z")), "2–5 PM ET");
+  assert.equal(timeBucket(Date.parse("2026-09-23T02:00:00Z")), "overnight (6 PM–8 AM ET)");
 });
 
 test("duration formatting", () => {
