@@ -8,12 +8,15 @@ import { prisma } from "./db";
 //   options      — the Robinhood live desk: ARM/DISARM, adapter verification, entries, closes, the brief.
 //                  Real money. Falls back to general — never dropped. (Until Sep 20 2026 it had no
 //                  fallback and every options page was silently lost.)
+//   copilot      — the live co-pilot on Spencer's own futures position (entry card, stop moves, +1R / +2R, give-back).
+//                  Its own channel once `webhook_copilot` is set; until then it rides the futures lane — never dropped.
 //   general      — the catch-all channel.
-export type NotifyChannel = "futures" | "options" | "general";
+export type NotifyChannel = "futures" | "options" | "copilot" | "general";
 
 const CHANNEL_KEYS: Record<NotifyChannel, string> = {
   futures: "webhook_futures",
   options: "webhook_options",
+  copilot: "webhook_copilot",
   general: "webhook_general",
 };
 
@@ -25,6 +28,7 @@ async function webhookFor(key: string): Promise<string | null> {
 export async function getWebhook(channel: NotifyChannel): Promise<string | null> {
   const own = await webhookFor(CHANNEL_KEYS[channel]);
   if (own) return own;
+  if (channel === "copilot") { const fut = await webhookFor(CHANNEL_KEYS.futures); if (fut) return fut; }
   const gen = await webhookFor("webhook_general");
   if (gen) return gen;
   return webhookFor("notification_webhook");
@@ -33,7 +37,7 @@ export async function getWebhook(channel: NotifyChannel): Promise<string | null>
 /** Which lane resolves to which webhook — for System Health, so a missing channel is visible, not silent. */
 export async function laneStatus(): Promise<{ channel: NotifyChannel; own: boolean; delivers: boolean }[]> {
   const out: { channel: NotifyChannel; own: boolean; delivers: boolean }[] = [];
-  for (const channel of ["futures", "options", "general"] as NotifyChannel[]) {
+  for (const channel of ["futures", "options", "copilot", "general"] as NotifyChannel[]) {
     const own = !!(await webhookFor(CHANNEL_KEYS[channel]));
     out.push({ channel, own, delivers: own || !!(await getWebhook(channel)) });
   }
