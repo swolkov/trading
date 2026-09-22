@@ -214,6 +214,16 @@ test("time-of-day buckets in ET", () => {
   assert.equal(timeBucket(Date.parse("2026-09-23T02:00:00Z")), "overnight (6 PM–8 AM ET)");
 });
 
+test("a REJECTED stop is called out at once, naming the naked position — once per order", () => {
+  const rej: CopilotOrder = { orderId: 77, symbol: "MNQ", action: "Buy", kind: "stop", price: 31042.75, qty: 20 };
+  const pos = (dt: number, orders: CopilotOrder[], extra: Partial<CopilotSnapshot> = {}): CopilotSnapshot => ({ nowMs: T0 + dt, positions: [{ symbol: "MNQ", netPos: -20, netPrice: 31044 }], orders, prices: {}, fills: [], ...extra });
+  const { out } = run([pos(0, [], { rejectedStops: [rej] }), pos(15_000, [], { rejectedStops: [rej] })]);
+  assert.match(out[0].join("\n"), /REJECTED your stop \(Buy Stop 31042\.75 ×20\)\. You are SHORT 20 MNQ with NO STOP\. A buy stop must sit ABOVE the market/);
+  assert.doesNotMatch(out[1].join("\n"), /REJECTED/);
+  const covered = run([pos(0, [{ orderId: 78, symbol: "MNQ", action: "Buy", kind: "stop", price: 31050, qty: 20 }], { rejectedStops: [rej] })]);
+  assert.match(covered.out[0].join("\n"), /Another stop is working at 31050\.00/);
+});
+
 test("duration formatting", () => {
   assert.equal(duration(45_000), "45s");
   assert.equal(duration(190_000), "3m 10s");
