@@ -1,6 +1,8 @@
 import crypto from "crypto";
 import { parseChartLevels, parseFeed } from "@/lib/trading-room-rules";
 import { buildCard, loadFeed, recordChartLevels, recordFeed } from "@/lib/trading-room";
+import { parseSetup } from "@/lib/setup-feed-rules";
+import { recordSetup } from "@/lib/setup-feed";
 
 // TRADINGVIEW → THE TRADING ROOM'S TAPE. The Pine study (pine/trading-room-levels.pine) posts one
 // JSON message when a 5-minute close breaks a level it draws:
@@ -38,6 +40,13 @@ export async function POST(request: Request) {
     if (!lv.ok) return Response.json({ error: lv.reason }, { status: 400 });
     try { await recordChartLevels(lv.levels); await buildCard(now); return Response.json({ status: "levels", symbol: lv.levels.symbol, at: lv.levels.at }); }
     catch (e) { return Response.json({ error: String(e).slice(0, 200) }, { status: 500 }); }
+  }
+  if ((body as Record<string, unknown>).kind === "setup") {
+    // A 5-minute higher low / lower high from the study → #futures-copilot, then scored by the room's tick. Information only.
+    const su = parseSetup(body);
+    if (!su.ok) return Response.json({ error: su.reason }, { status: 400 });
+    try { const { duplicate } = await recordSetup(su.setup); return Response.json({ status: duplicate ? "duplicate" : "setup", id: su.setup.id }); }
+    catch (e) { console.error("[/api/webhook/trading-room] setup", e); return Response.json({ error: String(e).slice(0, 200) }, { status: 500 }); }
   }
   const parsed = parseFeed(body, now);
   if (!parsed.ok) return Response.json({ error: parsed.reason }, { status: 400 });

@@ -13,6 +13,7 @@ import { foldJournal, journalView } from "@/lib/trading-room-journal-store";
 import { dayTally } from "@/lib/trading-room-journal";
 import { replayImageUrl } from "@/lib/trading-room-replay";
 import { syncLedger } from "@/lib/trading-room-ledger";
+import { resolveSetups } from "@/lib/setup-feed";
 import {
   CARD_POST_ET, CHART_LEVELS_FRESH_MS, EVENT_HEADS_UP_MIN, FEED_LABEL, INSTRUMENTS, ROOM_SYMBOLS, appendFeed, buildLevels, etParts, eventNote, levelsFromChart, parseSettings, sizingFor, weeklyPrints,
   type Bar, type ChartLevels, type FeedEvent, type LevelSet, type RoomEvent, type RoomSettings, type SizingLine,
@@ -257,6 +258,9 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
     state.flattenWarnDay = now.dayKey;
     notes.push("flatten warning");
   }
+  // The setup feed (last, so a slow Yahoo can never delay the card or the alarms): score the chart's setups on real bars, mark the ones he took, and the day's recap after the close.
+  try { const s = await resolveSetups(nowMs); if (s.resolved || s.recap) notes.push(`setups: ${s.resolved} scored${s.recap ? " · recap posted" : ""}`); }
+  catch (e) { notes.push(`setups failed: ${String(e).slice(0, 160)}`); }
   state.lastTickAt = new Date(nowMs).toISOString();
   await setKey(STATE_KEY, JSON.stringify(state));
   return { ok: !!card && live.ok, notes };
