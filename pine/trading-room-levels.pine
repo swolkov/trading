@@ -9,8 +9,6 @@
 //
 // The permission panel (bottom right) is five checks - window, level, volume, VWAP side, day range - and a
 // verdict: "OK to look" only when the first three are green. It is not a signal and never names a direction.
-// The setup feed marks a 5-minute higher low above VWAP after an opening-range break (lower high below, for
-// shorts) and posts it to #futures-copilot with the stop and the dollar risk - information for his read, scored.
 // Setup, once: paste the webhook secret into the study's settings (the session picks itself: gold
 // 08:20-13:30, indices 09:30-16:00); then ONE alert per symbol -> condition "Any alert() function
 // call" -> webhook URL https://trading-eta-snowy.vercel.app/api/webhook/trading-room, message left
@@ -23,7 +21,6 @@ rthSess    = input.session("0930-1600", "RTH session, ET - used only when the sw
 orMin      = input.int(15, "Opening range minutes", minval = 5, maxval = 60)
 showVwap   = input.bool(true, "Show session VWAP")
 sendAlerts = input.bool(true, "Post level breaks to the room")
-sendSetups = input.bool(true, "Post higher-low / lower-high setups (5-minute structure)")
 cooldown   = input.int(6, "Bars between repeat posts of the same break", minval = 1)
 tz = "America/New_York"
 
@@ -165,9 +162,53 @@ if barstate.islast
     table.cell(p, 0, 5, "Verdict", text_size = size.small, text_color = chart.fg_color)
     table.cell(p, 1, 5, okToLook ? "OK to look" : "sit on hands", text_size = size.small, text_color = chart.fg_color, bgcolor = okToLook ? color.new(color.green, 40) : color.new(color.red, 40))
 
+// ---- the tape: one message per level break at the 5-minute close, inside RTH, with a cooldown per kind ----
+var kinds = array.from("or_up", "or_down", "pdh_up", "pdl_down", "onh_up", "onl_down", "wh_up", "wl_down", "vwap_up", "vwap_down")
+var lastFired = array.new_int(10, -1000)
 num(float x) => na(x) ? "null" : str.tostring(x)
+post(string kind, float level) =>
+    i = array.indexof(kinds, kind)
+    if bar_index - array.get(lastFired, i) >= cooldown
+        array.set(lastFired, i, bar_index)
+        alert('{"secret":"' + secret + '","room":"trading","symbol":"' + syminfo.root + '","kind":"' + kind + '","price":' + str.tostring(close) + ',"level":' + num(level) + ',"atr":' + num(atr) + ',"volRatio":' + num(volRatio) + ',"bar":' + str.tostring(time) + ',"tf":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
 
-// ---- the setup feed (Sep 22 2026): Spencer's own entry, as information - never a signal to any executor ----
+crossedUp(float lvl) => not na(lvl) and close > lvl and close[1] <= lvl
+crossedDn(float lvl) => not na(lvl) and close < lvl and close[1] >= lvl
+
+// The whole level set, once per confirmed bar, 24/5 - the room uses it as the card while it is fresh,
+// so the admin page shows these exact numbers instead of a delayed Yahoo copy.
+if barstate.isconfirmed and sendAlerts
+    alert('{"secret":"' + secret + '","room":"trading","kind":"levels","symbol":"' + syminfo.root + '","price":' + str.tostring(close) + ',"pdh":' + num(pdh) + ',"pdl":' + num(pdl) + ',"pdc":' + num(pdc) + ',"onh":' + num(onActive ? na : onH) + ',"onl":' + num(onActive ? na : onL) + ',"wh":' + num(wkH) + ',"wl":' + num(wkL) + ',"orh":' + num(orH) + ',"orl":' + num(orL) + ',"orDone":' + (orDone ? "true" : "false") + ',"vwap":' + num(vwap) + ',"atr":' + num(atr) + ',"atrD":' + num(atrD) + ',"bar":' + str.tostring(time) + ',"tf":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and inRth and sendAlerts
+    if orDone
+        if crossedUp(orH)
+            post("or_up", orH)
+        if crossedDn(orL)
+            post("or_down", orL)
+    if crossedUp(pdh)
+        post("pdh_up", pdh)
+    if crossedDn(pdl)
+        post("pdl_down", pdl)
+    if not onActive
+        if crossedUp(onH)
+            post("onh_up", onH)
+        if crossedDn(onL)
+            post("onl_down", onL)
+    if crossedUp(wkHprev)
+        post("wh_up", wkHprev)
+    if crossedDn(wkLprev)
+        post("wl_down", wkLprev)
+    if showVwap
+        if crossedUp(vwap)
+            post("vwap_up", vwap)
+        if crossedDn(vwap)
+            post("vwap_down", vwap)
+
+
+// ---- the setup feed (Sep 22 2026) - appended at the END so the live script is updated by appending only
+sendSetups = input.bool(true, "Post higher-low / lower-high setups (5-minute structure)")
+// ---- the setup feed rules: Spencer's own entry, as information - never a signal to any executor ----
 // On 5-MINUTE bars whatever the chart is on, exactly the rules of scripts/pullback-study.ts (pre-registered):
 // long side once a 5m bar closes above the OR high AND VWAP (a close back under VWAP ends longs for the day);
 // a pullback starts on a bar undercutting the prior bar's low; the setup is the bar that closes above the prior
@@ -288,45 +329,3 @@ plotshape(newSetup and suSide == 1, "Higher low (setup)", shape.triangleup, loca
 plotshape(newSetup and suSide == -1, "Lower high (setup)", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
 if newSetup and sendSetups and barstate.isrealtime
     alert('{"secret":"' + secret + '","room":"trading","kind":"setup","symbol":"' + syminfo.root + '","side":"' + (suSide == 1 ? "long" : "short") + '","price":' + str.tostring(suPx) + ',"stop":' + str.tostring(suStop) + ',"orh":' + num(suOrH) + ',"orl":' + num(suOrL) + ',"vwap":' + num(suVw) + ',"bar":' + str.tostring(suT) + ',"tf":"5"}', alert.freq_once_per_bar)
-
-// ---- the tape: one message per level break at the 5-minute close, inside RTH, with a cooldown per kind ----
-var kinds = array.from("or_up", "or_down", "pdh_up", "pdl_down", "onh_up", "onl_down", "wh_up", "wl_down", "vwap_up", "vwap_down")
-var lastFired = array.new_int(10, -1000)
-post(string kind, float level) =>
-    i = array.indexof(kinds, kind)
-    if bar_index - array.get(lastFired, i) >= cooldown
-        array.set(lastFired, i, bar_index)
-        alert('{"secret":"' + secret + '","room":"trading","symbol":"' + syminfo.root + '","kind":"' + kind + '","price":' + str.tostring(close) + ',"level":' + num(level) + ',"atr":' + num(atr) + ',"volRatio":' + num(volRatio) + ',"bar":' + str.tostring(time) + ',"tf":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
-
-crossedUp(float lvl) => not na(lvl) and close > lvl and close[1] <= lvl
-crossedDn(float lvl) => not na(lvl) and close < lvl and close[1] >= lvl
-
-// The whole level set, once per confirmed bar, 24/5 - the room uses it as the card while it is fresh,
-// so the admin page shows these exact numbers instead of a delayed Yahoo copy.
-if barstate.isconfirmed and sendAlerts
-    alert('{"secret":"' + secret + '","room":"trading","kind":"levels","symbol":"' + syminfo.root + '","price":' + str.tostring(close) + ',"pdh":' + num(pdh) + ',"pdl":' + num(pdl) + ',"pdc":' + num(pdc) + ',"onh":' + num(onActive ? na : onH) + ',"onl":' + num(onActive ? na : onL) + ',"wh":' + num(wkH) + ',"wl":' + num(wkL) + ',"orh":' + num(orH) + ',"orl":' + num(orL) + ',"orDone":' + (orDone ? "true" : "false") + ',"vwap":' + num(vwap) + ',"atr":' + num(atr) + ',"atrD":' + num(atrD) + ',"bar":' + str.tostring(time) + ',"tf":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
-
-if barstate.isconfirmed and inRth and sendAlerts
-    if orDone
-        if crossedUp(orH)
-            post("or_up", orH)
-        if crossedDn(orL)
-            post("or_down", orL)
-    if crossedUp(pdh)
-        post("pdh_up", pdh)
-    if crossedDn(pdl)
-        post("pdl_down", pdl)
-    if not onActive
-        if crossedUp(onH)
-            post("onh_up", onH)
-        if crossedDn(onL)
-            post("onl_down", onL)
-    if crossedUp(wkHprev)
-        post("wh_up", wkHprev)
-    if crossedDn(wkLprev)
-        post("wl_down", wkLprev)
-    if showVwap
-        if crossedUp(vwap)
-            post("vwap_up", vwap)
-        if crossedDn(vwap)
-            post("vwap_down", vwap)
