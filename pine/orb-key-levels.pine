@@ -1,0 +1,143 @@
+//@version=6
+// ORB + KEY LEVELS v1.2 (rebuilt Sep 20 2026). Spencer had a private script of this name on his charts; it
+// was lost with a layout overwrite and no copy existed anywhere. This is a faithful rebuild of what it
+// drew: the opening range (high, low, midpoint, shaded box while forming), the day's key levels, an
+// "ORB LONG / ORB SHORT" label on the first CONFIRMED close outside the range, and a retest arrow when
+// price comes back to the broken edge and holds. Nothing repaints: every mark is placed on a closed bar.
+// The Trading Room study already draws the prior-day / overnight / week levels, so those are OFF here
+// by default - switch them on if this study is used alone.
+indicator("ORB + Key Levels v1.2", overlay = true, max_lines_count = 500, max_labels_count = 200, max_boxes_count = 100)
+
+mode      = input.string("Breakout", "Signal mode", options = ["Breakout", "Breakout + retest", "Off"])
+orMin     = input.int(15, "Opening range minutes", minval = 1, maxval = 120)
+autoSess  = input.bool(true, "Session by symbol (gold 0820-1330, indices 0930-1600)")
+rthSess   = input.session("0930-1600", "RTH session, ET - used only when the switch above is off")
+showMid   = input.bool(true, "Midpoint")
+showBox   = input.bool(true, "Shade the range while it forms")
+retestBars = input.int(30, "Retest window (bars after the break)", minval = 1, maxval = 200)
+showPD    = input.bool(false, "Key levels: prior-day high / low / close")
+showON    = input.bool(false, "Key levels: overnight high / low")
+showOpen  = input.bool(true, "Key levels: today's open")
+tz = "America/New_York"
+
+isGold   = syminfo.root == "MGC" or syminfo.root == "GC"
+sess     = autoSess ? (isGold ? "0820-1330" : "0930-1600") : rthSess
+inRth    = not na(time(timeframe.period, sess, tz))
+rthStart = inRth and not inRth[1]
+rthEnd   = not inRth and inRth[1]
+
+// ---- the opening range ----
+var float orH = na
+var float orL = na
+var int   orStart = na
+var bool  orDone = false
+var float dayOpen = na
+var line  lnH = na
+var line  lnL = na
+var line  lnM = na
+var box   bx = na
+var int   dir = 0          // 0 = still inside, 1 = broke up, -1 = broke down (first confirmed close outside)
+var int   breakBar = na
+var bool  retested = false
+if rthStart
+    orH := high
+    orL := low
+    orStart := time
+    orDone := false
+    dayOpen := open
+    dir := 0
+    breakBar := na
+    retested := false
+    lnH := na
+    lnL := na
+    lnM := na
+    bx := na
+else if inRth and not orDone
+    if time - orStart < orMin * 60000
+        orH := math.max(orH, high)
+        orL := math.min(orL, low)
+    else
+        orDone := true
+orMid = (orH + orL) / 2
+
+// ---- draw: the range as lines from its completion to the session close, the box while forming ----
+cyan = color.new(#22d3ee, 0)
+if inRth and not orDone and showBox
+    if na(bx)
+        bx := box.new(bar_index, orH, bar_index, orL, border_color = color.new(#f472b6, 60), bgcolor = color.new(#f472b6, 88))
+    else
+        box.set_right(bx, bar_index)
+        box.set_top(bx, orH)
+        box.set_bottom(bx, orL)
+if orDone and inRth
+    if na(lnH)
+        lnH := line.new(bar_index, orH, bar_index + 1, orH, color = cyan, width = 2)
+        lnL := line.new(bar_index, orL, bar_index + 1, orL, color = cyan, width = 2)
+        if showMid
+            lnM := line.new(bar_index, orMid, bar_index + 1, orMid, color = color.new(#22d3ee, 50), style = line.style_dashed)
+    else
+        line.set_x2(lnH, bar_index)
+        line.set_x2(lnL, bar_index)
+        if not na(lnM)
+            line.set_x2(lnM, bar_index)
+// Once the session closes the lines stop where the session did; they are redrawn fresh at the next open.
+
+// ---- key levels ----
+[pdh, pdl, pdc] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+var float onH = na
+var float onL = na
+var bool onActive = false
+if rthEnd
+    onH := high
+    onL := low
+    onActive := true
+else if onActive and not inRth
+    onH := math.max(onH, high)
+    onL := math.min(onL, low)
+if rthStart
+    onActive := false
+plot(showPD ? pdh : na, "Prior-day high", color = color.new(#4ade80, 0), style = plot.style_linebr, linewidth = 1)
+plot(showPD ? pdl : na, "Prior-day low", color = color.new(#f87171, 0), style = plot.style_linebr, linewidth = 1)
+plot(showPD ? pdc : na, "Prior-day close", color = color.new(#a78bfa, 0), style = plot.style_linebr, linewidth = 1)
+plot(showON and not onActive ? onH : na, "Overnight high", color = color.new(#4ade80, 40), style = plot.style_linebr)
+plot(showON and not onActive ? onL : na, "Overnight low", color = color.new(#f87171, 40), style = plot.style_linebr)
+plot(showOpen and inRth ? dayOpen : na, "Today's open", color = color.new(#fb923c, 30), style = plot.style_linebr)
+
+// ---- signals: first confirmed close outside the range, then one retest ----
+if barstate.isconfirmed and inRth and orDone and mode != "Off"
+    if dir == 0
+        if close > orH
+            dir := 1
+            breakBar := bar_index
+            label.new(bar_index, low, "ORB LONG", style = label.style_label_up, color = color.new(#22c55e, 20), textcolor = color.white, size = size.small)
+        else if close < orL
+            dir := -1
+            breakBar := bar_index
+            label.new(bar_index, high, "ORB SHORT", style = label.style_label_down, color = color.new(#ef4444, 20), textcolor = color.white, size = size.small)
+    else if mode == "Breakout + retest" and not retested and bar_index - breakBar <= retestBars
+        // Retest: the bar touched the broken edge and closed back on the breakout side.
+        if dir == 1 and low <= orH and close > orH
+            retested := true
+            label.new(bar_index, low, "retest", style = label.style_triangleup, color = color.new(#3b82f6, 0), size = size.tiny)
+        else if dir == -1 and high >= orL and close < orL
+            retested := true
+            label.new(bar_index, high, "retest", style = label.style_triangledown, color = color.new(#ef4444, 0), size = size.tiny)
+
+// ---- alerts: one condition each, so a TradingView alert can be set on them ----
+brokeUp = barstate.isconfirmed and inRth and orDone and dir == 1 and dir[1] == 0
+brokeDn = barstate.isconfirmed and inRth and orDone and dir == -1 and dir[1] == 0
+alertcondition(brokeUp, "ORB long", "{{ticker}} closed above the opening range at {{close}}")
+alertcondition(brokeDn, "ORB short", "{{ticker}} closed below the opening range at {{close}}")
+
+// ---- status line ----
+var table t = table.new(position.top_left, 2, 4, bgcolor = chart.bg_color, border_width = 1)
+fmt(float x) => na(x) ? "-" : str.tostring(x, format.mintick)
+if barstate.islast
+    table.cell(t, 0, 0, "ORB " + str.tostring(orMin) + "m", text_size = size.small, text_color = color.gray)
+    table.cell(t, 1, 0, orDone ? "set" : inRth ? "forming" : "closed", text_size = size.small, text_color = chart.fg_color)
+    table.cell(t, 0, 1, "High / low", text_size = size.small, text_color = chart.fg_color)
+    table.cell(t, 1, 1, fmt(orH) + " / " + fmt(orL), text_size = size.small, text_color = chart.fg_color)
+    table.cell(t, 0, 2, "Midpoint", text_size = size.small, text_color = chart.fg_color)
+    table.cell(t, 1, 2, fmt(orMid), text_size = size.small, text_color = chart.fg_color)
+    table.cell(t, 0, 3, "Break", text_size = size.small, text_color = chart.fg_color)
+    table.cell(t, 1, 3, dir == 1 ? "long" + (retested ? " + retested" : "") : dir == -1 ? "short" + (retested ? " + retested" : "") : "none yet", text_size = size.small, text_color = dir == 1 ? color.new(#22c55e, 0) : dir == -1 ? color.new(#ef4444, 0) : chart.fg_color)
