@@ -25,31 +25,35 @@ test("grade: Strong needs a breakout, alignment, a ≤5% spread and 1.5× payoff
 });
 
 test("ladder pins: $1,500 / $3,000 / $900 equity, the armed ceiling caps every rung", () => {
-  assert.deepEqual([maxLossFor("Normal", 1500), maxLossFor("Strong", 1500), maxLossFor("A+", 1500)], [100.5, 150, 225]);
-  assert.deepEqual([maxLossFor("Normal", 3000), maxLossFor("Strong", 3000), maxLossFor("A+", 3000)], [201, 300, 450]);
-  assert.deepEqual([maxLossFor("Normal", 900), maxLossFor("Strong", 900), maxLossFor("A+", 900)], [100, 150, 225]);
-  assert.equal(maxLossFor("Strong", 3000, 150), 150, "the ceiling wins");
-  assert.equal(maxLossFor("A+", null), 225, "no equity on file → the dollar floor");
-  assert.equal(OPTIONS_LADDER.Normal.pct, 0.067);
+  // At $1,500 the floors and the percentages agree exactly — these ARE today's caps.
+  assert.deepEqual([maxLossFor("Normal", 1500), maxLossFor("Strong", 1500), maxLossFor("A+", 1500)], [150, 225, 300]);
+  assert.deepEqual([maxLossFor("Normal", 3000), maxLossFor("Strong", 3000), maxLossFor("A+", 3000)], [300, 450, 600]);
+  assert.deepEqual([maxLossFor("Normal", 900), maxLossFor("Strong", 900), maxLossFor("A+", 900)], [150, 225, 300], "below $1,500 the dollar floors hold the line");
+  assert.equal(maxLossFor("Strong", 3000, 225), 225, "the ceiling wins");
+  assert.equal(maxLossFor("A+", null), 300, "no equity on file → the dollar floor");
+  assert.equal(OPTIONS_LADDER.Normal.pct, 0.10);
 });
 
-test("drawdown tiers at 5/10/15/20% under the high: 4.99% is tier 0; the halt is the larger of $300 and 20%", () => {
+test("drawdown tiers at 5/10/15/20% under the high: 4.99% is tier 0; the halt is the larger of $450 and 20%", () => {
   const at = (pct: number, high = 1500) => ddTier(high * (1 - pct / 100), high);
   assert.deepEqual([at(4.99).tier, at(4.99).mult], [0, 1]);
   assert.deepEqual([at(5).tier, at(5).mult], [1, 1]);
   assert.deepEqual([at(9.99).tier, at(10).tier, at(10).mult], [1, 2, 0.5]);
   assert.deepEqual([at(14.99).tier, at(15).tier, at(15).mult], [2, 3, 0.25]);
-  assert.deepEqual([at(19.99).tier, at(20).tier, at(20).mult, at(20).halt], [3, 4, 0, true]);
-  // $300 floor vs 20%: at a $1,000 high, 20% is $200 but the halt waits for $300 (tier 3 until then); at $3,000 it is $600.
-  assert.deepEqual([at(25, 1000).tier, at(25, 1000).halt, at(30, 1000).halt, at(30, 1000).tier], [3, false, true, 4]);
+  // $450 floor vs 20%: at a $1,500 high, 20% is only $300, so the FLOOR governs — 20% down is tier 3, not halted.
+  assert.deepEqual([at(19.99).tier, at(20).tier, at(20).mult, at(20).halt], [3, 3, 0.25, false]);
+  assert.deepEqual([at(30).halt, at(30).haltAtUsd, at(30).tier], [true, 450, 4], "$450 under a $1,500 high halts");
+  assert.deepEqual([at(40, 1000).halt, at(45, 1000).halt, at(45, 1000).tier], [false, true, 4], "at a $1,000 high the floor is still $450");
+  // Past $2,250 the 20% rule overtakes the floor and governs again.
   assert.deepEqual([at(15, 3000).halt, at(20, 3000).halt, at(20, 3000).haltAtUsd], [false, true, 600]);
   assert.equal(ddTier(1650, 1500).newHigh, 1650, "the mark only rises");
   assert.equal(ddTier(1650, 1500).tier, 0);
-  // The guardian's drawdownHalt delegates: $300 under a $1,500 high halts; 20% under a $1,650 high is $330.
-  assert.deepEqual(drawdownHalt(1199, 1500), { halt: true, newHigh: 1500 });
-  assert.deepEqual(drawdownHalt(1201, 1500), { halt: false, newHigh: 1500 });
-  assert.deepEqual(drawdownHalt(1319, 1650), { halt: true, newHigh: 1650 });
-  assert.deepEqual(drawdownHalt(1321, 1650), { halt: false, newHigh: 1650 });
+  // The guardian's drawdownHalt delegates: $450 under a $1,500 high halts (20% of that high is only $300, so the floor governs).
+  assert.deepEqual(drawdownHalt(1049, 1500), { halt: true, newHigh: 1500 });
+  assert.deepEqual(drawdownHalt(1051, 1500), { halt: false, newHigh: 1500 });
+  // At a $1,650 high, 20% is $330 — still under the $450 floor, so the floor governs there too.
+  assert.deepEqual(drawdownHalt(1199, 1650), { halt: true, newHigh: 1650 });
+  assert.deepEqual(drawdownHalt(1201, 1650), { halt: false, newHigh: 1650 });
 });
 
 test("clusters: SPY + QQQ + NVDA calls are one tech bet; NVDA call + F put are two; RIOT and MSTR share crypto-proxy", () => {
@@ -69,9 +73,11 @@ test("clusters: SPY + QQQ + NVDA calls are one tech bet; NVDA call + F put are t
   assert.equal(clusterRisk([], { symbol: "NVDA", kind: "long_call" }).refused, false);
 });
 
-test("reserve: everything at risk stays within 25% of equity; unknown equity refuses", () => {
-  assert.equal(reserveOk(375, 1500), true); assert.equal(reserveOk(375.01, 1500), false); assert.equal(reserveOk(100, null), false);
-  assert.equal(reserveRefusal(325, 150, 1500), "reserve: $325 already at risk + $150 would exceed 25% of $1,500");
+test("reserve: everything at risk stays within 35% of equity; unknown equity refuses", () => {
+  assert.equal(reserveOk(525, 1500), true); assert.equal(reserveOk(525.01, 1500), false); assert.equal(reserveOk(100, null), false);
+  assert.equal(reserveRefusal(450, 150, 1500), "reserve: $450 already at risk + $150 would exceed 35% of $1,500");
+  // Three Normal trades at the new rung fit; a fourth does not — the reserve, not the daily limit, is the real ceiling.
+  assert.equal(reserveRefusal(300, 150, 1500), null); assert.equal(reserveRefusal(450, 150, 1500) !== null, true);
   assert.equal(reserveRefusal(0, 150, 1500), null);
   assert.equal(reserveRefusal(0, 100, null), "reserve: account value unknown — cannot size against it");
 });

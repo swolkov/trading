@@ -28,12 +28,13 @@ test("exit rules: half the premium stops, full width exits, the last week times 
   assert.equal(exitDecision({ ...spread, direction: "credit" }, [], now).exit, false);
 });
 
-test("drawdown halt trips $300 under the high-water mark (20% once the high is past $1,500) and the mark only rises", () => {
+test("drawdown halt trips $450 under the high-water mark (20% once the high is past $2,250) and the mark only rises", () => {
   assert.deepEqual(drawdownHalt(1500, 1500), { halt: false, newHigh: 1500 });
   assert.deepEqual(drawdownHalt(1650, 1500), { halt: false, newHigh: 1650 });
-  assert.deepEqual(drawdownHalt(1199, 1500), { halt: true, newHigh: 1500 });
-  assert.deepEqual(drawdownHalt(1349, 1650), { halt: false, newHigh: 1650 });   // $301 under a $1,650 high: the halt there is 20% = $330
-  assert.deepEqual(drawdownHalt(1319, 1650), { halt: true, newHigh: 1650 });
+  assert.deepEqual(drawdownHalt(1049, 1500), { halt: true, newHigh: 1500 });   // $451 under a $1,500 high: 20% is only $300, so the $450 floor governs
+  assert.deepEqual(drawdownHalt(1201, 1650), { halt: false, newHigh: 1650 });  // $449 under a $1,650 high: still inside the floor
+  assert.deepEqual(drawdownHalt(1199, 1650), { halt: true, newHigh: 1650 });
+  assert.deepEqual(drawdownHalt(2399, 3000), { halt: true, newHigh: 3000 });   // past $2,250 the 20% rule overtakes the floor
   assert.equal(etDay(Date.parse("2026-09-14T03:30:00Z")), "2026-09-13");   // 23:30 ET the night before
 });
 

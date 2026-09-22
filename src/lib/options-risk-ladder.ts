@@ -10,10 +10,13 @@ import { directionOfKind, type Direction } from "./options-market-state";
 
 export type OptionsGrade = "Normal" | "Strong" | "A+";
 /** Max loss per trade by grade: the dollar floor for a small account, or the share of equity once it has grown. */
+// SIZE (Sep 22 2026, Spencer's call): raised one rung. At $1,500 the dollar floors and the percentages
+// agree, so these ARE the caps today — Normal $150, Strong $225, A+ $300. The reserve below is what
+// stops three of them being open at once; the drawdown halt is what stops a bad week.
 export const OPTIONS_LADDER: Record<OptionsGrade, { usd: number; pct: number }> = {
-  Normal: { usd: 100, pct: 0.067 },
-  Strong: { usd: 150, pct: 0.10 },
-  "A+": { usd: 225, pct: 0.15 },
+  Normal: { usd: 150, pct: 0.10 },
+  Strong: { usd: 225, pct: 0.15 },
+  "A+": { usd: 300, pct: 0.20 },
 };
 export const OPTIONS_LADDER_RULES = {
   strongSetups: ["20-session breakout", "20-session breakdown"],
@@ -22,9 +25,9 @@ export const OPTIONS_LADDER_RULES = {
   aPlusMinScore: 80,
   ddTierPcts: [5, 10, 15, 20],    // drawdown from the high-water mark, in %: tier 1 / 2 / 3 / 4
   ddTierMults: [1, 1, 0.5, 0.25, 0],
-  ddHaltFloorUsd: 300,            // the halt is never tighter than this many dollars under the high
+  ddHaltFloorUsd: 450,            // the halt is never tighter than this many dollars under the high (300 → 450 Sep 22 2026: at the bigger rungs $300 was two losers, which halted the desk on an ordinary week)
   ddHaltPct: 0.20,
-  reserveMaxFrac: 0.25,           // open max loss + the new trade's max loss ≤ this share of equity
+  reserveMaxFrac: 0.35,           // open max loss + the new trade's max loss ≤ this share of equity (0.25 → 0.35 Sep 22 2026, so the bigger rungs still leave room for three names)
   // SLOTS (Sep 20 2026, Spencer's call): the desk takes every name that clears the screen, up to `defaultSlots`
   // at once (AgentConfig options_live_slots can lower or raise it, never past maxSlots). The reserve rule above
   // is the real ceiling — at $1,500 that is $375 at risk, i.e. three Normal trades or two Strong — and the
@@ -68,7 +71,7 @@ export function ddTier(totalValue: number, high: number, rules = OPTIONS_LADDER_
   const halt = ddUsd >= haltAtUsd;
   let tier: 0 | 1 | 2 | 3 | 4 = halt ? 4 : 0;
   if (!halt) for (const [i, pct] of rules.ddTierPcts.entries()) if (ddPct >= pct) tier = Math.min(3, i + 1) as 1 | 2 | 3;
-  const labels = ["normal", "caution: 5% under the high", "half size: 10% under the high", "quarter size: 15% under the high", "halted: 20% (or $300) under the high"];
+  const labels = ["normal", "caution: 5% under the high", "half size: 10% under the high", "quarter size: 15% under the high", `halted: ${OPTIONS_LADDER_RULES.ddHaltPct * 100}% (or $${OPTIONS_LADDER_RULES.ddHaltFloorUsd}) under the high`];
   return { tier, mult: rules.ddTierMults[tier], label: labels[tier], ddPct: round2(ddPct), ddUsd: round2(ddUsd), halt, haltAtUsd: round2(haltAtUsd), newHigh };
 }
 

@@ -48,7 +48,7 @@ async function view() {
     armed: c.options_live_armed === "true",
     verified: c.options_live_integration_verified === "true",
     maxLossUsd: parseOptionsMaxLoss(c[OPTIONS_MAX_LOSS_KEY]),
-    ladder: { rungs: OPTIONS_LADDER, promoted, ceilingOnArm: ceilingFor(promoted), reserveMaxFrac: OPTIONS_LADDER_RULES.reserveMaxFrac, ddTierPcts: OPTIONS_LADDER_RULES.ddTierPcts, ddTierMults: OPTIONS_LADDER_RULES.ddTierMults, slotUnlockClosedTrades: OPTIONS_LADDER_RULES.slotUnlockClosedTrades },
+    ladder: { rungs: OPTIONS_LADDER, promoted, ceilingOnArm: ceilingFor(promoted), reserveMaxFrac: OPTIONS_LADDER_RULES.reserveMaxFrac, defaultSlots: OPTIONS_LADDER_RULES.defaultSlots, ddHaltFloorUsd: OPTIONS_LADDER_RULES.ddHaltFloorUsd, ddHaltPct: OPTIONS_LADDER_RULES.ddHaltPct, maxSlots: OPTIONS_LADDER_RULES.maxSlots, ddTierPcts: OPTIONS_LADDER_RULES.ddTierPcts, ddTierMults: OPTIONS_LADDER_RULES.ddTierMults, slotUnlockClosedTrades: OPTIONS_LADDER_RULES.slotUnlockClosedTrades },
     ddTier: parse(DD_TIER_KEY),
     feeReserveUsd: parseOptionsMaxLoss(c.options_live_verified_fee_reserve_usd),
     guardian: { at: guardianAt, fresh: guardianAge != null && guardianAge < 10 * 60_000 },

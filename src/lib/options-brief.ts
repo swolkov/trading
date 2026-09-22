@@ -100,7 +100,7 @@ export function buildOptionsBrief(ctx: BriefContext): OptionsBriefInput {
       { name: "chase", pass: !chase.vetoed, note: `${chase.reason} (signal-day bar; re-checked live at the tick)` },
       { name: "cluster", pass: !cluster.refused, note: cluster.reason ?? `no ${direction} bet in the same cluster` },
       { name: "ladder cap", pass: c.plannedLoss <= gradeCap, note: `${grade.grade} cap ${usd(gradeCap, 2)} vs ${usd(c.plannedLoss, 2)} planned loss (${grade.reasons[0]})` },
-      { name: "reserve", pass: reserve == null, note: reserve ?? `${usd(atRiskUsd)} at risk + ${usd(c.plannedLoss)} inside 25% of ${usd(equity)}` },
+      { name: "reserve", pass: reserve == null, note: reserve ?? `${usd(atRiskUsd)} at risk + ${usd(c.plannedLoss)} inside ${OPTIONS_LADDER_RULES.reserveMaxFrac * 100}% of ${usd(equity)}` },
       { name: "expiry window", pass: dte >= OPTIONS_DESK_RULES.minDte && dte <= OPTIONS_DESK_RULES.maxDte, note: `${dte.toFixed(1)} DTE` },
     ];
   };
