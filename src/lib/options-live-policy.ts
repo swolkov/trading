@@ -62,7 +62,7 @@ const fail = (reason: string): never => { throw new Error(`Options live refused:
  *  is stored as Postgres JSONB, which REORDERS keys; hashing the raw JSON.stringify meant every record failed its own
  *  consistency check the moment it was read back, and the desk's first real order (Sep 21 2026) jammed reconciliation
  *  for good. Tests run on in-memory stores, which is why they never saw it. */
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.keys(value as Record<string, unknown>).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
   return JSON.stringify(value);
