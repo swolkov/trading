@@ -117,7 +117,10 @@ async function readOpenPnl(accountId: number): Promise<{ openPnl: number | null;
   return { openPnl: liq != null && cash != null ? liq - cash : null, fields };
 }
 
+const REJECT_LOOKBACK_MS = 5 * 60_000;
+let lastRejected: CopilotOrder[] = [];   // filled by readOrders each time it runs (this poll's view)
 async function readOrders(accountId: number, state: Stored): Promise<CopilotOrder[]> {
+  lastRejected = [];
   const [orders, versions] = await Promise.all([
     get<RawOrder[]>("/order/list"),
     get<RawVersion[]>("/orderVersion/list"),
@@ -131,7 +134,8 @@ async function readOrders(accountId: number, state: Stored): Promise<CopilotOrde
   const out: CopilotOrder[] = [];
   for (const o of orders) {
     if (o.accountId && o.accountId !== accountId) continue;
-    if (!LIVE_STATUSES.has(o.ordStatus)) continue;
+    const rejected = o.ordStatus === "Rejected" && Date.now() - Date.parse(o.timestamp) < REJECT_LOOKBACK_MS;
+    if (!LIVE_STATUSES.has(o.ordStatus) && !rejected) continue;
     const v = latest.get(o.id);
     if (!v) continue;
     const symbol = await symbolOf(o.contractId);
@@ -142,7 +146,9 @@ async function readOrders(accountId: number, state: Stored): Promise<CopilotOrde
     const price = isStop ? v.stopPrice : isLimit ? v.price : undefined;
     if ((!isStop && !isLimit) || typeof price !== "number") continue;
     // A trailing stop's orderVersion keeps its STARTING price; the broker moves it server-side. Flagged, never presented as current.
-    out.push({ orderId: o.id, symbol, action, kind: isStop ? "stop" : "limit", price, qty: Number(v.orderQty) || 0, trailing: v.orderType.startsWith("Trailing") });
+    const order: CopilotOrder = { orderId: o.id, symbol, action, kind: isStop ? "stop" : "limit", price, qty: Number(v.orderQty) || 0, trailing: v.orderType.startsWith("Trailing") };
+    if (rejected) { if (isStop) lastRejected.push(order); continue; }
+    out.push(order);
   }
   return out;
 }
@@ -236,7 +242,7 @@ export async function copilotPoll(nowMs = Date.now(), readOrdersThisPoll = true)
     const records: Partial<Record<RoomSymbol, { label: string; n: number; netUsd: number; since: string }>> = {};
     for (const p of room) if (!state.trips[p.symbol]) { const r = await recordFor(p.symbol, nowMs).catch(() => null); if (r) records[p.symbol] = r; }
     const prices = { ...(await chartPrices(nowMs)), ...(openCount === 1 ? priceFromOpenPnl(room, pnl.openPnl) : {}) };
-    const { state: next, messages } = step(state, { nowMs, positions: room, orders: tracking ? orders : null, prices, fills, records });
+    const { state: next, messages } = step(state, { nowMs, positions: room, orders: tracking ? orders : null, prices, fills, records, rejectedStops: orders ? lastRejected : [] });
     // State first, then Slack: a failed save must not make the next poll say it all again (at most once > twice).
     const out: Stored = { ...next, accountId, lastPollMs: nowMs, lastOkMs: nowMs, polls: (state.polls ?? 0) + 1, snapshotFields: pnl.fields, auditError: state.auditError };
     await setKey(COPILOT_STATE_KEY, JSON.stringify(out));

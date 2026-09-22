@@ -29,6 +29,8 @@ export interface CopilotSnapshot {
   prices: Partial<Record<RoomSymbol, number>>;
   /** Fills since the previous poll — read only when a position's size changed. */
   fills: CopilotFill[];
+  /** Stop orders the broker REJECTED in the last few minutes (Sep 22: a buy stop placed under the market left 20 MNQ naked). */
+  rejectedStops?: CopilotOrder[];
   /** His own journal record for this market at this time of day — read only when a new position appears. */
   records?: Partial<Record<RoomSymbol, { label: string; n: number; netUsd: number; since: string }>>;
 }
@@ -56,6 +58,7 @@ export interface Trip {
   reduced: boolean;
   lastPrice: number | null;
   reentrySec: number | null;   // seconds since the previous exit, when it was inside REENTRY_MS
+  rejectedSeen?: number[];     // rejected stop order ids already announced
   record: { label: string; n: number; netUsd: number; since: string } | null;
 }
 export interface CopilotState { trips: Partial<Record<RoomSymbol, Trip>>; lastCloseMs?: number }
@@ -234,6 +237,16 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
           t.stop = seen; t.pendingStop = null;
         }
       }
+    }
+
+    // ---- a stop the broker rejected: said at once, loudly, with the reason he can act on ----
+    for (const o of snap.rejectedStops ?? []) {
+      if (o.symbol !== sym || o.action !== (t.side === 1 ? "Sell" : "Buy") || (t.rejectedSeen ?? []).includes(o.orderId)) continue;
+      t.rejectedSeen = [...(t.rejectedSeen ?? []), o.orderId];
+      const has = snap.orders ? protectiveStop(snap.orders, sym, t.side) : null;
+      const where = t.side === 1 ? "BELOW" : "ABOVE";
+      lines.push(`🚨 ${sym}: Tradovate REJECTED your stop (${o.action} Stop ${px(sym, o.price)} ×${o.qty}).${has ? ` Another stop is working at ${px(sym, has.px)}.` : ` You are ${sideWord(t.side)} ${t.qty} ${sym} with NO STOP.`} A ${t.side === 1 ? "sell" : "buy"} stop must sit ${where} the market when placed.`);
+      if (!has) t.noStopWarned = true;
     }
 
     // ---- the entry card: once the stop is known, or after the grace period without one ----
