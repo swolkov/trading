@@ -7,7 +7,7 @@
 import { prisma } from "@/lib/db";
 import { sendNotification } from "@/lib/notifications";
 import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
-import { getTradovateAccountSummary, getTradovateFills, getTradovatePositions, resolveContractSymbol } from "@/lib/tradovate";
+import { getTradovateAccountSummary, getTradovateFills, getTradovatePositions, publishSharedToken, resolveContractSymbol } from "@/lib/tradovate";
 import { macroCalendar } from "@/lib/event-calendar";
 import { foldJournal, journalView } from "@/lib/trading-room-journal-store";
 import { dayTally } from "@/lib/trading-room-journal";
@@ -127,6 +127,8 @@ export async function refreshLive(nowMs = Date.now()): Promise<LiveSnapshot> {
     const open = positions.filter((p) => p.netPos !== 0).map((p) => ({ contract: p.contractName, netPos: p.netPos, netPrice: p.netPrice }));
     const snap: LiveSnapshot = { at, ok: true, balance: summary.balance, netLiq: summary.netLiq, realizedPnl: summary.realizedPnl, unrealizedPnl: summary.unrealizedPnl, marginUsed: summary.marginUsed, positions: open, fillsToday: stored };
     await setKey(LIVE_KEY, JSON.stringify(snap));
+    // The co-pilot never logs in — it reads with this session. Re-publish it if the shared row went missing.
+    await publishSharedToken("live").catch(() => false);
     return snap;
   } catch (e) {
     const prev = parseJson<LiveSnapshot | null>(await cfg(LIVE_KEY), null);

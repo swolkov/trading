@@ -62,8 +62,15 @@ async function authenticate(modeOverride?: TradingMode): Promise<string> {
             if (savedAcctId) _accountId = savedAcctId;
             return token;
           }
-          // Token rejected — clear stale shared token
-          await prisma.agentConfig.delete({ where: { key: shareKey } }).catch(() => {});
+          // Only a 401 means the token is dead. A 429 or 5xx on /me says nothing about the token, and deleting the
+          // shared row then forces a fresh LOGIN somewhere (5 per hour, per user) — keep it and use it; a dead token
+          // still surfaces as a 401 on the real call, which re-authenticates in tvFetch.
+          if (testRes.status === 401) await prisma.agentConfig.delete({ where: { key: shareKey } }).catch(() => {});
+          else {
+            _tokenCache[mode] = { token, expires: expMs, accountId: savedAcctId || 0 };
+            if (savedAcctId) _accountId = savedAcctId;
+            return token;
+          }
         } catch {
           // Network error — try using the token anyway
           _tokenCache[mode] = { token, expires: expMs, accountId: savedAcctId || 0 };
@@ -170,6 +177,37 @@ async function authBackoffInForce(mode: TradingMode): Promise<{ until: string; m
     const until = Date.parse(parsed.until ?? "");
     return Number.isFinite(until) && until > Date.now() ? { until: parsed.until!, message: parsed.message ?? "" } : null;
   } catch { return null; }
+}
+
+/**
+ * Re-publish this instance's live session to the shared row when the row is missing or holds another token.
+ * No network call, never a login. The trading room calls it after every good read so the co-pilot (which
+ * refuses to log in) always has the session to read with.
+ */
+export async function publishSharedToken(mode: TradingMode): Promise<boolean> {
+  const cached = _tokenCache[mode];
+  if (!cached?.token || cached.expires <= Date.now() + 300_000) return false;   // authenticate() skips rows under 5 min
+  try {
+    const { prisma } = await import("./db");
+    const shareKey = mode === "live" ? "tradovate_live_shared_token" : "tradovate_demo_shared_token";
+    const row = await prisma.agentConfig.findUnique({ where: { key: shareKey } });
+    let current: { token?: string; expires?: string; accountId?: number } = {};
+    try { current = row?.value ? JSON.parse(row.value) : {}; } catch { /* rewrite it */ }
+    const sameToken = current.token === cached.token;
+    // Never replace a NEWER session another instance just published with this older one.
+    if (!sameToken && current.token && Date.parse(current.expires ?? "") >= cached.expires) return false;
+    if (sameToken && (current.accountId || !cached.accountId)) return false;
+    const value = JSON.stringify({ token: cached.token, expires: new Date(cached.expires).toISOString(), accountId: cached.accountId || current.accountId || 0, by: "room" });
+    // One conditional write, so two instances can't interleave an older session over a newer one.
+    const rows = await prisma.$queryRawUnsafe<{ key: string }[]>(
+      `INSERT INTO "AgentConfig" (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+       WHERE ("AgentConfig".value::jsonb ->> 'token') = $3 OR ("AgentConfig".value::jsonb ->> 'expires')::timestamptz < $4::timestamptz
+       RETURNING key`,
+      shareKey, value, cached.token, new Date(cached.expires).toISOString(),
+    );
+    return rows.length > 0;
+  } catch { return false; }
 }
 
 /** Record the account id beside the shared token so later instances skip /account/list too. */
