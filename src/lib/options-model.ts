@@ -19,7 +19,9 @@
 // position per group may be open at a time: holding WULF + IREN + APLD is one bet in
 // triplicate, which is the exact mistake the crypto book made with correlated alt shorts in
 // early September.
-export type CorrGroup = "ai-datacenter" | "semis" | "megacap" | "fintech" | "consumer" | "index" | "speculative";
+// "materials" and "energy" added Sep 22 2026 with CLF and PBR: without their own groups they fall back to
+// "speculative" (clusterOf) and collapse into one bet with every other speculative name, blocking entries.
+export type CorrGroup = "ai-datacenter" | "semis" | "megacap" | "fintech" | "consumer" | "index" | "speculative" | "materials" | "energy";
 
 export interface OptionName { symbol: string; group: CorrGroup }
 
@@ -59,6 +61,11 @@ export const OPTIONS_UNIVERSE: readonly OptionName[] = [
   // High-vol speculative — one slot at most, ever
   { symbol: "RKLB", group: "speculative" }, { symbol: "IONQ", group: "speculative" },
   { symbol: "SOUN", group: "speculative" }, { symbol: "ACHR", group: "speculative" },
+  // AFFORDABLE CORE II (Sep 22 2026) — each one verified against live Robinhood chains on the desk's own
+  // gates (open interest ≥ 500, volume ≥ 100, quoted spread ≤ 10% of mid) before being listed here.
+  { symbol: "GME", group: "speculative" }, { symbol: "CLF", group: "materials" },
+  { symbol: "PBR", group: "energy" }, { symbol: "CHWY", group: "consumer" },
+  { symbol: "LYFT", group: "consumer" }, { symbol: "SMCI", group: "ai-datacenter" },
 ];
 export const OPTIONS_SYMBOLS: readonly string[] = OPTIONS_UNIVERSE.map((n) => n.symbol);
 export function groupOf(symbol: string): CorrGroup | null {

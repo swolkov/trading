@@ -75,7 +75,7 @@ export function ddTier(totalValue: number, high: number, rules = OPTIONS_LADDER_
   return { tier, mult: rules.ddTierMults[tier], label: labels[tier], ddPct: round2(ddPct), ddUsd: round2(ddUsd), halt, haltAtUsd: round2(haltAtUsd), newHigh };
 }
 
-export type OptionsCluster = "ai-datacenter" | "semis" | "megacap" | "fintech" | "consumer" | "index" | "speculative" | "crypto-proxy";
+export type OptionsCluster = "ai-datacenter" | "semis" | "megacap" | "fintech" | "consumer" | "index" | "speculative" | "crypto-proxy" | "materials" | "energy";
 /** Names the paper universe never carried, or carried under a different reading, grouped for the live desk. */
 const LOCAL_CLUSTERS: Record<string, OptionsCluster> = {
   RIOT: "crypto-proxy", MARA: "crypto-proxy", COIN: "crypto-proxy", MSTR: "crypto-proxy",

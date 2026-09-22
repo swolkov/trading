@@ -12,14 +12,29 @@ export const OPTIONS_RESEARCH_KEY = "options_desk_research_v1";
 //   A — the six index/mega names (the desk's regime read) + the AFFORDABLE CORE (Sep 14 2026): at a
 //       $100 max loss a single contract on a $300+ stock never fits, so $11–$30 names with deep,
 //       tight option markets are where the live desk can actually buy delta. 18 names × 20 = 360.
-//   B — ten large caps (Sep 15 2026): at their prices only a $2.5–5-wide debit spread fits the cap;
-//       the screen enforces that by price, nothing special-cases them. Discovery names (≤6 from the
-//       broker scanners) ride in this slice only. (10 + 6) × 20 = 320.
+//   B — REPLACED Sep 22 2026. It used to hold ten large caps on the theory that a narrow debit spread
+//       would fit the cap. Measured at the close on Sep 22 they are $167–$738 a share (TSLA 379, META 737,
+//       AMD 624, AAPL 340, MSFT 501, AMZN 255, GOOGL 351, AVGO 365, NVDA 229, PLTR 185, COIN 201, MSTR 167)
+//       and not one produced a structure under the cap on a single tick that day — the desk logged
+//       "no long call/put or debit spread fits the cap" on twelve consecutive entry ticks while burning
+//       research budget on them. They are gone. In their place, six names screened against LIVE Robinhood
+//       chains on this desk's own gates (OI ≥ 500, volume ≥ 100, spread ≤ 10% of mid) — the measured
+//       numbers are in the table below, taken at the 2026-09-22 close:
+//         GME  24C Nov20 $220  OI    605 · vol 1088 · spread 4.7%
+//         CLF  13C Nov20 $121  OI  3,066 · vol  309 · spread 7.7%
+//         PBR  21C Nov20 $166  OI 144,791 · vol 126 · spread 7.5%
+//         CHWY 20C Oct16  $82  OI  1,261 · vol  170 · spread 2.5%
+//         LYFT 15C Oct16  $70  OI  3,316 · vol 4,387 · spread 9.0%
+//         SMCI 42C Nov20 $540  OI  1,695 · vol  515 · spread 1.9%  ← too dear as a single leg; spreads fit
+//       REJECTED on the same measurement, and deliberately NOT listed: U (OI 422, vol 24), RBLX (vol 33),
+//       M (spread 28%), HBAN (spread 46%, vol 2), VALE (OI 384, vol 65). A name earns its place by passing
+//       the gates, not by being cheap. Discovery names (≤6 from the broker scanners) ride in this slice
+//       only. (6 + 6) × 20 = 240 contracts — comfortably inside the per-run limit.
 // The screen still applies every quality gate; a name on this list earns nothing by being here.
 // For D4's cluster map: RIOT, MARA, COIN and MSTR are one `crypto-proxy` bet, not four.
 export const OPTIONS_WATCHLIST_SLICES = {
   A: ["SPY", "QQQ", "IWM", "AAPL", "AMD", "NVDA", "F", "AAL", "T", "PFE", "CCL", "NCLH", "WBD", "DKNG", "RIOT", "SOFI", "MARA", "RIVN"],
-  B: ["TSLA", "MSFT", "AMZN", "META", "GOOGL", "AVGO", "NFLX", "PLTR", "COIN", "MSTR"],
+  B: ["GME", "CLF", "PBR", "CHWY", "LYFT", "SMCI"],
 } as const satisfies Record<string, readonly string[]>;
 export type ResearchSlice = keyof typeof OPTIONS_WATCHLIST_SLICES;
 export const OPTIONS_WATCHLIST: string[] = [...OPTIONS_WATCHLIST_SLICES.A, ...OPTIONS_WATCHLIST_SLICES.B];
