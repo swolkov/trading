@@ -212,13 +212,15 @@ setupCalc(string s, int orMins, float endH) =>
         xS := na
         prevS := na
         nSig := 0
-    else if inS and not oDone
+    bool firstPost = false
+    if not st and inS and not oDone
         if time - oStart < orMins * 60000
             oH := math.max(oH, high)
             oL := math.min(oL, low)
         else
             oDone := true
-    if inS and oDone and not st
+            firstPost := true   // the first bar after the range is only the "prior bar" - as the study (its loop starts at k = 1)
+    if inS and oDone and not st and not firstPost
         closeH = hour(time_close, "America/New_York") + minute(time_close, "America/New_York") / 60.0
         canEnter = closeH < endH - 1.0 and nSig < 2
         bool firedL = false
@@ -278,7 +280,9 @@ setupEndH = isGold ? 13.5 : 16.0
 setupPrev(string s, int orMins, float endH) =>
     [a, b, c, d, e, f, g] = setupCalc(s, orMins, endH)
     [a[1], b[1], c[1], d[1], e[1], f[1], g[1]]
-[suT, suSide, suPx, suStop, suOrH, suOrL, suVw] = request.security(syminfo.tickerid, "5", setupPrev(sess, orMin, setupEndH), lookahead = barmerge.lookahead_on)
+// Extended session on purpose: VWAP anchored at the 18:00 ET Globex open (the study's), whatever the chart's RTH/ETH setting.
+setupTicker = ticker.new(syminfo.prefix, syminfo.ticker, session.extended)
+[suT, suSide, suPx, suStop, suOrH, suOrL, suVw] = request.security(setupTicker, "5", setupPrev(sess, orMin, setupEndH), lookahead = barmerge.lookahead_on)
 newSetup = not na(suT) and suSide != 0 and (na(suT[1]) or suT != suT[1])
 plotshape(newSetup and suSide == 1, "Higher low (setup)", shape.triangleup, location.belowbar, color.new(color.teal, 0), size = size.tiny)
 plotshape(newSetup and suSide == -1, "Lower high (setup)", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)

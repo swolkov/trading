@@ -189,9 +189,6 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
   // The journal: fills → round trips, stamped and scored. Its failure never blocks the card.
   try { const j = await foldJournal(nowMs); notes.push(`journal: ${j.trips} trips (${j.open} open) · ${j.updated} written`); }
   catch (e) { notes.push(`journal failed: ${String(e).slice(0, 160)}`); }
-  // The setup feed: score the chart's setups on real bars, mark the ones he took, and the day's recap after the close.
-  try { const s = await resolveSetups(nowMs); if (s.resolved || s.recap) notes.push(`setups: ${s.resolved} scored${s.recap ? " · recap posted" : ""}`); }
-  catch (e) { notes.push(`setups failed: ${String(e).slice(0, 160)}`); }
   const settings = parseSettings(await cfg(SETTINGS_KEY));
   // The morning card: once per weekday, at or after CARD_POST_ET, before the RTH open. And the SUNDAY card at 17:40 ET,
   // twenty minutes before the week reopens: the same levels (Friday's close is the prior day), with the reopen's own
@@ -261,6 +258,9 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
     state.flattenWarnDay = now.dayKey;
     notes.push("flatten warning");
   }
+  // The setup feed (last, so a slow Yahoo can never delay the card or the alarms): score the chart's setups on real bars, mark the ones he took, and the day's recap after the close.
+  try { const s = await resolveSetups(nowMs); if (s.resolved || s.recap) notes.push(`setups: ${s.resolved} scored${s.recap ? " · recap posted" : ""}`); }
+  catch (e) { notes.push(`setups failed: ${String(e).slice(0, 160)}`); }
   state.lastTickAt = new Date(nowMs).toISOString();
   await setKey(STATE_KEY, JSON.stringify(state));
   return { ok: !!card && live.ok, notes };

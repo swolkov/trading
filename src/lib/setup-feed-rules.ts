@@ -4,7 +4,7 @@
 // break-even before costs and negative after (scripts/pullback-study.ts, 0 of 12 cells survive). So every setup is
 // SCORED — what a plain 2R bracket on it did, and whether he took it and what he made — so his read on top of it is
 // measured, not assumed. Pure; unit-tested.
-import { INSTRUMENTS, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
+import { INSTRUMENTS, etDayStartMs, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
 
 export const SETUP_CONTRACTS = 20;           // his minimum
 export const SETUP_FEE_RT = 2.06;            // measured on his account, Sep 18
@@ -63,7 +63,7 @@ export function setupText(s: Setup): string {
   ].join("\n");
 }
 
-export interface Outcome { status: "open" | "done" | "no-data"; r?: number; usd?: number; how?: "target" | "stop" | "flat"; exitAt?: string }
+export interface Outcome { status: "open" | "done" | "no-data" | "skipped"; r?: number; usd?: number; how?: "target" | "stop" | "flat"; exitAt?: string }
 
 /**
  * What a plain 2R bracket did on this setup, on 1-minute bars: enter at the open of the first minute after the
@@ -80,7 +80,7 @@ export function resolveOutcome(s: Setup, bars: Bar[], nowMs: number): Outcome {
   if (!entryBar || entryBar.t - closeMs > 10 * 60_000) return nowMs - closeMs > 3 * 3_600_000 ? { status: "no-data" } : { status: "open" };
   const fill = entryBar.o + s.side * spec.tick;
   const riskPts = (fill - s.stop) * s.side;
-  if (!(riskPts > 0)) return { status: "done", r: -1, usd: -(SETUP_FEE_RT * SETUP_CONTRACTS), how: "stop", exitAt: new Date(entryBar.t).toISOString() };
+  if (!(riskPts > 0)) return { status: "skipped" };   // opened past the stop — the study takes no trade here
   const tgt = fill + 2 * s.side * riskPts;
   const done = (px: number, how: Outcome["how"], t: number): Outcome => {
     const usdNet = (px - fill) * s.side * spec.pointValue * SETUP_CONTRACTS - SETUP_FEE_RT * SETUP_CONTRACTS;
@@ -95,9 +95,10 @@ export function resolveOutcome(s: Setup, bars: Bar[], nowMs: number): Outcome {
     if (s.side === 1 ? b.h > tgt : b.l < tgt) return done(tgt, "target", b.t);
     last = b;
   }
-  // Bars end before the trade did: decided only once the session is over.
-  const sessionOver = etParts(nowMs).dayKey !== dayKey || etParts(nowMs).hourFrac >= spec.rthClose;
-  return sessionOver && last ? done(last.c - s.side * spec.tick, "flat", last.t) : { status: "open" };
+  // Bars end before the trade did. Yahoo runs ~10 minutes behind, so "flat" is decided only once the flat minute's bar
+  // exists (handled above) or 30 minutes after the session's close — never on the lagged tail of the last few minutes.
+  const flatMs = etDayStartMs(dayKey, spec.rthClose);
+  return nowMs >= flatMs + 30 * 60_000 && last ? done(last.c - s.side * spec.tick, "flat", last.t) : { status: "open" };
 }
 
 export interface ScoredSetup { symbol: RoomSymbol; side: 1 | -1; r: number | null; usd: number | null; taken: boolean; hisUsd: number | null }

@@ -53,11 +53,21 @@ test("outcome: a target touched but not traded through does not fill", () => {
   assert.equal(o.status, "open");
 });
 
-test("outcome: still running mid-session is open; after the session it goes flat at the last bar", () => {
+test("outcome: still running is open — including right after the close while Yahoo's tail lags; flat 30 min after the close", () => {
   const b = bars([[7835.25, 7837, 7834, 7836], [7836, 7838, 7835, 7837]]);
   assert.equal(resolveOutcome(setup(), b, BAR + 30 * 60_000).status, "open");
-  const after = resolveOutcome(setup(), b, Date.parse("2026-09-23T20:30:00Z"));
-  assert.equal(after.how, "flat");
+  assert.equal(resolveOutcome(setup(), b, Date.parse("2026-09-23T20:10:00Z")).status, "open");   // 16:10 ET: lagged tail, wait
+  assert.equal(resolveOutcome(setup(), b, Date.parse("2026-09-23T20:31:00Z")).how, "flat");       // 16:31 ET
+});
+
+test("outcome: the flat minute's bar decides it at once", () => {
+  const b = bars([[7835.25, 7837, 7834, 7836]]).concat([{ t: Date.parse("2026-09-23T19:55:00Z"), o: 7836, h: 7837, l: 7835, c: 7836.5, v: 1 }]);
+  const o = resolveOutcome(setup(), b, Date.parse("2026-09-23T20:05:00Z"));
+  assert.equal(o.how, "flat");
+});
+
+test("outcome: opened past the stop is skipped, not scored", () => {
+  assert.equal(resolveOutcome(setup(), bars([[7831, 7832, 7830, 7831]]), BAR + 60 * 60_000).status, "skipped");
 });
 
 test("outcome: no bars at all is 'open' early and 'no-data' after 3 hours", () => {
