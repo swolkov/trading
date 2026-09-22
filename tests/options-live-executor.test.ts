@@ -6,6 +6,7 @@ import {
   type LiveContract, type OptionOrderParams, type OwnedOptionsPosition,
 } from "../src/lib/options-live-policy";
 import { executeOptionsIntent, reconcileOptionsIntent, type OptionsExecutorDependencies, type OptionsIntentRecord } from "../src/lib/options-live-executor";
+import { assertDurableOptionsIntent } from "../src/lib/options-live-store";
 
 const NOW = Date.parse("2026-09-14T15:00:00Z");
 const REF = "12345678-1234-4234-8234-123456789abc";
@@ -373,3 +374,25 @@ test("REGRESSION (Sep 21 2026): the request fingerprint survives a JSONB round t
   assert.notEqual(optionsRequestFingerprint({ ...params, legs: [params.legs[1], params.legs[0]] }), optionsRequestFingerprint(params), "leg order is part of the order");
 });
 
+test("REGRESSION (Sep 22 2026): the durable-identity check survives a JSONB round trip — the save right after placement must not throw", () => {
+  // The desk's second real entry (MARA, 09:35 ET) placed and FILLED, then threw "Durable identity or fill evidence cannot be
+  // overwritten" while saving the accepted order: `prior` came back from JSONB with its keys reordered, the in-memory record did
+  // not, and the raw JSON.stringify comparison differed. The entry read back "unknown", paged, skipped the thesis stash (so the
+  // invalidation exit was never armed) and only recovered on the next guard tick. Identity must still be enforced.
+  const refId = "c87329b4-3931-4c92-b17f-872d471dce3e";
+  const intent: OptionsLiveIntent = { refId, action: "open", kind: "long_call", quantity: 1, limitPrice: 0.88, legs: [{ optionId: "a", side: "buy" }] };
+  const canonicalOrder = { account_number: OPTIONS_LIVE_ACCOUNT, legs: [{ option_id: "a", side: "buy", position_effect: "open", ratio_quantity: 1 }],
+    quantity: "1", direction: "debit", type: "limit", price: "0.88", time_in_force: "gfd", market_hours: "regular_hours" } as unknown as OptionOrderParams;
+  const rec = (over: Partial<OptionsIntentRecord> = {}): OptionsIntentRecord => ({ refId, accountNumber: OPTIONS_LIVE_ACCOUNT, action: "open",
+    fingerprint: optionsRequestFingerprint(canonicalOrder), state: "submitting", intent, canonicalOrder, createdAtMs: 1, ...over } as OptionsIntentRecord);
+  // What Postgres hands back: same data, keys in a different order, at every depth.
+  const reorder = (v: unknown): unknown => Array.isArray(v) ? v.map(reorder)
+    : v && typeof v === "object" ? Object.fromEntries(Object.keys(v as Record<string, unknown>).reverse().map((k) => [k, reorder((v as Record<string, unknown>)[k])]))
+    : v;
+  const fromDb = { ...rec(), intent: reorder(intent) as OptionsLiveIntent, canonicalOrder: reorder(canonicalOrder) as OptionOrderParams };
+  assert.doesNotThrow(() => assertDurableOptionsIntent(rec({ state: "accepted" }), fromDb), "same intent and order, different key order");
+  assert.doesNotThrow(() => assertDurableOptionsIntent({ ...fromDb, state: "accepted" }, fromDb), "and the reconcile path, both sides from the database");
+  // Identity is still enforced: a changed limit or leg is a different order.
+  assert.throws(() => assertDurableOptionsIntent(rec({ intent: { ...intent, limitPrice: 0.99 } }), fromDb), /Durable identity|canonical order/);
+  assert.throws(() => assertDurableOptionsIntent(rec({ intent: { ...intent, legs: [{ optionId: "b", side: "buy" }] } }), fromDb), /Durable identity|canonical order/);
+});

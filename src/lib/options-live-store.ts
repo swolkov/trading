@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, type PoolClient } from "pg";
-import { OPTIONS_LIVE_ACCOUNT, optionsRequestFingerprint, type OwnedOptionsPosition } from "./options-live-policy";
+import { OPTIONS_LIVE_ACCOUNT, canonicalJson, optionsRequestFingerprint, type OwnedOptionsPosition } from "./options-live-policy";
 import type { OptionsIntentRecord, OptionsLiveStore } from "./options-live-executor";
 // Session advisory lock + AUTOCOMMITTED reservations. A broker acceptance must never
 // be followed by rolling back the only durable record of its submission.
@@ -58,7 +58,7 @@ export function assertDurableOptionsIntent(record:OptionsIntentRecord,prior:Opti
     ||p.quantity!==String(i.quantity)||p.price!==i.limitPrice.toFixed(2)||p.legs.length!==i.legs.length
     ||p.legs.some((leg,n)=>leg.option_id!==i.legs[n].optionId||leg.side!==i.legs[n].side||leg.position_effect!==i.action||leg.ratio_quantity!==1))throw Error("Complete consistent canonical order required for recovery");
   if(prior&&(prior.fingerprint!==record.fingerprint||prior.action!==record.action||prior.positionId!==record.positionId
-    ||JSON.stringify(prior.intent)!==JSON.stringify(record.intent)
+    ||canonicalJson(prior.intent)!==canonicalJson(record.intent)   // prior comes from JSONB (keys reordered); the in-memory record does not — compare canonically or every first save after placement throws
     ||prior.order&&record.order?.id!==prior.order.id
     ||prior.state==="settled"&&record.state!=="settled"
     ||(record.maxFilledQuantity??0)<(prior.maxFilledQuantity??0)))throw Error("Durable identity or fill evidence cannot be overwritten");
