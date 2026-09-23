@@ -7,6 +7,7 @@ import { Chip } from "@/components/ui/chip";
 import { Empty, Note, Panel, PanelBody, PanelHeader, Stat } from "@/components/ui/panel";
 import { hold, pnl0, tone, when } from "@/lib/format";
 import type { ReplayView } from "@/lib/trading-room-replay";
+import { execVerb, pnlAt, usd0 } from "@/lib/trading-room-replay-rules";
 
 // THE REPLAY PANEL: one round trip on its own 1-minute chart — his fills as markers, the level set as it stood
 // at entry as dashed lines, entry/exit/stop as solid lines. Opens under the journal row that was clicked.
@@ -26,11 +27,12 @@ export function ReplayPanel({ id, onClose }: { id: string; onClose: () => void }
               <Stat label="Entry → exit" value={`${data.trip.entryPx} → ${Math.round(data.trip.exitPx * 100) / 100}`} sub={hold((Date.parse(data.trip.exitTs) - Date.parse(data.trip.entryTs)) / 60_000)} />
               <Stat label="Stop seen" value={data.trip.stopPx != null ? String(data.trip.stopPx) : "none"} sub={data.trip.riskUsd != null ? `risk $${Math.round(data.trip.riskUsd)} ${data.trip.riskSource === "stop" ? "at your stop" : "by proxy (2× 5m ATR)"}` : undefined} />
               <Stat label="Best / worst" value={`${data.trip.mfeR != null ? `+${data.trip.mfeR.toFixed(2)}R` : "—"} / ${data.trip.maeR != null ? `−${data.trip.maeR.toFixed(2)}R` : "—"}`} sub="while open" />
-              <Stat label="Fills" value={String(data.fills.length)} sub={data.fills.map((f) => `${f.action === "Buy" ? "B" : "S"}${f.qty}@${f.price}`).join(" · ")} />
+              <Stat label="Executions" value={String(data.executions.length)} sub={data.executions.map((e) => `${e.action === "Buy" ? "buy" : "sell"} ${e.qty} @ ${e.price}`).join(" · ")} />
               <Stat label="Levels" value={String(data.levels.length)} sub={data.levelsAt ? `as they stood at entry` : "none"} />
             </div>
             {data.bars.length ? <ReplayPlayer view={data} /> : <Empty>{data.note ?? "No bars."}</Empty>}
             {data.bars.length > 0 && data.note && <Note className="mt-2">{data.note}</Note>}
+            <ExecutionTable view={data} />
             <div className="mt-2 flex flex-wrap gap-1.5">
               <Chip tone="green">▲ buy fill</Chip><Chip tone="red">▼ sell fill</Chip><Chip tone="grey">dashed = level at entry</Chip><Chip tone="amber">solid = entry · exit · stop</Chip>
             </div>
@@ -38,6 +40,50 @@ export function ReplayPanel({ id, onClose }: { id: string; onClose: () => void }
         )}
       </PanelBody>
     </Panel>
+  );
+}
+
+// WHERE YOU STAND at the scrubber: what is on, its open P&L at the last shown close, and what has been banked.
+function LiveReadout({ view, untilMs, mark }: { view: ReplayView; untilMs: number; mark: number }) {
+  const now = pnlAt(view.trip.side, view.executions, view.pointValue, untilMs, mark);
+  const started = view.executions.some((e) => Date.parse(e.ts) < untilMs);
+  if (!started) return <span className="num text-muted-foreground">· before your entry</span>;
+  const total = now.openUsd + now.bankedUsd;
+  return (
+    <span className="num">
+      · {now.pos > 0 ? <>{view.trip.side} {now.pos} · open <span className={tone(now.openUsd)}>{usd0(now.openUsd)}</span>{now.bankedUsd !== 0 && <> · banked <span className={tone(now.bankedUsd)}>{usd0(now.bankedUsd)}</span></>}</> : <>flat · banked <span className={tone(now.bankedUsd)}>{usd0(now.bankedUsd)}</span></>}
+      {now.pos > 0 && now.bankedUsd !== 0 && <> · total <span className={tone(total)}>{usd0(total)}</span></>}
+    </span>
+  );
+}
+
+// EVERY EXECUTION: time, buy or sell, size, price, what it did, and the dollars an exit banked (before fees).
+function ExecutionTable({ view }: { view: ReplayView }) {
+  if (!view.executions.length) return null;
+  const banked = view.executions.reduce((a, e) => a + (e.realizedUsd ?? 0), 0);
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead><tr className="text-left text-muted-foreground"><th className="py-1 pr-3 font-normal">Time (ET)</th><th className="py-1 pr-3 font-normal">Order</th><th className="py-1 pr-3 text-right font-normal">Price</th><th className="py-1 pr-3 font-normal">What it did</th><th className="py-1 text-right font-normal">P&amp;L</th></tr></thead>
+        <tbody>
+          {view.executions.map((e, i) => (
+            <tr key={i} className="border-t border-border/50">
+              <td className="num py-1 pr-3">{et(Date.parse(e.ts))}</td>
+              <td className={`py-1 pr-3 font-semibold ${e.action === "Buy" ? "text-up" : "text-down"}`}>{e.action === "Buy" ? "BUY" : "SELL"} {e.qty}</td>
+              <td className="num py-1 pr-3 text-right">{e.price}</td>
+              <td className="py-1 pr-3 text-muted-foreground">{execVerb(view.trip.side, e)}</td>
+              <td className={`num py-1 text-right ${e.realizedUsd == null ? "text-muted-foreground" : tone(e.realizedUsd)}`}>{e.realizedUsd == null ? "—" : usd0(e.realizedUsd)}</td>
+            </tr>
+          ))}
+          {!view.trip.open && (
+            <tr className="border-t border-border">
+              <td colSpan={4} className="py-1 pr-3 text-muted-foreground">Banked {usd0(banked)} before fees · fees {usd0(-view.trip.feesUsd)} · net</td>
+              <td className={`num py-1 text-right font-semibold ${tone(view.trip.netUsd)}`}>{usd0(view.trip.netUsd)}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -60,6 +106,7 @@ function ReplayPlayer({ view }: { view: ReplayView }) {
         <button onClick={() => { setPlaying(false); setUpto(n); }} className="h-7 rounded-md border border-border px-3 text-muted-foreground hover:text-foreground">Show all</button>
         <input type="range" min={1} max={n} value={Math.min(upto, n)} onChange={(e) => { setPlaying(false); setUpto(Number(e.target.value)); }} className="w-56" />
         <span className="num text-muted-foreground">{et(shownUntil)} ET · bar {Math.min(upto, n)} of {n}</span>
+        <LiveReadout view={view} untilMs={shownUntil} mark={view.bars[Math.max(0, Math.min(upto, n) - 1)].c} />
       </div>
       <ReplayChart view={view} upto={Math.min(upto, n)} />
     </div>
@@ -100,14 +147,16 @@ function ReplayChart({ view, upto }: { view: ReplayView; upto: number }) {
     series.setData(view.bars.map((b) => ({ time: Math.floor(b.t / 1000) as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })));
     seriesRef.current = series;
     // Fills as markers: buys below the bar in green, sells above in red — with size and price.
-    const markers: SeriesMarker<Time>[] = view.fills.map((f) => ({
+    const markers: SeriesMarker<Time>[] = view.executions.map((f) => ({
       time: Math.floor(Date.parse(f.ts) / 1000) as UTCTimestamp, position: f.action === "Buy" ? "belowBar" : "aboveBar", shape: f.action === "Buy" ? "arrowUp" : "arrowDown",
-      color: f.action === "Buy" ? "#4ade80" : "#f87171", text: `${f.action === "Buy" ? "B" : "S"} ${f.qty} @ ${f.price}`,
+      color: f.action === "Buy" ? "#4ade80" : "#f87171",
+      text: `${f.action === "Buy" ? "BUY" : "SELL"} ${f.qty} @ ${f.price}${f.realizedUsd != null ? ` ${usd0(f.realizedUsd)}` : ""}`,
     }));
     allMarkers.current = markers.sort((a, b) => Number(a.time) - Number(b.time));
     markersRef.current = createSeriesMarkers(series, allMarkers.current);
     // Fix the visible range and the price scale to the whole trade so playback does not jump around.
-    const lo = Math.min(...view.bars.map((b) => b.l), view.trip.entryPx, view.trip.exitPx), hi = Math.max(...view.bars.map((b) => b.h), view.trip.entryPx, view.trip.exitPx);
+    const px = [view.trip.entryPx, view.trip.exitPx, ...view.executions.map((e) => e.price)];
+    const lo = Math.min(...view.bars.map((b) => b.l), ...px), hi = Math.max(...view.bars.map((b) => b.h), ...px);
     series.applyOptions({ autoscaleInfoProvider: () => ({ priceRange: { minValue: lo - (hi - lo) * 0.05, maxValue: hi + (hi - lo) * 0.05 } }) });
     // Levels at entry, dashed and quiet; entry / exit / stop solid.
     for (const l of view.levels) series.createPriceLine({ price: l.price, color: "rgba(255,255,255,0.35)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: l.name });
