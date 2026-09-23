@@ -19,7 +19,7 @@ import {
   type LiveContract, type LivePosition, type OptionOrderParams, type OptionsBrokerSnapshot,
   type OrderState, type OwnedOptionsPosition,
 } from "./options-live-policy";
-import type { OptionsIntentRecord, OptionsLiveBroker, OptionsOrderReview } from "./options-live-executor";
+import type { NeverPlacedProof, OptionsIntentRecord, OptionsLiveBroker, OptionsOrderReview } from "./options-live-executor";
 import { unwrapRobinhoodRead } from "./options-direct-collector";
 
 const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
@@ -283,6 +283,42 @@ export class RobinhoodLiveBroker implements OptionsLiveBroker {
   async cancel(orderId: string): Promise<void> {
     this.io.log(`CANCEL ${orderId}`);
     await this.client.call("cancel_option_order", { account_number: OPTIONS_LIVE_ACCOUNT, order_id: orderId });
+  }
+  /** PROOF THAT AN ENTRY NEVER BECAME AN ORDER (Sep 23 2026). Read from the broker's RAW order list, not the decoded one, so a
+   *  row this adapter cannot parse still counts against the proof. Proven only when, from two minutes before the reservation
+   *  onward, every order Robinhood lists was placed by hand ("user") on other contracts — no agentic, unlabelled or unreadable
+   *  row, nothing on the reservation's contracts — and no open position sits on those contracts. Anything else is not proof.
+   *  Any row by ANY label on the reservation's own contracts within the hour before it also refuses: our clock and Robinhood's
+   *  may disagree, and a desk order skipped as "too old" by a fast clock must still block (Fable review, Sep 23 2026).
+   *  OPERATING ASSUMPTION: get_option_orders lists every order Robinhood created, in every state. Before this proof, a hidden
+   *  order left the desk stuck (safe); now it would free the desk. Both live incidents (Sep 21, Sep 23) showed zero rows. */
+  async proveNeverPlaced(rec: OptionsIntentRecord): Promise<NeverPlacedProof> {
+    const since = (rec.createdAtMs ?? Number.NaN) - 120_000;
+    const sameContractSince = (rec.createdAtMs ?? Number.NaN) - 60 * 60_000;
+    const legIds = new Set((rec.canonicalOrder?.legs ?? []).map((l) => l.option_id));
+    if (!Number.isFinite(since) || !legIds.size) return { proven: false, why: "the reservation has no time or no legs" };
+    const rows = await pages(this.client, "get_option_orders", "orders", { account_number: OPTIONS_LIVE_ACCOUNT });
+    let inWindow = 0;
+    for (const r of rows) {
+      // A time without a zone would be read in the host's zone — unreadable, which refuses.
+      const at = str(r.created_at) ?? "";
+      const created = /(Z|[+-]\d\d:?\d\d)$/.test(at) ? Date.parse(at) : Number.NaN;
+      if (!Number.isFinite(created)) return { proven: false, why: "an order row has no readable time" };
+      if (created < sameContractSince) continue;
+      const legs = Array.isArray(r.legs) ? r.legs : null;
+      if (!legs || !legs.length || legs.some((l) => !record(l) || !optionIdOf(l))) return { proven: false, why: "an order row near the reservation has no readable legs" };
+      if (legs.some((l) => legIds.has(optionIdOf(l as Record<string, unknown>)!))) return { proven: false, why: `an order on the reservation's contracts exists (${str(r.placed_agent) ?? "unlabelled"}, ${str(r.state) ?? "?"})` };
+      if (created < since) continue;
+      inWindow++;
+      if (r.placed_agent !== "user") return { proven: false, why: `an order placed by "${str(r.placed_agent) ?? "unlabelled"}" exists since the reservation (${str(r.state) ?? "?"})` };
+    }
+    const positions = await pages(this.client, "get_option_positions", "positions", { account_number: OPTIONS_LIVE_ACCOUNT, nonzero: true });
+    for (const p of positions) {
+      const id = str(p.option_id);
+      if (!id) return { proven: false, why: "a position row has no contract id" };
+      if (legIds.has(id)) return { proven: false, why: "a position is open on the reservation's contracts" };
+    }
+    return { proven: true, evidence: `Robinhood lists no desk order since ${new Date(since).toISOString().slice(11, 16)}Z (${rows.length} orders read, ${inWindow} since then, all by hand on other contracts) and no position on its contracts` };
   }
   /** Every broker order (decoded), for the guardian's stale-order sweep and fill ingest. */
   async orders(): Promise<BrokerOrder[]> {

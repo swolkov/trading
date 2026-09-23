@@ -18,7 +18,14 @@ export interface OptionsLiveBroker {
   snapshot(optionIds: string[], refId: string): Promise<OptionsBrokerSnapshot>;
   decodeReview(raw: unknown): unknown;
   decodeOrder(raw: unknown): unknown;
+  /** Positive proof, from the broker's own full order list and positions, that an entry reservation never became an order.
+   *  Optional: without it an unmatched reservation stays "unknown" for a human, as before. */
+  proveNeverPlaced?(record: OptionsIntentRecord): Promise<NeverPlacedProof>;
 }
+export type NeverPlacedProof = { proven: true; evidence: string } | { proven: false; why: string };
+/** How long an entry reservation must sit unmatched before the broker's silence counts as proof. Robinhood lists a new order
+ *  within seconds; ten minutes is a wide margin, and at most two guard ticks (a page each) go by before it settles. */
+export const NEVER_PLACED_GRACE_MS = 10 * 60_000;
 export interface OptionsIntentRecord {
   refId: string; accountNumber: string; action: "open" | "close"; positionId?: string;
   fingerprint: string; state: "submitting" | "unknown" | "accepted" | "settled";
@@ -31,6 +38,10 @@ export interface OptionsIntentRecord {
   review?: { estimatedFeeUsd: number; maxLossUsd: number; buyingPowerRequiredUsd: number };
   /** What the runner knew about the setup (thesis, range, grade) — written by the runner after acceptance; the intent stays canonical. */
   candidate?: Record<string, unknown>;
+  /** The broker's own words when placement answered with an error (masked, ≤200 chars). Evidence for a human; never a settlement by itself. */
+  placementError?: string;
+  /** Set when the reservation was settled because the broker proved it never became an order (see settleNeverPlaced). */
+  autoSettled?: { atMs: number; evidence: string };
 }
 export interface OptionsLiveStore {
   // Exclusive ACROSS PROCESSES, held through review/submission/persistence. Must not
@@ -49,6 +60,10 @@ export interface OptionsExecutorDependencies {
 export interface OptionsExecutionResult {
   status: "refused" | "accepted" | "unknown" | "settled";
   refId: string; reason?: string; orderId?: string;
+  /** "settled" because the broker proved the reservation never became an order — the runner pages this once. */
+  autoSettled?: boolean;
+  /** "unknown" only because the grace window has not passed yet — the runner logs it instead of paging. */
+  awaitingProof?: boolean;
 }
 const object = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const amount = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x >= 0;
@@ -73,13 +88,32 @@ function checkReview(raw: unknown, prepared: PreparedOptionsOrder, policy: Optio
     || raw.maxLossUsd + feeReserve > policy.maxLossUsd!)) throw new Error("broker-reviewed maximum loss is incompatible with the authorized budget");
   return { estimatedFeeUsd: raw.estimatedFeeUsd, maxLossUsd: raw.maxLossUsd, buyingPowerRequiredUsd: raw.buyingPowerRequiredUsd };
 }
+/** An ENTRY reservation that never got a broker order id, never saw a fill, and is older than the grace window may be
+ *  settled — but only on the broker's positive proof that no order exists. Closes are never settled this way: a close that
+ *  may have happened changes what the guardian manages, so it stays with a human. null = not eligible, leave it unknown. */
+async function neverPlaced(record: OptionsIntentRecord, deps: OptionsExecutorDependencies): Promise<(NeverPlacedProof & { waiting?: boolean }) | null> {
+  if (record.action !== "open" || record.order || (record.maxFilledQuantity ?? 0) > 0 || !record.canonicalOrder || !deps.broker.proveNeverPlaced) return null;
+  const created = record.createdAtMs;
+  if (typeof created !== "number" || !Number.isFinite(created)) return null;
+  const age = deps.now() - created;
+  if (age < NEVER_PLACED_GRACE_MS) return { proven: false, why: `no order at the broker yet; settles on its own after ${Math.ceil((NEVER_PLACED_GRACE_MS - age) / 60_000)} more min if none appears`, waiting: true };
+  try { return await deps.broker.proveNeverPlaced(record); }
+  catch (e) { return { proven: false, why: `could not prove it never reached the broker: ${String(e).slice(0, 160)}` }; }
+}
 async function reconcileLocked(record: OptionsIntentRecord, deps: OptionsExecutorDependencies): Promise<OptionsExecutionResult> {
   const snapshot = await deps.broker.snapshot([], record.refId);
   validateOptionsSnapshot(snapshot, deps.now());
   const matches = snapshot.orders.filter((o) => o.refId === record.refId);
   if (matches.length !== 1) {
+    const proof = matches.length === 0 ? await neverPlaced(record, deps) : null;
+    if (proof?.proven) {
+      await deps.store.putIntent({ ...record, state: "settled", autoSettled: { atMs: deps.now(), evidence: proof.evidence } });
+      return { status: "settled", refId: record.refId, autoSettled: true,
+        reason: `never reached the broker — ${proof.evidence}${record.placementError ? `. Robinhood said: ${record.placementError}` : ""}` };
+    }
     await deps.store.putIntent({ ...record, state: "unknown" });
-    return { status: "unknown", refId: record.refId, reason: "exact ref_id lookup returned zero or multiple orders; no resubmission" };
+    return { status: "unknown", refId: record.refId, awaitingProof: proof?.waiting === true,
+      reason: `exact ref_id lookup returned zero or multiple orders; no resubmission${proof ? ` (${proof.why})` : ""}${record.placementError ? `. Robinhood said: ${record.placementError}` : ""}` };
   }
   const order = matchingOrder(matches[0], record);
   const observedFills = Math.max(record.maxFilledQuantity ?? 0, record.order?.filledQuantity ?? 0);
@@ -146,7 +180,8 @@ export async function executeOptionsIntent(intent: OptionsLiveIntent, deps: Opti
       const record: OptionsIntentRecord = { refId: intent.refId, accountNumber: OPTIONS_LIVE_ACCOUNT,
         action: intent.action, positionId: intent.positionId, fingerprint: prepared.fingerprint, state: "submitting", canonicalOrder: structuredClone(prepared.params), intent: structuredClone(intent), createdAtMs: deps.now(), review: reviewed };
       // Durable reservation BEFORE the broker call. If the process dies here, zero orders
-      // on a later lookup is still unknown, never permission to blindly retry.
+      // on a later lookup is still unknown, never permission to blindly retry. (An ENTRY may later be
+      // settled on the broker's positive proof — neverPlaced — but this ref_id is never sent again.)
       await deps.store.putIntent(record);
       mayHaveSubmitted = true;
       let raw: unknown;
@@ -155,7 +190,16 @@ export async function executeOptionsIntent(intent: OptionsLiveIntent, deps: Opti
         await deps.store.putIntent({ ...record, state: "unknown" }).catch(() => {});
         return { status: "unknown", refId: intent.refId, reason: "submission response lost; reconcile exact ref_id before any further order" };
       }
-      const order = matchingOrder(deps.broker.decodeOrder(raw), record);
+      // A placement that answers with an error is still "unknown", never "rejected": the error may have come after the
+      // order was created. Keep the broker's words on the record; reconciliation settles it only on the broker's proof.
+      let decoded: unknown;
+      try { decoded = deps.broker.decodeOrder(raw); }
+      catch (e) {
+        const why = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+        await deps.store.putIntent({ ...record, state: "unknown", placementError: why }).catch(() => {});
+        return { status: "unknown", refId: intent.refId, reason: `placement answered with an error (${why}); no retry — it settles on its own if the broker shows no order ${NEVER_PLACED_GRACE_MS / 60_000} min on` };
+      }
+      const order = matchingOrder(decoded, record);
       if (!order) {
         await deps.store.putIntent({ ...record, state: "unknown" }).catch(() => {});
         return { status: "unknown", refId: intent.refId, reason: "unrecognized placement response; no retry" };
