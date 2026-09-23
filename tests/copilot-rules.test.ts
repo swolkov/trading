@@ -98,13 +98,13 @@ test("give-back: +1R then back near entry with the stop still under entry — wa
   assert.doesNotMatch(b.out.flat().join("\n"), /was \+/);
 });
 
-test("quick manual exit gets the 2-minute note; a stop-out does not", () => {
+test("a manual exit inside 10 minutes gets the hands-off note; a stop-out does not", () => {
   const quick = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(45_000, 0, 0, [], undefined, { fills: [{ symbol: "MES", action: "Sell", qty: 20, price: 7830.5, ms: T0 + 44_000 }] })]);
   assert.match(quick.out[1][0], /MES long 20 closed by hand after ~45s @ 7830\.50 · −0\.2R/);
-  assert.match(quick.out[1][0], /Out inside 2 minutes/);
+  assert.match(quick.out[1][0], /Out by hand after 45s — your rule is hands off for 10 minutes/);
   const stopped = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(45_000, 0, 0, [], undefined, { fills: [{ symbol: "MES", action: "Sell", qty: 20, price: 7827.5, ms: T0 + 44_000 }] })]);
   assert.match(stopped.out[1][0], /stopped out after ~45s @ 7827\.50 · −1\.1R/);
-  assert.doesNotMatch(stopped.out[1][0], /Out inside/);
+  assert.doesNotMatch(stopped.out[1][0], /hands off/);
 });
 
 test("an exit at his own target is named as such, with no quick-exit note", () => {
@@ -187,7 +187,7 @@ test("after adding, the +1R line shows the real open P&L on the size held", () =
 });
 
 test("re-entry inside 3 minutes of the last exit is flagged on the new card; later entries are not", () => {
-  const fillsOut = { fills: [{ symbol: "MES" as const, action: "Sell" as const, qty: 20, price: 7830, ms: T0 + 59_000 }] };
+  const fillsOut = { fills: [{ symbol: "MES" as const, action: "Sell" as const, qty: 20, price: 7833, ms: T0 + 59_000 }] };   // a WIN
   const quick = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(60_000, 0, 0, [], undefined, fillsOut), snap(105_000, 20, 7829, [stop(7826)])]);
   assert.match(quick.out[2][0], /back in 45s after your last exit/);
   const later = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(60_000, 0, 0, [], undefined, fillsOut), snap(60_000 + 181_000, 20, 7829, [stop(7826)])]);
@@ -364,4 +364,98 @@ test("breakevenPx: a tradeable price on the safe side", () => {
   assert.equal(breakevenPx("MES", -1, 7833.625), 7833.5);
   assert.equal(breakevenPx("MES", 1, 7831.25), 7831.25);
   assert.equal(breakevenPx("MGC", 1, 4385.33), 4385.4);
+});
+
+// ---- his day rules ----
+const exitAt = (px: number, dt: number, qty = 20, symbol: "MES" | "MNQ" | "MGC" = "MES") => ({ fills: [{ symbol, action: "Sell" as const, qty, price: px, ms: T0 + dt }] });
+
+test("trade counter on every card; the 6th trade of the day is flagged", () => {
+  let st: CopilotState = { trips: {} }; const cards: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const t0 = i * 1_200_000;                                        // 20 min apart, all winners (no cooldown, no loss stop)
+    const r1 = step(st, snap(t0, 20, 7831.25, [stop(7827.75)])); st = r1.state; cards.push(r1.messages.join("\n"));
+    const r2 = step(st, snap(t0 + 700_000, 0, 0, [], undefined, exitAt(7833, t0 + 699_000))); st = r2.state;
+  }
+  assert.match(cards[0], /Trade 1 of 5 today/);
+  assert.match(cards[4], /Trade 5 of 5 today/);
+  assert.match(cards[5], /⛔ Trade 6 today — your limit is 5/);
+  assert.equal(st.day!.trades, 6); assert.equal(st.day!.losses, 0);
+});
+
+test("second loss of the day says done once; the next entry is flagged; a new trading day resets", () => {
+  const { out, state } = run([
+    snap(0, 20, 7831.25, [stop(7827.75)]),
+    snap(700_000, 0, 0, [], undefined, exitAt(7828, 699_000)),                 // loss 1
+    snap(1_500_000, 20, 7831.25, [stop(7827.75)]),
+    snap(2_200_000, 0, 0, [], undefined, exitAt(7828, 2_199_000)),             // loss 2
+    snap(3_000_000, 20, 7831.25, [stop(7827.75)]),
+    snap(3_700_000, 0, 0, [], undefined, exitAt(7833, 3_699_000)),            // closed before the session ends
+  ]);
+  assert.doesNotMatch(out[1].join("\n"), /done for the day/);
+  assert.match(out[3].join("\n"), /🛑 That's 2 losses today \(day ≈ −\$[\d,]+\)\. Your rule: done for the day/);
+  assert.match(out[4].join("\n"), /⛔ You already have 2 losses today/);
+  // 18:00 ET the next session: a fresh day
+  const next = step(state, snap(Date.parse("2026-09-23T22:05:00Z") - T0, 20, 7831.25, [stop(7827.75)]));
+  assert.match(next.messages.join("\n"), /Trade 1 of 5 today/);
+  assert.doesNotMatch(next.messages.join("\n"), /losses today/);
+});
+
+test("back in within 10 minutes after a LOSS is flagged; after a win it is not; after 10 min it is not", () => {
+  const afterLoss = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(700_000, 0, 0, [], undefined, exitAt(7829, 699_000)), snap(700_000 + 240_000, 20, 7830, [stop(7826.5)])]);
+  assert.match(afterLoss.out[2][0], /⛔ Back in 4m 00s after a LOSS — your rule is 10 minutes/);
+  assert.doesNotMatch(afterLoss.out[2][0], /after your last exit/);
+  const afterWin = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(700_000, 0, 0, [], undefined, exitAt(7834, 699_000)), snap(700_000 + 240_000, 20, 7830, [stop(7826.5)])]);
+  assert.doesNotMatch(afterWin.out[2][0], /after a LOSS/);
+  const waited = run([snap(0, 20, 7831.25, [stop(7827.75)]), snap(700_000, 0, 0, [], undefined, exitAt(7829, 699_000)), snap(700_000 + 601_000, 20, 7830, [stop(7826.5)])]);
+  assert.doesNotMatch(waited.out[2][0], /after a LOSS/);
+});
+
+test("MNQ / MGC entries carry the MES-only note; MES does not", () => {
+  const mnq: CopilotSnapshot = { nowMs: T0, positions: [{ symbol: "MNQ", netPos: 10, netPrice: 30700 }], orders: [stop(30690, "Sell", 10, "MNQ")], prices: {}, fills: [] };
+  assert.match(step({ trips: {} }, mnq).messages[0], /📌 Not MES — your plan is MES only for now/);
+  assert.doesNotMatch(run([snap(0, 20, 7831.25, [stop(7827.75)])]).out[0][0], /Not MES/);
+});
+
+test("a partial sale counts toward the trade's result: +2R on 15 then the runner stopped at breakeven is a WIN", () => {
+  const { state } = run([
+    snap(0, 20, 7831.25, [stop(7827.75)]),
+    snap(15_000, 20, 7831.25, null, 7838.25),
+    snap(30_000, 5, 7831.25, null, 7838.25, sold(15, 7838.25, 29_000)),
+    snap(700_000, 0, 0, [], undefined, exitAt(7831.25, 699_000, 5)),
+  ]);
+  assert.equal(state.day!.losses, 0);
+  assert.equal(Math.round(state.day!.netUsd), Math.round(15 * 7 * 5 - 2.06 * 20));   // 15 × 7 pts × $5 − fees
+  assert.equal(state.lastCloseLoss, false);
+});
+
+// ---- review round 2 ----
+test("no exit fills: the trade is not classified (a stale price can't hide a stop-out or fake a loss)", () => {
+  const { out, state } = run([
+    snap(0, 20, 7831.25, [stop(7827.75)]),
+    snap(15_000, 20, 7831.25, null, 7833),
+    snap(30_000, 0, 0, [], undefined),                                          // stopped, fills unreadable
+  ]);
+  assert.equal(state.day!.losses, 0); assert.equal(state.day!.netUsd, 0); assert.equal(state.lastCloseLoss, false);
+  assert.match(out[2].join("\n"), /isn't counted in today's losses/);
+});
+
+test("breakeven scratches are not losses: two of them don't trigger 'done for the day'", () => {
+  const { out, state } = run([
+    snap(0, 20, 7831.25, [stop(7827.75)]),
+    snap(700_000, 0, 0, [], undefined, exitAt(7831.25, 699_000)),
+    snap(1_500_000, 20, 7831.25, [stop(7827.75)]),
+    snap(2_200_000, 0, 0, [], undefined, exitAt(7831.25, 2_199_000)),
+  ]);
+  assert.equal(state.day!.losses, 0);
+  assert.doesNotMatch(out.flat().join("\n"), /done for the day/);
+});
+
+test("'finished red' judges the whole trade: ¾ banked at +2R, runner stopped a tick under breakeven is not a give-back", () => {
+  const { out } = run([
+    snap(0, 20, 7831.25, [stop(7827.75)]),
+    snap(15_000, 20, 7831.25, null, 7838.25),
+    snap(30_000, 5, 7831.25, null, 7838.25, sold(15, 7838.25, 29_000)),
+    snap(700_000, 0, 0, [], undefined, exitAt(7831, 699_000, 5)),
+  ]);
+  assert.doesNotMatch(out[3].join("\n"), /finished red/);
 });

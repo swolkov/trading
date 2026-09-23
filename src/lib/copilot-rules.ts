@@ -25,6 +25,19 @@ export const TRAIL_START_R = 5;              // the runner's stop starts trailin
 export const TRAIL_R = 5;                    // …5R behind the best price (tighter trails never caught a runner)
 export const TRAIL_STEP_R = 1;               // a new runner-stop message only when it has moved up another 1R
 
+// ---- HIS DAY RULES (Sep 23, after −$2,471 on 25 trades; he asked for them: "do it all"). Messages only. ----
+// This week's 109 trips (trading day = 18:00 ET → 17:00 ET): first 5 trades of each day −$400 · trades 6+ −$2,034 ·
+// before the 2nd loss of the day −$237 · after it −$2,197 · MES +$5,577 · MNQ −$3,664 · MGC −$4,347 ·
+// held 10+ min: 27 trades +$9,020 · out inside 2 min: 35 trades −$8,634 · back in < 3 min after a loss: 24 trades −$3,499.
+export const DAY_MAX_TRADES = 5;
+export const DAY_MAX_LOSSES = 2;
+export const COOLDOWN_AFTER_LOSS_MS = 600_000;
+export const HANDS_OFF_MS = 600_000;
+export const PLAN_SYMBOL: RoomSymbol = "MES";
+/** The trading day a moment belongs to: the session that opens at 18:00 ET counts as the next calendar day. */
+export function tradingDay(ms: number): string { return etParts(ms + 6 * 3_600_000).dayKey; }
+export interface DayTally { key: string; trades: number; losses: number; netUsd: number; doneSaid?: boolean }
+
 /** Breakeven as a price he can actually enter: his average rounded to the tick on the safe side (up for a long). */
 export function breakevenPx(sym: RoomSymbol, side: 1 | -1, avg: number): number {
   const tick = INSTRUMENTS[sym].tick, n = avg / tick;
@@ -77,6 +90,8 @@ export interface Trip {
   giveBackWarned: boolean;
   peakR: number;
   hit5R?: boolean;           // optional: state saved before the runner plan has no such field
+  realizedUsd?: number;      // $ banked on partial sales so far (gross)
+  guards?: string[];         // day-rule lines for the entry card
   trailPx?: number | null;   // the runner stop last announced by the plan
   reduced: boolean;
   lastPrice: number | null;
@@ -84,7 +99,7 @@ export interface Trip {
   rejectedSeen?: number[];     // rejected stop order ids already announced
   record: { label: string; n: number; netUsd: number; since: string } | null;
 }
-export interface CopilotState { trips: Partial<Record<RoomSymbol, Trip>>; lastCloseMs?: number }
+export interface CopilotState { trips: Partial<Record<RoomSymbol, Trip>>; lastCloseMs?: number; lastCloseLoss?: boolean; day?: DayTally }
 
 // ---- formatting ---------------------------------------------------------------------------------
 const dp = (s: RoomSymbol) => (s === "MGC" ? 1 : 2);
@@ -152,8 +167,8 @@ export function costShare(sym: RoomSymbol, riskPts: number): number {
 
 function entryCard(sym: RoomSymbol, t: Trip): string {
   const head = `🟢 ${sym} ${sideWord(t.side)} ${t.qty} @ ${px(sym, t.avg)}`;
-  const extra: string[] = [];
-  if (t.reentrySec != null) extra.push(`   ⏱ back in ${t.reentrySec}s after your last exit. Sep 20–22: 23 re-entries inside 3 min = −$3,918; the other 48 trades = +$4,222.`);
+  const extra: string[] = [...(t.guards ?? [])];
+  if (t.reentrySec != null && !extra.some((g) => g.includes("after a LOSS"))) extra.push(`   ⏱ back in ${t.reentrySec}s after your last exit. Sep 20–22: 23 re-entries inside 3 min = −$3,918; the other 48 trades = +$4,222.`);
   if (t.record && t.record.n >= 3) extra.push(`   📒 your record, ${sym} ${t.record.label}: ${t.record.n} trades · ${signedUsd(t.record.netUsd)} (since ${t.record.since})`);
   const tail = extra.length ? `\n${extra.join("\n")}` : "";
   if (t.stop == null) return `${head}\n   ⚠️ NO STOP on ${t.qty} ${sym}. Nothing limits this trade.${tail}`;
@@ -189,8 +204,9 @@ function closeLine(sym: RoomSymbol, t: Trip, exitPx: number | null, nowMs: numbe
   const how = stopped ? "stopped out" : targeted ? "target filled" : t.trailing ? "closed (trailing stop or by hand)" : "closed by hand";
   const byHand = !stopped && !targeted && !t.trailing;
   const parts = [`🏁 ${sym} ${sideWord(t.side).toLowerCase()} ${t.maxQty} ${how} after ~${duration(held)}${exitPx != null ? ` @ ${px(sym, exitPx)}` : ""}${r != null ? ` · ${signedR(r)}` : ""}`];
-  if (byHand && held < QUICK_EXIT_MS && !(r != null && r >= 2)) parts.push(`   Out inside 2 minutes and the stop wasn't hit. Sep 20–22: 23 trades sold inside 2 min = −$5,441; 15 held 10+ min = +$6,007.`);
-  if (t.hit1R && r != null && r < 0) parts.push(`   It was +${t.peakR.toFixed(1)}R and finished red. Sep 20–22: 11 trades did that = −$5,011.`);
+  if (byHand && held < HANDS_OFF_MS && !(r != null && r >= 2)) parts.push(`   Out by hand after ${duration(held)} — your rule is hands off for 10 minutes. This week: 35 trades out inside 2 min = −$8,634; 27 held 10+ min = +$9,020.`);
+  const wholeTrade = exitPx != null ? (t.realizedUsd ?? 0) + (exitPx - t.avg) * t.side * INSTRUMENTS[sym].pointValue * t.qty : null;
+  if (t.hit1R && r != null && r < 0 && (wholeTrade == null || wholeTrade < 0)) parts.push(`   It was +${t.peakR.toFixed(1)}R and finished red. Sep 20–22: 11 trades did that = −$5,011.`);
   // Only a real runner (the plan left one, he is down to it), only on a fill price (a stale last price could be a stop
   // fill), and only on trips that were given the plan (saved state from before it has hit5R/trailPx undefined).
   const runner = runnerSplit(t.maxQty).runner;
@@ -205,6 +221,9 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
   const trips: Partial<Record<RoomSymbol, Trip>> = { ...prev.trips };
   const messages: string[] = [];
   let lastCloseMs = prev.lastCloseMs;
+  let lastCloseLoss = prev.lastCloseLoss;
+  const dayKey = tradingDay(snap.nowMs);
+  const day: DayTally = prev.day && prev.day.key === dayKey ? { ...prev.day } : { key: dayKey, trades: 0, losses: 0, netUsd: 0 };
   for (const sym of ROOM_SYMBOLS) {
     const lines: string[] = [];
     const pos = snap.positions.find((p) => p.symbol === sym && p.netPos !== 0) ?? null;
@@ -213,19 +232,48 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     // ---- position lifecycle ----
     if (t && (!pos || Math.sign(pos.netPos) !== t.side)) {
       const filled = exitPrice(snap.fills, sym, t.side);
-      if (t.announced || snap.nowMs - t.openedMs >= 5_000) lines.push(closeLine(sym, t, filled ?? t.lastPrice, snap.nowMs, filled != null));
+      const exitPx = filled ?? t.lastPrice;
+      if (t.announced || snap.nowMs - t.openedMs >= 5_000) lines.push(closeLine(sym, t, exitPx, snap.nowMs, filled != null));
+      // The day's tally, only from a real fill price (a stale poll price can turn a stop-out into a "win").
+      // A LOSS = lost money on price (gross < 0): a breakeven scratch is not a loss just because of fees.
+      if (filled == null) {
+        lastCloseLoss = false;
+        if (t.announced) lines.push("   (couldn't read the exit fills — this trade isn't counted in today's losses)");
+      } else {
+        const gross = (t.realizedUsd ?? 0) + (filled - t.avg) * t.side * INSTRUMENTS[sym].pointValue * t.qty;
+        day.netUsd += gross - FEE_RT_PER_CONTRACT * t.maxQty;
+        lastCloseLoss = gross < 0;
+        if (gross < 0) {
+          day.losses += 1;
+          if (day.losses === DAY_MAX_LOSSES && !day.doneSaid) {
+            day.doneSaid = true;
+            lines.push(`🛑 That's ${DAY_MAX_LOSSES} losses today (day ≈ ${signedUsd(day.netUsd)}). Your rule: done for the day. This week, trades taken after the 2nd loss of the day = −$2,197; before it = −$237.`);
+          }
+        }
+      }
       lastCloseMs = snap.nowMs;
       t = null;
     }
     if (!t && pos) {
       t = newTrip(pos, snap.nowMs);
       if (lastCloseMs != null && snap.nowMs - lastCloseMs < REENTRY_MS) t.reentrySec = Math.max(1, Math.round((snap.nowMs - lastCloseMs) / 1000));
+      day.trades += 1;
+      const g: string[] = [];
+      if (day.losses >= DAY_MAX_LOSSES) g.push(`   ⛔ You already have ${day.losses} losses today — your rule says done for the day.`);
+      g.push(day.trades > DAY_MAX_TRADES
+        ? `   ⛔ Trade ${day.trades} today — your limit is ${DAY_MAX_TRADES}. This week: first 5 trades of each day = −$400; trades 6+ = −$2,034.`
+        : `   🧮 Trade ${day.trades} of ${DAY_MAX_TRADES} today`);
+      if (lastCloseLoss && lastCloseMs != null && snap.nowMs - lastCloseMs < COOLDOWN_AFTER_LOSS_MS)
+        g.push(`   ⛔ Back in ${duration(snap.nowMs - lastCloseMs)} after a LOSS — your rule is 10 minutes. This week: back in < 3 min after a loss = 24 trades −$3,499.`);
+      if (sym !== PLAN_SYMBOL) g.push(`   📌 Not MES — your plan is MES only for now (this week MES +$5,577 · MNQ −$3,664 · MGC −$4,347).`);
+      t.guards = g;
       t.record = snap.records?.[sym] ?? null;
     }
     if (!t) { delete trips[sym]; if (lines.length) messages.push(lines.join("\n")); continue; }
     const p = pos!;
     const cardAt = lines.length;   // a flip's close line stays ahead of the new entry card
     const qty = Math.abs(p.netPos);
+    const price0 = snap.prices[sym] ?? t.lastPrice;
     if (qty !== t.qty) {
       const delta = qty - t.qty;
       const fillsPx = delta > 0 ? exitPrice(snap.fills, sym, (t.side * -1) as 1 | -1) : exitPrice(snap.fills, sym, t.side);
@@ -238,7 +286,11 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
           lines.push(`➖ ${sym} sold ${-delta}${fillsPx != null ? ` @ ${px(sym, fillsPx)}` : ""}${r != null ? ` (${signedR(r)})` : ""} · ${qty} left${t.stop != null ? ` · stop ${px(sym, t.stop)}` : ""}`);
         }
       }
-      if (delta < 0) t.reduced = true;
+      if (delta < 0) {
+        t.reduced = true;
+        const soldPx = fillsPx ?? price0;
+        if (soldPx != null) t.realizedUsd = (t.realizedUsd ?? 0) + (soldPx - t.avg) * t.side * INSTRUMENTS[sym].pointValue * -delta;
+      }
       t.qty = qty; t.maxQty = Math.max(t.maxQty, qty);
     }
     t.avg = p.netPrice;
@@ -334,7 +386,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     trips[sym] = t;
     if (lines.length) messages.push(lines.join("\n"));
   }
-  return { state: { trips, lastCloseMs }, messages };
+  return { state: { trips, lastCloseMs, lastCloseLoss, day }, messages };
 }
 
 /** The price implied by the account's open P&L — exact when ONE room symbol is open (the P&L is account-wide). */
