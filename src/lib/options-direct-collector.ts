@@ -11,9 +11,24 @@ function num(x: unknown, name: string): number {
 function str(x: unknown, name: string): string { if (typeof x !== "string" || !x) throw Error(`Invalid ${name}`); return x; }
 function optionalNum(x: unknown, name: string) { return x == null ? null : num(x, name); }
 function optionalStr(x: unknown) { return typeof x === "string" && x ? x : null; }
+/** The broker's own words from an isError tool response: the first 200 characters, with account numbers and anything
+ *  token-shaped masked. A refused order then says WHY in the log and the page. (Sep 23 2026: a QQQ entry was refused, the
+ *  reason was thrown away, and the desk sat on "unknown" all day.) null when the response carries no readable text. */
+export function brokerErrorText(raw: unknown): string | null {
+  if (!record(raw)) return null;
+  const parts: string[] = [];
+  if (Array.isArray(raw.content)) for (const x of raw.content) if (record(x) && x.type === "text" && typeof x.text === "string") parts.push(x.text);
+  const sc = raw.structuredContent;
+  if (record(sc)) for (const k of ["error", "message", "detail"]) if (typeof sc[k] === "string") parts.push(sc[k] as string);
+  const clean = parts.join(" ")
+    .replace(/\d{6,}/g, "•••")                      // account and order numbers
+    .replace(/[A-Za-z0-9_\-.+/=]{32,}/g, "•••")      // tokens, ids, anything opaque and long
+    .replace(/\s+/g, " ").trim();
+  return clean ? clean.slice(0, 200) : null;
+}
 export function unwrapRobinhoodRead(raw: unknown): Record<string, unknown> {
   const response = obj(raw, "tool response");
-  if (response.isError) throw Error("Broker read returned an error");
+  if (response.isError) { const why = brokerErrorText(response); throw Error(`Broker read returned an error${why ? `: ${why}` : ""}`); }
   if (record(response.structuredContent)) return response.structuredContent;
   const text = Array.isArray(response.content) ? response.content.filter(x => record(x) && x.type === "text") : [];
   if (text.length !== 1 || typeof text[0].text !== "string") throw Error("Ambiguous broker response");

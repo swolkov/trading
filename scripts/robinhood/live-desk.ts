@@ -92,7 +92,10 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
         if (!verified) { log(`unsettled intent ${r.refId} (${r.state}) — cannot reconcile until the adapter is verified`); clean = false; continue; }
         const res = await reconcileOptionsIntent(r.refId, deps);
         log(`reconcile ${r.refId} ${r.action}: ${res.status}${res.reason ? ` — ${res.reason}` : ""}${res.orderId ? ` order ${res.orderId}` : ""}`);
+        // Inside the grace window the entry tick has already paged once; the wait is logged above, not paged every five minutes.
+        if (res.status === "unknown" && res.awaitingProof) { clean = false; continue; }
         if (res.status === "unknown") { clean = false; await page(`🚨 Options intent ${r.refId} is UNKNOWN at the broker (${res.reason}). No new entries until it is resolved by hand.`); continue; }
+        if (res.status === "settled" && res.autoSettled) { await page(`✅ Options intent ${r.refId.slice(0, 8)} settled on its own: it ${res.reason}. Entries resume.`); continue; }
         const rec = await store.withAccountLock(ACCOUNT, () => store.getIntent(r.refId));
         if (!rec || rec.state !== "accepted" || !rec.order) continue;
         // A filled order, or a cancelled/rejected one that filled part of a 2-lot before the stale sweep, owns exactly what filled.
