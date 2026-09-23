@@ -8,6 +8,9 @@ import type { LedgerTrade } from "@/lib/trading-room-ledger-rules";
 /** The first fill the room captured; broker-recorded trades before this have no fills and no chart. */
 export const ROOM_START_MS = Date.parse("2026-09-20T23:00:00Z");
 
+/** "Kept" needs a best worth keeping: under a quarter R of favorable move, net ÷ best is noise (Sep 23: −1,105,237%). */
+export const KEPT_MIN_MFE_R = 0.25;
+
 export interface LibraryRow {
   id: string; kind: "journal" | "record";
   symbol: string | null; side: "long" | "short" | null; qty: number | null;
@@ -24,7 +27,7 @@ export function libraryRows(journal: JournalRow[], ledger: LedgerTrade[]): Libra
     id: r.id, kind: "journal", symbol: r.symbol, side: r.side, qty: r.qty, entryTs: r.entryTs, exitTs: r.exitTs, entryPx: r.entryPx, exitPx: r.exitPx,
     netUsd: r.netUsd, feesUsd: r.feesUsd, netR: r.netR, mfeR: r.mfeR, maeR: r.maeR, riskSource: r.riskSource, holdMin: r.holdMin, session: r.session,
     nearestLevel: r.nearestLevel, distAtr: r.distAtr, setupTag: r.setupTag, why: r.why, grade: r.grade ?? null, open: r.open, pairs: null,
-    efficiency: r.open || r.netR == null || r.mfeR == null || r.mfeR <= 0 ? null : Math.round((r.netR / r.mfeR) * 100) / 100,
+    efficiency: r.open || r.netR == null || r.mfeR == null || r.mfeR < KEPT_MIN_MFE_R ? null : Math.round((r.netR / r.mfeR) * 100) / 100,
   }));
   for (const t of ledger) {
     if (Date.parse(t.exitTs) >= ROOM_START_MS) continue;   // the room has these as real round trips

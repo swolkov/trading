@@ -3,12 +3,15 @@
 import { prisma } from "@/lib/db";
 import { getHistoricalBars, getIntradayBars } from "@/lib/yahoo";
 import { INSTRUMENTS, buildLevels, type Bar, type LevelSet, type RoomSymbol } from "@/lib/trading-room-rules";
+import { executions, pnlAt, usd0, type Execution } from "@/lib/trading-room-replay-rules";
 
 export interface ReplayFill { id: number; ts: string; action: "Buy" | "Sell"; qty: number; price: number }
 export interface ReplayView {
-  trip: { id: string; symbol: RoomSymbol; side: "long" | "short"; qty: number; entryTs: string; exitTs: string; entryPx: number; exitPx: number; netUsd: number; netR: number | null; stopPx: number | null; riskUsd: number | null; riskSource: string; mfeR: number | null; maeR: number | null; open: boolean };
+  trip: { id: string; symbol: RoomSymbol; side: "long" | "short"; qty: number; entryTs: string; exitTs: string; entryPx: number; exitPx: number; netUsd: number; feesUsd: number; netR: number | null; stopPx: number | null; riskUsd: number | null; riskSource: string; mfeR: number | null; maeR: number | null; open: boolean };
   bars: Bar[];                // 1-minute, from an hour before entry to an hour after exit (or now)
   fills: ReplayFill[];
+  executions: Execution[];    // each fill with what it did (opened / added / took off / closed) and the dollars it banked
+  pointValue: number;
   levels: { name: string; price: number }[];
   levelsAt: string | null;    // when the level set is measured (entry time)
   note: string | null;
@@ -54,18 +57,21 @@ export async function replayView(id: string): Promise<ReplayView | null> {
     if (lv.openingRange?.complete) levels.push({ name: "OR high", price: lv.openingRange.high }, { name: "OR low", price: lv.openingRange.low });
     if (lv.vwap != null) levels.push({ name: "VWAP", price: lv.vwap });
   } catch (e) { note = `Bars could not be loaded: ${String(e).slice(0, 120)}`; }
+  const side = r.side === "short" ? "short" : "long";
+  const fillsOut = merged.map((f) => ({ ...f, price: Math.round(f.price * 100) / 100 }));
   return {
     trip: {
-      id: String(r.id), symbol, side: r.side === "short" ? "short" : "long", qty: Number(r.qty), entryTs: new Date(entryMs).toISOString(), exitTs: new Date(exitMs).toISOString(),
-      entryPx: Number(r.entry_px), exitPx: Number(r.exit_px), netUsd: Number(r.net_usd), netR: r.net_r == null ? null : Number(r.net_r), stopPx: r.stop_px == null ? null : Number(r.stop_px),
+      id: String(r.id), symbol, side, qty: Number(r.qty), entryTs: new Date(entryMs).toISOString(), exitTs: new Date(exitMs).toISOString(),
+      entryPx: Number(r.entry_px), exitPx: Number(r.exit_px), netUsd: Number(r.net_usd), feesUsd: Number(r.fees_usd ?? 0), netR: r.net_r == null ? null : Number(r.net_r), stopPx: r.stop_px == null ? null : Number(r.stop_px),
       riskUsd: r.risk_usd == null ? null : Number(r.risk_usd), riskSource: String(r.risk_source ?? "none"), mfeR: r.mfe_r == null ? null : Number(r.mfe_r), maeR: r.mae_r == null ? null : Number(r.mae_r), open: Boolean(r.open),
     },
-    bars, fills: merged.map((f) => ({ ...f, price: Math.round(f.price * 100) / 100 })), levels, levelsAt, note,
+    bars, fills: fillsOut, executions: executions(side, merged, spec.pointValue), pointValue: spec.pointValue, levels, levelsAt, note,
   };
 }
 
 // ---- the replay as a PNG for Slack: candles, fills, levels, entry / exit / stop ----
 import { Raster, encodeGif, indexRaster, type RGBA } from "@/lib/trading-room-png";
+import { execVerb } from "@/lib/trading-room-replay-rules";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 const C = {
@@ -94,11 +100,12 @@ export function renderReplayGif(v: ReplayView): Buffer {
 const W = 960, H = 480, L = 12, R = 88, T = 34, B = 26;
 function drawFrame(r: Raster, v: ReplayView, upto: number, solid: boolean, col = C) {
   const bars = v.bars;
-  const title = `${v.trip.symbol} ${v.trip.side.toUpperCase()} X${v.trip.qty}  ${v.trip.entryPx} TO ${Math.round(v.trip.exitPx * 100) / 100}  NET ${v.trip.netUsd >= 0 ? "+" : "-"}$${Math.abs(Math.round(v.trip.netUsd))}${v.trip.netR != null ? `  ${v.trip.netR >= 0 ? "+" : "-"}${Math.abs(v.trip.netR).toFixed(2)}R` : ""}`;
-  r.text(L, 10, title, col.fg, 2);
+  const fees = v.trip.feesUsd;
+  const title = `${v.trip.symbol} ${v.trip.side.toUpperCase()} X${v.trip.qty}  NET ${usd0(v.trip.netUsd)}${v.trip.open ? " SO FAR" : ` AFTER $${Math.round(fees)} FEES`}${v.trip.netR != null ? `  ${v.trip.netR >= 0 ? "+" : "-"}${Math.abs(v.trip.netR).toFixed(2)}R` : ""}`;
+  r.text(L, 10, title, v.trip.netUsd >= 0 ? col.up : col.down, 2);
   if (!bars.length) { r.text(L, T + 20, "NO 1-MINUTE BARS FOR THIS TRADE", col.muted, 2); return; }
   // The scale is fixed on the whole trade so the frames do not jump.
-  const prices = [...bars.flatMap((b) => [b.h, b.l]), v.trip.entryPx, v.trip.exitPx, ...(v.trip.stopPx != null ? [v.trip.stopPx] : [])];
+  const prices = [...bars.flatMap((b) => [b.h, b.l]), v.trip.entryPx, v.trip.exitPx, ...v.executions.map((e) => e.price), ...(v.trip.stopPx != null ? [v.trip.stopPx] : [])];
   let lo = Math.min(...prices), hi = Math.max(...prices);
   const near = v.levels.filter((l) => l.price >= lo - (hi - lo) * 0.6 && l.price <= hi + (hi - lo) * 0.6);
   for (const l of near) { lo = Math.min(lo, l.price); hi = Math.max(hi, l.price); }
@@ -121,14 +128,33 @@ function drawFrame(r: Raster, v: ReplayView, upto: number, solid: boolean, col =
   }
   const untilMs = shown.length ? shown[shown.length - 1].t + 60_000 : t0;
   r.line(L, Y(v.trip.entryPx), W - R, Y(v.trip.entryPx), col.gold); r.text(W - R - 40, Y(v.trip.entryPx) - 7, "ENTRY", col.gold, 1);
-  if (!v.trip.open && Date.parse(v.trip.exitTs) < untilMs) { r.line(L, Y(v.trip.exitPx), W - R, Y(v.trip.exitPx), col.gold); r.text(W - R - 36, Y(v.trip.exitPx) - 7, "EXIT", col.gold, 1); }
+  if (!v.trip.open && Date.parse(v.trip.exitTs) < untilMs) { r.line(L, Y(v.trip.exitPx), W - R, Y(v.trip.exitPx), col.gold); const exitLabel = v.executions.filter((e) => e.realizedUsd != null).length > 1 ? "AVG EXIT" : "EXIT"; r.text(W - R - 4 - r.textWidth(exitLabel), Y(v.trip.exitPx) - 7, exitLabel, col.gold, 1); }
   if (v.trip.stopPx != null) { r.line(L, Y(v.trip.stopPx), W - R, Y(v.trip.stopPx), col.stop); r.text(W - R - 36, Y(v.trip.stopPx) - 7, "STOP", col.stop, 1); }
-  for (const f of v.fills) {
-    if (Date.parse(f.ts) >= untilMs) continue;
-    const x = X(Date.parse(f.ts)) + bw / 2, y = Y(f.price);
-    if (f.action === "Buy") { r.triangle(x, y + 10, 6, true, col.up); r.text(x - 8, y + 18, `B${f.qty}`, col.up, 1); }
-    else { r.triangle(x, y - 10, 6, false, col.down); r.text(x - 8, y - 24, `S${f.qty}`, col.down, 1); }
+  // Every execution on the chart: BUY / SELL, size, and the dollars an exit banked.
+  const shownExecs = v.executions.filter((e) => Date.parse(e.ts) < untilMs);
+  for (const e of shownExecs) {
+    const x = X(Date.parse(e.ts)) + bw / 2, y = Y(e.price);
+    const c = e.action === "Buy" ? col.up : col.down;
+    const label = `${e.action === "Buy" ? "BUY" : "SELL"} ${e.qty}${e.realizedUsd != null ? ` ${usd0(e.realizedUsd)}` : ""}`;
+    const lx = Math.max(L, Math.min(W - R - r.textWidth(label, 2), x - r.textWidth(label, 2) / 2));
+    // Buys sit under the price, sells over it — flipped when that would run off the chart.
+    const below = e.action === "Buy" ? y + 30 < H - B : y - 30 < T;
+    if (e.action === "Buy") r.triangle(x, y + 12, 8, true, c); else r.triangle(x, y - 12, 8, false, c);
+    r.text(lx, below ? y + 22 : y - 30, label, c, 2);
   }
+  // The tape, top left: each execution as it happens, with what it did and what it banked.
+  const lines = shownExecs.slice(-6).map((e) => ({ s: `${etHm(Date.parse(e.ts))} ${e.action === "Buy" ? "BUY" : "SELL"} ${e.qty} AT ${fmtPx(v.trip.symbol, e.price)}  ${execVerb(v.trip.side, e).replace(" · ", " ").toUpperCase()}${e.realizedUsd != null ? `  ${usd0(e.realizedUsd)}` : ""}`, c: e.realizedUsd == null ? col.fg : e.realizedUsd >= 0 ? col.up : col.down }));
+  if (lines.length) {
+    const bwBox = Math.max(...lines.map((l) => r.textWidth(l.s, 2))) + 12;
+    r.rect(L, T + 2, bwBox, lines.length * 14 + 8, col.bg);
+    lines.forEach((l, i) => r.text(L + 6, T + 7 + i * 14, l.s, l.c, 2));
+  }
+  // Running P&L, top right: what is on, the open P&L at the last shown close, and what has been banked.
+  const mark = shown.length ? shown[shown.length - 1].c : v.trip.entryPx;
+  const now = pnlAt(v.trip.side, v.executions, v.pointValue, untilMs, mark);
+  const readout = now.pos > 0 ? `${v.trip.side.toUpperCase()} ${now.pos}  OPEN ${usd0(now.openUsd)}${now.bankedUsd ? `  BANKED ${usd0(now.bankedUsd)}` : ""}` : shownExecs.length ? `FLAT  BANKED ${usd0(now.bankedUsd)}` : "WAITING FOR ENTRY";
+  const readCol = now.pos > 0 ? (now.openUsd + now.bankedUsd >= 0 ? col.up : col.down) : shownExecs.length ? (now.bankedUsd >= 0 ? col.up : col.down) : col.muted;
+  r.text(W - 12 - r.textWidth(readout, 2), 10, readout, readCol, 2);
 }
 const fmtPx = (sym: string, p: number) => (sym === "MGC" ? p.toFixed(1) : p.toFixed(2));
 const etHm = (ms: number) => new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });

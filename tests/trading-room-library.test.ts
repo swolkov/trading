@@ -18,6 +18,8 @@ test("library rows: journal trips plus broker records from before the room, newe
   assert.equal(rows[0].id, "MES-2"); assert.equal(rows[3].kind, "record"); assert.equal(rows[3].netUsd, 1125); assert.equal(rows[3].pairs, 3);
   const win = rows.find((r) => r.id === "MES-0")!; assert.equal(win.efficiency, Math.round((1 / 1.5) * 100) / 100);
   assert.equal(rows.find((r) => r.id === "MES-1")!.efficiency, -1, "a loser: −0.5R over an MFE of 0.5R");
+  const noise = libraryRows([jr(5, -160, -0.49, { mfeR: 0.0000443 })], []);
+  assert.equal(noise[0].efficiency, null, "a trade that never went a quarter R his way has no 'kept' (was −1,105,237%)");
 });
 
 test("stats, filters, day groups, equity curve, csv", () => {
