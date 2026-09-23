@@ -139,7 +139,7 @@ const rec: OptionsIntentRecord = { refId: REF, accountNumber: OPTIONS_LIVE_ACCOU
 const order = (o: Partial<Record<string, unknown>>) => ({ id: "o", state: "filled", placed_agent: "user", created_at: new Date(T0 + 60_000).toISOString(), legs: [{ option_id: OTHER, side: "buy", position_effect: "open" }], ...o });
 
 test("proof: an empty list, or only older orders, or only hand orders on other contracts → proven", async () => {
-  for (const orders of [[], [order({ placed_agent: "agentic", created_at: new Date(T0 - 3 * 60_000).toISOString(), legs: [{ option_id: LEG }] })], [order({})]]) {
+  for (const orders of [[], [order({ placed_agent: "agentic", created_at: new Date(T0 - 2 * 3600_000).toISOString(), legs: [{ option_id: LEG }] })], [order({})]]) {
     const p = await new RobinhoodLiveBroker(fakeClient(orders), io).proveNeverPlaced(rec);
     assert.equal(p.proven, true, JSON.stringify(orders));
   }
@@ -174,4 +174,53 @@ test("broker error text: masked account numbers and tokens, capped, null when em
   assert.equal(brokerErrorText({ isError: true, content: [] }), null);
   assert.equal(brokerErrorText({ isError: true, content: [{ type: "text", text: "x".repeat(500) + " y" }] })!.length <= 200, true);
   assert.throws(() => unwrapRobinhoodRead({ isError: true, structuredContent: { error: "insufficient buying power" } }), /insufficient buying power/);
+});
+
+// ---- Fable review, Sep 23 2026: skew, empty legs, URL legs, zone-less times, pagination, and the order of checks ----------
+test("proof refused: a desk order on OUR contract just before the 2-minute lead-in (a fast clock), empty legs, URL-form legs on our contract, a zone-less time", async () => {
+  const cases: Record<string, unknown>[] = [
+    order({ placed_agent: "agentic", created_at: new Date(T0 - 7 * 60_000).toISOString(), legs: [{ option_id: LEG }] }),
+    order({ legs: [] }),
+    order({ legs: [{ option: `https://api.robinhood.com/options/instruments/${LEG}/` }] }),
+    order({ created_at: "2026-09-14T15:01:00" }),
+  ];
+  for (const o of cases) assert.equal((await new RobinhoodLiveBroker(fakeClient([o]), io).proveNeverPlaced(rec)).proven, false, JSON.stringify(o));
+});
+
+test("proof still passes over an earlier desk entry on OTHER contracts the same hour — a morning trade does not re-jam the desk", async () => {
+  const earlier = order({ placed_agent: "agentic", created_at: new Date(T0 - 30 * 60_000).toISOString() });
+  assert.equal((await new RobinhoodLiveBroker(fakeClient([earlier]), io).proveNeverPlaced(rec)).proven, true);
+});
+
+test("proof reads every page: a desk order on page two refuses; a pagination loop throws", async () => {
+  const pagesOf = (loop: boolean) => ({ call: async (name: string, args: Record<string, unknown>) => {
+    if (name === "get_option_positions") return { structuredContent: { data: { positions: [], next: null } } };
+    if (!args.cursor || loop) return { structuredContent: { data: { orders: [order({})], next: "https://api.robinhood.com/options/orders/?cursor=p2" } } };
+    return { structuredContent: { data: { orders: [order({ placed_agent: "agentic" })], next: null } } };
+  } });
+  assert.equal((await new RobinhoodLiveBroker(pagesOf(false), io).proveNeverPlaced(rec)).proven, false);
+  await assert.rejects(new RobinhoodLiveBroker(pagesOf(true), io).proveNeverPlaced(rec));
+});
+
+test("a reservation left 'submitting' (the process died before the broker call) is eligible and settles on proof", async () => {
+  const f = fixture();
+  f.records.set(REF, { ...rec, canonicalOrder: { ...rec.canonicalOrder!, legs: [{ option_id: "A", side: "buy", position_effect: "open", ratio_quantity: 1 }] }, state: "submitting" });
+  f.advance(NEVER_PLACED_GRACE_MS);
+  const res = await reconcileOptionsIntent(REF, f.deps);
+  assert.equal(res.status, "settled");
+  assert.equal(f.proofCalls(), 1);
+});
+
+test("when the snapshot binds a broker order, the proof is never consulted", async () => {
+  const f = fixture();
+  await executeOptionsIntent(intent(), f.deps);
+  const fp = f.records.get(REF)!.fingerprint;
+  f.deps.broker.snapshot = async () => ({ accountNumber: OPTIONS_LIVE_ACCOUNT, active: true, agenticAllowed: true, optionLevel: "option_level_3", marginType: "limited_margin",
+    asOfMs: T0 + NEVER_PLACED_GRACE_MS, complete: true, buyingPowerUsd: 500, regularSession: { opensAtMs: T0 - 3600_000, closesAtMs: T0 + 7200_000 }, positions: [], contracts: [contract()],
+    orders: [{ id: "broker-9", accountNumber: OPTIONS_LIVE_ACCOUNT, refId: REF, requestFingerprint: fp, state: "open", filledQuantity: 0 }] });
+  f.advance(NEVER_PLACED_GRACE_MS);
+  const res = await reconcileOptionsIntent(REF, f.deps);
+  assert.equal(res.status, "accepted");
+  assert.equal(res.orderId, "broker-9");
+  assert.equal(f.proofCalls(), 0);
 });

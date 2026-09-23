@@ -279,7 +279,9 @@ export async function runLiveDesk(mode: LiveDeskMode): Promise<void> {
             log(`ENTRY ${pick.intent.kind} ${pick.underlying} × ${pick.intent.quantity} [${pick.grade} cap $${pick.cap}]: ${res.status}${res.reason ? ` — ${res.reason}` : ""}${res.orderId ? ` order ${res.orderId}` : ""}`);
             // Stash the thesis on the reservation RECORD (the intent stays canonical): the fill ingest copies the range edge onto the owned record.
             // Written before anything else follows the core's answer — the guardian's invalidation rule depends on it.
-            if (res.status === "accepted" && pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
+            // Also on "unknown": the symbol then counts for the one-bite-a-day rule, so an entry Robinhood refused and the desk
+            // later settled as never placed is not re-placed on the same name the same day (Fable review, Sep 23 2026).
+            if ((res.status === "accepted" || res.status === "unknown") && pick.candidate) await store.withAccountLock(ACCOUNT, async () => { const rec = await store.getIntent(pick.intent!.refId); if (rec) await store.putIntent({ ...rec, candidate: { ...pick.candidate } }); })
               .catch((e) => log(`could not stash the candidate on ${pick.intent!.refId} (invalidation rule will be skipped for it): ${String(e).slice(0, 160)}`));
           }
           // The trade cards (D5): built from what the tick knew, AFTER the core has answered and the thesis is stashed; a throw yields no cards
