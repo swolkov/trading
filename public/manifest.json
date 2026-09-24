@@ -1,7 +1,7 @@
 {
   "name": "Esbueno Trades",
   "short_name": "Esbueno",
-  "description": "Kraken margin desk — live account, paper record, orders, system health",
+  "description": "Futures trading room and options desk — live account, orders, system health",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#111318",

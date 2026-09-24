@@ -9,6 +9,7 @@ import { EventsPanel, InstrumentCard, LiveAccountPanel, TapePanel, type LiveView
 import { SettingsPanel, SetupPanel } from "@/components/trading-room/room-setup";
 import { JournalSection } from "@/components/trading-room/journal-panels";
 import { DayRulesStrip } from "@/components/trading-room/day-rules-strip";
+import { ScorecardPanel } from "@/components/trading-room/scorecard-panel";
 
 // THE TRADING ROOM — Spencer trades MES / MNQ / MGC by hand on his live Tradovate account; this page
 // shows him what the chart shows (the level set), what his own rule allows (size), what is on the
@@ -55,6 +56,7 @@ export default function TradingRoomPage() {
       />
 
       <DayRulesStrip />
+      <ScorecardPanel />
 
       {data.error && <div className="rounded-lg border border-down/40 bg-down/10 px-3 py-2 text-[13px] text-down">{data.error}</div>}
       {data.card?.errors.length ? <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">{data.card.errors.join(" · ")}</div> : null}

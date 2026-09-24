@@ -13,7 +13,7 @@ const mono = Martian_Mono({ variable: "--font-mono-face", subsets: ["latin"], we
 
 export const metadata: Metadata = {
   title: "Esbueno Trades",
-  description: "Options and futures desks — live account, paper record, orders, system health",
+  description: "Futures trading room and options desk — live account, orders, system health",
 };
 
 export default function RootLayout({
