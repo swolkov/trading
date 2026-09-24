@@ -3,6 +3,8 @@ import { parseChartLevels, parseFeed } from "@/lib/trading-room-rules";
 import { buildCard, loadFeed, recordChartLevels, recordFeed } from "@/lib/trading-room";
 import { parseSetup } from "@/lib/setup-feed-rules";
 import { recordSetup } from "@/lib/setup-feed";
+import { parseIctAlert } from "@/lib/ict-alert-rules";
+import { recordIctAlert } from "@/lib/ict-alerts";
 
 // TRADINGVIEW → THE TRADING ROOM'S TAPE. The Pine study (pine/trading-room-levels.pine) posts one
 // JSON message when a 5-minute close breaks a level it draws:
@@ -47,6 +49,13 @@ export async function POST(request: Request) {
     if (!su.ok) return Response.json({ error: su.reason }, { status: 400 });
     try { const { duplicate } = await recordSetup(su.setup); return Response.json({ status: duplicate ? "duplicate" : "setup", id: su.setup.id }); }
     catch (e) { console.error("[/api/webhook/trading-room] setup", e); return Response.json({ error: String(e).slice(0, 200) }, { status: 500 }); }
+  }
+  if ((body as Record<string, unknown>).kind === "ict") {
+    // An ACTION change from the ICT Setups indicator (PREPARE / ENTRY READY / MISSED / INVALIDATED) → #futures-copilot. Information only.
+    const ia = parseIctAlert(body);
+    if (!ia.ok) return Response.json({ error: ia.reason }, { status: 400 });
+    try { const { duplicate } = await recordIctAlert(ia.alert); return Response.json({ status: duplicate ? "duplicate" : "ict", id: ia.alert.id }); }
+    catch (e) { console.error("[/api/webhook/trading-room] ict", e); return Response.json({ error: String(e).slice(0, 200) }, { status: 500 }); }
   }
   const parsed = parseFeed(body, now);
   if (!parsed.ok) return Response.json({ error: parsed.reason }, { status: 400 });

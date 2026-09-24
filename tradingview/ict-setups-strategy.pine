@@ -111,6 +111,8 @@ showGloss  = input.bool(false, "Beginner glossary (what SSL, MSS, iFVG… mean)"
 showStats  = input.bool(false, "Show results on loaded history", group=G_DSH)
 alertsOn   = input.bool(true, "Alerts on", group=G_DSH)
 alAction   = input.bool(true, "Alert: ACTION RIGHT NOW changes", group=G_DSH)
+hookSecret = input.string("", "Slack: Trading Room webhook secret (blank = plain-text alerts)", group=G_DSH,
+     tooltip="Paste the same secret as the Trading Room levels study. Then ACTION changes (PREPARE / ENTRY READY / MISSED / INVALIDATED) are sent as JSON to the Trading Room webhook, which posts them to Slack #futures-copilot with the side, zone, entry order, stop, targets and cancel time. Create ONE TradingView alert per chart: Condition = this indicator → Any alert() function call, Webhook URL = the Trading Room webhook.")
 alSweep    = input.bool(false, "Alert: liquidity sweep (overnight / prior day / week / 1H-4H only)", group=G_DSH)
 alMss      = input.bool(false, "Alert: setup MSS confirmed", group=G_DSH)
 alIFVG     = input.bool(false, "Alert: iFVG created (chart timeframe)", group=G_DSH)
@@ -1368,6 +1370,23 @@ var string actNow = "WAIT"
 var string actWhy = "No setup in progress."
 var int    actSide = 0             // +1 / -1 side the action refers to, 0 none
 
+HOOK = str.length(str.trim(hookSecret)) > 0
+f_num(float x) =>
+    na(x) ? "null" : str.tostring(x)
+f_jstr(string x) =>
+    '"' + str.replace_all(str.replace_all(x, '"', "'"), "\n", " ") + '"'
+// One JSON message per ACTION change for the Trading Room webhook → Slack (prices in real, not mirrored, space).
+f_hookJson(Setup S, string act) =>
+    string code = str.startswith(act, "ENTRY") ? "ENTRY_READY" : str.startswith(act, "PREPARE") ? "PREPARE" : str.startswith(act, "MISSED") ? "MISSED" : "INVALIDATED"
+    float lo = math.min(S.d * S.zTop, S.d * S.zBot)
+    float hi = math.max(S.d * S.zTop, S.d * S.zBot)
+    int cancelAt = S.stage == 5 ? S.tReady + pendBars * timeframe.in_seconds() * 1000 : 0
+    '{"secret":' + f_jstr(str.trim(hookSecret)) + ',"room":"trading","kind":"ict","symbol":"' + syminfo.root + '","tf":"' + timeframe.period +
+     '","action":"' + code + '","side":"' + (S.d == 1 ? "long" : "short") + '","zoneLo":' + f_num(lo) + ',"zoneHi":' + f_num(hi) +
+     ',"entry":' + f_num(S.d * S.entry) + ',"stop":' + f_num(S.d * S.stop) + ',"tp1":' + f_num(S.d * S.tp1) + ',"tp1s":' + f_jstr(S.tp1s) +
+     ',"tp2":' + f_num(S.d * S.tp2) + ',"tp3":' + f_num(S.d * S.tp3) + ',"cancelAt":' + str.tostring(cancelAt) + ',"bar":' + str.tostring(time) +
+     ',"why":' + f_jstr(code == "MISSED" or code == "INVALIDATED" ? str.substring(S.status, 0, math.min(str.length(S.status), 150)) : "") + '}'
+
 f_alertTxt(Setup S, string act) =>
     string up = S.d == 1 ? "bullish" : "bearish"
     string m = INS + " — " + eX.tf + " " + act + " | " + (S.d == 1 ? "SSL" : "BSL") + " swept (" + S.liqKind + " " + f_real(S, S.liqPx) + ")"
@@ -1404,10 +1423,10 @@ if barstate.isconfirmed
         why := "New setups are only scanned " + str.substring(winSess, 0, 2) + ":" + str.substring(winSess, 2, 4) + "–" + str.substring(winSess, 5, 7) + ":" + str.substring(winSess, 7, 9) + " ET.\nScanning resumes " + f_resume() + "."
     if alertsOn and alAction and newAct != actNow and not str.startswith(newAct, "WAIT")
         Setup F2 = newSide == -1 ? SS : SL
-        alert(f_alertTxt(F2, newAct), alert.freq_once_per_bar_close)
+        alert(HOOK ? f_hookJson(F2, newAct) : f_alertTxt(F2, newAct), alert.freq_once_per_bar_close)
     actNow := newAct, actWhy := why, actSide := newSide
-    // event alerts
-    if alertsOn
+    // event alerts (plain text only: with the Slack webhook on, only ACTION changes are sent)
+    if alertsOn and not HOOK
         if alSweep and not na(swS) and swS.w >= 3
             alert(INS + " — SSL swept: " + swS.kind + " " + f_px(swS.px) + " (traded below, closed back above)", alert.freq_once_per_bar_close)
         if alSweep and not na(swB) and swB.w >= 3

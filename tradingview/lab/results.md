@@ -127,3 +127,22 @@ KEY: of 73 ENTRY READY (A), 10 (13.7%) never gave the second dip (limit cancelle
    C on the setups A MISSED (no second dip): n=   8 win= 75.0% expR=+0.291 (t +0.98) avgW=+0.562 avgL=-0.521 PF=3.24 DD=1.0R/$77 streak=1 net=$282
    B on the setups A FILLED:                 n=  63 win= 46.0% expR=-0.135 (t -1.57) avgW=+0.489 avgL=-0.667 PF=0.63 DD=9.9R/$730 streak=6 net=$37
 ```
+
+## 1-MINUTE CHART test (Sep 24) — identical rules with 1m as the execution timeframe (`ict_lab.py <SYM> --tf1`)
+```
+══ MES ══  1M chart: ENTRY READY 607 · filled 477 · no second dip 129 · stop+target same minute (stop assumed) 3
+  1M all      n= 477 win= 51.2% expR=-0.166 (t -3.96) avgW=+0.694 avgL=-1.066 PF=0.68 DD=89.2R/$3,159 streak=13 net=$-2,678
+  1M 2011–18  n= 167 win= 49.1% expR=-0.254 (t -3.53) avgW=+0.656 avgL=-1.131 PF=0.56 DD=45.8R/$752 streak=6 net=$-609
+  1M 2019–26  n= 310 win= 52.3% expR=-0.118 (t -2.31) avgW=+0.713 avgL=-1.028 PF=0.76 DD=46.2R/$2,547 streak=13 net=$-2,068
+  5M all      n= 150 win= 56.0% expR=-0.102 (t -1.56) avgW=+0.578 avgL=-0.966 PF=0.76 DD=16.9R/$1,996 streak=5 net=$-1,474
+══ MNQ ══  1M chart: ENTRY READY 757 · filled 591 · no second dip 163 · stop+target same minute (stop assumed) 4
+  1M all      n= 591 win= 51.1% expR=-0.144 (t -3.87) avgW=+0.710 avgL=-1.037 PF=0.72 DD=86.3R/$3,943 streak=7 net=$-3,757
+  1M 2011–18  n= 235 win= 49.4% expR=-0.229 (t -3.84) avgW=+0.668 avgL=-1.103 PF=0.59 DD=54.6R/$914 streak=7 net=$-891
+  1M 2019–26  n= 356 win= 52.2% expR=-0.088 (t -1.86) avgW=+0.736 avgL=-0.991 PF=0.81 DD=34.5R/$3,118 streak=5 net=$-2,866
+  5M all      n= 164 win= 47.6% expR=-0.203 (t -3.32) avgW=+0.569 avgL=-0.903 PF=0.57 DD=34.1R/$3,760 streak=7 net=$-3,279
+══ MGC ══  1M chart: ENTRY READY 896 · filled 686 · no second dip 204 · stop+target same minute (stop assumed) 1
+  1M all      n= 686 win= 52.8% expR=-0.095 (t -2.60) avgW=+0.757 avgL=-1.047 PF=0.81 DD=75.9R/$1,480 streak=7 net=$-331
+  1M 2011–18  n= 346 win= 50.3% expR=-0.157 (t -2.98) avgW=+0.755 avgL=-1.079 PF=0.71 DD=60.6R/$938 streak=7 net=$-881
+  1M 2019–26  n= 340 win= 55.3% expR=-0.032 (t -0.63) avgW=+0.759 avgL=-1.011 PF=0.93 DD=23.1R/$636 streak=6 net=$550
+  5M all      n=  63 win= 49.2% expR=-0.083 (t -0.98) avgW=+0.504 avgL=-0.652 PF=0.75 DD=7.4R/$493 streak=5 net=$379
+```

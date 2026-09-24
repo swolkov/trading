@@ -183,10 +183,15 @@ ENTRY_VARIANTS = {
     'EN-C stop above retest high':   'C',
 }
 ENTRY_OF = {}
+BAR_MIN = 1 if '--tf1' in sys.argv else 5      # execution (chart) bar size in minutes
 TICK_OF = [None]                     # the running symbol's tick (read by on_close_zone for the EN-C trigger)
 if '--exits' in sys.argv:
     VARIANTS = {k: v[0] for k, v in EXIT_VARIANTS.items()}
     EXIT_OF = {k: v[1] for k, v in EXIT_VARIANTS.items()}
+elif '--tf1' in sys.argv:
+    # 1-MINUTE CHART (Sep 24): the indicator on a 1m chart uses 1m as execution; same rules, bar counts in 1m bars
+    VARIANTS = {'F on 1M chart (1m OFF)': (True, True, True, True, True, False)}
+    EXIT_OF = {k: 'TP1' for k in VARIANTS}
 elif '--entries' in sys.argv:
     VARIANTS = {k: (True, True, True, True, True, False) for k in ENTRY_VARIANTS}
     EXIT_OF = {k: 'TP1' for k in VARIANTS}
@@ -528,9 +533,9 @@ def run(sym, lastDays=None):
     if lastDays:
         keep = tmin >= tmin[-1] - lastDays * 1440
         tmin, o1, h1, l1, c1 = tmin[keep], o1[keep], h1[keep], l1[keep], c1[keep]
-    k5 = tmin // 5
+    k5 = tmin // BAR_MIN
     st5, en5, O, H, L, C = agg(k5, o1, h1, l1, c1)
-    T5 = k5[st5] * 5
+    T5 = k5[st5] * BAR_MIN
     sm = (tmin - 18 * 60) % 1440
     td = (tmin + 6 * 60) // 1440                           # trading day, named by its END date (18:00 ET start)
     dow = (td + 3) % 7                                     # 0 = Monday; Sunday-evening session → Monday
@@ -658,8 +663,8 @@ def run(sym, lastDays=None):
         for v, (SLo, SSo) in sides.items():
             ST = stats[v]; sess = SLo.sess
             inWin = (not sess) or (570 <= m5 < 840)                       # 09:30–14:00 (bar OPEN time)
-            nextInWin = (not sess) or (570 <= m5 + 5 < 840)               # the NEXT bar (Pine: time_close)
-            inFlat = (570 <= m5 < 950) if sess else not (1010 <= m5 < 1080)   # last held bar 15:50 → exit 15:55 / 16:55 break
+            nextInWin = (not sess) or (570 <= m5 + BAR_MIN < 840)               # the NEXT bar (Pine: time_close)
+            inFlat = (570 <= m5 < 955 - BAR_MIN) if sess else not (1010 <= m5 < 1080)   # last held bar 15:50 → exit 15:55 / 16:55 break
             flipL = fed['60'] and SLo.ctx and b1 <= -3
             flipS = fed['60'] and SLo.ctx and b1 >= 3
             ctx[v] = (flipL, flipS, inWin, nextInWin)
@@ -730,7 +735,7 @@ if __name__ == '__main__':
                                               pendBlocked=ST.pendBlocked, noRoom=ST.noRoom),
                                   readyIds=ST.readyIds, noReturnIds=ST.noReturnIds,
                                   trades=[(t[0], t[1], round(t[2], 4), round(t[3], 2), t[4], t[5]) for t in tr])
-    json.dump(out, open(f'/Users/user/trading/tradingview/lab/out_{sym}' + ('_exits' if '--exits' in sys.argv else '') + ('_entries' if '--entries' in sys.argv else '') + (f'_{lastDays}d' if lastDays else '') + '.json', 'w'))
+    json.dump(out, open(f'/Users/user/trading/tradingview/lab/out_{sym}' + ('_exits' if '--exits' in sys.argv else '') + ('_entries' if '--entries' in sys.argv else '') + ('_tf1' if '--tf1' in sys.argv else '') + (f'_{lastDays}d' if lastDays else '') + '.json', 'w'))
     for v, r in out['variants'].items():
         a = r['all']
         print(f"{sp['name']} {v:30s} n={a.get('n',0):5d} win={a.get('win',0):.3f} expR={a.get('expR',0):+.3f} "
