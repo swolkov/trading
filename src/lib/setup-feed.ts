@@ -7,6 +7,7 @@ import { sendNotification } from "@/lib/notifications";
 import { getIntradayBars } from "@/lib/yahoo";
 import { INSTRUMENTS, etDayStartMs, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
 import { recapText, resolveOutcome, setupText, type ScoredSetup, type Setup } from "@/lib/setup-feed-rules";
+import { paperBotRecap, runPaperBotTick } from "@/lib/paper-bot";
 
 const TAKEN_WINDOW_MS = 15 * 60_000;
 
@@ -45,7 +46,7 @@ async function priorSameDay(s: Setup): Promise<Row[]> {
 const toSetup = (r: Row): Setup => ({ id: r.id, symbol: r.symbol, side: r.side === 1 ? 1 : -1, at: new Date(r.at).toISOString(), price: Number(r.price), stop: Number(r.stop), orh: r.orh, orl: r.orl, vwap: r.vwap });
 
 /** Score open setups (10+ minutes old) and mark the ones he took. Then, once a weekday after the close, the recap. */
-export async function resolveSetups(nowMs = Date.now()): Promise<{ resolved: number; recap: boolean }> {
+export async function resolveSetups(nowMs = Date.now()): Promise<{ resolved: number; recap: boolean; paper: number }> {
   await ensureSetupsTable();
   const open = await prisma.$queryRawUnsafe<Row[]>(
     `SELECT * FROM trading_room_setups WHERE (status = 'open' OR taken IS NULL) AND at >= $1 AND at <= $2 ORDER BY at`,
@@ -94,7 +95,9 @@ export async function resolveSetups(nowMs = Date.now()): Promise<{ resolved: num
       }
     }
   }
-  return { resolved, recap: await maybeRecap(nowMs) };
+  // The paper bot trades the same setups (PAPER ONLY — no order path). Its failure must never stop the scoring above.
+  const paper = await runPaperBotTick(nowMs, bars).catch((e) => { console.error("[setup-feed] paper bot", e); return 0; });
+  return { resolved, recap: await maybeRecap(nowMs), paper };
 }
 
 const RECAP_KEY = "setup_feed_recap_day";
@@ -108,7 +111,9 @@ async function maybeRecap(nowMs: number): Promise<boolean> {
   const today: ScoredSetup[] = rows.filter((r) => etParts(new Date(r.at).getTime()).dayKey === now.dayKey)
     .map((r) => ({ symbol: r.symbol, side: r.side === 1 ? 1 : -1, r: r.r == null ? null : Number(r.r), usd: r.usd == null ? null : Number(r.usd), taken: r.taken === true, hisUsd: r.his_usd == null ? null : Number(r.his_usd) }));
   const text = recapText(now.dayKey, today);
-  if (text) await sendNotification(text, "copilot").catch(() => {});
+  const bot = await paperBotRecap(nowMs).catch(() => null);
+  const out = [text, bot].filter(Boolean).join("\n");
+  if (out) await sendNotification(out, "copilot").catch(() => {});
   await prisma.agentConfig.upsert({ where: { key: RECAP_KEY }, update: { value: now.dayKey }, create: { key: RECAP_KEY, value: now.dayKey } });
-  return !!text;
+  return !!out;
 }

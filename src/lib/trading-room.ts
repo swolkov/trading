@@ -259,7 +259,7 @@ export async function roomTick(nowMs = Date.now()): Promise<{ ok: boolean; notes
     notes.push("flatten warning");
   }
   // The setup feed (last, so a slow Yahoo can never delay the card or the alarms): score the chart's setups on real bars, mark the ones he took, and the day's recap after the close.
-  try { const s = await resolveSetups(nowMs); if (s.resolved || s.recap) notes.push(`setups: ${s.resolved} scored${s.recap ? " · recap posted" : ""}`); }
+  try { const s = await resolveSetups(nowMs); if (s.resolved || s.recap || s.paper) notes.push(`setups: ${s.resolved} scored${s.paper ? ` · paper bot ${s.paper} msgs` : ""}${s.recap ? " · recap posted" : ""}`); }
   catch (e) { notes.push(`setups failed: ${String(e).slice(0, 160)}`); }
   state.lastTickAt = new Date(nowMs).toISOString();
   await setKey(STATE_KEY, JSON.stringify(state));
