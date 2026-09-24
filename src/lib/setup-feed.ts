@@ -8,7 +8,7 @@ import { getIntradayBars } from "@/lib/yahoo";
 import { INSTRUMENTS, etDayStartMs, etParts, type Bar, type RoomSymbol } from "@/lib/trading-room-rules";
 import { recapText, resolveOutcome, setupText, type ScoredSetup, type Setup } from "@/lib/setup-feed-rules";
 import { paperBotRecap, runPaperBotTick } from "@/lib/paper-bot";
-import { gradesRecap } from "@/lib/trade-grades";
+import { disciplineRecap, gradesRecap } from "@/lib/trade-grades";
 
 const TAKEN_WINDOW_MS = 15 * 60_000;
 
@@ -114,7 +114,8 @@ async function maybeRecap(nowMs: number): Promise<boolean> {
   const text = recapText(now.dayKey, today);
   const bot = await paperBotRecap(nowMs).catch(() => null);
   const grades = await gradesRecap(nowMs).catch(() => null);
-  const out = [text, bot, grades].filter(Boolean).join("\n");
+  const discipline = await disciplineRecap(nowMs).catch(() => null);
+  const out = [text, bot, discipline, grades].filter(Boolean).join("\n");
   if (out) await sendNotification(out, "copilot").catch(() => {});
   await prisma.agentConfig.upsert({ where: { key: RECAP_KEY }, update: { value: now.dayKey }, create: { key: RECAP_KEY, value: now.dayKey } });
   return !!out;

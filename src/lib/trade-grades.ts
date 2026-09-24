@@ -4,10 +4,44 @@
 import { prisma } from "@/lib/db";
 import { tradingDay } from "@/lib/copilot-rules";
 import type { RoomSymbol } from "@/lib/trading-room-rules";
-import { MATCH_WINDOW_MS, gradeAskText, matchGrades, gradesRecapText, parseGradeKey, type Grade, type GradedTrip } from "@/lib/trade-grades-rules";
+import type { Discipline } from "@/lib/copilot-rules";
+import { MATCH_WINDOW_MS, disciplineRecapText, gradeAskText, gradeKey, matchGrades, gradesRecapText, parseGradeKey, type Grade, type GradedTrip } from "@/lib/trade-grades-rules";
 
 const base = () => (process.env.PUBLIC_APP_URL ?? "https://trading-eta-snowy.vercel.app").replace(/\/$/, "");
 export const gradeSecret = () => process.env.TRADING_ROOM_WEBHOOK_SECRET || null;
+
+export async function ensureDisciplineTable(): Promise<void> {
+  await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS trading_room_discipline (
+    key text PRIMARY KEY, symbol text NOT NULL, side int NOT NULL, opened_at timestamptz NOT NULL, score int NOT NULL,
+    broken text NOT NULL, closed_at timestamptz NOT NULL DEFAULT now())`);
+}
+/** The co-pilot's automatic grade for each closed trip (once per entry; a re-post never duplicates). */
+export async function saveDiscipline(rows: Discipline[]): Promise<void> {
+  if (!rows.length) return;
+  await ensureDisciplineTable();
+  for (const d of rows) {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO trading_room_discipline (key, symbol, side, opened_at, score, broken) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (key) DO NOTHING`,
+      gradeKey(d.symbol, d.side, d.openedMs), d.symbol, d.side, new Date(d.openedMs), d.score, d.broken.join(" · "));
+  }
+}
+
+/** Discipline scores matched to closed journal trips the same way as grades. */
+export async function disciplineRecap(nowMs: number): Promise<string | null> {
+  await ensureDisciplineTable();
+  type DRow = { symbol: string; side: number; opened_at: Date; score: number };
+  const rows: DRow[] = await prisma.$queryRawUnsafe<DRow[]>(`SELECT symbol, side, opened_at, score FROM trading_room_discipline ORDER BY opened_at`);
+  if (!rows.length) return null;
+  const from = new Date(new Date(rows[0].opened_at).getTime() - MATCH_WINDOW_MS);
+  const trips: TripRow[] = await prisma.$queryRawUnsafe<TripRow[]>(`SELECT symbol, side, entry_ts, net_usd FROM trading_room_trades WHERE entry_ts >= $1 AND open = false`, from);
+  const idx = matchGrades(
+    rows.map((r: DRow) => ({ symbol: r.symbol, side: (r.side === 1 ? 1 : -1) as 1 | -1, openedMs: new Date(r.opened_at).getTime() })),
+    trips.map((t: TripRow) => ({ symbol: t.symbol, side: (t.side === "long" ? 1 : -1) as 1 | -1, entryMs: new Date(t.entry_ts).getTime() })));
+  const key = tradingDay(nowMs);
+  const all: { score: number; netUsd: number; day: string }[] = [];
+  rows.forEach((r: DRow, n: number) => { const i = idx[n]; if (i >= 0) all.push({ score: Number(r.score), netUsd: Number(trips[i].net_usd ?? 0), day: tradingDay(new Date(r.opened_at).getTime()) }); });
+  return disciplineRecapText(all.filter((r) => r.day === key), all);
+}
 
 export async function ensureGradesTable(): Promise<void> {
   await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS trading_room_grades (

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { gradeAskText, gradeKey, matchGrades, gradeLine, gradeSignature, gradeSignatureOk, gradesRecapText, isGrade, parseGradeKey } from "../src/lib/trade-grades-rules";
+import { disciplineRecapText, gradeAskText, gradeKey, matchGrades, gradeLine, gradeSignature, gradeSignatureOk, gradesRecapText, isGrade, parseGradeKey } from "../src/lib/trade-grades-rules";
 import { step, type CopilotOrder, type CopilotSnapshot, type CopilotState } from "../src/lib/copilot-rules";
 
 const T0 = Date.parse("2026-09-24T14:00:00Z");
@@ -106,4 +106,74 @@ test("co-pilot: a quick trade that closed before its card went out still gets a 
   assert.match(gradeAskText("MES", 1, T0, "https://x", SECRET, true), /Grade that quick MES long you just closed — how was the ENTRY\?/);
   const c = step(b.state, snap(40_000, 0, []));
   assert.equal(c.gradeAsks.length, 0);
+});
+
+// ---- the automatic discipline grade ----
+const wide = (price = 7821.25, symbol: CopilotOrder["symbol"] = "MES", qty = 20): CopilotOrder => ({ orderId: 1, symbol, action: "Sell", kind: "stop", price, qty });
+const pos = (iso: string | number, netPos: number, orders: CopilotOrder[] | null, fills: CopilotSnapshot["fills"] = [], symbol: CopilotOrder["symbol"] = "MES", netPrice = 7831.25): CopilotSnapshot =>
+  ({ nowMs: typeof iso === "number" ? iso : Date.parse(iso), positions: netPos ? [{ symbol, netPos, netPrice }] : [], orders, prices: {}, fills });
+const sellFill = (px: number, iso: string, qty = 20, symbol: CopilotOrder["symbol"] = "MES") => [{ symbol, action: "Sell" as const, qty, price: px, ms: Date.parse(iso) }];
+
+test("discipline: an MES morning trade with a real stop, stopped out after 12 min, is by the book 6/6", () => {
+  const a = step({ trips: {} }, pos("2026-09-24T14:30:00Z", 20, [wide()]));           // 10:30 ET
+  const b = step(a.state, pos("2026-09-24T14:42:00Z", 0, [], sellFill(7821.25, "2026-09-24T14:41:50Z")));
+  assert.equal(b.discipline.length, 1);
+  assert.deepEqual({ score: b.discipline[0].score, broken: b.discipline[0].broken }, { score: 6, broken: [] });
+  assert.match(b.messages.join("\n"), /📏 By the book 6\/6/);
+});
+
+test("discipline: MNQ at 3 PM, sold by hand after 1 min → 3 rules broken, named", () => {
+  const mnqStop = { orderId: 1, symbol: "MNQ" as const, action: "Sell" as const, kind: "stop" as const, price: 30650, qty: 10 };
+  const a = step({ trips: {} }, pos("2026-09-24T19:00:00Z", 10, [mnqStop], [], "MNQ", 30700));                         // 15:00 ET
+  const b = step(a.state, pos("2026-09-24T19:01:00Z", 0, [], [{ symbol: "MNQ", action: "Sell", qty: 10, price: 30702, ms: Date.parse("2026-09-24T19:00:58Z") }], "MNQ"));
+  const d = b.discipline[0];
+  assert.equal(d.score, 3);
+  assert.deepEqual(d.broken, ["not MES", "outside 9:30 AM–2 PM", "out by hand < 10 min"]);
+  assert.match(b.messages.join("\n"), /📏 Discipline 3\/6 — broke: not MES · outside 9:30 AM–2 PM · out by hand < 10 min/);
+});
+
+test("discipline: back in within 10 min of a loss, and a too-tight stop, are both marked", () => {
+  let st: CopilotState = { trips: {} };
+  st = step(st, pos("2026-09-24T14:30:00Z", 20, [wide()])).state;
+  st = step(st, pos("2026-09-24T14:42:00Z", 0, [], sellFill(7821.25, "2026-09-24T14:41:50Z"))).state;   // a loss
+  st = step(st, pos("2026-09-24T14:45:00Z", 20, [wide(7827.75)])).state;                                  // back in 3 min later, 3.5-pt stop
+  const r = step(st, pos("2026-09-24T14:58:00Z", 0, [], sellFill(7827.75, "2026-09-24T14:57:50Z")));
+  assert.deepEqual(r.discipline[0].broken, ["< 10 min after a loss", "no stop or too tight"]);
+});
+
+test("discipline: the 6th trade of the day is past the limit", () => {
+  let st: CopilotState = { trips: {} }; let last: ReturnType<typeof step> | null = null;
+  for (let i = 0; i < 6; i++) {
+    const t0 = Date.parse("2026-09-24T13:40:00Z") + i * 20 * 60_000;              // 9:40 ET onward, winners
+    st = step(st, pos(t0, 20, [wide()])).state;
+    last = step(st, pos(t0 + 12 * 60_000, 0, [], [{ symbol: "MES", action: "Sell", qty: 20, price: 7840, ms: t0 + 12 * 60_000 - 5_000 }]));
+    st = last.state;
+  }
+  assert.deepEqual(last!.discipline[0].broken, ["past 5 trades / 2 losses"]);
+});
+
+test("discipline: an unknown exit price is never held against him; pre-rule saved state isn't scored", () => {
+  const a = step({ trips: {} }, pos("2026-09-24T14:30:00Z", 20, [wide()]));
+  const b = step(a.state, pos("2026-09-24T14:31:00Z", 0, []));                     // closed, fills unreadable
+  assert.deepEqual(b.discipline[0].broken, []);
+  const old = { ...a.state.trips.MES! } as Record<string, unknown>; delete old.entryRules;
+  const c = step({ trips: { MES: old as never } }, pos("2026-09-24T14:40:00Z", 0, [], sellFill(7825, "2026-09-24T14:39:50Z")));
+  assert.equal(c.discipline.length, 0);
+});
+
+test("discipline recap: by the book vs broke a rule, today and since start", () => {
+  const rows = [{ score: 6, netUsd: 700 }, { score: 6, netUsd: -350 }, { score: 4, netUsd: -500 }];
+  assert.equal(disciplineRecapText(rows.slice(0, 1), rows),
+    "📏 Discipline — today: by the book 1 trade +$700 (100% win) · since start: by the book 2 trades +$350 (50% win) · broke a rule 1 trade −$500 (0% win)");
+  assert.equal(disciplineRecapText([], []), null);
+});
+
+test("discipline: orders never read → the stop rule is unknown, not broken; no fills → no 'by hand' anywhere in the close", () => {
+  const a = step({ trips: {} }, pos("2026-09-24T14:30:00Z", 20, null));          // orders unreadable the whole trip
+  const b = step(a.state, pos("2026-09-24T14:31:00Z", 20, null));
+  const c = step(b.state, pos("2026-09-24T14:32:00Z", 0, null));                 // closed after 2 min, fills unreadable
+  const txt = c.messages.join("\n");
+  assert.deepEqual(c.discipline[0].broken, []);
+  assert.doesNotMatch(txt, /hands off for 10 minutes/);
+  assert.doesNotMatch(txt, /no stop or too tight/);
 });

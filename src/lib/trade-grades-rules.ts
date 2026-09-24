@@ -74,6 +74,20 @@ export function gradeLine(rows: GradedTrip[]): string | null {
   return parts.join(" · ");
 }
 
+/** "By the book (6/6): n trades +$ (win%) · broke a rule: n trades −$ (win%)" — the rules' own scorecard on his money. */
+export function disciplineRecapText(today: { score: number; netUsd: number }[], all: { score: number; netUsd: number }[], maxScore = 6): string | null {
+  if (!all.length) return null;
+  const usd = (x: number) => `${x < 0 ? "−" : "+"}$${Math.abs(Math.round(x)).toLocaleString("en-US")}`;
+  const part = (rows: { score: number; netUsd: number }[], label: string) => {
+    if (!rows.length) return null;
+    const net = rows.reduce((a, r) => a + r.netUsd, 0), win = rows.filter((r) => r.netUsd > 0).length / rows.length;
+    return `${label} ${rows.length} trade${rows.length === 1 ? "" : "s"} ${usd(net)} (${Math.round(win * 100)}% win)`;
+  };
+  const split = (rows: { score: number; netUsd: number }[]) =>
+    [part(rows.filter((r) => r.score >= maxScore), "by the book"), part(rows.filter((r) => r.score < maxScore), "broke a rule")].filter(Boolean).join(" · ") || "none";
+  return `📏 Discipline — today: ${today.length ? split(today) : "none"} · since start: ${split(all)}`;
+}
+
 /** The recap block: today, and since grading began with the ~50-trade bar for reading anything into it. */
 export function gradesRecapText(today: GradedTrip[], all: GradedTrip[]): string | null {
   if (!all.length) return null;
