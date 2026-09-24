@@ -217,9 +217,12 @@ function closeLine(sym: RoomSymbol, t: Trip, exitPx: number | null, nowMs: numbe
 }
 
 /** One poll. Returns the next state and the lines to post (already grouped per symbol). */
-export function step(prev: CopilotState, snap: CopilotSnapshot): { state: CopilotState; messages: string[] } {
+/** gradeAsks: entries whose card went out this poll — the I/O posts the A/B/C grade links for each. */
+export interface GradeAsk { symbol: RoomSymbol; side: 1 | -1; openedMs: number; closed?: boolean }
+export function step(prev: CopilotState, snap: CopilotSnapshot): { state: CopilotState; messages: string[]; gradeAsks: GradeAsk[] } {
   const trips: Partial<Record<RoomSymbol, Trip>> = { ...prev.trips };
   const messages: string[] = [];
+  const gradeAsks: GradeAsk[] = [];
   let lastCloseMs = prev.lastCloseMs;
   let lastCloseLoss = prev.lastCloseLoss;
   const dayKey = tradingDay(snap.nowMs);
@@ -234,6 +237,8 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
       const filled = exitPrice(snap.fills, sym, t.side);
       const exitPx = filled ?? t.lastPrice;
       if (t.announced || snap.nowMs - t.openedMs >= 5_000) lines.push(closeLine(sym, t, exitPx, snap.nowMs, filled != null));
+      // a quick trade that closed before its card went out never got the grade ask — ask now, or C would look better than it is
+      if (!t.announced && snap.nowMs - t.openedMs >= 5_000) gradeAsks.push({ symbol: sym, side: t.side, openedMs: t.openedMs, closed: true });
       // The day's tally, only from a real fill price (a stale poll price can turn a stop-out into a "win").
       // A LOSS = lost money on price (gross < 0): a breakeven scratch is not a loss just because of fees.
       if (filled == null) {
@@ -265,6 +270,8 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
         : `   🧮 Trade ${day.trades} of ${DAY_MAX_TRADES} today`);
       if (lastCloseLoss && lastCloseMs != null && snap.nowMs - lastCloseMs < COOLDOWN_AFTER_LOSS_MS)
         g.push(`   ⛔ Back in ${duration(snap.nowMs - lastCloseMs)} after a LOSS — your rule is 10 minutes. This week: back in < 3 min after a loss = 24 trades −$3,499.`);
+      const hh = etParts(snap.nowMs).hourFrac;
+      if (hh >= 14 && hh < 17) g.push(`   ⏰ After 2 PM ET. Sep 20–23: 20 trades after 2 PM = −$4,234 (25% win); 9:30–noon = 20 trades +$3,688.`);
       if (sym !== PLAN_SYMBOL) g.push(`   📌 Not MES — your plan is MES only for now (this week MES +$5,577 · MNQ −$3,664 · MGC −$4,347).`);
       t.guards = g;
       t.record = snap.records?.[sym] ?? null;
@@ -339,6 +346,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     if (!t.announced && (t.stop != null || snap.nowMs - t.openedMs >= ENTRY_STOP_GRACE_MS)) {
       lines.splice(cardAt, 0, entryCard(sym, t));
       t.announced = true;
+      gradeAsks.push({ symbol: sym, side: t.side, openedMs: t.openedMs });
       t.noStopWarned = t.stop == null;
     }
 
@@ -386,7 +394,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     trips[sym] = t;
     if (lines.length) messages.push(lines.join("\n"));
   }
-  return { state: { trips, lastCloseMs, lastCloseLoss, day }, messages };
+  return { state: { trips, lastCloseMs, lastCloseLoss, day }, messages, gradeAsks };
 }
 
 /** The price implied by the account's open P&L — exact when ONE room symbol is open (the P&L is account-wide). */

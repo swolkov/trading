@@ -47,7 +47,7 @@ export async function laneStatus(): Promise<{ channel: NotifyChannel; own: boole
 /** Slack Block Kit blocks — used for the trade meter's replay image. Optional; plain text is the default. */
 export type SlackBlock = Record<string, unknown>;
 
-export async function sendNotification(message: string, channel: NotifyChannel = "general", blocks?: SlackBlock[]) {
+export async function sendNotification(message: string, channel: NotifyChannel = "general", blocks?: SlackBlock[], opts?: { noUnfurl?: boolean }) {
   try {
     const webhook = await getWebhook(channel);
     if (!webhook) return;
@@ -55,7 +55,7 @@ export async function sendNotification(message: string, channel: NotifyChannel =
     const res = await fetch(webhook, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(blocks ? { text: message, blocks } : { text: message }),
+      body: JSON.stringify({ text: message, ...(blocks ? { blocks } : {}), ...(opts?.noUnfurl ? { unfurl_links: false, unfurl_media: false } : {}) }),
       signal: AbortSignal.timeout(5000),
     });
     // A REVOKED WEBHOOK IS A SUCCESSFUL FETCH (Slack answers 404 "no_service"), so the status is checked and
