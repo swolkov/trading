@@ -690,6 +690,7 @@ type Setup
     array<line>  pl
     array<label> pb
     int    nEntry   = 0           // bar that confirmed ENTRY READY
+    int    tReady   = 0           // close time of that bar (the order window is counted from here)
     bool   pDone    = false       // 1m confirmation complete
     string endKind  = ""          // "MISSED" / "INVALIDATED" / "" for the last ending
     float  fillPx   = na
@@ -1152,7 +1153,7 @@ method onCloseZone(Setup S, Stats T, bool hFlip, bool otherActive) =>
                 float e_ = S.entry0
                 if precOn and not na(S.pTop) and S.pTop > S.stop and S.pTop <= S.zTop
                     e_ := S.pTop
-                S.entry := e_, S.stage := 5, S.nEntry := bar_index, S.evEntry := true
+                S.entry := e_, S.stage := 5, S.nEntry := bar_index, S.evEntry := true, S.tReady := time_close
     true
 
 // Stage 5: pending limit that did not fill this bar.
@@ -1329,8 +1330,17 @@ f_explain(Setup S) =>
         s_ := "Price retested the 5-minute entry zone " + f_zoneTxt(S) + " and the candle closed holding it ✓" +
              (precOn ? "\nWaiting for confirmed 1-minute " + up + " structure (sweep → displacement → MSS → FVG → retest)." : "\nWaiting — the other side also has a live setup.")
     else if S.stage == 5
-        s_ := "Every enabled condition has closed and confirmed.\nLimit " + (S.d == 1 ? "buy" : "sell") + " at " + f_real(S, S.entry) + ", valid " + str.tostring(pendBars) +
-             " bars. Cancel if a 5-minute candle closes " + (S.d == 1 ? "below " : "above ") + f_real(S, math.max(S.ext, S.zBot)) + "."
+        string ord = S.d == 1 ? "BUY LIMIT" : "SELL LIMIT"
+        float R_ = S.entry - S.stop
+        bool atEntry = f_cl(S.d) <= S.entry
+        s_ := "Retest confirmed ✓ (the 5-minute candle closed holding the iFVG).\nPlace a " + ord + " at " + f_real(S, S.entry) +
+             " now. Do NOT " + (S.d == 1 ? "buy" : "sell") + " at market.\nCurrent price: " + f_px(close) + ". " +
+             (atEntry ? "Price is at/through the entry — the limit should fill."
+                      : "It fills only if price " + (S.d == 1 ? "dips back down to " : "rises back up to ") + f_real(S, S.entry) + " (a second pullback into the iFVG).") +
+             "\nOrder valid for " + str.tostring(pendBars) + " five-minute candles — cancel at " +
+             str.format_time(S.tReady + pendBars * timeframe.in_seconds() * 1000, "HH:mm", TZ) + " ET if not filled: MISSED — DO NOT CHASE." +
+             "\nCancel early if a 5-minute candle closes " + (S.d == 1 ? "below " : "above ") + f_real(S, math.max(S.ext, S.zBot)) +
+             " (invalidated) or " + (S.d == 1 ? "above " : "below ") + f_real(S, S.entry + chaseR * R_) + " unfilled (ran away)."
     else if S.stage == 6
         s_ := "Entry filled at " + f_real(S, S.fillPx) + " (as modelled). Stop " + f_real(S, S.stop) + " · TP1 " + f_real(S, S.tp1) + ". Manage your position."
     else
@@ -1360,7 +1370,7 @@ f_alertTxt(Setup S, string act) =>
     if S.stage >= 3 or str.startswith(act, "MISSED") or str.startswith(act, "INVALIDATED")
         m += " | " + up + " MSS ✓ | " + up + " iFVG " + f_zoneTxt(S)
     if S.stage == 5
-        m += " | entry " + f_real(S, S.entry) + " · stop " + f_real(S, S.stop) + " · TP1 " + f_real(S, S.tp1) + " (" + S.tp1s + ", " +
+        m += " | " + (S.d == 1 ? "BUY LIMIT " : "SELL LIMIT ") + f_real(S, S.entry) + " (valid " + str.tostring(pendBars) + " bars) · stop " + f_real(S, S.stop) + " · TP1 " + f_real(S, S.tp1) + " (" + S.tp1s + ", " +
              str.tostring((S.tp1 - S.entry) / (S.entry - S.stop), "#.#") + "R)"
     else if S.stage == 3
         m += " | waiting for the retest"
@@ -1585,7 +1595,8 @@ if barstate.islast and showDash and not IS_STRATEGY
         else if G.stage == 4 and precOn
             live := "1-minute confirmation may be developing inside this candle — it is confirmed only at this candle's close."
         else if G.stage == 5
-            live := "Limit pending at " + f_real(G, G.entry) + " · " + str.tostring(pendBars - (bar_index - G.nEntry) + 1) + " bars left."
+            live := (d == 1 ? "BUY" : "SELL") + " LIMIT pending at " + f_real(G, G.entry) + " · price " + f_px(close) + " · " + str.tostring(pendBars - (bar_index - G.nEntry) + 1) +
+                 " bars left · fills only if price " + (d == 1 ? "dips to " : "rises to ") + f_real(G, G.entry) + "."
         else
             live := "Nothing developing."
     f_cell(0, r, "LIVE BAR — NOT CONFIRMED", color.new(#787B86, 0), color.new(#1E222D, 0), true), r += 1
