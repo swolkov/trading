@@ -170,9 +170,27 @@ EXIT_VARIANTS = {
     'X-B all at TP2':     ((True, True, True, True, True, False), 'TP2'),
     'X-C thirds':         ((True, True, True, True, True, False), 'THIRDS'),
 }
+# Pre-declared ENTRY experiment (Sep 24): identical F setups, stop, TP1 prices, session, costs; ONLY the order
+# placed at ENTRY READY (the retest candle's close) differs. Declared before any result was seen; no tuning.
+#  EN-A  current: limit at the zone edge, fills on a 1-tick trade-through, valid PEND_BARS bars, chase cancel.
+#  EN-B  market at the NEXT bar's first 1m open + 1 tick slippage (the retest close itself is not fillable).
+#  EN-C  buy stop 1 tick above the retest candle's high (sell stop below its low), valid PEND_BARS bars,
+#        fills at max(trigger, 1m open) + 1 tick slippage; a stop hit inside the fill minute counts as stopped.
+#  B/C: R = actual fill − stop (their real risk); a fill at/above TP1 is skipped (no room), counted.
+ENTRY_VARIANTS = {
+    'EN-A limit at zone (current)':  'A',
+    'EN-B market next open':         'B',
+    'EN-C stop above retest high':   'C',
+}
+ENTRY_OF = {}
+TICK_OF = [None]                     # the running symbol's tick (read by on_close_zone for the EN-C trigger)
 if '--exits' in sys.argv:
     VARIANTS = {k: v[0] for k, v in EXIT_VARIANTS.items()}
     EXIT_OF = {k: v[1] for k, v in EXIT_VARIANTS.items()}
+elif '--entries' in sys.argv:
+    VARIANTS = {k: (True, True, True, True, True, False) for k in ENTRY_VARIANTS}
+    EXIT_OF = {k: 'TP1' for k in VARIANTS}
+    ENTRY_OF = dict(ENTRY_VARIANTS)
 else:
     EXIT_OF = {k: 'TP1' for k in VARIANTS}
 
@@ -180,6 +198,9 @@ class Stats:
     def __init__(s):
         s.ready = s.missed = s.expired = s.invalid = s.noPrec = s.ambRes = s.ambUnres = s.precDone = s.entryReady = s.noTp2 = s.noTp3 = s.qaChecks = s.qaViol = 0
         s.trades = []
+        # entry experiment: what happened to each ENTRY READY order
+        s.pendFilled = s.pendNoReturn = s.pendInvalid = s.pendBlocked = s.noRoom = 0
+        s.readyIds = []; s.noReturnIds = []
 
 class Setup:
     def __init__(s, d, flags):
@@ -193,6 +214,7 @@ class Setup:
         s.nRetest = 0; s.tFrom1m = 0; s.nEntry = 0
         s.pStep = 0; s.pMss = None; s.pDisp = False; s.pMssOK = False; s.pTop = None; s.pZoneN = 0
         s.legTp = []; s.legOpen = []; s.rGross = 0.0; s.ptsGross = 0.0; s.fillT = 0; s.fillPx = None; s.riskPlan = None
+        s.entryMode = 'A'; s.rtHi = None; s.trig = None; s.readyId = None
 
     def reset(s, bi):
         if s.stage > 0:
@@ -324,7 +346,7 @@ def on_close_prepare(S, ST, bi, h, l, c, hFlip, inWin, sub_h, sub_l, sub_t):
             if l_ <= S.zTop:
                 ST.qaChecks += 1
                 ST.qaViol += 0 if (bi > S.nReady and d * c >= S.zBot) else 1
-                S.stage = 4; S.nRetest = bi; S.tFrom1m = int(sub_t[0])
+                S.stage = 4; S.nRetest = bi; S.tFrom1m = int(sub_t[0]); S.rtHi = h_
                 S.pStep = 0; S.pDisp = False; S.pMssOK = False; S.pTop = None; S.pDone = False
                 for k in range(len(sub_h)):
                     if (sub_l[k] if d == 1 else -sub_h[k]) <= S.zTop:
@@ -389,18 +411,25 @@ def on_close_zone(S, ST, bi, c, hFlip, otherActive, inWin, nextInWin=True):
                 ST.qaViol += 0 if (S.nRetest > S.nReady and bi >= S.nRetest and (not S.prec or S.pDone)) else 1
                 S.entry = e_; S.stage = 5; S.nEntry = bi
                 ST.entryReady += 1
+                S.readyId = bi * 2 + (S.d == 1); ST.readyIds.append(S.readyId)
+                S.trig = S.rtHi + TICK_OF[0]              # EN-C trigger (long space), unused by A/B
                 if S.prec: ST.precDone += 1
 
 def on_close_pending(S, ST, bi, c, hFlip, inWin, nextInWin=True):
     if S.stage == 5 and bi > S.nEntry:
         c_ = S.d * c; R = S.entry - S.stop
-        if not pre_entry(S, ST, bi, c, hFlip):
-            if c_ >= S.entry + CHASE_R * R:
-                ST.missed += 1; S.reset(bi)
+        if S.entryMode == 'B':
+            # the market order could not be sent on the next bar (conflict / other trade open) → gone
+            ST.pendBlocked += 1; ST.missed += 1; S.reset(bi); return
+        if pre_entry(S, ST, bi, c, hFlip):
+            ST.pendInvalid += 1
+        else:
+            if S.entryMode == 'A' and c_ >= S.entry + CHASE_R * R:
+                ST.missed += 1; ST.pendNoReturn += 1; ST.noReturnIds.append(S.readyId); S.reset(bi)
             elif bi - S.nEntry >= PEND_BARS:
-                ST.missed += 1; S.reset(bi)
+                ST.missed += 1; ST.pendNoReturn += 1; ST.noReturnIds.append(S.readyId); S.reset(bi)
             elif not inWin or not nextInWin:
-                ST.invalid += 1; S.reset(bi)
+                ST.invalid += 1; ST.pendInvalid += 1; S.reset(bi)
 
 def exit_leg(S, i, px):
     nL = len(S.legTp)
@@ -426,11 +455,24 @@ def manage(S, ST, bi, o, h, l, c, sub_o, sub_h, sub_l, TICK, PV, FEE, conflictPr
         sl = sub_l[k] if d == 1 else -sub_h[k]
         so = d * sub_o[k]
         if S.stage != 6:
-            if sl <= S.entry - TICK:                       # limit fills on a 1-tick trade-through
+            if S.entryMode == 'A':
+                hit = sl <= S.entry - TICK                 # limit fills on a 1-tick trade-through
+            elif S.entryMode == 'B':
+                hit = k == 0                               # market at the next bar's first 1m open
+            else:
+                hit = sh >= S.trig                         # buy stop triggers when price trades at the trigger
+            if hit:
                 ST.qaChecks += 1
                 ST.qaViol += 0 if bi > S.nEntry else 1
-                S.riskPlan = S.entry - S.stop
-                S.fillPx = so if (k == 0 and so < S.entry) else S.entry   # through at the open → fill at the open
+                if S.entryMode == 'A':
+                    S.riskPlan = S.entry - S.stop
+                    S.fillPx = so if (k == 0 and so < S.entry) else S.entry   # through at the open → fill at the open
+                else:
+                    S.fillPx = (so if S.entryMode == 'B' else max(S.trig, so)) + STOP_SLIP * TICK
+                    S.riskPlan = S.fillPx - S.stop
+                    if S.fillPx >= S.tp1 or S.riskPlan <= 0:
+                        ST.noRoom += 1; S.reset(bi); return
+                ST.pendFilled += 1
                 S.stage = 6; S.fillT = tb
                 t1 = S.tp1; t2 = S.tp2 if S.tp2 is not None else t1; t3 = S.tp3 if S.tp3 is not None else t2
                 ST.noTp2 += S.tp2 is None; ST.noTp3 += S.tp3 is None
@@ -455,7 +497,7 @@ def manage(S, ST, bi, o, h, l, c, sub_o, sub_h, sub_l, TICK, PV, FEE, conflictPr
     if S.stage == 6 and any(S.legOpen) and not inFlat:
         exit_all(S, d * c); why = 'flat'
     if S.stage == 6 and not any(S.legOpen):
-        ST.trades.append((int(S.fillT), d, S.rGross - 2 * FEE / PV / S.riskPlan, S.ptsGross * PV - 2 * FEE, why))
+        ST.trades.append((int(S.fillT), d, S.rGross - 2 * FEE / PV / S.riskPlan, S.ptsGross * PV - 2 * FEE, why, S.readyId))
         S.reset(bi)
 
 # ───────────────────────────── data ─────────────────────────────
@@ -481,6 +523,7 @@ def agg(key, o, h, l, c):
 # ───────────────────────────── main run ─────────────────────────────
 def run(sym, lastDays=None):
     sp = SPEC[sym]; TICK = sp['tick']; PV = sp['pv']; FEE = sp['fee']
+    TICK_OF[0] = TICK
     tmin, o1, h1, l1, c1 = load(sp)
     if lastDays:
         keep = tmin >= tmin[-1] - lastDays * 1440
@@ -510,6 +553,7 @@ def run(sym, lastDays=None):
     sides = {v: (Setup(1, f), Setup(-1, f)) for v, f in VARIANTS.items()}
     for v, (a_, b_) in sides.items():
         a_.exitPlan = b_.exitPlan = EXIT_OF[v]
+        a_.entryMode = b_.entryMode = ENTRY_OF.get(v, 'A')
     stats = {v: Stats() for v in VARIANTS}
     cprev = {v: False for v in VARIANTS}; tprev = {v: False for v in VARIANTS}
     precV = [v for v, f in VARIANTS.items() if f[5]]
@@ -681,9 +725,12 @@ if __name__ == '__main__':
                                   years={y: summarize(ts) for y, ts in sorted(years.items())},
                                   counts=dict(prepare=ST.ready, missed=ST.missed, invalid=ST.invalid, expired=ST.expired,
                                               noPrec=ST.noPrec, ambRes=ST.ambRes, ambUnres=ST.ambUnres, entryReady=ST.entryReady, precDone=ST.precDone,
-                                              noTp2=ST.noTp2, noTp3=ST.noTp3, qaChecks=ST.qaChecks, qaViol=ST.qaViol),
-                                  trades=[(t[0], t[1], round(t[2], 4), round(t[3], 2), t[4]) for t in tr])
-    json.dump(out, open(f'/Users/user/trading/tradingview/lab/out_{sym}' + ('_exits' if '--exits' in sys.argv else '') + (f'_{lastDays}d' if lastDays else '') + '.json', 'w'))
+                                              noTp2=ST.noTp2, noTp3=ST.noTp3, qaChecks=ST.qaChecks, qaViol=ST.qaViol,
+                                              pendFilled=ST.pendFilled, pendNoReturn=ST.pendNoReturn, pendInvalid=ST.pendInvalid,
+                                              pendBlocked=ST.pendBlocked, noRoom=ST.noRoom),
+                                  readyIds=ST.readyIds, noReturnIds=ST.noReturnIds,
+                                  trades=[(t[0], t[1], round(t[2], 4), round(t[3], 2), t[4], t[5]) for t in tr])
+    json.dump(out, open(f'/Users/user/trading/tradingview/lab/out_{sym}' + ('_exits' if '--exits' in sys.argv else '') + ('_entries' if '--entries' in sys.argv else '') + (f'_{lastDays}d' if lastDays else '') + '.json', 'w'))
     for v, r in out['variants'].items():
         a = r['all']
         print(f"{sp['name']} {v:30s} n={a.get('n',0):5d} win={a.get('win',0):.3f} expR={a.get('expR',0):+.3f} "
