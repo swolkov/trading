@@ -1,0 +1,76 @@
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// STRATEGY ORDERS — appended only to ict-setups-strategy.pine by build-ict.sh. Every decision comes
+// from the shared core above: an order exists ONLY while a side is ENTRY READY (stage 5) with no
+// long/short conflict, and it is cancelled the moment that stops being true (filled, MISSED,
+// INVALIDATED, pending window over). Fills, stop, targets and session-flat mirror the core.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+int QTY_ENTRY = str.startswith(exitPlan, "Thirds") ? 3 * qtyC : qtyC
+
+f_tvExits(Setup S, string id) =>
+    float stopR = S.d * S.stop
+    float t1 = S.d * S.tp1
+    float t2 = S.d * nz(S.tp2, S.tp1)
+    float t3 = S.d * nz(S.tp3, nz(S.tp2, S.tp1))
+    if exitPlan == "TP1"
+        strategy.exit(id + "-x", id, stop=stopR, limit=t1, comment_loss="stop", comment_profit="TP1")
+    else if exitPlan == "TP2"
+        strategy.exit(id + "-x", id, stop=stopR, limit=t2, comment_loss="stop", comment_profit="TP2")
+    else
+        // thirds need whole contracts: the entry is 3 × Contracts, one third per target
+        strategy.exit(id + "-1", id, qty=qtyC, stop=stopR, limit=t1, comment_loss="stop", comment_profit="TP1")
+        strategy.exit(id + "-2", id, qty=qtyC, stop=stopR, limit=t2, comment_loss="stop", comment_profit="TP2")
+        strategy.exit(id + "-3", id, qty=qtyC, stop=stopR, limit=t3, comment_loss="stop", comment_profit="TP3")
+
+if barstate.isconfirmed
+    // same gate as the core's fill model: ENTRY READY, no conflict, no other position open
+    bool wantL = SL.stage == 5 and not conflictPrev and not tradePrev
+    bool wantS = SS.stage == 5 and not conflictPrev and not tradePrev
+    if wantL and strategy.position_size == 0
+        strategy.entry("L", strategy.long, qty=QTY_ENTRY, limit=SL.entry, comment="ENTRY READY L")
+        f_tvExits(SL, "L")
+    else if strategy.position_size == 0
+        strategy.cancel("L")
+    if wantS and strategy.position_size == 0
+        strategy.entry("S", strategy.short, qty=QTY_ENTRY, limit=-SS.entry, comment="ENTRY READY S")
+        f_tvExits(SS, "S")
+    else if strategy.position_size == 0
+        strategy.cancel("S")
+    if strategy.position_size != 0 and not inFlat
+        strategy.close_all(comment="flat: session end", immediately=true)   // same price as the core: this bar's close
+
+// verification log: every trade TradingView closes, next to the core's "CORE" lines
+var int loggedTV = 0
+if strategy.closedtrades > loggedTV
+    for i = loggedTV to strategy.closedtrades - 1
+        log.info("TV   {0} {1} fill {2} exit {3} · P&L ${4} (commission $1.03/side)", str.format_time(strategy.closedtrades.entry_time(i), "yyyy-MM-dd HH:mm", TZ),
+             strategy.closedtrades.size(i) > 0 ? "LONG" : "SHORT", f_px(strategy.closedtrades.entry_price(i)), f_px(strategy.closedtrades.exit_price(i)),
+             str.tostring(strategy.closedtrades.profit(i), "#.##"))
+    loggedTV := strategy.closedtrades
+
+// Results: TradingView's own fills next to the core's own model (they should be close; any gap is
+// TradingView's intrabar fill engine vs the core's 1m replay + stop-first rule).
+var table RT = table.new(position.bottom_left, 2, 16, bgcolor=color.new(#131722, 0), border_color=color.new(#363A45, 0), border_width=1)
+f_rt(int r, string a, string b) =>
+    table.cell(RT, 0, r, a, text_color=color.new(#9598A1, 0), text_size=size.small, text_halign=text.align_left, bgcolor=color.new(#131722, 0))
+    table.cell(RT, 1, r, b, text_color=color.new(#D1D4DC, 0), text_size=size.small, text_halign=text.align_left, bgcolor=color.new(#131722, 0))
+
+var int T0 = time
+if barstate.islastconfirmedhistory or barstate.islast
+    int tvN = strategy.closedtrades
+    float grossW = strategy.grossprofit
+    float grossL = strategy.grossloss
+    f_rt(0, "BACKTEST · " + INS + " · " + eX.tf, (precOn ? "1M precision ON" : "1M precision OFF") + " · exits: " + exitPlan)
+    f_rt(1, "Bars tested", str.format_time(T0, "yyyy-MM-dd", TZ) + " → " + str.format_time(time, "yyyy-MM-dd", TZ))
+    f_rt(2, "1m intrabars available from", ST.first1m > 0 ? str.format_time(ST.first1m, "yyyy-MM-dd", TZ) : "none")
+    f_rt(3, "TV: trades · win%", str.tostring(tvN) + " · " + (tvN > 0 ? str.tostring(100.0 * strategy.wintrades / tvN, "#.#") + "%" : "–"))
+    f_rt(4, "TV: net P&L (commission $1.03/side)", "$" + str.tostring(strategy.netprofit, "#,##0.00") + " · PF " + (grossL > 0 ? str.tostring(grossW / grossL, "#.##") : "n/a"))
+    f_rt(5, "TV: max drawdown", "$" + str.tostring(strategy.max_drawdown, "#,##0.00"))
+    f_rt(6, "Core model: trades · win%", str.tostring(ST.trades) + " · " + (ST.trades > 0 ? str.tostring(100.0 * ST.wins / ST.trades, "#.#") + "%" : "–"))
+    f_rt(7, "Core model: avg · net (" + INS + " fees $" + str.tostring(FEE_SIDE, "#.00") + "/side)", ST.trades > 0 ? str.tostring(ST.sumR / ST.trades, "+#.###;-#.###") + "R · $" + str.tostring(ST.netUSD, "#,##0") : "–")
+    f_rt(8, "Core model: avg win · avg loss", (ST.wins > 0 ? str.tostring(ST.winR / ST.wins, "#.##") + "R" : "–") + " · " + (ST.trades - ST.wins > 0 ? str.tostring(ST.lossR / (ST.trades - ST.wins), "#.##") + "R" : "–"))
+    f_rt(9, "Core model: PF · max DD", (ST.lossR < 0 ? str.tostring(ST.winR / -ST.lossR, "#.##") : "n/a") + " · " + str.tostring(ST.maxDD, "#.##") + "R")
+    f_rt(10, "Setups: PREPARE · missed · invalidated · expired", str.tostring(ST.ready) + " · " + str.tostring(ST.missed) + " · " + str.tostring(ST.invalid) + " · " + str.tostring(ST.expired))
+    f_rt(11, "1m: no confirmation · data missing (excluded)", precOn ? str.tostring(ST.noPrec) + " · " + str.tostring(ST.noData) : "precision off")
+    f_rt(12, "Same-bar stop+target: settled by 1m · stop-first", str.tostring(ST.ambRes) + " · " + str.tostring(ST.ambUnres))
+    f_rt(13, "Sample warning", ST.trades < 30 ? "Fewer than 30 trades — too few to judge an edge" : "≥30 trades — still check it holds in other periods")
