@@ -32,10 +32,12 @@ const RETIRED_PREFIXES = [
   "/watchlist",
   "/positions",
 ];
+// Live pages that sit under a retired prefix (Sep 24 2026: the tested-ideas record, linked from the sidebar).
+const LIVE_UNDER_RETIRED = new Set(["/research/tested"]);
 
 export default async function proxy(request: NextRequest, event: NextFetchEvent) {
   const { pathname } = request.nextUrl;
-  if (RETIRED_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
+  if (!LIVE_UNDER_RETIRED.has(pathname) && RETIRED_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
