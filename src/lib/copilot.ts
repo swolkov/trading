@@ -11,6 +11,7 @@ import { sendNotification } from "@/lib/notifications";
 import { CHART_KEY } from "@/lib/trading-room";
 import { ROOM_SYMBOLS, type ChartLevels, type RoomSymbol } from "@/lib/trading-room-rules";
 import { priceFromOpenPnl, step, timeBucket, type CopilotFill, type CopilotOrder, type CopilotPosition, type CopilotState } from "@/lib/copilot-rules";
+import { gradeAsk, saveDiscipline } from "@/lib/trade-grades";
 
 export const COPILOT_STATE_KEY = "copilot_state";
 export const COPILOT_ENABLED_KEY = "copilot_enabled";     // "false" silences it; anything else (or missing) = on
@@ -242,11 +243,14 @@ export async function copilotPoll(nowMs = Date.now(), readOrdersThisPoll = true)
     const records: Partial<Record<RoomSymbol, { label: string; n: number; netUsd: number; since: string }>> = {};
     for (const p of room) if (!state.trips[p.symbol]) { const r = await recordFor(p.symbol, nowMs).catch(() => null); if (r) records[p.symbol] = r; }
     const prices = { ...(await chartPrices(nowMs)), ...(openCount === 1 ? priceFromOpenPnl(room, pnl.openPnl) : {}) };
-    const { state: next, messages } = step(state, { nowMs, positions: room, orders: tracking ? orders : null, prices, fills, records, rejectedStops: orders ? lastRejected : [] });
+    const { state: next, messages, gradeAsks, discipline } = step(state, { nowMs, positions: room, orders: tracking ? orders : null, prices, fills, records, rejectedStops: orders ? lastRejected : [] });
     // State first, then Slack: a failed save must not make the next poll say it all again (at most once > twice).
     const out: Stored = { ...next, accountId, lastPollMs: nowMs, lastOkMs: nowMs, polls: (state.polls ?? 0) + 1, snapshotFields: pnl.fields, auditError: state.auditError };
     await setKey(COPILOT_STATE_KEY, JSON.stringify(out));
     for (const m of messages) await sendNotification(m, LANE).catch(() => {});
+    await saveDiscipline(discipline).catch((e) => console.error("[copilot] discipline save failed", e));
+    // His A/B/C read on each new entry, one tap, before it plays out (skipped when the signing secret isn't set).
+    for (const g of gradeAsks) { const txt = gradeAsk(g.symbol, g.side, g.openedMs, g.closed); if (txt) await sendNotification(txt, LANE, undefined, { noUnfurl: true }).catch(() => {}); }
     return { ok: true, posted: messages.length, note: `${room.length} open · ${orders ? `${orders.length} working` : "orders not read"} · ${Object.keys(prices).join(",") || "no price"}` };
   } catch (e) {
     // A blind co-pilot must say so — once per half hour, and only while it is watching a position.

@@ -36,6 +36,24 @@ export const HANDS_OFF_MS = 600_000;
 export const PLAN_SYMBOL: RoomSymbol = "MES";
 /** The trading day a moment belongs to: the session that opens at 18:00 ET counts as the next calendar day. */
 export function tradingDay(ms: number): string { return etParts(ms + 6 * 3_600_000).dayKey; }
+/** The six day rules, checked on every trade (no tap needed). Entry-time checks are frozen when the position appears. */
+export interface EntryRules { mes: boolean; window: boolean; cooled: boolean; dayOk: boolean }
+export const DISCIPLINE_RULES = 6;
+export interface Discipline { symbol: RoomSymbol; side: 1 | -1; openedMs: number; score: number; broken: string[] }
+/** Score a closed trip: the four entry checks + a real stop (fees+slip < 20% of it) + hands off 10 min (unless +2R). */
+export function disciplineOf(sym: RoomSymbol, t: Trip, handsOff: boolean): Discipline | null {
+  const e = t.entryRules;
+  if (!e) return null;   // state saved before the rule existed
+  // a stop the co-pilot never had the chance to see is unknown, not missing: never held against him
+  const stopOk = !t.ordersSeen || !!(t.riskPts && t.riskPts > 0 && costShare(sym, t.riskPts) < COST_SHARE_FLAG);
+  const checks: [boolean, string][] = [[e.mes, "not MES"], [e.window, "outside 9:30 AM–2 PM"], [e.cooled, "< 10 min after a loss"],
+    [e.dayOk, "past 5 trades / 2 losses"], [stopOk, "no stop or too tight"], [handsOff, "out by hand < 10 min"]];
+  const broken = checks.filter(([ok]) => !ok).map(([, why]) => why);
+  return { symbol: sym, side: t.side, openedMs: t.openedMs, score: DISCIPLINE_RULES - broken.length, broken };
+}
+export function disciplineLine(d: Discipline): string {
+  return d.broken.length ? `   📏 Discipline ${d.score}/${DISCIPLINE_RULES} — broke: ${d.broken.join(" · ")}` : `   📏 By the book ${d.score}/${DISCIPLINE_RULES}`;
+}
 export interface DayTally { key: string; trades: number; losses: number; netUsd: number; doneSaid?: boolean }
 
 /** Breakeven as a price he can actually enter: his average rounded to the tick on the safe side (up for a long). */
@@ -92,6 +110,8 @@ export interface Trip {
   hit5R?: boolean;           // optional: state saved before the runner plan has no such field
   realizedUsd?: number;      // $ banked on partial sales so far (gross)
   guards?: string[];         // day-rule lines for the entry card
+  entryRules?: EntryRules;   // the day rules as they stood when the position appeared
+  ordersSeen?: boolean;      // at least one orders read succeeded during this trip (else the stop rule is unknown, not failed)
   trailPx?: number | null;   // the runner stop last announced by the plan
   reduced: boolean;
   lastPrice: number | null;
@@ -192,19 +212,25 @@ function exitPrice(fills: CopilotFill[], sym: RoomSymbol, side: 1 | -1): number 
   return q > 0 ? f.reduce((a, x) => a + x.price * x.qty, 0) / q : null;
 }
 
-function closeLine(sym: RoomSymbol, t: Trip, exitPx: number | null, nowMs: number, fromFills: boolean): string {
-  const held = nowMs - t.openedMs;
-  const r = exitPx != null ? rAt(t, exitPx) : null;
+/** How a trip ended: at its stop, at its target, or by hand. */
+function exitKind(sym: RoomSymbol, t: Trip, exitPx: number | null): { stopped: boolean; targeted: boolean; byHand: boolean } {
   const tick = INSTRUMENTS[sym].tick;
   const near = (lvl: number | null | undefined) => exitPx != null && lvl != null && Math.abs(exitPx - lvl) <= 2 * tick;
   // A stop he just dragged (not yet announced) that then filled is still a stop-out.
   const stopped = near(t.stop) || near(t.pendingStop?.px);
   const targeted = !stopped && near(t.target);
   // A trailing stop's live level is unknown to the co-pilot, so an exit it can't place is not called "by hand".
+  return { stopped, targeted, byHand: !stopped && !targeted && !t.trailing };
+}
+
+function closeLine(sym: RoomSymbol, t: Trip, exitPx: number | null, nowMs: number, fromFills: boolean): string {
+  const held = nowMs - t.openedMs;
+  const r = exitPx != null ? rAt(t, exitPx) : null;
+  const tick = INSTRUMENTS[sym].tick;
+  const { stopped, targeted, byHand } = exitKind(sym, t, exitPx);
   const how = stopped ? "stopped out" : targeted ? "target filled" : t.trailing ? "closed (trailing stop or by hand)" : "closed by hand";
-  const byHand = !stopped && !targeted && !t.trailing;
   const parts = [`🏁 ${sym} ${sideWord(t.side).toLowerCase()} ${t.maxQty} ${how} after ~${duration(held)}${exitPx != null ? ` @ ${px(sym, exitPx)}` : ""}${r != null ? ` · ${signedR(r)}` : ""}`];
-  if (byHand && held < HANDS_OFF_MS && !(r != null && r >= 2)) parts.push(`   Out by hand after ${duration(held)} — your rule is hands off for 10 minutes. This week: 35 trades out inside 2 min = −$8,634; 27 held 10+ min = +$9,020.`);
+  if (byHand && fromFills && held < HANDS_OFF_MS && !(r != null && r >= 2)) parts.push(`   Out by hand after ${duration(held)} — your rule is hands off for 10 minutes. This week: 35 trades out inside 2 min = −$8,634; 27 held 10+ min = +$9,020.`);
   const wholeTrade = exitPx != null ? (t.realizedUsd ?? 0) + (exitPx - t.avg) * t.side * INSTRUMENTS[sym].pointValue * t.qty : null;
   if (t.hit1R && r != null && r < 0 && (wholeTrade == null || wholeTrade < 0)) parts.push(`   It was +${t.peakR.toFixed(1)}R and finished red. Sep 20–22: 11 trades did that = −$5,011.`);
   // Only a real runner (the plan left one, he is down to it), only on a fill price (a stale last price could be a stop
@@ -217,9 +243,13 @@ function closeLine(sym: RoomSymbol, t: Trip, exitPx: number | null, nowMs: numbe
 }
 
 /** One poll. Returns the next state and the lines to post (already grouped per symbol). */
-export function step(prev: CopilotState, snap: CopilotSnapshot): { state: CopilotState; messages: string[] } {
+/** gradeAsks: entries whose card went out this poll — the I/O posts the A/B/C grade links for each. */
+export interface GradeAsk { symbol: RoomSymbol; side: 1 | -1; openedMs: number; closed?: boolean }
+export function step(prev: CopilotState, snap: CopilotSnapshot): { state: CopilotState; messages: string[]; gradeAsks: GradeAsk[]; discipline: Discipline[] } {
   const trips: Partial<Record<RoomSymbol, Trip>> = { ...prev.trips };
   const messages: string[] = [];
+  const gradeAsks: GradeAsk[] = [];
+  const discipline: Discipline[] = [];
   let lastCloseMs = prev.lastCloseMs;
   let lastCloseLoss = prev.lastCloseLoss;
   const dayKey = tradingDay(snap.nowMs);
@@ -233,7 +263,17 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     if (t && (!pos || Math.sign(pos.netPos) !== t.side)) {
       const filled = exitPrice(snap.fills, sym, t.side);
       const exitPx = filled ?? t.lastPrice;
-      if (t.announced || snap.nowMs - t.openedMs >= 5_000) lines.push(closeLine(sym, t, exitPx, snap.nowMs, filled != null));
+      const shown = t.announced || snap.nowMs - t.openedMs >= 5_000;
+      if (shown) lines.push(closeLine(sym, t, exitPx, snap.nowMs, filled != null));
+      if (shown) {
+        // hands off: only a real fill price can say "by hand" (unknown exit → not held against him)
+        const r = filled != null ? rAt(t, filled) : null;
+        const handsOff = !(filled != null && exitKind(sym, t, filled).byHand && snap.nowMs - t.openedMs < HANDS_OFF_MS && !(r != null && r >= 2));
+        const d = disciplineOf(sym, t, handsOff);
+        if (d) { lines.push(disciplineLine(d)); discipline.push(d); }
+      }
+      // a quick trade that closed before its card went out never got the grade ask — ask now, or C would look better than it is
+      if (!t.announced && snap.nowMs - t.openedMs >= 5_000) gradeAsks.push({ symbol: sym, side: t.side, openedMs: t.openedMs, closed: true });
       // The day's tally, only from a real fill price (a stale poll price can turn a stop-out into a "win").
       // A LOSS = lost money on price (gross < 0): a breakeven scratch is not a loss just because of fees.
       if (filled == null) {
@@ -265,8 +305,13 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
         : `   🧮 Trade ${day.trades} of ${DAY_MAX_TRADES} today`);
       if (lastCloseLoss && lastCloseMs != null && snap.nowMs - lastCloseMs < COOLDOWN_AFTER_LOSS_MS)
         g.push(`   ⛔ Back in ${duration(snap.nowMs - lastCloseMs)} after a LOSS — your rule is 10 minutes. This week: back in < 3 min after a loss = 24 trades −$3,499.`);
+      const hh = etParts(snap.nowMs).hourFrac;
+      if (hh >= 14 && hh < 17) g.push(`   ⏰ After 2 PM ET. Sep 20–23: 20 trades after 2 PM = −$4,234 (25% win); 9:30–noon = 20 trades +$3,688.`);
       if (sym !== PLAN_SYMBOL) g.push(`   📌 Not MES — your plan is MES only for now (this week MES +$5,577 · MNQ −$3,664 · MGC −$4,347).`);
       t.guards = g;
+      t.entryRules = { mes: sym === PLAN_SYMBOL, window: hh >= 9.5 && hh < 14,
+        cooled: !(lastCloseLoss && lastCloseMs != null && snap.nowMs - lastCloseMs < COOLDOWN_AFTER_LOSS_MS),
+        dayOk: day.trades <= DAY_MAX_TRADES && day.losses < DAY_MAX_LOSSES };
       t.record = snap.records?.[sym] ?? null;
     }
     if (!t) { delete trips[sym]; if (lines.length) messages.push(lines.join("\n")); continue; }
@@ -297,6 +342,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
 
     // ---- orders: stop and target ----
     if (snap.orders) {
+      t.ordersSeen = true;
       const s = protectiveStop(snap.orders, sym, t.side);
       t.target = firstTarget(snap.orders, sym, t.side, t.avg);
       if (s) t.trailing = s.trailing;
@@ -339,6 +385,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     if (!t.announced && (t.stop != null || snap.nowMs - t.openedMs >= ENTRY_STOP_GRACE_MS)) {
       lines.splice(cardAt, 0, entryCard(sym, t));
       t.announced = true;
+      gradeAsks.push({ symbol: sym, side: t.side, openedMs: t.openedMs });
       t.noStopWarned = t.stop == null;
     }
 
@@ -386,7 +433,7 @@ export function step(prev: CopilotState, snap: CopilotSnapshot): { state: Copilo
     trips[sym] = t;
     if (lines.length) messages.push(lines.join("\n"));
   }
-  return { state: { trips, lastCloseMs, lastCloseLoss, day }, messages };
+  return { state: { trips, lastCloseMs, lastCloseLoss, day }, messages, gradeAsks, discipline };
 }
 
 /** The price implied by the account's open P&L — exact when ONE room symbol is open (the P&L is account-wide). */
