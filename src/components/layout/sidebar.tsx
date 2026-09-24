@@ -11,6 +11,7 @@ import {
   Activity,
   Wallet,
   Film,
+  FlaskConical,
   Menu,
   X,
 } from "lucide-react";
@@ -56,6 +57,13 @@ const sections = [
     label: "Robinhood · options · real account",
     links: [
       { href: "/options", label: "Live Account", icon: Wallet },
+    ],
+  },
+  {
+    // The record of every idea tested and its verdict — read-only, nothing on it trades (Sep 24 2026).
+    label: "Research",
+    links: [
+      { href: "/research/tested", label: "Tested ideas", icon: FlaskConical },
     ],
   },
   {

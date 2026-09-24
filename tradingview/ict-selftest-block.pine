@@ -1,0 +1,76 @@
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// SELF-TEST — appended only to ict-selftest.pine by build-ict.sh. Feeds hand-built candles through
+// the SAME Engine code the indicator uses and stops with runtime.error on the first wrong result.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+var int stChecks = 0
+
+f_check(bool ok, string name) =>
+    if not ok
+        runtime.error("SELF-TEST FAILED: " + name)
+    1
+
+f_isNewHtf(int t, int last) =>
+    na(last) or t != last
+
+if barstate.isfirst
+    int n = 0
+    int T = 1000000
+    // ── bullish FVG → wick (no inversion) → close (bear iFVG) → close back through (iFVG dies) ──
+    Engine a = f_engine("T", 0, 300, 3)
+    a.feed(1000, 1002, 999, 1001, T)
+    a.feed(1001, 1010, 1000, 1009, 2 * T)
+    n += f_check(a.zones.size() == 0, "no FVG before three candles exist")
+    a.feed(1009, 1012, 1008, 1011, 3 * T)
+    n += f_check(a.evBullFVG and a.zones.size() == 1, "bull FVG appears on the close of candle 3")
+    Zone z = a.zones.get(0)
+    n += f_check(z.bull and not z.inv and z.bot == 1002 and z.top == 1008, "bull FVG edges = candle-1 high (1002) / candle-3 low (1008)")
+    n += f_check(z.tLeft == T, "zone starts at candle 1")
+    a.feed(1010, 1011, 1000, 1004, 4 * T)
+    n += f_check(not z.inv and z.bull and not a.evBearIFVG, "a WICK below the bottom does not invert")
+    a.feed(1004, 1005, 998, 999, 5 * T)
+    n += f_check(z.inv and not z.bull and a.evBearIFVG, "a CLOSE below the bottom makes a bear iFVG")
+    n += f_check(z.top == 1008 and z.bot == 1002, "inversion keeps the original edges")
+    a.feed(999, 1012, 998, 1010, 6 * T)
+    n += f_check(z.dead, "a bear iFVG dies when a candle closes back above its top")
+    // ── bearish FVG → wick (no inversion) → close (bull iFVG) ──
+    Engine b = f_engine("T", 0, 300, 3)
+    b.feed(1000, 1001, 998, 999, T)
+    b.feed(999, 1000, 990, 991, 2 * T)
+    b.feed(991, 992, 988, 989, 3 * T)
+    n += f_check(b.evBearFVG and b.zones.size() == 1, "bear FVG appears on the close of candle 3")
+    Zone y = b.zones.get(0)
+    n += f_check(not y.bull and y.top == 998 and y.bot == 992, "bear FVG edges = candle-1 low (998) / candle-3 high (992)")
+    b.feed(990, 1000, 989, 996, 4 * T)
+    n += f_check(not y.inv and not b.evBullIFVG, "a WICK above the top does not invert")
+    b.feed(996, 1002, 995, 1001, 5 * T)
+    n += f_check(y.inv and y.bull and b.evBullIFVG, "a CLOSE above the top makes a bull iFVG")
+    // ── candles that touch but do not gap make no FVG ──
+    Engine c = f_engine("T", 0, 300, 3)
+    c.feed(1000, 1005, 999, 1004, T)
+    c.feed(1004, 1010, 1003, 1009, 2 * T)
+    c.feed(1009, 1012, 1005, 1011, 3 * T)
+    n += f_check(c.zones.size() == 0, "candle-3 low equal to candle-1 high is NOT a gap")
+    // ── swings are only known pLen candles later ──
+    Engine s = f_engine("T", 0, 300, 2)
+    s.feed(100, 101, 99, 100, T)
+    s.feed(100, 102, 99, 101, 2 * T)
+    s.feed(101, 105, 100, 104, 3 * T)
+    s.feed(104, 103, 100, 101, 4 * T)
+    n += f_check(not s.evPH and na(s.lastPH), "a swing high is not known one candle after it")
+    s.feed(101, 102, 99, 100, 5 * T)
+    n += f_check(s.evPH and s.lastPH == 105, "the swing high is confirmed exactly pLen candles later")
+    // ── higher-timeframe guard: the same completed candle is never processed twice ──
+    int lastT = na
+    n += f_check(f_isNewHtf(5000, lastT), "first HTF candle is processed")
+    lastT := 5000
+    n += f_check(not f_isNewHtf(5000, lastT), "the same HTF candle is not processed again")
+    n += f_check(f_isNewHtf(6000, lastT), "the next HTF candle is processed")
+    stChecks := n
+    log.info("ICT SELF-TEST: all {0} checks passed", n)
+
+var label stLbl = na
+if barstate.islast
+    stLbl.delete()
+    stLbl := label.new(bar_index, high, "ICT SELF-TEST: ALL " + str.tostring(stChecks) + " CHECKS PASSED", style=label.style_label_down,
+         color=color.new(#089981, 0), textcolor=color.white, size=size.normal)

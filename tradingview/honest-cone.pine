@@ -1,0 +1,347 @@
+//@version=6
+// HONEST CONE + TRADE PLANNER — how far MES / MNQ / MGC can travel next (1m, 5m, 15m, 4H), and what
+// that means for your stop BEFORE you click.
+//
+// What it forecasts and what it doesn't:
+//  • DIRECTION: nothing. 15 years of ES/NQ/GC data: trend, breakout, RSI and last-bar signals
+//    call the next 4H bar 47–51% right. Any indicator that draws "the next candles" going up or
+//    down is guessing, or repaints.
+//  • SIZE: yes. Expected movement = current volatility level × the time-of-day volatility
+//    profile (8:30 data, 9:30 open and 10:00 are the spikes; 22:00–02:00 is dead). That beats
+//    plain ATR on every timeframe, and most clearly on 15m and 4H.
+//
+// What you see:
+//  • Teal fan   — each edge gets touched about 50% of the time before that point in the cone
+//  • Orange fan — each edge gets touched about 20% of the time (top and bottom counted separately)
+//    Touching or breaking an edge says volatility is running hot. It does NOT say which way next.
+//  • Grey candles — each future candle's expected SIZE for its time of day: the wick is the typical
+//    high-to-low range, the body is half of it (bodies average ~50% of the range on 1m/5m/15m/4H).
+//    They are centred on price because their direction is unknowable, not because price will stall.
+//  • Table      — the cone edges, touch odds for yesterday's high/low and your levels, and the planner
+//  • Planner    — for tight → wide stops: odds that plain noise hits the stop within 2 and 15 min,
+//    how long a bracket typically takes to finish, how much fees+slippage eat, and the win rate
+//    needed. Tested on 2019–26 1m data from random entries: stop-hit odds within ±2 points; a 2R
+//    bracket won 32–35% (the fair 33%). Every bracket is a fair bet BEFORE costs, so the only
+//    things you control are costs and patience.
+//
+// Calibration: fit on 2011–18, tested on 2019–26. The 50% band caught 47–55% of moves and
+// the 80% band 77–85%. Keep the chart on the ETH (overnight) session.
+// Built for 1m / 5m / 15m / 4H; other intraday timeframes use the nearest calibration.
+// The time-of-day profile is from 2021–26 CME data.
+indicator("Honest Cone (MES/MNQ/MGC)", shorttitle="Cone", overlay=true, max_lines_count=500, max_labels_count=10, max_polylines_count=10)
+
+TZ = "America/New_York"
+
+prof      = input.string("Auto", "Calibration", options=["Auto", "ES/MES", "NQ/MNQ", "GC/MGC"])
+barsIn    = input.int(0, "Bars ahead (0 = auto: 1m→60, 5m→24, 15m→16, 4H→6)", minval=0, maxval=150)
+show80    = input.bool(true, "Show 80% cone")
+showGhost = input.bool(true, "Show forecast candles (grey, size only)")
+showLbl   = input.bool(false, "Also show the floating label next to the cone")
+showHist  = input.bool(false, "Show past 1-bar bands (check calibration by eye)")
+showPD    = input.bool(true, "Odds of touching yesterday's high/low")
+lvl1      = input.price(0.0, "My level 1 (0 = off)")
+lvl2      = input.price(0.0, "My level 2 (0 = off)")
+showPlan  = input.bool(true, "Show trade planner", group="Planner")
+rMult     = input.float(2.0, "Target = stop ×", minval=0.5, step=0.5, group="Planner")
+myStop    = input.float(0.0, "My usual stop (points, 0 = off)", minval=0, group="Planner")
+feeRT     = input.float(2.06, "Fees per contract, round trip ($)", minval=0, step=0.01, group="Planner")
+slipTicks = input.float(1.0, "Slippage per round trip (ticks)", minval=0, step=0.5, group="Planner")
+planPos   = input.string("Bottom left", "Table position", options=["Bottom left", "Bottom right", "Top right", "Top left"], group="Planner")
+
+// Share of daily variance per 5-minute slot (×1000), slot 0 = 18:00 ET. Measured 2021–26.
+string P_ES = "10,3.02,2.02,1.71,1.54,1.3,1.83,1.22,1.09,1.13,1.06,0.894,1.85,1.42,1.18,1.23,1.06,1.04,1.23,1.1,0.993,1.2,1.23,1.11,2.85,1.97,1.66,2.07,1.53,1.41,1.75,1.44,1.33,1.39,1.25,1.28,1.61,1.37,1.22,1.46,1.19,1.1,1.51,1.36,1.3,1.2,1.17,0.998,1.21,1.04,0.973,0.959,0.929,0.852,1.12,0.898,0.818,0.801,0.757,0.714,0.881,0.75,0.724,0.748,0.749,0.717,0.811,0.73,0.677,0.673,0.598,0.577,0.819,0.751,0.685,0.66,0.647,0.638,0.799,0.728,0.628,0.638,0.607,0.606,1.22,0.946,0.89,0.883,0.824,0.869,1.13,0.941,0.875,0.947,0.97,1.04,2.38,1.65,1.43,1.51,1.35,1.28,1.52,1.25,1.21,1.32,1.21,1.49,4.98,3.56,3.16,3.18,2.97,2.72,3.11,2.59,2.31,2.29,2.2,2.02,3.56,2.77,2.39,2.37,2.24,2.06,2.27,1.96,1.85,1.78,1.83,1.67,2.18,1.85,1.68,1.7,1.67,1.52,1.77,1.57,1.51,1.52,1.54,1.48,2.17,1.71,1.75,1.77,1.69,1.66,1.88,1.66,1.59,1.82,1.66,1.78,2.78,2.42,2,1.84,1.88,1.95,2.23,1.98,2.09,2.2,1.93,1.82,2.9,2.46,2.35,2.96,2.77,3.07,26.5,5.84,4.74,4.25,3.66,3.17,4.18,3.39,3.03,3.02,2.73,5.2,22.7,15.6,15.1,16.1,14.2,11.6,20.7,13.4,12.6,11.6,11.4,10.8,11.1,10.4,9.54,9.39,9.11,7.99,9.51,8.03,7.57,7.57,7.2,6.87,7.77,6.93,6.72,6.28,6.2,5.89,6.75,5.89,5.43,5.45,5.61,5.24,6.12,5.22,5.14,5.22,5.24,5.02,6.96,5.62,5.03,5.2,5.44,5.09,5.8,5.08,4.87,4.94,4.78,4.53,10.2,6.62,5.84,5.74,5.5,5.42,6.75,6.75,6.34,5.99,5.94,5.58,7.45,6.18,6.16,6.22,6,5.65,6.96,6.49,6.72,7.66,14.4,14.7,9.8,3.74,2.84,2.04,3.2,1.58,2.35,1.17,1.03,1,1.04,1.26,0,0,0,0,0,0,0,0,0,0,0,0"
+string P_NQ = "9.73,2.78,1.87,1.57,1.42,1.21,1.67,1.11,0.966,1,0.969,0.81,1.76,1.32,1.07,1.11,0.988,0.963,1.14,1.01,0.9,1.08,1.07,1.01,2.68,1.86,1.52,1.88,1.42,1.28,1.66,1.36,1.26,1.34,1.17,1.17,1.53,1.29,1.13,1.38,1.12,1.02,1.44,1.28,1.22,1.12,1.08,0.923,1.14,0.965,0.914,0.912,0.891,0.8,1.03,0.826,0.755,0.746,0.712,0.655,0.807,0.711,0.666,0.686,0.688,0.614,0.723,0.644,0.579,0.593,0.527,0.495,0.75,0.705,0.686,0.6,0.589,0.564,0.74,0.677,0.553,0.563,0.557,0.536,1.17,0.921,0.838,0.836,0.805,0.832,1.11,0.897,0.84,0.887,0.946,0.907,2.17,1.53,1.35,1.46,1.3,1.22,1.47,1.24,1.19,1.28,1.16,1.29,4.32,3.23,2.84,2.85,2.68,2.43,2.77,2.36,2.11,2.1,2.01,1.88,3.56,2.68,2.27,2.22,2.09,1.89,2.11,1.81,1.69,1.62,1.64,1.51,1.96,1.69,1.55,1.58,1.55,1.41,1.62,1.45,1.39,1.4,1.4,1.31,2.02,1.62,1.59,1.56,1.54,1.52,1.75,1.55,1.49,1.62,1.54,1.58,2.67,2.3,1.86,1.77,1.77,1.81,2.05,1.81,1.87,1.97,1.72,1.67,2.68,2.22,2.08,2.58,2.48,2.91,24.6,5.58,4.4,3.92,3.43,2.96,4.07,3.14,2.77,2.77,2.55,4.97,35.2,23,20.1,20.5,17.8,14.4,23.2,15.8,14.6,13.4,12.9,12,12.7,11.5,10.5,10.3,10,8.71,10.1,8.77,8.28,7.86,7.52,7.05,7.79,7.01,6.8,6.45,6.39,5.86,6.88,5.98,5.43,5.42,5.55,5.12,5.86,5.03,4.91,4.97,5.03,4.66,6.74,5.21,4.78,4.93,5.04,4.74,5.42,4.72,4.55,4.58,4.48,4.13,9.28,6.13,5.36,5.19,4.91,4.84,6.06,6.05,5.57,5.32,5.26,4.85,6.68,5.47,5.34,5.33,5.13,4.7,5.63,5.19,5.45,6.01,12.2,9.78,10.2,4.22,2.65,2.3,3.47,1.44,2.39,1.04,0.878,0.847,0.839,0.858,0,0,0,0,0,0,0,0,0,0,0,0"
+string P_GC = "12.9,3.61,2.49,2.43,1.81,1.79,1.95,1.51,1.42,1.57,1.34,1.53,2.49,1.65,1.45,1.38,1.45,1.28,1.6,1.44,1.44,1.69,1.53,1.53,4.96,3.25,2.77,2.85,2.6,2.35,2.8,2.39,2.18,2.18,2.24,2.35,6.65,4.26,3.47,3.55,3.02,2.66,3.98,3.49,3.01,2.8,2.78,2.55,3.08,2.56,2.23,1.98,1.87,1.71,2.47,2.17,2.01,2.1,1.81,1.74,2.01,1.77,1.74,1.72,1.61,1.43,1.36,1.25,1.16,1.16,1.09,1.07,1.48,1.28,1.15,1.22,1.18,1.21,2.19,1.53,1.5,1.52,1.45,1.57,1.9,1.8,1.7,1.65,1.67,1.67,3.52,2.6,2.3,2.35,2.26,2.28,4.09,3.11,2.91,2.93,3.06,2.87,3.13,2.82,2.77,2.76,2.53,2.47,4.73,3.89,3.59,3.71,3.47,3.34,3.78,3.28,3.15,3.07,3.01,2.94,4.15,3.37,3.31,3.23,3.08,2.91,3.03,2.76,2.66,2.61,2.51,2.32,2.9,2.47,2.46,2.38,2.35,2.51,3.81,2.39,2.29,2.18,2.11,2.11,2.62,2.48,2.3,2.33,2.29,2.33,2.46,2.47,2.45,2.4,2.34,2.24,3.37,2.94,2.71,2.75,2.76,2.67,3.16,2.98,3.15,3.16,2.99,3.05,6.06,4.76,4.72,6.8,11.1,7.74,36.9,13.3,10.8,9.1,8.29,7.29,11.5,8.94,8.12,7.86,7.19,6.57,15.1,13.7,12.5,15.3,10.8,9.35,22.5,13.3,11,10.3,9.44,8.27,9.7,8.7,7.54,7.65,7.05,6,7.74,6.56,6.11,6.02,5.58,4.79,5.38,4.72,4.25,4.23,3.92,3.62,4.21,3.79,3.31,3.21,3.06,2.71,3.14,2.92,2.96,2.78,2.51,2.42,4.02,2.77,2.55,2.63,2.9,3.98,3.57,2.5,2.08,2.07,1.94,1.86,6.55,3.07,2.45,2.37,2.05,2.13,2.75,3.14,2.57,2.27,2.2,2.22,2.98,2.13,1.94,1.96,1.82,1.61,1.84,1.56,1.6,1.71,1.73,2.16,1.81,0.967,0.947,0.919,0.822,0.811,0.976,0.861,0.911,1.02,1.29,1.49,0,0,0,0,0,0,0,0,0,0,0,0"
+
+string root = syminfo.root
+string p = prof != "Auto" ? prof : (root == "NQ" or root == "MNQ") ? "NQ/MNQ" : (root == "GC" or root == "MGC") ? "GC/MGC" : "ES/MES"
+bool known = prof != "Auto" or root == "ES" or root == "MES" or root == "NQ" or root == "MNQ" or root == "GC" or root == "MGC"
+
+f_parse(string s) =>
+    array<string> parts = str.split(s, ",")
+    array<float> out = array.new<float>()
+    for x in parts
+        out.push(str.tonumber(x))
+    out
+
+var array<float> dens = f_parse(p == "NQ/MNQ" ? P_NQ : p == "GC/MGC" ? P_GC : P_ES)
+
+float tfMin = timeframe.in_seconds() / 60.0
+bool okTf = timeframe.isintraday and tfMin <= 240
+
+// Session minute: 0 = 18:00 ET, 1380–1439 = the 17:00–18:00 halt
+f_sm(int t) =>
+    ((hour(t, TZ) * 60 + minute(t, TZ)) - 1080 + 1440) % 1440
+
+// Expected variance (profile units) of a window starting at t, lasting `mins` minutes
+f_var(int t, int mins) =>
+    float acc = 0.0
+    int m = f_sm(t)
+    int rem = mins
+    while rem > 0
+        int b = math.floor(m / 5)
+        int take = math.min(rem, 5 - m % 5)
+        acc += dens.get(b) * take / 5.0
+        m += take
+        rem -= take
+        if m >= 1440
+            m -= 1440
+    acc
+
+// Next bar's start, skipping the daily halt and the weekend
+f_adv(int t) =>
+    int tt = t
+    int s = f_sm(tt)
+    if s >= 1380
+        tt += (1440 - s) * 60000
+    if dayofweek(tt, TZ) == dayofweek.friday and hour(tt, TZ) >= 17
+        tt += 2 * 86400000
+    else if dayofweek(tt, TZ) == dayofweek.saturday
+        tt += 86400000
+    tt
+
+// Calibrated excursion multipliers (fraction of the cone scale), slowly widening with horizon k
+f_q(float k, bool outer) =>
+    float lk = math.log(math.max(k, 1.0))
+    float r = 0.0
+    if tfMin <= 2
+        r := outer ? 0.85 + 0.012 * lk : 0.39 + 0.013 * lk
+    else if tfMin <= 9
+        r := outer ? 0.80 + 0.012 * lk : 0.393 + 0.006 * lk
+    else if tfMin <= 60
+        r := outer ? 0.783 + 0.022 * lk : 0.386 + 0.009 * lk
+    else
+        r := outer ? 0.775 + 0.025 * lk : 0.378 + 0.019 * lk
+    r
+
+// Odds that price TOUCHES a level `ratio` × (50% cone) away — measured excursion distribution
+var array<float> TR_R = array.from(0.0, 0.18, 0.56, 1.0, 1.58, 2.02, 2.8, 3.6)
+var array<float> TR_P = array.from(1.0, 0.90, 0.70, 0.50, 0.30, 0.20, 0.10, 0.05)
+f_touch(float ratio) =>
+    float pr = 0.04
+    if ratio < 3.6
+        for i = 1 to 7
+            float r1 = TR_R.get(i)
+            if ratio <= r1
+                float r0 = TR_R.get(i - 1)
+                float p0 = TR_P.get(i - 1)
+                pr := p0 + (TR_P.get(i) - p0) * (ratio - r0) / (r1 - r0)
+                break
+    pr
+
+// Volatility level: EMA(14) of true range ÷ √(expected variance of that bar). Updates only on closed bars.
+int tfM = int(math.round(tfMin))
+float ev = okTf ? f_var(time, tfM) : na
+float trg = ta.tr(true)
+var float L = na
+float Lprev = L
+if okTf and barstate.isconfirmed and ev > 1e-6
+    float nrm = trg / math.sqrt(ev)
+    L := na(L) ? nrm : L + (nrm - L) / 14.0
+
+// Past 1-bar bands, from the prior close — nothing repaints
+float hs = okTf and not na(Lprev) ? Lprev * math.sqrt(ev) : na
+plot(showHist ? close[1] + f_q(1, false) * hs : na, "past 50% up", color.new(color.teal, 40), style=plot.style_stepline)
+plot(showHist ? close[1] - f_q(1, false) * hs : na, "past 50% down", color.new(color.teal, 40), style=plot.style_stepline)
+plot(showHist and show80 ? close[1] + f_q(1, true) * hs : na, "past 80% up", color.new(color.orange, 50), style=plot.style_stepline)
+plot(showHist and show80 ? close[1] - f_q(1, true) * hs : na, "past 80% down", color.new(color.orange, 50), style=plot.style_stepline)
+
+[pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+var array<line> ghosts = array.new<line>()
+var polyline pl80 = na
+var polyline pl50 = na
+var label lb = na
+var string coneTxt = ""
+
+f_pct(float x) =>
+    x < 0.05 ? "<5%" : str.tostring(math.round(x * 100)) + "%"
+
+f_odds(string name, float lvl, float sc50) =>
+    not na(lvl) and lvl > 0 ? "\n" + name + " " + str.tostring(lvl, format.mintick) + ": " + f_pct(f_touch(math.abs(lvl - close) / sc50)) : ""
+
+if barstate.islast
+    for g in ghosts
+        g.delete()
+    ghosts.clear()
+    polyline.delete(pl80)
+    polyline.delete(pl50)
+    label.delete(lb)
+    if not okTf
+        lb := label.new(bar_index, high, "Cone: use a 1m / 5m / 15m / 4H chart", style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white)
+    else if not na(L)
+        int K = barsIn > 0 ? barsIn : tfMin <= 2 ? 60 : tfMin <= 9 ? 24 : tfMin <= 60 ? 16 : 6
+        float remVar = 0.0
+        if not barstate.isconfirmed and barstate.isrealtime
+            int remMin = math.max(0, int((time_close - timenow) / 60000))
+            remVar := f_var(timenow, remMin)
+        float c0 = close
+        array<chart.point> up8 = array.new<chart.point>()
+        array<chart.point> dn8 = array.new<chart.point>()
+        array<chart.point> up5 = array.new<chart.point>()
+        array<chart.point> dn5 = array.new<chart.point>()
+        up8.push(chart.point.from_index(bar_index, c0))
+        up5.push(chart.point.from_index(bar_index, c0))
+        float cv = remVar
+        int t = f_adv(time_close)
+        float s50 = 0.0
+        float s80 = 0.0
+        float s50first = 0.0
+        float s80first = 0.0
+        float scK = 0.0
+        int tEnd = t
+        for j = 1 to K
+            float vj = f_var(t, tfM)
+            cv += vj
+            float sc = L * math.sqrt(cv)
+            s50 := f_q(j, false) * sc
+            s80 := f_q(j, true) * sc
+            if j == 1
+                s50first := s50
+                s80first := s80
+            scK := sc
+            up8.push(chart.point.from_index(bar_index + j, c0 + s80))
+            dn8.push(chart.point.from_index(bar_index + j, c0 - s80))
+            up5.push(chart.point.from_index(bar_index + j, c0 + s50))
+            dn5.push(chart.point.from_index(bar_index + j, c0 - s50))
+            if showGhost
+                float wick = L * math.sqrt(vj) / 2
+                float body = wick / 2
+                ghosts.push(line.new(bar_index + j, c0 - wick, bar_index + j, c0 + wick, color=color.new(color.gray, 35), width=1))
+                ghosts.push(line.new(bar_index + j, c0 - body, bar_index + j, c0 + body, color=color.new(color.gray, 55), width=4))
+            tEnd := t + tfM * 60000
+            t := f_adv(t + tfM * 60000)
+        // close each fan into a polygon: upper edge out, lower edge back
+        for i = dn8.size() - 1 to 0
+            up8.push(dn8.get(i))
+            up5.push(dn5.get(i))
+        up8.push(chart.point.from_index(bar_index, c0))
+        up5.push(chart.point.from_index(bar_index, c0))
+        if show80
+            pl80 := polyline.new(up8, closed=true, xloc=xloc.bar_index, line_color=color.new(color.orange, 30), fill_color=color.new(color.orange, 88))
+        pl50 := polyline.new(up5, closed=true, xloc=xloc.bar_index, line_color=color.new(color.teal, 0), fill_color=color.new(color.teal, 80))
+        float sc50K = scK * f_q(K, false) / 1.0
+        string odds = (showPD ? f_odds("Yday high", pdH, sc50K) + f_odds("Yday low", pdL, sc50K) : "") + f_odds("Level 1", lvl1, sc50K) + f_odds("Level 2", lvl2, sc50K)
+        coneTxt := "Cone to " + str.format_time(tEnd, "EEE HH:mm", TZ) + " ET: teal " + str.tostring(c0 - s50, format.mintick) + " / " + str.tostring(c0 + s50, format.mintick) +
+             " (each edge touched ~50%) · orange " + str.tostring(c0 - s80, format.mintick) + " / " + str.tostring(c0 + s80, format.mintick) + " (~20%)" +
+             (odds == "" ? "" : "\nTouch odds by then —" + str.replace_all(odds, "\n", "  ·  "))
+        if showLbl
+            string txt = "Cone · " + p + " · until " + str.format_time(tEnd, "EEE HH:mm", TZ) + " ET (" + str.tostring(K) + " bars)" +
+                 "\nTeal edges   " + str.tostring(c0 - s50, format.mintick) + " / " + str.tostring(c0 + s50, format.mintick) + "  (each touched ~50%)" +
+                 "\nOrange edges " + str.tostring(c0 - s80, format.mintick) + " / " + str.tostring(c0 + s80, format.mintick) + "  (each touched ~20%)" +
+                 "\nNext bar: ±" + str.tostring(s50first, format.mintick) + " teal, ±" + str.tostring(s80first, format.mintick) + " orange" +
+                 "\nOdds of a touch by then:" + odds +
+                 "\nDirection: no edge — size only"
+            lb := label.new(bar_index + K + 1, c0, txt, style=label.style_label_left, color=color.new(color.black, 15), textcolor=color.white, textalign=text.align_left, size=size.small)
+
+// ─── TRADE PLANNER ───────────────────────────────────────────────────────────────
+// Everything below is measured, not assumed (2019–26, 1m, random entries):
+//  • noise-hit odds: the touch table above, scaled to the minutes ahead
+//  • time to finish a bracket: median minutes until the market's expected variance reaches
+//    1.54 × stop × target (the "variance clock"), which matched actual median fill times
+//    within a minute in every hour except around the 16:00–18:00 close/halt
+f_q1(float h) =>
+    0.39 + 0.013 * math.log(math.max(h, 1.0))
+
+f_hit(int t0, float d, int h) =>
+    float v = f_var(t0, h)
+    v > 0 and not na(L) ? f_touch(d / (f_q1(h) * L * math.sqrt(v))) : na
+
+f_finish(int t0, float vStar) =>
+    float acc = 0.0
+    int m = f_sm(t0)
+    int mins = 0
+    while acc < vStar and mins < 2880
+        int b = math.floor(m / 5)
+        int take = 5 - m % 5
+        float v = dens.get(b) * take / 5.0
+        if v > 0 and acc + v >= vStar
+            mins += int(math.ceil(take * (vStar - acc) / v))
+            acc := vStar
+        else
+            acc += v
+            mins += take
+        m := (m + take) % 1440
+    mins
+
+f_dur(int m) =>
+    m >= 2880 ? "> 2 days" : m < 90 ? str.tostring(m) + " min" : str.tostring(math.round(m / 60.0, 1)) + " h"
+
+// Long-run volatility level (~5 sessions) so "hot / quiet" is relative to recent normal
+var float LL = na
+int nLong = int(math.min(5000, math.max(20, math.round(5 * 1380 / math.max(tfMin, 1)))))
+if okTf and barstate.isconfirmed and ev > 1e-6
+    float nrm2 = trg / math.sqrt(ev)
+    LL := na(LL) ? nrm2 : LL + (nrm2 - LL) / nLong
+
+var float busyThr = 2.5 * dens.sum() / 276.0
+var table tb = na
+string tPos = planPos == "Top right" ? position.top_right : planPos == "Bottom right" ? position.bottom_right : planPos == "Top left" ? position.top_left : position.bottom_left
+
+f_c(int col, int row, string txt, color bg, color fg) =>
+    tb.cell(col, row, txt, text_color=fg, bgcolor=bg, text_size=size.small)
+
+color C_HEAD = color.new(#1e2a38, 0)
+color C_NONE = color.new(#0b0f14, 100)
+color C_BAD  = color.new(#8b1e1e, 35)
+color C_MID  = color.new(#8a6d12, 35)
+color C_GOOD = color.new(#1f6b3a, 35)
+
+if barstate.islast and showPlan and okTf and not na(L)
+    table.delete(tb)
+    tb := table.new(tPos, 7, 11, bgcolor=color.new(#0b0f14, 5), border_color=color.new(color.gray, 75), border_width=1, frame_color=color.new(color.gray, 55), frame_width=1)
+    int t0 = barstate.isrealtime ? timenow : f_adv(time_close)
+    float pv = syminfo.pointvalue
+    float costPts = feeRT / pv + slipTicks * syminfo.mintick
+    float costUsd = feeRT + slipTicks * syminfo.mintick * pv
+    float c15 = f_q1(15) * L * math.sqrt(f_var(t0, 15))
+    // vol state + next busy slot
+    float vr = not na(LL) and LL > 0 ? L / LL : 1.0
+    string vs = vr > 1.2 ? "HOT" : vr < 0.85 ? "quiet" : "normal"
+    int m0 = f_sm(t0)
+    int nb = -1
+    for k = 1 to 288
+        int b = (math.floor(m0 / 5) + k) % 288
+        if dens.get(b) >= busyThr
+            nb := k
+            break
+    string busy = ""
+    if nb > 0
+        int minsTo = nb * 5 - m0 % 5
+        busy := " · next spike " + str.format_time(t0 + minsTo * 60000, "HH:mm", TZ) + " ET (in " + f_dur(minsTo) + ")"
+    string when = barstate.isrealtime ? "now" : "from " + str.format_time(t0, "EEE HH:mm", TZ) + " ET"
+    f_c(0, 0, syminfo.root + " planner · " + when + " · volatility " + str.tostring(vr, "#.0") + "× recent normal (" + vs + ")" + busy, C_HEAD, color.white)
+    tb.merge_cells(0, 0, 6, 0)
+    f_c(0, 1, coneTxt + (known ? "" : "  ⚠ not MES/MNQ/MGC: ES profile") + "  ·  Direction: no edge, size only", C_NONE, color.white)
+    tb.merge_cells(0, 1, 6, 1)
+    string rs = str.tostring(rMult, "#.#") + "R"
+    f_c(0, 2, "Stop", C_HEAD, color.silver)
+    f_c(1, 2, "Risk / contract", C_HEAD, color.silver)
+    f_c(2, 2, "Noise hits it\nwithin 2 min", C_HEAD, color.silver)
+    f_c(3, 2, "Noise hits it\nwithin 15 min", C_HEAD, color.silver)
+    f_c(4, 2, "Typical time for\na " + rs + " bracket to finish", C_HEAD, color.silver)
+    f_c(5, 2, "Fees + slippage\neat of your risk", C_HEAD, color.silver)
+    f_c(6, 2, "Win rate needed\nat " + rs + " (fair " + str.tostring(math.round(100 / (1 + rMult))) + "%)", C_HEAD, color.silver)
+    array<float> stops = array.from(0.5 * c15, 1.0 * c15, 1.5 * c15, 2.5 * c15)
+    array<string> names = array.from("Tight", "Normal", "Wide", "Swing")
+    if myStop > 0
+        stops.push(myStop)
+        names.push("Mine")
+    for i = 0 to stops.size() - 1
+        float S = math.max(syminfo.mintick, math.round_to_mintick(stops.get(i)))
+        float h2 = f_hit(t0, S, 2)
+        float h15 = f_hit(t0, S, 15)
+        int fin = f_finish(t0, 1.54 * S * rMult * S / (L * L))
+        float eat = costPts / S
+        float need = (1 + eat) / (1 + rMult)
+        int row = i + 3
+        f_c(0, row, names.get(i) + "  " + str.tostring(S, format.mintick) + " pts", C_NONE, color.white)
+        f_c(1, row, "$" + str.tostring(S * pv, "#,##0.00"), C_NONE, color.white)
+        f_c(2, row, na(h2) ? "–" : f_pct(h2), na(h2) ? C_NONE : h2 >= 0.4 ? C_BAD : h2 >= 0.2 ? C_MID : C_GOOD, color.white)
+        f_c(3, row, na(h15) ? "–" : f_pct(h15), na(h15) ? C_NONE : h15 >= 0.6 ? C_BAD : h15 >= 0.35 ? C_MID : C_GOOD, color.white)
+        f_c(4, row, f_dur(fin), C_NONE, color.white)
+        f_c(5, row, str.tostring(math.round(eat * 100)) + "%", eat >= 0.2 ? C_BAD : eat >= 0.1 ? C_MID : C_GOOD, color.white)
+        f_c(6, row, str.tostring(math.round(need * 100)) + "%  (+" + str.tostring(math.round((need - 1 / (1 + rMult)) * 100)) + ")", eat >= 0.2 ? C_BAD : eat >= 0.1 ? C_MID : C_GOOD, color.white)
+    int last = stops.size() + 3
+    f_c(0, last, "Before costs, every stop/target is a fair bet (2R won 32–35% from random entries, 2019–26). Costs = $" + str.tostring(costUsd, "#.##") + "/contract round trip. Tight stops lose to fees; wide stops need patience — bailing early just pays the fees again.", C_HEAD, color.silver)
+    tb.merge_cells(0, last, 6, last)
